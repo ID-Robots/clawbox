@@ -47,6 +47,13 @@ function writeExec(file: string, body: string) {
   writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 }
 
+/** The value of the generated unit's `Environment=LD_LIBRARY_PATH=` line. */
+function unitLdPath(unit: string): string {
+  const m = /^Environment=LD_LIBRARY_PATH=(.*)$/m.exec(unit);
+  expect(m, `the unit sets no LD_LIBRARY_PATH:\n${unit}`).not.toBeNull();
+  return m![1];
+}
+
 // ── The --tts-only harness ──────────────────────────────────────────────────
 
 interface VoiceRun {
@@ -56,6 +63,8 @@ interface VoiceRun {
   /** Every command string handed to `su - clawbox -c`, one per line. */
   su: string[];
   curl: string[];
+  /** Every `chown` argument list, one per line. */
+  chown: string[];
   home: string;
 }
 
@@ -72,18 +81,22 @@ let root: string;
  *   FAKE_ARCH           what `uname -m` reports
  *   WITH_CUDA           "1" puts an nvcc stub on PATH
  *
- * `stamped` pre-writes the completion stamp a previous successful run leaves.
+ * `stamped` pre-writes the completion stamp a previous successful run leaves —
+ * `true` for the current version, or a literal string for a stamp an older
+ * release wrote.
  */
-function runTtsOnly(env: Record<string, string> = {}, stamped = false): VoiceRun {
+function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string = false): VoiceRun {
   const home = path.join(root, "home", "clawbox");
   const bin = path.join(root, "bin");
   const suLog = path.join(root, "su.log");
   const curlLog = path.join(root, "curl.log");
+  const chownLog = path.join(root, "chown.log");
   mkdirSync(bin, { recursive: true });
   mkdirSync(home, { recursive: true });
   if (stamped) {
     mkdirSync(path.join(home, ".cache", "clawbox"), { recursive: true });
-    writeFileSync(path.join(home, ".cache", "clawbox", "kokoro-installed"), `${shellConst("KOKORO_STAMP_VERSION")}\n`);
+    const version = typeof stamped === "string" ? stamped : shellConst("KOKORO_STAMP_VERSION");
+    writeFileSync(path.join(home, ".cache", "clawbox", "kokoro-installed"), `${version}\n`);
   }
 
   // `su - clawbox -c "<cmd>"` is how every pip/python step runs, so this stub
@@ -95,6 +108,11 @@ function runTtsOnly(env: Record<string, string> = {}, stamped = false): VoiceRun
       'while [ $# -gt 0 ]; do case "$1" in -c) cmd="$2"; shift 2;; *) shift;; esac; done',
       `printf '%s\\n---\\n' "$cmd" >> "${suLog}"`,
       'case "$cmd" in',
+      // How the script asks the box which python pip --user will unpack the
+      // cusparselt wheel under, instead of pinning the version it was written
+      // against. A device answers "python3.10" (JetPack 6.2); the test host's
+      // own python is irrelevant, so it is scripted here.
+      '  *"sys.version_info"*) echo "${FAKE_PY_VERSION:-python3.10}"; exit 0 ;;',
       '  *"import kokoro, torch"*) exit "${KOKORO_IMPORT_EXIT:-1}" ;;',
       '  *"from kokoro import KPipeline"*) echo "Kokoro model ready on cuda"; exit "${WARMUP_EXIT:-0}" ;;',
       '  *"pip3 install"*) echo "Successfully installed"; exit "${PIP_EXIT:-0}" ;;',
@@ -113,7 +131,9 @@ function runTtsOnly(env: Record<string, string> = {}, stamped = false): VoiceRun
   writeExec(path.join(bin, "curl"), [`printf '%s\\n' "$*" >> "${curlLog}"`, "exit 1"].join("\n"));
   // chown to a user that does not exist on the test host would otherwise fail
   // deploy_voice_scripts for a reason that has nothing to do with the code.
-  writeExec(path.join(bin, "chown"), "exit 0");
+  // Logged as well as stubbed: this script runs as root in files the clawbox
+  // user has to keep owning.
+  writeExec(path.join(bin, "chown"), [`printf '%s\\n' "$*" >> "${chownLog}"`, "exit 0"].join("\n"));
   writeExec(path.join(bin, "loginctl"), "exit 0");
   if (env.WITH_CUDA === "1") {
     writeExec(path.join(bin, "nvcc"), 'echo "Cuda compilation tools, release 12.6, V12.6.68"');
@@ -155,6 +175,7 @@ function runTtsOnly(env: Record<string, string> = {}, stamped = false): VoiceRun
     stderr: res.stderr ?? "",
     su: read(suLog).split("\n---\n").filter(Boolean),
     curl: read(curlLog).trim().split("\n").filter(Boolean),
+    chown: read(chownLog).trim().split("\n").filter(Boolean),
     home,
   };
 }
@@ -298,18 +319,37 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     const step = res.su.filter((c) => c.includes("pip3 install")).find((c) => c.includes("kokoro"));
     expect(step, "no pip step installs kokoro at all").toBeDefined();
 
-    const pin = /numpy>=(\d+)\.(\d+)[^'"]*,\s*<2/.exec(step!);
+    // Read the requirement and its constraints rather than pattern-matching
+    // the line. A regex that just looked for "<2" was satisfied by "<2.5" and
+    // by "<20" — it matched the prefix and let the rest fall outside — which
+    // is the numpy-2.x breakage the ceiling is here to prevent, passing CI.
+    // The quotes are part of the requirement: `<` unquoted is a redirection.
+    const req = /'(numpy[^']*)'/.exec(step!)?.[1];
+    expect(req, `no quoted numpy requirement in: ${step}`).toBeDefined();
+    const constraints = req!.slice("numpy".length).split(",").map((c) => c.trim());
+    const version = (v: string) => {
+      const [maj = 0, min = 0, patch = 0] = v.split(".").map(Number);
+      return maj * 1_000_000 + min * 1_000 + patch;
+    };
+    const floor = constraints.find((c) => c.startsWith(">="));
+    const ceiling = constraints.find((c) => /^<[^=]/.test(c));
+
     expect(
-      pin,
-      `numpy is pinned without a usable floor: ${step} — the board's apt numpy already satisfies <2`,
-    ).not.toBeNull();
-    // >= 1.24. The measured-good version is 1.26.4; 1.21.5 is the one that
-    // makes torch raise, and anything below 1.24 has no numpy-1.x guarantee
-    // for this wheel.
-    expect(Number(pin![1]) * 100 + Number(pin![2])).toBeGreaterThanOrEqual(124);
+      floor,
+      `numpy is pinned without a floor (${req}) — the board's apt numpy 1.21.5 already satisfies <2, so pip installs nothing`,
+    ).toBeDefined();
+    // The measured-good version is 1.26.4; 1.21.5 is the one that makes torch
+    // raise "Numpy is not available".
+    expect(version(floor!.slice(2)), `the numpy floor ${floor} is below 1.24`).toBeGreaterThanOrEqual(version("1.24"));
     // And the ceiling stays: torch 2.5.0a0+872d972e41.nv24.8 is a numpy-1.x
-    // build, so an unbounded numpy would break it the other way.
-    expect(step).toContain("<2");
+    // build, so an unbounded numpy breaks it the other way.
+    expect(ceiling, `numpy is pinned without a ceiling (${req})`).toBeDefined();
+    expect(version(ceiling!.slice(1)), `the numpy ceiling ${ceiling} admits numpy 2.x`).toBeLessThanOrEqual(
+      version("2"),
+    );
+    // A floor at or above the ceiling is unsatisfiable — pip only says so at
+    // install time, on the device, an hour into an update.
+    expect(version(floor!.slice(2))).toBeLessThan(version(ceiling!.slice(1)));
   });
 
   it("writes the kokoro-server user unit and enables lingering", () => {
@@ -319,8 +359,59 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     const body = readFileSync(unit, "utf-8");
     expect(body).toContain("ExecStart=/usr/bin/python3");
     expect(body).toContain("kokoro-server.py");
-    expect(body).toContain("cusparselt");
+    // The loader path has to name THIS box's home, not the one the script was
+    // written against. Asserting only /cusparselt/ is what a hardcoded
+    // /home/clawbox/.local/lib/python3.10/... satisfies just as happily.
+    expect(unitLdPath(body), "the unit's LD_LIBRARY_PATH is not derived from CLAWBOX_HOME").toContain(
+      `${res.home}/.local/lib`,
+    );
+    expect(unitLdPath(body)).toContain("cusparselt");
     expect(res.su.some((c) => c.includes("systemctl --user daemon-reload"))).toBe(true);
+  });
+
+  it("points the unit at the python that is on the box, not a pinned version", () => {
+    // A wheel already unpacked under some python version is the authoritative
+    // answer, and it is found with a python* glob — a unit pinned to
+    // python3.10 would send this box's `import torch` at a directory that does
+    // not exist, which is the ImportError this whole task exists to remove.
+    const cusparselt = path.join(root, "home/clawbox/.local/lib/python3.13/site-packages/nvidia/cusparselt/lib");
+    mkdirSync(cusparselt, { recursive: true });
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1", FAKE_PY_VERSION: "python3.9" });
+    const ld = unitLdPath(readFileSync(path.join(res.home, ".config/systemd/user/kokoro-server.service"), "utf-8"));
+    expect(ld, "the real site-packages directory was not the one written").toContain(cusparselt);
+    expect(ld).not.toContain("python3.10");
+    expect(ld).not.toContain("python3.9");
+  });
+
+  it("still names the cusparselt directory when the wheels are not unpacked yet", () => {
+    // The deliberate difference from clawbox-tts.sh, which runs at speech time
+    // and can drop what is missing: this unit is written BEFORE the wheel is
+    // installed and is then read for the life of the box. Filtering on
+    // existence here would ship a unit with no cusparselt entry at all — the
+    // same broken import, arrived at more quietly.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1", FAKE_PY_VERSION: "python3.11" });
+    const ld = unitLdPath(readFileSync(path.join(res.home, ".config/systemd/user/kokoro-server.service"), "utf-8"));
+    expect(ld, "a missing directory was silently dropped from the unit").toContain(
+      `${res.home}/.local/lib/python3.11/site-packages/nvidia/cusparselt/lib`,
+    );
+    // An empty entry means "the current directory" to the loader.
+    expect(ld).not.toContain("::");
+    expect(ld.startsWith(":") || ld.endsWith(":")).toBe(false);
+  });
+
+  it("leaves the .bashrc it appends to owned by the clawbox user", () => {
+    // install_cuda_torch runs as ROOT and appends with `>>`, which creates the
+    // file when it is missing — a box whose clawbox user had no .bashrc would
+    // get a root-owned one it can never edit again. The exports still load,
+    // so nothing here fails loudly; the user just loses their own file.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
+    const bashrc = path.join(res.home, ".bashrc");
+    const body = readFileSync(bashrc, "utf-8");
+    expect(body, "the loader path is not exported for interactive shells").toContain("cusparselt");
+    // Derived here too: this line is appended once and sourced for the life of
+    // the box, so a pinned /home/clawbox would outlive the run that wrote it.
+    expect(body).toContain(`${res.home}/.local/lib`);
+    expect(res.chown.some((c) => c.includes("clawbox:clawbox") && c.includes(bashrc)), "the .bashrc was never chowned back to the user").toBe(true);
   });
 
   it("still deploys Piper and the TTS entrypoint alongside it", () => {
@@ -362,6 +453,23 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only is cheap on re-run", () =
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "0" }, true);
     expect(existsSync(path.join(res.home, ".config/systemd/user/kokoro-server.service"))).toBe(true);
     expect(existsSync(path.join(res.home, ".openclaw/workspace/scripts/kokoro-server.py"))).toBe(true);
+  });
+
+  it("redoes the install on a box stamped by the release that got numpy wrong", () => {
+    // The stamp makes an update cheap, and it is also how a fix to the pip
+    // steps can miss exactly the boxes that need it. A box that installed
+    // `numpy<2` — a no-op against the board's apt 1.21.5 — passes BOTH halves
+    // of kokoro_stack_present(): the stamp is there, and `import kokoro,
+    // torch` succeeds, because torch imports fine and only raises "Numpy is
+    // not available" later at the tensor conversion. Bumping the version is
+    // what makes such a box redo the pip steps.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "0" }, "1");
+    expect(res.status, res.stderr).toBe(0);
+    expect(
+      res.su.some((c) => c.includes("pip3 install") && c.includes("numpy")),
+      "a box stamped by the old version never redid the numpy step",
+    ).toBe(true);
+    expect(shellConst("KOKORO_STAMP_VERSION"), "the numpy fix shipped without bumping the stamp").not.toBe("1");
   });
 
   // One run per test: runTtsOnly reuses the per-test temp root, so a second

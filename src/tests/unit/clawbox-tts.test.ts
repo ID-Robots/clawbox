@@ -103,6 +103,7 @@ function stubKokoro(atDir = binDir, name = "kokoro") {
       'if [ "${KOKORO_FAIL:-0}" != "0" ]; then echo "CUDA out of memory" >&2; exit 1; fi',
       'python3 "$WAV_WRITER" "$out" "${KOKORO_SECONDS:-1}"',
     ].join("\n"),
+    atDir,
   );
 }
 
@@ -290,15 +291,19 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     const r = synth([], { LD_LIBRARY_PATH: "/opt/already-here" });
     expect(r.status).toBe(0);
     const observed = calls().split("\n").find((l) => l.startsWith("ld=")) ?? "";
-    expect(observed, "the engine was invoked without the cusparselt path").toContain(cusparse);
-    expect(observed).toContain(path.join(dir, ".local/lib"));
+    // Split into entries rather than substring-matching the whole string:
+    // $HOME/.local/lib is a PREFIX of the cusparselt path, so a toContain on
+    // the joined value would be satisfied by the cusparselt entry alone and
+    // would not notice $HOME/.local/lib going missing.
+    const entries = observed.replace(/^ld=/, "").split(":");
+    expect(entries, "the engine was invoked without the cusparselt path").toContain(cusparse);
+    expect(entries, "the engine was invoked without the user-site lib dir").toContain(path.join(dir, ".local/lib"));
     // Appended, never replaced — and ours first, so it is not shadowed.
-    expect(observed).toContain("/opt/already-here");
-    expect(observed.indexOf(cusparse)).toBeLessThan(observed.indexOf("/opt/already-here"));
+    expect(entries).toContain("/opt/already-here");
+    expect(entries.indexOf(cusparse)).toBeLessThan(entries.indexOf("/opt/already-here"));
     // An empty entry means "the current directory" to the loader, which is not
     // somewhere to resolve .so files from.
-    expect(observed).not.toContain("::");
-    expect(observed).not.toMatch(/^ld=:|:$/);
+    expect(entries.filter((e) => e === "")).toEqual([]);
   });
 
   it("leaves Piper's own library path alone", () => {

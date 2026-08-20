@@ -20,10 +20,6 @@ PIP="pip3"
 
 # JP v61 wheel works on JetPack 6.1+ (including 6.2.x).
 JETSON_TORCH_URL="https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
-# libcusparseLt (shipped by the nvidia-cusparselt-cu12 wheel) is not on the
-# default loader path, so `import torch` fails without this. The systemd user
-# units and every python invocation below need it.
-KOKORO_LD_PATH="/home/clawbox/.local/lib:/home/clawbox/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64"
 SYSTEMD_USER="$CLAWBOX_HOME/.config/systemd/user"
 CUDA_HOME_DIR="${CLAWBOX_CUDA_HOME:-/usr/local/cuda}"
 # Written only after a COMPLETE Kokoro install, and read as the idempotence
@@ -36,7 +32,84 @@ CUDA_HOME_DIR="${CLAWBOX_CUDA_HOME:-/usr/local/cuda}"
 # repeated install, never correctness.
 KOKORO_STAMP="$CLAWBOX_HOME/.cache/clawbox/kokoro-installed"
 # Bump when a step below changes in a way an already-stamped box must redo.
-KOKORO_STAMP_VERSION="1"
+# 2: the numpy floor. A box stamped "1" installed `numpy<2`, which was a no-op
+#    against the board's apt numpy 1.21.5 — and it passes BOTH halves of the
+#    gate below, because `import kokoro, torch` succeeds on such a box (torch
+#    only raises "Numpy is not available" later, at the tensor conversion). So
+#    without this bump the fix reaches every box except the ones that have the
+#    defect. The cost of the bump is one repeat of a ~4 minute install.
+KOKORO_STAMP_VERSION="2"
+
+# ── The CUDA loader path ────────────────────────────────────────────────────
+# libcusparseLt.so.0 ships INSIDE the nvidia-cusparselt-cu12 wheel, under the
+# clawbox user's site-packages, where no loader looks by default, so without
+# these directories `import torch` dies with
+#   ImportError: libcusparseLt.so.0: cannot open shared object file
+# which is the exact failure TASK-420 exists to remove. The systemd user units,
+# the ~/.bashrc export and every python invocation below need them.
+#
+# DERIVED from $CLAWBOX_HOME and $CUDA_HOME_DIR, never pinned. The literal this
+# replaced said /home/clawbox and python3.10, and it was baked verbatim into
+# kokoro-server.service; a box with another CLAWBOX_HOME, or the same Jetson
+# after a python minor-version bump, got a unit and a clawbox_python pointing
+# at a directory that does not exist — that ImportError again, with the install
+# still reporting success. scripts/openclaw/clawbox-tts.sh resolves the same
+# three directories the same way in its own kokoro_ld_path(); this is
+# deliberately the same shape rather than a third spelling of it.
+#
+# The callers need DIFFERENT semantics, so the mode is explicit:
+#
+#   present   keep only directories that are on disk right now. For commands
+#             this script runs itself, where naming a directory that does not
+#             exist yet adds nothing. It is what clawbox-tts.sh does, because
+#             it runs at speech time when the wheels are installed by
+#             definition.
+#
+#   expected  keep the site-packages entry even when nothing is unpacked there
+#             yet, resolving the python version from the interpreter that will
+#             run pip. The unit and ~/.bashrc are written ONCE and then read
+#             for the LIFE of the box, and they are written before (or despite)
+#             a failed wheel install — so a strict "skip what is missing"
+#             filter there would silently produce a unit with no cusparselt
+#             entry at all, which is the same broken import arrived at more
+#             quietly.
+#
+# Both modes join with ${out:+$out:} because an EMPTY entry in LD_LIBRARY_PATH
+# means "the current directory" to the loader, which is not somewhere to
+# resolve .so files from.
+kokoro_ld_path() {
+  local mode="${1:-present}" out="" d cusparselt=""
+  # A python* glob, not a pinned python3.10: the minor version is a property of
+  # the box. A directory that really exists always outranks a predicted one.
+  for d in "$CLAWBOX_HOME"/.local/lib/python*/site-packages/nvidia/cusparselt/lib; do
+    if [ -d "$d" ]; then cusparselt="$d"; fi
+  done
+  if [ -z "$cusparselt" ] && [ "$mode" = "expected" ]; then
+    cusparselt=$(kokoro_expected_cusparselt_dir)
+  fi
+  local dirs=("$CLAWBOX_HOME/.local/lib")
+  if [ -n "$cusparselt" ]; then dirs+=("$cusparselt"); fi
+  dirs+=("$CUDA_HOME_DIR/lib64")
+  for d in "${dirs[@]}"; do
+    if [ "$mode" = "present" ] && [ ! -d "$d" ]; then continue; fi
+    out="${out:+$out:}$d"
+  done
+  printf '%s' "$out"
+}
+
+# Where pip --user is going to unpack that wheel on THIS box. Asked of the
+# interpreter that will run pip, so the answer carries the python minor version
+# the box actually has instead of the one this file was written against. Prints
+# nothing if the interpreter cannot be reached or answers something
+# unrecognisable — leaving the entry out is honest, inventing a version is not.
+kokoro_expected_cusparselt_dir() {
+  local ver
+  ver=$(su - "$CLAWBOX_USER" -c \
+    'python3 -c "import sys; print(\"python%d.%d\" % sys.version_info[:2])"' 2>/dev/null | tail -1) || ver=""
+  case "$ver" in
+    python[0-9]*.[0-9]*) printf '%s' "$CLAWBOX_HOME/.local/lib/$ver/site-packages/nvidia/cusparselt/lib" ;;
+  esac
+}
 
 # ── Piper (CPU fallback engine) ─────────────────────────────────────────────
 # Piper is what keeps a spoken reply from becoming silence. Kokoro owns the
@@ -234,9 +307,14 @@ pip_as_clawbox() {
 }
 
 # Run a python3 snippet as the clawbox user with the CUDA library path set.
+# "present": these commands run here and now. The export is skipped entirely
+# when nothing resolved, because `LD_LIBRARY_PATH=:$LD_LIBRARY_PATH` hands the
+# loader an empty leading entry — the current directory.
 clawbox_python() {
+  local ld
+  ld=$(kokoro_ld_path present)
   su - "$CLAWBOX_USER" -c "
-    export LD_LIBRARY_PATH=$KOKORO_LD_PATH:\$LD_LIBRARY_PATH
+    ${ld:+export LD_LIBRARY_PATH=\"$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"}
     python3 -c \"$1\""
 }
 
@@ -244,11 +322,19 @@ install_cuda_torch() {
   echo "  Installing CUDA-enabled PyTorch for Jetson (~300 MB)..."
   pip_as_clawbox "nvidia-cusparselt-cu12" || return 1
   pip_as_clawbox "--no-cache-dir '$JETSON_TORCH_URL'" || return 1
-  # Interactive shells need the same loader path the units get.
-  local bashrc="$CLAWBOX_HOME/.bashrc"
+  # Interactive shells need the same loader path the units get. "expected":
+  # this line is appended once and sourced for the life of the box.
+  local bashrc="$CLAWBOX_HOME/.bashrc" ld
+  ld=$(kokoro_ld_path expected)
   if ! grep -q "cusparselt" "$bashrc" 2>/dev/null; then
-    echo "export LD_LIBRARY_PATH=$KOKORO_LD_PATH:\${LD_LIBRARY_PATH}" >> "$bashrc"
+    echo "export LD_LIBRARY_PATH=$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" >> "$bashrc"
     echo "export CUDA_HOME=$CUDA_HOME_DIR" >> "$bashrc"
+    # `>>` CREATES the file when it is missing, and this runs as root: a box
+    # whose clawbox user had no .bashrc would get a root-owned one it can never
+    # edit again. Best-effort, like every other chown here — the exports still
+    # work if it fails, and failing the GPU install over file ownership would
+    # cost the box its voice for nothing.
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$bashrc" 2>/dev/null || true
   fi
 }
 
@@ -320,6 +406,10 @@ kokoro_mark_installed() {
 # The kokoro-server.service heredoc lives here, once, so the full path and
 # --tts-only cannot ship two different units.
 write_kokoro_unit() {
+  local ld
+  # "expected": this file is written once and read for the life of the box, and
+  # it is refreshed even on a run whose wheel install failed.
+  ld=$(kokoro_ld_path expected)
   mkdir -p "$SYSTEMD_USER" || return 1
   cat > "$SYSTEMD_USER/kokoro-server.service" << EOF
 [Unit]
@@ -328,7 +418,7 @@ After=default.target
 
 [Service]
 Type=simple
-Environment=LD_LIBRARY_PATH=$KOKORO_LD_PATH
+Environment=LD_LIBRARY_PATH=$ld
 ExecStart=/usr/bin/python3 $WORKSPACE/scripts/kokoro-server.py
 Restart=no
 
@@ -551,13 +641,14 @@ if $HAS_CUDA; then
   DEVICE="cuda"
   COMPUTE="float16"
 fi
-su - "$CLAWBOX_USER" -c "
-  export LD_LIBRARY_PATH=$CLAWBOX_HOME/.local/lib:$CLAWBOX_HOME/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH
-  python3 -c \"
+# Through the shared helper: this was the third copy of the same pinned
+# python3.10 path, and STT needs that loader path for exactly the reason TTS
+# does — the CUDA libraries live under user-site.
+clawbox_python "
 from faster_whisper import WhisperModel
 model = WhisperModel('base', device='$DEVICE', compute_type='$COMPUTE')
 print('Whisper base model ready on $DEVICE')
-\"" 2>&1 | tail -3
+" 2>&1 | tail -3
 
 echo "[6/8] Pre-downloading Kokoro model..."
 if kokoro_predownload_model; then
@@ -589,7 +680,7 @@ After=default.target
 
 [Service]
 Type=simple
-Environment=LD_LIBRARY_PATH=$KOKORO_LD_PATH
+Environment=LD_LIBRARY_PATH=$(kokoro_ld_path expected)
 Environment=WHISPER_MODEL=base
 ExecStart=/usr/bin/python3 $SCRIPTS_DST/whisper-server.py
 Restart=no
