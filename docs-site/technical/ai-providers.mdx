@@ -54,7 +54,15 @@ ClawBox AI Flash and ClawBox AI Pro expose three reasoning-effort levels, select
 | `high` | Extended reasoning for harder tasks. |
 | `xhigh` | Maximum reasoning. Mapped upstream to DeepSeek's `reasoning_effort: "max"`. |
 
-The chat header may show more levels globally, but for the ClawBox AI (DeepSeek) provider only these three take effect; anything else is clamped or rejected by the gateway.
+These three cover the **full behavioral range** of the DeepSeek backend. OpenClaw's generic ladder has seven levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), but DeepSeek V4's API accepts only two reasoning efforts, so the extra names are aliases that collapse onto the same two calls:
+
+| You select | Sent to DeepSeek |
+|---|---|
+| `off` | thinking disabled |
+| `minimal`, `low`, `medium`, `high` | `reasoning_effort: "high"` |
+| `xhigh`, `max` | `reasoning_effort: "max"` |
+
+Exposing `off` / `high` / `xhigh` therefore gives access to every distinct behavior the model has. Adding `low` or `max` to the menu would add labels, not capability — `low` behaves identically to `high`, and `max` identically to `xhigh`.
 
 <Warning>
 **This list is set programmatically, not by hand-editing config.** Three mechanisms each independently overwrite a manual edit, so all three must be satisfied in code:
