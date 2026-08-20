@@ -64,20 +64,25 @@ jobs:
     steps:
       - name: Checkout PR head
         if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
+          # The updater fetches its target branch explicitly. Keeping only the
+          # exact PR head avoids copying the repository's full object history
+          # into the Docker image while preserving a real, fetchable .git repo.
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Checkout repository
         if: ${{ github.event_name != 'pull_request' }}
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          # We need the target branch reachable from the working tree so the
-          # updater can `git fetch origin <branch>`. Fetch tags too since the
-          # version check polls `git ls-remote --tags`.
-          fetch-depth: 0
+          # Scheduled/dispatch runs update the checked-out branch. The updater
+          # performs its own `git fetch origin <branch>`, and version checks use
+          # `git ls-remote --tags`, so local history and tags are unnecessary.
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Show Docker + runner info
         run: |
@@ -124,6 +129,19 @@ jobs:
         with:
           bun-version: "1.2.10"
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build e2e-install image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: e2e-install/Dockerfile
+          load: true
+          tags: clawbox-e2e:latest
+          cache-from: type=gha,scope=e2e-install-${{ runner.arch }}
+          cache-to: type=gha,mode=min,scope=e2e-install-${{ runner.arch }}
+
       # Only install the host-side bits we need to *drive* the tests: the
       # Playwright runner + its system libs for the chat UI spec. The
       # container inside Docker has its own separate Playwright install.
@@ -140,13 +158,10 @@ jobs:
           GREP_FILTER: ${{ inputs.grep_filter }}
           # Let global-setup.ts handle image build + container boot +
           # waitForInstallComplete. It already does all three with one
-          # consistent error path; running a separate "boot" step here and
-          # then SKIP_SETUP=1 would race against install.sh still running.
-          DOCKER_BUILDKIT: "1"
-          # Force the image to build fresh each CI run — caching layers
-          # across runs makes failures hard to reproduce and the runner
-          # disk is throwaway anyway.
-          CLAWBOX_E2E_REBUILD: "1"
+          # consistent error path. The image itself was built immediately
+          # above from this exact checkout; content-addressed BuildKit layers
+          # only avoid re-downloading unchanged base packages on cold runners.
+          CLAWBOX_E2E_REBUILD: "0"
         run: |
           set -o pipefail
           args=()

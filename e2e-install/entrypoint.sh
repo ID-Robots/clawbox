@@ -40,5 +40,32 @@ CLAWBOX_TEST_MODE=1
 NETWORK_INTERFACE=${NETWORK_INTERFACE:-eth0}
 EOF
 
+# The full installer still deploys clawbox-ap.service so upgrade paths can
+# verify its unit file, but this container has no WiFi radio and the install
+# harness intentionally excludes the service from active-service validation.
+# Keep the real root-update/systemd restart path while replacing only the
+# impossible hardware boundary; otherwise each settings write waits ~34s for
+# start-ap.sh retries that cannot succeed and whose failure is already ignored.
+mkdir -p /etc/systemd/system/clawbox-ap.service.d
+cat > /etc/systemd/system/clawbox-ap.service.d/e2e-no-radio.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/bin/true
+ExecStop=
+ExecStop=/bin/true
+EOF
+
+# Docker networking is already configured before PID 1 starts. Ubuntu's
+# NetworkManager-wait-online helper cannot classify the synthetic eth0 link
+# and burns its full 60-second timeout on every tested reboot before allowing
+# clawbox-setup.service to start. Preserve the network-online dependency graph
+# but satisfy the impossible hardware probe immediately in this container.
+mkdir -p /etc/systemd/system/NetworkManager-wait-online.service.d
+cat > /etc/systemd/system/NetworkManager-wait-online.service.d/e2e-docker-network.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=/bin/true
+EOF
+
 # Hand off to systemd.
 exec "$@"
