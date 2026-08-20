@@ -44,6 +44,28 @@ Some native OpenClaw provider plugins expect auth stores ClawBox doesn't populat
 - Requests proxy through the portal's AI endpoint; both models advertise reasoning support including **X-High** effort (mapped upstream to DeepSeek's maximum reasoning mode).
 - Changing the linked portal account automatically unpairs ClawKeep (backups belong to the account).
 
+### Reasoning effort
+
+ClawBox AI Flash and ClawBox AI Pro expose three reasoning-effort levels, selectable per conversation from the brain icon in the chat header (or with `/think <level>`):
+
+| Level | Behavior |
+|---|---|
+| `off` | No extended reasoning — the default. The cloud proxy disables thinking unless you opt in, keeping replies fast and cheap. |
+| `high` | Extended reasoning for harder tasks. |
+| `xhigh` | Maximum reasoning. Mapped upstream to DeepSeek's `reasoning_effort: "max"`. |
+
+The chat header may show more levels globally, but for the ClawBox AI (DeepSeek) provider only these three take effect; anything else is clamped or rejected by the gateway.
+
+<Warning>
+**This list is set programmatically, not by hand-editing config.** Three mechanisms each independently overwrite a manual edit, so all three must be satisfied in code:
+
+1. **`gateway-pre-start.sh` re-asserts it on every gateway start.** The boot script rewrites `compat.supportedReasoningEfforts` on the DeepSeek models back to the target list each time the gateway starts. A hand edit to `openclaw.json` survives only until the next restart.
+2. **`npm install -g openclaw@latest` overwrites the plugin catalog.** The levels are also declared in the OpenClaw package at `dist/extensions/deepseek/openclaw.plugin.json`, which every system update replaces wholesale. ClawBox re-applies the patch on each boot precisely because of this.
+3. **A configured provider overrides the plugin catalog entirely.** When `openclaw.json` defines the `deepseek` provider, OpenClaw ignores the plugin's `modelCatalog` for those models — so the `compat` block must live on the configured entry (written by the setup route), not on the plugin file.
+
+Without the declaration, OpenClaw's `catalogSupportsXHigh()` returns false, `sessions.patch` rejects `xhigh` ("use off|minimal|low|medium|high"), and the chat header's **X-High** option silently fails — even though the transport layer already translates OpenClaw `xhigh` → DeepSeek `reasoning_effort: "max"` correctly. The capability is present; only the catalog declaration was ever missing. The two source-of-truth locations are `src/app/setup-api/ai-models/configure/route.ts` (written at pairing) and `scripts/gateway-pre-start.sh` (enforced at every boot).
+</Warning>
+
 ## Local models (Ollama / llama.cpp)
 
 - Local lanes authenticate with a **per-install bearer token** through a local proxy — nothing is exposed unauthenticated, even on localhost.
