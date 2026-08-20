@@ -69,19 +69,26 @@ function writeMeminfo(availableMb: number) {
   );
 }
 
-function writeStub(name: string, body: string) {
-  const p = path.join(binDir, name);
+function writeStub(name: string, body: string, atDir = binDir) {
+  const p = path.join(atDir, name);
   writeFileSync(p, `#!/usr/bin/env bash\n${body}\n`);
   chmodSync(p, 0o755);
   return p;
 }
 
-/** A kokoro CLI that honours -o/-m and can be told to fail or fall silent. */
-function stubKokoro() {
+/**
+ * A kokoro CLI that honours -o/-m and can be told to fail or fall silent.
+ * `atDir` is a parameter because WHERE the CLI is is itself under test: pip
+ * --user puts it somewhere the exec PATH does not include.
+ */
+function stubKokoro(atDir = binDir, name = "kokoro") {
   return writeStub(
-    "kokoro",
+    name,
     [
       'echo "kokoro $*" >> "$CALLS_LOG"',
+      // The loader path the engine was actually handed. torch does not import
+      // without it, and the stub is the only place a test can observe it.
+      'echo "ld=${LD_LIBRARY_PATH:-}" >> "$CALLS_LOG"',
       'out=""; voice=""',
       "while [ $# -gt 0 ]; do",
       '  case "$1" in',
@@ -96,6 +103,7 @@ function stubKokoro() {
       'if [ "${KOKORO_FAIL:-0}" != "0" ]; then echo "CUDA out of memory" >&2; exit 1; fi',
       'python3 "$WAV_WRITER" "$out" "${KOKORO_SECONDS:-1}"',
     ].join("\n"),
+    atDir,
   );
 }
 
@@ -221,6 +229,92 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     // that is quietly living on the CPU engine.
     expect(r.stderr).toContain("fell back to Piper");
     expect(r.stderr).toContain("is not installed");
+  });
+
+  // ── Where the engine is, and what it can load ─────────────────────────────
+  // Installing Kokoro was not enough. With the whole package set on disk and
+  // `kokoro -t ... -o ...` producing 105 KB of audio from an interactive
+  // shell, a real Orin still spoke through Piper: the CLI lives at
+  // ~/.local/bin, which is not on the PATH OpenClaw execs this script with,
+  // and torch cannot import libcusparseLt.so.0 without a loader path that
+  // only ~/.bashrc and the systemd unit carried (TASK-420).
+
+  it("finds the CLI pip --user installed, which the exec PATH does not include", () => {
+    const userBin = path.join(dir, ".local", "bin");
+    mkdirSync(userBin, { recursive: true });
+    stubKokoro(userBin);
+    stubPiper();
+    const r = synth([]);
+    expect(r.status).toBe(0);
+    // Kokoro is the engine that spoke — not Piper, and not "Piper with a note".
+    expect(calls()).toContain("kokoro ");
+    expect(calls()).not.toContain("piper ");
+    expect(r.stderr).not.toContain("fell back to Piper");
+    expect(outputBytes()).toBeGreaterThan(1024);
+  });
+
+  it("says where it looked when the CLI is in neither place", () => {
+    stubPiper();
+    const r = synth([]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("piper ");
+    expect(r.stderr).toContain("is not installed");
+    // "not installed" is what a box printed while Kokoro was installed and
+    // working at exactly this path, so the note has to name the path it
+    // checked rather than leave that as the reader's guess.
+    expect(r.stderr).toContain(path.join(dir, ".local/bin/kokoro"));
+    expect(outputBytes()).toBeGreaterThan(1024);
+  });
+
+  it("lets an explicit KOKORO_BIN outrank both PATH and ~/.local/bin", () => {
+    // The per-channel provider `env` sets it, and this suite drives the script
+    // through it, so resolution must not quietly take the choice away.
+    const userBin = path.join(dir, ".local", "bin");
+    mkdirSync(userBin, { recursive: true });
+    writeStub("kokoro", 'echo "wrong-kokoro-from-PATH $*" >> "$CALLS_LOG"; exit 1');
+    writeStub("kokoro", 'echo "wrong-kokoro-from-user-site $*" >> "$CALLS_LOG"; exit 1', userBin);
+    const explicit = stubKokoro(binDir, "kokoro-explicit");
+    stubPiper();
+    const r = synth([], { KOKORO_BIN: explicit });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("kokoro ");
+    expect(calls()).not.toContain("wrong-kokoro");
+    expect(calls()).not.toContain("piper ");
+    expect(outputBytes()).toBeGreaterThan(1024);
+  });
+
+  it("hands Kokoro the CUDA loader path, appended to whatever was already set", () => {
+    const cusparse = path.join(dir, ".local/lib/python3.10/site-packages/nvidia/cusparselt/lib");
+    mkdirSync(cusparse, { recursive: true });
+    stubKokoro();
+    stubPiper();
+    const r = synth([], { LD_LIBRARY_PATH: "/opt/already-here" });
+    expect(r.status).toBe(0);
+    const observed = calls().split("\n").find((l) => l.startsWith("ld=")) ?? "";
+    // Split into entries rather than substring-matching the whole string:
+    // $HOME/.local/lib is a PREFIX of the cusparselt path, so a toContain on
+    // the joined value would be satisfied by the cusparselt entry alone and
+    // would not notice $HOME/.local/lib going missing.
+    const entries = observed.replace(/^ld=/, "").split(":");
+    expect(entries, "the engine was invoked without the cusparselt path").toContain(cusparse);
+    expect(entries, "the engine was invoked without the user-site lib dir").toContain(path.join(dir, ".local/lib"));
+    // Appended, never replaced — and ours first, so it is not shadowed.
+    expect(entries).toContain("/opt/already-here");
+    expect(entries.indexOf(cusparse)).toBeLessThan(entries.indexOf("/opt/already-here"));
+    // An empty entry means "the current directory" to the loader, which is not
+    // somewhere to resolve .so files from.
+    expect(entries.filter((e) => e === "")).toEqual([]);
+  });
+
+  it("leaves Piper's own library path alone", () => {
+    // Piper ships its own onnxruntime next to the binary; putting user-site
+    // CUDA directories in front of that is not this change's business.
+    writeStub("piper", ['echo "piper-ld=${LD_LIBRARY_PATH:-}" >> "$CALLS_LOG"', "cat > /dev/null", "exit 1"].join("\n"));
+    mkdirSync(path.join(dir, ".local/lib/python3.10/site-packages/nvidia/cusparselt/lib"), { recursive: true });
+    synth([]);
+    const observed = calls().split("\n").find((l) => l.startsWith("piper-ld=")) ?? "";
+    expect(observed).toContain(binDir);
+    expect(observed).not.toContain("cusparselt");
   });
 
   it("falls back to Piper when kokoro fails, instead of exiting 1", () => {
@@ -698,9 +792,12 @@ describe("install.sh wires TTS to the on-device chain", () => {
     expect(step).toContain('outputFormat:"wav"');
   });
 
-  it("installs the Piper fallback as part of the same step", () => {
+  it("installs both engines as part of the same step", () => {
     expect(step).toContain("install-voice.sh");
-    expect(step).toContain("--piper-only");
+    // --piper-only until TASK-420, which installed the fallback and nothing
+    // else while this step claimed Kokoro GPU. --tts-only installs both.
+    // Behaviour is covered by install-kokoro-tts.test.ts, which executes it.
+    expect(step).toMatch(/install-voice\.sh" --tts-only/);
   });
 
   it("runs on updated boxes and not just fresh installs", () => {

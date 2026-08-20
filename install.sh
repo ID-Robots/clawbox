@@ -1786,8 +1786,42 @@ step_openclaw_tts() {
   is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
 
-  bash "$PROJECT_DIR/scripts/install-voice.sh" --piper-only \
-    || echo "  Warning: Piper fallback install failed (non-fatal) — Kokoro still works, but a GPU failure will be silent"
+  # --tts-only, NOT --piper-only. --piper-only installs the CPU fallback and
+  # nothing else, so every box we shipped ran on Piper while this step printed
+  # "Kokoro GPU" — on freshly flashed hardware neither `import kokoro` nor
+  # `import torch` resolved and no kokoro-server unit existed (TASK-420).
+  # --tts-only installs the CUDA Kokoro stack too, and deliberately not the STT
+  # half of that script (faster-whisper + the CTranslate2 source build, about
+  # an hour on an Orin) because this step also runs from step_post_update on
+  # every in-app update.
+  #
+  # Its exit code is the contract: it never fails the install over the GPU
+  # path, it reports whether Kokoro is actually there so the summary below can
+  # tell the truth instead of asserting it.
+  local VOICE_RC=0
+  bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
+  local KOKORO_READY=false KOKORO_REASON=""
+  case "$VOICE_RC" in
+    0)  KOKORO_READY=true ;;
+    10) KOKORO_REASON="no CUDA toolkit on this board" ;;
+    11) KOKORO_REASON="no Jetson CUDA build for this CPU architecture" ;;
+    12) KOKORO_REASON="the Kokoro GPU install failed, see the log above" ;;
+    1)  KOKORO_REASON="the voice install did not complete"
+        # Reworded for TASK-420: this used to say "Kokoro still works, but a
+        # GPU failure will be silent", which was written when Kokoro was
+        # assumed present. Losing Piper is only survivable while Kokoro works.
+        echo "  Warning: the Piper CPU fallback did not install (non-fatal) — if Kokoro is unavailable or its GPU path fails, the box answers speech with silence" >&2
+        ;;
+    *)  KOKORO_REASON="install-voice.sh exited $VOICE_RC" ;;
+  esac
+  if [ "$KOKORO_READY" = true ]; then
+    echo "  Kokoro GPU TTS installed (Piper CPU fallback behind it)"
+  else
+    # No engine claim here: on VOICE_RC=1 the Piper half is the thing that
+    # failed, so "Piper is the active engine" would be its own small lie. The
+    # summary at the end of the step names the engine.
+    echo "  Kokoro GPU TTS NOT installed: $KOKORO_REASON"
+  fi
 
   # Seed-if-unset, same contract as the primary model above: an owner who has
   # chosen ElevenLabs (or turned TTS off) must not have it silently reset by
@@ -1868,7 +1902,16 @@ step_openclaw_tts() {
     echo "  ERROR: could not select the tts-local-cli provider" >&2
     return 1
   fi
-  echo "  On-device TTS configured (Kokoro GPU, Piper fallback)"
+  # Only claim Kokoro when Kokoro is genuinely there. This line asserting
+  # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three
+  # freshly flashed boxes printed it while running entirely on Piper.
+  if [ "$KOKORO_READY" = true ]; then
+    echo "  On-device TTS configured (Kokoro GPU, Piper fallback)"
+  elif [ "$VOICE_RC" -eq 1 ]; then
+    echo "  On-device TTS configured, but NO engine is confirmed installed ($KOKORO_REASON)"
+  else
+    echo "  On-device TTS configured (Piper CPU only — $KOKORO_REASON)"
+  fi
 }
 
 step_setup_config() {
