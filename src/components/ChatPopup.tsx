@@ -246,6 +246,14 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
   return true
 }
 
+// The newest server timestamp currently on screen — the line a later message
+// has to be after to belong to the wait that starts now.
+function newestTimestamp(msgs: ChatMessage[]): number {
+  let newest = 0
+  for (const m of msgs) if (m.timestamp > newest) newest = m.timestamp
+  return newest
+}
+
 function countImages(msgs: ChatMessage[]): number {
   let total = 0
   for (const m of msgs) total += m.images?.length ?? 0
@@ -296,6 +304,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // A failed job produces no picture, so the count check that normally ends the
   // wait would never fire and the banner would sit there until it timed out.
   const imageFailedRef = useRef(false)
+  // Timestamp the current wait started from; anything at or before it is a
+  // previous generation's outcome, not this one's.
+  const imageWaitFromRef = useRef(0)
   // Which agent harness backs this chat. OpenClaw uses the gateway WebSocket;
   // Hermes uses the /setup-api/hermes/chat HTTP route (hermes -z, persistent
   // session). Loaded once on mount; connect() is gated on `harnessLoaded` so we
@@ -1112,6 +1123,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               generatingImageRef.current = true
               imageFailedRef.current = false
               imageBaselineRef.current = countImages(messagesRef.current)
+              imageWaitFromRef.current = newestTimestamp(messagesRef.current)
               setGeneratingImage(true)
             }
           }
@@ -1337,8 +1349,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // `role: "user"` messages. They are instructions to the agent, not
         // anything the person typed, and rendering them puts a wall of internal
         // text in the transcript attributed to the user.
+        const timestamp = (m.timestamp as number) || 0
         if (isInternalRoutingMessage(m, raw)) {
-          if (isFailedImageGenerationNotice(raw)) imageFailedRef.current = true
+          // Only a notice NEWER than the wait counts. Every history read
+          // returns the last 50 messages, so failures from earlier generations
+          // are still in the window — treating those as this job's outcome
+          // ended the wait ~400ms after it started and the banner never showed.
+          // Both sides of the comparison are server timestamps, so a browser
+          // clock that disagrees with the device cannot skew it.
+          if (
+            generatingImageRef.current &&
+            timestamp > imageWaitFromRef.current &&
+            isFailedImageGenerationNotice(raw)
+          ) {
+            imageFailedRef.current = true
+          }
           continue
         }
         // Inter-session routing envelopes are machinery addressed to the agent,
@@ -1349,8 +1374,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // different failure reports. Checked BEFORE splitAssistantMedia so an
         // envelope carrying a MEDIA: line is dropped whole rather than
         // surviving as a picture. Shared with ChatApp so the surfaces can't drift.
+        //
+        // `timestamp` is already declared above — this commit hoisted it so the
+        // image-failure window could compare against it.
         if (isInterSessionEnvelope(raw, m)) continue
-        const timestamp = (m.timestamp as number) || 0
         if (role === 'user') {
           const cleaned = raw.replace(/^\[[^\]]+\]\s*/, '')
           if (!cleaned) continue
