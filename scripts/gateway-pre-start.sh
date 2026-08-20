@@ -490,7 +490,11 @@ if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
 # max_tokens 128000 is accepted and 200000 (the generic default an entry falls
 # through to when the field is absent) comes back 400 "supports at most 128000
 # completion tokens".
-CLAWBOX_VISION_MODEL_ID = "gpt-5.6-luna"
+# Honour the same env override CLAWBOX_AI_VISION_MODEL_ID gives the route, so a
+# box provisioned against a staging proxy with a different alias map is not
+# dragged back to the production slug at the next boot. Unset (the normal case)
+# means the shipped default, which the unit test pins to the TS constant.
+CLAWBOX_VISION_MODEL_ID = (os.environ.get("CLAWBOX_AI_VISION_MODEL_ID") or "").strip() or "gpt-5.6-luna"
 CLAWBOX_VISION_MODEL_NAME = "ClawBox AI Vision"
 CLAWBOX_VISION_MODEL_REF = "deepseek/" + CLAWBOX_VISION_MODEL_ID
 CLAWBOX_VISION_MAX_TOKENS = 128000

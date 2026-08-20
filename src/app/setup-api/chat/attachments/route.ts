@@ -5,6 +5,7 @@ import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
+import { randomUUID } from "crypto";
 import { OPENCLAW_HOME } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
@@ -43,6 +44,24 @@ const ATTACHMENT_DIR = path.join(OPENCLAW_HOME, "media", "chat-attachments");
 // it stages a file the agent opens by path, and the composer also accepts PDFs
 // and text. 25 MB matches the ceiling the sibling media reader uses.
 const MAX_BYTES = 25 * 1024 * 1024;
+
+// `limits.fileSize` bounds each file, not the request. Without a total-bytes
+// guard a caller can stream unbounded data at the disk under one part, or pile
+// on parts and fields that never hit the file limit at all. This route is
+// session-gated, so this is a resource guard rather than a perimeter, but the
+// disk it fills is the customer's.
+const MAX_REQUEST_BYTES = MAX_BYTES + 1024 * 1024;
+const MAX_FIELDS = 8;
+const MAX_FIELD_BYTES = 4096;
+const MAX_PARTS = 12;
+
+/** Raised for input the client got wrong (400) as opposed to a failure of ours (500). */
+class BadUpload extends Error {
+  constructor(message: string, readonly status = 400) {
+    super(message);
+    this.name = "BadUpload";
+  }
+}
 
 /**
  * A filesystem-safe leaf name for an uploaded file.
@@ -93,17 +112,39 @@ export async function POST(req: NextRequest) {
   }
   if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
 
-  await fsp.mkdir(ATTACHMENT_DIR, { recursive: true });
-  // Resolve AFTER mkdir: realpath on a directory that does not exist yet
-  // throws, and ~/.openclaw is a symlink on shared-identity installs.
-  const dirReal = await fsp.realpath(ATTACHMENT_DIR);
+  // Preparing the staging directory is our side of the contract, not the
+  // caller's: a read-only filesystem or a bad permission here is a 500, and it
+  // has to be caught, or the rejection escapes the route with no JSON body at
+  // all.
+  let dirReal: string;
+  try {
+    await fsp.mkdir(ATTACHMENT_DIR, { recursive: true });
+    // Resolve AFTER mkdir: realpath on a directory that does not exist yet
+    // throws, and ~/.openclaw is a symlink on shared-identity installs.
+    dirReal = await fsp.realpath(ATTACHMENT_DIR);
+  } catch (err) {
+    return NextResponse.json(
+      { error: `Could not prepare the attachment directory: ${err instanceof Error ? err.message : String(err)}` },
+      { status: 500 },
+    );
+  }
 
   let written: string | null = null;
+  // Hoisted so the cleanup below can wait for the write to stop before
+  // unlinking. Rejecting on a limit does not halt the pipeline synchronously,
+  // and an unlink that races it just gets the bytes written back underneath it.
+  const pendingWrites: Promise<unknown>[] = [];
   try {
     const result = await new Promise<{ name: string; path: string }>((resolve, reject) => {
       const busboy = Busboy({
         headers: { "content-type": contentType },
-        limits: { files: 1, fileSize: MAX_BYTES },
+        limits: {
+          files: 1,
+          fileSize: MAX_BYTES,
+          fields: MAX_FIELDS,
+          fieldSize: MAX_FIELD_BYTES,
+          parts: MAX_PARTS,
+        },
       });
       let settled = false;
       let fileName = "";
@@ -117,18 +158,31 @@ export async function POST(req: NextRequest) {
         reject(error);
       };
 
+      // busboy stops emitting past a limit rather than failing, so a request
+      // that trips one would otherwise look like a well-formed short upload.
+      busboy.on("filesLimit", () => rejectOnce(new BadUpload("Only one file per request")));
+      busboy.on("partsLimit", () => rejectOnce(new BadUpload("Too many multipart parts")));
+      busboy.on("fieldsLimit", () => rejectOnce(new BadUpload("Too many form fields")));
+
       busboy.on("file", (_field, fileStream, info) => {
         sawFile = true;
         const leaf = safeLeafName(info.filename);
         if (!leaf) {
           fileStream.resume();
-          rejectOnce(new Error("Invalid filename"));
+          rejectOnce(new BadUpload("Invalid filename"));
           return;
         }
-        const dest = resolveDest(dirReal, leaf);
+        // Storage name is ours, display name is theirs. Deriving the path from
+        // the client filename alone means two uploads called screenshot.png
+        // land on the same file, and the second silently rewrites the bytes an
+        // earlier chat message already points at — `createWriteStream` opens
+        // "w", which truncates. The uuid prefix also makes the exclusive open
+        // below a genuine collision check rather than a formality.
+        const storageName = `${randomUUID()}-${leaf}`;
+        const dest = resolveDest(dirReal, storageName);
         if (!dest) {
           fileStream.resume();
-          rejectOnce(new Error("Invalid destination"));
+          rejectOnce(new BadUpload("Invalid destination"));
           return;
         }
         fileName = leaf;
@@ -136,15 +190,19 @@ export async function POST(req: NextRequest) {
         written = dest;
         // busboy raises `limit` and then ends the stream, so the pipeline would
         // otherwise resolve on a truncated file and hand back a path to it.
-        fileStream.on("limit", () => rejectOnce(new Error("File exceeds the size limit")));
-        const write = pipeline(fileStream, fs.createWriteStream(dest)).then(() => {});
+        fileStream.on("limit", () => rejectOnce(new BadUpload("File exceeds the size limit", 413)));
+        // "wx": never clobber. A path we just generated should not exist, and
+        // if it does, something is wrong enough that overwriting is the worst
+        // available answer.
+        const write = pipeline(fileStream, fs.createWriteStream(dest, { flags: "wx" })).then(() => {});
         writes.push(write);
+        pendingWrites.push(write);
         write.catch(rejectOnce);
       });
 
       busboy.on("finish", () => {
         if (!sawFile) {
-          rejectOnce(new Error("No file part"));
+          rejectOnce(new BadUpload("No file part"));
           return;
         }
         void Promise.all(writes)
@@ -158,6 +216,18 @@ export async function POST(req: NextRequest) {
       busboy.on("error", rejectOnce);
 
       const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+      // Total-request guard. Per-file and per-field limits leave the sum
+      // unbounded, so count what actually arrives and cut the stream off.
+      let receivedBytes = 0;
+      nodeStream.on("data", (chunk: Buffer) => {
+        receivedBytes += chunk.length;
+        if (receivedBytes > MAX_REQUEST_BYTES) {
+          nodeStream.unpipe(busboy);
+          nodeStream.destroy();
+          rejectOnce(new BadUpload("Request exceeds the size limit", 413));
+        }
+      });
+      nodeStream.on("error", rejectOnce);
       nodeStream.pipe(busboy);
     });
     return NextResponse.json({ ok: true, name: result.name, path: result.path });
@@ -166,11 +236,16 @@ export async function POST(req: NextRequest) {
     // would be told nothing, but a later request reusing the name would
     // silently inherit whatever bytes did land.
     if (written) {
+      await Promise.allSettled(pendingWrites);
       try { await fsp.unlink(written); } catch { /* best effort */ }
     }
+    // 400/413 only for input the caller can fix. Anything else is ours —
+    // a full disk, a permission problem — and reporting it as a client error
+    // sends the user off debugging a request that was fine.
+    const status = err instanceof BadUpload ? err.status : 500;
     return NextResponse.json(
       { error: `Upload failed: ${err instanceof Error ? err.message : String(err)}` },
-      { status: 400 },
+      { status },
     );
   }
 }

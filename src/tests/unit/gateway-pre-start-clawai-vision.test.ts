@@ -65,11 +65,11 @@ type ModelEntry = { id?: string; name?: string; input?: unknown; maxTokens?: unk
  * (`deepseek_provider`, `agents_defaults`, `changed`) — mock at that boundary
  * and nothing else, so the logic under test is 100% shipped bytes.
  */
-function migrate(cfg: Config): { cfg: Config; changed: boolean } {
+function migrate(cfg: Config, env: Record<string, string> = {}): { cfg: Config; changed: boolean } {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const program = [
-    "import json, sys",
+    "import json, os, sys",
     "cfg = json.load(open(sys.argv[1]))",
     'models_providers = cfg.setdefault("models", {}).setdefault("providers", {})',
     'agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})',
@@ -78,7 +78,10 @@ function migrate(cfg: Config): { cfg: Config; changed: boolean } {
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
-  const out = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
+  const out = execFileSync("python3", ["-c", program, file], {
+    encoding: "utf-8",
+    env: { ...process.env, ...env },
+  }).trim().split("\n");
   return JSON.parse(out[out.length - 1]);
 }
 
@@ -224,11 +227,20 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision migration",
     expect(visionEntry(chosen.cfg)?.maxTokens).toBe(4096);
   });
 
+  it("follows CLAWBOX_AI_VISION_MODEL_ID when a staging proxy sets it", () => {
+    // The route resolves the slug from the environment; a migration that always
+    // wrote the production default would drag a staging box back to a model its
+    // proxy may not allow at the next boot.
+    const { cfg } = migrate(pairedBox(), { CLAWBOX_AI_VISION_MODEL_ID: "vision-staging-1" });
+    expect(dsModels(cfg).some((m) => m.id === "vision-staging-1")).toBe(true);
+    expect(imageModel(cfg)).toEqual({ primary: "deepseek/vision-staging-1" });
+  });
+
   it("keeps the model id, label and ceiling in step with the TS constants", () => {
     // The .sh hardcodes them because a shell migration cannot import a TS
     // constant. The proxy matches the BARE id against its allowlist, so a drift
     // here silently breaks every vision request.
-    expect(POLICY).toContain(`CLAWBOX_VISION_MODEL_ID = "${CLAWBOX_AI_VISION_MODEL_ID}"`);
+    expect(POLICY).toContain(`or "${CLAWBOX_AI_VISION_MODEL_ID}"`);
     expect(POLICY).toContain(`CLAWBOX_VISION_MODEL_NAME = "${CLAWBOX_AI_VISION_MODEL_LABEL}"`);
     expect(POLICY).toContain(`CLAWBOX_VISION_MAX_TOKENS = ${CLAWBOX_AI_VISION_MAX_TOKENS}`);
     expect(CLAWBOX_AI_VISION_MODEL).toBe(`deepseek/${CLAWBOX_AI_VISION_MODEL_ID}`);

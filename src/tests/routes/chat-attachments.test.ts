@@ -85,8 +85,10 @@ describe("/setup-api/chat/attachments", () => {
     expect(body.name).toBe("shapes.png");
     // The assertion that matters: the path handed to the agent is inside the
     // media root, not $HOME/uploads.
-    expect(body.path).toBe(path.join(stagingDir(), "shapes.png"));
+    expect(path.dirname(body.path)).toBe(stagingDir());
     expect(path.resolve(body.path).startsWith(path.join(openclawHome, "media") + path.sep)).toBe(true);
+    // Storage name is server-generated; the client name survives as the label.
+    expect(path.basename(body.path)).toMatch(/^[0-9a-f-]{36}-shapes\.png$/);
     expect(fs.readFileSync(body.path)).toEqual(PNG);
   });
 
@@ -101,7 +103,8 @@ describe("/setup-api/chat/attachments", () => {
     const res = await POST(request(multipart("../../../etc/evil.png", PNG)));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.path).toBe(path.join(stagingDir(), "evil.png"));
+    expect(path.dirname(body.path)).toBe(stagingDir());
+    expect(path.basename(body.path)).toMatch(/-evil\.png$/);
     expect(fs.existsSync(path.join(tmpHome, "evil.png"))).toBe(false);
   });
 
@@ -122,7 +125,8 @@ describe("/setup-api/chat/attachments", () => {
     const res = await POST(request(multipart(".bashrc", PNG)));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(path.basename(body.path)).toBe("bashrc");
+    expect(body.name).toBe("bashrc");
+    expect(path.basename(body.path)).toMatch(/-bashrc$/);
   });
 
   it("rejects a non-multipart body", async () => {
@@ -137,6 +141,40 @@ describe("/setup-api/chat/attachments", () => {
     );
     const res = await POST(request(body));
     expect(res.status).toBe(400);
+  });
+
+  it("never lets a second upload overwrite the first one's bytes", async () => {
+    // Two screenshots both called screenshot.png. Deriving the path from the
+    // client name alone would truncate the first, and an earlier chat message
+    // still points at it.
+    const first = await (await POST(request(multipart("screenshot.png", PNG)))).json();
+    const other = Buffer.concat([PNG, Buffer.from("second")]);
+    const second = await (await POST(request(multipart("screenshot.png", other)))).json();
+
+    expect(first.path).not.toBe(second.path);
+    expect(first.name).toBe("screenshot.png");
+    expect(second.name).toBe("screenshot.png");
+    expect(fs.readFileSync(first.path)).toEqual(PNG);
+    expect(fs.readFileSync(second.path)).toEqual(other);
+  });
+
+  it("refuses a request larger than the total limit with 413", async () => {
+    // Per-file and per-field limits leave the SUM unbounded; this is the guard
+    // on what actually arrives.
+    const huge = Buffer.alloc(27 * 1024 * 1024, 0x41);
+    const res = await POST(request(multipart("huge.bin", huge)));
+    expect(res.status).toBe(413);
+    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
+    expect(listed).toEqual([]);
+  });
+
+  it("reports a broken staging directory as a server error, not a client one", async () => {
+    // A read-only filesystem is our problem, and it happens before the try
+    // block that used to be the only error path.
+    fs.writeFileSync(path.join(openclawHome, "media"), "not a directory");
+    const res = await POST(request(multipart("shapes.png", PNG)));
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain("attachment directory");
   });
 
   it("leaves no partial file behind when the upload is rejected", async () => {
