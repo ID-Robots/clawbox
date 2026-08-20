@@ -76,20 +76,38 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unsupported media type" }, { status: 415 });
   }
 
-  // Resolve symlinks BEFORE the containment test: a link planted inside the
-  // media tree and pointing at ~/.openclaw/openclaw.json would otherwise pass a
-  // plain prefix check (CWE-59). A path that does not exist fails here too, and
-  // is reported as a miss rather than distinguishing the two cases.
+  const root = await resolvedRoot();
+  if (!root) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // TWO containment tests, and the order of the first one is the point.
+  //
+  // This one is purely lexical and runs BEFORE any filesystem call touches the
+  // query string. `path.resolve` collapses `..`, so a traversal is rejected
+  // without ever being handed to realpath. That matters for more than tidiness:
+  // realpath IS a filesystem sink, so validating after it left the taint flow
+  // intact and CodeQL flagged js/path-injection high severity even though the
+  // second check below made the handler behave correctly.
+  const candidate = path.resolve(requested);
+  if (candidate !== root && !candidate.startsWith(root + path.sep)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+
+  // The second test still resolves symlinks, because the lexical check above
+  // cannot see them: a link planted inside the media tree pointing at
+  // ~/.openclaw/openclaw.json is textually contained and still an escape
+  // (CWE-59). A path that does not exist fails here too, reported as a miss
+  // rather than distinguishing the two cases.
   let real: string;
   try {
-    real = await fsp.realpath(path.resolve(requested));
+    real = await fsp.realpath(candidate);
   } catch {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   // Exact match or a genuine descendant. The separator matters: without it a
   // sibling such as `~/.openclaw/media-backup` would slip through the prefix.
-  const root = await resolvedRoot();
-  if (!root || (real !== root && !real.startsWith(root + path.sep))) {
+  if (real !== root && !real.startsWith(root + path.sep)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
