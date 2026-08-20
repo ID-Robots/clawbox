@@ -455,6 +455,118 @@ if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
     deepseek_provider["baseUrl"] = "https://clawbox.com/api/ai"
     changed = True
 
+# Migration: ClawBox AI image generation.
+#
+# OpenClaw only registers its `image_generate` tool when an image-generation
+# provider is configured, and ClawBox provisioning configured none — so every
+# box paired before this change cannot produce a picture even though the
+# subscription includes 5/50/200 of them a month. Boxes already in the field
+# never re-run the configure route, so the repair has to happen here.
+#
+# Mirrors configureClawboxAiImages() in
+# src/app/setup-api/ai-models/configure/route.ts; the two must stay in step.
+# See that function for why each field is shaped the way it is. The short
+# version: the per-model `baseUrl` retargets exactly one model (a provider-wide
+# one would point OpenAI's whole built-in chat catalog at a proxy that does not
+# speak it), the absent `api` keeps the entry out of the chat model picker,
+# `name` is required or the config will not validate, and the
+# `imageGenerationModel` write is what actually makes the tool appear —
+# `imageModel` is a different key that selects the vision model.
+#
+# The model id is duplicated from CLAWBOX_AI_IMAGE_MODEL_ID in
+# src/lib/clawbox-ai-models.ts because a shell migration cannot import it. It
+# must name a model production allows: the proxy matches the bare id and
+# answers 400 "Model not allowed" on a miss.
+CLAWBOX_IMAGE_MODEL_ID = "gpt-image-1-mini"
+CLAWBOX_IMAGE_MODEL_NAME = "ClawBox AI Images"
+CLAWBOX_IMAGE_MODEL_REF = "openai/" + CLAWBOX_IMAGE_MODEL_ID
+
+# Only boxes that actually have ClawBox AI get an image provider — the token is
+# the entitlement. Read it from where the configure route already put it rather
+# than re-reading data/config.json, and take the proxy URL off the same entry so
+# a box provisioned against a staging proxy (CLAWBOX_AI_PROXY_URL) keeps
+# talking to that staging proxy for images too.
+_clawai_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
+if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
+    _image_base_url = deepseek_provider.get("baseUrl")
+    if not isinstance(_image_base_url, str) or not _image_base_url.strip():
+        _image_base_url = "https://clawbox.com/api/ai"
+
+    openai_provider = models_providers.get("openai")
+    if not isinstance(openai_provider, dict):
+        openai_provider = {}
+
+    # A literal key we did not write is someone's own OpenAI credential. Leave
+    # it — and the whole migration — alone rather than overwrite it. ClawBox
+    # itself has never written this field (the openai setup path uses an auth
+    # profile), so anything else here was put there deliberately.
+    _existing_key = openai_provider.get("apiKey")
+    _key_is_ours = (
+        _existing_key is None
+        or (isinstance(_existing_key, str) and (not _existing_key.strip() or _existing_key.startswith("claw_")))
+    )
+    if _key_is_ours:
+        models_providers["openai"] = openai_provider
+        if openai_provider.get("apiKey") != _clawai_token:
+            openai_provider["apiKey"] = _clawai_token
+            changed = True
+
+        # Upsert our entry, preserving any other model entries the box carries.
+        _openai_models = openai_provider.get("models")
+        if not isinstance(_openai_models, list):
+            _openai_models = []
+            openai_provider["models"] = _openai_models
+        _entry = next(
+            (m for m in _openai_models if isinstance(m, dict) and m.get("id") == CLAWBOX_IMAGE_MODEL_ID),
+            None,
+        )
+        if _entry is None:
+            _openai_models.append({
+                "id": CLAWBOX_IMAGE_MODEL_ID,
+                "name": CLAWBOX_IMAGE_MODEL_NAME,
+                "baseUrl": _image_base_url,
+            })
+            changed = True
+        else:
+            if not isinstance(_entry.get("name"), str) or not _entry.get("name").strip():
+                _entry["name"] = CLAWBOX_IMAGE_MODEL_NAME
+                changed = True
+            if _entry.get("baseUrl") != _image_base_url:
+                _entry["baseUrl"] = _image_base_url
+                changed = True
+            # An `api` here would surface the image model in the chat picker as
+            # a conversational model that fails on every turn. Only ever ours to
+            # remove, so drop it wherever it appears on this entry.
+            if "api" in _entry:
+                del _entry["api"]
+                changed = True
+
+        # Only claim the slot when it is empty. A box whose owner pointed image
+        # generation at their own provider keeps that choice.
+        #
+        # "Empty" has to mean what OpenClaw means by it, which is neither a
+        # primary NOR a usable fallback: hasToolModelConfig()
+        # (dist/model-config.helpers-BS3FWcoO.js:25 on 2026.7.1-2) returns true
+        # for `primary?.trim() || fallbacks.some(non-empty)`, so a
+        # fallbacks-only entry is a working, deliberate configuration. Testing
+        # `primary` alone would replace the whole object below and take the
+        # owner's fallbacks with it — the exact outcome the paragraph above
+        # says must not happen.
+        _image_model_cfg = agents_defaults.get("imageGenerationModel")
+        _image_model_fallbacks = (
+            _image_model_cfg.get("fallbacks") if isinstance(_image_model_cfg, dict) else None
+        )
+        _has_image_model = isinstance(_image_model_cfg, dict) and bool(
+            (isinstance(_image_model_cfg.get("primary"), str) and _image_model_cfg.get("primary").strip())
+            or (
+                isinstance(_image_model_fallbacks, list)
+                and any(isinstance(ref, str) and ref.strip() for ref in _image_model_fallbacks)
+            )
+        )
+        if not _has_image_model:
+            agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
+            changed = True
+
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:

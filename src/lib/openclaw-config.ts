@@ -461,6 +461,10 @@ export interface OpenClawConfig {
   agents?: {
     defaults?: {
       model?: { primary?: string; fallbacks?: string[] };
+      // Which model the `image_generate` tool draws with. Same shape as
+      // `model`, entirely separate key — and distinct again from `imageModel`,
+      // which selects the vision (image *understanding*) model.
+      imageGenerationModel?: { primary?: string; fallbacks?: string[] };
       workspace?: string;
       compaction?: { reserveTokensFloor?: number };
     };
