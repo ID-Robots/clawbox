@@ -48,14 +48,18 @@ See [Hardware](/hardware/clawbox-connect).
 
 ## Reasoning effort
 
-You can control how hard the model thinks before answering, per conversation, from the brain icon in the chat header (or with `/think <level>`). More thinking gives better results on hard problems and costs more time and tokens.
+You can control how hard the model thinks before answering, per conversation, from the brain icon in the chat header. More thinking gives better answers on hard problems, and costs more time and tokens.
 
-The available levels depend on the model you are using. With **ClawBox AI**, three are available: **Off** (the fast default), **High**, and **X-High** (maximum reasoning). Off keeps everyday replies quick; you opt in to reasoning when a task needs it.
+The picker offers the same four levels on every cloud provider — **Off**, **Low**, **Medium**, **High** — so it works the same way whichever model you choose.
 
-Other models offer their own sets — some more, some fewer — and models with no reasoning control at all, such as the on-device local model, hide the control completely. The chat header always shows only what the selected model actually supports.
+- **ClawBox AI** starts at **Off**, so everyday prompts stay fast and you turn reasoning on when a task needs it.
+- **Claude, GPT, Gemini and OpenRouter** start at **Medium**.
+- The **on-device local model** has no reasoning control, so the brain icon does not appear when it is selected.
+
+Your choice is remembered per provider. If you switch to a provider that does not offer your current level, it falls back to that provider's default.
 
 <Note>
-For the technical detail of how these levels are configured — and why they are set in code rather than by hand — see [AI Providers → Reasoning effort](/technical/ai-providers#reasoning-effort).
+For the technical detail of how model reasoning capability is configured — and why it is set in code rather than by hand — see [AI Providers → Reasoning effort](/technical/ai-providers#reasoning-effort).
 </Note>
 
 ## Switching later
