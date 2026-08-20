@@ -4,10 +4,39 @@
 # Runs as clawbox user. Requires espeak-ng to be installed (system package).
 set -euo pipefail
 
-CLAWBOX_USER="clawbox"
-CLAWBOX_HOME="/home/${CLAWBOX_USER}"
+# Overridable for the same reason PIPER_DIR is: the tests run the real script
+# end-to-end so they fail when the shipped artifact drifts, and they cannot
+# write into a real /home/clawbox. install.sh does not export either name, so a
+# device always takes these defaults.
+CLAWBOX_USER="${CLAWBOX_USER:-clawbox}"
+CLAWBOX_HOME="${CLAWBOX_HOME:-/home/${CLAWBOX_USER}}"
 WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
 PIP="pip3"
+
+# ── Shared Kokoro (GPU TTS) constants ───────────────────────────────────────
+# Named once because two paths through this file install Kokoro — the full
+# voice-pipeline run at the bottom and the --tts-only run install.sh uses — and
+# a second copy of any of these is a drift waiting to happen.
+
+# JP v61 wheel works on JetPack 6.1+ (including 6.2.x).
+JETSON_TORCH_URL="https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
+# libcusparseLt (shipped by the nvidia-cusparselt-cu12 wheel) is not on the
+# default loader path, so `import torch` fails without this. The systemd user
+# units and every python invocation below need it.
+KOKORO_LD_PATH="/home/clawbox/.local/lib:/home/clawbox/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64"
+SYSTEMD_USER="$CLAWBOX_HOME/.config/systemd/user"
+CUDA_HOME_DIR="${CLAWBOX_CUDA_HOME:-/usr/local/cuda}"
+# Written only after a COMPLETE Kokoro install, and read as the idempotence
+# gate. Importability alone must not be the gate: the packages land before the
+# transformers pin and before the model download, so a run that failed at
+# either leaves `import kokoro` working with the job half done — and gating on
+# the import would latch that half-done box in as "ready" on every subsequent
+# update, while the first spoken reply still paid for the 300 MB the warm-up
+# was supposed to have fetched. Derived state under .cache: losing it costs one
+# repeated install, never correctness.
+KOKORO_STAMP="$CLAWBOX_HOME/.cache/clawbox/kokoro-installed"
+# Bump when a step below changes in a way an already-stamped box must redo.
+KOKORO_STAMP_VERSION="1"
 
 # ── Piper (CPU fallback engine) ─────────────────────────────────────────────
 # Piper is what keeps a spoken reply from becoming silence. Kokoro owns the
@@ -172,10 +201,244 @@ deploy_voice_scripts() {
   return "$rc"
 }
 
-# --piper-only installs just the CPU fallback and refreshes the entrypoint.
-# install.sh calls this on every install and update: it is a small pinned
-# download, unlike the CUDA torch/CTranslate2 build below, so it is safe to
-# run unattended on a box that already works.
+# ── Kokoro (GPU TTS) ────────────────────────────────────────────────────────
+# Kokoro is the DEFAULT voice (TASK-382 benchmarked it on real Orin hardware,
+# TASK-383 shipped it), but until TASK-420 nothing on the install path actually
+# installed it: install.sh called this script with --piper-only and then printed
+# "Kokoro GPU, Piper fallback". Every shipped box spoke through the CPU
+# fallback. The pieces below are functions, not inline steps, because both the
+# full pipeline install and --tts-only run them and neither may drift.
+
+# CUDA detection: nvcc on PATH, else the standard Jetson location (exported so
+# later steps find it). Returns 0 only when CUDA is genuinely usable — the
+# torch wheel and the whole Kokoro stack are pointless without it.
+NVCC=""
+detect_cuda() {
+  NVCC=$(command -v nvcc 2>/dev/null || echo "")
+  if [ -z "$NVCC" ] && [ -x "$CUDA_HOME_DIR/bin/nvcc" ]; then
+    export PATH="$CUDA_HOME_DIR/bin:$PATH"
+    NVCC="$CUDA_HOME_DIR/bin/nvcc"
+  fi
+  [ -n "$NVCC" ]
+}
+
+# pip as the clawbox user. The `| tail -3` the inline steps used swallowed the
+# exit status (pipefail reports the RIGHTMOST failure, and tail always
+# succeeds), which is how a failed install could still look like one that
+# worked. Capture, trim for the log, and return the real status.
+pip_as_clawbox() {
+  local out rc=0
+  out=$(su - "$CLAWBOX_USER" -c "$PIP install --user $1" 2>&1) || rc=$?
+  printf '%s\n' "$out" | tail -3
+  return "$rc"
+}
+
+# Run a python3 snippet as the clawbox user with the CUDA library path set.
+clawbox_python() {
+  su - "$CLAWBOX_USER" -c "
+    export LD_LIBRARY_PATH=$KOKORO_LD_PATH:\$LD_LIBRARY_PATH
+    python3 -c \"$1\""
+}
+
+install_cuda_torch() {
+  echo "  Installing CUDA-enabled PyTorch for Jetson (~300 MB)..."
+  pip_as_clawbox "nvidia-cusparselt-cu12" || return 1
+  pip_as_clawbox "--no-cache-dir '$JETSON_TORCH_URL'" || return 1
+  # Interactive shells need the same loader path the units get.
+  local bashrc="$CLAWBOX_HOME/.bashrc"
+  if ! grep -q "cusparselt" "$bashrc" 2>/dev/null; then
+    echo "export LD_LIBRARY_PATH=$KOKORO_LD_PATH:\${LD_LIBRARY_PATH}" >> "$bashrc"
+    echo "export CUDA_HOME=$CUDA_HOME_DIR" >> "$bashrc"
+  fi
+}
+
+install_kokoro_packages() {
+  echo "  Installing Kokoro TTS..."
+  # Install kokoro first, then force transformers<5 as a separate step.
+  # pip 22's resolver won't downgrade huggingface-hub (pulled in by
+  # faster-whisper) to satisfy transformers<5 in a single command, so it
+  # silently picks transformers 5.x. Keep these two as two pip invocations.
+  pip_as_clawbox "'numpy<2' kokoro soundfile 'Pillow>=10'" || return 1
+  pip_as_clawbox "'transformers<5'" || return 1
+}
+
+# Warm the model cache so the FIRST spoken reply is not a 300 MB download the
+# user waits through with no explanation.
+kokoro_predownload_model() {
+  local out rc=0
+  echo "  Pre-downloading Kokoro model..."
+  out=$(clawbox_python "
+from kokoro import KPipeline
+pipeline = KPipeline(lang_code='a')
+print('Kokoro model ready on', next(pipeline.model.parameters()).device)
+" 2>&1) || rc=$?
+  printf '%s\n' "$out" | tail -5
+  return "$rc"
+}
+
+# Does the box already have a COMPLETE Kokoro stack? This is the idempotence
+# gate: --tts-only runs on EVERY in-app update of a shipped device, and
+# re-fetching the torch wheel each time would make every update a ~300 MB
+# download for nothing.
+#
+# Both halves are load-bearing. The stamp says "a previous run of this script
+# finished every step"; the import says "and it is still true" (a pip
+# uninstall, a python upgrade or a wiped ~/.local invalidates it). Gating on
+# the import alone would report a box that died at the model download as ready
+# forever — see $KOKORO_STAMP above.
+kokoro_stack_present() {
+  [ "$(cat "$KOKORO_STAMP" 2>/dev/null || true)" = "$KOKORO_STAMP_VERSION" ] || return 1
+  clawbox_python "import kokoro, torch" >/dev/null 2>&1
+}
+
+# Record a finished install. Best-effort: if the stamp cannot be written the
+# only cost is redoing this work on the next update, so it must not fail the
+# install — but it is said out loud, because silently paying for a 300 MB
+# download on every update is exactly the kind of thing nobody notices.
+kokoro_mark_installed() {
+  local dir
+  dir=$(dirname "$KOKORO_STAMP")
+  if ! (mkdir -p "$dir" && printf '%s\n' "$KOKORO_STAMP_VERSION" > "$KOKORO_STAMP"); then
+    echo "  Warning: could not write $KOKORO_STAMP — the next update will reinstall Kokoro" >&2
+    return 0
+  fi
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$dir" 2>/dev/null || true
+}
+
+# The kokoro-server.service heredoc lives here, once, so the full path and
+# --tts-only cannot ship two different units.
+write_kokoro_unit() {
+  mkdir -p "$SYSTEMD_USER" || return 1
+  cat > "$SYSTEMD_USER/kokoro-server.service" << EOF
+[Unit]
+Description=Kokoro TTS Server (GPU)
+After=default.target
+
+[Service]
+Type=simple
+Environment=LD_LIBRARY_PATH=$KOKORO_LD_PATH
+ExecStart=/usr/bin/python3 $WORKSPACE/scripts/kokoro-server.py
+Restart=no
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+# Make freshly written user units usable: owned by the user that runs them,
+# lingering enabled so they can start without a login session, and reloaded.
+# All three are best-effort — none of them can cost the box its voice, because
+# clawbox-tts.sh starts the server on demand if the unit is not running.
+activate_user_units() {
+  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$SYSTEMD_USER" 2>/dev/null || true
+  loginctl enable-linger "$CLAWBOX_USER" 2>/dev/null || true
+  su - "$CLAWBOX_USER" -c "
+    export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+    systemctl --user daemon-reload
+  " 2>/dev/null || true
+}
+
+# Install the GPU Kokoro stack. NEVER fatal: every exit path leaves Piper and
+# the deployed scripts untouched, because a box that lost its voice to a failed
+# GPU install is strictly worse than a box on the CPU fallback. The return code
+# is the contract with install.sh's step_openclaw_tts, which uses it to decide
+# whether it may claim Kokoro in its summary:
+#   0   Kokoro ready
+#   10  skipped, no CUDA toolkit
+#   11  skipped, no Jetson build for this architecture
+#   12  attempted and failed
+install_kokoro_tts() {
+  local arch
+  arch=$(uname -m)
+  if [ "$arch" != "aarch64" ]; then
+    # $JETSON_TORCH_URL is an aarch64 wheel and install_piper already refuses
+    # to guess for other arches. Installing "something" here and reporting
+    # Kokoro is the exact lie TASK-420 removes.
+    echo "  Skipping Kokoro: no Jetson CUDA build for $arch (ClawBox ships aarch64)"
+    echo "CLAWBOX_TTS_KOKORO=skipped:arch-$arch"
+    return 11
+  fi
+  if ! detect_cuda; then
+    echo "  Skipping Kokoro: no CUDA toolkit (no nvcc on PATH, none at $CUDA_HOME_DIR/bin/nvcc)"
+    echo "CLAWBOX_TTS_KOKORO=skipped:no-cuda"
+    return 10
+  fi
+  echo "  CUDA detected: $("$NVCC" --version 2>/dev/null | tail -1)"
+
+  if kokoro_stack_present; then
+    echo "  Kokoro already installed by a previous run — skipping the GPU install"
+  else
+    if ! install_cuda_torch; then
+      echo "  ERROR: CUDA PyTorch install failed — leaving TTS on the Piper fallback" >&2
+      echo "CLAWBOX_TTS_KOKORO=failed:torch"
+      return 12
+    fi
+    if ! install_kokoro_packages; then
+      echo "  ERROR: Kokoro package install failed — leaving TTS on the Piper fallback" >&2
+      echo "CLAWBOX_TTS_KOKORO=failed:packages"
+      return 12
+    fi
+    if ! kokoro_predownload_model; then
+      echo "  ERROR: Kokoro model pre-download failed — leaving TTS on the Piper fallback" >&2
+      echo "CLAWBOX_TTS_KOKORO=failed:model"
+      return 12
+    fi
+    # Only now: every step above landed. Stamping earlier is what would turn a
+    # partial install into a permanent false "ready".
+    kokoro_mark_installed
+  fi
+
+  # Refreshed on every run, present or not: the unit points at a script
+  # deploy_voice_scripts just re-copied, and a stale unit is how a working box
+  # stops working after an update.
+  if ! write_kokoro_unit; then
+    echo "  ERROR: could not write $SYSTEMD_USER/kokoro-server.service" >&2
+    echo "CLAWBOX_TTS_KOKORO=failed:unit"
+    return 12
+  fi
+  activate_user_units
+  echo "CLAWBOX_TTS_KOKORO=ready"
+}
+
+# --tts-only installs exactly what on-device TTS needs: the Piper CPU fallback,
+# the workspace scripts OpenClaw execs, and the CUDA Kokoro stack with its
+# on-demand server unit.
+#
+# It deliberately does NOT run the STT half of this file — faster-whisper, the
+# CTranslate2 CUDA source build, the Whisper model download — which is roughly
+# an hour on an Orin. install.sh runs this from step_openclaw_tts on every
+# install AND every in-app update; an hour of source builds per update is not
+# something a shipped device can absorb.
+#
+# Piper goes first so a Kokoro failure can never take the fallback with it.
+if [ "${1:-}" = "--tts-only" ]; then
+  echo "=== On-device TTS (Kokoro GPU + Piper fallback) ==="
+  TTS_ONLY_RC=0
+  install_piper || TTS_ONLY_RC=1
+  deploy_voice_scripts || TTS_ONLY_RC=1
+
+  KOKORO_RC=0
+  install_kokoro_tts || KOKORO_RC=$?
+
+  if [ "$TTS_ONLY_RC" -ne 0 ]; then
+    # The loud one: without Piper AND without Kokoro the box answers speech
+    # with silence, so this outranks whatever the GPU path reported.
+    echo "=== Piper fallback INCOMPLETE — the box may answer speech with silence ===" >&2
+    exit 1
+  fi
+  if [ "$KOKORO_RC" -eq 0 ]; then
+    echo "=== On-device TTS ready (Kokoro GPU, Piper fallback) ==="
+  else
+    echo "=== On-device TTS ready on Piper CPU only (Kokoro unavailable) ==="
+  fi
+  exit "$KOKORO_RC"
+fi
+
+# --piper-only installs just the CPU fallback and refreshes the entrypoint. It
+# is a small pinned download, unlike the CUDA torch/CTranslate2 build below, so
+# it is safe to run unattended on a box that already works. install.sh moved to
+# --tts-only above, but this stays: clawbox-tts.sh names it in its
+# "Piper not installed" hint, and older devices' scripts call it.
 if [ "${1:-}" = "--piper-only" ]; then
   echo "=== Voice fallback (Piper) ==="
   PIPER_ONLY_RC=0
@@ -194,32 +457,22 @@ echo "=== Voice Pipeline Installer (GPU-Accelerated) ==="
 # ── Detect CUDA availability ────────────────────────────────────────────────
 
 HAS_CUDA=false
-# Check PATH first, then the standard Jetson CUDA location
-NVCC=$(command -v nvcc 2>/dev/null || echo "")
-if [ -z "$NVCC" ] && [ -x /usr/local/cuda/bin/nvcc ]; then
-  export PATH="/usr/local/cuda/bin:$PATH"
-  NVCC=/usr/local/cuda/bin/nvcc
-fi
-if [ -n "$NVCC" ]; then
+if detect_cuda; then
   HAS_CUDA=true
-  echo "  CUDA detected: $($NVCC --version | tail -1)"
+  echo "  CUDA detected: $("$NVCC" --version | tail -1)"
 fi
 
 # ── Step 1: Install CUDA PyTorch (if available) ─────────────────────────────
 
+# Tracked across the Kokoro steps so this path can write the same completion
+# stamp --tts-only reads, and write it only when every one of them worked. A
+# box installed the long way must not then redo the whole GPU stack on its
+# first in-app update — nor be stamped as complete when it is not.
+KOKORO_FULL_OK=$HAS_CUDA
+
 if $HAS_CUDA; then
   echo "[1/8] Installing CUDA-enabled PyTorch for Jetson..."
-  # JP v61 wheel works on JetPack 6.1+ (including 6.2.x)
-  TORCH_URL="https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch/torch-2.5.0a0+872d972e41.nv24.08.17622132-cp310-cp310-linux_aarch64.whl"
-  su - "$CLAWBOX_USER" -c "$PIP install --user nvidia-cusparselt-cu12" 2>&1 | tail -3
-  su - "$CLAWBOX_USER" -c "$PIP install --user --no-cache-dir '$TORCH_URL'" 2>&1 | tail -3
-
-  # Set up LD_LIBRARY_PATH in .bashrc if not already there
-  BASHRC="$CLAWBOX_HOME/.bashrc"
-  if ! grep -q "cusparselt" "$BASHRC" 2>/dev/null; then
-    echo 'export LD_LIBRARY_PATH=/home/clawbox/.local/lib:/home/clawbox/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64:${LD_LIBRARY_PATH}' >> "$BASHRC"
-    echo 'export CUDA_HOME=/usr/local/cuda' >> "$BASHRC"
-  fi
+  install_cuda_torch || { KOKORO_FULL_OK=false; echo "  Warning: CUDA PyTorch install reported an error"; }
 else
   echo "[1/8] No CUDA detected, using CPU PyTorch..."
 fi
@@ -269,11 +522,7 @@ fi
 # ── Step 4: Install Kokoro TTS ───────────────────────────────────────────────
 
 echo "[4/8] Installing Kokoro TTS..."
-# Install kokoro first, then force transformers<5 as a separate step.
-# pip 22's resolver won't downgrade huggingface-hub (pulled in by faster-whisper)
-# to satisfy transformers<5 in a single command, so it silently picks transformers 5.x.
-su - "$CLAWBOX_USER" -c "$PIP install --user 'numpy<2' kokoro soundfile 'Pillow>=10'" 2>&1 | tail -3
-su - "$CLAWBOX_USER" -c "$PIP install --user 'transformers<5'" 2>&1 | tail -3
+install_kokoro_packages || { KOKORO_FULL_OK=false; echo "  Warning: Kokoro package install reported an error"; }
 
 # ── Step 5: Pre-download models ─────────────────────────────────────────────
 
@@ -299,13 +548,13 @@ print('Whisper base model ready on $DEVICE')
 \"" 2>&1 | tail -3
 
 echo "[6/8] Pre-downloading Kokoro model..."
-su - "$CLAWBOX_USER" -c "
-  export LD_LIBRARY_PATH=$CLAWBOX_HOME/.local/lib:$CLAWBOX_HOME/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64:\$LD_LIBRARY_PATH
-  python3 -c \"
-from kokoro import KPipeline
-pipeline = KPipeline(lang_code='a')
-print('Kokoro model ready on', next(pipeline.model.parameters()).device)
-\"" 2>&1 | tail -5
+if kokoro_predownload_model; then
+  if $KOKORO_FULL_OK; then
+    kokoro_mark_installed
+  fi
+else
+  echo "  Warning: Kokoro model pre-download reported an error"
+fi
 
 # ── Step 6: Deploy scripts ───────────────────────────────────────────────────
 
@@ -316,26 +565,10 @@ echo "[8/8] Deploying voice server scripts..."
 SCRIPTS_DST="$WORKSPACE/scripts"
 deploy_voice_scripts
 
-# Install systemd user services for persistent model servers
-SYSTEMD_USER="$CLAWBOX_HOME/.config/systemd/user"
-mkdir -p "$SYSTEMD_USER"
-
-LD_PATH="/home/clawbox/.local/lib:/home/clawbox/.local/lib/python3.10/site-packages/nvidia/cusparselt/lib:/usr/local/cuda/lib64"
-
-cat > "$SYSTEMD_USER/kokoro-server.service" << EOF
-[Unit]
-Description=Kokoro TTS Server (GPU)
-After=default.target
-
-[Service]
-Type=simple
-Environment=LD_LIBRARY_PATH=$LD_PATH
-ExecStart=/usr/bin/python3 $SCRIPTS_DST/kokoro-server.py
-Restart=no
-
-[Install]
-WantedBy=default.target
-EOF
+# Install systemd user services for persistent model servers. The Kokoro unit
+# comes from the shared writer so this path and --tts-only cannot disagree
+# about it; the Whisper unit is STT and only exists on this path.
+write_kokoro_unit
 
 cat > "$SYSTEMD_USER/whisper-server.service" << EOF
 [Unit]
@@ -344,7 +577,7 @@ After=default.target
 
 [Service]
 Type=simple
-Environment=LD_LIBRARY_PATH=$LD_PATH
+Environment=LD_LIBRARY_PATH=$KOKORO_LD_PATH
 Environment=WHISPER_MODEL=base
 ExecStart=/usr/bin/python3 $SCRIPTS_DST/whisper-server.py
 Restart=no
@@ -353,16 +586,8 @@ Restart=no
 WantedBy=default.target
 EOF
 
-chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$SYSTEMD_USER"
-
-# Enable lingering so user services start on boot without login
-loginctl enable-linger "$CLAWBOX_USER" 2>/dev/null || true
-
-# Reload service files (servers start on demand via stt-client.py)
-su - "$CLAWBOX_USER" -c "
-  export XDG_RUNTIME_DIR=/run/user/\$(id -u)
-  systemctl --user daemon-reload
-" 2>/dev/null || true
+# Owner, lingering and daemon-reload (servers start on demand via stt-client.py)
+activate_user_units
 
 echo ""
 echo "=== Voice Pipeline Installed ==="

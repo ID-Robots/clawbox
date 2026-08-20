@@ -698,9 +698,12 @@ describe("install.sh wires TTS to the on-device chain", () => {
     expect(step).toContain('outputFormat:"wav"');
   });
 
-  it("installs the Piper fallback as part of the same step", () => {
+  it("installs both engines as part of the same step", () => {
     expect(step).toContain("install-voice.sh");
-    expect(step).toContain("--piper-only");
+    // --piper-only until TASK-420, which installed the fallback and nothing
+    // else while this step claimed Kokoro GPU. --tts-only installs both.
+    // Behaviour is covered by install-kokoro-tts.test.ts, which executes it.
+    expect(step).toMatch(/install-voice\.sh" --tts-only/);
   });
 
   it("runs on updated boxes and not just fresh installs", () => {
