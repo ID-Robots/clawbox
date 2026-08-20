@@ -70,3 +70,104 @@ export function isClawboxAiProModel(model: string | null | undefined): boolean {
   if (modelId !== CLAWBOX_AI_PRO_MODEL_ID) return false;
   return provider === CLAWBOX_AI_PROVIDER || provider === "clawai";
 }
+
+/* ---------------------------------------------------------------------------
+ * ClawBox AI image generation
+ * ------------------------------------------------------------------------ */
+
+/**
+ * OpenClaw provider id the image model is registered under.
+ *
+ * It has to be `openai`. OpenClaw has no built-in image providers at all
+ * (`BUILTIN_IMAGE_GENERATION_PROVIDERS = []`); every one of them comes from a
+ * bundled plugin declaring the `imageGenerationProviders` capability contract,
+ * and the only one that both speaks the OpenAI-compatible
+ * `POST {baseUrl}/images/generations` shape and honours a per-model `baseUrl`
+ * override is `openai`. A ClawBox-specific provider id would simply not be an
+ * image provider as far as the gateway is concerned.
+ *
+ * Reusing `openai` is safe for a user who also brings their own OpenAI key —
+ * see `buildClawboxAiImageProviderModels` for why.
+ */
+export const CLAWBOX_AI_IMAGE_PROVIDER = "openai" as const;
+
+/**
+ * Image model advertised by the cloud proxy on every plan.
+ *
+ * Confirmed against production on 2026-08-20:
+ * `GET https://clawbox.com/api/ai/images/generations` reports
+ * `defaultModel: "gpt-image-1-mini"` and
+ * `modelTiers: { "gpt-image-1-mini": ["free","pro","max"] }`.
+ *
+ * `gpt-image-2` exists too but is Max-only, so it is deliberately NOT the
+ * device default: provisioning is tier-blind (it runs before we know what the
+ * portal says the plan is) and stamping a Max-only id on a Free box would turn
+ * every image request into a model-gate rejection. Env-overridable for the
+ * same reason the chat slugs are — a staging proxy with a different alias map
+ * should not need a code change. See [[task-380-model-allowlist]]: the proxy
+ * matches the BARE id and answers 400 "Model not allowed" on a miss, so this
+ * value must always name something production already allows.
+ */
+export const CLAWBOX_AI_IMAGE_MODEL_ID =
+  process.env.CLAWBOX_AI_IMAGE_MODEL_ID?.trim() || "gpt-image-1-mini";
+
+/** Fully-qualified ref written to `agents.defaults.imageGenerationModel.primary`. */
+export const CLAWBOX_AI_IMAGE_MODEL = `${CLAWBOX_AI_IMAGE_PROVIDER}/${CLAWBOX_AI_IMAGE_MODEL_ID}`;
+
+/**
+ * `name` on the model entry. Not cosmetic: OpenClaw's config schema *requires*
+ * `name` on every `models.providers.<p>.models[]` entry. Omitting it makes the
+ * whole config invalid ("models.providers.openai.models.0.name: Invalid input")
+ * and the gateway refuses to start — verified against OpenClaw 2026.7.1-2.
+ */
+export const CLAWBOX_AI_IMAGE_MODEL_LABEL = "ClawBox AI Images";
+
+/**
+ * Subscription plan names as the portal reports them in
+ * `/api/clawbox-ai/device-info` → `tier`. Distinct from `ClawboxAiTier`, which
+ * is the *device* tier (`flash` / `pro`) driving the chat model choice.
+ */
+export type ClawboxAiPlan = "free" | "pro" | "max";
+
+/**
+ * Images per calendar month included in each plan.
+ *
+ * Approved by Yanko on 2026-08-19 and enforced by the cloud proxy, which is
+ * the only counter — the device deliberately does not keep one of its own.
+ * Mirrors `monthlyImageLimits` from
+ * `GET https://clawbox.com/api/ai/images/generations`, re-checked against
+ * production on 2026-08-20. These numbers are shown to the user, so if the
+ * cloud ever changes them this table has to move in the same release.
+ */
+export const CLAWBOX_AI_MONTHLY_IMAGE_LIMITS: Record<ClawboxAiPlan, number> = {
+  free: 5,
+  pro: 50,
+  max: 200,
+};
+
+/** Human-facing plan name used in the images allowance copy. */
+export const CLAWBOX_AI_PLAN_LABEL: Record<ClawboxAiPlan, string> = {
+  free: "Free",
+  pro: "Pro",
+  max: "Max",
+};
+
+/** Narrows the portal's free-form `tier` string to a known plan, or null. */
+export function normalizeClawboxAiPlan(value: unknown): ClawboxAiPlan | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "free" || normalized === "pro" || normalized === "max"
+    ? normalized
+    : null;
+}
+
+/**
+ * Monthly image allowance for a plan, or `null` when the plan is unknown.
+ *
+ * `null` is load-bearing: when the portal is unreachable we genuinely do not
+ * know which allowance applies, and showing a guessed number would be worse
+ * than showing none. Callers must render nothing rather than a default.
+ */
+export function monthlyImageLimitForPlan(plan: ClawboxAiPlan | null): number | null {
+  return plan ? CLAWBOX_AI_MONTHLY_IMAGE_LIMITS[plan] : null;
+}

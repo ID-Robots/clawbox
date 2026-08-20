@@ -1,7 +1,15 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
-import { normalizeClawboxAiTier, type ClawboxAiTier } from "@/lib/clawbox-ai-models";
+import {
+  normalizeClawboxAiTier,
+  normalizeClawboxAiPlan,
+  monthlyImageLimitForPlan,
+  CLAWBOX_AI_IMAGE_MODEL_ID,
+  CLAWBOX_AI_PLAN_LABEL,
+  type ClawboxAiTier,
+  type ClawboxAiPlan,
+} from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 
@@ -68,11 +76,16 @@ interface DeviceInfoResponse {
 }
 
 type PortalLookup =
-  | { source: "portal"; tier: ClawboxAiTier | null }
+  | { source: "portal"; tier: ClawboxAiTier | null; plan: ClawboxAiPlan | null }
   | { source: "unreachable" };
 
 interface PortalCacheEntry {
   tier: ClawboxAiTier | null;
+  // Subscription plan behind the tier. Kept alongside `tier` because the two
+  // are not interchangeable: `tier` collapses Free and "portal said something
+  // we don't recognise" into the same `null`, and the image allowance has to
+  // tell those apart (Free has a real 5-image allowance to show).
+  plan: ClawboxAiPlan | null;
   expiresAt: number;
 }
 
@@ -91,10 +104,16 @@ const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
  *
  * @param token Portal token (`claw_*`) used as the cache key.
  * @param tier Resolved tier (or `null` for Free / no entitlement).
+ * @param plan Resolved subscription plan (or `null` when unrecognised).
  * @param now Current epoch ms; used both for expiry comparison and to
  *   set the new entry's `expiresAt`.
  */
-function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
+function rememberTier(
+  token: string,
+  tier: ClawboxAiTier | null,
+  plan: ClawboxAiPlan | null,
+  now: number,
+) {
   for (const [key, entry] of portalTierCache) {
     if (entry.expiresAt <= now) portalTierCache.delete(key);
   }
@@ -103,7 +122,7 @@ function rememberTier(token: string, tier: ClawboxAiTier | null, now: number) {
     if (oldest === undefined) break;
     portalTierCache.delete(oldest);
   }
-  portalTierCache.set(token, { tier, expiresAt: now + PORTAL_TIER_CACHE_TTL_MS });
+  portalTierCache.set(token, { tier, plan, expiresAt: now + PORTAL_TIER_CACHE_TTL_MS });
 }
 
 /**
@@ -152,7 +171,9 @@ function mapPortalTier(body: DeviceInfoResponse): ClawboxAiTier | null {
 async function fetchPortalTier(token: string): Promise<PortalLookup> {
   const now = Date.now();
   const cached = portalTierCache.get(token);
-  if (cached && cached.expiresAt > now) return { source: "portal", tier: cached.tier };
+  if (cached && cached.expiresAt > now) {
+    return { source: "portal", tier: cached.tier, plan: cached.plan };
+  }
 
   const unreachableUntil = portalUnreachableCache.get(token);
   if (unreachableUntil !== undefined && unreachableUntil > now) {
@@ -175,9 +196,10 @@ async function fetchPortalTier(token: string): Promise<PortalLookup> {
       if (res.ok) {
         const body = await res.json() as DeviceInfoResponse;
         const tier = mapPortalTier(body);
-        rememberTier(token, tier, now);
+        const plan = normalizeClawboxAiPlan(body.tier);
+        rememberTier(token, tier, plan, now);
         portalUnreachableCache.delete(token);
-        return { source: "portal", tier };
+        return { source: "portal", tier, plan };
       }
       // 401/403 is ambiguous: it can mean genuinely Free OR token
       // revoked / migrated / corrupted on a still-paid account. We
@@ -342,6 +364,11 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
   let clawaiAccountTier: ClawboxAiTier | null = null;
   let accountTierSource: "portal" | "picker" = "picker";
+  // Only ever set from a live portal answer. There is no local fallback on
+  // purpose: the stored `clawai_tier` is a device tier, and inferring a plan
+  // back out of it cannot distinguish Free from "we never asked", so a guess
+  // here would put a wrong image allowance in front of the user.
+  let clawaiPlan: ClawboxAiPlan | null = null;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -353,6 +380,7 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
+        clawaiPlan = lookup.plan;
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
@@ -388,6 +416,27 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     // prompts independently of paid-tier checks.
     clawaiConfigured: state.hasClawaiProfile,
     tierSource,
+    // Monthly image allowance, so a user learns the cap exists *before* they
+    // run into it rather than only from a failed request.
+    //
+    // What this is NOT: a usage counter. The cloud proxy is the only counter,
+    // and it reports live usage in the `X-ClawBox-Images-*` response headers on
+    // the images endpoint — which the gateway calls directly, so the device
+    // never sees those headers and cannot honestly report `used`/`remaining`
+    // here. Publishing a device-side count would mean either inventing a second
+    // counter or serving a cached number as if it were live. Both are worse
+    // than saying only what we actually know, which is the allowance.
+    //
+    // `monthlyLimit` is null whenever the portal did not answer this request
+    // cycle. Callers must render nothing in that case; a default would be a
+    // guess at the user's subscription.
+    clawaiImages: {
+      supported: state.hasClawaiProfile,
+      model: CLAWBOX_AI_IMAGE_MODEL_ID,
+      plan: clawaiPlan,
+      planLabel: clawaiPlan ? CLAWBOX_AI_PLAN_LABEL[clawaiPlan] : null,
+      monthlyLimit: monthlyImageLimitForPlan(clawaiPlan),
+    },
   }, {
     headers: {
       "Cache-Control": "no-store",
@@ -407,7 +456,11 @@ export async function GET() {
     return await buildStatusResponse(state);
   } catch {
     return NextResponse.json(
-      { connected: false, provider: null, providerLabel: null, mode: null, model: null, clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker" },
+      {
+        connected: false, provider: null, providerLabel: null, mode: null, model: null,
+        clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker",
+        clawaiImages: { supported: false, model: CLAWBOX_AI_IMAGE_MODEL_ID, plan: null, planLabel: null, monthlyLimit: null },
+      },
       {
         headers: {
           "Cache-Control": "no-store",

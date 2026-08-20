@@ -1662,6 +1662,19 @@ step_openclaw_config() {
     oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
     oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"
     echo "  ClawBox AI fallback model configured"
+    # Deliberately no image provider here, unlike configureClawboxAi() in
+    # src/app/setup-api/ai-models/configure/route.ts and the migration in
+    # scripts/gateway-pre-start.sh. CLAWBOX_AI_API_KEY is a raw DeepSeek key
+    # pointed straight at api.deepseek.com (see the baseUrl above) — there is
+    # no ClawBox AI subscription behind it and therefore no monthly image
+    # allowance to wire up. Adding one would send a DeepSeek key to
+    # clawbox.com and 401 on every image request. This path is also
+    # effectively CI-only: CLAWBOX_AI_API_KEY is commented out in
+    # .env.example and set only by .github/workflows/e2e-install.yml.
+    #
+    # A box provisioned this way is skipped by the boot migration too, which
+    # keys off a `claw_`-prefixed portal token in models.providers.deepseek
+    # .apiKey. That is correct, not an oversight — do not "fix" it here.
   fi
 
   # gateway.auth.mode/token and gateway.controlUi.{allowInsecureAuth,

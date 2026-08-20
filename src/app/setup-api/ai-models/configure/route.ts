@@ -18,6 +18,7 @@ import {
   setProviderPlugins,
   openclawIsAbsent,
   OpenclawUnavailableError,
+  type OpenClawConfig,
 } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
 import { applyLocalAiToHermes, HermesLocalApplyError } from "@/lib/hermes-local-ai";
@@ -39,6 +40,10 @@ import {
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_MODEL_BY_TIER,
   CLAWBOX_AI_DEFAULT_TIER,
+  CLAWBOX_AI_IMAGE_PROVIDER,
+  CLAWBOX_AI_IMAGE_MODEL,
+  CLAWBOX_AI_IMAGE_MODEL_ID,
+  CLAWBOX_AI_IMAGE_MODEL_LABEL,
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
@@ -320,6 +325,318 @@ function buildClawboxAiProviderDefinition(apiKey: string) {
   });
 }
 
+/**
+ * Model catalog entry that points OpenClaw's `openai` image provider at the
+ * ClawBox AI proxy instead of api.openai.com.
+ *
+ * Why this exact shape — every field (and every omission) is load-bearing, all
+ * verified against OpenClaw 2026.7.1-2, the version the device ships:
+ *
+ * - **Per-model `baseUrl`, never a provider-wide one.**
+ *   `resolveConfiguredOpenAIImageBaseUrl(cfg, model)` in
+ *   `dist/image-generation-provider-*.js` looks the requested image model up
+ *   inside `models.providers.openai.models[]` and takes that entry's `baseUrl`,
+ *   falling back to `models.providers.openai.baseUrl`, then to
+ *   api.openai.com. Both hooks work, but the provider-wide one also retargets
+ *   the OpenAI plugin's built-in *chat* catalog: `models.providers` merging
+ *   keeps the implicit catalog when `models[]` is empty and each row resolves
+ *   its endpoint as `model.baseUrl ?? providerBaseUrl`. Setting the provider
+ *   baseUrl therefore points GPT-5.4/5.5/... at a proxy that only speaks
+ *   DeepSeek chat and images, so every one of those picker entries would fail
+ *   on its first turn. The per-model override touches exactly one model.
+ *
+ * - **No `api` field.** This is what keeps the image model out of the chat
+ *   model picker. The catalog row source skips a configured model entry that
+ *   declares no `api`, so the entry is invisible to `openclaw models list` and
+ *   to everything downstream of it. Measured on 2026-08-20: with `api` absent
+ *   `models list --provider openai --all` returns the same 7 chat rows as an
+ *   unconfigured box; adding `api: "openai-completions"` makes it 8, with
+ *   `openai/gpt-image-1-mini` offered as a conversational model that would
+ *   fail on every turn. The image path is unaffected either way because it
+ *   reads raw config, not the normalised catalog.
+ *
+ * - **`name` is mandatory.** OpenClaw's config schema rejects a models[] entry
+ *   without one ("models.providers.openai.models.0.name: Invalid input") and an
+ *   invalid config stops the gateway from starting.
+ *
+ * - **No `input` / `contextWindow` / `maxTokens` / `cost`.** Those describe a
+ *   chat model's token accounting; an images endpoint has none, and the fields
+ *   only exist on the DeepSeek entries because a configured provider overrides
+ *   OpenClaw's bundled chat catalog. Nothing reads them here.
+ */
+type OpenAiProviderConfig = NonNullable<
+  NonNullable<NonNullable<OpenClawConfig["models"]>["providers"]>[string]
+>;
+type OpenAiModelEntry = NonNullable<OpenAiProviderConfig["models"]>[number];
+
+/**
+ * Merge our image-model entry into whatever `models[]` the box already carries.
+ *
+ * An upsert, not a replacement: `config set models.providers.openai.models`
+ * writes the whole array, so building it from our entry alone would delete every
+ * other model row the owner configured. The boot migration in
+ * scripts/gateway-pre-start.sh has always upserted; this is the same operation
+ * expressed against a JSON blob instead of a mutable dict, and the two must
+ * agree — a box repaired at boot and a box configured through this route have to
+ * end up with the same config.
+ *
+ * Repairs on an entry that is already ours, in the same order the migration
+ * applies them: a missing/blank `name` (OpenClaw's schema rejects the config
+ * without one and the gateway then refuses to start), a `baseUrl` left pointing
+ * at a retired proxy, and a stray `api` — see
+ * `buildClawboxAiImageProviderModels` for why `api` must not be there.
+ */
+function upsertClawboxAiImageModel(existing: unknown): OpenAiModelEntry[] {
+  const rows: OpenAiModelEntry[] = Array.isArray(existing)
+    ? existing.filter((row): row is OpenAiModelEntry => typeof row === "object" && row !== null)
+    : [];
+  const ours = rows.find((row) => row.id === CLAWBOX_AI_IMAGE_MODEL_ID);
+  if (!ours) {
+    return [
+      ...rows,
+      {
+        id: CLAWBOX_AI_IMAGE_MODEL_ID,
+        name: CLAWBOX_AI_IMAGE_MODEL_LABEL,
+        baseUrl: CLAWBOX_AI_PROXY_URL,
+      },
+    ];
+  }
+  return rows.map((row) => {
+    if (row !== ours) return row;
+    const { api: _api, ...rest } = row;
+    return {
+      ...rest,
+      name: typeof row.name === "string" && row.name.trim() ? row.name : CLAWBOX_AI_IMAGE_MODEL_LABEL,
+      baseUrl: CLAWBOX_AI_PROXY_URL,
+    };
+  });
+}
+
+function buildClawboxAiImageProviderModels(existing?: unknown) {
+  return JSON.stringify(upsertClawboxAiImageModel(existing));
+}
+
+/**
+ * True when it is safe for us to own `models.providers.openai.apiKey`.
+ *
+ * We put the ClawBox AI token there because that is the only credential slot
+ * the OpenAI image provider reads: on the image path it calls
+ * `forceOpenAIImageApiKeyAuth(cfg)`, which injects `auth: "api-key"` into a
+ * *copy* of the config, which in turn makes `shouldPreferExplicitConfigApiKeyAuth`
+ * true and the configured key outrank any auth profile. Chat does not take that
+ * branch — we deliberately never write `auth: "api-key"` into the real config —
+ * so a user who also signs in to OpenAI keeps chatting on their own key from
+ * `auth.profiles.openai:default` while images go out on the ClawBox token.
+ *
+ * The one case we refuse is a box that already has some *other* literal key
+ * sitting in that slot. ClawBox has never written one (the openai branch of
+ * this route configures a native auth profile and leaves `models.providers`
+ * alone), so a value there was put there by hand, and overwriting a
+ * hand-placed credential to enable a feature nobody asked for is not ours to
+ * do. Those boxes get no image provider and a log line saying why.
+ */
+function canOwnOpenAiImageApiKey(existingKey: unknown): boolean {
+  if (existingKey === undefined || existingKey === null) return true;
+  if (typeof existingKey !== "string") return false;
+  const trimmed = existingKey.trim();
+  return trimmed === "" || trimmed.startsWith("claw_");
+}
+
+/**
+ * Where OpenClaw sends a request for an `openai` model that names no host of
+ * its own. `resolveConfiguredOpenAIBaseUrl` in
+ * `dist/shared-BdJp-xt6.js:11` (2026.7.1-2).
+ */
+const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
+
+function hostOfUrl(url: string): string | null {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The baseUrl an already-configured `openai` route would send our token to, or
+ * `null` when every configured route stays on the ClawBox AI proxy.
+ *
+ * `models.providers.openai.apiKey` is a *provider-wide* credential — the image
+ * path is the only reason we write it, but nothing scopes it to the image
+ * model. OpenClaw resolves a model's key by walking per-entry bindings, then
+ * auth profiles, then the environment, and finally
+ * `models.providers.<p>.apiKey` (`getApiKeyForModel`,
+ * `dist/model-auth-CJEm9SNp.js:753` on 2026.7.1-2). On a ClawBox there is no
+ * openai auth profile and no `OPENAI_API_KEY`, so that last step is where every
+ * `openai/*` request lands: writing the portal token there makes it the bearer
+ * for whatever else the box has configured under `openai`.
+ *
+ * Two configured shapes send it off-proxy, and both are the owner's own work
+ * (ClawBox writes neither):
+ *   - a `models[]` row other than ours. Its endpoint is
+ *     `row.baseUrl ?? provider.baseUrl ?? api.openai.com` — so a row like
+ *     `{id: "gpt-5", api: "openai-completions"}` with no baseUrl resolves
+ *     straight to api.openai.com and would go out bearing `claw_…`.
+ *   - a provider-level `baseUrl`, which is the fallback for every row that
+ *     sets none.
+ * Either one means the box has an `openai` setup we did not build and cannot
+ * reason about, so the caller backs the whole migration off rather than
+ * half-configure it: an image tool is not worth mailing the subscription token
+ * to a third party.
+ *
+ * A malformed URL counts as foreign. We cannot show where it points, and
+ * guessing in the permissive direction is the wrong way to be wrong here.
+ *
+ * Not covered — deliberately, and it is not something this function could fix:
+ * OpenClaw's bundled openai *plugin* catalog (gpt-5.x, o1, o3, …) exists on
+ * every box whether or not anything is configured, and those rows resolve to
+ * api.openai.com too. Verified on 2026.7.1-2: with `models.providers.openai
+ * .apiKey` set to a `claw_` token, `openclaw models list --provider openai`
+ * flips all 17 of them from `Auth: no` to `Auth: yes`, so picking one in the
+ * chat model picker would send the portal token to OpenAI. The only credential
+ * slot the image provider reads is this provider-wide one (there is no
+ * per-model `apiKey`), so the two cannot be separated in this version — see
+ * the note on the PR.
+ */
+function foreignOpenAiRoute(provider: OpenAiProviderConfig | undefined): string | null {
+  if (!provider) return null;
+  const proxyHost = hostOfUrl(CLAWBOX_AI_PROXY_URL);
+  const isForeign = (baseUrl: string) => {
+    const host = hostOfUrl(baseUrl);
+    return host === null || proxyHost === null || host !== proxyHost;
+  };
+
+  const providerBaseUrl = typeof provider.baseUrl === "string" ? provider.baseUrl.trim() : "";
+  if (providerBaseUrl && isForeign(providerBaseUrl)) return providerBaseUrl;
+
+  const rows = Array.isArray(provider.models) ? provider.models : [];
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) continue;
+    if (row.id === CLAWBOX_AI_IMAGE_MODEL_ID) continue;
+    const rowBaseUrl = typeof row.baseUrl === "string" && row.baseUrl.trim()
+      ? row.baseUrl.trim()
+      : providerBaseUrl || OPENAI_DEFAULT_BASE_URL;
+    if (isForeign(rowBaseUrl)) return rowBaseUrl;
+  }
+  return null;
+}
+
+/**
+ * True when `agents.defaults.imageGenerationModel` already names a model.
+ *
+ * Byte-for-byte the same test OpenClaw applies in `hasToolModelConfig`
+ * (`dist/model-config.helpers-BS3FWcoO.js:25` on 2026.7.1-2):
+ * `primary?.trim() || (fallbacks ?? []).some(entry => entry.trim().length > 0)`.
+ * Fallbacks count. A box carrying only
+ * `{ fallbacks: ["replicate/flux-pro"] }` has a working image setup its owner
+ * chose, and since the write below replaces the whole object, testing
+ * `primary` alone would delete those fallbacks.
+ *
+ * Connecting ClawBox AI is not by itself a request to change where images come
+ * from — `configureClawboxAi` also runs from `ensureFallbackModel`, i.e. when
+ * the user is configuring some *other* provider entirely and ClawBox AI is
+ * only the fallback. Claiming an occupied slot there would silently overrule a
+ * choice the user made elsewhere, so we claim only what is empty. Mirrors the
+ * same guard in the boot migration in scripts/gateway-pre-start.sh.
+ */
+function hasImageGenerationModel(existing: unknown): boolean {
+  if (typeof existing !== "object" || existing === null) return false;
+  const cfg = existing as { primary?: unknown; fallbacks?: unknown };
+  if (typeof cfg.primary === "string" && cfg.primary.trim()) return true;
+  return Array.isArray(cfg.fallbacks)
+    && cfg.fallbacks.some((ref) => typeof ref === "string" && ref.trim().length > 0);
+}
+
+/**
+ * Point OpenClaw's `image_generate` tool at the ClawBox AI image proxy.
+ *
+ * Without this a provisioned ClawBox cannot generate images at all, even
+ * though the subscription pays for 5/50/200 of them a month: OpenClaw only
+ * registers `image_generate` when an image-generation provider is configured,
+ * and ClawBox provisioning configured none.
+ *
+ * Registration is gated twice and the gates are asymmetric, which is why the
+ * `agents.defaults.imageGenerationModel` write below is not optional:
+ *   - Gate 1 (`resolveOptionalMediaToolFactoryPlan`) plans the tool only if
+ *     `agents.defaults.imageGenerationModel` has a non-empty primary/fallback
+ *     OR a plugin capability snapshot reports an available provider — and for
+ *     `openai` that snapshot only accepts an `openai` *auth profile* or an
+ *     `OPENAI_API_KEY` in the gateway's environment. It never reads
+ *     `models.providers.openai.apiKey`.
+ *   - Gate 2 (inside `createImageGenerateTool`) does accept the config key.
+ * So a box with only the provider block would satisfy gate 2, fail gate 1, and
+ * never see the tool. Naming a model in `imageGenerationModel` is the
+ * deterministic path — hence the write below on every box that does not
+ * already name one (see `hasImageGenerationModel` for why "already" includes
+ * fallbacks).
+ *
+ * Note the key name: `imageGenerationModel`, *not* `imageModel`. They are two
+ * independent config keys with no aliasing between them — `imageModel` selects
+ * the image *understanding* (vision) model and is what `openclaw models
+ * set-image` writes, which is why that CLI command is not used here.
+ */
+async function configureClawboxAiImages(clawboxAiToken: string): Promise<boolean> {
+  let existingOpenAiProvider: OpenAiProviderConfig | undefined;
+  let existingImageModel: unknown;
+  try {
+    const config = await readOpenClawConfig();
+    existingOpenAiProvider = config.models?.providers?.[CLAWBOX_AI_IMAGE_PROVIDER];
+    existingImageModel = config.agents?.defaults?.imageGenerationModel;
+  } catch {
+    // No readable config yet (fresh box) — nothing to preserve.
+    existingOpenAiProvider = undefined;
+    existingImageModel = undefined;
+  }
+  if (typeof existingOpenAiProvider !== "object" || existingOpenAiProvider === null) {
+    existingOpenAiProvider = undefined;
+  }
+
+  if (!canOwnOpenAiImageApiKey(existingOpenAiProvider?.apiKey)) {
+    console.warn(
+      "[AI Config] Skipped ClawBox AI image provider: models.providers.openai.apiKey holds a non-ClawBox key we will not overwrite",
+    );
+    return false;
+  }
+
+  const foreignRoute = foreignOpenAiRoute(existingOpenAiProvider);
+  if (foreignRoute) {
+    console.warn(
+      `[AI Config] Skipped ClawBox AI image provider: models.providers.openai already routes to ${logSafe(foreignRoute)}, and the apiKey we would write there is the credential for that route too`,
+    );
+    return false;
+  }
+
+  // Leaf-path writes, not a whole-provider `config set models.providers.openai`:
+  // replacing the object would drop any other openai settings the box carries.
+  await runCommand(OPENCLAW_BIN, [
+    "config",
+    "set",
+    `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey`,
+    clawboxAiToken,
+  ]);
+  await runCommand(OPENCLAW_BIN, [
+    "config",
+    "set",
+    `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.models`,
+    buildClawboxAiImageProviderModels(existingOpenAiProvider?.models),
+    "--json",
+  ]);
+  if (hasImageGenerationModel(existingImageModel)) {
+    console.log(
+      "[AI Config] Left agents.defaults.imageGenerationModel alone: it already names an image model",
+    );
+    return true;
+  }
+  await runCommand(OPENCLAW_BIN, [
+    "config",
+    "set",
+    "agents.defaults.imageGenerationModel",
+    JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }),
+    "--json",
+  ]);
+  return true;
+}
+
 async function configureClawboxAi(setFallback: boolean, preferredToken?: string) {
   const clawboxAiToken = await getConfiguredClawboxAiToken(preferredToken);
   if (!clawboxAiToken) {
@@ -348,6 +665,31 @@ async function configureClawboxAi(setFallback: boolean, preferredToken?: string)
     buildClawboxAiProviderDefinition(clawboxAiToken),
     "--json",
   ]);
+
+  // Images ride on the same token and the same proxy, so they are provisioned
+  // here rather than behind a separate opt-in — a box that has ClawBox AI has
+  // an image allowance whether or not ClawBox AI is also the chat provider.
+  // Non-fatal: a chat provider that works is worth more than an image tool, so
+  // a failure here must not fail the whole "Connect ClawBox AI" flow.
+  try {
+    if (await configureClawboxAiImages(clawboxAiToken)) {
+      console.log(
+        `[AI Config] Set ClawBox AI image provider ${CLAWBOX_AI_IMAGE_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+      );
+    }
+  } catch (err) {
+    // `logSafe`, not the raw message: this one is built from a subprocess
+    // failure, so it carries whatever `openclaw` wrote to stderr — a value that
+    // reached the CLI from this route's request body, control characters and
+    // all. Unbounded and un-escaped, it would be the caller deciding how many
+    // journal records one API call produces. The command line itself is already
+    // safe: `spawnOpenclawConfigSet` names the config path and elides the value,
+    // which for this call is the portal token (see `configSetLabelArgs`).
+    console.warn(
+      "[AI Config] Failed to configure ClawBox AI image provider:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
+  }
 
   if (setFallback) {
     await runCommand(OPENCLAW_BIN, [
@@ -418,7 +760,7 @@ async function ensureFallbackModel(
     await setFallbackModels([]);
     console.log("[AI Config] Cleared stale fallback (no local or ClawBox AI backup available)");
   } catch (err) {
-    console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? err.message : err);
+    console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err);
   }
 }
 
@@ -1123,7 +1465,7 @@ export async function POST(request: Request) {
         await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
       } catch (err) {
         // Non-fatal: Ollama will still work, just use more memory
-        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? err.message : err);
+        console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? logSafe(err.message) : err);
       }
       console.log(`[AI Config] Set ollama provider in openclaw.json: ${logSafe(modelName)} (context=${OLLAMA_CONTEXT_WINDOW}, mode=replace)`);
     } else if (isLlamaCpp) {
@@ -1274,7 +1616,7 @@ export async function POST(request: Request) {
     try {
       await restartGateway();
     } catch (err) {
-      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? err.message : err);
+      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
       return NextResponse.json(
         { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
         { status: 502 },

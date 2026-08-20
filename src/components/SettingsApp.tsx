@@ -988,7 +988,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── AI Provider ── */
-  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
+  const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null; clawaiImages?: { supported: boolean; model: string; plan: string | null; planLabel: string | null; monthlyLimit: number | null } | null } | null>(null);
   useEffect(() => {
     // The Local AI panel needs this too: it is the only source that knows which
     // provider the ACTIVE harness is really set to, which is what separates
@@ -2200,6 +2200,34 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
                           </span>
                         </div>
+                        {(() => {
+                          // Monthly image allowance. Rendered only when the
+                          // portal told us the plan on this poll — the route
+                          // sends monthlyLimit: null otherwise, and a fallback
+                          // number here would be us guessing at someone's
+                          // subscription. This is an allowance, not a usage
+                          // count: the cloud proxy holds the only counter.
+                          //
+                          // `isClawai` gates it because the allowance is an
+                          // account-level fact, reported whenever a ClawBox AI
+                          // token is on the box — including when the *active*
+                          // provider is Claude or a local model. This row draws
+                          // inside the active provider's card, so without the
+                          // gate a Claude box would read "50 images/month · Pro"
+                          // under the Claude heading, which says Anthropic
+                          // includes an image allowance. It does not.
+                          const images = isClawai ? aiProvider.clawaiImages : null;
+                          if (!images?.supported || images.monthlyLimit === null) return null;
+                          return (
+                            <div className="flex items-center gap-1.5 mt-0.5">
+                              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 12 }} aria-hidden="true">image</span>
+                              <span className="text-xs text-[var(--text-muted)]">
+                                {t("settings.imagesPerMonth", { count: images.monthlyLimit })}
+                                {images.planLabel ? ` · ${images.planLabel}` : ""}
+                              </span>
+                            </div>
+                          );
+                        })()}
                       </div>
                       {isClawai && (
                         <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:text-green-400 transition-all shrink-0" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
