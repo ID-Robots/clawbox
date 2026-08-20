@@ -54,7 +54,7 @@ ClawBox AI Flash and ClawBox AI Pro expose three reasoning-effort levels, select
 | `high` | Extended reasoning for harder tasks. |
 | `xhigh` | Maximum reasoning. |
 
-The chat header may offer more levels globally, but for ClawBox AI only these three take effect.
+**The set of levels is per model, not global.** Each provider and model advertises its own supported levels, and the chat header only offers what the selected model actually accepts. Some models expose a different set, some expose more, and models with no reasoning control at all — such as the on-device local model — hide the dial entirely. Selecting a level a model does not support is clamped down to the nearest one it does. So the three above apply to ClawBox AI Flash and Pro, not to every model you can run on a ClawBox.
 
 <Warning>
 **The available levels are set programmatically, not by hand-editing config.** Editing `openclaw.json` by hand does not stick — two separate mechanisms will overwrite it:
