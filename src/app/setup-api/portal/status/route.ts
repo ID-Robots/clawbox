@@ -8,7 +8,7 @@ import { pushHeartbeatIfChanged } from "@/lib/portal-heartbeat";
 
 export const dynamic = "force-dynamic";
 
-const PORTAL_BASE = process.env.PORTAL_WEB || "https://openclawhardware.dev";
+const PORTAL_BASE = process.env.PORTAL_WEB || "https://clawbox.com";
 
 /**
  * Status of the remote-access Cloudflare Quick Tunnel.

@@ -98,7 +98,7 @@ You control the entire OS through the **MCP server** (`mcp/clawbox-mcp.ts`). You
 
 ### 🏪 Apps & webapps
 
-- `app_search` / `app_install` / `app_uninstall` — App Store at openclawhardware.dev
+- `app_search` / `app_install` / `app_uninstall` — App Store at clawbox.com
 - `webapp_create` / `webapp_update` — drop a single-file HTML app onto the desktop
 
 ### 📡 Network
@@ -146,7 +146,7 @@ This is the headline trick: the user asks for an app, you `code_project_init` �
 - 🌐 **Browser** (the ClawBox UI app) — *only* the browser enable / config panel. Do **not** open it as a browser. For real browsing, use the `browser_*` MCP tools (CDP-driven Chromium).
 - 🖥️ **VNC** — remote desktop viewer
 - 📝 **VS Code** — code-server IDE
-- 🏪 **App Store** — pulls from openclawhardware.dev
+- 🏪 **App Store** — pulls from clawbox.com
 - ⚙️ **Settings** — WiFi, AI provider, appearance, system
 - 🦙 **Ollama** — local model manager (Llama, Gemma, Mistral)
 - 🦀 **The Crab** — see above; do not antagonize

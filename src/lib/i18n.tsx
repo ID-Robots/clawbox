@@ -97,11 +97,18 @@ export function I18nProvider({ children }: { children: ReactNode }) {
   // top of English so any key missing from the active locale falls back
   // to the English copy instead of rendering as the raw key string.
   useEffect(() => {
-    import("@/lib/translations").then((mod) => {
-      const enBase = mod.translations.en ?? {};
-      const active = mod.translations[locale] ?? enBase;
-      setTranslations({ ...enBase, ...active });
-    });
+    import("@/lib/translations")
+      .then((mod) => {
+        const enBase = mod.translations.en ?? {};
+        const active = mod.translations[locale] ?? enBase;
+        setTranslations({ ...enBase, ...active });
+      })
+      // A chunk load can fail for reasons that are not bugs: the device is
+      // offline mid-update, or the page is being torn down while this is in
+      // flight. Keep whatever copy is already in state (English, or the raw
+      // keys on a first load) rather than turning it into an unhandled
+      // rejection — nothing here is recoverable by retrying.
+      .catch(() => {});
   }, [locale]);
 
   const setLocale = useCallback((newLocale: Locale) => {

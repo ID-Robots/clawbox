@@ -448,6 +448,11 @@ deepseek_provider = (
     cfg.get("models", {}).get("providers", {}).get("deepseek")
     if isinstance(cfg.get("models"), dict) else None
 )
+# These two are LEGACY values on purpose: they are what a box paired before the
+# clawbox.com move still has written in its config, and matching them is the
+# whole point of the branch. Do not "update" them to the current domain — that
+# turns the retarget into a no-op that rewrites the config to itself (and sets
+# `changed` on every boot) while leaving field devices pointed at the old host.
 if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
     "https://openclawhardware.dev/api/ai",
     "https://www.openclawhardware.dev/api/ai",

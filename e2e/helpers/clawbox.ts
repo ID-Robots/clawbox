@@ -104,7 +104,7 @@ const DEFAULT_STORE_APPS: StoreCatalogApp[] = [
     installs: "12K",
     developer: "ClawBox Labs",
     version: "1.4.2",
-    url: "https://openclawhardware.dev/store/apps/task-orbit",
+    url: "https://clawbox.com/store/apps/task-orbit",
     tags: ["tasks", "focus", "planning"],
   },
   {
@@ -116,7 +116,7 @@ const DEFAULT_STORE_APPS: StoreCatalogApp[] = [
     installs: "8K",
     developer: "Climate Ops",
     version: "2.1.0",
-    url: "https://openclawhardware.dev/store/apps/weather-deck",
+    url: "https://clawbox.com/store/apps/weather-deck",
     tags: ["weather", "travel"],
   },
 ];
@@ -293,7 +293,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           connected: setupState.ai_model_configured,
           available: true,
           providerLabel: "ClawBox AI",
-          endpoint: "https://openclawhardware.dev/api/clawkeep/device-backups",
+          endpoint: "https://clawbox.com/api/clawkeep/device-backups",
           lastSync: cloudEnabled ? clawKeepState.lastSync : null,
         },
       },

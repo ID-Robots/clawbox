@@ -36,8 +36,8 @@ describe("/setup-api/portal/status", () => {
       service: "active",
       url: "https://abc.trycloudflare.com",
     });
-    expect(body.portalAddDeviceUrl).toMatch(/openclawhardware\.dev.*addDevice/);
-    expect(body.portalWeb).toMatch(/openclawhardware\.dev/);
+    expect(body.portalAddDeviceUrl).toMatch(/clawbox\.com.*addDevice/);
+    expect(body.portalWeb).toMatch(/clawbox\.com/);
     expect(heartbeatMock.pushHeartbeatIfChanged).toHaveBeenCalledWith(
       "https://abc.trycloudflare.com",
     );

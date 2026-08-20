@@ -15,7 +15,7 @@ export const dynamic = "force-dynamic";
 
 const CLAWBOX_AI_DEVICE_POLL_URL =
   process.env.CLAWBOX_AI_DEVICE_POLL_URL?.trim()
-  || "https://openclawhardware.dev/api/clawbox-ai/device-poll";
+  || "https://clawbox.com/api/clawbox-ai/device-poll";
 
 // Max time a session may sit in `configuring` before the poll route gives up
 // on the background configure and surfaces a retryable error. A gateway

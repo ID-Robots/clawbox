@@ -1,6 +1,6 @@
 # clawkeep-device
 
-On-device backup client for [ClawBox hardware](https://openclawhardware.dev/) and any
+On-device backup client for [ClawBox hardware](https://clawbox.com/) and any
 Linux box (Pi, Jetson, x86 server, VPS) that wants to back up to Cloudflare R2 through
 the OpenClaw portal.
 
@@ -31,8 +31,8 @@ sudo install -d -m 0750 -o clawkeep -g clawkeep /var/lib/clawkeep /var/log/clawk
 sudo cp config.toml.example /etc/clawkeep/config.toml
 sudo $EDITOR /etc/clawkeep/config.toml
 
-# Pair with your portal account (mint a token at https://openclawhardware.dev/portal/dashboard):
-clawkeep pair --server https://openclawhardware.dev
+# Pair with your portal account (mint a token at https://clawbox.com/portal/dashboard):
+clawkeep pair --server https://clawbox.com
 
 # Run a backup right now (debug):
 clawkeepd --verbose
@@ -88,7 +88,7 @@ chmod 600 "$CREDS_FILE"
 trap 'shred -u "$CREDS_FILE" 2>/dev/null || rm -f "$CREDS_FILE"' EXIT
 
 curl -s -X POST -H "Authorization: Bearer $TOKEN" \
-     https://openclawhardware.dev/api/clawkeep/credentials > "$CREDS_FILE"
+     https://clawbox.com/api/clawkeep/credentials > "$CREDS_FILE"
 
 export AWS_ACCESS_KEY_ID=$(jq -r .accessKeyId "$CREDS_FILE")
 export AWS_SECRET_ACCESS_KEY=$(jq -r .secretAccessKey "$CREDS_FILE")

@@ -6,7 +6,7 @@ import { useT } from "@/lib/i18n";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
 
 const STORE_API = "/setup-api/apps/store";
-const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 // Upstream `/api/store/apps` caps any single response at 200 apps and offers
 // no `offset`/`page` parameter, so on the "All" view we walk through each
 // category (also capped at 200) to surface more of the 6000+ catalogue as
@@ -14,7 +14,7 @@ const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
 // firehose page we already have.
 const STORE_PAGE_LIMIT = 200;
 
-// Brand orange from openclawhardware.dev
+// Brand orange from clawbox.com
 const BRAND_ORANGE = "#fe6e00";
 const BRAND_ORANGE_LIGHT = "#ff8b1a";
 

@@ -1,7 +1,7 @@
 blank_issues_enabled: false
 contact_links:
   - name: OpenClaw Hardware
-    url: https://openclawhardware.dev/
+    url: https://clawbox.com/
     about: Product information, setup guides, and documentation for the device.
   - name: Security vulnerability
     url: https://github.com/ID-Robots/clawbox/security/policy

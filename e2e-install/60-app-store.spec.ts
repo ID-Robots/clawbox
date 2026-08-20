@@ -1,8 +1,8 @@
 /**
- * App Store — real round trip to openclawhardware.dev/api/store/apps, then
+ * App Store — real round trip to clawbox.com/api/store/apps, then
  * install one skill and verify it ends up registered locally.
  *
- * This test is network-dependent on openclawhardware.dev — if that service
+ * This test is network-dependent on clawbox.com — if that service
  * is down or region-restricted, the whole spec fails. We don't cache the
  * result because the point is catching regressions in the live integration.
  *

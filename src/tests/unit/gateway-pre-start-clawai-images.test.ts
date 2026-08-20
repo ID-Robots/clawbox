@@ -417,6 +417,10 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
   });
 
   it("retargets an entry left pointing at an old proxy", () => {
+    // The stale host on the IMAGE entry is the point of this fixture: deepseek
+    // already carries the current proxy, and the migration has to drag the
+    // model entry onto it. Renaming that literal to the current domain makes
+    // the test assert that migrating an already-correct entry reports a change.
     const { cfg, changed } = migrate(pairedBox({
       models: {
         providers: {

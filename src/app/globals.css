@@ -31,7 +31,7 @@
 }
 
 :root {
-  /* Design tokens — matching openclawhardware.dev dark sections */
+  /* Design tokens — matching clawbox.com dark sections */
   --bg-deep: #111827;
   --bg-surface: #172030;
   --bg-elevated: #1e2939;
@@ -875,7 +875,7 @@ h6 {
   box-shadow: none;
 }
 
-/* Card surface — matching openclawhardware.dev dark sections */
+/* Card surface — matching clawbox.com dark sections */
 .card-surface {
   background: var(--surface-card);
   border: 1px solid var(--border-subtle);

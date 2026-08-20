@@ -40,7 +40,7 @@ Some native OpenClaw provider plugins expect auth stores ClawBox doesn't populat
 
 ## ClawBox AI specifics
 
-- Pairing uses a device-code flow against the portal (`openclawhardware.dev`) — the wizard shows a short code you confirm in your portal account; the resulting token is stored on-device.
+- Pairing uses a device-code flow against the portal (`clawbox.com`) — the wizard shows a short code you confirm in your portal account; the resulting token is stored on-device.
 - Requests proxy through the portal's AI endpoint; both models advertise reasoning support including **X-High** effort (mapped upstream to DeepSeek's maximum reasoning mode).
 - Changing the linked portal account automatically unpairs ClawKeep (backups belong to the account).
 

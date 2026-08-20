@@ -4,7 +4,7 @@
 # in section 7 of the design doc (clawkeep-plan.md).
 
 # Portal endpoint. Change once the canonical domain migrates.
-server = "https://openclawhardware.dev"
+server = "https://clawbox.com"
 
 # How often the systemd timer fires. Keep in sync with the timer unit.
 schedule = "daily"  # daily | weekly | manual

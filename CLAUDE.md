@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://openclawhardware.dev/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). It manages the full device lifecycle: broadcasts a WiFi access point with captive portal for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps. The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox an OS the AI can operate, not just a UI the user clicks through.
+ClawBox is **OpenClaw OS** — the operating system for [OpenClaw Hardware](https://clawbox.com/), a private AI assistant running on NVIDIA Jetson (Tegra/ARM). It manages the full device lifecycle: broadcasts a WiFi access point with captive portal for first-boot setup from any phone/laptop, transitions to the home network, then serves a Chrome OS-style desktop environment with built-in apps. The OpenClaw AI agent controls the entire device through MCP (Model Context Protocol) tools — making ClawBox an OS the AI can operate, not just a UI the user clicks through.
 
 ## Stack
 
@@ -108,7 +108,7 @@ Handles two concerns:
 - **`FilesApp.tsx`** — file browser with upload, rename, delete, mkdir
 - **`VNCApp.tsx`** — NoVNC remote desktop viewer
 - **`VSCodeApp.tsx`** — VS Code server integration
-- **`AppStore.tsx`** — discover and install apps from openclawhardware.dev
+- **`AppStore.tsx`** — discover and install apps from clawbox.com
 - **`SettingsApp.tsx`** — appearance, WiFi, AI provider, Telegram, system settings
 - **`OllamaModelPanel.tsx`** — local model pull, search, delete
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper

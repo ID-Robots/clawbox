@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 // poll /pair/poll until the portal issues a token.
 const CLAWKEEP_DEVICE_START_URL =
   process.env.CLAWKEEP_DEVICE_START_URL?.trim()
-  || "https://openclawhardware.dev/api/clawkeep/device-start";
+  || "https://clawbox.com/api/clawkeep/device-start";
 const CLAWKEEP_VERIFICATION_URL =
   process.env.CLAWKEEP_VERIFICATION_URL?.trim()
   || `${PORTAL_LOGIN_URL}/connect`;

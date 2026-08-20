@@ -23,7 +23,7 @@ function buildStatus(overrides: ClawKeepStatusOverrides = {}) {
   return {
     paired: overrides.paired ?? false,
     configured: overrides.configured ?? false,
-    server: "https://openclawhardware.dev",
+    server: "https://clawbox.com",
     lastBackupAtMs: overrides.lastBackupAtMs ?? 0,
     lastHeartbeatAtMs: 0,
     lastHeartbeatStatus: "idle",
@@ -87,7 +87,7 @@ test("pair-start renders the challenge card and Cancel returns to pair card", as
   await page.route("**/setup-api/clawkeep/pair/start", (route) =>
     fulfillJson(route, {
       user_code: "ABCD-1234",
-      verification_url: "https://openclawhardware.dev/clawkeep/pair",
+      verification_url: "https://clawbox.com/clawkeep/pair",
       interval: 5,
       code_length: 9,
     }),

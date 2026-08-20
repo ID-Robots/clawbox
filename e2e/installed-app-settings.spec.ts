@@ -21,7 +21,7 @@ test("installed app settings can save configuration and toggle enablement", asyn
         installs: "20K",
         developer: "ClawBox Labs",
         version: "3.2.1",
-        url: "https://openclawhardware.dev/store/apps/home-assistant",
+        url: "https://clawbox.com/store/apps/home-assistant",
         tags: ["home", "automation"],
       },
     ],

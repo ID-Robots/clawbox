@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, waitFor } from "@/tests/helpers/test-utils";
+import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatApp from "@/components/ChatApp";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
@@ -265,7 +265,16 @@ describe("ChatPopup and the inter-session routing envelope", () => {
 
     expectEnvelopeHidden();
     expect(document.body.textContent).toContain(USER_TURN);
-    expect(document.body.textContent).toContain(`MEDIA:${MEDIA_PATH}`);
+    // The mascot chat renders MEDIA: as a picture rather than printing the
+    // directive (TASK-382 / PR #405), so the raw string is deliberately absent
+    // here while ChatApp still shows it as text. What matters for TASK-416 is
+    // unchanged and still asserted above: a legitimate reply carrying MEDIA:
+    // survives the envelope filter — it just arrives as an <img> now.
+    expect(document.body.textContent).not.toContain(`MEDIA:${MEDIA_PATH}`);
+    expect(screen.getByRole("img")).toHaveAttribute(
+      "src",
+      expect.stringContaining(encodeURIComponent(MEDIA_PATH)),
+    );
   });
 
   it("keeps it out of a live streaming turn", async () => {

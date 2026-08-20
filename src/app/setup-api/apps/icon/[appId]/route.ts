@@ -6,7 +6,7 @@ import { DATA_DIR } from "@/lib/config-store";
 export const dynamic = "force-dynamic";
 
 const ICONS_DIR = path.join(DATA_DIR, "icons");
-const STORE_ICONS_BASE = "https://openclawhardware.dev/store/icons";
+const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 
 export async function GET(
   _req: Request,
