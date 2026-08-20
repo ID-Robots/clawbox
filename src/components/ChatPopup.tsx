@@ -1116,10 +1116,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (payload.stream === 'tool') {
             const toolData = payload.data as Record<string, unknown> | undefined
             applyToolEvent(toolData)
-            // Any phase starts the wait: `result` only means the job was
-            // accepted, and a socket reconnecting mid-job may never see `start`.
+            // ONLY `start` opens a wait. `image_generate` reports `result`
+            // ~200ms later (the job is merely queued), and that event can be
+            // delivered after the picture has already landed and closed the
+            // wait — which opened a second one whose baseline already counted
+            // the new picture, so nothing could ever end it and the banner sat
+            // there until it timed out.
             const toolName = typeof toolData?.name === 'string' ? toolData.name : ''
-            if (isImageGenerationTool(toolName) && !generatingImageRef.current) {
+            const toolPhase = typeof toolData?.phase === 'string' ? toolData.phase : ''
+            if (toolPhase === 'start' && isImageGenerationTool(toolName) && !generatingImageRef.current) {
               generatingImageRef.current = true
               imageFailedRef.current = false
               imageBaselineRef.current = countImages(messagesRef.current)
@@ -1180,12 +1185,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // An image with no caption is a real reply, not an ack — it must
             // not be mistaken for the empty "Sent." case and refetched away.
             const isAckOnly = (!text && images.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            // The reconcile often wins the race now: `session.message` lands
+            // the stored reply, media intact, before this event arrives with
+            // the same text and the media stripped. Appending it again showed
+            // the reply twice — once with the picture, once without.
+            const alreadyShownWithMedia = images.length === 0 && text.length > 0 &&
+              messagesRef.current.some(m =>
+                m.role === 'assistant' && m.text === text && (m.images?.length ?? 0) > 0)
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
             // envelope carrying a MEDIA: line must be dropped whole, not split
             // into a picture plus its own machinery.
-            if (!isAckOnly && !isInterSessionEnvelope(extractText(msg), msg)) {
+            if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(extractText(msg), msg)) {
               setMessages(prev => [...prev, {
                 role: 'assistant', text, timestamp: Date.now(), images,
               }])

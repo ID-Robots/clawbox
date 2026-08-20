@@ -189,12 +189,18 @@ describe("waiting for a generated picture", () => {
     await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
   });
 
-  it("starts the wait even if only the result phase is seen", async () => {
+  it("opens the wait on `start` only", async () => {
+    // `result` must NOT open one: it fires ~200ms after `start` for a job that
+    // is merely queued, and a late delivery would otherwise open a second wait
+    // after the picture had already closed the first.
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).toBeTruthy());
     await screen.findByText("Here's your snake! 🐍");
 
     await fireImageGenTool("result");
+    expect(screen.queryByRole("status")).toBeNull();
+
+    await fireImageGenTool("start");
     expect(await screen.findByRole("status")).toHaveTextContent("chat.generatingImage");
   });
 
@@ -302,6 +308,63 @@ describe("waiting for a generated picture", () => {
 
     // The banner must still be up — this job has not reported anything.
     expect(screen.getByRole("status")).toHaveTextContent("chat.generatingImage");
+  });
+
+  it("does not reopen the wait when the late `result` event arrives", async () => {
+    // image_generate reports `result` ~200ms after `start` (the job is only
+    // queued), and that event can be delivered AFTER the picture has landed.
+    // Opening a second wait then gives it a baseline that already counts the
+    // new picture, so nothing can ever close it — the banner sat there until
+    // it timed out.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).toBeTruthy());
+    await screen.findByText("Here's your snake! 🐍");
+
+    await fireImageGenTool("start");
+    await screen.findByRole("status");
+
+    history = [history[0], assistantWithImage()];
+    await fireTranscriptAppend();
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+
+    // The straggler.
+    await fireImageGenTool("result");
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("does not show the reply twice when history delivered it first", async () => {
+    // The reconcile lands the stored reply WITH its picture; the live `chat`
+    // final then arrives carrying the same text with the media stripped.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).toBeTruthy());
+    await screen.findByText("Here's your snake! 🐍");
+
+    history = [history[0], assistantWithImage()];
+    await fireTranscriptAppend();
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    await waitFor(() => expect(screen.getByRole("img")).toBeInTheDocument());
+
+    // Same reply over the `chat` stream, media stripped.
+    await act(async () => {
+      socket().deliver({
+        type: "event",
+        event: "chat",
+        payload: {
+          sessionKey: "main",
+          state: "final",
+          message: { role: "assistant", content: [{ type: "text", text: "Here's your snake! \u{1F40D}" }] },
+        },
+      });
+      await Promise.resolve();
+    });
+
+    // Exactly one copy, and it is the one that has the picture.
+    expect(screen.getAllByText("Here's your snake! 🐍")).toHaveLength(1);
+    expect(screen.getAllByRole("img")).toHaveLength(1);
   });
 
   it("ignores tools that are not image generation", async () => {
