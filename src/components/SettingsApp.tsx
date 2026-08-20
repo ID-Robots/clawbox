@@ -2207,7 +2207,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                           // number here would be us guessing at someone's
                           // subscription. This is an allowance, not a usage
                           // count: the cloud proxy holds the only counter.
-                          const images = aiProvider.clawaiImages;
+                          //
+                          // `isClawai` gates it because the allowance is an
+                          // account-level fact, reported whenever a ClawBox AI
+                          // token is on the box — including when the *active*
+                          // provider is Claude or a local model. This row draws
+                          // inside the active provider's card, so without the
+                          // gate a Claude box would read "50 images/month · Pro"
+                          // under the Claude heading, which says Anthropic
+                          // includes an image allowance. It does not.
+                          const images = isClawai ? aiProvider.clawaiImages : null;
                           if (!images?.supported || images.monthlyLimit === null) return null;
                           return (
                             <div className="flex items-center gap-1.5 mt-0.5">

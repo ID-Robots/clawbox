@@ -1,9 +1,28 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { CLAWBOX_AI_IMAGE_MODEL, CLAWBOX_AI_IMAGE_MODEL_ID, CLAWBOX_AI_IMAGE_MODEL_LABEL } from "@/lib/clawbox-ai-models";
+
+// `CLAWBOX_AI_IMAGE_MODEL_ID` resolves `process.env.CLAWBOX_AI_IMAGE_MODEL_ID`
+// at module load, and the .sh hardcodes the default because a shell migration
+// cannot import a TS constant. Read the constants through a plain `import` and
+// a developer or CI job that happens to export that variable fails this file
+// while both sides are perfectly correct. Load the module with the override
+// cleared instead: what the migration has to match is the documented default,
+// not whatever the ambient environment is pointed at today.
+const { CLAWBOX_AI_IMAGE_MODEL, CLAWBOX_AI_IMAGE_MODEL_ID, CLAWBOX_AI_IMAGE_MODEL_LABEL } =
+  await (async () => {
+    const override = process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
+    delete process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
+    vi.resetModules();
+    try {
+      return await import("@/lib/clawbox-ai-models");
+    } finally {
+      if (override !== undefined) process.env.CLAWBOX_AI_IMAGE_MODEL_ID = override;
+      vi.resetModules();
+    }
+  })();
 
 // OpenClaw registers `image_generate` only when an image-generation provider is
 // configured, and ClawBox provisioning configured none — so every box paired
@@ -45,7 +64,7 @@ type OpenAiModelEntry = { id?: string; name?: string; baseUrl?: string; api?: st
  * `changed`) — mock at that boundary and nothing else, so the migration logic
  * under test is 100% the shipped bytes.
  */
-function migrate(cfg: Config): { cfg: Config; changed: boolean } {
+function migrate(cfg: Config): { cfg: Config; changed: boolean; log: string } {
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const program = [
@@ -58,7 +77,11 @@ function migrate(cfg: Config): { cfg: Config; changed: boolean } {
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
-  return JSON.parse(execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim());
+  // The block prints progress lines of its own (the real script's stdout is the
+  // boot log), so the result is the LAST line and everything before it is what
+  // the operator would read. Both are asserted on below.
+  const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
+  return { ...JSON.parse(lines[lines.length - 1]), log: lines.slice(0, -1).join("\n") };
 }
 
 /** A box provisioned with ClawBox AI: portal token + proxy on the deepseek entry. */
@@ -215,18 +238,111 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
   });
 
   it("preserves other entries in models.providers.openai.models[]", () => {
+    // A sibling row that stays on the ClawBox AI proxy: nothing leaves our
+    // infrastructure, so the migration runs and the row survives it. A sibling
+    // pointing anywhere else is the back-off case below.
+    const sibling = { id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://clawbox.com/api/ai" };
     const { cfg } = migrate(pairedBox({
       models: {
         providers: {
           deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
-          openai: { models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }] },
+          openai: { models: [sibling] },
         },
       },
     }));
 
     expect(openaiModels(cfg)).toHaveLength(2);
-    expect(openaiModels(cfg)[0]).toEqual({ id: "gpt-5", name: "GPT-5", api: "openai-completions" });
+    expect(openaiModels(cfg)[0]).toEqual(sibling);
     expect(imageEntry(cfg)?.baseUrl).toBe("https://clawbox.com/api/ai");
+  });
+
+  describe("will not make the portal token the credential for someone else's endpoint", () => {
+    // models.providers.openai.apiKey is provider-wide. getApiKeyForModel
+    // (dist/model-auth-CJEm9SNp.js:753 on OpenClaw 2026.7.1-2) falls back to it
+    // for any `openai/*` model once per-entry bindings, auth profiles and
+    // OPENAI_API_KEY come up empty — which on a ClawBox they always do. So a
+    // configured route we did not build would start carrying the subscription
+    // token, and the whole migration backs off instead.
+    function backedOff(cfg: Config) {
+      const result = migrate(cfg);
+      expect(result.changed).toBe(false);
+      expect(openaiProvider(result.cfg).apiKey).toBeUndefined();
+      expect(imageEntry(result.cfg)).toBeUndefined();
+      expect(imageGenerationModel(result.cfg)).toBeUndefined();
+      return result;
+    }
+
+    function boxWithOpenai(openai: Record<string, unknown>): Config {
+      return pairedBox({
+        models: {
+          providers: {
+            deepseek: { apiKey: "claw_token123", baseUrl: "https://clawbox.com/api/ai" },
+            openai,
+          },
+        },
+      });
+    }
+
+    it("backs off on a sibling row that resolves to api.openai.com", () => {
+      // CodeRabbit's case: `api` makes it a live chat row and the absent baseUrl
+      // means OpenClaw resolves it to api.openai.com, where our claw_ token
+      // would be sent as the bearer.
+      const { log } = backedOff(boxWithOpenai({ models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }] }));
+
+      expect(log).toContain("Skipped ClawBox AI image provider");
+      expect(log).toContain("api.openai.com");
+    });
+
+    it("backs off on a sibling row pointing at a third-party host", () => {
+      backedOff(boxWithOpenai({
+        models: [{ id: "local-gpt", name: "Local GPT", api: "openai-completions", baseUrl: "https://someone-elses-proxy.example/v1" }],
+      }));
+    });
+
+    it("backs off on a provider-level baseUrl that is not ours", () => {
+      // Every row without a baseUrl of its own inherits this one — including
+      // OpenClaw's bundled openai catalog rows.
+      const { log } = backedOff(boxWithOpenai({ baseUrl: "https://someone-elses-proxy.example/v1" }));
+
+      expect(log).toContain("someone-elses-proxy.example");
+    });
+
+    it("backs off on a baseUrl it cannot parse", () => {
+      // We cannot say where "not-a-url" points, and guessing permissively is
+      // the wrong direction to be wrong in.
+      backedOff(boxWithOpenai({ models: [{ id: "mystery", name: "Mystery", baseUrl: "not-a-url" }] }));
+    });
+
+    it("proceeds when a sibling row points at the same proxy we do", () => {
+      const { cfg, changed } = migrate(boxWithOpenai({
+        models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: "https://clawbox.com/api/ai" }],
+      }));
+
+      expect(changed).toBe(true);
+      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
+    });
+
+    it("proceeds on a box whose only openai row is ours", () => {
+      // Re-running the migration must not back off on its own previous output.
+      const { cfg, changed } = migrate(boxWithOpenai({
+        apiKey: "claw_old",
+        models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: "https://clawbox.com/api/ai" }],
+      }));
+
+      expect(changed).toBe(true);
+      expect(openaiProvider(cfg).apiKey).toBe("claw_token123");
+    });
+
+    it("stays quiet about a box it was never going to touch", () => {
+      // The hand-placed-key branch already backs off; it should not also print
+      // a routing complaint about a config it is leaving alone.
+      const { log } = migrate(boxWithOpenai({
+        apiKey: "sk-proj-users-own-key",
+        models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }],
+      }));
+
+      expect(log).toBe("");
+    });
   });
 
   it("preserves other openai provider settings — it writes leaves, not the provider", () => {

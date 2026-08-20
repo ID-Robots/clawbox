@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CLAWBOX_AI_IMAGE_PROVIDER,
   CLAWBOX_AI_IMAGE_MODEL,
@@ -14,6 +14,28 @@ import {
 // The image-generation half of the ClawBox AI constants (TASK-413). The plan
 // table is user-facing copy backed by what the cloud proxy actually enforces,
 // and `null` is a distinct answer from "0 images" everywhere it appears.
+
+/**
+ * Run `load` with `CLAWBOX_AI_IMAGE_MODEL_ID` set to `override` (or unset when
+ * `undefined`) and the module registry cleared, then restore the ambient value.
+ *
+ * The module reads the variable at load time, so a static `import` binds
+ * whatever the environment held when the file was first evaluated — which makes
+ * any assertion about the value a statement about the test runner's shell.
+ */
+async function withImageModelIdOverride<T>(override: string | undefined, load: () => Promise<T>): Promise<T> {
+  const ambient = process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
+  if (override === undefined) delete process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
+  else process.env.CLAWBOX_AI_IMAGE_MODEL_ID = override;
+  vi.resetModules();
+  try {
+    return await load();
+  } finally {
+    if (ambient === undefined) delete process.env.CLAWBOX_AI_IMAGE_MODEL_ID;
+    else process.env.CLAWBOX_AI_IMAGE_MODEL_ID = ambient;
+    vi.resetModules();
+  }
+}
 
 describe("ClawBox AI image model identifiers", () => {
   it("registers under the `openai` provider", () => {
@@ -31,12 +53,33 @@ describe("ClawBox AI image model identifiers", () => {
     expect(rest.join("/")).toBe(CLAWBOX_AI_IMAGE_MODEL_ID);
   });
 
-  it("defaults to the tier-blind gpt-image-1-mini", () => {
+  it("has no slash — the proxy matches the bare id", () => {
+    expect(CLAWBOX_AI_IMAGE_MODEL_ID).not.toContain("/");
+  });
+
+  it("defaults to the tier-blind gpt-image-1-mini", async () => {
     // Provisioning runs before the portal has told us the plan, so the default
     // must be a model every plan is allowed to call. gpt-image-2 is Max-only
     // and would turn every Free-box request into a model-gate rejection.
-    expect(CLAWBOX_AI_IMAGE_MODEL_ID).toBe("gpt-image-1-mini");
-    expect(CLAWBOX_AI_IMAGE_MODEL_ID).not.toContain("/");
+    //
+    // Loaded with the env override cleared, on purpose: the constant resolves
+    // `process.env.CLAWBOX_AI_IMAGE_MODEL_ID` once at module load, so a shell
+    // or CI job that exports it for a staging proxy would fail this assertion
+    // while nothing is actually wrong. What is being pinned here is the
+    // documented default, which is a property of the source, not of the
+    // environment the suite happens to run in.
+    const fresh = await withImageModelIdOverride(undefined, () => import("@/lib/clawbox-ai-models"));
+
+    expect(fresh.CLAWBOX_AI_IMAGE_MODEL_ID).toBe("gpt-image-1-mini");
+    expect(fresh.CLAWBOX_AI_IMAGE_MODEL).toBe("openai/gpt-image-1-mini");
+  });
+
+  it("lets CLAWBOX_AI_IMAGE_MODEL_ID retarget a staging proxy's alias map", async () => {
+    // The other half of the same coupling, and the reason it exists.
+    const fresh = await withImageModelIdOverride("gpt-image-staging", () => import("@/lib/clawbox-ai-models"));
+
+    expect(fresh.CLAWBOX_AI_IMAGE_MODEL_ID).toBe("gpt-image-staging");
+    expect(fresh.CLAWBOX_AI_IMAGE_MODEL).toBe("openai/gpt-image-staging");
   });
 
   it("carries a non-empty label — OpenClaw's schema requires models[].name", () => {

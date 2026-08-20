@@ -118,6 +118,11 @@ interface SpawnOpenclawOptions {
   timeoutMs?: number;
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
   captureStdout?: boolean;
+  /**
+   * Argv to name the process by in error messages, when the real argv must not
+   * appear in one. Defaults to `args`. See {@link spawnOpenclawConfigSet}.
+   */
+  labelArgs?: string[];
   uid?: number;
   gid?: number;
   cwd?: string;
@@ -146,7 +151,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   const timeoutMs = options.timeoutMs ?? 30_000;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
-  const label = `${bin} ${args.join(" ")}`;
+  const label = `${bin} ${(options.labelArgs ?? args).join(" ")}`;
 
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -194,11 +199,36 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   });
 }
 
+/**
+ * Argv for a `config set` call with the *value* elided, for use in a log line.
+ *
+ * `openclaw config set <path> <value>` carries the secret in argv — the ClawBox
+ * AI portal token, a provider API key, the Telegram bot token, the gateway
+ * token. `spawnOpenclaw` names the process in the two errors it can reject with
+ * (timeout, and a non-zero exit that produced no output), and every caller of
+ * `runOpenclawConfigSet` logs that message. Naming the config path is what makes
+ * such a line diagnosable; the value never adds anything a reader needs, and
+ * writing it puts a live credential in the journal (CWE-532).
+ *
+ * Flags keep their literal form — they are part of the command's shape, not its
+ * payload — so a reader still sees `--json` and can reproduce the call.
+ */
+export function configSetLabelArgs(args: string[]): string[] {
+  const [configPath, ...rest] = args;
+  return [
+    "config",
+    "set",
+    ...(configPath === undefined ? [] : [configPath]),
+    ...rest.map((arg) => (arg.startsWith("--") ? arg : "<redacted>")),
+  ];
+}
+
 function spawnOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions & { timeoutMs: number },
 ): Promise<void> {
   return spawnOpenclaw(["config", "set", ...args], {
+    labelArgs: configSetLabelArgs(args),
     timeoutMs: options.timeoutMs,
     uid: options.uid,
     gid: options.gid,
@@ -454,7 +484,12 @@ export interface OpenClawConfig {
   models?: {
     mode?: string;
     providers?: Record<string, {
-      models?: Array<{ id?: string; name?: string }>;
+      // `baseUrl` appears at both levels and the model-level one wins:
+      // OpenClaw resolves a row's endpoint as `model.baseUrl ?? provider.baseUrl`
+      // and only then falls back to the provider's own default host. Callers
+      // deciding where a configured row actually points need to see both.
+      baseUrl?: string;
+      models?: Array<{ id?: string; name?: string; baseUrl?: string; api?: string; [key: string]: unknown }>;
       [key: string]: unknown;
     }>;
   };

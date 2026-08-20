@@ -481,6 +481,32 @@ CLAWBOX_IMAGE_MODEL_ID = "gpt-image-1-mini"
 CLAWBOX_IMAGE_MODEL_NAME = "ClawBox AI Images"
 CLAWBOX_IMAGE_MODEL_REF = "openai/" + CLAWBOX_IMAGE_MODEL_ID
 
+# Where OpenClaw sends an `openai` request that names no host of its own:
+# resolveConfiguredOpenAIBaseUrl, dist/shared-BdJp-xt6.js:11 on 2026.7.1-2.
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+
+# Imported here rather than at the top of the block so this migration stays a
+# self-contained slice: src/tests/unit/gateway-pre-start-clawai-images.test.ts
+# runs these exact bytes out of the shipped .sh.
+from urllib.parse import urlsplit
+
+
+def _url_host(_url):
+    """Lowercased host[:port] of a URL, or None when it is not a usable URL.
+
+    Deliberately excludes any userinfo, and matches what `new URL(u).host`
+    returns on the TypeScript side so the two guards agree on the same string.
+    """
+    try:
+        _parts = urlsplit(_url if isinstance(_url, str) else "")
+        if not _parts.scheme or not _parts.hostname:
+            return None
+        _port = _parts.port
+    except ValueError:
+        return None
+    return _parts.hostname.lower() + (":" + str(_port) if _port is not None else "")
+
+
 # Only boxes that actually have ClawBox AI get an image provider — the token is
 # the entitlement. Read it from where the configure route already put it rather
 # than re-reading data/config.json, and take the proxy URL off the same entry so
@@ -505,7 +531,57 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         _existing_key is None
         or (isinstance(_existing_key, str) and (not _existing_key.strip() or _existing_key.startswith("claw_")))
     )
-    if _key_is_ours:
+
+    # The apiKey we are about to write is provider-wide, not image-only: nothing
+    # in OpenClaw scopes it to one model. getApiKeyForModel
+    # (dist/model-auth-CJEm9SNp.js:753 on 2026.7.1-2) walks per-entry bindings,
+    # auth profiles, then the environment, and lands on
+    # models.providers.<p>.apiKey last. A ClawBox has no openai auth profile and
+    # no OPENAI_API_KEY, so that last step is where every `openai/*` request gets
+    # its bearer — including one aimed at a host that is not ours.
+    #
+    # Two configured shapes route off-proxy, and the owner wrote both (ClawBox
+    # writes neither):
+    #   - a models[] row other than ours, whose endpoint resolves as
+    #     `row.baseUrl or provider.baseUrl or api.openai.com` — so a hand-added
+    #     {"id": "gpt-5", "api": "openai-completions"} with no baseUrl goes
+    #     straight to api.openai.com carrying claw_…
+    #   - a provider-level baseUrl, the fallback for every row without one.
+    # Either means an `openai` setup we did not build, so back the whole
+    # migration off. Half-configuring it — key written, images maybe working —
+    # is the outcome that mails the subscription token to a third party.
+    # An unparseable URL counts as foreign: we cannot say where it points.
+    # Mirrors foreignOpenAiRoute() in
+    # src/app/setup-api/ai-models/configure/route.ts.
+    _proxy_host = _url_host(_image_base_url)
+
+    def _is_foreign(_url):
+        _host = _url_host(_url)
+        return _host is None or _proxy_host is None or _host != _proxy_host
+
+    _provider_base_url = openai_provider.get("baseUrl")
+    if not isinstance(_provider_base_url, str) or not _provider_base_url.strip():
+        _provider_base_url = ""
+    _foreign_route = _provider_base_url if (_provider_base_url and _is_foreign(_provider_base_url)) else None
+    if _foreign_route is None:
+        for _row in (openai_provider.get("models") if isinstance(openai_provider.get("models"), list) else []):
+            if not isinstance(_row, dict) or _row.get("id") == CLAWBOX_IMAGE_MODEL_ID:
+                continue
+            _row_base_url = _row.get("baseUrl")
+            if not isinstance(_row_base_url, str) or not _row_base_url.strip():
+                _row_base_url = _provider_base_url or OPENAI_DEFAULT_BASE_URL
+            if _is_foreign(_row_base_url):
+                _foreign_route = _row_base_url
+                break
+
+    if _key_is_ours and _foreign_route is not None:
+        print(
+            "  Skipped ClawBox AI image provider: models.providers.openai already routes to "
+            + _foreign_route
+            + ", and the apiKey we would write there is the credential for that route too"
+        )
+
+    if _key_is_ours and _foreign_route is None:
         models_providers["openai"] = openai_provider
         if openai_provider.get("apiKey") != _clawai_token:
             openai_provider["apiKey"] = _clawai_token

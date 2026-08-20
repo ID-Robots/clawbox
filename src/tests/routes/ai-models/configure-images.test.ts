@@ -323,6 +323,149 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     });
   });
 
+  describe("upserts models[] instead of replacing it", () => {
+    // `config set models.providers.openai.models` writes the whole array, so
+    // building it from our entry alone deletes every other row the owner
+    // configured. The boot migration in scripts/gateway-pre-start.sh has always
+    // upserted; a box repaired at boot and a box configured through this route
+    // have to end up with the same config.
+    function writtenModels(): Array<Record<string, unknown>> {
+      return JSON.parse(callFor("models.providers.openai.models")?.[1] ?? "null");
+    }
+
+    async function connectWithOpenaiProvider(openai: Record<string, unknown>) {
+      mockReadConfig.mockResolvedValue({ models: { providers: { openai } } } as never);
+      await connectClawai();
+    }
+
+    it("keeps a sibling row and appends ours", async () => {
+      const sibling = { id: "house-model", name: "House model", api: "openai-completions", baseUrl: PROXY_URL };
+      await connectWithOpenaiProvider({ models: [sibling] });
+
+      expect(writtenModels()).toEqual([
+        sibling,
+        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
+      ]);
+    });
+
+    it("repairs its own entry in place rather than duplicating it", async () => {
+      // Same three repairs the boot migration applies: a blank `name` (the
+      // config will not validate without one and the gateway then refuses to
+      // start), a baseUrl left on a retired proxy, and a stray `api` that would
+      // put the image model in the chat picker.
+      await connectWithOpenaiProvider({
+        apiKey: "claw_old",
+        models: [{
+          id: CLAWBOX_AI_IMAGE_MODEL_ID,
+          name: "   ",
+          baseUrl: "https://openclawhardware.dev/api/ai",
+          api: "openai-completions",
+        }],
+      });
+
+      expect(writtenModels()).toEqual([
+        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
+      ]);
+    });
+
+    it("leaves a name the owner gave our entry alone", async () => {
+      await connectWithOpenaiProvider({
+        apiKey: "claw_old",
+        models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: "Drawing machine", baseUrl: PROXY_URL }],
+      });
+
+      expect(writtenModels()[0].name).toBe("Drawing machine");
+    });
+
+    it("starts a fresh array when models[] is present but not a list", async () => {
+      await connectWithOpenaiProvider({ models: "nonsense" });
+
+      expect(writtenModels()).toEqual([
+        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
+      ]);
+    });
+
+    it("drops non-object junk rows rather than writing back an invalid config", async () => {
+      await connectWithOpenaiProvider({ models: [null, "gpt-5", 42] });
+
+      expect(writtenModels()).toEqual([
+        { id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL },
+      ]);
+    });
+  });
+
+  describe("will not make the portal token the credential for someone else's endpoint", () => {
+    // models.providers.openai.apiKey is provider-wide — nothing scopes it to the
+    // image model. getApiKeyForModel (dist/model-auth-CJEm9SNp.js:753 on
+    // OpenClaw 2026.7.1-2) falls back to it for any `openai/*` request once
+    // per-entry bindings, auth profiles and OPENAI_API_KEY come up empty, which
+    // on a ClawBox they always do.
+    async function backsOff(openai: Record<string, unknown>) {
+      mockReadConfig.mockResolvedValue({ models: { providers: { openai } } } as never);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const res = await connectClawai();
+
+        expect(res.status).toBe(200); // ClawBox AI chat still connected
+        expect(callFor("models.providers.openai.apiKey")).toBeUndefined();
+        expect(callFor("models.providers.openai.models")).toBeUndefined();
+        expect(callFor("agents.defaults.imageGenerationModel")).toBeUndefined();
+        expect(callFor("models.providers.deepseek")).toBeDefined();
+        return warn.mock.calls.map((call) => call.join(" ")).join("\n");
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it("backs off on a sibling row that resolves to api.openai.com", async () => {
+      // `api` makes it a live chat row; the absent baseUrl resolves it to
+      // api.openai.com, where the claw_ token would be sent as the bearer.
+      const logged = await backsOff({ models: [{ id: "gpt-5", name: "GPT-5", api: "openai-completions" }] });
+
+      expect(logged).toContain("Skipped ClawBox AI image provider");
+      expect(logged).toContain("api.openai.com");
+    });
+
+    it("backs off on a sibling row pointing at a third-party host", async () => {
+      await backsOff({
+        models: [{ id: "local-gpt", name: "Local GPT", api: "openai-completions", baseUrl: "https://someone-elses-proxy.example/v1" }],
+      });
+    });
+
+    it("backs off on a provider-level baseUrl that is not ours", async () => {
+      // Every row without a baseUrl of its own inherits this one, including
+      // OpenClaw's bundled openai catalog rows.
+      const logged = await backsOff({ baseUrl: "https://someone-elses-proxy.example/v1" });
+
+      expect(logged).toContain("someone-elses-proxy.example");
+    });
+
+    it("backs off on a baseUrl it cannot parse", async () => {
+      await backsOff({ models: [{ id: "mystery", name: "Mystery", baseUrl: "not-a-url" }] });
+    });
+
+    it("proceeds when a sibling row points at the same proxy we do", async () => {
+      mockReadConfig.mockResolvedValue({
+        models: { providers: { openai: { models: [{ id: "house-model", name: "House model", api: "openai-completions", baseUrl: PROXY_URL }] } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+    });
+
+    it("proceeds on a box whose only openai row is ours", async () => {
+      // Re-configuring must not back off on this route's own previous output.
+      mockReadConfig.mockResolvedValue({
+        models: { providers: { openai: { apiKey: "claw_old", models: [{ id: CLAWBOX_AI_IMAGE_MODEL_ID, name: CLAWBOX_AI_IMAGE_MODEL_LABEL, baseUrl: PROXY_URL }] } } },
+      } as never);
+
+      await connectClawai();
+
+      expect(callFor("models.providers.openai.apiKey")?.[1]).toBe(CLAWAI_TOKEN);
+    });
+  });
+
   describe("does not steal an image model the owner already chose", () => {
     async function connectWithImageModel(imageGenerationModel: unknown) {
       mockReadConfig.mockResolvedValue({ agents: { defaults: { imageGenerationModel } } } as never);
@@ -383,6 +526,51 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
       expect(JSON.parse(callFor("agents.defaults.imageGenerationModel")?.[1] ?? "null")).toEqual({
         primary: CLAWBOX_AI_IMAGE_MODEL,
       });
+    });
+  });
+
+  describe("what the failure path is allowed to write to the journal", () => {
+    /** The single journal record the image-provider catch produced. */
+    async function failImageWritesWith(message: string): Promise<string> {
+      mockRunOpenclawConfigSet.mockImplementation(async (args: string[]) => {
+        if (args[0]?.startsWith("models.providers.openai")) throw new Error(message);
+      });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await connectClawai();
+        const records = warn.mock.calls
+          .map((call) => call.map(String).join(" "))
+          .filter((record) => record.includes("ClawBox AI image provider"));
+        // configureClawboxAi runs twice on this path — once for the primary and
+        // once from ensureFallbackModel — so the catch fires twice with the
+        // same message. One distinct record is what matters here.
+        expect(records.length).toBeGreaterThan(0);
+        expect(new Set(records).size).toBe(1);
+        return records[0];
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it("does not let a subprocess error forge extra log records", async () => {
+      // CodeQL "Log injection": the message is built from whatever `openclaw`
+      // wrote to stderr, and a value reaches that CLI straight from this
+      // route's request body. Unescaped CR/LF would let one API call decide how
+      // many records the journal gets, and an ESC would be acted on by whatever
+      // terminal tails it.
+      const logged = await failImageWritesWith("boom\nWARN forged record\r\n[31mred");
+
+      expect(logged).toContain("Failed to configure ClawBox AI image provider");
+      expect(logged).not.toContain("\n[31m");
+      expect(logged.split("\n")).toHaveLength(1);
+      expect(logged).toContain("�");
+    });
+
+    it("bounds the record instead of letting the CLI size it", async () => {
+      const logged = await failImageWritesWith("x".repeat(5000));
+
+      expect(logged.length).toBeLessThan(400);
+      expect(logged).toContain("chars]");
     });
   });
 
