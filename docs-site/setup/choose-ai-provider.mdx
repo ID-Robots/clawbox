@@ -46,6 +46,22 @@ Connect** (Jetson Orin Nano) is best paired with cloud providers or smaller loca
 See [Hardware](/hardware/clawbox-connect).
 </Note>
 
+## Reasoning effort
+
+You can control how hard the model thinks before answering, per conversation, from the brain icon in the chat header. More thinking gives better answers on hard problems, and costs more time and tokens.
+
+The picker offers the same four levels on every cloud provider — **Off**, **Low**, **Medium**, **High** — so it works the same way whichever model you choose.
+
+- **ClawBox AI** starts at **Off**, so everyday prompts stay fast and you turn reasoning on when a task needs it.
+- **Claude, GPT, Gemini and OpenRouter** start at **Medium**.
+- The **on-device local model** has no reasoning control, so the brain icon does not appear when it is selected.
+
+Your choice is remembered per provider. If you switch to a provider that does not offer your current level, it falls back to that provider's default.
+
+<Note>
+For the technical detail of how model reasoning capability is configured — and why it is set in code rather than by hand — see [AI Providers → Reasoning effort](/technical/ai-providers#reasoning-effort).
+</Note>
+
 ## Switching later
 
 You can change provider any time from the device settings — no re-setup required.

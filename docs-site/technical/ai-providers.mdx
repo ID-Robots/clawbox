@@ -44,6 +44,32 @@ Some native OpenClaw provider plugins expect auth stores ClawBox doesn't populat
 - Requests proxy through the portal's AI endpoint; both models advertise reasoning support including **X-High** effort (mapped upstream to DeepSeek's maximum reasoning mode).
 - Changing the linked portal account automatically unpairs ClawKeep (backups belong to the account).
 
+### Reasoning effort
+
+The chat header's reasoning-effort picker is **uniform across every cloud provider** — `Off`, `Low`, `Medium`, `High` — so the control behaves the same whichever model you select. The gateway accepts this ladder for all of them and normalizes it per provider.
+
+| Provider | Levels offered | Default |
+|---|---|---|
+| ClawBox AI | Off, Low, Medium, High | **Off** — simple prompts stay fast; you opt in to reasoning |
+| Anthropic, OpenAI, ChatGPT subscription, Google, OpenRouter | Off, Low, Medium, High | Medium |
+| Local llama.cpp (Gemma) | Off only — **the picker is hidden** | Off |
+
+Two consequences worth knowing:
+
+- **A model with only one level shows no control at all.** The header renders the picker only when more than one level is available, which is why the on-device local model has no reasoning dial.
+- **An unsupported level falls back to that provider's default**, not to the nearest neighbouring level. Switching provider mid-conversation therefore resets the effort to the new provider's default if the current one is not in its list. The selection is remembered per provider.
+
+Provider-specific extras that the gateway vocabulary also accepts (`minimal`, `xhigh`, `max`, `adaptive`) are deliberately **not** offered in the picker, to keep the control consistent across models.
+
+<Warning>
+**Model reasoning capability is declared programmatically, not by hand-editing config.** Separately from the picker above, each model entry carries gateway compatibility metadata describing which efforts it accepts. Editing that by hand in `openclaw.json` does not stick — two mechanisms overwrite it:
+
+1. **The gateway re-applies its expected values on every start.** ClawBox's boot-time configuration step rewrites the reasoning metadata on the ClawBox AI models each time the gateway starts, so a manual edit survives only until the next restart.
+2. **System updates replace the bundled model catalog.** Updating OpenClaw overwrites the packaged catalog wholesale, so edits made there are lost on the next update. ClawBox re-applies its own values on each boot precisely because of this.
+
+If a level is not declared as supported, the gateway rejects it. Changes must therefore be made in ClawBox's setup and boot-time configuration code, which is the single source of truth.
+</Warning>
+
 ## Local models (Ollama / llama.cpp)
 
 - Local lanes authenticate with a **per-install bearer token** through a local proxy — nothing is exposed unauthenticated, even on localhost.
