@@ -85,21 +85,29 @@ export async function GET(req: NextRequest) {
   //
   // This one is purely lexical and runs BEFORE any filesystem call touches the
   // query string. It reduces the request to a path RELATIVE to the media root,
-  // rejects anything that climbs out, and then rebuilds the absolute path by
-  // joining that cleared segment onto MEDIA_ROOT — a module constant, never
-  // user input. Nothing derived from the query string is handed to the
-  // filesystem; realpath below receives a value built from the constant.
+  // rejects anything that climbs out, and rebuilds the absolute path by joining
+  // that cleared segment onto the root. Nothing derived from the query string is
+  // handed to the filesystem; realpath below receives a value built from a
+  // trusted base.
   //
   // Written this way deliberately. Comparing `path.resolve(requested)` against
   // the root with startsWith is equally correct and reads more naturally, but
   // the root is only known after an async call, so a scanner cannot tie the
   // guard to the sink and js/path-injection stayed open at high severity. This
   // form is both correct and legible to the tool.
-  const rel = path.relative(MEDIA_ROOT, path.resolve(requested));
+  // Measured against the RESOLVED root, not the MEDIA_ROOT constant. The two
+  // differ whenever the media directory is itself a symlink, which is a
+  // supported deployment — anchoring on the constant rejected those requests
+  // outright and broke the "follows a symlinked root" test.
+  //
+  // `root` is still untrusted-free: it comes from realpath of a module
+  // constant, never from the request. Relative-then-join is what makes the
+  // guard legible to the scanner where a startsWith comparison was not.
+  const rel = path.relative(root, path.resolve(requested));
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
-  const candidate = path.join(MEDIA_ROOT, rel);
+  const candidate = path.join(root, rel);
 
   // The second test still resolves symlinks, because the lexical check above
   // cannot see them: a link planted inside the media tree pointing at
