@@ -59,15 +59,24 @@ function silentChild(code: number): ChildProcess {
   return child;
 }
 
+/**
+ * Whatever the test runner's shell held before this file pinned the edition.
+ * Deleting unconditionally instead would hand every later file in the worker a
+ * different environment than it started with.
+ */
+let ambientEdition: string | undefined;
+
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  ambientEdition = process.env.CLAWBOX_EDITION;
   process.env.CLAWBOX_EDITION = "openclaw";
   openclawConfig = await import("@/lib/openclaw-config");
 });
 
 afterEach(() => {
-  delete process.env.CLAWBOX_EDITION;
+  if (ambientEdition === undefined) delete process.env.CLAWBOX_EDITION;
+  else process.env.CLAWBOX_EDITION = ambientEdition;
   vi.clearAllMocks();
 });
 
