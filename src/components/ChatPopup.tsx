@@ -13,7 +13,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills } from '@/lib/chat-tool-events'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
-import { isSentinel } from '@/lib/chat-sentinels'
+import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import {
   type ThinkingLevel,
   type ProviderReasoningConfig,
@@ -1027,7 +1027,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (state === 'delta') {
             const text = extractText(msg)
             // Sentinels would flash before the final-state filter drops them.
-            if (text && !isSentinel(text)) {
+            if (text && !isSentinel(text) && !isInterSessionEnvelope(text, msg)) {
               setStreaming(text); setReloadingSkill(false)
             }
           } else if (state === 'final') {
@@ -1039,7 +1039,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // avoids a brief "Sent." bubble flashing on the screen before
             // the real reply replaces it.
             const isAckOnly = !text || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
-            if (text && !isAckOnly) {
+            // Same suppression as the history path, so the bubble cannot
+            // appear in real time either — and so an envelope can never be
+            // cached as a mascot snippet.
+            if (text && !isAckOnly && !isInterSessionEnvelope(text, msg)) {
               setMessages(prev => [...prev, { role: 'assistant', text, timestamp: Date.now() }])
               saveMascotSnippet(text)
             }
@@ -1194,6 +1197,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (role !== 'user' && role !== 'assistant') continue
         const text = extractText(m)
         if (!text || isSentinel(text)) continue
+        // Inter-session routing envelopes are machinery addressed to the
+        // agent, not chat content — drop the whole message. Shared with
+        // ChatApp so the two surfaces can't drift.
+        if (isInterSessionEnvelope(text, m)) continue
         const cleaned = role === 'user' ? text.replace(/^\[[^\]]+\]\s*/, '') : text
         chatMsgs.push({ role: role as 'user' | 'assistant', text: cleaned, timestamp: (m.timestamp as number) || 0 })
       }
