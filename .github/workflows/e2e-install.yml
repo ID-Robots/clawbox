@@ -68,16 +68,19 @@ jobs:
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
-          fetch-depth: 0
+          # The updater fetches its target branch explicitly. Keeping only the
+          # exact PR head avoids copying the repository's full object history
+          # into the Docker image while preserving a real, fetchable .git repo.
+          fetch-depth: 1
 
       - name: Checkout repository
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/checkout@v7
         with:
-          # We need the target branch reachable from the working tree so the
-          # updater can `git fetch origin <branch>`. Fetch tags too since the
-          # version check polls `git ls-remote --tags`.
-          fetch-depth: 0
+          # Scheduled/dispatch runs update the checked-out branch. The updater
+          # performs its own `git fetch origin <branch>`, and version checks use
+          # `git ls-remote --tags`, so local history and tags are unnecessary.
+          fetch-depth: 1
 
       - name: Show Docker + runner info
         run: |
