@@ -167,7 +167,11 @@ test.describe("settings actions", () => {
     expect(["active", "inactive", "failed", "activating", "unknown"]).toContain(
       body.tunnel.service,
     );
-    expect(body.portalAddDeviceUrl).toMatch(/clawbox\.com/);
+    // Anchored to the host, not merely "contains clawbox.com": an unanchored
+    // match also accepts https://clawbox.com.attacker.example/… , which is
+    // exactly the string an open-redirect bug would produce and this assertion
+    // is meant to catch.
+    expect(body.portalAddDeviceUrl).toMatch(/^https:\/\/(?:[a-z0-9-]+\.)*clawbox\.com(?:[/?#]|$)/);
   });
 
   test("System panel — power route exists (without actually shutting down)", async () => {

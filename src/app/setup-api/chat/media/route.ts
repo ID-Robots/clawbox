@@ -93,8 +93,22 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  // Everything below reads `safe`, never `real` or `requested`. `safe` is
+  // rebuilt from the trusted root plus a relative segment that has just been
+  // proven not to escape it, so no value derived from the query string reaches
+  // the filesystem calls. The containment test above already made this correct;
+  // reconstructing makes it *provable* — CodeQL's js/path-injection cannot
+  // follow the check through the async resolvedRoot() indirection and flagged
+  // the route high severity. A guard a scanner cannot see is one the next
+  // person will quietly refactor away.
+  const rel = path.relative(root, real);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    return NextResponse.json({ error: "Not found" }, { status: 404 });
+  }
+  const safe = path.join(root, rel);
+
   try {
-    const stat = await fsp.stat(real);
+    const stat = await fsp.stat(safe);
     if (!stat.isFile()) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
@@ -104,7 +118,7 @@ export async function GET(req: NextRequest) {
     // Streamed, not buffered — the sibling files route does the same, for the
     // same reason: a 25 MB ceiling read into RAM (and then copied again into a
     // Uint8Array) is not something to hand a Jetson per request.
-    const body = Readable.toWeb(fs.createReadStream(real)) as unknown as ReadableStream;
+    const body = Readable.toWeb(fs.createReadStream(safe)) as unknown as ReadableStream;
     return new NextResponse(body, {
       headers: {
         "Content-Type": contentType,
