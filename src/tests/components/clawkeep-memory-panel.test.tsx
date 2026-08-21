@@ -94,6 +94,20 @@ describe("the memory index panel in ClawKeep", () => {
     expect(screen.getByText("Healthy")).toBeTruthy();
   });
 
+  it("cannot take ClawKeep down when the route answers something else", async () => {
+    // Exactly what the e2e mock does: any unrecognised /setup-api/* path is
+    // answered `{}` with HTTP 200. That used to be adopted as a status, and
+    // the first render read `status.run.status` off undefined and threw —
+    // which is why every ClawKeep e2e test failed with the window never
+    // appearing at all. A panel must not cost the customer the app it is in.
+    memory = {} as Record<string, unknown>;
+    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    // ClawKeep itself still renders...
+    expect(await screen.findByRole("button", { name: "Pair with portal" })).toBeTruthy();
+    // ...and the panel stays on its loading line rather than inventing a state.
+    expect(screen.getByText(/Memory index — Loading/)).toBeTruthy();
+  });
+
   it("shows a cloud embedder as cloud", async () => {
     memory = { ...LOCAL_MEMORY, provider: "openai", model: "text-embedding-3-large", location: "cloud" };
     render(<I18nProvider><ClawKeepApp /></I18nProvider>);

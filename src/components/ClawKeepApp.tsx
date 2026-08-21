@@ -875,6 +875,29 @@ function ScheduleCard({
  * /setup-api/clawkeep/memory, which already strips paths, provider errors and
  * raw CLI output before they reach the browser.
  */
+/**
+ * Is this actually a memory status?
+ *
+ * Load-bearing, and not defensive programming for its own sake: every e2e
+ * ClawKeep test failed on this. Their mock answers any unrecognised
+ * `/setup-api/*` path with `{}` and HTTP 200, `jsonOrError` accepted it, and
+ * the first render then read `status.run.status` off `undefined` and threw —
+ * taking the ENTIRE ClawKeep window down, backups and all, because one
+ * subordinate panel got an answer it did not expect.
+ *
+ * The same thing happens in the field whenever this route answers something
+ * else: an older build behind a proxy, a truncated response, a schema that
+ * moves on. A panel is not allowed to cost the customer the app it lives in.
+ */
+function isMemoryStatus(body: unknown): body is ClawKeepMemoryStatus {
+  if (!body || typeof body !== "object") return false;
+  const b = body as Partial<ClawKeepMemoryStatus>;
+  return typeof b.health === "string"
+    && typeof b.location === "string"
+    && !!b.run && typeof b.run === "object" && typeof b.run.status === "string"
+    && !!b.schedule && typeof b.schedule === "object" && typeof b.schedule.enabled === "boolean";
+}
+
 function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   const { t } = useT();
   const [status, setStatus] = useState<ClawKeepMemoryStatus | null>(null);
@@ -898,7 +921,11 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
     if (loadInFlightRef.current) return;
     loadInFlightRef.current = true;
     try {
-      const body = await jsonOrError<ClawKeepMemoryStatus>(await fetch("/setup-api/clawkeep/memory"));
+      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
+      // Anything that is not a memory status is ignored outright rather than
+      // rendered. The panel keeps its last good reading, or stays on its
+      // loading line, and the rest of ClawKeep is untouched.
+      if (!isMemoryStatus(body)) return;
       setStatus(body);
       // Only adopt the server's schedule while the user is not mid-edit, or a
       // poll landing between two clicks would throw their change away.
