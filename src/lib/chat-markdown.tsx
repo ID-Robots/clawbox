@@ -65,3 +65,46 @@ export function renderText(text: string) {
     );
   });
 }
+
+/**
+ * The same message as plain speech, for an accessible name.
+ *
+ * A control's accessible name is read aloud verbatim, so the markdown source
+ * cannot go in it: `*"seventeen copper bells"*` is announced as "asterisk
+ * quote seventeen copper bells quote asterisk", and a fenced block reads its
+ * backticks out one by one. The audio player's label was the raw `msg.text`,
+ * so every emphasis mark, link URL and heading hash in a spoken reply landed
+ * in the screen reader.
+ *
+ * Deliberately in this file and not next to the player: it strips the same
+ * markers `renderInline`/`renderText` consume, so the two cannot drift into
+ * disagreeing about what counts as markup. Where it differs it strips MORE,
+ * never less: `renderText` only promotes `##`/`###` to headings and only
+ * bullets a paragraph made entirely of them, while this drops any leading
+ * `#`s and any leading bullet. That asymmetry is the safe one — a stray `#`
+ * that stays on screen costs nothing, but spoken aloud it is just noise.
+ *
+ * `max` is a budget for the SPOKEN name, so it cuts on a word boundary — the
+ * previous `slice(0, 100)` could stop mid-word, and mid-token, which is worse
+ * out loud than it looks on screen.
+ */
+export function plainTextForLabel(text: string, max = 100): string {
+  const flat = text
+    // Fenced blocks first: their content may contain any other marker.
+    .replace(/```[\s\S]*?```/g, (seg) => seg.slice(3, -3).replace(/^\w*\n/, ""))
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    // Headings and list bullets are line-leading, so anchor them per line.
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max);
+  const lastSpace = cut.lastIndexOf(" ");
+  // Only honour the word boundary if one exists late enough to leave a useful
+  // label; a single very long token still gets truncated rather than dropped.
+  return `${(lastSpace > max * 0.5 ? cut.slice(0, lastSpace) : cut).trimEnd()}…`;
+}
