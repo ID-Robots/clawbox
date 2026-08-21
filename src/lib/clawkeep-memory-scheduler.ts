@@ -17,6 +17,7 @@
 import {
   computeNextMemoryRunMs,
   readMemorySchedule,
+  resolveIndexMode,
   startMemoryIndex,
   type MemoryIndexSchedule,
 } from "@/lib/clawkeep-memory";
@@ -34,9 +35,12 @@ function clear(): void {
 
 function fire(): void {
   // Incremental, never a full reindex: a scheduled run must not spend hours
-  // re-embedding everything unattended. `startMemoryIndex` is single-flight,
-  // so a manual run already in progress simply declines this one.
-  void startMemoryIndex("incremental", "schedule")
+  // re-embedding everything unattended. The one exception is a box with no
+  // index at all, where an incremental pass cannot succeed — resolveIndexMode
+  // owns that call so the button and the schedule agree. `startMemoryIndex` is
+  // single-flight, so a manual run already in progress declines this one.
+  void resolveIndexMode("incremental")
+    .then((mode) => startMemoryIndex(mode, "schedule"))
     .catch((err) => {
       console.warn(
         "[clawkeep-memory-scheduler] scheduled index failed:",

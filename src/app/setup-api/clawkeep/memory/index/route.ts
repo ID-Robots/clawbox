@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getMemoryStatus, startMemoryIndex } from "@/lib/clawkeep-memory";
+import { getMemoryStatus, resolveIndexMode, startMemoryIndex } from "@/lib/clawkeep-memory";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +15,11 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
-  const mode = (body as { mode?: unknown }).mode === "full" ? "full" : "incremental";
+  const requested = (body as { mode?: unknown }).mode === "full" ? "full" : "incremental";
   try {
-    const { accepted, run } = await startMemoryIndex(mode, "manual");
+    // On a box with no index yet, an incremental pass cannot succeed — see
+    // resolveIndexMode. The run reports the mode it actually used.
+    const { accepted, run } = await startMemoryIndex(await resolveIndexMode(requested), "manual");
     if (!accepted) {
       return NextResponse.json(
         { accepted: false, run, status: await getMemoryStatus() },

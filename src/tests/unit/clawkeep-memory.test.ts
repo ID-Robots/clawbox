@@ -189,3 +189,44 @@ describe("run state", () => {
     expect("childPid" in run).toBe(false);
   });
 });
+
+describe("what the first Index now click actually runs", () => {
+  /**
+   * Observed on .177, not reasoned about: on a box whose vector index has
+   * never been built, `openclaw memory index` WITHOUT `--force` exits 1 with
+   * `no such table: memory_index_chunks_vec`, while the same command with
+   * `--force` exits 0 and creates it. Without this rule the very first
+   * "Index now" a new owner clicks fails and blames their embedding model.
+   *
+   * Driven through the real spawn-and-parse path by pointing the binary at a
+   * script that prints a status payload, so a change to either the CLI probe
+   * or the rule breaks it.
+   */
+  async function withStatusChunks(chunks: number): Promise<typeof import("@/lib/clawkeep-memory")> {
+    const payload = JSON.parse(JSON.stringify(REAL_STATUS)) as Array<{ status: { chunks: number; files: number } }>;
+    payload[0].status.chunks = chunks;
+    payload[0].status.files = chunks ? 7 : 0;
+    const script = path.join(tmpDir, "fake-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\ncat <<'JSON'\n${JSON.stringify(payload)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    vi.resetModules();
+    return await import("@/lib/clawkeep-memory");
+  }
+
+  afterEach(() => { delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN; });
+
+  it("upgrades to a full build when nothing is indexed yet", async () => {
+    const { resolveIndexMode } = await withStatusChunks(0);
+    expect(await resolveIndexMode("incremental")).toBe("full");
+  });
+
+  it("leaves an existing index alone", async () => {
+    const { resolveIndexMode } = await withStatusChunks(512);
+    expect(await resolveIndexMode("incremental")).toBe("incremental");
+  });
+
+  it("never downgrades an explicit full reindex", async () => {
+    const { resolveIndexMode } = await withStatusChunks(512);
+    expect(await resolveIndexMode("full")).toBe("full");
+  });
+});

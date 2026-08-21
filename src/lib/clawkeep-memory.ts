@@ -511,6 +511,31 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   return statusInFlight;
 }
 
+/**
+ * What "Index now" should actually run.
+ *
+ * Observed on .177, not reasoned about: on a box whose vector index has never
+ * been built, `openclaw memory index` WITHOUT `--force` exits 1 with
+ * `no such table: memory_index_chunks_vec`, while the same command with
+ * `--force` exits 0 and builds it. So the very first click of "Index now" —
+ * the most likely click a new owner ever makes — would have failed with a
+ * message telling them to check a model that was perfectly fine.
+ *
+ * There is nothing to preserve when the index is empty, so the first build IS
+ * the full build. The run records the mode it really used, so the panel never
+ * claims an incremental pass it did not do.
+ */
+export async function resolveIndexMode(requested: MemoryIndexMode): Promise<MemoryIndexMode> {
+  if (requested === "full") return "full";
+  try {
+    return (await getMemoryStatus()).chunks === 0 ? "full" : "incremental";
+  } catch {
+    // If the status cannot be read, run what was asked rather than silently
+    // upgrading to a full reindex on a box we know nothing about.
+    return requested;
+  }
+}
+
 async function acquireRunLock(): Promise<boolean> {
   await ensureDataDir();
   try {
