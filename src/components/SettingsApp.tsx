@@ -3027,6 +3027,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className="text-[var(--text-primary)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>
                 </div>
                 <div className="flex justify-between text-sm">
+                  <span className="text-[var(--text-muted)]">OpenClaw</span>
+                  <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
+                </div>
+                <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
                   <span className="text-[var(--text-primary)]">Next.js + Bun</span>
                 </div>
