@@ -12,10 +12,13 @@ export const dynamic = "force-dynamic";
  *
  * Returns:
  *  - 200 { ok: true, phrases } on success
- *  - 200 { ok: false, reason } when the on-device model cannot run right now
- *    (busy serving the user's chat, not enough free RAM, or — until the local
- *    generation hook lands — not implemented). The caller keeps whatever it
- *    had; the locale's pack is a correct answer, just a static one.
+ *  - 200 { ok: false, reason } when the on-device model cannot run right now:
+ *    busy serving the user's chat, not enough free RAM, local AI switched
+ *    off, or the answer failed validation. The caller keeps whatever it had;
+ *    the locale's pack is a correct answer, just a static one.
+ *
+ * Generation is local-only — this triggers a call to the on-device llama.cpp
+ * server and nothing else. There is no cloud path.
  */
 export async function POST(request: Request) {
   try {
