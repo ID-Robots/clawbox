@@ -96,34 +96,40 @@ describe("step_hermes_install treats a shim without an agent as NOT installed", 
     expect(alreadyLine).not.toContain("--version");
   });
 
-  it("moves the stale agent husk aside rather than deleting it", () => {
-    // step_post_update now runs this step on EVERY update on EVERY hermes/dual
-    // box, so the destructive branch is no longer reached only by a device
-    // that is genuinely broken. `rm -rf "$agent_dir"` followed by a network
-    // install that is explicitly non-fatal is a one-way door: one
-    // false-negative probe on a box with no internet and a healthy agent
-    // becomes no agent at all.
-    expect(HERMES_CODE).not.toMatch(/rm -rf "\$agent_dir"\s*$/m);
-    expect(HERMES_CODE).toMatch(/mv "\$agent_dir" "\$agent_dir\.broken"/);
-  });
-
-  it("checks the installer is reachable BEFORE it touches the disk", () => {
-    // Ordering is the whole guarantee: a precheck after the husk is gone
-    // protects nothing.
-    const precheckIdx = HERMES_CODE.indexOf("$installer_url");
-    const mvIdx = HERMES_CODE.indexOf('mv "$agent_dir"');
-    expect(precheckIdx).toBeGreaterThan(-1);
-    expect(mvIdx).toBeGreaterThan(precheckIdx);
-    // …and it must bail out rather than press on.
-    expect(HERMES_CODE).toMatch(/cannot reach the Hermes installer/);
-  });
+  // "moves the husk aside" and "reachability before the husk moves" used to be
+  // asserted here as regexes over the shell text. They are now driven for real
+  // against a fake HOME at the bottom of this file, which is stronger evidence
+  // and does not have to be rewritten every time the branch is reshaped.
 
   it("prechecks and installs from the same URL", () => {
     // A precheck against a host the install does not then use would be worse
-    // than no precheck — it would report reachable and still fail.
-    const urls = HERMES_CODE.match(/https:\/\/[^\s"']+/g) ?? [];
-    expect(urls.length).toBe(1);
-    expect(HERMES_CODE.match(/\$installer_url/g)?.length).toBe(2);
+    // than no precheck — it would report reachable and still fail. Expressed
+    // as: every curl call goes through the one variable, none carries a
+    // literal URL of its own.
+    const curlLines = HERMES_CODE.split(NL).filter((l) => l.includes("curl "));
+    expect(curlLines.length).toBe(2);
+    for (const line of curlLines) {
+      expect(line, `curl must use $installer_url: ${line}`).toContain("$installer_url");
+      expect(line, `curl must not carry its own URL: ${line}`).not.toContain("https://");
+      // …and the URL reaches the install as an ARGUMENT, never spliced into a
+      // `bash -c` string. Harmless while it is a local literal; free to keep
+      // safe if it is ever made configurable.
+      expect(line, `URL must not be interpolated into a shell string: ${line}`).not.toContain(
+        "'$installer_url'",
+      );
+    }
+  });
+
+  it("hands the husk to the clawbox user so a later factory reset can delete it", () => {
+    // Not reachable behaviourally — it needs root and a root-owned file. The
+    // failure it prevents was reproduced on hardware: the husk is a verbatim
+    // `mv` of a tree an older root-run probe wrote __pycache__ into, the reset
+    // route runs as clawbox and does NOT spare a `.broken` name, so the unlink
+    // fails with EACCES, the reset aborts at its failure gate — before the
+    // password/WiFi/hostname reset and the reboot — and returns 500 every time.
+    const mvIdx = HERMES_CODE.indexOf('mv "$agent_dir" "$agent_dir.broken"');
+    expect(mvIdx).toBeGreaterThan(-1);
+    expect(HERMES_CODE.slice(mvIdx)).toMatch(/chown -R "\$CLAWBOX_USER:" "\$agent_dir\.broken"/);
   });
 
   it("verifies the install afterwards instead of assuming it worked", () => {
@@ -157,9 +163,15 @@ describe("step_hermes_install never runs hermes as root", () => {
     // install.sh runs as root (HOME=/root); relying on runuser to reset HOME
     // would point the probe at /root/.hermes.
     const runuserLines = HERMES_CODE.split(NL).filter((l) => l.includes("runuser -u"));
-    expect(runuserLines.length).toBeGreaterThan(0);
+    // Two probes, the reachability precheck, and the installer itself.
+    expect(runuserLines.length).toBe(4);
     for (const line of runuserLines) {
-      if (!line.includes("$shim")) continue;
+      // The upstream installer is the one exception: it is handed to `bash -c`
+      // and resolves the home directory for itself.
+      if (line.includes("bash -c")) continue;
+      // Everything else — the two probes and the reachability precheck — runs
+      // with the same environment, so none of them can quietly read /root's
+      // dotfiles instead of the owner's.
       expect(line, `runuser call must pass HOME: ${line}`).toContain('HOME="$CLAWBOX_HOME"');
     }
   });
@@ -259,10 +271,15 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
   const shimPath = () => path.join(tmp, ".local", "bin", "hermes");
   const exists = (p: string) => fs.existsSync(p);
 
-  /** The shim survives a factory reset — it lives outside ~/.hermes. */
-  function giveShim() {
+  /**
+   * The shim survives a factory reset — it lives outside ~/.hermes.
+   * `answers: false` gives a shim that is present and executable but exits
+   * non-zero, which is what a false-negative probe looks like from here.
+   */
+  function giveShim({ answers = true } = {}) {
     fs.mkdirSync(path.dirname(shimPath()), { recursive: true });
-    fs.copyFileSync(path.join(tmp, "fake-py"), shimPath());
+    if (answers) fs.copyFileSync(path.join(tmp, "fake-py"), shimPath());
+    else fs.writeFileSync(shimPath(), "#!/bin/sh\nexit 1\n");
     fs.chmodSync(shimPath(), 0o755);
   }
 
@@ -286,8 +303,31 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
    * directly observable.
    */
   function run({ reachable = true, installOk = true } = {}) {
+    // The reachability precheck is the `-o /dev/null` call; anything else is
+    // the real installer being fetched to be piped into bash.
+    fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmp, "bin", "curl"),
+      [
+        "#!/bin/sh",
+        'case " $* " in *" -o /dev/null "*) exit "$PRECHECK_RC" ;; esac',
+        'echo ran >> "$MARKER"',
+        'if [ "$INSTALL_OK" = "1" ]; then',
+        '  mkdir -p "$AGENT_DIR/venv/bin" "$(dirname "$SHIM")"',
+        '  cp "$FAKE_PY" "$AGENT_DIR/venv/bin/python"',
+        '  cp "$FAKE_PY" "$SHIM"',
+        "fi",
+        'echo ":"',
+        "",
+      ].join(NL),
+      { mode: 0o755 },
+    );
     const script = [
-      "set -u",
+      // install.sh's OWN options, not a laxer subset. Under `set -e` a probe
+      // assignment that inherits a non-zero status aborts the whole script, so
+      // a harness running with plain `set -u` certifies paths the shipped
+      // script does not actually have.
+      "set -euo pipefail",
       'CLAWBOX_HOME="$1"',
       'CLAWBOX_USER="$(id -un)"',
       'export MARKER="$1/installer-ran"',
@@ -298,20 +338,12 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       'export INSTALL_OK="$3"',
       "has_hermes_harness() { return 0; }",
       // Run the command as this user instead of switching: `runuser -u X -- cmd`.
-      'runuser() { shift 2; [ "$1" = "--" ] && shift; "$@"; }',
-      "curl() {",
-      //  The reachability precheck is the `-o /dev/null` call; anything else is
-      //  the real installer being piped into bash.
-      '  case " $* " in *" -o /dev/null "*) return "$PRECHECK_RC" ;; esac',
-      '  echo ran >> "$MARKER"',
-      '  if [ "$INSTALL_OK" = "1" ]; then',
-      '    mkdir -p "$AGENT_DIR/venv/bin" "$(dirname "$SHIM")"',
-      '    cp "$FAKE_PY" "$AGENT_DIR/venv/bin/python"',
-      '    cp "$FAKE_PY" "$SHIM"',
-      "  fi",
-      '  echo ":"',
-      "}",
-      "export -f curl",
+      'runuser() { shift 2; if [ "$1" = "--" ]; then shift; fi; "$@"; }',
+      // curl is stubbed as a real executable on PATH, not as a shell function:
+      // the reachability precheck runs it through `env`, which does a PATH
+      // lookup and never sees a function. A function stub therefore let the
+      // precheck reach the real network — the test passed for the wrong reason.
+      'export PATH="$1/bin:$PATH"',
       "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
       '. "$1/fn.sh"',
       // Merged, because the warnings that matter here are all on stderr.
@@ -360,10 +392,30 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(r.code).toBe(0);
     expect(r.out).not.toMatch(/already installed/);
     expect(r.installerRan).toBe(true);
-    // Moved aside, not deleted — the old checkout is still recoverable.
-    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
-    // …and a working agent is in its place.
+    expect(r.out).toMatch(/Moved the unusable agent to .*hermes-agent\.broken/);
+    // A working agent is in its place…
     expect(exists(path.join(agentDir(), "venv", "bin", "python"))).toBe(true);
+    expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\)/);
+    // …so the husk has done its job and is gone. It is ~1.9 GB on a
+    // disk-constrained device, and while it exists a factory reset has to be
+    // able to delete it — the reset keeps only the exact name "hermes-agent".
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
+  });
+
+  it("a probe that exits non-zero reinstalls instead of killing install.sh", () => {
+    // The false-negative case the whole step is built around, and the one that
+    // errexit turns into a silent death: `installed=$(… | head -1)` inherits
+    // the probe's status, so without `|| installed=""` bash exits right there —
+    // no output, nothing repaired. It takes down `install.sh --step
+    // hermes_install` (the documented repair command) and, in a full install,
+    // every step that follows this one.
+    giveShim({ answers: false });
+    giveAgent({ venv: true });
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.installerRan).toBe(true);
     expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\)/);
   });
 
@@ -412,17 +464,21 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
   });
 
-  it("only ever keeps one husk, so repeated failures cannot fill the disk", () => {
+  it("keeps the FIRST husk, so a second failed repair cannot destroy it", () => {
+    // step_post_update runs this on every update, so a persistently broken box
+    // reaches the husk branch again and again. Round 2 must not overwrite the
+    // owner's original checkout with the garbage round 1's failed install left
+    // behind — and one fixed name still bounds the disk cost at a single husk.
     giveShim();
     giveAgent({ venv: false });
     run({ installOk: false });
-    // Second round: a new husk replaces the first rather than accumulating.
+
     giveAgent({ venv: false });
     fs.writeFileSync(path.join(agentDir(), "SENTINEL"), "second");
+    const r = run({ installOk: false });
 
-    run({ installOk: false });
-
-    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("second");
+    expect(r.out).toMatch(/Keeping the earlier .*hermes-agent\.broken/);
+    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
     expect(fs.readdirSync(path.join(tmp, ".hermes")).filter((e) => e.includes(".broken"))).toEqual([
       "hermes-agent.broken",
     ]);

@@ -1160,8 +1160,17 @@ step_hermes_install() {
     # `hermes`, so running it under runuser removes the writer entirely.
     # HOME is passed explicitly: hermes resolves ~/.hermes from $HOME, and this
     # function's HOME is /root.
+    #
+    # `|| installed=""` is NOT decoration. This file runs under `set -euo
+    # pipefail`, and a bare assignment takes the exit status of its command
+    # substitution — so a probe that exits non-zero (the exact false-negative
+    # case this step exists to survive) would kill install.sh right here,
+    # before the reachability check and before any repair, printing nothing.
+    # That would break both `install.sh --step hermes_install`, the repair
+    # command scripts/setup-hermes-edition.sh tells the operator to run, and
+    # the full install, which would skip every step after this one.
     installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-      "$shim" --version 2>/dev/null | head -1)
+      "$shim" --version 2>/dev/null | head -1) || installed=""
   fi
 
   if [ -n "$installed" ]; then
@@ -1181,53 +1190,77 @@ step_hermes_install() {
   # a healthy agent into no agent, which is the very outcome this file exists
   # to prevent. Check reachability FIRST and leave the disk alone if the
   # installer cannot be had.
-  if ! runuser -u "$CLAWBOX_USER" -- \
+  if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
     curl -fsS --max-time 30 -o /dev/null "$installer_url"; then
     echo "  Warning: cannot reach the Hermes installer — leaving the existing agent untouched" >&2
     return 0
   fi
 
-  if [ -e "$agent_dir" ] || [ -e "$shim" ]; then
+  # The husk has to be out of the way before the reinstall: the upstream
+  # installer refuses outright with "Directory exists but is not a git
+  # repository" when $agent_dir survives as an empty shell — exactly what a
+  # factory reset leaves behind — so without this the reinstall fails and the
+  # box stays bricked.
+  #
+  # MOVED ASIDE, not deleted. The husk is the only copy of whatever state the
+  # box had, and this step is no longer only reached by a genuinely broken
+  # device; a rename is just as good for unblocking the installer and is
+  # recoverable when the diagnosis was wrong. A FIXED name rather than a
+  # timestamp keeps at most one husk on a device whose disk is not large — a
+  # per-run stamp would accumulate a git checkout plus a venv on every failed
+  # update. Renaming as ROOT is also required: the root-owned __pycache__
+  # described above is not movable by the clawbox user the installer runs as.
+  if [ -e "$agent_dir" ]; then
     echo "  Hermes is present but not runnable — reinstalling the agent"
-    # The husk has to be out of the way before the reinstall: the upstream
-    # installer refuses outright with "Directory exists but is not a git
-    # repository" when $agent_dir survives as an empty shell — exactly what a
-    # factory reset leaves behind — so without this the reinstall fails and the
-    # box stays bricked.
-    #
-    # MOVED ASIDE, not deleted. The husk is the only copy of whatever state the
-    # box had, and this step is no longer only reached by a genuinely broken
-    # device; a rename is just as good for unblocking the installer and is
-    # recoverable when the diagnosis was wrong. A FIXED name rather than a
-    # timestamp keeps at most one husk on a device whose disk is not large — a
-    # per-run stamp would accumulate a git checkout plus a venv on every failed
-    # update. Renaming as ROOT is also required: the root-owned __pycache__
-    # described above is not movable by the clawbox user the installer runs as.
-    if [ -e "$agent_dir" ]; then
-      rm -rf "$agent_dir.broken"
-      if ! mv "$agent_dir" "$agent_dir.broken"; then
-        echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
-        return 0
-      fi
+    if [ -e "$agent_dir.broken" ]; then
+      # An earlier repair already saved the owner's checkout. Overwriting it
+      # here would replace it with the partial garbage the failed install left
+      # behind — on a persistently broken box, update #2 would destroy the only
+      # good copy. First husk wins.
+      echo "  Keeping the earlier $agent_dir.broken; discarding the unusable checkout"
+      rm -rf "$agent_dir"
+    elif mv "$agent_dir" "$agent_dir.broken"; then
+      # The husk MUST be deletable by the clawbox user. The factory-reset route
+      # runs as clawbox and keeps only the exact name "hermes-agent", so it
+      # tries to delete this directory — and a root-owned __pycache__ inside it
+      # (written by an older root-run probe) makes that unlink fail with EACCES.
+      # A reset that reports a failure aborts BEFORE the password/WiFi/hostname
+      # reset and the reboot, so the box would be stuck half-reset forever.
+      # install.sh is root here; the reset is not.
+      chown -R "$CLAWBOX_USER:" "$agent_dir.broken"
       echo "  Moved the unusable agent to $agent_dir.broken"
+    else
+      echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
+      return 0
     fi
-    rm -f "$shim"
   fi
+  # A no-op when the shim is absent; a stale shim must never outlive its agent.
+  rm -f "$shim"
 
   echo "  Installing Hermes agent (NousResearch)..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
   # the clawbox user so it lands in ~/.hermes and ~/.local/bin.
+  # The URL is passed as an argument rather than spliced into the -c string, so
+  # it stays a single source of truth without shell-quoting exposure.
   runuser -u "$CLAWBOX_USER" -- bash -c \
-    "curl -fsSL '$installer_url' | bash" \
+    'curl -fsSL "$1" | bash' _ "$installer_url" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
   # non-fatal above, so a silent failure here would otherwise be discovered by
   # the owner as a crash-looping dashboard.
+  # `|| installed=""` for the same errexit reason as the first probe: when the
+  # install laid down nothing, this runs a shim that does not exist and exits
+  # 127, which would abort the step before the warning below ever printed.
   installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
-    "$shim" --version 2>/dev/null | head -1)
+    "$shim" --version 2>/dev/null | head -1) || installed=""
   if [ -n "$installed" ]; then
     echo "  Hermes installed ($installed)"
+    # The husk was insurance against a wrong diagnosis, and the new agent
+    # answers --version — so the insurance is over. It costs ~1.9 GB (checkout
+    # plus venv) on a device the comment above calls disk-constrained, and it
+    # is one more directory a later factory reset has to be able to delete.
+    rm -rf "$agent_dir.broken"
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
     # Say where the previous install went, so a wrong diagnosis is reversible
