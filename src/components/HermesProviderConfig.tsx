@@ -6,6 +6,7 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import { copyToClipboard } from "@/lib/clipboard";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
 import {
   HERMES_PANEL_PROVIDERS,
@@ -472,10 +473,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   }, [signin, onOauthConnected]);
 
   function copyUserCode(code: string) {
-    void navigator.clipboard?.writeText(code).then(
-      () => setCodeCopied(true),
-      () => {},
-    );
+    // copyToClipboard, not navigator.clipboard directly: the device is served
+    // over plain http on the LAN, where the async clipboard API doesn't exist.
+    void copyToClipboard(code).then((ok) => setCodeCopied(ok));
   }
 
   const changeUiTier = useCallback((tier: ClawaiTier) => {
