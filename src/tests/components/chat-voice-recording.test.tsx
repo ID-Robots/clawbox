@@ -410,6 +410,30 @@ describe("chat voice recording", () => {
     expect(transcribeCalls()).toBe(0);
   });
 
+  it("shows no error for a permission denied after the panel closed", async () => {
+    // The other half of the same window: a prompt still open when the panel
+    // closes can be DENIED afterwards. An error pinned to a panel nobody is
+    // looking at waits there for the next time it opens, describing a request
+    // that is no longer anyone's.
+    let refuse!: () => void;
+    const answered = new Promise<void>((_, reject) => { refuse = () => reject(new DOMException("Permission denied", "NotAllowedError")); });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => { await answered; return null; } },
+    });
+    vi.stubGlobal("MediaRecorder", FakeMediaRecorder as unknown as typeof MediaRecorder);
+    installFetch("hello");
+    const { rerender } = render(<ChatPopup isOpen onClose={() => {}} />);
+    fireEvent.click(await readyToRecord());
+    await screen.findByTestId("voice-status");
+
+    rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
+    await act(async () => { refuse(); await Promise.resolve(); });
+
+    rerender(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.queryByTestId("voice-status")).toBeNull());
+  });
+
   it("stops a microphone that arrives after the component has unmounted", async () => {
     const mic = installPendingMedia();
     installFetch("hello");

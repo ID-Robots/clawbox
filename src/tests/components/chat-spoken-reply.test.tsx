@@ -43,6 +43,15 @@ let history: unknown[] = [];
 /** How many times the component has re-read it. */
 let historyReads = 0;
 
+/**
+ * The socket the component opened.
+ *
+ * Recorded by the class itself rather than by `socket = this` in a subclass
+ * constructor: that trips `@typescript-eslint/no-this-alias` and fails lint.
+ */
+const sockets: FakeGatewayWs[] = [];
+const socket = () => sockets[sockets.length - 1] ?? null;
+
 class FakeGatewayWs {
   static readonly OPEN = 1;
   readyState = FakeGatewayWs.OPEN;
@@ -52,6 +61,7 @@ class FakeGatewayWs {
   onopen: (() => void) | null = null;
 
   constructor(public url: string) {
+    sockets.push(this);
     setTimeout(() => this.emit({ type: "event", event: "connect.challenge", payload: { nonce: "n" } }), 0);
   }
 
@@ -85,8 +95,6 @@ class FakeGatewayWs {
   }
 }
 
-let socket: FakeGatewayWs | null = null;
-
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
     const url = String(input);
@@ -111,7 +119,7 @@ function installFetch() {
  * only reads the `chat` stream and the history replay renders no player at all.
  */
 function deliverSessionMessage(message: unknown) {
-  socket?.emit({
+  socket()?.emit({
     type: "event",
     event: "session.message",
     payload: { sessionKey: "agent:main:main", agentId: "main", message },
@@ -120,7 +128,7 @@ function deliverSessionMessage(message: unknown) {
 
 /** Push one `final` chat event, the way a completed turn arrives. */
 function deliver(message: unknown) {
-  socket?.emit({
+  socket()?.emit({
     type: "event",
     event: "chat",
     payload: {
@@ -139,13 +147,11 @@ describe("spoken replies in the mascot chat", () => {
   beforeEach(() => {
     history = [];
     historyReads = 0;
-    socket = null;
+    sockets.length = 0;
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal("WebSocket", class extends FakeGatewayWs {
-      constructor(url: string) { super(url); socket = this; }
-    } as unknown as typeof WebSocket);
+    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
     installFetch();
   });
 
@@ -157,7 +163,7 @@ describe("spoken replies in the mascot chat", () => {
 
   it("renders the audio the harness attached as a player with native controls", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
-    await waitFor(() => expect(socket).not.toBeNull());
+    await waitFor(() => expect(socket()).not.toBeNull());
     await screen.findByRole("textbox");
 
     deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
@@ -177,7 +183,7 @@ describe("spoken replies in the mascot chat", () => {
 
   it("does not show the answer twice when its spoken half arrives", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
-    await waitFor(() => expect(socket).not.toBeNull());
+    await waitFor(() => expect(socket()).not.toBeNull());
     await screen.findByRole("textbox");
 
     deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
@@ -196,7 +202,7 @@ describe("spoken replies in the mascot chat", () => {
     // flicker, not as a bug, and is worse than never showing it.
     history = [assistantMessage(SPOKEN_TEXT, 1787291821899)];
     render(<ChatPopup isOpen onClose={() => {}} />);
-    await waitFor(() => expect(socket).not.toBeNull());
+    await waitFor(() => expect(socket()).not.toBeNull());
     await screen.findByText(SPOKEN_TEXT);
 
     deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));

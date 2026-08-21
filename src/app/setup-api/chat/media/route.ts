@@ -52,6 +52,11 @@ const CONTENT_TYPES: Record<string, string> = {
   ".aac": "audio/aac",
   ".flac": "audio/flac",
   ".weba": "audio/webm",
+  // Served as audio because the only .webm this tree ever holds is one: it is
+  // what MediaRecorder emits and what a provider returning Opus-in-WebM would
+  // write. `isAudioMedia` deliberately does NOT claim the extension, so a bare
+  // MEDIA: line naming a .webm video is still not routed into an audio player.
+  ".webm": "audio/webm",
 };
 
 // A generated 1024×1024 PNG runs ~1.5 MB; this leaves room for larger renders
@@ -83,6 +88,9 @@ export function parseRange(header: string | null, size: number): { start: number
   if (!rawStart) {
     const wanted = Number(rawEnd);
     if (!Number.isFinite(wanted) || wanted <= 0) return null;
+    // An empty file has no last N bytes. Without this the reply is
+    // `Content-Range: bytes 0--1/0`, which is not a range at all.
+    if (size === 0) return null;
     return { start: Math.max(0, size - wanted), end: size - 1 };
   }
   const start = Number(rawStart);

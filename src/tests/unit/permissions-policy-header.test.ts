@@ -29,6 +29,10 @@ describe("Permissions-Policy", () => {
     // `*` would extend it to every embedder; the portal frames this device on
     // clawbox.com and must not silently gain a microphone with it.
     const value = await policy();
+    // `*` INSIDE the parentheses is the wildcard the spec actually defines —
+    // `microphone=(*)` and `microphone=(self *)` both hand it to every
+    // embedder, and neither contains the string `microphone=*`.
+    expect(value).not.toMatch(/microphone=\([^)]*\*/);
     expect(value).not.toMatch(/microphone=\*/);
     expect(value).not.toMatch(/microphone=\([^)]*https?:/);
   });

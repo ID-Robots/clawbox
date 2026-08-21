@@ -255,8 +255,13 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     if ((x.images?.length ?? 0) !== (y.images?.length ?? 0)) return false
     // Without this a reply that gained its spoken half between two history
     // reads compares equal, React skips the render, and the player never
-    // appears until something else forces one.
-    if ((x.audio?.length ?? 0) !== (y.audio?.length ?? 0)) return false
+    // appears until something else forces one. Compared by URL and not only by
+    // count: a reply whose recording was replaced keeps the count and changes
+    // the file, and a player left pointing at the old one plays the wrong
+    // words convincingly.
+    const xa = x.audio ?? [], ya = y.audio ?? []
+    if (xa.length !== ya.length) return false
+    for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
   }
   return true
 }
@@ -1735,6 +1740,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     } catch (err) {
+      // Same staleness test as the success path below. A prompt that is still
+      // open when the panel closes can be denied afterwards, and an error
+      // pinned to a panel nobody is looking at is waiting on screen the next
+      // time it opens, describing a request that is no longer anyone's.
+      if (captureGenerationRef.current !== generation) { setVoice(IDLE_STATUS); return }
       setVoice({ state: 'error', error: classifyCaptureError(err), message: null, canRetry: false })
       return
     }
@@ -3029,7 +3039,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
                 {msg.audio && msg.audio.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
-                    {msg.audio.map((src, j) => (
+                    {msg.audio.map((src) => (
                       // The browser's own player, not a bespoke one: play,
                       // pause, scrub and duration are what "a normal playable
                       // message" means, and every one of them already works

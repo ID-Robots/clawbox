@@ -243,6 +243,28 @@ describe("/setup-api/chat/media", () => {
     }
   });
 
+  it("does not answer a suffix range against an empty file", async () => {
+    // `bytes=-4` on a zero-byte file has no last four bytes. Answered as a
+    // range it produces `Content-Range: bytes 0--1/0`, which is not a range;
+    // the whole (empty) file is the honest reply.
+    fs.writeFileSync(path.join(mediaDir, "empty.wav"), Buffer.alloc(0));
+    const res = await GET(request(path.join(mediaDir, "empty.wav"), "bytes=-4"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Range")).toBeNull();
+    expect(res.headers.get("Content-Length")).toBe("0");
+  });
+
+  it("serves a .webm recording as audio", async () => {
+    // The only .webm this tree holds is audio: MediaRecorder's own output, and
+    // what a provider returning Opus-in-WebM would write. Refused as an
+    // unsupported type, a spoken reply in that container is a player pointed
+    // at a 415.
+    fs.writeFileSync(path.join(mediaDir, "v.webm"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "v.webm")));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("audio/webm");
+  });
+
   it("still refuses a type it does not serve", async () => {
     fs.writeFileSync(path.join(mediaDir, "clip.mp4"), AUDIO);
     const res = await GET(request(path.join(mediaDir, "clip.mp4")));
