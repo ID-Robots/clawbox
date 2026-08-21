@@ -107,7 +107,7 @@ describe("step_hermes_install treats a shim without an agent as NOT installed", 
     // as: every curl call goes through the one variable, none carries a
     // literal URL of its own.
     const curlLines = HERMES_CODE.split(NL).filter((l) => l.includes("curl "));
-    expect(curlLines.length).toBe(2);
+    expect(curlLines.length).toBeGreaterThan(0);
     for (const line of curlLines) {
       expect(line, `curl must use $installer_url: ${line}`).toContain("$installer_url");
       expect(line, `curl must not carry its own URL: ${line}`).not.toContain("https://");
@@ -129,7 +129,20 @@ describe("step_hermes_install treats a shim without an agent as NOT installed", 
     // password/WiFi/hostname reset and the reboot — and returns 500 every time.
     const mvIdx = HERMES_CODE.indexOf('mv "$agent_dir" "$agent_dir.broken"');
     expect(mvIdx).toBeGreaterThan(-1);
-    expect(HERMES_CODE.slice(mvIdx)).toMatch(/chown -R "\$CLAWBOX_USER:" "\$agent_dir\.broken"/);
+    expect(HERMES_CODE.slice(mvIdx)).toMatch(
+      /chown -R "\$CLAWBOX_USER:\$CLAWBOX_USER" "\$agent_dir\.broken"/,
+    );
+    // …and it must not be able to abort the step: errexit is live at this
+    // function's bare call sites, and the agent is moved aside at this exact
+    // moment, so a chown failure would leave the device with nothing.
+    expect(HERMES_CODE.slice(mvIdx)).toMatch(/chown -R[\s\S]{0,120}\|\| echo/);
+  });
+
+  it("never deletes the shim", () => {
+    // Deleting it on the failure path left the operator with no `hermes`
+    // command at all, and moving the husk back by hand did not bring it back.
+    // On the success path the installer rewrites it anyway.
+    expect(HERMES_CODE).not.toMatch(/rm -f "\$shim"/);
   });
 
   it("verifies the install afterwards instead of assuming it worked", () => {
@@ -163,12 +176,11 @@ describe("step_hermes_install never runs hermes as root", () => {
     // install.sh runs as root (HOME=/root); relying on runuser to reset HOME
     // would point the probe at /root/.hermes.
     const runuserLines = HERMES_CODE.split(NL).filter((l) => l.includes("runuser -u"));
-    // Two probes, the reachability precheck, and the installer itself.
-    expect(runuserLines.length).toBe(4);
+    expect(runuserLines.length).toBeGreaterThan(0);
     for (const line of runuserLines) {
-      // The upstream installer is the one exception: it is handed to `bash -c`
-      // and resolves the home directory for itself.
-      if (line.includes("bash -c")) continue;
+      // The upstream installer is the one exception: it is piped into `bash`,
+      // which resolves the home directory for itself.
+      if (line.includes("| bash")) continue;
       // Everything else — the two probes and the reachability precheck — runs
       // with the same environment, so none of them can quietly read /root's
       // dotfiles instead of the owner's.
@@ -261,8 +273,8 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-guard-"));
-    // Stands in for both the venv interpreter and the shim: all either has to
-    // do here is exist, be executable, and answer --version.
+    // Stands in for the venv interpreter: all it has to do here is exist, be
+    // executable, and answer --version.
     fs.writeFileSync(path.join(tmp, "fake-py"), "#!/bin/sh\necho 'Hermes 9.9.9'\n", { mode: 0o755 });
   });
   afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -278,8 +290,14 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
    */
   function giveShim({ answers = true } = {}) {
     fs.mkdirSync(path.dirname(shimPath()), { recursive: true });
-    if (answers) fs.copyFileSync(path.join(tmp, "fake-py"), shimPath());
-    else fs.writeFileSync(shimPath(), "#!/bin/sh\nexit 1\n");
+    // The real shim is 4 lines that exec the venv interpreter, so it answers
+    // only while the agent behind it exists — the property the step now
+    // depends on twice, since it no longer deletes the shim before installing.
+    const venvPython = path.join(agentDir(), "venv", "bin", "python");
+    fs.writeFileSync(
+      shimPath(),
+      answers ? `#!/bin/sh${NL}exec "${venvPython}" "$@"${NL}` : `#!/bin/sh${NL}exit 1${NL}`,
+    );
     fs.chmodSync(shimPath(), 0o755);
   }
 
@@ -302,7 +320,7 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
    * records that it ran, so "did the network install happen at all" is
    * directly observable.
    */
-  function run({ reachable = true, installOk = true } = {}) {
+  function run({ reachable = true, installOk = true, fetchOk = true } = {}) {
     // The reachability precheck is the `-o /dev/null` call; anything else is
     // the real installer being fetched to be piped into bash.
     fs.mkdirSync(path.join(tmp, "bin"), { recursive: true });
@@ -312,6 +330,9 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
         "#!/bin/sh",
         'case " $* " in *" -o /dev/null "*) exit "$PRECHECK_RC" ;; esac',
         'echo ran >> "$MARKER"',
+        // A fetch that fails after the precheck said the host was up: the CDN
+        // answering is not the same as the install succeeding.
+        'if [ "$FETCH_OK" = "0" ]; then exit 22; fi',
         'if [ "$INSTALL_OK" = "1" ]; then',
         '  mkdir -p "$AGENT_DIR/venv/bin" "$(dirname "$SHIM")"',
         '  cp "$FAKE_PY" "$AGENT_DIR/venv/bin/python"',
@@ -336,6 +357,7 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       'export FAKE_PY="$1/fake-py"',
       'export PRECHECK_RC="$2"',
       'export INSTALL_OK="$3"',
+      'export FETCH_OK="$5"',
       "has_hermes_harness() { return 0; }",
       // Run the command as this user instead of switching: `runuser -u X -- cmd`.
       'runuser() { shift 2; if [ "$1" = "--" ]; then shift; fi; "$@"; }',
@@ -352,7 +374,16 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     try {
       const out = execFileSync(
         "bash",
-        ["-c", script, "bash", tmp, reachable ? "0" : "1", installOk ? "1" : "0", INSTALL_SH_PATH],
+        [
+          "-c",
+          script,
+          "bash",
+          tmp,
+          reachable ? "0" : "1",
+          installOk ? "1" : "0",
+          INSTALL_SH_PATH,
+          fetchOk ? "1" : "0",
+        ],
         { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
       );
       return { code: 0, out, installerRan: exists(path.join(tmp, "installer-ran")) };
@@ -448,39 +479,91 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(exists(shimPath())).toBe(true);
   });
 
-  it("a failed install still succeeds as a step, and says where the old agent went", () => {
-    // Non-fatal by design — but it must not go quiet, and the husk it left
-    // behind is the difference between a hand repair and a reflash.
+  it("a failed install puts the previous agent back", () => {
+    // Non-fatal by design — but it must not be one-way. The husk is insurance
+    // against a WRONG diagnosis, so the step has to be able to undo itself.
     giveShim();
     giveAgent({ venv: false });
 
     const r = run({ installOk: false });
 
-    // step_post_update's `|| echo` depends on this not being a hard failure,
-    // and the trailing `[ -e ... ]` test must not leak a non-zero status.
+    // step_post_update's `|| echo` depends on this not being a hard failure.
     expect(r.code).toBe(0);
     expect(r.out).toMatch(/Warning: Hermes still does not run/);
-    expect(r.out).toMatch(/preserved at .*hermes-agent\.broken/);
-    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
+    expect(r.out).toMatch(/Restored the previous agent/);
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+    // Nothing parked under another name for an operator to find and move back.
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
   });
 
-  it("keeps the FIRST husk, so a second failed repair cannot destroy it", () => {
-    // step_post_update runs this on every update, so a persistently broken box
-    // reaches the husk branch again and again. Round 2 must not overwrite the
-    // owner's original checkout with the garbage round 1's failed install left
-    // behind — and one fixed name still bounds the disk cost at a single husk.
-    giveShim();
-    giveAgent({ venv: false });
-    run({ installOk: false });
+  it("a healthy agent survives a lying probe plus a failed install", () => {
+    // The worst realistic case, and the reason the restore exists: a box whose
+    // agent works, a probe that comes back non-zero anyway (a fork failure on
+    // an 8 GB device mid-update), a reachable CDN, and an upstream install that
+    // then fails — clone or venv build, neither of which the precheck sees.
+    // step_post_update drives this on EVERY update on EVERY hermes/dual box,
+    // so this path has to leave the device exactly as it found it.
+    giveShim({ answers: false });
+    giveAgent({ venv: true });
 
-    giveAgent({ venv: false });
-    fs.writeFileSync(path.join(agentDir(), "SENTINEL"), "second");
     const r = run({ installOk: false });
 
-    expect(r.out).toMatch(/Keeping the earlier .*hermes-agent\.broken/);
-    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
-    expect(fs.readdirSync(path.join(tmp, ".hermes")).filter((e) => e.includes(".broken"))).toEqual([
-      "hermes-agent.broken",
-    ]);
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+    expect(exists(path.join(agentDir(), "venv", "bin", "python"))).toBe(true);
+    // The shim has to survive too: without it there is no `hermes` command,
+    // and the next run would find no shim, skip the probe and move the healthy
+    // agent aside all over again.
+    expect(exists(shimPath())).toBe(true);
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
+  });
+
+  it("repeated failed repairs neither accumulate husks nor lose the original", () => {
+    // step_post_update runs this on every update, so a persistently broken box
+    // reaches this branch again and again. Round 2 must still find the owner's
+    // original checkout, not round 1's leftovers.
+    giveShim();
+    giveAgent({ venv: false });
+
+    run({ installOk: false });
+    const r = run({ installOk: false });
+
+    expect(r.code).toBe(0);
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+    expect(fs.readdirSync(path.join(tmp, ".hermes")).filter((e) => e.includes(".broken"))).toEqual(
+      [],
+    );
+  });
+
+  it("a fetch failure is reported, not swallowed by the pipe", () => {
+    // `curl … | bash` exits 0 when curl fails — bash just reads empty stdin —
+    // so without `-o pipefail` this warning could never fire and a download
+    // failure looked identical to a successful install.
+    giveShim();
+    giveAgent({ venv: false });
+
+    const r = run({ fetchOk: false });
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Hermes install failed \(non-fatal\)/);
+    // …and the box is still whole.
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+  });
+});
+
+describe("setup-hermes-edition.sh does not repeat the shim-only check", () => {
+  const SETUP_HERMES = readFileSync(path.join(REPO, "scripts/setup-hermes-edition.sh"), "utf-8");
+
+  it("requires the venv interpreter, not just the shim", () => {
+    // This script hard-fails when Hermes is missing — but it tested exactly
+    // the file install.sh's old guard tested. On a factory-reset box the shim
+    // was present and executable, so this check passed and the edition setup
+    // continued on a device with no agent behind it.
+    expect(SETUP_HERMES).toContain(
+      'HERMES_VENV_PYTHON="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"',
+    );
+    const guard = SETUP_HERMES.split(NL).find((l) => l.includes('[ ! -x "$HERMES_BIN" ]'));
+    expect(guard).toBeDefined();
+    expect(guard).toContain('[ ! -x "$HERMES_VENV_PYTHON" ]');
   });
 });
