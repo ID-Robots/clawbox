@@ -1194,24 +1194,33 @@ step_hermes_install() {
   # __pycache__ above is not movable by the clawbox user the installer runs as.
   if [ -e "$agent_dir" ]; then
     echo "  Hermes is present but not runnable — reinstalling the agent"
-    # Non-empty only if an earlier repair was interrupted between the move and
-    # the restore; without this `mv` would nest the new husk inside the old.
-    rm -rf "$agent_dir.broken"
-    if mv "$agent_dir" "$agent_dir.broken"; then
-      # The husk MUST be deletable by the clawbox user: the factory-reset route
-      # runs as clawbox and keeps only the exact name "hermes-agent", so a
-      # root-owned __pycache__ inside it fails the unlink with EACCES — and a
-      # reset that reports a failure aborts BEFORE the password/WiFi/hostname
-      # reset and the reboot. Non-fatal: errexit is live at this function's
-      # bare call sites and the agent is moved aside right now, so aborting
-      # here would leave the device with nothing installed at all.
-      chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$agent_dir.broken" \
-        || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
+    if [ -e "$agent_dir.broken" ]; then
+      # An existing husk means an earlier repair was interrupted between the
+      # move and the restore: the husk is the owner's original checkout and
+      # $agent_dir is whatever the interrupted installer left behind. The
+      # original is the copy worth keeping; the partial tree is not. Deleting
+      # the husk here instead would destroy the last known-good agent.
+      if rm -rf "$agent_dir"; then
+        echo "  Kept the earlier husk at $agent_dir.broken and discarded the partial install"
+      else
+        echo "  Warning: could not clear the partial install at $agent_dir — leaving both in place" >&2
+        return 0
+      fi
+    elif mv "$agent_dir" "$agent_dir.broken"; then
       echo "  Moved the unusable agent to $agent_dir.broken"
     else
       echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
       return 0
     fi
+    # The husk MUST be deletable by the clawbox user: the factory-reset route
+    # runs as clawbox and keeps only the exact name "hermes-agent", so a
+    # root-owned __pycache__ inside it fails the unlink with EACCES — and a
+    # reset that reports a failure aborts BEFORE the password/WiFi/hostname
+    # reset and the reboot. Non-fatal: errexit is live at this function's
+    # bare call sites and the agent is moved aside right now, so aborting
+    # here would leave the device with nothing installed at all.
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$agent_dir.broken" \
+      || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
   fi
 
   echo "  Installing Hermes agent (NousResearch)..."
@@ -1223,7 +1232,7 @@ step_hermes_install() {
   # reads empty stdin) and the warning below could never fire; the timeouts
   # because the caller is a systemd unit with TimeoutStartSec=7200.
   runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
-    'curl -fsSL --connect-timeout 15 --max-time 900 "$1" | bash' _ "$installer_url" \
+    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash' _ "$installer_url" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
@@ -1247,8 +1256,9 @@ step_hermes_install() {
     # parking the only copy under another name would leave the owner with no
     # working agent AND no automatic second chance on the next update.
     if [ -e "$agent_dir.broken" ]; then
-      rm -rf "$agent_dir"
-      if mv "$agent_dir.broken" "$agent_dir"; then
+      # Both steps guarded: a failed rm followed by mv would NEST the original
+      # inside the failed install and report success.
+      if rm -rf "$agent_dir" && mv "$agent_dir.broken" "$agent_dir"; then
         echo "  Restored the previous agent from $agent_dir.broken" >&2
       else
         echo "  Warning: the previous agent is at $agent_dir.broken — move it back by hand" >&2
