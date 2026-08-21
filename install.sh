@@ -1133,41 +1133,35 @@ step_hermes_install() {
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
   # One constant so the reachability precheck and the install itself can never
-  # drift onto different hosts — a precheck against a URL we then do not use
-  # would be worse than no precheck.
+  # drift onto different hosts.
   local installer_url="https://hermes-agent.nousresearch.com/install.sh"
 
-  # `$shim` alone is NOT evidence of an install. It is a 4-line wrapper in
-  # ~/.local/bin that execs $venv_python; the agent it points at lives under
-  # ~/.hermes. A factory reset that removed ~/.hermes left the shim behind, so
-  # the old `[ -x "$shim" ]` guard reported "Hermes already installed ()" —
-  # with the version probe returning EMPTY into an echo nobody checked — and
-  # returned success without reinstalling anything. That is what turned a
-  # recoverable box into one that needed a reflash: every later repair attempt,
-  # including a full `install.sh` re-run, hit the same guard and did nothing.
+  # `$shim` alone is NOT evidence of an install: it is a 4-line wrapper in
+  # ~/.local/bin that execs $venv_python, and the agent it points at lives
+  # under ~/.hermes. A factory reset removed ~/.hermes and left the shim, so
+  # the old `[ -x "$shim" ]` guard printed "Hermes already installed ()" — an
+  # EMPTY version probe inside an echo nobody looked at — and returned success
+  # without reinstalling. Every later repair, a full install.sh re-run
+  # included, hit the same guard and did nothing: that is what turned a
+  # recoverable box into a reflash.
   #
   # So: require the interpreter to exist AND the agent to actually answer
-  # `--version`. Anything less is treated as "not installed" and reinstalled.
+  # `--version`. Anything less is treated as "not installed".
   if [ -x "$shim" ] && [ -x "$venv_python" ]; then
     # Probed AS THE CLAWBOX USER, deliberately. `hermes` is a Python entry
     # point and CPython writes __pycache__/*.pyc next to the sources it
-    # imports. install.sh runs as root, so probing here as root left ~13
-    # root-owned .pyc files (~165 after an agent version bump) inside a
-    # clawbox-owned tree — and the factory-reset route runs as clawbox, so its
-    # wipe hit EACCES on them and aborted MID-WIPE with the agent already half
-    # deleted. The probe is the only thing in this file that ever executed
-    # `hermes`, so running it under runuser removes the writer entirely.
-    # HOME is passed explicitly: hermes resolves ~/.hermes from $HOME, and this
+    # imports; probing as root left root-owned .pyc files inside a
+    # clawbox-owned tree, and the factory-reset route (which runs as clawbox)
+    # then hit EACCES and aborted MID-WIPE with the agent half deleted. HOME is
+    # passed explicitly: hermes resolves ~/.hermes from $HOME, and this
     # function's HOME is /root.
     #
-    # `|| installed=""` is NOT decoration. This file runs under `set -euo
-    # pipefail`, and a bare assignment takes the exit status of its command
-    # substitution — so a probe that exits non-zero (the exact false-negative
-    # case this step exists to survive) would kill install.sh right here,
-    # before the reachability check and before any repair, printing nothing.
-    # That would break both `install.sh --step hermes_install`, the repair
-    # command scripts/setup-hermes-edition.sh tells the operator to run, and
-    # the full install, which would skip every step after this one.
+    # `|| installed=""` is NOT decoration. Under `set -euo pipefail` an
+    # assignment takes the exit status of its command substitution, so the
+    # false-negative probe this step exists to survive would kill install.sh
+    # right here — before the reachability check, before any repair, printing
+    # nothing — taking `install.sh --step hermes_install` (the documented
+    # repair command) and every later step of a full install down with it.
     installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       "$shim" --version 2>/dev/null | head -1) || installed=""
   fi
@@ -1178,17 +1172,10 @@ step_hermes_install() {
   fi
 
   # NOTHING above this line has modified the disk, and nothing below it does
-  # until the installer is known to be fetchable.
-  #
-  # This matters now in a way it did not before: step_post_update calls this
-  # step on EVERY update on EVERY hermes/dual box, not just on a broken one. So
-  # a false-negative probe — the venv busy, a transient fork failure, anything
-  # that makes `--version` come back empty on a device that is actually fine —
-  # used to reach a `rm -rf "$agent_dir"` and then depend on a network install
-  # that is explicitly non-fatal. On a box with no internet that sequence turns
-  # a healthy agent into no agent, which is the very outcome this file exists
-  # to prevent. Check reachability FIRST and leave the disk alone if the
-  # installer cannot be had.
+  # until the installer is known to be fetchable. step_post_update now calls
+  # this step on EVERY update on EVERY hermes/dual box, so a false-negative
+  # probe on a device with no internet must not be able to turn a healthy agent
+  # into no agent — the very outcome this file exists to prevent.
   if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
     curl -fsS --max-time 30 -o /dev/null "$installer_url"; then
     echo "  Warning: cannot reach the Hermes installer — leaving the existing agent untouched" >&2
@@ -1198,74 +1185,74 @@ step_hermes_install() {
   # The husk has to be out of the way before the reinstall: the upstream
   # installer refuses outright with "Directory exists but is not a git
   # repository" when $agent_dir survives as an empty shell — exactly what a
-  # factory reset leaves behind — so without this the reinstall fails and the
-  # box stays bricked.
+  # factory reset leaves behind — so without this the box stays bricked.
   #
-  # MOVED ASIDE, not deleted. The husk is the only copy of whatever state the
-  # box had, and this step is no longer only reached by a genuinely broken
-  # device; a rename is just as good for unblocking the installer and is
-  # recoverable when the diagnosis was wrong. A FIXED name rather than a
-  # timestamp keeps at most one husk on a device whose disk is not large — a
-  # per-run stamp would accumulate a git checkout plus a venv on every failed
-  # update. Renaming as ROOT is also required: the root-owned __pycache__
-  # described above is not movable by the clawbox user the installer runs as.
+  # MOVED ASIDE, never deleted, and only until the outcome is known: the
+  # install either succeeds (husk dropped below) or fails (husk moved back), so
+  # the device is never left with two copies and never with none, and a wrong
+  # diagnosis costs nothing. Renaming as ROOT is also required — the root-owned
+  # __pycache__ above is not movable by the clawbox user the installer runs as.
   if [ -e "$agent_dir" ]; then
     echo "  Hermes is present but not runnable — reinstalling the agent"
-    if [ -e "$agent_dir.broken" ]; then
-      # An earlier repair already saved the owner's checkout. Overwriting it
-      # here would replace it with the partial garbage the failed install left
-      # behind — on a persistently broken box, update #2 would destroy the only
-      # good copy. First husk wins.
-      echo "  Keeping the earlier $agent_dir.broken; discarding the unusable checkout"
-      rm -rf "$agent_dir"
-    elif mv "$agent_dir" "$agent_dir.broken"; then
-      # The husk MUST be deletable by the clawbox user. The factory-reset route
-      # runs as clawbox and keeps only the exact name "hermes-agent", so it
-      # tries to delete this directory — and a root-owned __pycache__ inside it
-      # (written by an older root-run probe) makes that unlink fail with EACCES.
-      # A reset that reports a failure aborts BEFORE the password/WiFi/hostname
-      # reset and the reboot, so the box would be stuck half-reset forever.
-      # install.sh is root here; the reset is not.
-      chown -R "$CLAWBOX_USER:" "$agent_dir.broken"
+    # Non-empty only if an earlier repair was interrupted between the move and
+    # the restore; without this `mv` would nest the new husk inside the old.
+    rm -rf "$agent_dir.broken"
+    if mv "$agent_dir" "$agent_dir.broken"; then
+      # The husk MUST be deletable by the clawbox user: the factory-reset route
+      # runs as clawbox and keeps only the exact name "hermes-agent", so a
+      # root-owned __pycache__ inside it fails the unlink with EACCES — and a
+      # reset that reports a failure aborts BEFORE the password/WiFi/hostname
+      # reset and the reboot. Non-fatal: errexit is live at this function's
+      # bare call sites and the agent is moved aside right now, so aborting
+      # here would leave the device with nothing installed at all.
+      chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$agent_dir.broken" \
+        || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
       echo "  Moved the unusable agent to $agent_dir.broken"
     else
       echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
       return 0
     fi
   fi
-  # A no-op when the shim is absent; a stale shim must never outlive its agent.
-  rm -f "$shim"
 
   echo "  Installing Hermes agent (NousResearch)..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
-  # the clawbox user so it lands in ~/.hermes and ~/.local/bin.
-  # The URL is passed as an argument rather than spliced into the -c string, so
-  # it stays a single source of truth without shell-quoting exposure.
-  runuser -u "$CLAWBOX_USER" -- bash -c \
-    'curl -fsSL "$1" | bash' _ "$installer_url" \
+  # the clawbox user so it lands in ~/.hermes and ~/.local/bin. The URL is
+  # passed as an argument rather than spliced into the -c string, so it stays a
+  # single source of truth without shell-quoting exposure. `-o pipefail`
+  # because `curl | bash` otherwise exits 0 when the fetch fails (bash just
+  # reads empty stdin) and the warning below could never fire; the timeouts
+  # because the caller is a systemd unit with TimeoutStartSec=7200.
+  runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
+    'curl -fsSL --connect-timeout 15 --max-time 900 "$1" | bash' _ "$installer_url" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
   # non-fatal above, so a silent failure here would otherwise be discovered by
-  # the owner as a crash-looping dashboard.
-  # `|| installed=""` for the same errexit reason as the first probe: when the
-  # install laid down nothing, this runs a shim that does not exist and exits
-  # 127, which would abort the step before the warning below ever printed.
+  # the owner as a crash-looping dashboard. `|| installed=""` for the same
+  # errexit reason as the first probe: when the install laid down nothing, this
+  # runs a shim that does not exist and exits 127.
   installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
     "$shim" --version 2>/dev/null | head -1) || installed=""
   if [ -n "$installed" ]; then
     echo "  Hermes installed ($installed)"
-    # The husk was insurance against a wrong diagnosis, and the new agent
-    # answers --version — so the insurance is over. It costs ~1.9 GB (checkout
-    # plus venv) on a device the comment above calls disk-constrained, and it
-    # is one more directory a later factory reset has to be able to delete.
+    # Diagnosis confirmed, so the insurance copy goes: it costs ~1.9 GB
+    # (checkout plus venv) on a disk-constrained device and is one more
+    # directory a later factory reset has to be able to delete.
     rm -rf "$agent_dir.broken"
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
-    # Say where the previous install went, so a wrong diagnosis is reversible
-    # by hand instead of needing a reflash.
+    # The diagnosis may simply have been wrong — an empty probe on a loaded
+    # device is exactly the case above. Put the original back: whatever the
+    # failed install left behind is worth less than what was there before, and
+    # parking the only copy under another name would leave the owner with no
+    # working agent AND no automatic second chance on the next update.
     if [ -e "$agent_dir.broken" ]; then
-      echo "  The previous agent is preserved at $agent_dir.broken" >&2
+      rm -rf "$agent_dir"
+      if mv "$agent_dir.broken" "$agent_dir"; then
+        echo "  Restored the previous agent from $agent_dir.broken" >&2
+      else
+        echo "  Warning: the previous agent is at $agent_dir.broken — move it back by hand" >&2
+      fi
     fi
   fi
   # Explicit: the last command above is a test that is FALSE on the happy path,

@@ -18,6 +18,7 @@ CLAWBOX_USER="${CLAWBOX_USER:-clawbox}"
 CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
 CLAWBOX_HOME="${CLAWBOX_HOME:-/home/$CLAWBOX_USER}"
 HERMES_BIN="${HERMES_BIN:-$CLAWBOX_HOME/.local/bin/hermes}"
+HERMES_VENV_PYTHON="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"
 EDITION_FILE="/etc/clawbox/edition.env"
 EDITION_DROPIN="/etc/systemd/system/clawbox-setup.service.d/edition.conf"
 
@@ -136,8 +137,14 @@ esac
 log "edition: $EDITION"
 
 # ── 1. Sanity: Hermes must be present (this edition runs on it). ────────────
-if [ ! -x "$HERMES_BIN" ]; then
-  fail "Hermes binary not found/executable at $HERMES_BIN — run: sudo bash $PROJECT_DIR/install.sh --step hermes_install"
+# BOTH halves, deliberately. $HERMES_BIN is a 4-line shim that execs
+# $HERMES_VENV_PYTHON, and it lives outside ~/.hermes — so a factory reset that
+# removed the agent left the shim executable and this check passing on a device
+# whose `hermes` command could not start. That is the same shim-only test that
+# made install.sh report "Hermes already installed ()"; fail loudly here instead
+# of continuing into a Hermes setup with no Hermes.
+if [ ! -x "$HERMES_BIN" ] || [ ! -x "$HERMES_VENV_PYTHON" ]; then
+  fail "Hermes agent not runnable ($HERMES_BIN -> $HERMES_VENV_PYTHON) — run: sudo bash $PROJECT_DIR/install.sh --step hermes_install"
 fi
 
 # ── 2. Shared-identity bridge ───────────────────────────────────────────────
