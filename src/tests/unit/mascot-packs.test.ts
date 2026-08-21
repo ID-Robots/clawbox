@@ -1,10 +1,14 @@
 // Structural contract for the mascot phrase packs (INV-2 / INV-3).
 //
-// Runs over every pack that currently exists, so it keeps working as the
-// locale packs land on their own branch. On beta this suite fails: the single
-// English bag in src/lib/mascot-phrases.ts contained "Здрасти, {name}! 🇧🇬"
-// (:69) and "шефе" / "capitão" (:81), so an English box was neither
-// script-compatible with its own locale nor free of another pack's lines.
+// Runs over ALL TEN shipped locales: every entry in PREFERENCE_LANGUAGES must
+// have a real pack registered in the LOADERS map, so a pack file that is
+// written but never registered — which silently downgrades that locale to the
+// language-free neutral pack — fails here instead of shipping.
+//
+// On beta this suite fails: the single English bag in
+// src/lib/mascot-phrases.ts contained "Здрасти, {name}! 🇧🇬" (:69) and
+// "шефе" / "capitão" (:81), so an English box was neither script-compatible
+// with its own locale nor free of another pack's lines.
 
 import { describe, expect, it } from "vitest";
 import { PREFERENCE_LANGUAGES } from "@/lib/preference-schema";
@@ -22,11 +26,25 @@ const LOCALES = [...PREFERENCE_LANGUAGES];
 async function loadPacks(): Promise<Map<string, MascotPhraseSet>> {
   const packs = new Map<string, MascotPhraseSet>([["neutral", NEUTRAL_PACK]]);
   for (const locale of LOCALES) {
-    if (!hasPack(locale)) continue; // pack file not written yet
     packs.set(locale, await packFor(locale));
   }
   return packs;
 }
+
+describe("mascot packs — coverage", () => {
+  it("every shipped UI language has a registered pack", () => {
+    expect(LOCALES.length).toBe(10);
+    for (const locale of LOCALES) {
+      expect(hasPack(locale), `${locale} has no entry in the LOADERS map`).toBe(true);
+    }
+  });
+
+  it("no locale silently falls back to the neutral pack", async () => {
+    for (const locale of LOCALES) {
+      expect(await packFor(locale), `${locale} resolved to the neutral pack`).not.toBe(NEUTRAL_PACK);
+    }
+  });
+});
 
 describe("mascot packs — completeness (INV-3)", () => {
   it("every existing pack defines every category, non-empty", async () => {

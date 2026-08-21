@@ -119,11 +119,16 @@ describe("mascot phrase cache", () => {
     expect(store.has("clawbox-mascot-phrase-last-failure")).toBe(false);
   });
 
-  it("serves a locale with no pack from the language-free pack, never from English", async () => {
+  it("serves an uncached locale from its OWN pack, never from English", async () => {
+    const { ja } = await import("@/lib/mascot-packs/ja");
     const result = await server.getMascotPhrases("ja");
+    expect(result.meta.source).toBe("pack");
     expect(result.meta.locale).toBe("ja");
-    expect(result.phrases.sass).toEqual(neutral.sass);
+    expect(result.phrases.sass).toEqual(ja.sass);
     expect(result.phrases.sass).not.toEqual(en.sass);
+    // Every locale ships a pack now, so nothing should be reduced to the
+    // emoji-only floor either.
+    expect(result.phrases.sass).not.toEqual(neutral.sass);
   });
 
   it("falls back to the stored preference, then to English", async () => {

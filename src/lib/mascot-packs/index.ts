@@ -26,24 +26,24 @@ export const NEUTRAL_PACK: MascotPhraseSet = neutral;
 
 type PackLoader = () => Promise<MascotPhraseSet>;
 
-// TODO(feat/mascot-locale-packs): the locale packs are written on their own
-// branch. Add one entry here per pack file as it lands — the import specifier
-// must stay a string literal so the bundler can code-split it:
+// One entry per locale ClawBox ships a UI language for. Each import specifier
+// is a string literal on purpose: that is what lets the bundler code-split the
+// pack into its own chunk, so a Japanese box never downloads the other nine.
 //
-//   bg: async () => (await import("./bg")).bg,
-//   de: async () => (await import("./de")).de,
-//   es: async () => (await import("./es")).es,
-//   fr: async () => (await import("./fr")).fr,
-//   it: async () => (await import("./it")).it,
-//   ja: async () => (await import("./ja")).ja,
-//   nl: async () => (await import("./nl")).nl,
-//   sv: async () => (await import("./sv")).sv,
-//   zh: async () => (await import("./zh")).zh,
-//
-// Until an entry exists the locale renders from `neutral`, which is correct
-// (language-free) if joyless.
+// A locale missing from this map renders from `neutral` — correct
+// (language-free) if joyless — and `mascot-packs.test.ts` fails, because every
+// PREFERENCE_LANGUAGES entry is required to have a real pack.
 const LOADERS: Readonly<Record<string, PackLoader>> = {
   en: async () => en,
+  bg: async () => (await import("./bg")).bg,
+  de: async () => (await import("./de")).de,
+  es: async () => (await import("./es")).es,
+  fr: async () => (await import("./fr")).fr,
+  it: async () => (await import("./it")).it,
+  ja: async () => (await import("./ja")).ja,
+  nl: async () => (await import("./nl")).nl,
+  sv: async () => (await import("./sv")).sv,
+  zh: async () => (await import("./zh")).zh,
 };
 
 const loaded = new Map<string, MascotPhraseSet>([["en", en], ["neutral", neutral]]);
