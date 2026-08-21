@@ -131,11 +131,11 @@ const micTrackStop = vi.fn();
  *   of error that leaves the audio worth sending again. The last entry answers
  *   every further call, so a single argument means "always this".
  */
-function installFetch(...transcripts: (string | null)[]) {
+function installFetch(...transcripts: (string | null | Promise<string>)[]) {
   let calls = 0;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: unknown) => {
+    vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       fetchedUrls.push(url);
       if (url.includes("/setup-api/gateway/ws-config")) {
@@ -148,7 +148,15 @@ function installFetch(...transcripts: (string | null)[]) {
         return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
       }
       if (url.includes("/setup-api/chat/transcribe")) {
-        const answer = transcripts[Math.min(calls++, transcripts.length - 1)];
+        const configured = transcripts[Math.min(calls++, transcripts.length - 1)];
+        const signal = init?.signal;
+        const aborted = new Promise<never>((_, reject) => {
+          if (!signal) return;
+          const rejectAbort = () => reject(new DOMException("aborted", "AbortError"));
+          if (signal.aborted) rejectAbort();
+          else signal.addEventListener("abort", rejectAbort, { once: true });
+        });
+        const answer = await Promise.race([Promise.resolve(configured), aborted]);
         if (answer === null) return { ok: false, status: 500, json: async () => ({ error: "the box is busy" }) };
         return { ok: true, json: async () => ({ ok: true, text: answer }) };
       }
@@ -244,9 +252,15 @@ describe("chat voice recording", () => {
 
     expect(recorder.stop).toHaveBeenCalledTimes(1);
     expect(micTrackStop).toHaveBeenCalled();
-    // Ended the same way the stop button ends it, so the words still arrive.
+    // Ended the same way the stop button ends it, so the words still arrive
+    // and are sent through the real chat turn (Telegram-like voice flow).
     const textarea = await screen.findByRole("textbox");
-    await waitFor(() => expect((textarea as HTMLTextAreaElement).value).toContain("hello"));
+    await waitFor(() => expect(sentFrames.some(frame => {
+      if (frame.method !== "chat.send") return false;
+      const params = frame.params as { message?: unknown } | undefined;
+      return params?.message === "hello";
+    })).toBe(true));
+    expect((textarea as HTMLTextAreaElement).value).toBe("");
   });
 
   it("does not push the deadline back as the recording clock re-renders", async () => {
@@ -447,5 +461,91 @@ describe("chat voice recording", () => {
     await waitFor(() => expect(micTrackStop).toHaveBeenCalled());
     expect(FakeMediaRecorder.instances).toHaveLength(0);
     expect(transcribeCalls()).toBe(0);
+  });
+
+  it("does not transcribe an active recording after the component unmounts", async () => {
+    installFetch("should never be sent");
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} />);
+    const recorder = await pressRecord(await readyToRecord());
+
+    unmount();
+
+    expect(recorder.stop).toHaveBeenCalledTimes(1);
+    expect(micTrackStop).toHaveBeenCalled();
+    expect(transcribeCalls()).toBe(0);
+  });
+
+  it("releases the microphone when MediaRecorder.start throws", async () => {
+    class StartFailureRecorder extends FakeMediaRecorder {
+      override start() { throw new DOMException("unsupported", "NotSupportedError"); }
+    }
+    vi.stubGlobal("MediaRecorder", StartFailureRecorder as unknown as typeof MediaRecorder);
+    installFetch("should never be sent");
+    render(<ChatPopup isOpen onClose={() => {}} />);
+
+    fireEvent.click(await readyToRecord());
+
+    await waitFor(() => expect(screen.getByTestId("voice-status")).toBeTruthy());
+    expect(micTrackStop).toHaveBeenCalled();
+    expect(transcribeCalls()).toBe(0);
+    expect(screen.queryByTestId("voice-stop")).toBeNull();
+  });
+
+  it("does not send a transcript that finishes after the chat unmounts", async () => {
+    let finish!: (text: string) => void;
+    const pending = new Promise<string>(resolve => { finish = resolve; });
+    installFetch(pending);
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} />);
+    await pressRecord(await readyToRecord());
+    fireEvent.click(screen.getByTestId("voice-stop"));
+    await waitFor(() => expect(transcribeCalls()).toBe(1));
+
+    unmount();
+    await act(async () => { finish("late invisible message"); await Promise.resolve(); });
+
+    expect(sentFrames.some(frame => {
+      if (frame.method !== "chat.send") return false;
+      return (frame.params as { message?: unknown } | undefined)?.message === "late invisible message";
+    })).toBe(false);
+  });
+
+  it("turns a stalled transcription upload into a retryable timeout", async () => {
+    installFetch(new Promise<string>(() => {}));
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await pressRecord(await readyToRecord());
+    const sendsBefore = sentFrames.filter(frame => frame.method === "chat.send").length;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByTestId("voice-stop"));
+    await waitFor(() => expect(transcribeCalls()).toBe(1));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
+
+    expect(await screen.findByTestId("voice-retry")).toBeTruthy();
+    expect(transcribeCalls()).toBe(1);
+    expect(sentFrames.filter(frame => frame.method === "chat.send")).toHaveLength(sendsBefore);
+  });
+
+  it("sends only the recording and preserves a draft typed while transcription is pending", async () => {
+    let finish!: (text: string) => void;
+    const pending = new Promise<string>(resolve => { finish = resolve; });
+    installFetch(pending);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await pressRecord(await readyToRecord());
+    fireEvent.click(screen.getByTestId("voice-stop"));
+    await waitFor(() => expect(transcribeCalls()).toBe(1));
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "draft for later" } });
+    await act(async () => { finish("recorded voice turn"); await Promise.resolve(); });
+
+    await waitFor(() => expect(sentFrames.some(frame => {
+      if (frame.method !== "chat.send") return false;
+      return (frame.params as { message?: unknown } | undefined)?.message === "recorded voice turn";
+    })).toBe(true));
+    expect(sentFrames.some(frame => {
+      if (frame.method !== "chat.send") return false;
+      return String((frame.params as { message?: unknown } | undefined)?.message).includes("draft for later");
+    })).toBe(false);
+    expect(textarea.value).toBe("draft for later");
   });
 });

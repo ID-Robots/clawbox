@@ -97,12 +97,23 @@ export function isImageMedia(source: string): boolean {
  * endpoint refuses this tree as "Outside allowed folders". Anything the browser
  * can already address is passed straight through.
  */
-export function mediaUrl(source: string): string {
+export function mediaUrl(source: string, mimeType?: string): string {
   if (/^(?:https?:|data:)/i.test(source)) return source;
   const local = source.startsWith("file://")
     ? source.slice("file://".length)
     : source;
-  return `/setup-api/chat/media?path=${encodeURIComponent(local)}`;
+  const query = new URLSearchParams({ path: local });
+  // A structured attachment may be identified only by its MIME type and have
+  // no extension at all. Carry only an audio hint; the server checks it against
+  // its own allowlist before using it, so this never becomes a generic content-
+  // type override for arbitrary files.
+  const mimeEssence = typeof mimeType === "string"
+    ? mimeType.split(";", 1)[0].trim().toLowerCase()
+    : "";
+  if (mimeEssence.startsWith("audio/")) {
+    query.set("mime", mimeEssence);
+  }
+  return `/setup-api/chat/media?${query.toString()}`;
 }
 
 /**
@@ -136,8 +147,8 @@ export function splitAssistantMedia(raw: string): { text: string; images: string
   const { text, media } = splitMediaDirectives(raw);
   return {
     text,
-    images: media.filter(isImageMedia).map(mediaUrl),
-    audio: media.filter(isAudioMedia).map(mediaUrl),
+    images: media.filter(isImageMedia).map(source => mediaUrl(source)),
+    audio: media.filter(isAudioMedia).map(source => mediaUrl(source)),
   };
 }
 
@@ -190,7 +201,12 @@ export function extractAudioAttachments(msg: unknown): string[] {
     const isAudio = a.kind === "audio"
       || (typeof a.mimeType === "string" && a.mimeType.toLowerCase().startsWith("audio/"))
       || isAudioMedia(a.url);
-    if (isAudio) urls.push(mediaUrl(a.url));
+    if (isAudio) {
+      const mime = !isAudioMedia(a.url) && typeof a.mimeType === "string"
+        ? a.mimeType
+        : undefined;
+      urls.push(mediaUrl(a.url, mime));
+    }
   }
   return urls;
 }

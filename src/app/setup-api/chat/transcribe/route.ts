@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
+import Busboy from "busboy";
+import { Readable } from "stream";
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 import { CLAWBOX_AI_PROXY_URL } from "@/lib/hermes-clawai";
 import { readConfig } from "@/lib/openclaw-config";
@@ -8,8 +10,8 @@ export const dynamic = "force-dynamic";
 // -- Voice input ------------------------------------------------------------
 //
 // Turns a recording made in device chat into text. The mascot chat composer
-// records with `MediaRecorder`, POSTs the blob here, and puts what comes back
-// in the input box for the user to read before they send it.
+// records with `MediaRecorder`, POSTs the blob here, and sends the returned
+// text through the ordinary chat-turn path.
 //
 // Why the device proxies instead of the browser calling out directly: the
 // ClawBox AI token lives in `~/.openclaw/openclaw.json` and is the device's
@@ -53,6 +55,7 @@ export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 // limit. The spare megabyte is multipart framing and the `model` field, the
 // same headroom the attachment route next door allows itself.
 const MAX_REQUEST_BYTES = MAX_AUDIO_BYTES + 1024 * 1024;
+const MAX_MULTIPART_PARTS = 4;
 
 // Long enough that a slow uplink on a busy box still finishes, short enough
 // that a wedged upstream cannot pin the recording UI in "transcribing" for
@@ -113,16 +116,14 @@ function boundedBody(body: ReadableStream<Uint8Array>): {
 }
 
 /**
- * Read the audio part out of the request.
+ * Read the one audio part out of the request.
  *
- * A streaming parser like the attachment route's busboy would still buy
- * nothing here: nothing is written to disk, so there is no partial file to
- * clean up and no staged path to hand back. What the read does need is a
- * ceiling. `formData()` will not say how big a part is until the entire body
- * is buffered, so on its own the size check below fires only after the memory
- * has been spent -- which on a box with a couple of gigabytes free and a model
- * already loaded is the whole of the damage. So the bytes are counted on the
- * way in and the parser is handed the metered stream instead of the request.
+ * The byte meter protects against a huge file or chunked body. Busboy adds the
+ * other bound `formData()` cannot express: part count. Tens of thousands of
+ * one-byte fields fit inside the byte ceiling but amplify heavily while the
+ * platform builds a FormData object, enough to exhaust a Nano under parallel
+ * requests. This parser accepts exactly one file part and never materialises
+ * fields at all.
  */
 async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string } | Failure> {
   // Content-Length is worth believing when it is offered -- an honest client
@@ -133,20 +134,119 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
   if (Number.isFinite(declared) && declared > MAX_REQUEST_BYTES) {
     return { status: 413, error: "The recording is too long" };
   }
-  let bounded: ReturnType<typeof boundedBody> | null = null;
-  let form: FormData;
+  if (!req.body) return { status: 400, error: "Could not read the recording." };
+
+  const bounded = boundedBody(req.body);
   try {
-    // Inside the try because a body that is already locked or consumed makes
-    // `pipeThrough` throw, and that is the same "this request cannot be read"
-    // failure as a malformed one -- not a 500.
-    bounded = req.body ? boundedBody(req.body) : null;
-    form = bounded
-      ? await new Response(bounded.stream, {
+    return await new Promise<{ file: Blob; name: string } | Failure>((resolve) => {
+      let busboy: ReturnType<typeof Busboy>;
+      try {
+        busboy = Busboy({
           headers: { "content-type": req.headers.get("content-type") ?? "" },
-        }).formData()
-      : await req.formData();
+          limits: {
+            files: 1,
+            fields: 2,
+            parts: MAX_MULTIPART_PARTS,
+            // Busboy raises `limit` when the byte count reaches its configured
+            // value. Give it one sentinel byte so the advertised <= limit is
+            // accepted and only a genuinely larger recording is rejected.
+            fileSize: MAX_AUDIO_BYTES + 1,
+          },
+        });
+      } catch {
+        resolve({ status: 400, error: "Could not read the recording." });
+        return;
+      }
+
+      let settled = false;
+      let sawFile = false;
+      let completed: { file: Blob; name: string } | null = null;
+      let activeFile: Readable | null = null;
+      const nodeStream = Readable.fromWeb(
+        bounded.stream as unknown as import("stream/web").ReadableStream,
+      );
+
+      const finish = (result: { file: Blob; name: string } | Failure, abort = false) => {
+        if (settled) return;
+        settled = true;
+        if (abort) {
+          nodeStream.unpipe(busboy);
+          nodeStream.destroy();
+          activeFile?.destroy();
+        }
+        resolve(result);
+      };
+      const badMultipart = () => {
+        console.warn("[chat/transcribe] could not parse multipart body");
+        finish({ status: 400, error: "Could not read the recording." }, true);
+      };
+
+      busboy.on("filesLimit", badMultipart);
+      busboy.on("fieldsLimit", badMultipart);
+      busboy.on("partsLimit", badMultipart);
+      busboy.on("error", badMultipart);
+      busboy.on("field", () => {
+        finish({ status: 400, error: "Expected an audio `file` part" }, true);
+      });
+      nodeStream.on("error", () => {
+        finish(bounded.overflowed()
+          ? { status: 413, error: "The recording is too long" }
+          : { status: 400, error: "Could not read the recording." }, true);
+      });
+
+      busboy.on("file", (field, stream, info) => {
+        if (field !== "file" || sawFile) {
+          stream.resume();
+          badMultipart();
+          return;
+        }
+        sawFile = true;
+        activeFile = stream as unknown as Readable;
+        const chunks: Buffer[] = [];
+        let fileBytes = 0;
+        stream.on("data", (chunk: Buffer) => {
+          if (settled) return;
+          fileBytes += chunk.byteLength;
+          if (fileBytes > MAX_AUDIO_BYTES) {
+            finish({ status: 413, error: "The recording is too long" }, true);
+            return;
+          }
+          chunks.push(Buffer.from(chunk));
+        });
+        stream.on("limit", () => finish({ status: 413, error: "The recording is too long" }, true));
+        stream.on("error", badMultipart);
+        stream.on("end", () => {
+          if (settled) return;
+          const bytes = Buffer.concat(chunks);
+          if (bytes.length === 0) {
+            completed = null;
+            return;
+          }
+          const type = info.mimeType || "application/octet-stream";
+          completed = {
+            file: new Blob([bytes], { type }),
+            name: info.filename || "recording.webm",
+          };
+        });
+      });
+
+      busboy.on("finish", () => {
+        if (settled) return;
+        if (!sawFile) {
+          finish({ status: 400, error: "Expected an audio `file` part" });
+          return;
+        }
+        if (!completed) {
+          finish({ status: 400, error: "The recording is empty" });
+          return;
+        }
+        finish(completed);
+      });
+
+      nodeStream.pipe(busboy);
+    });
   } catch (err) {
-    if (bounded?.overflowed()) {
+    if (bounded.overflowed()) {
       return { status: 413, error: "The recording is too long" };
     }
     // A truncated or malformed multipart body is the caller's to fix, so it is
@@ -158,30 +258,18 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
     console.warn("[chat/transcribe] could not parse the multipart body:", err);
     return { status: 400, error: "Could not read the recording." };
   }
-  const file = form.get("file");
-  if (!file || typeof file === "string") {
-    return { status: 400, error: "Expected an audio `file` part" };
-  }
-  if (file.size === 0) {
-    // A zero-length blob is what a recording that never captured anything
-    // looks like -- a denied microphone, or stop pressed before the first
-    // chunk. Saying so beats forwarding silence and relaying "no speech".
-    return { status: 400, error: "The recording is empty" };
-  }
-  if (file.size > MAX_AUDIO_BYTES) {
-    return { status: 413, error: "The recording is too long" };
-  }
-  const name = file instanceof File && file.name ? file.name : "recording.webm";
-  return { file, name };
 }
 
 // POST /setup-api/chat/transcribe
 // Body: multipart/form-data with one `file` part holding the recording.
-// Returns { ok: true, text } -- the transcript, for the composer to show.
+// Returns { ok: true, text } -- the transcript for the voice turn to send.
 export async function POST(req: NextRequest) {
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.includes("multipart/form-data")) {
     return NextResponse.json({ error: "Expected multipart/form-data" }, { status: 400 });
+  }
+  if (!/;\s*boundary=/i.test(contentType)) {
+    return NextResponse.json({ error: "Expected multipart/form-data with a boundary" }, { status: 400 });
   }
 
   const audio = await readAudio(req);
@@ -209,7 +297,9 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
       body: upstream,
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      // A disconnected browser must not leave a paid upstream transcription
+      // running until the server timeout expires.
+      signal: AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]),
     });
   } catch (err) {
     // A box on a flaky uplink is the common case here, and the distinction

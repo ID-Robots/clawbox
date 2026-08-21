@@ -16,9 +16,10 @@ let originalHome: string | undefined;
 let originalOpenclawHome: string | undefined;
 let GET: (req: NextRequest) => Promise<Response>;
 
-function request(rawPath: string | null, range?: string): NextRequest {
+function request(rawPath: string | null, range?: string, mime?: string): NextRequest {
   const url = new URL("http://localhost/setup-api/chat/media");
   if (rawPath !== null) url.searchParams.set("path", rawPath);
+  if (mime) url.searchParams.set("mime", mime);
   return new NextRequest(url, range ? { headers: { range } } : undefined);
 }
 
@@ -57,6 +58,7 @@ describe("/setup-api/chat/media", () => {
     expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
     // Per-conversation content must never reach a shared cache.
     expect(res.headers.get("Cache-Control")).toContain("private");
+    expect(res.headers.get("Cache-Control")).toContain("no-store");
     expect(Buffer.from(await res.arrayBuffer())).toEqual(PNG);
   });
 
@@ -111,7 +113,11 @@ describe("/setup-api/chat/media", () => {
     fs.symlinkSync(realHome, path.join(tmpHome, ".openclaw"));
     vi.resetModules();
     const freshGET = (await import("@/app/setup-api/chat/media/route")).GET;
-    const res = await freshGET(request(path.join(realMedia, "cat.png")));
+    // The harness uses the logical ~/.openclaw path in its message, not the
+    // resolved target. The old test passed only the latter and missed the real
+    // 404 on every shared-identity device.
+    const logical = path.join(tmpHome, ".openclaw", "media", "tool-image-generation", "cat.png");
+    const res = await freshGET(request(logical));
     expect(res.status).toBe(200);
     fs.rmSync(realHome, { recursive: true, force: true });
   });
@@ -263,6 +269,22 @@ describe("/setup-api/chat/media", () => {
     const res = await GET(request(path.join(mediaDir, "v.webm")));
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("audio/webm");
+  });
+
+  it("serves extensionless structured audio under an allowlisted MIME hint", async () => {
+    const voice = path.join(mediaDir, "voice");
+    fs.writeFileSync(voice, AUDIO);
+    const res = await GET(request(voice, undefined, "audio/webm; codecs=opus"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("audio/webm");
+  });
+
+  it("does not let a MIME hint override a named unsupported type", async () => {
+    for (const name of ["secret.json", "document.pdf", "vector.svg"]) {
+      const source = path.join(mediaDir, name);
+      fs.writeFileSync(source, AUDIO);
+      expect((await GET(request(source, undefined, "audio/wav"))).status, name).toBe(415);
+    }
   });
 
   it("still refuses a type it does not serve", async () => {
