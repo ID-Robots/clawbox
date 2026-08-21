@@ -36,6 +36,7 @@ import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
 import { registerDesktopTools } from "./tools/desktop";
+import { registerEmailTools } from "./tools/email";
 import { registerOrientationTools } from "./tools/orientation";
 import { registerSkillTools } from "./tools/skills";
 import { registerSystemTools } from "./tools/system";
@@ -91,6 +92,7 @@ export async function buildServer(edition: Ed, profile: Profile = resolveProfile
   registerSystemTools(reg, ctx);
   registerDesktopTools(reg, ctx);
   registerBrowserTools(reg);
+  registerEmailTools(reg);
   registerCodingTools(reg);
 
   // LAST. It takes over tools/call so that argument-validation failures come

@@ -136,6 +136,10 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/vnc",
   "/setup-api/terminal",
   "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
+  // Mail account credentials in, and an authenticated send path out. No
+  // onboarding role at all (the wizard never touches it), so it must never be
+  // reachable while the open ClawBox-Setup AP is broadcasting.
+  "/setup-api/email",
   "/setup-api/tunnel",      // enabling remote tunnel access
   "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
   "/setup-api/apps/install",

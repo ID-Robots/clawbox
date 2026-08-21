@@ -111,6 +111,20 @@ grabber, and the tool is simply not offered.
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
 
+### Email
+`email_send` (both editions)
+
+The only outbound-mail capability the agent has, and on the OpenClaw edition the
+only email capability at all — OpenClaw has no email channel, and inventing one
+in its config would fail the gateway's strict schema and silence the channels
+that do work. Hermes' native adapter can reply to mail that arrives; it cannot
+start a thread.
+
+Deliberately NOT read-only: a sent email cannot be recalled, so the tool stays
+inside Hermes' `trust: untrusted` approval gate. The credentials never enter the
+MCP process — `/setup-api/email/send` holds them — and an unconfigured device
+answers `CONFLICT` with "do not retry, tell the user to open Settings → Email".
+
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
 (both editions) · `browser_click` · `browser_type` · `browser_keypress` ·

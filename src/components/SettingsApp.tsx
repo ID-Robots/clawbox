@@ -79,6 +79,19 @@ interface SettingsAppProps {
   ui: UISettings;
 }
 
+/** Exactly what /setup-api/email/status returns. The address is already
+ *  masked server-side and the password is only ever a boolean. */
+interface EmailStatus {
+  configured: boolean;
+  address: string | null;
+  smtpHost: string | null;
+  smtpPort: number | null;
+  imapHost: string | null;
+  allowedSenders: string[];
+  inbound: boolean;
+  inboundSupported: boolean;
+}
+
 interface SwapStats { used: number; total: number; percent: number }
 interface DiskMount { filesystem: string; size: string; used: string; avail: string; usePercent: number; mountpoint: string }
 interface NetworkIface { name: string; ip: string; rx: number; tx: number }
@@ -96,7 +109,7 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "email", "remote", "system", "about"] as const;
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -113,6 +126,7 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string 
   { id: "localModels", icon: "deployed_code", label: "Local Models" },
   { id: "voice", icon: "record_voice_over", label: "Voice" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
+  { id: "email", icon: "mail", labelKey: "settings.email" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
@@ -1449,6 +1463,147 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setTgStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
       if (!controller.signal.aborted) setTgSaving(false);
+    }
+  };
+
+  /* ── Email (SMTP) ── */
+  // Gmail's submission endpoint, used only to prefill the form. The device
+  // itself has no Gmail-specific path: any SMTP server works.
+  const GMAIL_SMTP_HOST = "smtp.gmail.com";
+  const GMAIL_IMAP_HOST = "imap.gmail.com";
+  const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
+  const [emailAddress, setEmailAddress] = useState("");
+  const [emailPassword, setEmailPassword] = useState("");
+  const [emailShowPassword, setEmailShowPassword] = useState(false);
+  const [emailHost, setEmailHost] = useState(GMAIL_SMTP_HOST);
+  const [emailPort, setEmailPort] = useState("587");
+  const [emailInboundWanted, setEmailInboundWanted] = useState(false);
+  const [emailImapHost, setEmailImapHost] = useState(GMAIL_IMAP_HOST);
+  const [emailAllowedSenders, setEmailAllowedSenders] = useState("");
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailTesting, setEmailTesting] = useState(false);
+  const [emailReconfigure, setEmailReconfigure] = useState(false);
+  const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const emailSaveControllerRef = useRef<AbortController | null>(null);
+
+  const refreshEmailStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/email/status", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      // Every field is guarded: the component test's fetch stub answers unknown
+      // URLs with {}, and a transient 5xx must not blank the panel either.
+      setEmailStatus({
+        configured: d?.configured === true,
+        address: typeof d?.address === "string" ? d.address : null,
+        smtpHost: typeof d?.smtpHost === "string" ? d.smtpHost : null,
+        smtpPort: typeof d?.smtpPort === "number" ? d.smtpPort : null,
+        imapHost: typeof d?.imapHost === "string" ? d.imapHost : null,
+        allowedSenders: Array.isArray(d?.allowedSenders)
+          ? d.allowedSenders.filter((s: unknown): s is string => typeof s === "string")
+          : [],
+        inbound: d?.inbound === true,
+        inboundSupported: d?.inboundSupported === true,
+      });
+    } catch {
+      // keep the last known state rather than flashing "not configured"
+    }
+  }, []);
+
+  useEffect(() => {
+    if (section !== "email" && !isMobile) return;
+    refreshEmailStatus();
+  }, [section, isMobile, refreshEmailStatus]);
+
+  const saveEmail = async () => {
+    if (!emailAddress.trim()) {
+      setEmailMsg({ type: "error", message: t("settings.emailEnterAddress") });
+      return;
+    }
+    if (!emailPassword) {
+      setEmailMsg({ type: "error", message: t("settings.emailEnterPassword") });
+      return;
+    }
+    emailSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    emailSaveControllerRef.current = controller;
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: emailAddress.trim(),
+          password: emailPassword,
+          smtpHost: emailHost.trim(),
+          smtpPort: Number(emailPort) || 587,
+          imapHost: emailInboundWanted ? emailImapHost.trim() : "",
+          allowedSenders: emailInboundWanted ? emailAllowedSenders : "",
+        }),
+        signal: controller.signal,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.failedSave") });
+        return;
+      }
+      // The app password is in memory for as long as this panel is open;
+      // drop it the moment the device has accepted it.
+      setEmailPassword("");
+      setEmailReconfigure(false);
+      setEmailMsg({
+        type: data.warning ? "error" : "success",
+        message: data.warning || t("settings.emailConfigured"),
+      });
+      refreshEmailStatus();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.failedSave") });
+    } finally {
+      if (!controller.signal.aborted) setEmailSaving(false);
+    }
+  };
+
+  const sendTestEmail = async () => {
+    setEmailTesting(true);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/test", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.emailTestFailed") });
+        return;
+      }
+      setEmailMsg({
+        type: "success",
+        message: t("settings.emailTestSent", { address: emailStatus?.address || "" }),
+      });
+    } catch (err) {
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.emailTestFailed") });
+    } finally {
+      setEmailTesting(false);
+    }
+  };
+
+  const disconnectEmail = async () => {
+    setEmailSaving(true);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/configure", { method: "DELETE" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.failedSave") });
+        return;
+      }
+      setEmailReconfigure(false);
+      setEmailInboundWanted(false);
+      setEmailMsg({ type: "success", message: t("settings.emailDisconnected") });
+      refreshEmailStatus();
+    } catch (err) {
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.failedSave") });
+    } finally {
+      setEmailSaving(false);
     }
   };
 
@@ -2873,6 +3028,267 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Email ─── */}
+        {activeSection === "email" && (
+          <div className="max-w-xl space-y-5" data-testid="settings-section-email">
+
+            {/* Status */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">mail</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+              </div>
+
+              {emailStatus === null ? (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-40 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-24 rounded bg-white/[0.06]" />
+                  </div>
+                </div>
+              ) : emailStatus.configured && !emailReconfigure ? (
+                <div>
+                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
+                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
+                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[var(--text-primary)] font-medium truncate">
+                        {t("settings.emailConnected", { address: emailStatus.address || "" })}
+                      </div>
+                      <div className="text-xs text-[var(--text-muted)] mt-0.5 truncate">
+                        {emailStatus.smtpHost}:{emailStatus.smtpPort}
+                      </div>
+                      {emailStatus.inboundSupported && (
+                        <div className="text-xs text-[var(--text-muted)] opacity-70 mt-0.5">
+                          {emailStatus.inbound ? t("settings.emailInboundOn") : t("settings.emailInboundOff")}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={sendTestEmail}
+                      disabled={emailTesting}
+                      className="px-4 py-2.5 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                    >
+                      {emailTesting && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {emailTesting ? t("settings.emailSendingTest") : t("settings.emailSendTest")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setEmailReconfigure(true); setEmailMsg(null); }}
+                      className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                    >
+                      {t("settings.emailReconfigure")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={disconnectEmail}
+                      disabled={emailSaving}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50"
+                    >
+                      {t("settings.emailDisconnect")}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>link_off</span>
+                  </div>
+                  <div className="text-sm text-[var(--text-muted)]">{t("settings.notConfigured")}</div>
+                </div>
+              )}
+
+              {emailMsg && <div className="mt-4"><StatusMessage type={emailMsg.type} message={emailMsg.message} /></div>}
+            </div>
+
+            {/* Setup */}
+            {(emailStatus === null || !emailStatus.configured || emailReconfigure) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailAccount")}</label>
+                </div>
+
+                {/* The 3-step Gmail guide, in the panel rather than behind a docs link */}
+                <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5 mb-5">
+                  <div className="text-sm text-[var(--text-primary)] font-medium mb-2">{t("settings.emailGuideTitle")}</div>
+                  <ol className="ml-0 pl-5 leading-[1.9] text-sm text-[var(--text-secondary)] list-decimal">
+                    <li>{t("settings.emailGuideStep1")}</li>
+                    <li>
+                      {t("settings.emailGuideStep2")}{" "}
+                      <a
+                        href="https://myaccount.google.com/apppasswords"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline"
+                      >
+                        {t("settings.emailGuideLink")}
+                      </a>
+                    </li>
+                    <li>{t("settings.emailGuideStep3")}</li>
+                  </ol>
+                  <p className="text-xs text-[var(--text-muted)] mt-2">{t("settings.emailGuideOther")}</p>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label htmlFor="settings-email-address" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAddress")}</label>
+                    <input
+                      id="settings-email-address"
+                      type="email"
+                      value={emailAddress}
+                      onChange={(e) => { setEmailAddress(e.target.value); setEmailMsg(null); }}
+                      placeholder="you@gmail.com"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="settings-email-password" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAppPassword")}</label>
+                    <div className="relative">
+                      <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>key</span>
+                      <input
+                        id="settings-email-password"
+                        type={emailShowPassword ? "text" : "password"}
+                        value={emailPassword}
+                        onChange={(e) => { setEmailPassword(e.target.value); setEmailMsg(null); }}
+                        placeholder="abcd efgh ijkl mnop"
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="w-full pl-10 pr-10 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                        onKeyDown={(e) => e.key === "Enter" && saveEmail()}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setEmailShowPassword((v) => !v)}
+                        aria-label={t("settings.emailAppPassword")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{emailShowPassword ? "visibility_off" : "visibility"}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex gap-3">
+                    <div className="flex-1 min-w-0">
+                      <label htmlFor="settings-email-host" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailHost")}</label>
+                      <input
+                        id="settings-email-host"
+                        type="text"
+                        value={emailHost}
+                        onChange={(e) => { setEmailHost(e.target.value); setEmailMsg(null); }}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all"
+                      />
+                    </div>
+                    <div className="w-24 shrink-0">
+                      <label htmlFor="settings-email-port" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailPort")}</label>
+                      <input
+                        id="settings-email-port"
+                        type="text"
+                        inputMode="numeric"
+                        value={emailPort}
+                        onChange={(e) => { setEmailPort(e.target.value.replace(/[^0-9]/g, "")); setEmailMsg(null); }}
+                        className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Inbound is Hermes-only, and never offered without an allowlist. */}
+                  {emailStatus?.inboundSupported && (
+                    <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={emailInboundWanted}
+                          onChange={(e) => { setEmailInboundWanted(e.target.checked); setEmailMsg(null); }}
+                          className="mt-0.5 accent-[var(--coral-bright)]"
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailInboundTitle")}</span>
+                          <span className="block text-xs text-[var(--text-secondary)] mt-0.5">{t("settings.emailInboundHint")}</span>
+                        </span>
+                      </label>
+
+                      {emailInboundWanted && (
+                        <div className="mt-4 space-y-3">
+                          <div>
+                            <label htmlFor="settings-email-imap" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailImapHost")}</label>
+                            <input
+                              id="settings-email-imap"
+                              type="text"
+                              value={emailImapHost}
+                              onChange={(e) => { setEmailImapHost(e.target.value); setEmailMsg(null); }}
+                              spellCheck={false}
+                              autoComplete="off"
+                              className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all"
+                            />
+                          </div>
+                          <div>
+                            <label htmlFor="settings-email-allowed" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAllowedSenders")}</label>
+                            <input
+                              id="settings-email-allowed"
+                              type="text"
+                              value={emailAllowedSenders}
+                              onChange={(e) => { setEmailAllowedSenders(e.target.value); setEmailMsg(null); }}
+                              placeholder="you@work.com, colleague@work.com"
+                              spellCheck={false}
+                              autoComplete="off"
+                              className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all placeholder-white/15"
+                            />
+                            <p className="text-xs text-[var(--text-muted)] mt-1.5">{t("settings.emailAllowedSendersHint")}</p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <p className="text-xs text-[var(--text-muted)]">{t("settings.emailSecurityNote")}</p>
+                </div>
+
+                <div className="flex items-center gap-3 mt-5">
+                  <button
+                    type="button"
+                    onClick={saveEmail}
+                    disabled={emailSaving || !emailAddress.trim() || !emailPassword}
+                    className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  >
+                    {emailSaving ? (
+                      <>
+                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        {t("connecting")}
+                      </>
+                    ) : (
+                      <>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                        {t("settings.connect")}
+                      </>
+                    )}
+                  </button>
+                  {emailReconfigure && (
+                    <button
+                      type="button"
+                      onClick={() => { setEmailReconfigure(false); setEmailMsg(null); setEmailPassword(""); }}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer"
+                    >
+                      {t("cancel")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
@@ -3337,6 +3753,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (tgConfigured === null) return { subtitle: null };
         if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
         return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected") };
+      }
+      case "email": {
+        if (emailStatus === null) return { subtitle: null };
+        if (!emailStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        return { subtitle: emailStatus.address };
       }
       case "remote":
         return { subtitle: null };
