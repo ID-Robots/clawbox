@@ -16,11 +16,15 @@ let originalHome: string | undefined;
 let originalOpenclawHome: string | undefined;
 let GET: (req: NextRequest) => Promise<Response>;
 
-function request(rawPath: string | null): NextRequest {
+function request(rawPath: string | null, range?: string): NextRequest {
   const url = new URL("http://localhost/setup-api/chat/media");
   if (rawPath !== null) url.searchParams.set("path", rawPath);
-  return new NextRequest(url);
+  return new NextRequest(url, range ? { headers: { range } } : undefined);
 }
+
+// 64 distinguishable bytes, so a byte range can be checked against the exact
+// slice it asked for rather than against a length.
+const AUDIO = Buffer.from(Array.from({ length: 64 }, (_, i) => i));
 
 describe("/setup-api/chat/media", () => {
   beforeEach(async () => {
@@ -157,5 +161,100 @@ describe("/setup-api/chat/media", () => {
     const res = await GET(request(path.join(mediaDir, "SHOUT.PNG")));
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("image/png");
+  });
+
+  // ── Spoken replies ────────────────────────────────────────────────────────
+  //
+  // This route is the only way the chat can reach a generated file, so an
+  // audio type it refuses is a spoken reply the user cannot play. The on-device
+  // TTS provider writes .wav; the rest are here so changing provider does not
+  // turn every answer into a 415.
+
+  it("serves the audio types a spoken reply can arrive as", async () => {
+    const cases: [string, string][] = [
+      ["v.wav", "audio/wav"],
+      ["v.mp3", "audio/mpeg"],
+      ["v.ogg", "audio/ogg"],
+      ["v.oga", "audio/ogg"],
+      ["v.opus", "audio/ogg"],
+      ["v.m4a", "audio/mp4"],
+      ["v.aac", "audio/aac"],
+      ["v.flac", "audio/flac"],
+      ["v.weba", "audio/webm"],
+    ];
+    for (const [name, type] of cases) {
+      fs.writeFileSync(path.join(mediaDir, name), AUDIO);
+      const res = await GET(request(path.join(mediaDir, name)));
+      expect(res.status, name).toBe(200);
+      expect(res.headers.get("Content-Type"), name).toBe(type);
+    }
+  });
+
+  it("tells the player it may ask for byte ranges", async () => {
+    // An <audio> element learns this from the FIRST, whole-file response and
+    // only seeks afterwards. Without the header the file plays and the
+    // scrubber does not move, which is not "native controls".
+    fs.writeFileSync(path.join(mediaDir, "v.wav"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "v.wav")));
+    expect(res.headers.get("Accept-Ranges")).toBe("bytes");
+  });
+
+  it("answers a seek with the bytes it asked for", async () => {
+    fs.writeFileSync(path.join(mediaDir, "v.wav"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "v.wav"), "bytes=8-15"));
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 8-15/64");
+    expect(res.headers.get("Content-Length")).toBe("8");
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(AUDIO.subarray(8, 16));
+  });
+
+  it("reads an open-ended range to the end of the file", async () => {
+    fs.writeFileSync(path.join(mediaDir, "v.wav"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "v.wav"), "bytes=60-"));
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 60-63/64");
+    expect(Buffer.from(await res.arrayBuffer())).toEqual(AUDIO.subarray(60));
+  });
+
+  it("reads a suffix range from the end", async () => {
+    // How a player finds the metadata trailer some containers keep last.
+    fs.writeFileSync(path.join(mediaDir, "v.wav"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "v.wav"), "bytes=-4"));
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 60-63/64");
+  });
+
+  it("clamps a range that runs past the end", async () => {
+    fs.writeFileSync(path.join(mediaDir, "v.wav"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "v.wav"), "bytes=32-9999"));
+    expect(res.status).toBe(206);
+    expect(res.headers.get("Content-Range")).toBe("bytes 32-63/64");
+  });
+
+  it("serves the whole file for a range it does not implement", async () => {
+    // Multi-range and anything malformed. Answering the whole file is a legal
+    // reply to any range request; a 416 would break playback over a header we
+    // simply chose not to support.
+    fs.writeFileSync(path.join(mediaDir, "v.wav"), AUDIO);
+    for (const header of ["bytes=0-1,4-5", "items=0-1", "bytes=abc-def", "bytes=-", "bytes=99-100"]) {
+      const res = await GET(request(path.join(mediaDir, "v.wav"), header));
+      expect(res.status, header).toBe(200);
+      expect(res.headers.get("Content-Length"), header).toBe("64");
+    }
+  });
+
+  it("still refuses a type it does not serve", async () => {
+    fs.writeFileSync(path.join(mediaDir, "clip.mp4"), AUDIO);
+    const res = await GET(request(path.join(mediaDir, "clip.mp4")));
+    expect(res.status).toBe(415);
+  });
+
+  it("applies the range only after the containment checks", async () => {
+    // A Range header must not become a way to read a file the route would
+    // otherwise refuse.
+    const outside = path.join(tmpHome, "secret.wav");
+    fs.writeFileSync(outside, AUDIO);
+    const res = await GET(request(outside, "bytes=0-7"));
+    expect(res.status).toBe(404);
   });
 });

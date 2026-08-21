@@ -41,11 +41,56 @@ const CONTENT_TYPES: Record<string, string> = {
   ".webp": "image/webp",
   ".bmp": "image/bmp",
   ".avif": "image/avif",
+  // Spoken replies. The on-device TTS provider writes `.wav`; the rest are here
+  // so switching provider does not silently turn every answer back into a 415.
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".oga": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".m4a": "audio/mp4",
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".weba": "audio/webm",
 };
 
 // A generated 1024×1024 PNG runs ~1.5 MB; this leaves room for larger renders
 // without letting the route buffer something unbounded into memory.
 const MAX_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Parse one `Range: bytes=…` header against a known size.
+ *
+ * Only the single-range forms a media element actually sends are honoured;
+ * anything else returns null and is answered with the whole file, which is a
+ * legal response to any range request. Returning the whole file is also why
+ * this never produces a 416: refusing outright would break playback over a
+ * header we chose not to implement.
+ *
+ * Why it exists at all: an `<audio>` element seeks by asking for a byte range.
+ * Served without `Accept-Ranges`, Chrome plays the file but the scrubber will
+ * not move, and Safari refuses to start it — so "playable with native
+ * controls" is not a property of the element, it is a property of this
+ * response.
+ */
+export function parseRange(header: string | null, size: number): { start: number; end: number } | null {
+  if (!header) return null;
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) return null;
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) return null;
+  // A suffix range ("give me the last N bytes") is the one form with no start.
+  if (!rawStart) {
+    const wanted = Number(rawEnd);
+    if (!Number.isFinite(wanted) || wanted <= 0) return null;
+    return { start: Math.max(0, size - wanted), end: size - 1 };
+  }
+  const start = Number(rawStart);
+  if (!Number.isFinite(start) || start >= size) return null;
+  const end = rawEnd ? Math.min(Number(rawEnd), size - 1) : size - 1;
+  if (!Number.isFinite(end) || end < start) return null;
+  return { start, end };
+}
 
 /**
  * The root with symlinks resolved. `~/.openclaw` may itself be a link (a
@@ -147,11 +192,34 @@ export async function GET(req: NextRequest) {
     // Streamed, not buffered — the sibling files route does the same, for the
     // same reason: a 25 MB ceiling read into RAM (and then copied again into a
     // Uint8Array) is not something to hand a Jetson per request.
+    const range = parseRange(req.headers.get("range"), stat.size);
+    if (range) {
+      const partial = Readable.toWeb(
+        fs.createReadStream(safe, { start: range.start, end: range.end }),
+      ) as unknown as ReadableStream;
+      return new NextResponse(partial, {
+        status: 206,
+        headers: {
+          "Content-Type": contentType,
+          "Content-Length": String(range.end - range.start + 1),
+          "Content-Range": `bytes ${range.start}-${range.end}/${stat.size}`,
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "private, max-age=31536000, immutable",
+          "X-Content-Type-Options": "nosniff",
+          "Content-Security-Policy": "default-src 'none'; sandbox",
+        },
+      });
+    }
     const body = Readable.toWeb(fs.createReadStream(safe)) as unknown as ReadableStream;
     return new NextResponse(body, {
       headers: {
         "Content-Type": contentType,
         "Content-Length": String(stat.size),
+        // Advertised on every response, not only the partial ones: a media
+        // element reads this from the first, full-file reply and only asks for
+        // ranges afterwards. Without it the scrubber is dead however well the
+        // 206 path works.
+        "Accept-Ranges": "bytes",
         // Per-device, per-conversation content: keep it out of shared caches,
         // stop the browser sniffing it into something executable, and give it
         // no ambient authority if it is ever opened as a document.

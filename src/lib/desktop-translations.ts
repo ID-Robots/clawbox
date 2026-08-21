@@ -100,6 +100,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.generatedImage": "Generated image",
     "chat.generatingImage": "Generating image…",
     "chat.downloadImage": "Download image",
+    "chat.downloadAudio": "Download audio",
     "chat.imagePreview": "Image preview",
     "chat.closePreview": "Close preview",
     "chat.connectingPlaceholder": "Connecting...",

@@ -17,7 +17,7 @@ import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/li
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName, extractAudioAttachments } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -253,6 +253,10 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     const x = a[i], y = b[i]
     if (x.role !== y.role || x.text !== y.text || x.timestamp !== y.timestamp) return false
     if ((x.images?.length ?? 0) !== (y.images?.length ?? 0)) return false
+    // Without this a reply that gained its spoken half between two history
+    // reads compares equal, React skips the render, and the player never
+    // appears until something else forces one.
+    if ((x.audio?.length ?? 0) !== (y.audio?.length ?? 0)) return false
   }
   return true
 }
@@ -1186,7 +1190,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
             // text, not as a structured attachment — see lib/chat-media.ts.
-            const { text, images } = splitAssistantMedia(extractText(msg))
+            const { text, images, audio: directiveAudio } = splitAssistantMedia(extractText(msg))
+            // A spoken reply is a structured attachment part, not a MEDIA:
+            // line — see lib/chat-media.ts. Both are read; the harness uses
+            // the first and image generation the second.
+            const audio = [...extractAudioAttachments(msg), ...directiveAudio]
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
@@ -1195,23 +1203,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // the real reply replaces it.
             // An image with no caption is a real reply, not an ack — it must
             // not be mistaken for the empty "Sent." case and refetched away.
-            const isAckOnly = (!text && images.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            // Audio counts as content for the same reason a picture does: the
+            // harness delivers a spoken reply as its own message whose text is
+            // a repeat of the one already on screen, and treating that as an
+            // empty ack threw the recording away and refetched history instead.
+            const isAckOnly = (!text && images.length === 0 && audio.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
             // The reconcile often wins the race now: `session.message` lands
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
             // the reply twice — once with the picture, once without.
-            const alreadyShownWithMedia = images.length === 0 && text.length > 0 &&
+            const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && text.length > 0 &&
               messagesRef.current.some(m =>
-                m.role === 'assistant' && m.text === text && (m.images?.length ?? 0) > 0)
+                m.role === 'assistant' && m.text === text && ((m.images?.length ?? 0) > 0 || (m.audio?.length ?? 0) > 0))
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
             // envelope carrying a MEDIA: line must be dropped whole, not split
             // into a picture plus its own machinery.
             if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(extractText(msg), msg)) {
-              setMessages(prev => [...prev, {
-                role: 'assistant', text, timestamp: Date.now(), images,
-              }])
+              setMessages(prev => {
+                // The spoken half arrives as a SECOND message repeating the
+                // text of the one already rendered. Appending it verbatim
+                // showed the answer twice, once silent and once playable, so
+                // the audio is folded into the bubble it belongs to when the
+                // text matches and that bubble has none yet.
+                const last = prev[prev.length - 1]
+                if (audio.length > 0 && !images.length && last && last.role === 'assistant'
+                    && last.text === text && (last.audio?.length ?? 0) === 0) {
+                  return [...prev.slice(0, -1), { ...last, audio }]
+                }
+                return [...prev, { role: 'assistant' as const, text, timestamp: Date.now(), images, audio }]
+              })
               if (text) saveMascotSnippet(text)
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
@@ -1409,10 +1431,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
         // Replayed history carries the same MEDIA: lines the live turn did, so
         // a reopened chat shows its pictures rather than a bare caption.
-        const { text, images } = splitAssistantMedia(raw)
-        if (!text && images.length === 0) continue
+        const { text, images, audio: directiveAudio } = splitAssistantMedia(raw)
+        const audio = [...extractAudioAttachments(m), ...directiveAudio]
+        if (!text && images.length === 0 && audio.length === 0) continue
+        // Replayed history repeats the live path's two-message shape: the
+        // spoken reply is stored as its own message carrying the same text.
+        // Folded into the preceding bubble so a reopened chat shows one answer
+        // with a player rather than the answer twice.
+        const previous = chatMsgs[chatMsgs.length - 1]
+        if (audio.length > 0 && images.length === 0 && previous && previous.role === 'assistant'
+            && previous.text === text && (previous.audio?.length ?? 0) === 0) {
+          previous.audio = audio
+          continue
+        }
         chatMsgs.push({
-          role: 'assistant', text, timestamp, images,
+          role: 'assistant', text, timestamp, images, audio,
         })
       }
       // Preserve any optimistic user turns appended after this load was
@@ -1880,11 +1913,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // way whichever edition answered. A reply that is nothing BUT a media
       // line is still a real answer — don't call it '(no response)'.
       const hermesReply = splitAssistantMedia(typeof data.text === 'string' ? data.text : '')
+      const hermesHasMedia = hermesReply.images.length > 0 || hermesReply.audio.length > 0
       setMessages(prev => [...prev, {
         role: 'assistant',
-        text: hermesReply.text || (hermesReply.images.length > 0 ? '' : '(no response)'),
+        text: hermesReply.text || (hermesHasMedia ? '' : '(no response)'),
         timestamp: Date.now(),
         images: hermesReply.images,
+        audio: hermesReply.audio,
       }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
@@ -2951,6 +2986,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   </div>
                 )}
                 {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
+                {msg.audio && msg.audio.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
+                    {msg.audio.map((src, j) => (
+                      // The browser's own player, not a bespoke one: play,
+                      // pause, scrub and duration are what "a normal playable
+                      // message" means, and every one of them already works
+                      // here and is reachable from the keyboard.
+                      //
+                      // `preload="metadata"` so the duration is on screen
+                      // before anything is played, without pulling the whole
+                      // file down for a reply nobody listens to. The src is
+                      // this box's own media route, which answers Range
+                      // requests — without that the scrubber does not move.
+                      //
+                      // Keyed by the URL: the harness names every file with a
+                      // uuid, so re-rendering a transcript cannot hand one
+                      // player another player's audio.
+                      <audio
+                        key={src}
+                        data-testid="chat-audio"
+                        controls
+                        preload="metadata"
+                        src={src}
+                        style={{ width: '100%', maxWidth: 280, height: 34 }}
+                      >
+                        <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
+                      </audio>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           );
