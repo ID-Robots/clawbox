@@ -43,10 +43,11 @@ Everything ClawBox cares about lives under `/home/clawbox`. The app itself is a 
 | | System update | Factory reset |
 |---|---|---|
 | App code (`/home/clawbox/clawbox` tracked files) | **hard-reset to the release** | hard-reset + wiped state |
-| `data/` (settings, tokens, webapps) | ✅ kept | ❌ wiped (except `network.env`) |
+| `data/` (settings, tokens, webapps) | ✅ kept | ❌ wiped (except `network.env` and `llamacpp/models`) |
 | `.env` | ✅ kept | ✅ kept (gitignored, not in wipe list) |
 | `.update-branch` (channel pin) | ✅ kept | ✅ kept |
 | `~/.openclaw` (AI config, credentials, chats) | ✅ kept | ❌ wiped |
+| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except `hermes-agent` (the agent install — can't be re-downloaded in AP mode) |
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
 | Ollama models | ✅ kept | ❌ deleted |
 | Saved Wi-Fi networks | ✅ kept | ❌ deleted (box returns to AP mode) |

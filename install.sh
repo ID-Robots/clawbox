@@ -1128,16 +1128,172 @@ step_openclaw_setup() {
 # harness to switch to).
 step_hermes_install() {
   has_hermes_harness || return 0
-  if [ -x "$CLAWBOX_HOME/.local/bin/hermes" ]; then
-    echo "  Hermes already installed ($("$CLAWBOX_HOME/.local/bin/hermes" --version 2>/dev/null | head -1))"
+  local shim="$CLAWBOX_HOME/.local/bin/hermes"
+  local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
+  local venv_python="$agent_dir/venv/bin/python"
+  local installed=""
+  # One constant so the reachability precheck and the install itself can never
+  # drift onto different hosts.
+  local installer_url="https://hermes-agent.nousresearch.com/install.sh"
+
+  # `$shim` alone is NOT evidence of an install: it is a 4-line wrapper in
+  # ~/.local/bin that execs $venv_python, and the agent it points at lives
+  # under ~/.hermes. A factory reset removed ~/.hermes and left the shim, so
+  # the old `[ -x "$shim" ]` guard printed "Hermes already installed ()" — an
+  # EMPTY version probe inside an echo nobody looked at — and returned success
+  # without reinstalling. Every later repair, a full install.sh re-run
+  # included, hit the same guard and did nothing: that is what turned a
+  # recoverable box into a reflash.
+  #
+  # So: require the interpreter to exist AND the agent to actually answer
+  # `--version`. Anything less is treated as "not installed".
+  if [ -x "$shim" ] && [ -x "$venv_python" ]; then
+    # Probed AS THE CLAWBOX USER, deliberately. `hermes` is a Python entry
+    # point and CPython writes __pycache__/*.pyc next to the sources it
+    # imports; probing as root left root-owned .pyc files inside a
+    # clawbox-owned tree, and the factory-reset route (which runs as clawbox)
+    # then hit EACCES and aborted MID-WIPE with the agent half deleted. HOME is
+    # passed explicitly: hermes resolves ~/.hermes from $HOME, and this
+    # function's HOME is /root.
+    #
+    # `|| installed=""` is NOT decoration. Under `set -euo pipefail` an
+    # assignment takes the exit status of its command substitution, so the
+    # false-negative probe this step exists to survive would kill install.sh
+    # right here — before the reachability check, before any repair, printing
+    # nothing — taking `install.sh --step hermes_install` (the documented
+    # repair command) and every later step of a full install down with it.
+    installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      "$shim" --version 2>/dev/null | head -1) || installed=""
+  fi
+
+  if [ -n "$installed" ]; then
+    echo "  Hermes already installed ($installed)"
     return 0
   fi
+
+  # NOTHING above this line has modified the disk, and nothing below it does
+  # until the installer is known to be fetchable. step_post_update now calls
+  # this step on EVERY update on EVERY hermes/dual box, so a false-negative
+  # probe on a device with no internet must not be able to turn a healthy agent
+  # into no agent — the very outcome this file exists to prevent.
+  if ! runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    curl -fsS --max-time 30 -o /dev/null "$installer_url"; then
+    echo "  Warning: cannot reach the Hermes installer — leaving the existing agent untouched" >&2
+    return 0
+  fi
+
+  # The husk has to be out of the way before the reinstall: the upstream
+  # installer refuses outright with "Directory exists but is not a git
+  # repository" when $agent_dir survives as an empty shell — exactly what a
+  # factory reset leaves behind — so without this the box stays bricked.
+  #
+  # MOVED ASIDE, never deleted, and only until the outcome is known: the
+  # install either succeeds (husk dropped below) or fails (husk moved back), so
+  # the device is never left with two copies and never with none, and a wrong
+  # diagnosis costs nothing. Renaming as ROOT is also required — the root-owned
+  # __pycache__ above is not movable by the clawbox user the installer runs as.
+  if [ -e "$agent_dir" ]; then
+    echo "  Hermes is present but not runnable — reinstalling the agent"
+    if [ -e "$agent_dir.broken" ]; then
+      # An existing husk means an earlier repair was interrupted between the
+      # move and the restore: the husk is the owner's original checkout and
+      # $agent_dir is whatever the interrupted installer left behind. The
+      # original is the copy worth keeping; the partial tree is not. Deleting
+      # the husk here instead would destroy the last known-good agent.
+      if rm -rf "$agent_dir"; then
+        echo "  Kept the earlier husk at $agent_dir.broken and discarded the partial install"
+      else
+        echo "  Warning: could not clear the partial install at $agent_dir — leaving both in place" >&2
+        return 0
+      fi
+    elif mv "$agent_dir" "$agent_dir.broken"; then
+      echo "  Moved the unusable agent to $agent_dir.broken"
+    else
+      echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
+      return 0
+    fi
+    # The husk MUST be deletable by the clawbox user: the factory-reset route
+    # runs as clawbox and keeps only the exact name "hermes-agent", so a
+    # root-owned __pycache__ inside it fails the unlink with EACCES — and a
+    # reset that reports a failure aborts BEFORE the password/WiFi/hostname
+    # reset and the reboot. Non-fatal: errexit is live at this function's
+    # bare call sites and the agent is moved aside right now, so aborting
+    # here would leave the device with nothing installed at all.
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$agent_dir.broken" \
+      || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
+  fi
+
   echo "  Installing Hermes agent (NousResearch)..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
-  # the clawbox user so it lands in ~/.hermes and ~/.local/bin.
-  runuser -u "$CLAWBOX_USER" -- bash -c \
-    'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' \
+  # the clawbox user so it lands in ~/.hermes and ~/.local/bin. The URL is
+  # passed as an argument rather than spliced into the -c string, so it stays a
+  # single source of truth without shell-quoting exposure. `-o pipefail`
+  # because `curl | bash` otherwise exits 0 when the fetch fails (bash just
+  # reads empty stdin) and the warning below could never fire; the timeouts
+  # because the caller is a systemd unit with TimeoutStartSec=7200.
+  runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
+    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash' _ "$installer_url" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
+
+  # Verify rather than assume. The installer is fetched over the network and is
+  # non-fatal above, so a silent failure here would otherwise be discovered by
+  # the owner as a crash-looping dashboard. `|| installed=""` for the same
+  # errexit reason as the first probe: when the install laid down nothing, this
+  # runs a shim that does not exist and exits 127.
+  installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+    "$shim" --version 2>/dev/null | head -1) || installed=""
+  if [ -n "$installed" ]; then
+    echo "  Hermes installed ($installed)"
+    # Diagnosis confirmed, so the insurance copy goes: it costs ~1.9 GB
+    # (checkout plus venv) on a disk-constrained device and is one more
+    # directory a later factory reset has to be able to delete.
+    rm -rf "$agent_dir.broken"
+  else
+    echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
+    # The diagnosis may simply have been wrong — an empty probe on a loaded
+    # device is exactly the case above. Put the original back: whatever the
+    # failed install left behind is worth less than what was there before, and
+    # parking the only copy under another name would leave the owner with no
+    # working agent AND no automatic second chance on the next update.
+    if [ -e "$agent_dir.broken" ]; then
+      # Both steps guarded: a failed rm followed by mv would NEST the original
+      # inside the failed install and report success.
+      if rm -rf "$agent_dir" && mv "$agent_dir.broken" "$agent_dir"; then
+        echo "  Restored the previous agent from $agent_dir.broken" >&2
+      else
+        echo "  Warning: the previous agent is at $agent_dir.broken — move it back by hand" >&2
+      fi
+    fi
+  fi
+  # Explicit: the last command above is a test that is FALSE on the happy path,
+  # and step_post_update reports any non-zero return as a failed step.
+  return 0
+}
+
+# Re-cache ONLY the offline Gemma GGUF.
+#
+# Split out of step_llamacpp_install so the in-app updater can dispatch it:
+# that step also does apt work, a pip install and (worst case) a ~19-minute
+# native llama.cpp build, none of which an update needs. This one touches
+# nothing but the model file and is a fast no-op when it is already there,
+# which is what makes it safe to run on every update.
+#
+# Not gated on has_hermes_harness: the factory-reset route wipes data/ on EVERY
+# edition, so an openclaw box lost the same 3.2 GB model and needs the same
+# repair.
+step_llamacpp_model() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping Gemma model re-cache"
+    return 0
+  fi
+  # `hf` is installed by step_llamacpp_install. If it was never run on this
+  # device there is no model to restore and nothing this step can do — say so
+  # instead of failing on a missing binary.
+  if ! as_clawbox_login "command -v hf" &>/dev/null; then
+    echo "  Hugging Face CLI not installed — skipping Gemma model re-cache"
+    return 0
+  fi
+  ensure_llamacpp_model_cached
 }
 
 # The OpenClaw gateway is an UNAUTHENTICATED agent control surface on
@@ -1982,6 +2138,25 @@ step_post_update() {
   # clawbox-gateway as the active single source of truth.
   step_gateway_setup || echo "  Warning: gateway_setup step failed (non-fatal)"
   step_gateway_legacy_state_recovery || echo "  Warning: gateway_legacy_state_recovery step failed (non-fatal)"
+  # Repair the two assets a factory reset performed by a pre-fix build deleted:
+  # the Hermes agent install (~/.hermes/hermes-agent) and the offline Gemma
+  # GGUF (data/llamacpp). Neither `git pull && build` nor any fixup above put
+  # them back, so before this an in-app UPDATE could not heal an
+  # already-bricked device — the owner needed SSH, which is not a support path
+  # for an appliance.
+  #
+  # Placed here, at the end of post_update, because both need the network the
+  # earlier steps have already brought back, and because the updater's
+  # `hermes_edition` step runs immediately AFTER this one and hard-fails when
+  # ~/.local/bin/hermes is not runnable — so the agent has to be repaired first
+  # or the repair and the provisioning would fight each other.
+  #
+  # Both are fast no-ops on a healthy box: step_hermes_install returns after a
+  # `--version` probe, step_llamacpp_model after a single `[ -f ]` test.
+  # step_hermes_install self-gates on has_hermes_harness; step_llamacpp_model
+  # deliberately does not (see its comment).
+  step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
+  step_llamacpp_model || echo "  Warning: llamacpp_model step failed (non-fatal)"
   # Hermes re-provisioning is deliberately NOT called here. The in-app updater
   # dispatches `hermes_edition` as its own step immediately after this one, so a
   # failure is reported instead of swallowed by `|| echo "(non-fatal)"`.
@@ -3193,7 +3368,7 @@ step_validate_services() {
 
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
-  bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install
+  bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
   chromium_install ai_tools_install vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models
   # Edition steps must be dispatchable or no in-app update can ever re-bake the

@@ -16,8 +16,38 @@ const execFile = promisify(execFileCb);
 export const dynamic = "force-dynamic";
 const OPENCLAW_DIR = "/home/clawbox/.openclaw";
 
-// Files to preserve during factory reset (hardware-specific, auto-generated)
-const PRESERVE_FILES = new Set(["network.env"]);
+// Entries under DATA_DIR that survive a factory reset. A `keep` set means the
+// entry survives this top-level pass as a CONTAINER only and is then wiped
+// entry-by-entry down to those names; without one it is kept as it is.
+const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
+  // Hardware-specific and auto-generated.
+  { rel: "network.env" },
+  {
+    // models/ holds the 3.2 GB offline Gemma GGUF — the same category as the
+    // ~/.cache/huggingface voice models the home wipe keeps below: a reset
+    // device reboots into AP mode with no internet, so a deleted model cannot
+    // be re-downloaded and the box comes up with no on-device AI at all.
+    // Weights are pure cache, not owner state — no tokens, no chats, no
+    // prompts — so keeping them hands the next owner nothing. (It also carries
+    // ~24 KB of `hf` download bookkeeping; re-check that if huggingface_hub
+    // ever starts caching credentials under a --local-dir.)
+    //
+    // Its siblings are a different matter: llamacpp/ is also llama-server's
+    // runtime scratch (server.pid, server.log), and a log of a LOCAL MODEL is
+    // owner-adjacent by nature. The shipped server config keeps prompt text
+    // out of that log today; narrowing the keep to models/ is what makes that
+    // stay true when the config changes.
+    //
+    // Same KNOWN RESIDUAL as the ~/.hermes exception below, with the same
+    // verdict: a previous owner with a shell can plant a file in a preserved
+    // directory and it survives the reset.
+    rel: "llamacpp",
+    keep: new Set(["models"]),
+  },
+];
+const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
+
+const HERMES_KEEP = new Set(["hermes-agent"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
@@ -96,13 +126,14 @@ async function deleteWifiConnections(): Promise<void> {
   }
 }
 
-async function removeDirectoryContents(dir: string): Promise<string[]> {
+async function removeDirectoryContents(dir: string, keep?: ReadonlySet<string>): Promise<string[]> {
   // Background processes (npm install, plugin runtimes) can recreate files
   // between readdir and rm; one retry catches that.
   for (let attempt = 0; attempt < 2; attempt++) {
     let entries: string[];
     try {
       entries = await fs.readdir(dir);
+      if (keep) entries = entries.filter((entry) => !keep.has(entry));
     } catch (err: unknown) {
       if (err && typeof err === "object" && "code" in err && err.code === "ENOENT") return [];
       throw err;
@@ -202,26 +233,68 @@ const HOME_REMOVE_PATHS = [
   ".cache/huggingface/stored_tokens",
   // VS Code server state/extensions from the VSCode app.
   ".local/share/code-server",
-  // Hermes edition state — the Hermes equivalent of ~/.openclaw, and the single
-  // biggest thing a resold box used to hand its next owner. It holds
-  // config.yaml (the providers.clawai billing token, the dashboard's session
-  // SIGNING SECRET and the scrypt password_hash, and a pointer to the chat DB),
-  // config.yaml.bak-* (full prior copies of the same), .env (~24 KB of provider
-  // keys), auth.json (OAuth tokens), plus memories/, logs/, cron/ and pairing/.
-  // The whole directory goes, not a per-file list: the .bak-* copies alone show
-  // how easily a surgical list misses a full duplicate of every secret.
-  //
-  // Nothing preserved. Re-provisioning is automatic — the dashboard unit runs
-  // scripts/setup-hermes-dashboard-auth.sh as an ExecStartPre, which recreates
-  // config.yaml and a fresh password/hash/signing-secret on the next boot.
-  // (Before that ExecStartPre existed, wiping this would have left the
-  // dashboard with no auth provider on its non-loopback bind and crash-looped
-  // it forever, which is why the wipe had to land together with it.)
-  ".hermes",
 ];
 // User-visible folders the Files app exposes (and recreates empty on demand):
 // wipe the contents, keep the directories.
 const HOME_CONTENT_WIPE_DIRS = ["Documents", "Downloads", "Desktop"];
+
+// Directories wiped entry-by-entry with a NAMED exception list. Same
+// remove-everything default as HOME_REMOVE_PATHS — the exception is spelled
+// out and justified, and anything new that appears in the directory is
+// removed by default rather than kept by default.
+const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<string> }> = [
+  {
+    // Hermes edition state — the Hermes equivalent of ~/.openclaw, and the
+    // single biggest thing a resold box could hand its next owner: config.yaml
+    // (billing token, the dashboard session SIGNING SECRET, the scrypt
+    // password_hash), config.yaml.bak-*, .env (~24 KB of provider keys),
+    // auth.json (OAuth tokens), memories/, logs/, cron/, pairing/, sessions/,
+    // skills/ and the state/projects SQLite files. All of it still goes: this
+    // is a wipe with ONE exception, not a keep-list.
+    //
+    // That exception is hermes-agent/, and it is not owner state at all. It is
+    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus the
+    // Python venv that ~/.local/bin/hermes (a 4-line shim) execs. Deleting it
+    // was the factory-reset defect this exception fixes: the shim survives the
+    // wipe (it lives in ~/.local/bin), so a reset box was left with a `hermes`
+    // command whose interpreter no longer existed:
+    //   ~/.local/bin/hermes: line 4:
+    //   ~/.hermes/hermes-agent/venv/bin/python: No such file or directory
+    // …and clawbox-hermes-dashboard.service (Restart=always) crash-looping on
+    // status 127 forever. Nothing at boot reinstalls it, and a reset device is
+    // in AP mode with no internet to re-download it — a reflash.
+    //
+    // It carries no secrets to leak: upstream source and a venv, byte-identical
+    // on every box of this SKU.
+    //
+    // KNOWN RESIDUAL, accepted deliberately: a previous owner with a shell
+    // could plant a file inside this one preserved directory and it would
+    // survive the reset. The obvious guard — wipe the checkout unless `git
+    // status --porcelain` is empty — was tried and rejected. Both of its
+    // outcomes are worse than the hole: wiping a "dirty" checkout recreates
+    // this very brick on every box of the SKU at once the day upstream starts
+    // writing into its own checkout (whether it stays pristine is
+    // NousResearch's choice, not ours), and reporting it as a failure instead
+    // aborts the reset (500, no reboot) so the box cannot be reset at all. It
+    // would not stop the attacker either: the same shell can add the payload
+    // to .git/info/exclude or drop it in venv/, gitignored upstream and
+    // invisible to --porcelain. Re-provisioning the agent from upstream after
+    // a reset is the real fix, and it needs network this device does not have
+    // at reset time.
+    //
+    // Re-provisioning of the removed state is automatic: the dashboard unit
+    // runs scripts/setup-hermes-dashboard-auth.sh as an ExecStartPre, which
+    // recreates config.yaml and a fresh password/hash/signing-secret on the
+    // next boot.
+    //
+    // Wiping entry-by-entry rather than `rm -rf ~/.hermes` also makes the reset
+    // survivable: each child is removed independently, so one undeletable entry
+    // is reported as a failure instead of aborting the whole subtree with the
+    // agent already half deleted.
+    rel: ".hermes",
+    keep: HERMES_KEEP,
+  },
+];
 
 /**
  * Wipe previous-owner state from the home directory so a factory-reset
@@ -240,6 +313,10 @@ async function wipeHomeUserState(): Promise<string[]> {
   );
   for (const rel of HOME_CONTENT_WIPE_DIRS) {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel));
+    failures.push(...dirFailures.map((f) => `${rel}/${f}`));
+  }
+  for (const { rel, keep } of HOME_CONTENT_WIPE_KEEP) {
+    const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel), keep);
     failures.push(...dirFailures.map((f) => `${rel}/${f}`));
   }
   // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
@@ -319,7 +396,7 @@ export async function POST() {
       const entries = await fs.readdir(DATA_DIR);
       const results = await Promise.allSettled(
         entries
-          .filter(entry => !PRESERVE_FILES.has(entry))
+          .filter(entry => !DATA_KEEP_NAMES.has(entry))
           .map(entry => fs.rm(path.join(DATA_DIR, entry), { recursive: true, force: true }))
       );
       for (const r of results) {
@@ -327,6 +404,13 @@ export async function POST() {
       }
     } catch (err: unknown) {
       if (!(err && typeof err === "object" && "code" in err && err.code === "ENOENT")) throw err;
+    }
+    // …then take each container keep down to its exception list.
+    for (const { rel, keep } of DATA_KEEP) {
+      if (!keep) continue;
+      dataFailures.push(
+        ...(await removeDirectoryContents(path.join(DATA_DIR, rel), keep)).map((f) => `${rel}/${f}`),
+      );
     }
 
     const openclawFailures = await removeDirectoryContents(OPENCLAW_DIR);
