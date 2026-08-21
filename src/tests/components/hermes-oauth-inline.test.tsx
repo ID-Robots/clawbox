@@ -225,6 +225,73 @@ describe("HermesProviderConfig inline OAuth", () => {
     expect(await screen.findByRole("button", { name: /^Sign in$/ })).toBeInTheDocument();
   });
 
+  it("cancels a session minted by a /start that resolves after the user moved on", async () => {
+    // Own stub: /start must stay pending until after the user abandons the
+    // flow (switches rows — the only abandon affordance while stage is
+    // "starting"), so the generation-token branch is what handles the late
+    // session, not the normal reset path.
+    let resolveStart!: () => void;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "/setup-api/hermes/clawai") {
+        return {
+          ok: true,
+          json: async () => ({ hasToken: false, tier: "flash", tierStored: null, active: false, model: "" }),
+        } as Response;
+      }
+      if (url === "/setup-api/hermes/oauth") {
+        return {
+          ok: true,
+          json: async () => ({
+            providers: [{ id: "anthropic", name: "Anthropic", loggedIn: false, flow: "pkce" }],
+          }),
+        } as Response;
+      }
+      if (url === "/setup-api/hermes/oauth/start" && method === "POST") {
+        return new Promise<Response>((resolve) => {
+          resolveStart = () =>
+            resolve({
+              ok: true,
+              json: async () => ({
+                session_id: "sess-late-1",
+                flow: "pkce",
+                auth_url: "https://claude.ai/oauth/authorize?x=1",
+                expires_in: 600,
+              }),
+            } as Response);
+        });
+      }
+      if (url === "/setup-api/hermes/oauth/cancel") {
+        return { ok: true, json: async () => ({ ok: true }) } as Response;
+      }
+      if (url === "/setup-api/hermes/models") {
+        return { ok: true, json: async () => ({ provider: "openrouter" }) } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Sign in$/ }));
+    await screen.findByText("Starting sign-in with Anthropic...");
+
+    // Abandon while /start is still in flight, then let it resolve late.
+    fireEvent.click(screen.getByRole("radio", { name: /OpenRouter/ }));
+    resolveStart();
+
+    await waitFor(() => {
+      const cancelCall = fetchMock.mock.calls.find(([u]) => String(u) === "/setup-api/hermes/oauth/cancel");
+      expect(cancelCall).toBeTruthy();
+      expect(JSON.parse(String(cancelCall?.[1]?.body))).toEqual({ sessionId: "sess-late-1" });
+    });
+    // The dead flow must not resurrect: no paste step, no consent tab.
+    expect(screen.queryByPlaceholderText("Paste the code from Anthropic")).not.toBeInTheDocument();
+    expect(openMock).not.toHaveBeenCalled();
+  });
+
   it("copies the device code and confirms with Copied", async () => {
     stubFetch();
     const writeText = vi.fn().mockResolvedValue(undefined);

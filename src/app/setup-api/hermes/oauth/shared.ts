@@ -28,27 +28,45 @@ export function isValidSessionId(value: unknown): value is string {
 // body-size limit, and this server runs on a memory-constrained Jetson.
 // Anything the wizard legitimately sends is under a kilobyte.
 export const MAX_BODY_BYTES = 16 * 1024;
+// Whole-body deadline on top of the byte cap: Node's server-level
+// requestTimeout still allows five minutes of dribbled chunks, each arriving
+// just often enough to hold a handler open. A wizard POST that hasn't fully
+// arrived within this window is not a wizard POST.
+const BODY_READ_TIMEOUT_MS = 10_000;
 
-/** Parse a JSON object body, refusing oversized or malformed input with null. */
+/** Parse a JSON object body, refusing oversized, stalled or malformed input
+ *  with null. */
 export async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
   const declared = Number(request.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
   let text: string;
   if (request.body) {
-    // Read the stream with a running cap so a chunked body with no (or a lying)
-    // content-length can never be buffered past the limit.
+    // Read the stream with a running byte cap (a chunked body with no — or a
+    // lying — content-length can never be buffered past the limit) and a
+    // deadline (a read that stalls can never hold the handler open).
     const reader = request.body.getReader();
     const chunks: Uint8Array[] = [];
     let received = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.byteLength;
-      if (received > MAX_BODY_BYTES) {
-        await reader.cancel().catch(() => {});
-        return null;
+    const deadlineAt = Date.now() + BODY_READ_TIMEOUT_MS;
+    try {
+      for (;;) {
+        const remaining = deadlineAt - Date.now();
+        if (remaining <= 0) throw new Error("body read deadline");
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const step = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("body read deadline")), remaining);
+          }),
+        ]).finally(() => clearTimeout(timer));
+        if (step.done) break;
+        received += step.value.byteLength;
+        if (received > MAX_BODY_BYTES) throw new Error("body too large");
+        chunks.push(step.value);
       }
-      chunks.push(value);
+    } catch {
+      await reader.cancel().catch(() => {});
+      return null;
     }
     text = Buffer.concat(chunks).toString("utf8");
   } else {
