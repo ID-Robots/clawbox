@@ -38,6 +38,54 @@ function multipart(filename: string, content: Buffer): Buffer {
   return Buffer.concat([head, content, tail]);
 }
 
+/**
+ * The same body, but delivered in separate chunks with a gap between them.
+ *
+ * A single-buffer body hands busboy everything at once, which hides the
+ * ordering that matters here: a real connection delivers a multipart request
+ * over several reads, so a rejection can land while parts are still arriving.
+ */
+function chunkedRequest(chunks: Buffer[]): NextRequest {
+  const body = new ReadableStream({
+    async start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(new Uint8Array(chunk));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      controller.close();
+    },
+  });
+  return new NextRequest("http://localhost/setup-api/chat/attachments", {
+    method: "POST",
+    headers: { "content-type": `multipart/form-data; boundary=${BOUNDARY}` },
+    body,
+    duplex: "half",
+  } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+}
+
+/** `n` form fields, as their own chunk. */
+function fieldParts(n: number): Buffer {
+  const parts: Buffer[] = [];
+  for (let i = 0; i < n; i++) {
+    parts.push(Buffer.from(
+      `--${BOUNDARY}\r\nContent-Disposition: form-data; name="f${i}"\r\n\r\nv${i}\r\n`,
+    ));
+  }
+  return Buffer.concat(parts);
+}
+
+/** A trailing file part plus the closing boundary, as its own chunk. */
+function filePart(filename: string, content: Buffer): Buffer {
+  return Buffer.concat([
+    Buffer.from(
+      `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\n`
+        + "Content-Type: application/octet-stream\r\n\r\n",
+    ),
+    content,
+    Buffer.from(`\r\n--${BOUNDARY}--\r\n`),
+  ]);
+}
+
 function request(body: Buffer, contentType = `multipart/form-data; boundary=${BOUNDARY}`): NextRequest {
   return new NextRequest("http://localhost/setup-api/chat/attachments", {
     method: "POST",
@@ -191,4 +239,56 @@ describe("/setup-api/chat/attachments", () => {
     const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
     expect(listed).toEqual([]);
   });
+
+  it("stages nothing after a rejection that arrives before the file does", async () => {
+    // busboy's fields limit ends `field` events but not `file` ones. Rejecting
+    // without tearing the parser down let the route answer 400 and then accept
+    // the file anyway, leaving a staged file on the customer's disk that no
+    // response ever named and nothing would come back for. Only reproducible
+    // with a chunked body: in one buffer the `file` event lands early enough
+    // for the catch to still see the path and clean up by luck.
+    const res = await POST(chunkedRequest([fieldParts(9), filePart("orphan.png", PNG)]));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("Too many form fields");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
+    expect(listed).toEqual([]);
+  });
+
+  it("answers, and cleans up, when the connection dies mid-file", async () => {
+    // A source error used to leave busboy and the file stream alive, so the
+    // write never settled and the awaited cleanup never returned: the route
+    // produced no response at all. The race below fails the test rather than
+    // hanging the suite.
+    const body = new ReadableStream({
+      async start(controller) {
+        controller.enqueue(new Uint8Array(Buffer.from(
+          `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="half.bin"\r\n`
+            + "Content-Type: application/octet-stream\r\n\r\n",
+        )));
+        controller.enqueue(new Uint8Array(Buffer.alloc(1024, 7)));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        controller.error(new Error("client went away"));
+      },
+    });
+    const req = new NextRequest("http://localhost/setup-api/chat/attachments", {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${BOUNDARY}` },
+      body,
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]);
+
+    const res = await Promise.race([
+      POST(req),
+      new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error("route never answered")), 4000)),
+    ]);
+
+    // Their connection broke, not their request: this is ours to report as 500.
+    expect(res.status).toBe(500);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
+    expect(listed).toEqual([]);
+  }, 10000);
 });

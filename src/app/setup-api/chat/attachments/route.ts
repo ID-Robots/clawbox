@@ -160,25 +160,62 @@ export async function POST(req: NextRequest) {
       // The file stream currently being written, so an abort can stop it at the
       // source rather than wait for bytes nobody wants any more.
       let activeFileStream: Readable | null = null;
+      // Assigned once the request body is adapted, below. Hoisted so the abort
+      // helper can reach it: nothing can emit before `pipe`, so it is never
+      // still null by the time an abort can fire.
+      let nodeStream: Readable | null = null;
 
-      const rejectOnce = (error: unknown) => {
+      /**
+       * The single way this upload fails.
+       *
+       * Rejecting on its own is not enough, because rejecting stops nothing.
+       * Two failures were reproduced against the previous reject-and-hope
+       * version:
+       *
+       *  - `fieldsLimit` ends `field` events but not `file` ones. With the body
+       *    split across chunks the way a real connection delivers it, the route
+       *    answered 400 and busboy then handed over the file part anyway,
+       *    staging a file on the customer's disk that nothing would ever come
+       *    back for. It only looked clean under test because a single-chunk
+       *    body let the `file` event land before the catch read `written`.
+       *  - a source error mid-file (client hung up) left busboy and the file
+       *    stream alive, so the write never settled, the awaited cleanup never
+       *    returned, and the route answered *nothing at all* — not a slow 500,
+       *    a permanent hang.
+       *
+       * So every limit, parser, file, write and source error comes through
+       * here, and it tears down all three stages before rejecting. Destroying
+       * the file stream with the error is what makes an in-flight write settle,
+       * which is what lets the cleanup unlink the partial file rather than wait
+       * on it forever. Idempotent, because the teardown makes other handlers
+       * fire in turn.
+       */
+      const fail = (error: unknown) => {
         if (settled) return;
         settled = true;
+        const cause = error instanceof Error ? error : new Error(String(error));
+        nodeStream?.unpipe(busboy);
+        nodeStream?.destroy();
+        activeFileStream?.destroy(cause);
+        busboy.destroy();
         reject(error);
       };
 
       // busboy stops emitting past a limit rather than failing, so a request
       // that trips one would otherwise look like a well-formed short upload.
-      busboy.on("filesLimit", () => rejectOnce(new BadUpload("Only one file per request")));
-      busboy.on("partsLimit", () => rejectOnce(new BadUpload("Too many multipart parts")));
-      busboy.on("fieldsLimit", () => rejectOnce(new BadUpload("Too many form fields")));
+      busboy.on("filesLimit", () => fail(new BadUpload("Only one file per request")));
+      busboy.on("partsLimit", () => fail(new BadUpload("Too many multipart parts")));
+      busboy.on("fieldsLimit", () => fail(new BadUpload("Too many form fields")));
 
       busboy.on("file", (_field, fileStream, info) => {
         sawFile = true;
+        // Registered before the first thing that can reject, so an abort on
+        // this part stops it at the source instead of leaving it draining.
+        activeFileStream = fileStream as unknown as Readable;
+        fileStream.on("error", fail);
         const leaf = safeLeafName(info.filename);
         if (!leaf) {
-          fileStream.resume();
-          rejectOnce(new BadUpload("Invalid filename"));
+          fail(new BadUpload("Invalid filename"));
           return;
         }
         // Storage name is ours, display name is theirs. Deriving the path from
@@ -190,8 +227,7 @@ export async function POST(req: NextRequest) {
         const storageName = `${randomUUID()}-${leaf}`;
         const dest = resolveDest(dirReal, storageName);
         if (!dest) {
-          fileStream.resume();
-          rejectOnce(new BadUpload("Invalid destination"));
+          fail(new BadUpload("Invalid destination"));
           return;
         }
         fileName = leaf;
@@ -199,20 +235,19 @@ export async function POST(req: NextRequest) {
         written = dest;
         // busboy raises `limit` and then ends the stream, so the pipeline would
         // otherwise resolve on a truncated file and hand back a path to it.
-        activeFileStream = fileStream as unknown as Readable;
-        fileStream.on("limit", () => rejectOnce(new BadUpload("File exceeds the size limit", 413)));
+        fileStream.on("limit", () => fail(new BadUpload("File exceeds the size limit", 413)));
         // "wx": never clobber. A path we just generated should not exist, and
         // if it does, something is wrong enough that overwriting is the worst
         // available answer.
         const write = pipeline(fileStream, fs.createWriteStream(dest, { flags: "wx" })).then(() => {});
         writes.push(write);
         pendingWrites.push(write);
-        write.catch(rejectOnce);
+        write.catch(fail);
       });
 
       busboy.on("finish", () => {
         if (!sawFile) {
-          rejectOnce(new BadUpload("No file part"));
+          fail(new BadUpload("No file part"));
           return;
         }
         void Promise.all(writes)
@@ -221,30 +256,23 @@ export async function POST(req: NextRequest) {
             settled = true;
             resolve({ name: fileName, path: destPath });
           })
-          .catch(rejectOnce);
+          .catch(fail);
       });
-      busboy.on("error", rejectOnce);
+      busboy.on("error", fail);
 
-      const nodeStream = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+      const source = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
+      nodeStream = source;
       // Total-request guard. Per-file and per-field limits leave the sum
       // unbounded, so count what actually arrives and cut the stream off.
       let receivedBytes = 0;
-      nodeStream.on("data", (chunk: Buffer) => {
+      source.on("data", (chunk: Buffer) => {
         receivedBytes += chunk.length;
         if (receivedBytes > MAX_REQUEST_BYTES) {
-          // Tear down every stage, not just the source. Leaving busboy or the
-          // file stream alive means the pipeline never settles and the awaited
-          // cleanup below hangs instead of answering 413.
-          nodeStream.unpipe(busboy);
-          nodeStream.destroy();
-          const aborted = new BadUpload("Request exceeds the size limit", 413);
-          activeFileStream?.destroy(aborted);
-          busboy.destroy();
-          rejectOnce(aborted);
+          fail(new BadUpload("Request exceeds the size limit", 413));
         }
       });
-      nodeStream.on("error", rejectOnce);
-      nodeStream.pipe(busboy);
+      source.on("error", fail);
+      source.pipe(busboy);
     });
     return NextResponse.json({ ok: true, name: result.name, path: result.path });
   } catch (err) {
