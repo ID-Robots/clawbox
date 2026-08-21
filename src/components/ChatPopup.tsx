@@ -521,6 +521,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(SAFE_THINKING_LEVEL)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  // Bumped whenever the composer's attachments are abandoned (currently: on
+  // close). An upload captures it at start and checks it before touching
+  // state, so a slow request cannot repopulate a strip the user has left.
+  const uploadGenerationRef = useRef(0)
   // Why a staged upload failed, or null. Rendered next to the attachment
   // strip: the previous behaviour was to return early on a non-OK response,
   // which is indistinguishable to the user from a paste that never fired.
@@ -1806,6 +1810,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // A new attempt clears the previous complaint. Leaving a stale error above
     // a strip that now holds a good attachment reads as "this one failed too".
     setAttachmentError(null)
+    // Which composer these uploads belong to. Closing the chat bumps it, so a
+    // request that resolves afterwards releases its thumbnail and drops
+    // instead of pushing an attachment nobody can see back into a strip the
+    // user has already dismissed.
+    const generation = uploadGenerationRef.current
+    const isCurrent = () => uploadGenerationRef.current === generation
     const tasks = files.map(async (rawFile, idx) => {
       // Clipboard images come in as the generic "image.png"; stamp them so
       // a burst of pastes in the same millisecond doesn't collide on disk.
@@ -1822,33 +1832,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // for the life of the document.
       const previewUrl = createPreviewUrl(rawFile)
       const releasePreview = () => revokePreviews([{ previewUrl }])
+      // Report a failure only while this composer is still the current one.
+      // After a close there is nothing on screen to attach the complaint to.
+      const fail = (status: number | undefined, payload: unknown) => {
+        releasePreview()
+        if (!isCurrent()) return
+        setAttachmentError({ ...classifyStagingFailure(status, payload), file: filename })
+      }
       try {
         const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
         const json = await res.json().catch(() => ({} as { name?: string; path?: string; error?: string }))
         if (!res.ok) {
-          releasePreview()
-          setAttachmentError({ ...classifyStagingFailure(res.status, json), file: filename })
+          fail(res.status, json)
           return
         }
-        const name = json.name || filename
-        const absPath = json.path
+        // Only a non-empty string is a path. The route is ours, but a 200
+        // carrying `{ path: {} }` would otherwise reach the strip, render a
+        // name that can throw, and send `[object Object]` as the file the
+        // agent should open.
+        const absPath = typeof json.path === 'string' ? json.path.trim() : ''
+        const name = typeof json.name === 'string' && json.name.trim() ? json.name : filename
         if (!absPath) {
           // A 200 with no path is the box misbehaving, not the file: staging
           // "succeeded" and produced nothing for the agent to open. Reporting
           // it is the difference between a visible fault and a paste that
           // silently does nothing.
+          fail(500, json)
+          return
+        }
+        if (!isCurrent()) {
+          // Landed after the chat closed: keep the staged copy on the box (a
+          // later turn may still name it) but do not resurrect the strip, and
+          // never leak the Blob this thumbnail pins.
           releasePreview()
-          setAttachmentError({ ...classifyStagingFailure(500, json), file: filename })
           return
         }
         setAttachments(prev => [...prev, { name, path: absPath, type: rawFile.type, previewUrl }])
       } catch (err) {
         console.error('[chat] upload failed:', err)
-        releasePreview()
         // No status: the request never completed. classifyStagingFailure maps
         // that to the box's problem rather than the file's, and the thrown
         // error itself is never shown — it can carry the request URL.
-        setAttachmentError({ ...classifyStagingFailure(undefined, null), file: filename })
+        fail(undefined, null)
       }
     })
     void Promise.all(tasks)
@@ -1881,11 +1906,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // the chat with attachments staged keeps their Blobs alive until the tab is
   // closed — on an 8 GB box, with screenshots, that is the whole budget.
   //
-  // The ref mirrors the state so the cleanup can read the final list: an
-  // effect with `[]` deps closes over the first render's empty array.
+  // Unmount is NOT enough. page.tsx keeps this component mounted for the life
+  // of the session and only toggles `isOpen`, so the render returns null while
+  // React holds on to `attachments` — the previews would outlive every close.
+  // Closing therefore clears the strip the same way the microphone is
+  // abandoned a few lines below: the composer starts empty next time either
+  // way, since the staged files are named in the turn, not in this state.
+  //
+  // The ref mirrors the state so the unmount cleanup can read the final list:
+  // an effect with `[]` deps closes over the first render's empty array.
   const attachmentsRef = useRef<ChatAttachment[]>([])
   useEffect(() => { attachmentsRef.current = attachments }, [attachments])
   useEffect(() => () => { revokePreviews(attachmentsRef.current) }, [])
+  useEffect(() => {
+    if (isOpen) return
+    // Bump first: an upload still in flight must see a stale generation the
+    // moment it resolves, not race the state reset below.
+    uploadGenerationRef.current += 1
+    setAttachments(prev => {
+      if (prev.length === 0) return prev
+      revokePreviews(prev)
+      return []
+    })
+    setAttachmentError(null)
+  }, [isOpen])
 
   // ── Voice input ───────────────────────────────────────────────────────
   //

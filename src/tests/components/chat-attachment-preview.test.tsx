@@ -101,6 +101,18 @@ let stagingResponse: { ok: boolean; status: number; body: unknown } = {
 };
 /** Set to make fetch reject outright, the way a dropped connection does. */
 let stagingThrows = false;
+/**
+ * Held open to keep a staging request in flight, so a test can close the chat
+ * underneath one. `null` means answer immediately, which is every other test.
+ */
+let stagingGate: { promise: Promise<void>; open: () => void } | null = null;
+
+function holdStaging() {
+  let open = () => {};
+  const promise = new Promise<void>((resolve) => { open = resolve; });
+  stagingGate = { promise, open };
+  return () => stagingGate?.open();
+}
 
 const revoked: string[] = [];
 let nextBlobId = 0;
@@ -121,6 +133,7 @@ function installFetch() {
       }
       if (url.includes("/setup-api/chat/attachments")) {
         if (stagingThrows) throw new TypeError("Failed to fetch");
+        if (stagingGate) await stagingGate.promise;
         return {
           ok: stagingResponse.ok,
           status: stagingResponse.status,
@@ -172,6 +185,7 @@ describe("device chat attachment preview", () => {
     revoked.length = 0;
     nextBlobId = 0;
     stagingThrows = false;
+    stagingGate = null;
     stagingResponse = { ok: true, status: 200, body: { ok: true, name: "paste-1.png", path: STAGED_PATH } };
     resetHarnessCache();
     window.localStorage.clear();
@@ -327,6 +341,65 @@ describe("device chat attachment preview", () => {
 
     await screen.findByTestId("chat-attachment-error");
     expect(screen.queryByTestId("chat-attachments")).toBeFalsy();
+  });
+
+  it("releases the thumbnail when the chat is closed while it stays mounted", async () => {
+    // page.tsx never unmounts ChatPopup — it keeps it mounted for the whole
+    // session and flips `isOpen`. So the unmount cleanup above never runs in
+    // the product, and without this the preview outlives every close.
+    const view = render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const textarea = await screen.findByRole("textbox");
+    await connected();
+
+    pasteImage(textarea);
+    await waitFor(() => expect(thumbnail()).toBeTruthy());
+
+    view.rerender(<I18nProvider><ChatPopup isOpen={false} onClose={() => {}} /></I18nProvider>);
+
+    await waitFor(() => expect(revoked).toContain("blob:preview-1"));
+    // And it is gone for good, not merely hidden: reopening must not show an
+    // attachment whose thumbnail has already been revoked.
+    view.rerender(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    await screen.findByRole("textbox");
+    expect(screen.queryByTestId("chat-attachments")).toBeFalsy();
+  });
+
+  it("drops an upload that lands after the chat was closed", async () => {
+    const release = holdStaging();
+    const view = render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const textarea = await screen.findByRole("textbox");
+    await connected();
+
+    pasteImage(textarea);
+    // The request is in flight and the object URL is already minted.
+    await waitFor(() => expect(nextBlobId).toBe(1));
+
+    view.rerender(<I18nProvider><ChatPopup isOpen={false} onClose={() => {}} /></I18nProvider>);
+    release();
+
+    // It must release its own thumbnail rather than push an attachment back
+    // into a strip the user has dismissed.
+    await waitFor(() => expect(revoked).toContain("blob:preview-1"));
+    view.rerender(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    await screen.findByRole("textbox");
+    expect(screen.queryByTestId("chat-attachments")).toBeFalsy();
+    expect(screen.queryByTestId("chat-attachment-error")).toBeFalsy();
+  });
+
+  it("treats a 200 whose path is not a string as a failure", async () => {
+    // The route is ours, but a truthy non-string would otherwise reach the
+    // strip and be sent to the agent as "[object Object]".
+    stagingResponse = { ok: true, status: 200, body: { ok: true, name: {}, path: {} } };
+
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const textarea = await screen.findByRole("textbox");
+    await connected();
+
+    pasteImage(textarea);
+
+    await screen.findByTestId("chat-attachment-error");
+    expect(screen.queryByTestId("chat-attachments")).toBeFalsy();
+    await waitFor(() => expect(revoked).toContain("blob:preview-1"));
   });
 
   it("clears a previous error when a later paste succeeds", async () => {
