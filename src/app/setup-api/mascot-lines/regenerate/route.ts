@@ -58,14 +58,10 @@ export async function POST(request: Request) {
   } catch (err) {
     // Don't let a model hiccup or KV write failure bubble out as an unhandled
     // 500 from Next; surface a structured reason the UI can show alongside
-    // the existing "unavailable" branch.
+    // the existing "unavailable" branch. The exception itself stays in the
+    // server log — its message can carry filesystem paths and other
+    // internals, so the client gets a fixed string.
     console.error("[mascot-lines/regenerate] forceRegenerate threw:", err);
-    return NextResponse.json(
-      {
-        ok: false,
-        reason: err instanceof Error ? err.message : "Mascot phrase regen failed",
-      },
-      { status: 500 },
-    );
+    return NextResponse.json({ ok: false, reason: "Mascot phrase regen failed" }, { status: 500 });
   }
 }

@@ -39,10 +39,9 @@ export async function GET(request: Request) {
     // pack import; a failure in any of those should be logged once and return
     // a structured 500, not bubble out as an unhandled Next error. The client
     // already falls back to its in-memory pack when this is not a 200.
+    // The exception stays in the server log — its message can carry filesystem
+    // paths and other internals, so the client gets a fixed string.
     console.error("[mascot-lines] getMascotPhrases threw:", err);
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to load mascot phrases" },
-      { status: 500 },
-    );
+    return NextResponse.json({ error: "Failed to load mascot phrases" }, { status: 500 });
   }
 }
