@@ -1580,6 +1580,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // The last recording, kept so a failed transcription can be retried without
   // making the user say it all again.
   const lastAudioRef = useRef<{ blob: Blob; name: string } | null>(null)
+  // Bumped every time the microphone is released, which is every way out of a
+  // capture including the panel closing and the component unmounting.
+  //
+  // `getUserMedia` resolves in a later task than the click that called it, and
+  // the stream it hands back does not exist until it does — so nothing the
+  // cleanup can reach is holding a microphone while the permission prompt is
+  // still open. Close the panel in that window and the stream arrives after
+  // there is any interface left to stop it: a live recorder with no indicator,
+  // which is the one outcome this feature must never produce. The resolver
+  // compares this counter against the value it captured and, if it moved,
+  // stops the tracks it was just handed instead of recording with them.
+  const captureGenerationRef = useRef(0)
 
   /**
    * Release the microphone.
@@ -1590,6 +1602,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * called more often than strictly necessary.
    */
   const releaseMicrophone = useCallback(() => {
+    captureGenerationRef.current += 1
     const stream = streamRef.current
     streamRef.current = null
     recorderRef.current = null
@@ -1643,11 +1656,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       return
     }
     setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
+    const generation = captureGenerationRef.current
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
     } catch (err) {
       setVoice({ state: 'error', error: classifyCaptureError(err), message: null, canRetry: false })
+      return
+    }
+    if (captureGenerationRef.current !== generation) {
+      // The panel closed, or the component unmounted, while the prompt was up.
+      // Whoever released the microphone could not reach this stream because it
+      // did not exist yet, so it is stopped here instead of being recorded
+      // with. No error is shown: nothing went wrong and, more to the point,
+      // there may no longer be anywhere to show it.
+      for (const track of stream.getTracks()) track.stop()
+      setVoice(IDLE_STATUS)
       return
     }
     const mimeType = pickRecordingMimeType()
@@ -1682,6 +1706,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       void transcribe(blob, name)
     }
     recorder.onerror = () => {
+      // `error` is not the end of the event sequence: the recorder still
+      // delivers `dataavailable` and then `stop`. Left attached, that stop
+      // handler uploads whatever partial audio the failure produced and
+      // replaces this error with a transcribing spinner — so a capture the
+      // browser said had failed is paid for and answered anyway. Detach both
+      // and drop the chunks before the error state is set.
+      recorder.ondataavailable = null
+      recorder.onstop = null
+      chunksRef.current = []
+      lastAudioRef.current = null
       releaseMicrophone()
       setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: false })
     }
@@ -1725,7 +1759,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (voice.state !== 'recording') return
     const started = Date.now()
     const id = setInterval(() => setRecordingMs(Date.now() - started), 200)
-    const deadline = setTimeout(stopRecording, MAX_RECORDING_MS)
+    const deadline = setTimeout(() => {
+      // Not through `stopRecording` blind: that clears the cancelled flag, and
+      // cancelling leaves a window where clearing it is wrong. `stop()` goes
+      // inactive at once but delivers `dataavailable`/`stop` in a later task,
+      // so between the user's Cancel and those events the state here is still
+      // `recording` and this deadline is still armed. Firing in that window
+      // would hand the recorder's stop handler a capture that no longer looks
+      // cancelled — uploading, and paying to transcribe, audio the user threw
+      // away. The button is unaffected: it only ever runs outside that window.
+      if (cancelledRef.current) return
+      stopRecording()
+    }, MAX_RECORDING_MS)
     return () => { clearInterval(id); clearTimeout(deadline) }
   }, [voice.state, stopRecording])
 
@@ -3050,7 +3095,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           )}
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {voice.state === 'requesting' && t("chat.voice.requesting")}
-            {voice.state === 'recording' && `${t("chat.voice.recording")} ${formatRecordingClock(recordingMs)}`}
+            {voice.state === 'recording' && <>{t("chat.voice.recording")}{' '}
+              {/* The clock is kept out of the accessibility tree, not out of
+                  the page. `role="status"` is implicitly atomic, so a live
+                  region re-announces ALL of its text on any change inside it:
+                  with the elapsed time in here the row would be read out in
+                  full every second, for as long as the capture runs — ten
+                  minutes of a screen reader talking over everything else the
+                  user is doing. Hidden, its ticking is not a change the tree
+                  can see, so the announcement fires on what a listener
+                  actually needs: the state going recording → transcribing →
+                  error. Sighted users lose nothing; this renders as before. */}
+              <span aria-hidden data-testid="voice-clock">{formatRecordingClock(recordingMs)}</span>
+            </>}
             {voice.state === 'transcribing' && t("chat.voice.transcribing")}
             {voice.state === 'error' && (
               voice.message

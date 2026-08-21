@@ -5,16 +5,26 @@ import { resetHarnessCache } from "@/lib/client-harness";
 import { MAX_RECORDING_MS } from "@/lib/chat-voice-input";
 
 /**
- * Two things a capture must not do to the person holding the microphone.
+ * What a capture must not do to the person holding the microphone.
  *
  * It must not run forever: nothing in the browser bounds a `MediaRecorder`, and
  * the transcribe route only learns a blob is oversized after the whole upload
  * has gone up, so an unbounded recording is paid for twice — once in the wait,
  * once in the lost dictation.
  *
- * And it must not offer to re-send audio that already came back empty: the call
+ * It must not come back after it has been cancelled: `stop()` ends the capture
+ * before it hands over the audio, and the ten-minute deadline is still armed in
+ * that gap. Audio the user threw away must not be uploaded and paid for by a
+ * timer that fired a moment too late.
+ *
+ * It must not offer to re-send audio that already came back empty: the call
  * succeeded, so the same bytes buy the same silence and one more paid
  * transcription.
+ *
+ * And it must not shout. The status row is a live region because it is the only
+ * way a screen reader learns the microphone opened — but a live region is
+ * announced whole, so a running clock inside it is read out every second for as
+ * long as the capture lasts.
  */
 
 type Frame = Record<string, unknown>;
@@ -115,8 +125,14 @@ class FakeMediaRecorder {
 
 const micTrackStop = vi.fn();
 
-/** @param transcript what the transcribe route answers with. */
-function installFetch(transcript: string) {
+/**
+ * @param transcripts what the transcribe route answers with, one entry per
+ *   upload: a string is a transcript, `null` a server failure — the one kind
+ *   of error that leaves the audio worth sending again. The last entry answers
+ *   every further call, so a single argument means "always this".
+ */
+function installFetch(...transcripts: (string | null)[]) {
+  let calls = 0;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown) => {
@@ -132,7 +148,9 @@ function installFetch(transcript: string) {
         return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
       }
       if (url.includes("/setup-api/chat/transcribe")) {
-        return { ok: true, json: async () => ({ ok: true, text: transcript }) };
+        const answer = transcripts[Math.min(calls++, transcripts.length - 1)];
+        if (answer === null) return { ok: false, status: 500, json: async () => ({ error: "the box is busy" }) };
+        return { ok: true, json: async () => ({ ok: true, text: answer }) };
       }
       return { ok: true, json: async () => ({}) };
     }),
@@ -145,6 +163,30 @@ function installMedia() {
     value: { getUserMedia: async () => ({ getTracks: () => [{ stop: micTrackStop }] }) },
   });
   vi.stubGlobal("MediaRecorder", FakeMediaRecorder as unknown as typeof MediaRecorder);
+}
+
+/**
+ * A microphone whose permission prompt stays open until the test answers it.
+ *
+ * The real gap this reproduces: `getUserMedia` resolves in a later task than
+ * the click, and until it does there is no stream for any cleanup to stop.
+ * Returns the resolver so a test can close or unmount the panel first and then
+ * hand the stream over, which is exactly the order a slow prompt produces.
+ */
+function installPendingMedia(): { grant: () => void } {
+  let release!: () => void;
+  const answered = new Promise<void>(resolve => { release = resolve; });
+  Object.defineProperty(navigator, "mediaDevices", {
+    configurable: true,
+    value: {
+      getUserMedia: async () => {
+        await answered;
+        return { getTracks: () => [{ stop: micTrackStop }] };
+      },
+    },
+  });
+  vi.stubGlobal("MediaRecorder", FakeMediaRecorder as unknown as typeof MediaRecorder);
+  return { grant: () => release() };
 }
 
 /**
@@ -217,18 +259,74 @@ describe("chat voice recording", () => {
     // Tick the elapsed clock 150 times, one committed render each. A deadline
     // re-armed by those renders would sit 30s past the cap.
     const RENDER_CHURN_MS = 30_000;
+    const readings = new Set<string>();
     for (let elapsed = 0; elapsed < RENDER_CHURN_MS; elapsed += 200) {
       await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+      readings.add(screen.getByTestId("voice-clock").textContent ?? "");
     }
     // The renders really happened, so the jump below is a real test of the
-    // deadline's arming rather than of an inert component.
-    expect(screen.getByTestId("voice-status").textContent).toContain("0:30");
+    // deadline's arming rather than of an inert component. Counted as distinct
+    // readings rather than asserted as one exact time: `shouldAdvanceTime` also
+    // moves the mocked clock with real wall time, so whatever the clock ends on
+    // depends on how fast the machine ran and any single value would flake in
+    // CI. Thirty simulated seconds cannot show fewer than thirty different
+    // readings — drift only ever adds seconds, never takes them away — so the
+    // bound holds on any machine and still fails on a component that stopped
+    // re-rendering.
+    expect(readings.size).toBeGreaterThanOrEqual(30);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(MAX_RECORDING_MS - RENDER_CHURN_MS);
     });
 
     expect(recorder.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not transcribe a capture the user cancelled a moment before the cap", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const record = await readyToRecord();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const recorder = await pressRecord(record);
+
+    // A spec-accurate stop, which the shared fake is not: `stop()` goes
+    // inactive at once and queues `dataavailable`/`stop` as a task. That queue
+    // is the whole race — until it drains the composer still believes it is
+    // recording, so the deadline is still armed over a capture that is already
+    // over and already cancelled. `deliver` drains it on the test's word.
+    let deliver = () => {};
+    recorder.stop = vi.fn(() => {
+      recorder.state = "inactive";
+      deliver = () => {
+        recorder.ondataavailable?.({ data: new Blob([new Uint8Array([1, 2, 3])], { type: recorder.mimeType }) });
+        recorder.onstop?.();
+      };
+    });
+
+    fireEvent.click(screen.getByTestId("voice-cancel"));
+    await act(async () => { await vi.advanceTimersByTimeAsync(MAX_RECORDING_MS); });
+    await act(async () => { deliver(); });
+
+    // The user threw this audio away. Uploading it anyway is a transcription
+    // they did not ask for and are billed for.
+    expect(transcribeCalls()).toBe(0);
+  });
+
+  it("keeps the running clock out of what the live region announces", async () => {
+    installFetch("hello");
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await pressRecord(await readyToRecord());
+
+    const clock = await screen.findByTestId("voice-clock");
+    // The row is `role="status"`, which is atomic: everything left inside it is
+    // re-read in full on any change within it, and this changes five times a
+    // second for up to ten minutes.
+    expect(clock).toHaveAttribute("aria-hidden", "true");
+    // Hidden from assistive tech only. On screen the line reads exactly as it
+    // did before the clock was split out of it — label, one space, elapsed
+    // time. (No I18nProvider here, so `t` hands back the key; the shape of the
+    // line is what this pins.)
+    expect(clock.parentElement?.textContent).toBe(`chat.voice.recording ${clock.textContent}`);
   });
 
   it("does not offer a retry when the recording transcribed to nothing", async () => {
@@ -246,5 +344,84 @@ describe("chat voice recording", () => {
     // And with no retry there is no second upload of the same silence.
     await waitFor(() => expect(transcribeCalls()).toBe(1));
     expect(transcribeCalls()).toBe(1);
+  });
+
+  it("holds no audio to re-upload once a transcript has come back empty", async () => {
+    // The first upload fails, which is the one outcome that DOES offer the
+    // recording again — so the retry below is proof that the audio was being
+    // held and was re-uploadable. That retry comes back empty, and from there
+    // the composer must be holding nothing that can be sent a third time.
+    installFetch(null, "");
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await pressRecord(await readyToRecord());
+
+    fireEvent.click(screen.getByTestId("voice-stop"));
+    fireEvent.click(await screen.findByTestId("voice-retry"));
+    await waitFor(() => expect(transcribeCalls()).toBe(2));
+
+    expect(await screen.findByTestId("voice-dismiss")).toBeTruthy();
+    expect(screen.queryByTestId("voice-retry")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("voice-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("voice-status")).toBeNull());
+    expect(transcribeCalls()).toBe(2);
+  });
+
+  it("throws away the audio a failed recorder produced instead of paying to transcribe it", async () => {
+    // `error` is not the last event a MediaRecorder sends. It still delivers
+    // `dataavailable` and `stop` afterwards, and the stop handler's whole job
+    // is to upload. Left attached it would take the partial audio from a
+    // capture the browser had just declared failed, send it, and replace the
+    // error the user is reading with a transcribing spinner.
+    installFetch("should never be transcribed");
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    const recorder = await pressRecord(await readyToRecord());
+
+    act(() => { recorder.onerror?.(); });
+    // The real sequence: the recorder goes on to deliver its audio and stop.
+    act(() => { recorder.stop(); });
+
+    await waitFor(() => expect(screen.getByTestId("voice-status").textContent).toBeTruthy());
+    expect(transcribeCalls()).toBe(0);
+    // And nothing is held that a retry could send either.
+    expect(screen.queryByTestId("voice-retry")).toBeNull();
+    expect(micTrackStop).toHaveBeenCalled();
+  });
+
+  it("stops a microphone that arrives after the panel has closed", async () => {
+    // The window nothing else covers: between the click and the permission
+    // being answered there is no stream, so the close handler has nothing to
+    // stop. If the resolver simply records with whatever it is handed, closing
+    // the panel mid-prompt leaves a live microphone behind an interface that
+    // is no longer on screen — with the pulsing dot and the clock gone with it.
+    const mic = installPendingMedia();
+    installFetch("hello");
+    const { rerender } = render(<ChatPopup isOpen onClose={() => {}} />);
+    const record = await readyToRecord();
+    fireEvent.click(record);
+    await screen.findByTestId("voice-status");
+
+    rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
+    await act(async () => { mic.grant(); await Promise.resolve(); });
+
+    await waitFor(() => expect(micTrackStop).toHaveBeenCalled());
+    // Handed back, stopped, and never recorded with.
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+    expect(transcribeCalls()).toBe(0);
+  });
+
+  it("stops a microphone that arrives after the component has unmounted", async () => {
+    const mic = installPendingMedia();
+    installFetch("hello");
+    const { unmount } = render(<ChatPopup isOpen onClose={() => {}} />);
+    fireEvent.click(await readyToRecord());
+    await screen.findByTestId("voice-status");
+
+    unmount();
+    await act(async () => { mic.grant(); await Promise.resolve(); });
+
+    await waitFor(() => expect(micTrackStop).toHaveBeenCalled());
+    expect(FakeMediaRecorder.instances).toHaveLength(0);
+    expect(transcribeCalls()).toBe(0);
   });
 });

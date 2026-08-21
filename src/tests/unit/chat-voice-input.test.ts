@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_RECORDING_MS,
   RECORDING_MIME_CANDIDATES,
   classifyCaptureError,
   describeTranscribeFailure,
@@ -141,5 +142,19 @@ describe("formatRecordingClock", () => {
 
   it("never renders a negative clock from a jumped system time", () => {
     expect(formatRecordingClock(-5_000)).toBe("0:00");
+  });
+});
+
+describe("MAX_RECORDING_MS", () => {
+  it("cuts a capture off at ten minutes", () => {
+    // Pinned to the number, because the tests that exercise the deadline
+    // import this constant and would stay green at any value at all — a zero
+    // would end every capture the instant it started and none of them would
+    // notice. The value is a compromise between two failures: ten minutes of
+    // Opus at the bitrate MediaRecorder picks is around a tenth of the route's
+    // 25 MB ceiling, far enough under it that no browser's default can upload
+    // its way into a 413, and long enough that no dictation a person actually
+    // speaks gets cut off mid-sentence.
+    expect(MAX_RECORDING_MS).toBe(10 * 60 * 1000);
   });
 });
