@@ -412,6 +412,31 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
   });
 
+  it("an interrupted earlier repair left a husk — the husk (the original) wins, the partial tree goes", () => {
+    // State after a power cut or unit timeout between the move and the restore:
+    // ~/.hermes/hermes-agent holds whatever the interrupted installer managed
+    // to write (no venv), and ~/.hermes/hermes-agent.broken is the owner's
+    // original, working checkout.
+    giveShim({ answers: false });
+    giveAgent({ venv: false });
+    const husk = `${agentDir()}.broken`;
+    fs.mkdirSync(path.join(husk, "venv", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(husk, "SENTINEL"), "husk-original");
+    fs.copyFileSync(path.join(tmp, "fake-py"), path.join(husk, "venv", "bin", "python"));
+    fs.chmodSync(path.join(husk, "venv", "bin", "python"), 0o755);
+
+    // The reinstall fails too — so the restore must bring back the HUSK, not
+    // the partial tree. (The old code deleted the husk first and restored the
+    // partial tree: the original was gone for good.)
+    const r = run({ installOk: false });
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Kept the earlier husk/);
+    expect(r.out).toMatch(/Restored the previous agent/);
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("husk-original");
+    expect(exists(husk)).toBe(false);
+  });
+
   it("a shim with no venv is reinstalled — the factory-reset husk case", () => {
     // What the bench box actually looked like: the shim survived in
     // ~/.local/bin and ~/.hermes/hermes-agent was a shell with no venv.
