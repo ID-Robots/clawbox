@@ -17,7 +17,7 @@ import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/li
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, extractAudioAttachments } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, splitUserAttachments, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -1633,10 +1633,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // image-failure window could compare against it.
         if (isInterSessionEnvelope(raw, m)) continue
         if (role === 'user') {
-          const cleaned = raw.replace(/^\[[^\]]+\]\s*/, '')
-          if (!cleaned) continue
+          // The customer's own attachments come out first, as picture URLs
+          // rather than as the `[Attached file: /abs/path]` lines the composer
+          // wrote (TASK-436). The generic single-bracket strip below still runs
+          // on what is left, so every OTHER leading prefix — `[System: …]` and
+          // friends — is dropped exactly as before.
+          const { text: withoutAttachments, images, files } = splitUserAttachments(raw)
+          const stripped = withoutAttachments.replace(/^\[[^\]]+\]\s*/, '')
+          // Non-image attachments are re-labelled the way the live composer
+          // labels them, so the bubble a customer sees before and after a
+          // refresh is the same bubble rather than two different ones.
+          const cleaned = [files.map(name => `📎 ${name}`).join('\n'), stripped]
+            .filter(Boolean).join('\n')
+          // An image sent with no caption used to disappear from history
+          // entirely, because nothing survived the strip and this `continue`
+          // took the whole turn with it — leaving the answer replying to a
+          // question that was not there.
+          if (!cleaned && images.length === 0) continue
           const idempotencyKey = typeof m.idempotencyKey === 'string' ? m.idempotencyKey : undefined
-          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey })
+          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey, images })
           continue
         }
         // Replayed history carries the same MEDIA: lines the live turn did, so
@@ -2355,14 +2370,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
-    const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
+    // Pictures render in the bubble; everything else keeps its 📎 line, because
+    // a document has nothing to show and a caption alone would refer to nothing.
+    //
+    // Tested on the STAGED PATH, not on the browser's MIME type, so that the
+    // bubble drawn now and the one rebuilt from history after a refresh make
+    // the same decision. Two different tests here would mean an image that is a
+    // thumbnail until you reload and a filename afterwards.
+    const images = sendAttachments.filter(a => isImageMedia(a.path)).map(a => mediaUrl(a.path))
+    const fileNames = sendAttachments
+      .filter(a => !isImageMedia(a.path))
+      .map(a => `📎 ${a.name}`)
+      .join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
     const idempotencyKey = uuid()
     // Stamped onto the bubble, not just sent with the request: it is how the
     // reconcile recognises the server's copy of this exact turn. Text cannot
     // do that job here — `displayText` carries the 📎 filenames while the
     // gateway stores and returns the prompt alone.
-    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey }])
+    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey, images }])
     setSending(true)
     setStreaming('')
     runIdRef.current = idempotencyKey

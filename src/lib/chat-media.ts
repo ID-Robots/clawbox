@@ -210,3 +210,65 @@ export function extractAudioAttachments(msg: unknown): string[] {
   }
   return urls;
 }
+
+// ── The user's own attachments ──────────────────────────────────────────────
+//
+// A picture the CUSTOMER sent travels differently from one the assistant
+// produced. There is no `MEDIA:` line: the composer stages the file on the box
+// and names it in the prompt as `[Attached file: /abs/path]` (see
+// `dispatchSend`), which is what the agent reads and what the gateway stores.
+//
+// The transcript then threw all of it away. The stored turn was reduced to its
+// caption by one anchored, non-global bracket strip, so the image never came
+// back on reload — and the live bubble never had it in the first place, which
+// together is TASK-436: vision answered correctly about a photo that appeared
+// nowhere in the conversation.
+
+/** `[Attached file: /path]` as the composer writes it, one per line. */
+const ATTACHED_FILE_LINE_RE = /^\[Attached file:\s*([^\]]+)\]$/;
+
+/** The last path segment, which is the only part a customer ever chose. */
+function baseName(source: string): string {
+  return source.replace(/\/+$/, "").split("/").pop() || source;
+}
+
+/**
+ * A stored user turn split into what to show and what to render.
+ *
+ * EVERY `[Attached file: …]` line is removed, not just the first. The strip
+ * this replaces was `^\[[^\]]+\]\s*` — anchored and non-global — so a turn
+ * carrying two attachments kept the second one's ABSOLUTE PATH on screen after
+ * a refresh. Lines are matched wherever they appear rather than only at the
+ * top, because the only thing guaranteeing they lead is the composer that
+ * wrote them, and a leaked path is not worth making conditional on that.
+ *
+ * Images resolve through `mediaUrl`, the same session-gated route the
+ * assistant's own pictures already use — deliberately not an object URL, which
+ * dies on the first refresh and so could never satisfy "still there after a
+ * reboot".
+ *
+ * A non-image attachment has nothing to render, so its BASENAME comes back
+ * separately for the caller to show the way the live composer does. Dropping
+ * the line outright would leave a caption like "summarise this" pointing at
+ * nothing; keeping the line would print the absolute path.
+ */
+export function splitUserAttachments(
+  raw: string,
+): { text: string; images: string[]; files: string[] } {
+  if (!raw.includes("[Attached file:")) return { text: raw, images: [], files: [] };
+  const images: string[] = [];
+  const files: string[] = [];
+  const kept: string[] = [];
+  for (const line of raw.split("\n")) {
+    const match = ATTACHED_FILE_LINE_RE.exec(line.trim());
+    const source = match ? match[1].trim() : "";
+    if (!source) {
+      kept.push(line);
+      continue;
+    }
+    if (isImageMedia(source)) images.push(mediaUrl(source));
+    else files.push(baseName(source));
+  }
+  const text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { text, images, files };
+}
