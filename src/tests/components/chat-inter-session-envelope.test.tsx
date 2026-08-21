@@ -295,15 +295,23 @@ describe("ChatPopup and the inter-session routing envelope", () => {
     expectEnvelopeHidden();
   });
 
-  it("does not cache an envelope as the mascot's snippet", async () => {
-    // ChatPopup persists the last assistant final as the mascot speech bubble.
-    // An envelope reaching that store would leak the media path onto the
-    // desktop long after the chat closed.
+  it("never writes the mascot snippet key — the crab no longer quotes the chat back", async () => {
+    // ChatPopup used to clip up to two sentences out of EVERY assistant reply
+    // into `clawbox-mascot-convo-lines`, and the mascot route merged them into
+    // its phrase bag. The feature is gone: the snippets were in whatever
+    // language the assistant answered in (and about whatever the user was
+    // doing), so they leaked straight past the mascot's language gate — and an
+    // envelope landing there leaked the media path onto the desktop long after
+    // the chat closed.
     render(<ChatPopup isOpen onClose={() => {}} />);
     await historyRendered();
     const ws = await socket();
 
     await act(async () => {
+      ws.pushChat("final", {
+        role: "assistant",
+        content: "Deployment finished cleanly. I restarted the gateway for you.",
+      });
       ws.pushChat("final", { role: "user", content: ENVELOPE });
       await Promise.resolve();
     });
