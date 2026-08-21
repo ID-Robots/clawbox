@@ -17,7 +17,7 @@ import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/li
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, extractAudioAttachments } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, splitUserAttachments, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -544,7 +544,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // which is indistinguishable to the user from a paste that never fired.
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
   // The image the full-size preview is showing, or null when it is closed.
-  const [preview, setPreview] = useState<string | null>(null)
+  // It carries the picture's accessible name as well as its URL: a screen
+  // reader must not be told "generated image" after opening one the customer
+  // sent, and the src alone cannot tell the two apart.
+  const [preview, setPreview] = useState<{ src: string; alt: string } | null>(null)
   const closePreview = useCallback(() => setPreview(null), [])
   // The desktop's one modal-dialog behaviour: focus in, Tab trapped, focus
   // restored, the page behind inerted, and Escape closing THIS and stopping
@@ -1633,10 +1636,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // image-failure window could compare against it.
         if (isInterSessionEnvelope(raw, m)) continue
         if (role === 'user') {
-          const cleaned = raw.replace(/^\[[^\]]+\]\s*/, '')
-          if (!cleaned) continue
+          // The customer's own attachments come out first, as picture URLs
+          // rather than as the `[Attached file: /abs/path]` lines the composer
+          // wrote (TASK-436). The generic single-bracket strip below still runs
+          // on what is left, so every OTHER leading prefix — `[System: …]` and
+          // friends — is dropped exactly as before.
+          const { text: withoutAttachments, images, files } = splitUserAttachments(raw)
+          const stripped = withoutAttachments.replace(/^\[[^\]]+\]\s*/, '')
+          // Non-image attachments are re-labelled the way the live composer
+          // labels them, so the bubble a customer sees before and after a
+          // refresh is the same bubble rather than two different ones.
+          const cleaned = [files.map(name => `📎 ${name}`).join('\n'), stripped]
+            .filter(Boolean).join('\n')
+          // An image sent with no caption used to disappear from history
+          // entirely, because nothing survived the strip and this `continue`
+          // took the whole turn with it — leaving the answer replying to a
+          // question that was not there.
+          if (!cleaned && images.length === 0) continue
           const idempotencyKey = typeof m.idempotencyKey === 'string' ? m.idempotencyKey : undefined
-          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey })
+          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey, images })
           continue
         }
         // Replayed history carries the same MEDIA: lines the live turn did, so
@@ -2355,14 +2373,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
-    const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
+    // Pictures render in the bubble; everything else keeps its 📎 line, because
+    // a document has nothing to show and a caption alone would refer to nothing.
+    //
+    // Tested on the STAGED PATH, not on the browser's MIME type, so that the
+    // bubble drawn now and the one rebuilt from history after a refresh make
+    // the same decision. Two different tests here would mean an image that is a
+    // thumbnail until you reload and a filename afterwards.
+    const images = sendAttachments.filter(a => isImageMedia(a.path)).map(a => mediaUrl(a.path))
+    const fileNames = sendAttachments
+      .filter(a => !isImageMedia(a.path))
+      .map(a => `📎 ${a.name}`)
+      .join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
     const idempotencyKey = uuid()
     // Stamped onto the bubble, not just sent with the request: it is how the
     // reconcile recognises the server's copy of this exact turn. Text cannot
     // do that job here — `displayText` carries the 📎 filenames while the
     // gateway stores and returns the prompt alone.
-    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey }])
+    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey, images }])
     setSending(true)
     setStreaming('')
     runIdRef.current = idempotencyKey
@@ -3412,14 +3441,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }}>
                 {msg.images && msg.images.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
-                    {msg.images.map((src, j) => (
+                    {msg.images.map((src, j) => {
+                    // The same block draws both the pictures the assistant made
+                    // and, since TASK-436, the ones the customer sent. They are
+                    // not the same thing to announce: "Generated image" on a
+                    // photo the customer just attached is simply wrong, and an
+                    // accessible name is read out verbatim.
+                    const imageAlt = msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")
+                    return (
                       <div key={j} style={{ position: 'relative', display: 'inline-flex', maxWidth: '100%' }}>
                         {/* A button, not a bare onClick on the image: the
                             preview has to be reachable from the keyboard too,
                             and the alt text gives the control its name. */}
                         <button
                           type="button"
-                          onClick={() => setPreview(src)}
+                          onClick={() => setPreview({ src, alt: imageAlt })}
                           style={{
                             padding: 0, border: 'none', background: 'none',
                             cursor: 'zoom-in', lineHeight: 0, borderRadius: 8, maxWidth: '100%',
@@ -3429,7 +3465,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                               it gets a real alt so a screen reader announces it,
                               and it is contained rather than cropped so the image
                               the user asked for does not lose its edges. */}
-                          <img src={src} alt={t("chat.generatedImage")} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
+                          <img src={src} alt={imageAlt} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
                         </button>
                         {/* Same-origin, so the `download` attribute is enough to
                             save it under the name the harness gave it. */}
@@ -3449,7 +3485,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                           <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
                         </a>
                       </div>
-                    ))}
+                    );
+                    })}
                   </div>
                 )}
                 {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
@@ -3928,8 +3965,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }}
           >
             <img
-              src={preview}
-              alt={t("chat.generatedImage")}
+              src={preview.src}
+              alt={preview.alt}
               style={{
                 maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
                 borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
@@ -3937,8 +3974,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             />
             <div style={{ position: 'absolute', top: 16, right: 16, display: 'flex', gap: 8 }}>
               <a
-                href={preview}
-                download={mediaFileName(preview)}
+                href={preview.src}
+                download={mediaFileName(preview.src)}
                 title={t("chat.downloadImage")}
                 aria-label={t("chat.downloadImage")}
                 style={PREVIEW_BUTTON_STYLE}
