@@ -138,6 +138,11 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
   "/setup-api/tunnel",      // enabling remote tunnel access
   "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
+  // Writes a bot credential and restarts the harness. Unlike /setup-api/telegram
+  // it has NO onboarding role — Discord is configured from Settings only — so
+  // there is no reason for it to be reachable while the open ClawBox-Setup AP
+  // is broadcasting.
+  "/setup-api/discord",
   "/setup-api/apps/install",
   "/setup-api/apps/uninstall",
   "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes

@@ -3,6 +3,7 @@ import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
+import { DATA_DIR } from "@/lib/config-store";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
@@ -468,6 +469,9 @@ export interface OpenClawConfig {
     [name: string]: {
       enabled?: boolean;
       botToken?: string;
+      /** Indirect credential ("read it from this env var"). Discord uses this
+       *  form rather than a literal `botToken` — see setDiscordToken. */
+      token?: { source?: string; provider?: string; id?: string };
       dmPolicy?: string;
       allowFrom?: string[];
       streaming?: { mode?: string; [key: string]: unknown };
@@ -699,6 +703,92 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
   // a preference toggle, not a token re-secure; gateway-pre-start.sh already
   // strips those on every boot.
   await writeConfig(config);
+}
+
+// === Discord ===
+//
+// Discord differs from Telegram in one structural way that is easy to miss:
+// OpenClaw's Discord channel takes its credential as an env REFERENCE
+// (`token: {source:"env", provider:"default", id:"DISCORD_BOT_TOKEN"}`), not as
+// a literal string like `channels.telegram.botToken`. So writing the config is
+// only half the job — DISCORD_BOT_TOKEN also has to be present in the gateway
+// PROCESS environment, or the config validates, the gateway starts, and the bot
+// silently never logs in.
+//
+// That is what `data/discord.env` is for: clawbox-gateway.service loads it with
+// `EnvironmentFile=-`, the same mechanism it already uses for network.env.
+// systemd re-reads EnvironmentFile on every start, so the restart that follows
+// a save is what picks the value up.
+
+/** Env var the gateway resolves the Discord credential from. */
+export const DISCORD_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN";
+
+/** EnvironmentFile the gateway unit loads the Discord token from. */
+export const DISCORD_ENV_PATH = path.join(DATA_DIR, "discord.env");
+
+/**
+ * Write `data/discord.env` at 0600.
+ *
+ * Written temp-then-rename, and chmod'ed explicitly: `writeFile`'s `mode` is
+ * only honoured when it CREATES the file, so a rewrite over an existing 0644
+ * would silently keep the loose mode (same reasoning as config-store.ts).
+ *
+ * The value is interpolated unquoted, which is safe only because the caller has
+ * already restricted the token to `[A-Za-z0-9._-]` (isSafeDiscordToken) — no
+ * newline can split the line, no quote can escape it.
+ */
+export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tmpPath = `${DISCORD_ENV_PATH}.tmp`;
+  const body =
+    "# Written by ClawBox. Loaded by clawbox-gateway.service (EnvironmentFile).\n" +
+    "# Do not edit by hand — the Discord section of Settings rewrites this file.\n" +
+    `${DISCORD_TOKEN_ENV_VAR}=${botToken}\n`;
+  await fs.writeFile(tmpPath, body, { mode: 0o600, encoding: "utf-8" });
+  await fs.chmod(tmpPath, 0o600);
+  await fs.rename(tmpPath, DISCORD_ENV_PATH);
+}
+
+/**
+ * Register the Discord channel with the OpenClaw gateway.
+ *
+ * Deliberately writes the smallest config that can work:
+ *   * `enabled` + the env-reference `token`, and nothing else. OpenClaw refuses
+ *     to start on an unknown key or an out-of-schema value, and a refusal takes
+ *     the WHOLE config down — including a working Telegram bot. Every optional
+ *     knob we could write here (groupPolicy, guilds, commands, streaming) is a
+ *     value we would be guessing at, so we let OpenClaw's own defaults stand.
+ *   * `dmPolicy`/`allowFrom` are STRIPPED, never written. OpenClaw defaults to
+ *     `dmPolicy: "pairing"`, i.e. the owner approves each new sender. Writing
+ *     "open"/["*"] would expose the agent's shell/file/system_power tools to
+ *     anyone who finds the bot — the exact bug the Telegram path carries a boot-
+ *     time migration for (scripts/gateway-pre-start.sh), which now covers this
+ *     channel too.
+ *   * a literal `botToken` left by any other writer is dropped, so the env
+ *     reference is the only credential path and a stale copy cannot outlive it.
+ */
+export async function setDiscordToken(botToken: string): Promise<void> {
+  const config = await readConfig();
+  if (!config.channels) {
+    config.channels = {};
+  }
+  const {
+    dmPolicy: _dmPolicy,
+    allowFrom: _allowFrom,
+    botToken: _legacyLiteralToken,
+    ...rest
+  } = config.channels.discord ?? {};
+  config.channels.discord = {
+    ...rest,
+    enabled: true,
+    token: { source: "env", provider: "default", id: DISCORD_TOKEN_ENV_VAR },
+  };
+  await writeConfig(config);
+  // Config first, secret second: a half-applied save that has the reference but
+  // not the value is a bot that does not log in, which the status route reports
+  // honestly. The reverse — a token on disk for a channel nothing reads — is
+  // the failure mode that made the Hermes Telegram bug so hard to see.
+  await writeDiscordGatewayEnv(botToken);
 }
 
 // === Telegram pairing (DM sender approval) ===

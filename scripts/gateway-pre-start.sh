@@ -347,24 +347,31 @@ if _codex_refs or agents_models:
 # to any Telegram user who found the handle. Strip those keys on every
 # gateway start so updated devices re-secure themselves without needing
 # a bot-token reconfigure or factory reset. No-op on already-safe configs.
+#
+# Discord gets the same treatment for the same reason: ClawBox never writes
+# those keys for it either, and one out-of-schema value in ANY channel block
+# invalidates the whole config — a Discord misconfiguration would take a
+# working Telegram bot down with it.
 channels = cfg.get("channels")
 if isinstance(channels, dict):
-    telegram = channels.get("telegram")
-    if isinstance(telegram, dict):
+    for _channel_name in ("telegram", "discord"):
+        _channel = channels.get(_channel_name)
+        if not isinstance(_channel, dict):
+            continue
         for k in ("dmPolicy", "allowFrom"):
-            if k in telegram:
-                del telegram[k]
+            if k in _channel:
+                del _channel[k]
                 changed = True
-        # Config-validity migration: a Telegram bot set up on an older OpenClaw
-        # can carry a channels.telegram.groupPolicy value the current schema no
-        # longer accepts (allowed: open, disabled, allowlist). One invalid value
-        # makes the WHOLE config invalid, so the gateway loads nothing and the
-        # bot goes silent ("Telegram channel active" but never replies). Reset
-        # unknown values to the secure default so the device self-heals on the
-        # next gateway start — ClawBox exposes no group-chat UI, so "disabled"
-        # (bot ignores group chats; owner DMs still work) is the safe choice.
-        if telegram.get("groupPolicy") not in (None, "open", "disabled", "allowlist"):
-            telegram["groupPolicy"] = "disabled"
+        # Config-validity migration: a bot set up on an older OpenClaw can carry
+        # a channels.<name>.groupPolicy value the current schema no longer
+        # accepts (allowed: open, disabled, allowlist). One invalid value makes
+        # the WHOLE config invalid, so the gateway loads nothing and the bot goes
+        # silent ("channel active" but never replies). Reset unknown values to
+        # the secure default so the device self-heals on the next gateway start
+        # — ClawBox exposes no group-chat UI, so "disabled" (bot ignores group
+        # chats; owner DMs still work) is the safe choice.
+        if _channel.get("groupPolicy") not in (None, "open", "disabled", "allowlist"):
+            _channel["groupPolicy"] = "disabled"
             changed = True
 
 # Migration: devices that configured OpenRouter before the provider-def

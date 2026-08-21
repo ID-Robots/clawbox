@@ -47,6 +47,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Browser**: `browser/` — Chromium automation via CDP (launch, navigate, click, type, screenshot)
 - **Gateway**: `gateway/`, `gateway/health`, `gateway/ws-config` — gateway proxying with HTML injection
 - **Telegram**: `telegram/configure`, `telegram/status` — Telegram bot config
+- **Discord**: `discord/configure`, `discord/status` — Discord bot config (token validated live against the Discord API before it is saved)
 - **Setup**: `setup/status`, `setup/complete`, `setup/reset` — setup flow state, factory reset
 - **Update**: `update/run`, `update/status` — git-based system updates
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)

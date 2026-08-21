@@ -471,6 +471,9 @@ describe("middleware", () => {
       "/setup-api/vnc/status",
       "/setup-api/terminal",
       "/setup-api/clawkeep/restore",
+      // Writes a bot credential; configured from Settings, never the wizard.
+      "/setup-api/discord/configure",
+      "/setup-api/discord/status",
       "/setup-api/tunnel/enable",
       "/setup-api/portal/start", // same privileged tunnel control as /tunnel
       "/setup-api/portal/stop",

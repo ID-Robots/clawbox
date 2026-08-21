@@ -70,7 +70,7 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "discord", "remote", "system", "about"] as const;
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -85,6 +85,7 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string 
   { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
   { id: "localAi", icon: "memory", label: "Local AI" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
+  { id: "discord", icon: "forum", labelKey: "settings.discord" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
@@ -1367,6 +1368,104 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setTgStatus({ type: "error", message: `Failed: ${err instanceof Error ? err.message : err}` });
     } finally {
       if (!controller.signal.aborted) setTgSaving(false);
+    }
+  };
+
+  /* ── Discord ── */
+  // Deliberately smaller than the Telegram block: Discord access control is
+  // OpenClaw's own DM pairing (or DISCORD_ALLOWED_USERS on Hermes), neither of
+  // which ClawBox writes, so there is no allowlist UI to keep in sync here.
+  const [dcToken, setDcToken] = useState("");
+  const [dcShowToken, setDcShowToken] = useState(false);
+  const [dcSaving, setDcSaving] = useState(false);
+  const [dcStatus, setDcStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [dcConfigured, setDcConfigured] = useState<boolean | null>(null);
+  const [dcBotName, setDcBotName] = useState<string | null>(null);
+  // Discord itself said the stored token is dead — surfaced even while the
+  // section otherwise reads "configured", because nothing else would explain a
+  // bot that is set up and silent.
+  const [dcTokenRejected, setDcTokenRejected] = useState(false);
+  const [dcReconfigure, setDcReconfigure] = useState(false);
+  // Application ID is only ever used in the browser to build the invite URL —
+  // it is public (it is in the invite link itself) and is never sent to the box.
+  const [dcAppId, setDcAppId] = useState("");
+  const dcSaveControllerRef = useRef<AbortController | null>(null);
+
+  const refreshDiscordStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/discord/status", { cache: "no-store" });
+      if (!r.ok) {
+        // Transient error — keep the last known state rather than flashing
+        // "not configured" at someone whose bot is fine.
+        console.warn("[discord] /setup-api/discord/status returned", r.status);
+        return;
+      }
+      const d = await r.json();
+      setDcConfigured(d.configured ?? false);
+      setDcBotName(typeof d.username === "string" ? d.username : null);
+      setDcTokenRejected(d.tokenRejected === true);
+    } catch (err) {
+      console.warn("[discord] refresh failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (section !== "discord" && !isMobile) return;
+    refreshDiscordStatus();
+  }, [section, isMobile, refreshDiscordStatus]);
+
+  useEffect(() => () => dcSaveControllerRef.current?.abort(), []);
+
+  // The invite link is assembled client-side from a public Application ID.
+  // 274878286912 = view channels + send messages + read history + attach files
+  // + embed links + send in threads + add reactions: what the agent needs to
+  // hold a conversation, and nothing that can moderate or manage a server.
+  const DISCORD_INVITE_PERMISSIONS = "274878286912";
+  const dcAppIdValid = /^\d{15,25}$/.test(dcAppId.trim());
+  const dcInviteUrl = dcAppIdValid
+    ? `https://discord.com/oauth2/authorize?client_id=${dcAppId.trim()}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`
+    : null;
+
+  const saveDiscord = async () => {
+    if (!dcToken.trim()) {
+      setDcStatus({ type: "error", message: t("settings.enterToken") });
+      return;
+    }
+    dcSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    dcSaveControllerRef.current = controller;
+    setDcSaving(true);
+    setDcStatus(null);
+    try {
+      const res = await fetch("/setup-api/discord/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ botToken: dcToken.trim() }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        // The route already phrases its errors for a person (bad token vs
+        // "couldn't reach Discord"), so show them rather than a generic line.
+        setDcStatus({ type: "error", message: data.error || t("settings.failedSave") });
+        return;
+      }
+      setDcStatus({
+        type: data.warning ? "error" : "success",
+        message: data.warning || t("settings.discordConfigured"),
+      });
+      setDcConfigured(true);
+      setDcTokenRejected(false);
+      setDcBotName(typeof data.username === "string" ? data.username : null);
+      setDcReconfigure(false);
+      setDcToken("");
+      refreshDiscordStatus();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setDcStatus({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      if (!controller.signal.aborted) setDcSaving(false);
     }
   };
 
@@ -2751,6 +2850,191 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Discord ─── */}
+        {activeSection === "discord" && (
+          <div className="max-w-xl space-y-5">
+
+            {/* Status card */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[#5865F2]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+              </div>
+              {dcConfigured === null ? (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                  </div>
+                </div>
+              ) : dcConfigured && !dcReconfigure ? (
+                <div>
+                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
+                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
+                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[var(--text-primary)] font-medium">
+                        {dcBotName || t("settings.botConnected")}
+                      </div>
+                      <div className="flex items-center gap-1.5 mt-0.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                        <span className="text-xs text-green-400/80">{t("settings.discordActive")}</span>
+                      </div>
+                    </div>
+                  </div>
+                  {dcTokenRejected && (
+                    <div className="mb-4">
+                      <StatusMessage type="error" message={t("settings.discordTokenRejected")} />
+                    </div>
+                  )}
+                  <button
+                    onClick={() => { setDcReconfigure(true); setDcStatus(null); }}
+                    className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                  >
+                    {t("settings.reconfigureBot")}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>link_off</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-[var(--text-muted)]">{t("settings.notConfigured")}</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.discordSetupBelow")}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Setup card — shown when not configured or reconfiguring */}
+            {(dcConfigured === false || dcReconfigure) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                    {dcReconfigure ? t("settings.reconfigureBot") : t("settings.discordGuideTitle")}
+                  </label>
+                </div>
+
+                <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                  <li>
+                    {t("settings.discordStep1")}{" "}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline"
+                    >
+                      discord.com/developers
+                    </a>
+                  </li>
+                  <li>{t("settings.discordStep2")}</li>
+                  <li>{t("settings.discordStep3")}</li>
+                  <li>{t("settings.discordStep4")}</li>
+                </ol>
+
+                {/* The single most common Discord support ticket — a checklist
+                    item, not a docs link. */}
+                <div className="flex items-start gap-2 mt-4 px-3 py-2.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+                  <p className="text-xs text-amber-200/90 m-0">{t("settings.discordIntentsWarning")}</p>
+                </div>
+
+                {/* Invite-link builder (client-side only) */}
+                <div className="mt-5 pt-4 border-t border-white/[0.06]">
+                  <span className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.discordInviteTitle")}</span>
+                  <p className="text-xs text-[var(--text-secondary)] mb-2">{t("settings.discordInviteHint")}</p>
+                  <input
+                    id="settings-dc-appid"
+                    type="text"
+                    value={dcAppId}
+                    onChange={(e) => setDcAppId(e.target.value)}
+                    placeholder={t("settings.discordAppIdPlaceholder")}
+                    aria-label={t("settings.discordAppIdPlaceholder")}
+                    inputMode="numeric"
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] font-mono outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15 placeholder:font-sans"
+                  />
+                  {dcInviteUrl && (
+                    <a
+                      href={dcInviteUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-2 w-full px-4 py-3 mt-3 bg-[#5865F2]/15 hover:bg-[#5865F2]/25 border border-[#5865F2]/40 hover:border-[#5865F2]/60 rounded-lg text-sm font-semibold text-[#98a2ff] transition-colors no-underline"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
+                      {t("settings.discordInviteOpen")}
+                    </a>
+                  )}
+                  <p className="text-[11px] text-[var(--text-muted)] mt-2 mb-0">{t("settings.discordPermissionsNote")}</p>
+                </div>
+
+                {/* Token input */}
+                <div className="mt-5">
+                  <label htmlFor="settings-dc-token" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.botToken")}</label>
+                  <div className="relative">
+                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>key</span>
+                    <input
+                      id="settings-dc-token"
+                      type={dcShowToken ? "text" : "password"}
+                      value={dcToken}
+                      onChange={(e) => { setDcToken(e.target.value); setDcStatus(null); }}
+                      placeholder="••••••••••••••••••••••••"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full pl-10 pr-10 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                      onKeyDown={e => e.key === "Enter" && saveDiscord()}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setDcShowToken(v => !v)}
+                      aria-label={t("settings.botToken")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{dcShowToken ? "visibility_off" : "visibility"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {dcStatus && <div className="mt-3"><StatusMessage type={dcStatus.type} message={dcStatus.message} /></div>}
+
+                <div className="flex items-center gap-3 mt-5">
+                  <button
+                    onClick={saveDiscord}
+                    disabled={dcSaving || !dcToken.trim()}
+                    className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  >
+                    {dcSaving ? (
+                      <>
+                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        {t("settings.discordChecking")}
+                      </>
+                    ) : (
+                      <>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                        {t("settings.connect")}
+                      </>
+                    )}
+                  </button>
+                  {dcReconfigure && (
+                    <button
+                      onClick={() => { setDcReconfigure(false); setDcStatus(null); setDcToken(""); }}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer"
+                    >
+                      {t("cancel")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
@@ -3200,6 +3484,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (tgConfigured === null) return { subtitle: null };
         if (!tgConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
         return { subtitle: tgBotInfo?.username ? `@${tgBotInfo.username}` : (t("settings.botConnected") || "Connected") };
+      }
+      case "discord": {
+        if (dcConfigured === null) return { subtitle: null };
+        if (!dcConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        return { subtitle: dcBotName || (t("settings.botConnected") || "Connected") };
       }
       case "remote":
         return { subtitle: null };
