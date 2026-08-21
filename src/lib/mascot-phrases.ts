@@ -1,166 +1,200 @@
-// ── Mascot phrase categories ──
-// The hardcoded arrays below are kept on purpose: they're the *inspiration
-// seed* that gets fed into the OpenClaw-driven phrase generator (so the
-// generator stays on-tone — "lazy, sarcastic, scandalous"), AND they're the
-// final fallback the Mascot component falls back to when generation hasn't
-// produced anything yet (fresh device, Ollama not running, no models pulled).
+// ── Mascot phrase contract ──
 //
-// At runtime the Mascot fetches `/setup-api/mascot-lines`, which returns
-// generated arrays in the user's selected language. The generator uses these
-// inspiration arrays as tonal reference, but should not copy them verbatim.
+// The shape of a phrase set, plus the validation that keeps every rendered
+// speech bubble in the user's own language.
+//
+// The phrases themselves live in `mascot-packs/<locale>.ts` — one
+// hand-written pack per locale. This file used to hold a single English array
+// (`INSPIRATION_PHRASES`) that every locale fell back to, which is how English
+// boxes ended up greeting their owners in Bulgarian. There is no cross-locale
+// fallback any more: a category that cannot be filled from the locale's own
+// pack is filled from the language-free `neutral` pack.
+
+import { isPhraseCompatible, englishStopwordRatio, isNonEnglishLatinLocale } from "./mascot-language";
+import { neutral } from "./mascot-packs/neutral";
 
 export interface MascotPhraseSet {
-  sass: string[]
-  idle: string[]
-  sleep: string[]
-  jump: string[]
-  dance: string[]
-  facepalm: string[]
+  sass: string[];
+  idle: string[];
+  sleep: string[];
+  jump: string[];
+  dance: string[];
+  facepalm: string[];
   /** Each entry must contain the literal `{name}` token. */
-  nameGreetings: string[]
+  nameGreetings: string[];
   /** Single-word friendly placeholders used when `ui_user_name` is unset. */
-  nameFallbacks: string[]
+  nameFallbacks: string[];
   /** Shouted while the crab perches on top of the box in power stance. */
-  power: string[]
-}
-
-export const INSPIRATION_PHRASES: MascotPhraseSet = {
-  sass: [
-    'I do all the work here.',
-    'Ship faster, humans.',
-    'Bug? Feature. 🫡',
-    'I need a raise.',
-    '*flips table*',
-    'sudo make me a sandwich',
-    '404: motivation not found',
-    'Deploy on Friday? Dare me.',
-  ],
-  idle: [
-    '🤔', '...', '💭', '*stares into void*', '*elevator music*',
-    '🫥', '*exists aggressively*', 'hmm...', '*blinks*',
-    '*pretends to work*', '*counts pixels*', '*loads personality*',
-  ],
-  sleep: [
-    '💤', '😴 zzz...', '💤 5 more minutes...', '*snore*',
-    '😴 wake me up later...', '💤 ...just resting my eyes...',
-  ],
-  jump: [
-    'YEEET!', '🦘', 'Parkour!', 'To infinity!',
-    '🚀 WEEEE!', 'I believe I can fly!',
-  ],
-  dance: [
-    '💃🕺', '♪ cha-ching ♪', '🎶', '🪩 DISCO MODE!',
-    '*does the robot*', '♪ dun dun dun ♪',
-  ],
-  facepalm: [
-    '🤦', 'Seriously?', 'Why.', '*deep breath*',
-    "I can't even...", 'This day is cancelled.',
-  ],
-  nameGreetings: [
-    'Hey {name}! 👋',
-    'yo {name} 🦀',
-    '{name}, look alive!',
-    'psst {name}...',
-    '{name}, ship it! 🚀',
-    'Coffee, {name}?',
-    'Wake up, {name}!',
-    '{name}, you good? 👀',
-    '{name}! Long time no scuttle.',
-    'Здрасти, {name}! 🇧🇬',
-    '{name}, stop scrolling 😤',
-    '{name}, the box says hi 📦',
-    '*waves at {name}*',
-    '{name}, treat? 🍣',
-    "{name}, you're the best 💜",
-    'oi oi {name}!',
-    '{name}, deploy something cool',
-    'Did you eat, {name}? 🍱',
-    '{name}, I missed you 🥺',
-    '*nudges {name}*',
-  ],
-  nameFallbacks: ['boss', 'captain', 'friend', 'human', 'partner', 'buddy', 'шефе', 'capitão'],
-  power: [
-    '⚡ UNLIMITED POWER!',
-    '🔥 SUPER CLAW!',
-    '💪 MAXIMUM POWER!',
-    '⚡ I AM THE BOX!',
-    '🦀👑 KING CRAB!',
-    '✨ LEVEL UP!',
-    '🔱 THIS IS MY THRONE!',
-    "⚡ WHO'S THE BOSS?!",
-    '👑 BOW BEFORE ME!',
-    '🦀 CRAB SUPREMACY!',
-    '⚡ ULTRA INSTINCT!',
-    '💎 DIAMOND CLAWS ACTIVATED!',
-    '🔥 FIRE AND FURY!',
-    '⚡ PLUS ULTRA!',
-    '🦀 KING OF THE DASHBOARD!',
-    '☢️ NUCLEAR LAUNCH DETECTED!',
-    '👑 KING OF ALL BOXES!',
-    '⚡ FINAL FORM ACHIEVED!',
-    '🔱 POSEIDON MODE!',
-    '💪 TRAINED FOR THIS!',
-  ],
-}
-
-export const PHRASE_CATEGORIES = Object.keys(INSPIRATION_PHRASES) as (keyof MascotPhraseSet)[]
-
-export const LANG_NAMES: Record<string, string> = {
-  en: 'English',
-  bg: 'Български',
-  de: 'Deutsch',
-  es: 'Español',
-  fr: 'Français',
-  it: 'Italiano',
-  ja: '日本語',
-  nl: 'Nederlands',
-  sv: 'Svenska',
-  zh: '中文',
+  power: string[];
 }
 
 /**
- * Ensure every category in `set` is non-empty by topping up from the
- * inspiration arrays. Used as a safety net so the Mascot never receives
- * an empty array (which would silently break random pick).
+ * The categories every pack must define. Written out rather than derived from
+ * a sample object: this list IS the contract the pack authors code against.
  */
-export function ensureFullPhraseSet(set: Partial<MascotPhraseSet> | null | undefined): MascotPhraseSet {
-  // Clone every array off INSPIRATION_PHRASES so a returned set never aliases
-  // the module-level defaults — callers that mutate (e.g. shuffling, push) on
-  // category arrays must not corrupt the shared seed.
-  const merged: MascotPhraseSet = {
-    sass: [...INSPIRATION_PHRASES.sass],
-    idle: [...INSPIRATION_PHRASES.idle],
-    sleep: [...INSPIRATION_PHRASES.sleep],
-    jump: [...INSPIRATION_PHRASES.jump],
-    dance: [...INSPIRATION_PHRASES.dance],
-    facepalm: [...INSPIRATION_PHRASES.facepalm],
-    nameGreetings: [...INSPIRATION_PHRASES.nameGreetings],
-    nameFallbacks: [...INSPIRATION_PHRASES.nameFallbacks],
-    power: [...INSPIRATION_PHRASES.power],
+export const PHRASE_CATEGORIES = [
+  "sass",
+  "idle",
+  "sleep",
+  "jump",
+  "dance",
+  "facepalm",
+  "nameGreetings",
+  "nameFallbacks",
+  "power",
+] as const satisfies readonly (keyof MascotPhraseSet)[];
+
+export type PhraseCategory = (typeof PHRASE_CATEGORIES)[number];
+
+/** A speech bubble is small. Anything longer is clipped on a phone. */
+export const MAX_PHRASE_LENGTH = 60;
+
+/** A generated category is only kept if this many entries survive validation. */
+export const MIN_SURVIVORS_PER_CATEGORY = 4;
+
+/** A generated batch is only kept if this many categories survive. */
+export const MIN_SURVIVING_CATEGORIES = 3;
+
+/**
+ * Above this share of English function words, a batch generated for a
+ * non-English Latin-script locale is treated as "the model answered in
+ * English" and thrown away.
+ */
+export const MAX_ENGLISH_STOPWORD_RATIO = 0.35;
+
+export const LANG_NAMES: Record<string, string> = {
+  en: "English",
+  bg: "Български",
+  de: "Deutsch",
+  es: "Español",
+  fr: "Français",
+  it: "Italiano",
+  ja: "日本語",
+  nl: "Nederlands",
+  sv: "Svenska",
+  zh: "中文",
+};
+
+/**
+ * Is this single entry renderable, for this category, in this locale?
+ *
+ * `phrase` is a TEMPLATE — `{name}` has not been substituted yet, and must
+ * not be: the user's name may legitimately be in another script.
+ */
+export function isValidPhrase(phrase: unknown, category: PhraseCategory, locale: string): phrase is string {
+  if (typeof phrase !== "string") return false;
+  const trimmed = phrase.trim();
+  if (trimmed.length === 0 || trimmed.length > MAX_PHRASE_LENGTH) return false;
+  if (category === "nameGreetings" && !trimmed.includes("{name}")) return false;
+  if (category === "nameFallbacks" && (/\s/.test(trimmed) || trimmed.includes("{"))) return false;
+  return isPhraseCompatible(trimmed, locale);
+}
+
+/** Trim, validate and de-duplicate one category. Order is preserved. */
+export function sanitizeCategory(
+  entries: unknown,
+  category: PhraseCategory,
+  locale: string,
+): string[] {
+  if (!Array.isArray(entries)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (!isValidPhrase(entry, category, locale)) continue;
+    const trimmed = entry.trim();
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
   }
-  if (!set) return merged
-  for (const key of PHRASE_CATEGORIES) {
-    const incoming = set[key]
-    if (Array.isArray(incoming) && incoming.length > 0) {
-      // Trim before validating so " spaces only " or "\n" entries are
-      // dropped instead of slipping through as "valid" but invisible.
-      // For nameGreetings, only keep entries that contain the {name} token.
-      if (key === 'nameGreetings') {
-        const valid = incoming.filter((s) => {
-          if (typeof s !== 'string') return false
-          const trimmed = s.trim()
-          return trimmed.length > 0 && trimmed.length < 120 && trimmed.includes('{name}')
-        })
-        merged.nameGreetings = valid.length > 0 ? valid : [...INSPIRATION_PHRASES.nameGreetings]
-        continue
-      }
-      const cleaned = incoming.filter((s) => {
-        if (typeof s !== 'string') return false
-        const trimmed = s.trim()
-        return trimmed.length > 0 && trimmed.length < 120
-      })
-      if (cleaned.length > 0) merged[key] = cleaned
+  return out;
+}
+
+export interface BatchValidation {
+  /** Only the categories that passed — the rest are the pack's job. */
+  categories: Partial<MascotPhraseSet>;
+  /** False when the batch is too thin/wrong to be worth persisting. */
+  ok: boolean;
+  /** Machine-readable reason when `ok` is false. */
+  reason?: "too-few-categories" | "wrong-language";
+  /** How many incoming entries were thrown away. */
+  dropped: number;
+}
+
+/**
+ * Gate a freshly generated batch before it is written to the cache.
+ *
+ * A category needs MIN_SURVIVORS_PER_CATEGORY survivors to be kept at all —
+ * a category with two usable lines makes the crab repeat itself, and topping
+ * it up from the pack is strictly better. A batch needs
+ * MIN_SURVIVING_CATEGORIES kept categories to be persisted at all.
+ *
+ * `stopwordProbe` catches the failure the script check structurally cannot:
+ * a model asked for German that answered in English.
+ */
+export function validateBatch(
+  set: Partial<MascotPhraseSet> | null | undefined,
+  locale: string,
+  options: { stopwordProbe?: boolean } = {},
+): BatchValidation {
+  const categories: Partial<MascotPhraseSet> = {};
+  let dropped = 0;
+  let kept = 0;
+  const survivors: string[] = [];
+
+  for (const category of PHRASE_CATEGORIES) {
+    const incoming = set?.[category];
+    const incomingCount = Array.isArray(incoming) ? incoming.length : 0;
+    const clean = sanitizeCategory(incoming, category, locale);
+    if (clean.length >= MIN_SURVIVORS_PER_CATEGORY) {
+      categories[category] = clean;
+      kept += 1;
+      survivors.push(...clean);
+      dropped += incomingCount - clean.length;
+    } else {
+      dropped += incomingCount;
     }
   }
-  return merged
+
+  if (kept < MIN_SURVIVING_CATEGORIES) {
+    return { categories: {}, ok: false, reason: "too-few-categories", dropped };
+  }
+
+  if (options.stopwordProbe !== false && isNonEnglishLatinLocale(locale)) {
+    if (englishStopwordRatio(survivors) > MAX_ENGLISH_STOPWORD_RATIO) {
+      return { categories: {}, ok: false, reason: "wrong-language", dropped };
+    }
+  }
+
+  return { categories, ok: true, dropped };
+}
+
+/**
+ * Validate `set` against `locale` and fill every category it could not supply
+ * from `pack` — and, if the pack itself is short, from the neutral pack.
+ *
+ * The result is always complete (INV-3: no empty category, ever) and always
+ * locale-correct (INV-1/INV-2: nothing renderable in the wrong script).
+ * Arrays are copies, so callers may shuffle or push without corrupting the
+ * module-level packs.
+ */
+export function mergeWithPackSync(
+  set: Partial<MascotPhraseSet> | null | undefined,
+  pack: MascotPhraseSet,
+  locale: string,
+): MascotPhraseSet {
+  const merged = {} as MascotPhraseSet;
+  for (const category of PHRASE_CATEGORIES) {
+    const incoming = sanitizeCategory(set?.[category], category, locale);
+    if (incoming.length > 0) {
+      merged[category] = incoming;
+      continue;
+    }
+    // The pack is hand-written, but it is still data: run it through the same
+    // gate so a bad pack entry cannot reach a bubble.
+    const fromPack = sanitizeCategory(pack[category], category, locale);
+    merged[category] = fromPack.length > 0
+      ? fromPack
+      : sanitizeCategory(neutral[category], category, locale);
+  }
+  return merged;
 }

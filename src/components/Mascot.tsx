@@ -3,18 +3,22 @@
 import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
 import * as kv from '@/lib/client-kv'
 import { useT } from '@/lib/i18n'
-import { INSPIRATION_PHRASES, type MascotPhraseSet } from '@/lib/mascot-phrases'
-import { fetchUserName, fetchPhraseSet, pickNameGreeting } from '@/lib/mascot-client'
+import { type MascotPhraseSet } from '@/lib/mascot-phrases'
+import { isPhraseCompatible } from '@/lib/mascot-language'
+import { NEUTRAL_PACK } from '@/lib/mascot-packs'
+import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
-// All speech-bubble phrases used to live as hardcoded arrays here. They've
-// moved to `@/lib/mascot-phrases` (shared with the server-side generator)
-// and are now treated as INSPIRATION SEEDS only. At runtime we fetch a
-// LLM-generated set in the user's selected language from
-// `/setup-api/mascot-lines`, refreshed weekly with daily top-ups based on
-// what the user actually works on. Inspiration is the cold-start fallback.
+// Speech-bubble phrases come from `/setup-api/mascot-lines` in the locale the
+// UI is currently rendering; the hand-written pack for that locale is the
+// fallback, and the language-free neutral pack is the floor (it is what the
+// crab says on the very first tick, before the fetch resolves — never
+// English, which would be wrong on nine of the ten locales).
+//
+// Every bubble passes through the language gate in `say()`: a string that is
+// not script-compatible with the current locale is not rendered at all.
 
 type MascotState = 'waddle' | 'idle' | 'jump' | 'celebrate' | 'sleep' | 'sass' | 'look' | 'dance' | 'facepalm' | 'frenzy'
 const MASCOT_ACTIONS: { state: MascotState; dur: [number, number]; weight: number }[] = [
@@ -37,6 +41,10 @@ const POWER_PARTICLES = [
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
   const { locale } = useT()
+  // Read by `say()` — the language gate must judge against the locale the UI
+  // is rendering RIGHT NOW, and `say` is a stable callback.
+  const localeRef = useRef(locale)
+  localeRef.current = locale
   const frozenRef = useRef(false)
   const onPositionChangeRef = useRef(onPositionChange)
   onPositionChangeRef.current = onPositionChange
@@ -54,7 +62,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // Speech
   const [speech, setSpeech] = useState('')
   const speechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const say = useCallback((text: string, ms = 3000) => {
+  const say = useCallback((line: string | MascotLine, ms = 3000) => {
+    const template = typeof line === 'string' ? line : line.template
+    const text = typeof line === 'string' ? line : line.text
+    // ── INV-1 render gate ──
+    // Nothing reaches a bubble unless it is script-compatible with the UI
+    // locale. Judged on the TEMPLATE, before `{name}` was substituted: the
+    // owner's name may be in any script and must not silence the crab.
+    if (!isPhraseCompatible(template, localeRef.current)) return
     // Clear any in-flight clear timer first: without this, an older bubble's
     // timeout fires and blanks a newer bubble early (visible flicker during
     // frenzy / rapid taps), and a late fire can setState after unmount.
@@ -62,7 +77,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     setSpeech(text)
     speechTimerRef.current = setTimeout(() => setSpeech(''), ms)
   }, [])
-  const sayRef = useRef<((text: string, ms?: number) => void) | null>(null)
+  const sayRef = useRef<((line: string | MascotLine, ms?: number) => void) | null>(null)
   sayRef.current = say
 
   // Simple sleeping state (no tamagotchi engine)
@@ -78,21 +93,25 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const ctxOpenedAt = useRef(0)
 
-  // Categorized phrase set + extra sass snippets harvested from chat.
-  // Initialized to inspiration so the crab can talk before the API responds.
-  // Re-fetches when locale changes so a language switch flips the phrase
-  // bag immediately instead of after the next midnight cache expiry.
-  const phrasesRef = useRef<MascotPhraseSet>(INSPIRATION_PHRASES)
-  const sassLinesRef = useRef<string[]>(INSPIRATION_PHRASES.sass)
+  // Categorized phrase set for the current locale. Starts on whatever can be
+  // had synchronously — the locale's pack if it is already in memory, the
+  // language-free neutral pack otherwise — so the first bubble is never in
+  // the wrong language. Re-fetches when the locale changes so a language
+  // switch flips the bag immediately instead of at the next midnight expiry.
+  const phrasesRef = useRef<MascotPhraseSet>(NEUTRAL_PACK)
+  const sassLinesRef = useRef<string[]>(NEUTRAL_PACK.sass)
   // Per-effect token so a slow fetch from a stale locale (e.g. en→bg→en in
   // quick succession) can't overwrite the phrase set with the wrong language.
   const phraseFetchTokenRef = useRef(0)
   useEffect(() => {
     const myToken = ++phraseFetchTokenRef.current
-    fetchPhraseSet(locale).then(({ phrases, snippets }) => {
+    const immediate = initialPhraseSet(locale)
+    phrasesRef.current = immediate
+    sassLinesRef.current = immediate.sass
+    fetchPhraseSet(locale).then((phrases) => {
       if (myToken !== phraseFetchTokenRef.current) return
       phrasesRef.current = phrases
-      sassLinesRef.current = snippets.length > 0 ? [...phrases.sass, ...snippets] : phrases.sass
+      sassLinesRef.current = phrases.sass
     })
   }, [locale])
 
@@ -115,7 +134,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (userNameRef.current) return userNameRef.current
     const fallbacks = phrasesRef.current.nameFallbacks.length > 0
       ? phrasesRef.current.nameFallbacks
-      : INSPIRATION_PHRASES.nameFallbacks
+      : NEUTRAL_PACK.nameFallbacks
     return fallbacks[Math.floor(Math.random() * fallbacks.length)]
   }, [])
 
@@ -244,8 +263,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const x = -20 + Math.random() * 40
     setDamageFloaters(prev => [...prev, { id, dmg: Math.round(dmg), x }])
     setTimeout(() => setDamageFloaters(prev => prev.filter(f => f.id !== id)), 1200)
-    if (speed > 1200) say('OUCH! 💀', 1500)
-    else if (speed > 800) say('Ow! 🤕', 1200)
+    // Emoji-only on purpose: an impact reaction has to work in every locale,
+    // and the phrase packs have no "ouch" category.
+    if (speed > 1200) say('💀💥', 1500)
+    else if (speed > 800) say('🤕', 1200)
   }, [say])
 
   // ─── ImpactJS-style physics tick (runs after drop) ───
@@ -594,7 +615,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   const randRange = (min: number, max: number) => min + Math.random() * (max - min)
 
-  const getSpeech = (st: MascotState): string | null => {
+  const getSpeech = (st: MascotState): string | MascotLine | null => {
     const phrases = phrasesRef.current
     const lines: Record<string, string[]> = {
       sass: sassLinesRef.current,
@@ -603,10 +624,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       jump: phrases.jump,
       dance: phrases.dance,
       facepalm: phrases.facepalm,
-      // celebrate / look kept as inline literals — short, action-specific,
-      // and not currently part of the generated set.
-      celebrate: ['🎉 CHA-CHING!', '💰💰💰', 'MONEY MONEY MONEY!'],
-      look: ['👀', '🔍 Hmm...', 'What\'s over there?'],
+      // celebrate / look are inline: short, action-specific, and not part of
+      // the phrase-set contract. Kept emoji-only so they render in every
+      // locale instead of being dropped by the language gate.
+      celebrate: ['🎉', '💰💰💰', '🤑🎉'],
+      look: ['👀', '🔍', '👀❓'],
     }
     const opts = lines[st]
     if (!opts || opts.length === 0) return null
@@ -635,7 +657,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
     if (sleepZzzRef.current) clearInterval(sleepZzzRef.current)
     setState('sleep')
-    const zzzLines = ['💤 Zzzzz...', '😴 ...zzz...', '💤 *snore*', '😴 ...mumble...', '💤 Zzzzz...']
+    // From the locale's own pack — these used to be hardcoded English.
+    const zzzLines = phrasesRef.current.sleep
     let zIdx = 0
     say(zzzLines[0], 4000)
     sleepZzzRef.current = setInterval(() => {
@@ -660,7 +683,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     setState('idle')
     setIsSleeping(false)
     kv.remove(SLEEP_KEY)
-    say('*yawn* I\'m awake! 😤', 2500)
+    say('😤☀️', 2500)
   }, [say])
   const wakeSleepRef = useRef<(() => void) | null>(null)
   useEffect(() => {
@@ -711,7 +734,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       setFacingDirect(Math.random() > 0.5 ? 'left' : 'right')
       const powerLines = phrasesRef.current.power.length > 0
         ? phrasesRef.current.power
-        : INSPIRATION_PHRASES.power
+        : NEUTRAL_PACK.power
       say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
     } else if (action.state === 'idle') {
       const line = getSpeech('idle')
@@ -874,14 +897,21 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       }
       walkInterval.current = requestAnimationFrame(frenzyAnimate) as unknown as ReturnType<typeof setInterval>
 
+      // The frenzy quotes are a hardcoded easter egg in two languages, so
+      // pick the ones this locale can actually read (the gate in `say()`
+      // would otherwise silently drop half the cycle) and fall back to the
+      // locale's own power lines when none of them fits.
+      const localeQuotes = FRENZY_QUOTES.filter(q => isPhraseCompatible(q, localeRef.current))
+      const quotes = localeQuotes.length > 0 ? localeQuotes : phrasesRef.current.power
+
       // Cycle through quotes every 5 seconds — longer display for readability
       let quoteIdx = 0
-      say(FRENZY_QUOTES[0], 4500)
+      say(quotes[0], 4500)
       frenzyIntervalsRef.current.forEach(clearInterval)
       frenzyIntervalsRef.current = []
       const quoteInterval = setInterval(() => {
-        quoteIdx = (quoteIdx + 1) % FRENZY_QUOTES.length
-        say(FRENZY_QUOTES[quoteIdx], 4500)
+        quoteIdx = (quoteIdx + 1) % quotes.length
+        say(quotes[quoteIdx], 4500)
       }, 5000)
 
       // Spawn money waves every 3 seconds
@@ -1198,7 +1228,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
               transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
               zIndex: 10,
             }}>
-              <div style={{
+              <div data-speech="1" style={{
                 background: bubbleBg,
                 color: frenzy ? '#000' : '#fff',
                 padding: frenzy ? '10px 20px' : '8px 18px',
