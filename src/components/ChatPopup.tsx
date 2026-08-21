@@ -6,8 +6,6 @@ import { createPortal } from 'react-dom'
 // ── Gateway WebSocket chat widget ──
 // Connects directly to the OpenClaw gateway, no iframe.
 
-// Save short assistant snippets for mascot speech lines via client-kv
-import * as kv from '@/lib/client-kv'
 import {
   uuid,
   type ChatMessage as BaseChatMessage,
@@ -40,7 +38,6 @@ import {
   PERSIST_KEY_PREFIX,
 } from '@/lib/chat-reasoning'
 
-const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const MAX_RETRIES = 8
 const MAX_QUEUED_SENDS = 20
 const MAX_AUDIO_PER_MESSAGE = 4
@@ -60,28 +57,13 @@ const RETRY_DELAY = 3000
 // having to reload.
 const AUTH_BACKOFF_DELAY = 30000
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
-function saveMascotSnippet(text: string) {
-  if (!text || text.length < 10) return
-  const sentences = text
-    .replace(/\n+/g, '. ')
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(s => s.length >= 10 && s.length <= 80)
-    .filter(s => !/^(here|sure|ok|yes|no|let me|i'll|i can|```)/i.test(s))
-    .filter(s => !s.includes('```') && !s.includes('http') && !s.includes('**'))
-  if (sentences.length === 0) return
-  const picks = sentences.slice(0, 2)
-  const existing = kv.getJSON<{ lines: string[]; date: string }>(MASCOT_LINES_KEY) || { lines: [], date: '' }
-  const today = new Date().toISOString().slice(0, 10)
-  if (existing.date !== today) { existing.lines = []; existing.date = today }
-  let changed = false
-  for (const p of picks) {
-    if (!existing.lines.includes(p)) { existing.lines.push(p); changed = true }
-  }
-  if (!changed) return
-  if (existing.lines.length > 50) existing.lines = existing.lines.slice(-50)
-  kv.setJSON(MASCOT_LINES_KEY, existing)
-}
+
+// The chat used to clip up to two sentences out of every assistant reply into
+// `clawbox-mascot-convo-lines` so the crab could quote them back. It has been
+// removed: the snippets were whatever language the assistant happened to
+// answer in (and whatever the user happened to be discussing), so they leaked
+// into a mascot bag that must be in the UI locale. The server deletes the
+// legacy KV key on first read.
 
 interface ChatPopupProps {
   isOpen: boolean
@@ -1440,7 +1422,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   audio,
                 }]
               })
-              if (text) saveMascotSnippet(text)
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
               if (images.length > 0) endImageWait()

@@ -4,24 +4,26 @@ import Mascot from "@/components/Mascot";
 
 // The mascot pulls its name/phrases over the network and reads persisted UI
 // state — stub both so the component mounts deterministically in jsdom.
-vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en" }) }));
+vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en", localeResolved: true }) }));
 vi.mock("@/lib/client-kv", () => ({
   get: () => null,
   getJSON: () => null,
   set: vi.fn(),
   setJSON: vi.fn(),
 }));
-vi.mock("@/lib/mascot-client", () => ({
-  fetchUserName: () => Promise.resolve(null),
-  // Must resolve a REAL phrase set — the component reads `phrases.sass` on load.
-  // Dynamic-import the (unmocked) phrases module inside the factory so this
-  // survives vi.mock's hoisting above the top-level imports.
-  fetchPhraseSet: async () => ({
-    phrases: (await import("@/lib/mascot-phrases")).INSPIRATION_PHRASES,
-    snippets: [],
-  }),
-  pickNameGreeting: () => "",
-}));
+// Must resolve REAL phrase sets — the component reads `phrases.sass` on load
+// and `phrases.power` during a frenzy. Dynamic-import the (unmocked) packs
+// inside the factory so this survives vi.mock's hoisting above the imports.
+vi.mock("@/lib/mascot-client", async () => {
+  const { neutral } = await import("@/lib/mascot-packs/neutral");
+  const { en } = await import("@/lib/mascot-packs/en");
+  return {
+    fetchUserName: () => Promise.resolve(null),
+    initialPhraseSet: () => neutral,
+    fetchPhraseSet: async () => en,
+    pickNameGreeting: () => ({ template: "", text: "" }),
+  };
+});
 
 // Drive `prefers-reduced-motion` per-test. matchMedia is consulted once on mount.
 let reduceMotion = false;
