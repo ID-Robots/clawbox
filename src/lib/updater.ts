@@ -491,9 +491,27 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // longer (wait_for_apt alone allows 900s), so an overrun past these 5
     // minutes is advisory: the unit finishes on its own (TimeoutStartSec is
     // 30 min) and everything inside it is non-fatal by design.
+    // 15 min, raised from 5. post_update now also REPAIRS a device that a
+    // pre-fix factory reset left without its Hermes agent install or its
+    // offline Gemma GGUF (step_hermes_install + step_llamacpp_model at the end
+    // of step_post_update). On a healthy box both are sub-second no-ops and
+    // nothing about the timing changes; on a broken one they are a git clone +
+    // venv build (~90s measured) and a 3.2 GB model download, on top of the
+    // fixups that already routinely outlive a minute.
+    //
+    // The raise is not cosmetic. `advisoryOnOverrun` does not pause the
+    // update: it marks the step completed and moves straight on to
+    // `hermes_edition`, which hard-fails when ~/.local/bin/hermes is not yet
+    // runnable. So an overrun DURING the repair would report the repair as
+    // fine and then fail the step after it. The budget has to cover the repair
+    // rather than lean on the advisory path.
+    //
+    // Still well inside the unit's own ceiling (TimeoutStartSec=7200 in
+    // config/clawbox-root-update@.service), and advisoryOnOverrun stays as the
+    // backstop for the genuinely pathological case.
     id: "post_update",
     label: "Applying system fixups",
-    timeoutMs: 300_000,
+    timeoutMs: 900_000,
     requiresRoot: true,
     advisoryOnOverrun: true,
   },
