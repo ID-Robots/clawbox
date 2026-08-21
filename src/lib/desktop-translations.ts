@@ -98,6 +98,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.takePhoto": "Take photo",
     "chat.messagePlaceholder": "Type a message...",
     "chat.generatedImage": "Generated image",
+    "chat.sentImage": "Image you sent",
     "chat.generatingImage": "Generating image…",
     "chat.downloadImage": "Download image",
     "chat.downloadAudio": "Download audio",

@@ -544,7 +544,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // which is indistinguishable to the user from a paste that never fired.
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
   // The image the full-size preview is showing, or null when it is closed.
-  const [preview, setPreview] = useState<string | null>(null)
+  // It carries the picture's accessible name as well as its URL: a screen
+  // reader must not be told "generated image" after opening one the customer
+  // sent, and the src alone cannot tell the two apart.
+  const [preview, setPreview] = useState<{ src: string; alt: string } | null>(null)
   const closePreview = useCallback(() => setPreview(null), [])
   // The desktop's one modal-dialog behaviour: focus in, Tab trapped, focus
   // restored, the page behind inerted, and Escape closing THIS and stopping
@@ -3438,14 +3441,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }}>
                 {msg.images && msg.images.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
-                    {msg.images.map((src, j) => (
+                    {msg.images.map((src, j) => {
+                    // The same block draws both the pictures the assistant made
+                    // and, since TASK-436, the ones the customer sent. They are
+                    // not the same thing to announce: "Generated image" on a
+                    // photo the customer just attached is simply wrong, and an
+                    // accessible name is read out verbatim.
+                    const imageAlt = msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")
+                    return (
                       <div key={j} style={{ position: 'relative', display: 'inline-flex', maxWidth: '100%' }}>
                         {/* A button, not a bare onClick on the image: the
                             preview has to be reachable from the keyboard too,
                             and the alt text gives the control its name. */}
                         <button
                           type="button"
-                          onClick={() => setPreview(src)}
+                          onClick={() => setPreview({ src, alt: imageAlt })}
                           style={{
                             padding: 0, border: 'none', background: 'none',
                             cursor: 'zoom-in', lineHeight: 0, borderRadius: 8, maxWidth: '100%',
@@ -3455,7 +3465,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                               it gets a real alt so a screen reader announces it,
                               and it is contained rather than cropped so the image
                               the user asked for does not lose its edges. */}
-                          <img src={src} alt={t("chat.generatedImage")} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
+                          <img src={src} alt={imageAlt} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
                         </button>
                         {/* Same-origin, so the `download` attribute is enough to
                             save it under the name the harness gave it. */}
@@ -3475,7 +3485,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                           <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
                         </a>
                       </div>
-                    ))}
+                    );
+                    })}
                   </div>
                 )}
                 {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
@@ -3954,8 +3965,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }}
           >
             <img
-              src={preview}
-              alt={t("chat.generatedImage")}
+              src={preview.src}
+              alt={preview.alt}
               style={{
                 maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
                 borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
@@ -3963,8 +3974,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             />
             <div style={{ position: 'absolute', top: 16, right: 16, display: 'flex', gap: 8 }}>
               <a
-                href={preview}
-                download={mediaFileName(preview)}
+                href={preview.src}
+                download={mediaFileName(preview.src)}
                 title={t("chat.downloadImage")}
                 aria-label={t("chat.downloadImage")}
                 style={PREVIEW_BUTTON_STYLE}

@@ -230,6 +230,46 @@ describe("the image a customer sent, in the transcript", () => {
     expect(shown).toContain("report.pdf");
   });
 
+  it("announces it as the customer's own picture, not as a generated one", async () => {
+    // Proven on .177 before it was fixed: the picture in the user's own bubble
+    // carried alt="Generated image", because that element was written for the
+    // ones the assistant makes. An accessible name is read out verbatim, so a
+    // screen-reader user was told the box had generated the photo they had
+    // just attached.
+    history = [
+      storedUserTurn(`[Attached file: ${PNG}]\nWhat is this ?`, 1787260000000),
+      { role: "assistant", content: [{ type: "text", text: `MEDIA:${SECOND}` }], timestamp: 1787260001000 },
+    ];
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    await screen.findByRole("textbox");
+    await connected();
+
+    const sent = await screen.findByAltText("chat.sentImage");
+    expect(sent.getAttribute("src")).toBe(mediaRoute(PNG));
+    // The assistant's own picture must keep the name it had — this is a split,
+    // not a rename.
+    const generated = await screen.findByAltText("chat.generatedImage");
+    expect(generated.getAttribute("src")).toBe(mediaRoute(SECOND));
+  });
+
+  it("keeps that name when the picture is opened full size", async () => {
+    // The enlarged view is a second element with its own alt. Left generic it
+    // would contradict the thumbnail the customer just clicked.
+    history = [storedUserTurn(`[Attached file: ${PNG}]\nWhat is this ?`, 1787260000000)];
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    await screen.findByRole("textbox");
+    await connected();
+
+    fireEvent.click(await screen.findByRole("button", { name: "chat.sentImage" }));
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => {
+      const enlarged = [...dialog.querySelectorAll("img")];
+      expect(enlarged.length).toBe(1);
+      expect(enlarged[0].getAttribute("alt")).toBe("chat.sentImage");
+      expect(enlarged[0].getAttribute("src")).toBe(mediaRoute(PNG));
+    });
+  });
+
   it("leaves an ordinary turn exactly as it was", async () => {
     history = [storedUserTurn("just a question", 1787260000000)];
     render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
