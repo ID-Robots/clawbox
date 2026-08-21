@@ -154,13 +154,27 @@ const PROVIDER_PILL_LABEL: Record<string, string> = {
   'Ollama Local': 'Ollama',
   'Gemma 4 Local': 'Gemma 4',
 }
+
+/**
+ * Accessible name for a spoken reply's player.
+ *
+ * The message body is already on screen and already read by the message
+ * itself, so this is a short identifying fragment, not a second copy — but it
+ * has to be there: a transcript can hold several players, and "audio" three
+ * times over tells a screen-reader user nothing about which is which.
+ */
+function audioLabel(text: string | undefined, prefix: string): string {
+  const spoken = text ? plainTextForLabel(text, 100) : "";
+  return spoken ? `${prefix}: ${spoken}` : prefix;
+}
+
 function getProviderPillText(option: ChatModelState['options'][number]): string {
   const full = getChatModelOptionText(option)
   if (!option.available) return full
   return PROVIDER_PILL_LABEL[option.label ?? ''] ?? full
 }
 
-import { renderText } from '@/lib/chat-markdown'
+import { renderText, plainTextForLabel } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
   type ChatAttachment,
@@ -3459,9 +3473,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       <audio
                         key={src}
                         data-testid="chat-audio"
-                        aria-label={msg.text
-                          ? `${t("chat.audioReply")}: ${msg.text.slice(0, 100)}`
-                          : t("chat.audioReply")}
+                        // Markdown source must not reach an accessible name —
+                        // it is read out character for character. See
+                        // plainTextForLabel.
+                        aria-label={audioLabel(msg.text, t("chat.audioReply"))}
                         controls
                         preload="metadata"
                         src={src}

@@ -209,6 +209,31 @@ describe("spoken replies in the mascot chat", () => {
     expect(player).toHaveAccessibleName(`chat.audioReply: ${SPOKEN_TEXT}`);
   });
 
+  it("labels the player with speakable text, not the markdown the model wrote", async () => {
+    // Observed live on .177 at beta 084e3f7: the model answered
+    // `Sent — *"Seventeen copper bells."*` and the player's accessible name was
+    // that string verbatim, so a screen reader announced the asterisks. It also
+    // carried the whole message body, including a paragraph about how MEDIA is
+    // delivered — internal wording, read out as the control's name.
+    const MARKDOWN = 'Sent — *"Seventeen copper bells."*\n\nSee [the docs](https://clawbox.com/docs/tts) or run `openclaw health`.';
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    await screen.findByRole("textbox");
+
+    deliver(assistantMessage(MARKDOWN, 1787291821899));
+    deliverSessionMessage(assistantMessage(MARKDOWN, 1787291825743, VOICE));
+    await waitFor(() => expect(players()).toHaveLength(1));
+
+    const name = players()[0].getAttribute("aria-label") ?? "";
+    expect(name.startsWith("chat.audioReply: ")).toBe(true);
+    for (const marker of ["*", "`", "](", "https://"]) {
+      expect(name).not.toContain(marker);
+    }
+    // The words survive; only the syntax is gone.
+    expect(name).toContain("Seventeen copper bells.");
+    expect(name).toContain("the docs");
+  });
+
   it("does not show the answer twice when its spoken half arrives", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await waitFor(() => expect(socket()).not.toBeNull());
