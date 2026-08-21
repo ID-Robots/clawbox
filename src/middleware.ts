@@ -168,6 +168,11 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   // booleans (hasToken/loggedIn), never the stored secrets.
   "/setup-api/hermes/chat",
   "/setup-api/hermes/skills",
+  // WhatsApp access control (who may talk to the agent) and channel
+  // enable/disable. Unlike /setup-api/telegram/*, nothing in the first-boot
+  // wizard touches it — the section lives only in Settings — so it has no
+  // reason to be reachable while the open ClawBox-Setup AP is broadcasting.
+  "/setup-api/whatsapp",
   "/setup-api/harness/select",
   "/setup-api/harness/status",  // probes both harnesses; only the desktop picker calls it
 ];
