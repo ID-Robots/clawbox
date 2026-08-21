@@ -55,11 +55,102 @@ const MAX_FIELDS = 8;
 const MAX_FIELD_BYTES = 4096;
 const MAX_PARTS = 12;
 
+// -- Retention --------------------------------------------------------------
+//
+// Every accepted upload stays here for as long as the chat message that names
+// it is useful, and nothing else ever removes one. Per-request limits bound a
+// single upload; they say nothing about the total. On a Jetson this directory
+// shares a disk with openclaw.json, the identity keys and every transcript, so
+// left alone it is a slow way to fill the box.
+//
+// Age first, then a total-size cap on what age left behind. Both are swept
+// before a new file is staged, best effort: a failed sweep must never turn a
+// good upload into an error.
+const RETENTION_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const RETENTION_MAX_BYTES = 500 * 1024 * 1024;
+// Nothing this young is ever removed, whatever the totals say. A file being
+// written by a concurrent request is the newest thing in the directory, and
+// deleting it out from under an in-flight upload would hand the composer back
+// a path with nothing at it.
+const RETENTION_MIN_AGE_MS = 60 * 1000;
+
 /** Raised for input the client got wrong (400) as opposed to a failure of ours (500). */
 class BadUpload extends Error {
   constructor(message: string, readonly status = 400) {
     super(message);
     this.name = "BadUpload";
+  }
+}
+
+/**
+ * The errors busboy 1.6.0's multipart parser raises for input it cannot read.
+ *
+ * Verified against busboy 1.6.0 rather than taken from the docs, because where
+ * they surface is not obvious: with no file part open both arrive on the Busboy
+ * instance, but a body truncated *while a file part is open* is emitted on that
+ * file's stream instead. So the same client mistake reaches this route by two
+ * different paths and has to be classified in both.
+ */
+const PARSER_FAULTS = new Set(["Malformed part header", "Unexpected end of form"]);
+
+/**
+ * Re-label a parser fault as client input; leave everything else alone.
+ *
+ * A malformed or truncated multipart body is something the caller can fix, so
+ * it is a 400. Anything else reaching the same handlers -- a write failure, a
+ * dead socket, a bug of ours -- keeps its identity and is reported as a 500,
+ * because telling the user to fix a request that was fine sends them nowhere.
+ */
+function asBadUpload(err: unknown): unknown {
+  if (err instanceof BadUpload) return err;
+  if (err instanceof Error && PARSER_FAULTS.has(err.message)) return new BadUpload(err.message);
+  return err;
+}
+
+/**
+ * Drop staged files that are old, then oldest-first until the directory fits.
+ *
+ * Best effort by construction: it is called for its side effect before a new
+ * upload is staged, and every failure -- an unreadable entry, a file that
+ * vanished under a concurrent sweep, a stat that races an unlink -- is skipped
+ * rather than raised. Directories and anything else that is not a regular file
+ * are left untouched.
+ */
+async function pruneStagingDir(dirReal: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(dirReal);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  const kept: { path: string; mtimeMs: number; size: number }[] = [];
+  for (const name of entries) {
+    const full = path.join(dirReal, name);
+    let stat;
+    try {
+      stat = await fsp.lstat(full);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const age = now - stat.mtimeMs;
+    if (age < RETENTION_MIN_AGE_MS) continue;
+    if (age > RETENTION_MAX_AGE_MS) {
+      try { await fsp.unlink(full); } catch { /* raced another sweep */ }
+      continue;
+    }
+    kept.push({ path: full, mtimeMs: stat.mtimeMs, size: stat.size });
+  }
+  let total = kept.reduce((sum, f) => sum + f.size, 0);
+  if (total <= RETENTION_MAX_BYTES) return;
+  kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const f of kept) {
+    if (total <= RETENTION_MAX_BYTES) break;
+    try {
+      await fsp.unlink(f.path);
+      total -= f.size;
+    } catch { /* raced another sweep */ }
   }
 }
 
@@ -134,6 +225,11 @@ export async function POST(req: NextRequest) {
       { status: 500 },
     );
   }
+
+  // Before staging anything new, not after: the point is to make room, and a
+  // sweep that only ran on the way out would leave the last upload of a session
+  // sitting on the disk until the next one arrived.
+  await pruneStagingDir(dirReal);
 
   let written: string | null = null;
   // Hoisted so the cleanup below can wait for the write to stop before
@@ -212,7 +308,9 @@ export async function POST(req: NextRequest) {
         // Registered before the first thing that can reject, so an abort on
         // this part stops it at the source instead of leaving it draining.
         activeFileStream = fileStream as unknown as Readable;
-        fileStream.on("error", fail);
+        // A body truncated while this part is open surfaces here rather than on
+        // busboy, so the classifier has to run on this path too.
+        fileStream.on("error", (err) => fail(asBadUpload(err)));
         const leaf = safeLeafName(info.filename);
         if (!leaf) {
           fail(new BadUpload("Invalid filename"));
@@ -258,7 +356,10 @@ export async function POST(req: NextRequest) {
           })
           .catch(fail);
       });
-      busboy.on("error", fail);
+      // Malformed headers and a body that ends early are the caller's mistake,
+      // not ours; unclassified they left this route answering 500 for a request
+      // no server change could ever make work.
+      busboy.on("error", (err) => fail(asBadUpload(err)));
 
       const source = Readable.fromWeb(req.body as unknown as import("stream/web").ReadableStream);
       nodeStream = source;

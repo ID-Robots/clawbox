@@ -102,6 +102,56 @@ function stagingDir(): string {
   return path.join(openclawHome, "media", "chat-attachments");
 }
 
+/** What is staged right now, or `[]` when nothing ever created the directory. */
+function staged(): string[] {
+  return fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
+}
+
+/**
+ * Wait until the staging directory is empty, or fail once the deadline passes.
+ *
+ * Cleanup finishes after the response, so these assertions need to wait for
+ * something. A fixed sleep is the wrong instrument twice over: too short and it
+ * flakes on a loaded CI box, too long and every run pays for it. Polling
+ * returns as soon as the directory is actually clean, and a real leak still
+ * fails -- one `expect` on the last read, either way.
+ */
+async function expectStagingDrains(timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let listed = staged();
+  while (listed.length && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    listed = staged();
+  }
+  expect(listed).toEqual([]);
+}
+
+/** `n` file parts, so a request can trip the one-file limit. */
+function fileParts(n: number, content: Buffer): Buffer {
+  const parts: Buffer[] = [];
+  for (let i = 0; i < n; i++) {
+    parts.push(Buffer.concat([
+      Buffer.from(
+        `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="f${i}.png"\r\n`
+          + "Content-Type: application/octet-stream\r\n\r\n",
+      ),
+      content,
+      Buffer.from("\r\n"),
+    ]));
+  }
+  return Buffer.concat(parts);
+}
+
+/** Write a staged file directly and backdate it, to set up a retention sweep. */
+function seedStaged(name: string, bytes: Buffer, ageMs: number): string {
+  fs.mkdirSync(stagingDir(), { recursive: true });
+  const full = path.join(stagingDir(), name);
+  fs.writeFileSync(full, bytes);
+  const when = new Date(Date.now() - ageMs);
+  fs.utimesSync(full, when, when);
+  return full;
+}
+
 describe("/setup-api/chat/attachments", () => {
   beforeEach(async () => {
     originalHome = process.env.HOME;
@@ -220,8 +270,7 @@ describe("/setup-api/chat/attachments", () => {
     const huge = Buffer.alloc(27 * 1024 * 1024, 0x41);
     const res = await POST(request(multipart("huge.bin", huge)));
     expect(res.status).toBe(413);
-    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
-    expect(listed).toEqual([]);
+    expect(staged()).toEqual([]);
   });
 
   it("reports a broken staging directory as a server error, not a client one", async () => {
@@ -236,8 +285,7 @@ describe("/setup-api/chat/attachments", () => {
   it("leaves no partial file behind when the upload is rejected", async () => {
     await POST(request(multipart("...", PNG)));
     // The name never resolved, so nothing should have been created at all.
-    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
-    expect(listed).toEqual([]);
+    expect(staged()).toEqual([]);
   });
 
   it("stages nothing after a rejection that arrives before the file does", async () => {
@@ -251,9 +299,161 @@ describe("/setup-api/chat/attachments", () => {
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain("Too many form fields");
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
-    expect(listed).toEqual([]);
+    await expectStagingDrains();
+  });
+
+  it("refuses a second file part rather than staging one of them", async () => {
+    // busboy caps files at 1 by going quiet, so without the filesLimit handler
+    // a two-file request looked like a perfectly ordinary one-file upload.
+    const res = await POST(chunkedRequest([
+      fileParts(2, PNG),
+      Buffer.from(`--${BOUNDARY}--\r\n`),
+    ]));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("Only one file per request");
+    await expectStagingDrains();
+  });
+
+  it("refuses a request with more parts than the limit", async () => {
+    // Parts are the cheapest thing to pile on: each one costs the sender almost
+    // nothing and costs the parser real work.
+    const res = await POST(chunkedRequest([
+      fieldParts(20),
+      filePart("late.png", PNG),
+    ]));
+
+    expect(res.status).toBe(400);
+    // Fields and parts are both exceeded here; either rejection is the right
+    // answer, and both have to leave the disk clean.
+    expect((await res.json()).error).toMatch(/Too many (multipart parts|form fields)/);
+    await expectStagingDrains();
+  });
+
+  it("reports a malformed part header as client input, not a server fault", async () => {
+    // busboy raises "Malformed part header" on itself. Unclassified it reached
+    // the catch as a plain Error and the caller was told 500 -- go and debug the
+    // server -- for a request only they could fix.
+    const body = Buffer.concat([
+      Buffer.from(
+        `--${BOUNDARY}\r\n`
+          + `Content-Disposition form-data; name="file"; filename="broken.png"\r\n\r\n`,
+      ),
+      PNG,
+      Buffer.from(`\r\n--${BOUNDARY}--\r\n`),
+    ]);
+    const res = await POST(request(body));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("Malformed part header");
+    await expectStagingDrains();
+  });
+
+  it("reports a body that ends early as client input, in both places busboy raises it", async () => {
+    // The same client mistake surfaces on two different objects: with no file
+    // part open busboy emits it, and mid-file the file's own stream does. Both
+    // have to answer 400, so both paths are asserted here.
+    const beforeFile = await POST(request(Buffer.from(
+      `--${BOUNDARY}\r\nContent-Disposition: form-data; name="note"\r\n\r\nhal`,
+    )));
+    expect(beforeFile.status).toBe(400);
+    expect((await beforeFile.json()).error).toContain("Unexpected end of form");
+
+    const midFile = await POST(request(Buffer.concat([
+      Buffer.from(
+        `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="half.png"\r\n`
+          + "Content-Type: application/octet-stream\r\n\r\n",
+      ),
+      PNG,
+    ])));
+    expect(midFile.status).toBe(400);
+    expect((await midFile.json()).error).toContain("Unexpected end of form");
+    await expectStagingDrains();
+  });
+
+  it("keeps a genuine server fault a 500 while parser faults become 400", async () => {
+    // The classifier must not swallow everything: a dead connection is ours to
+    // report, and the two cases arrive through the very same handlers.
+    const body = new ReadableStream({
+      async start(controller) {
+        controller.enqueue(new Uint8Array(Buffer.from(
+          `--${BOUNDARY}\r\nContent-Disposition: form-data; name="file"; filename="gone.bin"\r\n`
+            + "Content-Type: application/octet-stream\r\n\r\n",
+        )));
+        controller.enqueue(new Uint8Array(Buffer.alloc(512, 3)));
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        controller.error(new Error("client went away"));
+      },
+    });
+    const res = await POST(new NextRequest("http://localhost/setup-api/chat/attachments", {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${BOUNDARY}` },
+      body,
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toContain("client went away");
+  }, 10000);
+
+  it("drops staged files past the retention age when the next upload arrives", async () => {
+    // Nothing else ever removes one of these, so without a sweep the directory
+    // only grows -- on a box whose disk also holds openclaw.json and the keys.
+    const stale = seedStaged("stale.png", PNG, 8 * 24 * 60 * 60 * 1000);
+    const fresh = seedStaged("fresh.png", PNG, 2 * 60 * 1000);
+
+    const res = await POST(request(multipart("new.png", PNG)));
+    expect(res.status).toBe(200);
+
+    expect(fs.existsSync(stale)).toBe(false);
+    // Inside the window: a week-old file goes, yesterday's stays.
+    expect(fs.existsSync(fresh)).toBe(true);
+    expect(fs.existsSync((await res.json()).path)).toBe(true);
+  });
+
+  it("evicts the oldest staged files once the directory is over its size cap", async () => {
+    // 500 MB of real bytes would make the suite unusable, so the cap is reached
+    // with sparse files: the size the sweep reads is the apparent one.
+    const big = (name: string, ageMs: number) => {
+      const full = seedStaged(name, Buffer.alloc(0), ageMs);
+      fs.truncateSync(full, 200 * 1024 * 1024);
+      const when = new Date(Date.now() - ageMs);
+      fs.utimesSync(full, when, when);
+      return full;
+    };
+    const oldest = big("oldest.bin", 6 * 60 * 60 * 1000);
+    const middle = big("middle.bin", 3 * 60 * 60 * 1000);
+    const newest = big("newest.bin", 2 * 60 * 60 * 1000);
+
+    const res = await POST(request(multipart("new.png", PNG)));
+    expect(res.status).toBe(200);
+
+    // 600 MB against a 500 MB cap: exactly one eviction, and it is the oldest.
+    expect(fs.existsSync(oldest)).toBe(false);
+    expect(fs.existsSync(middle)).toBe(true);
+    expect(fs.existsSync(newest)).toBe(true);
+  });
+
+  it("never sweeps a file young enough to still be arriving", async () => {
+    // A concurrent upload's file is the newest thing in the directory and, once
+    // the cap is exceeded, deleting it would hand that request's composer back
+    // a path with nothing at it.
+    const inFlight = seedStaged("in-flight.bin", Buffer.alloc(0), 0);
+    fs.truncateSync(inFlight, 600 * 1024 * 1024);
+
+    const res = await POST(request(multipart("new.png", PNG)));
+    expect(res.status).toBe(200);
+    expect(fs.existsSync(inFlight)).toBe(true);
+  });
+
+  it("stages the upload even when the retention sweep cannot read the directory", async () => {
+    // Retention is a housekeeping side effect. If it ever became load-bearing,
+    // a permission problem in it would start failing good uploads.
+    const spy = vi.spyOn(fs.promises, "readdir").mockRejectedValueOnce(new Error("EACCES"));
+    const res = await POST(request(multipart("shapes.png", PNG)));
+    expect(res.status).toBe(200);
+    expect(fs.existsSync((await res.json()).path)).toBe(true);
+    spy.mockRestore();
   });
 
   it("answers, and cleans up, when the connection dies mid-file", async () => {
@@ -287,8 +487,6 @@ describe("/setup-api/chat/attachments", () => {
 
     // Their connection broke, not their request: this is ours to report as 500.
     expect(res.status).toBe(500);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const listed = fs.existsSync(stagingDir()) ? fs.readdirSync(stagingDir()) : [];
-    expect(listed).toEqual([]);
+    await expectStagingDrains();
   }, 10000);
 });
