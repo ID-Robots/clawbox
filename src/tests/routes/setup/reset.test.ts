@@ -442,3 +442,169 @@ describe("POST /setup-api/setup/reset", () => {
     expect(unlinkInputCall).toBeDefined();
   });
 });
+
+/**
+ * A factory reset on a Hermes-edition device used to brick it.
+ *
+ * `.hermes` was in HOME_REMOVE_PATHS as a whole directory, on the (wrong)
+ * belief that it held only owner state. `~/.hermes/hermes-agent/` is the AGENT
+ * INSTALL — the upstream checkout plus the Python venv that the 4-line
+ * `~/.local/bin/hermes` shim execs. The shim lives outside the wipe and
+ * survived it, so the box came up with a `hermes` command whose interpreter was
+ * gone and clawbox-hermes-dashboard.service (Restart=always) crash-looping on
+ * exit 127 forever. The same reset emptied data/, taking the 3.2 GB offline
+ * Gemma GGUF with it — on a device that reboots into AP mode with no internet
+ * to re-download either.
+ *
+ * These tests pin both exceptions, and — just as importantly — pin that
+ * carving them out did not turn the wipe into a keep-list: every
+ * secret-bearing sibling under ~/.hermes must still be removed.
+ */
+describe("POST /setup-api/setup/reset — Hermes agent + offline model survive", () => {
+  let resetPost: () => Promise<Response>;
+  const HOME = process.env.HOME || "/home/clawbox";
+  const HERMES = `${HOME}/.hermes`;
+
+  // What a used Hermes box actually has under ~/.hermes.
+  const HERMES_ENTRIES = [
+    "hermes-agent",
+    "config.yaml",
+    "config.yaml.bak-20260813",
+    ".env",
+    "auth.json",
+    "memories",
+    "logs",
+    "cron",
+    "pairing",
+    "sessions",
+    "skills",
+    "state.db",
+    "projects.db",
+  ];
+  const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => e !== "hermes-agent");
+
+  const rmTargets = () =>
+    mockFs.rm.mock.calls.map(([p]) => p).filter((p): p is string => typeof p === "string");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [] }),
+    }));
+    vi.stubGlobal("process", { ...process, getuid: () => 1000, getgid: () => 1000 });
+
+    mockFs.readdir.mockImplementation(((p: string) => {
+      if (p === HERMES) return Promise.resolve(HERMES_ENTRIES);
+      if (p === "/test/data") return Promise.resolve(["config.json", "network.env", "llamacpp", ".session-secret"]);
+      return Promise.resolve([]);
+    }) as unknown as typeof fs.readdir);
+    mockFs.rm.mockResolvedValue();
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue();
+    mockFs.chown.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue();
+    mockResetUpdateState.mockReturnValue();
+    setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+
+    const mod = await import("@/app/setup-api/setup/reset/route");
+    resetPost = mod.POST;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it("never removes ~/.hermes/hermes-agent, directly or via its parent", async () => {
+    await resetPost();
+    const targets = rmTargets();
+
+    // The agent install itself.
+    expect(targets).not.toContain(`${HERMES}/hermes-agent`);
+    // And not by taking the whole directory out from under it — the exact
+    // shape of the original defect.
+    expect(targets).not.toContain(HERMES);
+  });
+
+  it("still removes every secret-bearing entry under ~/.hermes", async () => {
+    await resetPost();
+    const targets = rmTargets();
+
+    for (const entry of SECRET_ENTRIES) {
+      expect(targets, `expected ~/.hermes/${entry} to be removed`).toContain(`${HERMES}/${entry}`);
+    }
+  });
+
+  it("removes unknown new entries under ~/.hermes by default", async () => {
+    // The exception is a named allow-list of one. Anything Hermes starts
+    // writing tomorrow must be wiped without a code change, or the fix quietly
+    // becomes a keep-list and the next secret leaks to the next owner.
+    mockFs.readdir.mockImplementation(((p: string) =>
+      Promise.resolve(p === HERMES ? ["hermes-agent", "some-future-token-store"] : [])
+    ) as unknown as typeof fs.readdir);
+
+    await resetPost();
+
+    expect(rmTargets()).toContain(`${HERMES}/some-future-token-store`);
+  });
+
+  it("keeps data/llamacpp (the offline GGUF) while wiping the rest of data/", async () => {
+    await resetPost();
+    const targets = rmTargets();
+
+    expect(targets).not.toContain("/test/data/llamacpp");
+    expect(targets).toContain("/test/data/config.json");
+    expect(targets).toContain("/test/data/.session-secret");
+    // network.env was already preserved; assert it stayed that way.
+    expect(targets).not.toContain("/test/data/network.env");
+  });
+
+  it("one undeletable entry under ~/.hermes does not stop the rest of the wipe", async () => {
+    // Root-owned __pycache__ under ~/.hermes (written by a root-run `hermes
+    // --version`) made `rm -rf ~/.hermes` fail as ONE call, aborting the whole
+    // subtree with the agent already half deleted. Per-entry removal means one
+    // EACCES is reported and the other entries still go.
+    mockFs.rm.mockImplementation(((p: unknown) =>
+      typeof p === "string" && p === `${HERMES}/auth.json`
+        ? Promise.reject(new Error("EACCES: permission denied"))
+        : Promise.resolve()) as unknown as typeof fs.rm);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    const body = await res.json();
+    warnSpy.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain("auth.json");
+    // Everything else still got removed.
+    const targets = rmTargets();
+    for (const entry of SECRET_ENTRIES.filter((e) => e !== "auth.json")) {
+      expect(targets, `expected ~/.hermes/${entry} to still be removed`).toContain(`${HERMES}/${entry}`);
+    }
+  });
+
+  it("a failed wipe leaves the owner able to get back in", async () => {
+    // The abort path does NOT reboot, and the AP only returns on reboot. So a
+    // reset that failed must not have already deleted the WiFi profiles or
+    // reset the login password — that would strand a WiFi-only device offline
+    // with credentials the owner does not have.
+    mockFs.rm.mockImplementation(((p: unknown) =>
+      typeof p === "string" && p.endsWith("auth.json")
+        ? Promise.reject(new Error("EACCES: permission denied"))
+        : Promise.resolve()) as unknown as typeof fs.rm);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    warnSpy.mockRestore();
+
+    expect(res.status).toBe(500);
+    const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[])?.join(" ")}`);
+    expect(calls.some((c) => c.includes("connection delete"))).toBe(false);
+    expect(calls.some((c) => c.includes("clawbox-root-update@chpasswd"))).toBe(false);
+    expect(calls.some((c) => c.includes("systemctl reboot"))).toBe(false);
+  });
+});
