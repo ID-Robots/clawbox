@@ -98,6 +98,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.takePhoto": "Take photo",
     "chat.messagePlaceholder": "Type a message...",
     "chat.generatedImage": "Generated image",
+    "chat.sentImage": "Image you sent",
     "chat.generatingImage": "Generating image…",
     "chat.downloadImage": "Download image",
     "chat.downloadAudio": "Download audio",
@@ -121,6 +122,12 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.voice.failed": "Could not turn that recording into text.",
     "chat.voice.privacy": "Voice input sends your recording to ClawBox AI to be transcribed. It leaves this ClawBox.",
     "chat.voice.dismiss": "Dismiss",
+    "chat.attachment.previewAlt": "Preview of {name}",
+    "chat.attachment.remove": "Remove {name}",
+    "chat.attachment.error.tooLarge": "{name} is too large to attach.",
+    "chat.attachment.error.rejected": "{name} could not be attached.",
+    "chat.attachment.error.session": "Your session expired. Reload the page and attach {name} again.",
+    "chat.attachment.error.box": "This ClawBox could not save {name}. Try attaching it again.",
 
     // === TerminalApp ===
     "terminal.connecting": "Connecting to terminal server…",

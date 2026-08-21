@@ -15,7 +15,7 @@ import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/li
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, extractAudioAttachments } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, splitUserAttachments, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -136,14 +136,36 @@ const PROVIDER_PILL_LABEL: Record<string, string> = {
   'Ollama Local': 'Ollama',
   'Gemma 4 Local': 'Gemma 4',
 }
+
+/**
+ * Accessible name for a spoken reply's player.
+ *
+ * The message body is already on screen and already read by the message
+ * itself, so this is a short identifying fragment, not a second copy — but it
+ * has to be there: a transcript can hold several players, and "audio" three
+ * times over tells a screen-reader user nothing about which is which.
+ */
+function audioLabel(text: string | undefined, prefix: string): string {
+  const spoken = text ? plainTextForLabel(text, 100) : "";
+  return spoken ? `${prefix}: ${spoken}` : prefix;
+}
+
 function getProviderPillText(option: ChatModelState['options'][number]): string {
   const full = getChatModelOptionText(option)
   if (!option.available) return full
   return PROVIDER_PILL_LABEL[option.label ?? ''] ?? full
 }
 
-import { renderText } from '@/lib/chat-markdown'
+import { renderText, plainTextForLabel } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
+import {
+  type ChatAttachment,
+  classifyStagingFailure,
+  createPreviewUrl,
+  isPreviewableImage,
+  revokePreviews,
+  type StagingFailure,
+} from '@/lib/chat-attachments'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useT } from '@/lib/i18n'
 import {
@@ -480,7 +502,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [streaming, setStreaming] = useState('')
   const [sending, setSending] = useState(false)
   // Queued while a run is in flight; drained one at a time on `final`.
-  const [queuedSends, setQueuedSends] = useState<{ id: string; text: string; attachments: { name: string; path: string; type: string }[] }[]>([])
+  const [queuedSends, setQueuedSends] = useState<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
@@ -494,9 +516,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // reasoning level a local (off-only) model would reject.
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>(SAFE_THINKING_LEVEL)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const [attachments, setAttachments] = useState<{ name: string; path: string; type: string }[]>([])
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([])
+  // Bumped whenever the composer's attachments are abandoned (currently: on
+  // close). An upload captures it at start and checks it before touching
+  // state, so a slow request cannot repopulate a strip the user has left.
+  const uploadGenerationRef = useRef(0)
+  // Why a staged upload failed, or null. Rendered next to the attachment
+  // strip: the previous behaviour was to return early on a non-OK response,
+  // which is indistinguishable to the user from a paste that never fired.
+  const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
   // The image the full-size preview is showing, or null when it is closed.
-  const [preview, setPreview] = useState<string | null>(null)
+  // It carries the picture's accessible name as well as its URL: a screen
+  // reader must not be told "generated image" after opening one the customer
+  // sent, and the src alone cannot tell the two apart.
+  const [preview, setPreview] = useState<{ src: string; alt: string } | null>(null)
   const closePreview = useCallback(() => setPreview(null), [])
   // The desktop's one modal-dialog behaviour: focus in, Tab trapped, focus
   // restored, the page behind inerted, and Escape closing THIS and stopping
@@ -836,7 +869,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // hit Enter before the gateway is ready without seeing a hard error.
   const pendingSendsRef = useRef<Array<{
     text: string
-    attachments: { name: string; path: string; type: string }[]
+    attachments: ChatAttachment[]
     idempotencyKey: string
   }>>([])
   // Auto-scroll to bottom — see scrollToBottomAfterLayout for the rationale
@@ -1584,10 +1617,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // image-failure window could compare against it.
         if (isInterSessionEnvelope(raw, m)) continue
         if (role === 'user') {
-          const cleaned = raw.replace(/^\[[^\]]+\]\s*/, '')
-          if (!cleaned) continue
+          // The customer's own attachments come out first, as picture URLs
+          // rather than as the `[Attached file: /abs/path]` lines the composer
+          // wrote (TASK-436). The generic single-bracket strip below still runs
+          // on what is left, so every OTHER leading prefix — `[System: …]` and
+          // friends — is dropped exactly as before.
+          const { text: withoutAttachments, images, files } = splitUserAttachments(raw)
+          const stripped = withoutAttachments.replace(/^\[[^\]]+\]\s*/, '')
+          // Non-image attachments are re-labelled the way the live composer
+          // labels them, so the bubble a customer sees before and after a
+          // refresh is the same bubble rather than two different ones.
+          const cleaned = [files.map(name => `📎 ${name}`).join('\n'), stripped]
+            .filter(Boolean).join('\n')
+          // An image sent with no caption used to disappear from history
+          // entirely, because nothing survived the strip and this `continue`
+          // took the whole turn with it — leaving the answer replying to a
+          // question that was not there.
+          if (!cleaned && images.length === 0) continue
           const idempotencyKey = typeof m.idempotencyKey === 'string' ? m.idempotencyKey : undefined
-          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey })
+          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey, images })
           continue
         }
         // Replayed history carries the same MEDIA: lines the live turn did, so
@@ -1772,6 +1820,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const uploadFiles = useCallback((files: File[]) => {
     if (files.length === 0) return
     const stampBase = Date.now()
+    // A new attempt clears the previous complaint. Leaving a stale error above
+    // a strip that now holds a good attachment reads as "this one failed too".
+    setAttachmentError(null)
+    // Which composer these uploads belong to. Closing the chat bumps it, so a
+    // request that resolves afterwards releases its thumbnail and drops
+    // instead of pushing an attachment nobody can see back into a strip the
+    // user has already dismissed.
+    const generation = uploadGenerationRef.current
+    const isCurrent = () => uploadGenerationRef.current === generation
     const tasks = files.map(async (rawFile, idx) => {
       // Clipboard images come in as the generic "image.png"; stamp them so
       // a burst of pastes in the same millisecond doesn't collide on disk.
@@ -1782,16 +1839,54 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         : rawFile.name
       const formData = new FormData()
       formData.append('file', rawFile, filename)
+      // Minted before the request so the thumbnail is ready the moment the box
+      // answers, and released on every path that does not hand it to the strip
+      // — an object URL that is created and then dropped pins the whole Blob
+      // for the life of the document.
+      const previewUrl = createPreviewUrl(rawFile)
+      const releasePreview = () => revokePreviews([{ previewUrl }])
+      // Report a failure only while this composer is still the current one.
+      // After a close there is nothing on screen to attach the complaint to.
+      const fail = (status: number | undefined, payload: unknown) => {
+        releasePreview()
+        if (!isCurrent()) return
+        setAttachmentError({ ...classifyStagingFailure(status, payload), file: filename })
+      }
       try {
         const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
-        if (!res.ok) return
-        const json = await res.json().catch(() => ({} as { name?: string; path?: string }))
-        const name = json.name || filename
-        const absPath = json.path
-        if (!absPath) return
-        setAttachments(prev => [...prev, { name, path: absPath, type: rawFile.type }])
+        const json = await res.json().catch(() => ({} as { name?: string; path?: string; error?: string }))
+        if (!res.ok) {
+          fail(res.status, json)
+          return
+        }
+        // Only a non-empty string is a path. The route is ours, but a 200
+        // carrying `{ path: {} }` would otherwise reach the strip, render a
+        // name that can throw, and send `[object Object]` as the file the
+        // agent should open.
+        const absPath = typeof json.path === 'string' ? json.path.trim() : ''
+        const name = typeof json.name === 'string' && json.name.trim() ? json.name : filename
+        if (!absPath) {
+          // A 200 with no path is the box misbehaving, not the file: staging
+          // "succeeded" and produced nothing for the agent to open. Reporting
+          // it is the difference between a visible fault and a paste that
+          // silently does nothing.
+          fail(500, json)
+          return
+        }
+        if (!isCurrent()) {
+          // Landed after the chat closed: keep the staged copy on the box (a
+          // later turn may still name it) but do not resurrect the strip, and
+          // never leak the Blob this thumbnail pins.
+          releasePreview()
+          return
+        }
+        setAttachments(prev => [...prev, { name, path: absPath, type: rawFile.type, previewUrl }])
       } catch (err) {
         console.error('[chat] upload failed:', err)
+        // No status: the request never completed. classifyStagingFailure maps
+        // that to the box's problem rather than the file's, and the thrown
+        // error itself is never shown — it can carry the request URL.
+        fail(undefined, null)
       }
     })
     void Promise.all(tasks)
@@ -1813,8 +1908,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [status, uploadFiles])
 
   const removeAttachment = useCallback((idx: number) => {
-    setAttachments(prev => prev.filter((_, i) => i !== idx))
+    setAttachments(prev => {
+      const gone = prev[idx]
+      if (gone) revokePreviews([gone])
+      return prev.filter((_, i) => i !== idx)
+    })
   }, [])
+
+  // Release every thumbnail when the surface goes away. Without this, closing
+  // the chat with attachments staged keeps their Blobs alive until the tab is
+  // closed — on an 8 GB box, with screenshots, that is the whole budget.
+  //
+  // Unmount is NOT enough. page.tsx keeps this component mounted for the life
+  // of the session and only toggles `isOpen`, so the render returns null while
+  // React holds on to `attachments` — the previews would outlive every close.
+  // Closing therefore clears the strip the same way the microphone is
+  // abandoned a few lines below: the composer starts empty next time either
+  // way, since the staged files are named in the turn, not in this state.
+  //
+  // The ref mirrors the state so the unmount cleanup can read the final list:
+  // an effect with `[]` deps closes over the first render's empty array.
+  const attachmentsRef = useRef<ChatAttachment[]>([])
+  useEffect(() => { attachmentsRef.current = attachments }, [attachments])
+  useEffect(() => () => {
+    // Same bump as the close path, for the same reason: an upload still in
+    // flight is not in `attachmentsRef` yet, so revoking that list alone would
+    // let the late completion keep its object URL — and hand it to a
+    // `setAttachments` on a component that no longer exists.
+    uploadGenerationRef.current += 1
+    revokePreviews(attachmentsRef.current)
+  }, [])
+  useEffect(() => {
+    if (isOpen) return
+    // Bump first: an upload still in flight must see a stale generation the
+    // moment it resolves, not race the state reset below.
+    uploadGenerationRef.current += 1
+    setAttachments(prev => {
+      if (prev.length === 0) return prev
+      revokePreviews(prev)
+      return []
+    })
+    setAttachmentError(null)
+  }, [isOpen])
 
   // ── Voice input ───────────────────────────────────────────────────────
   //
@@ -2103,7 +2238,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const dispatchSend = useCallback(async (
     text: string,
-    sendAttachments: { name: string; path: string; type: string }[],
+    sendAttachments: ChatAttachment[],
     idempotencyKey: string,
   ) => {
     let messageText = text
@@ -2218,15 +2353,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [])
 
-  const startRun = useCallback((text: string, sendAttachments: { name: string; path: string; type: string }[]) => {
-    const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
+  const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
+    // Pictures render in the bubble; everything else keeps its 📎 line, because
+    // a document has nothing to show and a caption alone would refer to nothing.
+    //
+    // Tested on the STAGED PATH, not on the browser's MIME type, so that the
+    // bubble drawn now and the one rebuilt from history after a refresh make
+    // the same decision. Two different tests here would mean an image that is a
+    // thumbnail until you reload and a filename afterwards.
+    const images = sendAttachments.filter(a => isImageMedia(a.path)).map(a => mediaUrl(a.path))
+    const fileNames = sendAttachments
+      .filter(a => !isImageMedia(a.path))
+      .map(a => `📎 ${a.name}`)
+      .join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
     const idempotencyKey = uuid()
     // Stamped onto the bubble, not just sent with the request: it is how the
     // reconcile recognises the server's copy of this exact turn. Text cannot
     // do that job here — `displayText` carries the 📎 filenames while the
     // gateway stores and returns the prompt alone.
-    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey }])
+    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey, images }])
     setSending(true)
     setStreaming('')
     runIdRef.current = idempotencyKey
@@ -2263,6 +2409,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const currentAttachments = [...attachments]
     setInput('')
     setAttachments([])
+    setAttachmentError(null)
+    // Safe here and not later: the thumbnail is only ever rendered by the
+    // composer strip, which this send has just emptied. The queued/pending
+    // copies of these objects are read for `name` and `path` alone.
+    revokePreviews(currentAttachments)
     if (sending) {
       // Cap to bound memory; dropping the oldest matches "newest is freshest".
       setQueuedSends(prev => {
@@ -3271,14 +3422,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }}>
                 {msg.images && msg.images.length > 0 && (
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: msg.text ? 6 : 0 }}>
-                    {msg.images.map((src, j) => (
+                    {msg.images.map((src, j) => {
+                    // The same block draws both the pictures the assistant made
+                    // and, since TASK-436, the ones the customer sent. They are
+                    // not the same thing to announce: "Generated image" on a
+                    // photo the customer just attached is simply wrong, and an
+                    // accessible name is read out verbatim.
+                    const imageAlt = msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")
+                    return (
                       <div key={j} style={{ position: 'relative', display: 'inline-flex', maxWidth: '100%' }}>
                         {/* A button, not a bare onClick on the image: the
                             preview has to be reachable from the keyboard too,
                             and the alt text gives the control its name. */}
                         <button
                           type="button"
-                          onClick={() => setPreview(src)}
+                          onClick={() => setPreview({ src, alt: imageAlt })}
                           style={{
                             padding: 0, border: 'none', background: 'none',
                             cursor: 'zoom-in', lineHeight: 0, borderRadius: 8, maxWidth: '100%',
@@ -3288,7 +3446,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                               it gets a real alt so a screen reader announces it,
                               and it is contained rather than cropped so the image
                               the user asked for does not lose its edges. */}
-                          <img src={src} alt={t("chat.generatedImage")} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
+                          <img src={src} alt={imageAlt} style={{ maxWidth: '100%', maxHeight: 220, borderRadius: 8, objectFit: 'contain' }} />
                         </button>
                         {/* Same-origin, so the `download` attribute is enough to
                             save it under the name the harness gave it. */}
@@ -3308,7 +3466,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                           <span className="material-symbols-rounded" style={{ fontSize: 16 }}>download</span>
                         </a>
                       </div>
-                    ))}
+                    );
+                    })}
                   </div>
                 )}
                 {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
@@ -3332,9 +3491,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       <audio
                         key={src}
                         data-testid="chat-audio"
-                        aria-label={msg.text
-                          ? `${t("chat.audioReply")}: ${msg.text.slice(0, 100)}`
-                          : t("chat.audioReply")}
+                        // Markdown source must not reach an accessible name —
+                        // it is read out character for character. See
+                        // plainTextForLabel.
+                        aria-label={audioLabel(msg.text, t("chat.audioReply"))}
                         controls
                         preload="metadata"
                         src={src}
@@ -3445,18 +3605,68 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Attachment preview */}
+      {/* Attachment strip.
+
+          A pasted screenshot has no name the user recognises — the composer
+          stamps it `paste-<ts>-<idx>.png` so a burst of pastes cannot collide
+          on disk — so the thumbnail IS the confirmation that the right image
+          is about to be sent. The file name stays beside it for the
+          file-picker case and for non-images, which have no thumbnail. */}
       {attachments.length > 0 && (
-        <div style={{ padding: '6px 14px 0', display: 'flex', gap: 6, flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+        <div data-testid="chat-attachments" style={{ padding: '6px 14px 0', display: 'flex', gap: 6, flexWrap: 'wrap', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
           {attachments.map((a, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '3px 8px', borderRadius: 8, background: 'rgba(249,115,22,0.15)', fontSize: 11, color: '#f97316' }}>
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{a.type.startsWith('image/') ? 'image' : 'attach_file'}</span>
+            <div key={`${a.path}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: a.previewUrl ? '3px 6px 3px 3px' : '3px 8px', borderRadius: 8, background: 'rgba(249,115,22,0.15)', fontSize: 11, color: '#f97316' }}>
+              {a.previewUrl ? (
+                // Raw <img>, like the other three in this file: the source is
+                // a `blob:` object URL for bytes the browser already holds, so
+                // next/image has nothing to optimise and its loader cannot
+                // fetch it at all.
+                <img
+                  src={a.previewUrl}
+                  alt={t('chat.attachment.previewAlt', { name: a.name })}
+                  style={{ width: 34, height: 34, borderRadius: 6, objectFit: 'cover', display: 'block', background: 'rgba(0,0,0,0.35)' }}
+                />
+              ) : (
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{isPreviewableImage(a.type) ? 'image' : 'attach_file'}</span>
+              )}
               <span style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{a.name}</span>
-              <button onClick={() => removeAttachment(i)} style={{ background: 'none', border: 'none', color: '#f97316', cursor: 'pointer', padding: 0, display: 'flex' }}>
+              <button
+                onClick={() => removeAttachment(i)}
+                aria-label={t('chat.attachment.remove', { name: a.name })}
+                style={{ background: 'none', border: 'none', color: '#f97316', cursor: 'pointer', padding: 0, display: 'flex' }}
+              >
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Why an attachment did not appear.
+
+          The uploader used to return early on a non-OK response, so a rejected
+          file, a full disk or an expired session all looked exactly like a
+          paste that had not happened. The generic line is chosen by what the
+          customer can do about it; `detail` is only ever a message the box
+          produced AND that survived the leak filter in safe-error-text. */}
+      {attachmentError && (
+        <div
+          data-testid="chat-attachment-error"
+          role="status"
+          aria-live="polite"
+          style={{ padding: '6px 14px 0', display: 'flex', alignItems: 'flex-start', gap: 6, background: 'rgba(0,0,0,0.2)', fontSize: 11.5, color: '#f87171' }}
+        >
+          <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 15, flexShrink: 0 }}>error</span>
+          <span style={{ flex: 1 }}>
+            {t(`chat.attachment.error.${attachmentError.reason}`, { name: attachmentError.file })}
+            {attachmentError.detail ? ` ${attachmentError.detail}` : ''}
+          </span>
+          <button
+            onClick={() => setAttachmentError(null)}
+            style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontSize: 11.5 }}
+          >
+            {t('chat.voice.dismiss')}
+          </button>
         </div>
       )}
 
@@ -3736,8 +3946,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }}
           >
             <img
-              src={preview}
-              alt={t("chat.generatedImage")}
+              src={preview.src}
+              alt={preview.alt}
               style={{
                 maxWidth: '100%', maxHeight: '100%', objectFit: 'contain',
                 borderRadius: 12, boxShadow: '0 8px 40px rgba(0,0,0,0.6)',
@@ -3745,8 +3955,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             />
             <div style={{ position: 'absolute', top: 16, right: 16, display: 'flex', gap: 8 }}>
               <a
-                href={preview}
-                download={mediaFileName(preview)}
+                href={preview.src}
+                download={mediaFileName(preview.src)}
                 title={t("chat.downloadImage")}
                 aria-label={t("chat.downloadImage")}
                 style={PREVIEW_BUTTON_STYLE}
