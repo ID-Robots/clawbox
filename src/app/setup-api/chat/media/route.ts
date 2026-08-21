@@ -59,6 +59,17 @@ const CONTENT_TYPES: Record<string, string> = {
   ".webm": "audio/webm",
 };
 
+const AUDIO_MIME_TYPES = new Set([
+  "audio/mpeg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/aac",
+  "audio/flac",
+  "audio/webm",
+]);
+
 // A generated 1024×1024 PNG runs ~1.5 MB; this leaves room for larger renders
 // without letting the route buffer something unbounded into memory.
 const MAX_BYTES = 25 * 1024 * 1024;
@@ -124,7 +135,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Path must be absolute" }, { status: 400 });
   }
 
-  const contentType = CONTENT_TYPES[path.extname(requested).toLowerCase()];
+  const hintedMime = (req.nextUrl.searchParams.get("mime") ?? "")
+    .split(";", 1)[0].trim().toLowerCase();
+  const extension = path.extname(requested).toLowerCase();
+  // A MIME hint exists only for structured attachments whose provider wrote
+  // an extensionless file. It must never override a named unsupported type:
+  // otherwise `secret.json?mime=audio/wav` defeats this route's allowlist.
+  const contentType = CONTENT_TYPES[extension]
+    ?? (!extension && AUDIO_MIME_TYPES.has(hintedMime) ? hintedMime : undefined);
   if (!contentType) {
     return NextResponse.json({ error: "Unsupported media type" }, { status: 415 });
   }
@@ -148,16 +166,24 @@ export async function GET(req: NextRequest) {
   // the root is only known after an async call, so a scanner cannot tie the
   // guard to the sink and js/path-injection stayed open at high severity. This
   // form is both correct and legible to the tool.
-  // Measured against the RESOLVED root, not the MEDIA_ROOT constant. The two
-  // differ whenever the media directory is itself a symlink, which is a
-  // supported deployment — anchoring on the constant rejected those requests
-  // outright and broke the "follows a symlinked root" test.
+  // A shared-identity install gives one legitimate file two spellings: the
+  // logical `~/.openclaw/media/...` path the harness writes into its message,
+  // and the resolved target path returned by realpath. Accept either root,
+  // then rebuild from the trusted resolved root. Comparing only against the
+  // resolved root rejects the logical spelling and 404s every real reply.
   //
   // `root` is still untrusted-free: it comes from realpath of a module
   // constant, never from the request. Relative-then-join is what makes the
   // guard legible to the scanner where a startsWith comparison was not.
-  const rel = path.relative(root, path.resolve(requested));
-  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+  const resolvedRequested = path.resolve(requested);
+  const logicalRel = path.relative(MEDIA_ROOT, resolvedRequested);
+  const resolvedRel = path.relative(root, resolvedRequested);
+  const rel = !logicalRel.startsWith("..") && !path.isAbsolute(logicalRel)
+    ? logicalRel
+    : !resolvedRel.startsWith("..") && !path.isAbsolute(resolvedRel)
+      ? resolvedRel
+      : null;
+  if (rel === null) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   const candidate = path.join(root, rel);
@@ -212,7 +238,10 @@ export async function GET(req: NextRequest) {
           "Content-Length": String(range.end - range.start + 1),
           "Content-Range": `bytes ${range.start}-${range.end}/${stat.size}`,
           "Accept-Ranges": "bytes",
-          "Cache-Control": "private, max-age=31536000, immutable",
+          // Authentication is cookie-based, while browser caches are not keyed
+          // by that cookie. Revalidating every media read prevents a recording
+          // cached before logout/password rotation from surviving revocation.
+          "Cache-Control": "private, no-store",
           "X-Content-Type-Options": "nosniff",
           "Content-Security-Policy": "default-src 'none'; sandbox",
         },
@@ -232,10 +261,7 @@ export async function GET(req: NextRequest) {
         // stop the browser sniffing it into something executable, and give it
         // no ambient authority if it is ever opened as a document.
         //
-        // `immutable` because the harness names every file with a UUID and
-        // never rewrites one — without it, reopening a chat re-reads and
-        // re-transfers every picture in the visible history once an hour.
-        "Cache-Control": "private, max-age=31536000, immutable",
+        "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "default-src 'none'; sandbox",
       },

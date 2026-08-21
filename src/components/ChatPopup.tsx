@@ -24,7 +24,6 @@ import {
   classifyCaptureError,
   describeTranscribeFailure,
   formatRecordingClock,
-  mergeTranscript,
   pickRecordingMimeType,
   recordingFileName,
   type VoiceStatus,
@@ -264,6 +263,50 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
   }
   return true
+}
+
+// A live TTS supplement can arrive before an older gateway's history
+// projection learns about it. Carry players across that short reconcile by
+// message occurrence, never by a text->audio map: common replies such as
+// "Sure." may appear many times, and one map entry would put the newest
+// recording on every identical bubble.
+function preserveSpokenByOccurrence(previous: ChatMessage[], next: ChatMessage[]): ChatMessage[] {
+  const restored = next.map(message => ({ ...message }))
+  const used = new Set<number>()
+  for (let i = previous.length - 1; i >= 0; i--) {
+    const prior = previous[i]
+    if (prior.role !== 'assistant' || !prior.audio?.length) continue
+    let target = -1
+    if (prior.timestamp > 0) {
+      target = restored.findIndex((candidate, index) =>
+        !used.has(index) && candidate.role === 'assistant'
+        && candidate.timestamp === prior.timestamp && candidate.text === prior.text)
+      if (target !== -1) {
+        // Durable transcript recovery may already have filled this exact
+        // occurrence. Treat that as the match even though there is nothing to
+        // copy; falling through would clone the same recording onto a later
+        // identical reply.
+        if (!restored[target].audio?.length) {
+          restored[target] = { ...restored[target], audio: prior.audio }
+        }
+        used.add(target)
+        continue
+      }
+    }
+    for (let j = restored.length - 1; j >= 0; j--) {
+      const candidate = restored[j]
+      if (!used.has(j) && candidate.role === 'assistant' && !candidate.audio?.length
+          && candidate.text === prior.text) {
+        target = j
+        break
+      }
+    }
+    if (target !== -1) {
+      restored[target] = { ...restored[target], audio: prior.audio }
+      used.add(target)
+    }
+  }
+  return restored
 }
 
 // The newest server timestamp currently on screen — the line a later message
@@ -1164,29 +1207,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (!payload) return
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
-          // A spoken reply arrives HERE and only here. Measured on box .65:
-          // the harness appends an `assistant-media` message carrying the audio
-          // as an attachment part, it is pushed on this event with the
-          // attachment intact — and `chat.history` does not return it, so the
-          // reconcile below can never find it. Reading it off the event is the
-          // only way the player appears at all; see the task for the refresh
-          // half, which needs a gateway change.
-          const pushedAudio = extractAudioAttachments(payload.message)
-          if (pushedAudio.length > 0) {
-            const pushedText = splitMediaDirectives(extractText(payload.message)).text
+          // Older gateways push the TTS supplement intact here but omit it
+          // from chat.history. Render it immediately; the on-box transcript
+          // supplement route below restores the same identity after refresh.
+          const pushedMessage = payload.message
+          const pushedRole = pushedMessage && typeof pushedMessage === 'object'
+            ? String((pushedMessage as Record<string, unknown>).role ?? '').toLowerCase()
+            : ''
+          const pushedRaw = extractText(pushedMessage)
+          const pushedAudio = extractAudioAttachments(pushedMessage)
+          if (pushedRole === 'assistant' && pushedAudio.length > 0
+              && !isSentinel(pushedRaw) && !isInterSessionEnvelope(pushedRaw, pushedMessage)) {
+            const pushedText = splitMediaDirectives(pushedRaw).text
             setMessages(prev => {
-              // Fold into the bubble it belongs to. The media message repeats
-              // the text of the reply already on screen, so appending it would
-              // show every spoken answer twice, once silent.
-              const at = [...prev].reverse().findIndex(m =>
-                m.role === 'assistant' && m.text === pushedText && (m.audio?.length ?? 0) === 0)
-              if (at === -1) {
-                return [...prev, { role: 'assistant' as const, text: pushedText, timestamp: Date.now(), audio: pushedAudio }]
+              // Only a bubble after the latest user turn can own this event.
+              // Otherwise a late supplement from the previous turn could be
+              // put on a new identical "Sure.". If the target is ambiguous,
+              // the timestamp-aware transcript reconcile scheduled below is
+              // the sole authority; text-only pending queues cross turns.
+              let latestUser = -1
+              for (let i = prev.length - 1; i >= 0; i--) {
+                if (prev[i].role === 'user') { latestUser = i; break }
               }
-              const index = prev.length - 1 - at
-              const next = [...prev]
-              next[index] = { ...next[index], audio: pushedAudio }
-              return next
+              for (let i = prev.length - 1; i > latestUser; i--) {
+                const candidate = prev[i]
+                if (candidate.role !== 'assistant' || candidate.text !== pushedText) continue
+                if (candidate.audio?.length) return prev // duplicate push
+                const next = [...prev]
+                next[i] = { ...candidate, audio: pushedAudio }
+                return next
+              }
+              // A genuinely audio-only reply has no caption to wait for.
+              if (!pushedText) {
+                return [...prev, { role: 'assistant' as const, text: '', timestamp: Date.now(), audio: pushedAudio }]
+              }
+              return prev
             })
           }
           if (transcriptReconcileTimerRef.current !== null) {
@@ -1224,7 +1279,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // A spoken reply is a structured attachment part, not a MEDIA:
             // line — see lib/chat-media.ts. Both are read; the harness uses
             // the first and image generation the second.
-            const audio = [...extractAudioAttachments(msg), ...directiveAudio]
+            const audio = [...new Set([
+              ...extractAudioAttachments(msg),
+              ...directiveAudio,
+            ])]
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
@@ -1242,9 +1300,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
             // the reply twice — once with the picture, once without.
+            const latestShown = messagesRef.current[messagesRef.current.length - 1]
             const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && text.length > 0 &&
-              messagesRef.current.some(m =>
-                m.role === 'assistant' && m.text === text && ((m.images?.length ?? 0) > 0 || (m.audio?.length ?? 0) > 0))
+              latestShown?.role === 'assistant' && latestShown.text === text &&
+              ((latestShown.images?.length ?? 0) > 0 || (latestShown.audio?.length ?? 0) > 0)
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
@@ -1259,8 +1318,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // text matches and that bubble has none yet.
                 const last = prev[prev.length - 1]
                 if (audio.length > 0 && !images.length && last && last.role === 'assistant'
-                    && last.text === text && (last.audio?.length ?? 0) === 0) {
-                  return [...prev.slice(0, -1), { ...last, audio }]
+                    && last.text === text) {
+                  const mergedAudio = [...new Set([...(last.audio ?? []), ...audio])]
+                  if (last.audio?.length === mergedAudio.length
+                      && last.audio.every((src, index) => src === mergedAudio[index])) return prev
+                  return [...prev.slice(0, -1), { ...last, audio: mergedAudio }]
                 }
                 return [...prev, { role: 'assistant' as const, text, timestamp: Date.now(), images, audio }]
               })
@@ -1411,7 +1473,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setStreaming('')
     }
     try {
-      const result = await wsRequest('chat.history', { sessionKey: sessionKeyRef.current, limit: 50 }) as Record<string, unknown>
+      const [result, spokenPayload] = await Promise.all([
+        wsRequest('chat.history', { sessionKey: sessionKeyRef.current, limit: 50 }) as Promise<Record<string, unknown>>,
+        fetch('/setup-api/chat/spoken-history', { cache: 'no-store' })
+          .then(async response => response.ok ? response.json() : { items: [] })
+          .catch(() => ({ items: [] })),
+      ])
       const msgs = (result.messages as unknown[]) || []
       const chatMsgs: ChatMessage[] = []
       for (const msg of msgs) {
@@ -1478,27 +1545,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           role: 'assistant', text, timestamp, images, audio,
         })
       }
+      // Current OpenClaw merges TTS supplement records into chat.history, but
+      // older supported gateways do not. The session-gated device route reads
+      // the canonical transcript and returns only target timestamp + playable
+      // URLs, which makes this survive a fresh browser and a full reboot.
+      const durableAudio = new Map<number, string[]>()
+      const spokenItems = spokenPayload && typeof spokenPayload === 'object'
+        ? (spokenPayload as { items?: unknown }).items
+        : null
+      if (Array.isArray(spokenItems)) {
+        for (const item of spokenItems) {
+          if (!item || typeof item !== 'object') continue
+          const candidate = item as { targetTimestamp?: unknown; audio?: unknown }
+          if (typeof candidate.targetTimestamp !== 'number' || !Number.isFinite(candidate.targetTimestamp)
+              || !Array.isArray(candidate.audio)) continue
+          const audio = candidate.audio.filter((src): src is string =>
+            typeof src === 'string' && src.length > 0 && src.length <= 4096)
+          if (audio.length) durableAudio.set(candidate.targetTimestamp, audio)
+        }
+      }
+      for (let i = 0; i < chatMsgs.length; i++) {
+        const message = chatMsgs[i]
+        if (message.role !== 'assistant' || message.audio?.length || message.timestamp <= 0) continue
+        const audio = durableAudio.get(message.timestamp)
+        if (audio) chatMsgs[i] = { ...message, audio }
+      }
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
       // the server yet so chatMsgs doesn't include them.
       setMessages(prev => {
         if (prev.length === 0) return chatMsgs
-        // Carry spoken replies across the reconcile. `chat.history` does not
-        // return the media message (measured on .65 — the attachment part is
-        // pushed on `session.message` and is absent from every history read),
-        // so rebuilding the transcript from history alone would take the
-        // player back off the screen 400ms after it appeared. Matched on the
-        // text rather than the timestamp: the pushed message and the stored
-        // one are the same reply with different clocks on them.
-        const spoken = new Map<string, string[]>()
-        for (const m of prev) {
-          if (m.role === 'assistant' && m.audio?.length) spoken.set(m.text, m.audio)
-        }
-        const restored = spoken.size === 0 ? chatMsgs : chatMsgs.map(m => {
-          if (m.role !== 'assistant' || m.audio?.length) return m
-          const audio = spoken.get(m.text)
-          return audio ? { ...m, audio } : m
-        })
+        // Carry an event that beat the disk/history read across this one
+        // reconcile. One-to-one occurrence matching is essential here: a map
+        // keyed by text put the newest recording on every historical "Sure.".
+        const restored = preserveSpokenByOccurrence(prev, chatMsgs)
         const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0
         const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
         const next = inFlight.length === 0 ? restored : [...restored, ...inFlight]
@@ -1642,10 +1722,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // ── Voice input ───────────────────────────────────────────────────────
   //
-  // Record in the composer, transcribe on the box, drop the text in the input
-  // for the user to read before they send it. Deliberately NOT send-on-stop:
-  // transcription gets words wrong, and a chat that fires off a misheard
-  // sentence before you can look at it is worse than no dictation at all.
+  // Record in the composer, transcribe on the box, then send the usable text
+  // through the same turn path as the Send button. This is intentionally the
+  // Telegram-like record -> stop -> send flow Yanko requested; Cancel remains
+  // available for anything the user does not want uploaded.
   const [voice, setVoice] = useState<VoiceStatus>(IDLE_STATUS)
   const [recordingMs, setRecordingMs] = useState(0)
   const recorderRef = useRef<MediaRecorder | null>(null)
@@ -1671,6 +1751,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // compares this counter against the value it captured and, if it moved,
   // stops the tracks it was just handed instead of recording with them.
   const captureGenerationRef = useRef(0)
+  const sendVoiceTranscriptRef = useRef<(text: string) => void>(() => {})
+  const transcribeAbortRef = useRef<AbortController | null>(null)
 
   /**
    * Release the microphone.
@@ -1688,13 +1770,43 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (stream) for (const track of stream.getTracks()) track.stop()
   }, [])
 
+  const abandonRecording = useCallback(() => {
+    cancelledRef.current = true
+    const recorder = recorderRef.current
+    if (recorder) {
+      // Track shutdown can queue the normal dataavailable/stop sequence. With
+      // these handlers still attached an unmounted panel uploads audio the user
+      // can no longer see or cancel.
+      recorder.ondataavailable = null
+      recorder.onstop = null
+      recorder.onerror = null
+      if (recorder.state !== 'inactive') {
+        try { recorder.stop() } catch { /* already stopping */ }
+      }
+    }
+    chunksRef.current = []
+    lastAudioRef.current = null
+    transcribeAbortRef.current?.abort()
+    transcribeAbortRef.current = null
+    releaseMicrophone()
+  }, [releaseMicrophone])
+
   const transcribe = useCallback(async (blob: Blob, name: string) => {
+    const generation = captureGenerationRef.current
+    const controller = new AbortController()
+    transcribeAbortRef.current?.abort()
+    transcribeAbortRef.current = controller
     setVoice({ state: 'transcribing', error: null, message: null, canRetry: false })
     try {
       const form = new FormData()
       form.append('file', blob, name)
-      const res = await fetch('/setup-api/chat/transcribe', { method: 'POST', body: form })
+      const res = await fetch('/setup-api/chat/transcribe', {
+        method: 'POST',
+        body: form,
+        signal: controller.signal,
+      })
       const payload = await res.json().catch(() => null)
+      if (captureGenerationRef.current !== generation || controller.signal.aborted) return
       if (!res.ok) {
         setVoice({
           state: 'error',
@@ -1719,12 +1831,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setVoice({ state: 'error', error: 'empty', message: null, canRetry: false })
         return
       }
-      setInput(prev => mergeTranscript(prev, text))
       setVoice(IDLE_STATUS)
       lastAudioRef.current = null
-      setTimeout(() => inputRef.current?.focus(), 0)
+      // A voice turn owns only the words captured by that recording. The
+      // composer remains editable while transcription is in flight, so
+      // merging its current value here would silently send and erase a draft
+      // the user typed after pressing Stop.
+      sendVoiceTranscriptRef.current(text)
     } catch {
+      if (captureGenerationRef.current !== generation || controller.signal.aborted) return
       setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: true })
+    } finally {
+      if (transcribeAbortRef.current === controller) transcribeAbortRef.current = null
     }
   }, [])
 
@@ -1803,7 +1921,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       releaseMicrophone()
       setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: false })
     }
-    recorder.start()
+    try {
+      recorder.start()
+    } catch {
+      // Some browsers expose MediaRecorder and accept its constructor but
+      // reject start synchronously for the selected device/container. The
+      // stream is already live here, so this path must tear it down too.
+      recorder.ondataavailable = null
+      recorder.onstop = null
+      recorder.onerror = null
+      chunksRef.current = []
+      lastAudioRef.current = null
+      releaseMicrophone()
+      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+      return
+    }
     setRecordingMs(0)
     setVoice({ state: 'recording', error: null, message: null, canRetry: false })
   }, [voice.state, releaseMicrophone, transcribe])
@@ -1859,14 +1991,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [voice.state, stopRecording])
 
   // Closing the panel, navigating away or unmounting must not leave the
-  // microphone running: at that point there is no interface left to stop it.
-  useEffect(() => releaseMicrophone, [releaseMicrophone])
+  // microphone running or let its queued stop event upload abandoned audio.
+  useEffect(() => () => abandonRecording(), [abandonRecording])
   useEffect(() => {
     if (isOpen) return
-    const recorder = recorderRef.current
-    if (recorder && recorder.state !== 'inactive') { cancelledRef.current = true; recorder.stop() }
-    else releaseMicrophone()
-  }, [isOpen, releaseMicrophone])
+    abandonRecording()
+    setVoice(IDLE_STATUS)
+  }, [isOpen, abandonRecording])
 
   const dispatchSend = useCallback(async (
     text: string,
@@ -2003,6 +2134,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     void dispatchSend(text, sendAttachments, idempotencyKey)
   }, [status, dispatchSend, dispatchHermes])
+
+  const sendVoiceTranscript = useCallback((text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    if (sending) {
+      setQueuedSends(prev => {
+        const next = [...prev, { id: uuid(), text: trimmed, attachments: [] }]
+        return next.length > MAX_QUEUED_SENDS ? next.slice(next.length - MAX_QUEUED_SENDS) : next
+      })
+      return
+    }
+    startRun(trimmed, [])
+  }, [sending, startRun])
+  sendVoiceTranscriptRef.current = sendVoiceTranscript
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
@@ -2326,6 +2471,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (ackOnlyHistoryTimerRef.current !== null) {
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
         ackOnlyHistoryTimerRef.current = null
+      }
+      if (transcriptReconcileTimerRef.current !== null) {
+        window.clearTimeout(transcriptReconcileTimerRef.current)
+        transcriptReconcileTimerRef.current = null
       }
     }
   }, [])
@@ -3057,6 +3206,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       <audio
                         key={src}
                         data-testid="chat-audio"
+                        aria-label={msg.text
+                          ? `${t("chat.audioReply")}: ${msg.text.slice(0, 100)}`
+                          : t("chat.audioReply")}
                         controls
                         preload="metadata"
                         src={src}

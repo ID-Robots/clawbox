@@ -42,6 +42,8 @@ function assistantMessage(text: string, timestamp: number, audioPath?: string) {
 let history: unknown[] = [];
 /** How many times the component has re-read it. */
 let historyReads = 0;
+/** Durable mapping recovered from the on-box transcript route. */
+let durableSpoken: Array<{ targetTimestamp: number; audio: string[] }> = [];
 
 /**
  * The socket the component opened.
@@ -107,6 +109,9 @@ function installFetch() {
     if (url.includes("/setup-api/chat/model")) {
       return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
     }
+    if (url.includes("/setup-api/chat/spoken-history")) {
+      return { ok: true, json: async () => ({ items: durableSpoken }) };
+    }
     return { ok: true, json: async () => ({}) };
   }));
 }
@@ -147,6 +152,7 @@ describe("spoken replies in the mascot chat", () => {
   beforeEach(() => {
     history = [];
     historyReads = 0;
+    durableSpoken = [];
     sockets.length = 0;
     resetHarnessCache();
     window.localStorage.clear();
@@ -179,6 +185,7 @@ describe("spoken replies in the mascot chat", () => {
     // Duration on screen before anything is played, without pulling the file
     // down for a reply nobody listens to.
     expect(player.getAttribute("preload")).toBe("metadata");
+    expect(player).toHaveAccessibleName(`chat.audioReply: ${SPOKEN_TEXT}`);
   });
 
   it("does not show the answer twice when its spoken half arrives", async () => {
@@ -217,24 +224,33 @@ describe("spoken replies in the mascot chat", () => {
     expect(players()[0].getAttribute("src")).toBe(playerSrc(VOICE));
   });
 
-  it("would show the player from history alone, if history carried it", async () => {
-    // ⚠️ This does NOT prove the refresh case works on a real box, and must not
-    // be read as though it does. Measured on .65: `chat.history` returns the
-    // media message WITHOUT its attachment part — 16 messages back, not one
-    // containing `"type":"attachment"`, while the session file on disk has it.
-    // So the client half of the refresh path is ready and the data never
-    // arrives. Kept because the day the gateway does return it, this is what
-    // says the chat renders it; the gap itself is recorded on TASK-381 as a
-    // blocker against an OpenClaw change, outside this repository.
+  it("restores stripped gateway history from the on-box transcript after a fresh remount", async () => {
+    // Real .65 shape: chat.history has only the ordinary text replies. The
+    // supplement route recovers exact target timestamps from the transcript,
+    // so this starts with no React state and remains correct after unmount.
     history = [
-      assistantMessage(SPOKEN_TEXT, 1787291821899),
-      assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE),
+      assistantMessage("Sure.", 100),
+      assistantMessage("Sure.", 200),
     ];
-    render(<ChatPopup isOpen onClose={() => {}} />);
+    durableSpoken = [
+      { targetTimestamp: 100, audio: [playerSrc(VOICE)] },
+      { targetTimestamp: 200, audio: [playerSrc(SECOND_VOICE)] },
+    ];
+    const first = render(<ChatPopup isOpen onClose={() => {}} />);
 
-    await waitFor(() => expect(players()).toHaveLength(1));
-    expect(players()[0].getAttribute("src")).toBe(playerSrc(VOICE));
-    expect(screen.getAllByText(SPOKEN_TEXT)).toHaveLength(1);
+    await waitFor(() => expect(players()).toHaveLength(2));
+    expect(players().map(p => p.getAttribute("src"))).toEqual([
+      playerSrc(VOICE),
+      playerSrc(SECOND_VOICE),
+    ]);
+
+    first.unmount();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(players()).toHaveLength(2));
+    expect(players().map(p => p.getAttribute("src"))).toEqual([
+      playerSrc(VOICE),
+      playerSrc(SECOND_VOICE),
+    ]);
   });
 
   it("gives each spoken reply its own file", async () => {
@@ -253,6 +269,79 @@ describe("spoken replies in the mascot chat", () => {
       playerSrc(VOICE),
       playerSrc(SECOND_VOICE),
     ]);
+  });
+
+  it("holds an early repeated-text supplement for the new reply, not the old one", async () => {
+    history = [
+      assistantMessage("Sure.", 100, VOICE),
+      { role: "user", content: [{ type: "text", text: "Again" }], timestamp: 150 },
+    ];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(players()).toHaveLength(1));
+
+    // The new audio beats its chat.final. Text-only matching used to attach it
+    // to the older identical answer and then suppress the real new reply.
+    history = [
+      assistantMessage("Sure.", 100),
+      { role: "user", content: [{ type: "text", text: "Again" }], timestamp: 150 },
+      assistantMessage("Sure.", 200),
+    ];
+    durableSpoken = [
+      { targetTimestamp: 100, audio: [playerSrc(VOICE)] },
+      { targetTimestamp: 200, audio: [playerSrc(SECOND_VOICE)] },
+    ];
+    deliverSessionMessage(assistantMessage("Sure.", 210, SECOND_VOICE));
+    deliver(assistantMessage("Sure.", 200));
+
+    await waitFor(() => expect(players()).toHaveLength(2));
+    expect(players().map(p => p.getAttribute("src"))).toEqual([
+      playerSrc(VOICE),
+      playerSrc(SECOND_VOICE),
+    ]);
+  });
+
+  it("never carries a late old supplement into a later identical reply", async () => {
+    history = [
+      assistantMessage("Sure.", 100),
+      { role: "user", content: [{ type: "text", text: "Again" }], timestamp: 150 },
+    ];
+    durableSpoken = [{ targetTimestamp: 100, audio: [playerSrc(VOICE)] }];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(players()).toHaveLength(1));
+    const before = historyReads;
+
+    // Turn-one audio arrives only after turn two has begun. A text-only pending
+    // queue would hand it to turn two's identical final.
+    deliverSessionMessage(assistantMessage("Sure.", 175, VOICE));
+    history = [
+      assistantMessage("Sure.", 100),
+      { role: "user", content: [{ type: "text", text: "Again" }], timestamp: 150 },
+      assistantMessage("Sure.", 200),
+    ];
+    deliver(assistantMessage("Sure.", 200));
+
+    await waitFor(() => expect(screen.getAllByText("Sure.")).toHaveLength(2));
+    await waitFor(() => expect(historyReads).toBeGreaterThan(before), { timeout: 3000 });
+    expect(players()).toHaveLength(1);
+    expect(players()[0].getAttribute("src")).toBe(playerSrc(VOICE));
+  });
+
+  it("does not render audio carried by an internal routing envelope", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    deliverSessionMessage({
+      role: "user",
+      provenance: { kind: "inter_session", sourceTool: "sessions_send" },
+      content: [
+        { type: "text", text: "[Inter-session message] internal route" },
+        { type: "attachment", attachment: { url: VOICE, kind: "audio", mimeType: "audio/wav" } },
+      ],
+      timestamp: 300,
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(players()).toHaveLength(0);
+    expect(document.body.textContent).not.toContain("internal route");
   });
 
   it("keeps a reply that is nothing but audio", async () => {

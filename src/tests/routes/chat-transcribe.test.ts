@@ -191,6 +191,19 @@ describe("/setup-api/chat/transcribe", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("rejects field-count amplification before materialising a FormData object", async () => {
+    const form = new FormData();
+    for (let i = 0; i < 100; i++) form.append(`tiny-${i}`, "x");
+    form.append("file", new Blob([new Uint8Array(AUDIO)], { type: "audio/webm" }), "recording.webm");
+    const res = await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
+      method: "POST",
+      body: form,
+    }));
+
+    expect(res.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("names an empty recording as such instead of forwarding silence", async () => {
     // What a denied microphone, or stop pressed before the first chunk, looks
     // like. Forwarding it would spend a proxy call to be told there is no
@@ -208,6 +221,18 @@ describe("/setup-api/chat/transcribe", () => {
 
     expect(res.status).toBe(413);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("accepts a recording exactly at the documented size limit", async () => {
+    const { MAX_AUDIO_BYTES } = await import("@/app/setup-api/chat/transcribe/route");
+    fetchMock.mockResolvedValue(jsonResponse({ text: "exactly bounded" }));
+
+    const res = await POST(audioRequest(Buffer.alloc(MAX_AUDIO_BYTES, 0x41)));
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const sent = fetchMock.mock.calls[0][1].body as FormData;
+    expect((sent.get("file") as File).size).toBe(MAX_AUDIO_BYTES);
   });
 
   it("refuses a body that declares itself oversized before reading it", async () => {

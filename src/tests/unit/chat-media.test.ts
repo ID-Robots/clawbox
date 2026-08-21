@@ -243,7 +243,20 @@ describe("chat-media", () => {
       // because a provider labelled it differently is the whole failure here.
       expect(extractAudioAttachments({
         content: [{ type: "attachment", attachment: { url: "/a/b", mimeType: "AUDIO/MPEG" } }],
-      })).toHaveLength(1);
+      })).toEqual([
+        "/setup-api/chat/media?path=%2Fa%2Fb&mime=audio%2Fmpeg",
+      ]);
+    });
+
+    it("uses the MIME essence for an extensionless codec-qualified attachment", () => {
+      expect(extractAudioAttachments({
+        content: [{
+          type: "attachment",
+          attachment: { url: "/a/b", mimeType: "audio/webm; codecs=opus" },
+        }],
+      })).toEqual([
+        "/setup-api/chat/media?path=%2Fa%2Fb&mime=audio%2Fwebm",
+      ]);
     });
 
     it("accepts an attachment identified only by its extension", () => {
