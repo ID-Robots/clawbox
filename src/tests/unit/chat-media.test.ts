@@ -259,6 +259,17 @@ describe("chat-media", () => {
       ]);
     });
 
+    it("does not turn a non-audio MIME type into a media-route override", () => {
+      expect(extractAudioAttachments({
+        content: [{
+          type: "attachment",
+          attachment: { url: "/a/b", kind: "audio", mimeType: "text/html" },
+        }],
+      })).toEqual([
+        "/setup-api/chat/media?path=%2Fa%2Fb",
+      ]);
+    });
+
     it("accepts an attachment identified only by its extension", () => {
       expect(extractAudioAttachments({
         content: [{ type: "attachment", attachment: { url: "/a/b.opus" } }],

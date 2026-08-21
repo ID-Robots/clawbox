@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { constants } from "fs";
+import { constants, type BigIntStats } from "fs";
 import fs, { type FileHandle } from "fs/promises";
 import path from "path";
 import { extractAudioAttachments } from "@/lib/chat-media";
@@ -38,10 +38,34 @@ interface AssistantTarget {
   runPrefix?: string;
 }
 
+// History reconcile runs repeatedly while a response arrives. The canonical
+// transcript normally has not changed between those reads, so retain only the
+// last bounded result and skip reallocating/decoding an 8 MiB tail. The key is
+// descriptor identity plus content metadata, not the caller-controlled path.
+let cachedHistory: { key: string; items: SpokenHistoryItem[] } | null = null;
+
+function cloneHistory(items: SpokenHistoryItem[]): SpokenHistoryItem[] {
+  return items.map((item) => ({ targetTimestamp: item.targetTimestamp, audio: [...item.audio] }));
+}
+
 function relativeChild(base: string, candidate: string): string | null {
   const rel = path.relative(base, candidate);
   if (rel.startsWith("..") || path.isAbsolute(rel)) return null;
   return rel;
+}
+
+function isMissingFile(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && "code" in err
+    && (err as { code?: unknown }).code === "ENOENT");
+}
+
+async function realpathIfPresent(file: string): Promise<string | null> {
+  try {
+    return await fs.realpath(file);
+  } catch (err) {
+    if (isMissingFile(err)) return null;
+    throw err;
+  }
 }
 
 function messageText(message: Record<string, unknown>): string {
@@ -122,7 +146,13 @@ async function boundedJsonFile(file: string, maxBytes: number): Promise<unknown>
   // Open once and validate/read through the same descriptor. A path-level
   // stat followed by readFile lets another process replace the index between
   // those calls, defeating both the type and size checks.
-  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let handle: FileHandle;
+  try {
+    handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (err) {
+    if (isMissingFile(err)) return null;
+    throw err;
+  }
   try {
     const stat = await handle.stat();
     if (!stat.isFile() || stat.size > maxBytes) return null;
@@ -159,7 +189,8 @@ async function resolveTranscript(sessionKey: string, home: string): Promise<File
       : "";
   if (!namedFile) return null;
 
-  const realSessionsDir = await fs.realpath(sessionsDir);
+  const realSessionsDir = await realpathIfPresent(sessionsDir);
+  if (!realSessionsDir) return null;
   const requested = path.isAbsolute(namedFile)
     ? path.resolve(namedFile)
     : path.resolve(sessionsDir, namedFile);
@@ -169,7 +200,8 @@ async function resolveTranscript(sessionKey: string, home: string): Promise<File
   const rel = relativeChild(sessionsDir, requested)
     ?? relativeChild(realSessionsDir, requested);
   if (rel === null) return null;
-  const realFile = await fs.realpath(path.join(realSessionsDir, rel));
+  const realFile = await realpathIfPresent(path.join(realSessionsDir, rel));
+  if (!realFile) return null;
   if (relativeChild(realSessionsDir, realFile) === null) return null;
   let handle: FileHandle | null = null;
   try {
@@ -178,7 +210,11 @@ async function resolveTranscript(sessionKey: string, home: string): Promise<File
     // from before open(). This closes the rename/symlink race between realpath
     // and use; the ClawBox runtime is Linux, where procfs exposes the pinned
     // descriptor target without reopening the caller-controlled path.
-    const openedFile = await fs.realpath(`/proc/self/fd/${handle.fd}`);
+    const openedFile = await realpathIfPresent(`/proc/self/fd/${handle.fd}`);
+    if (!openedFile) {
+      await handle.close();
+      return null;
+    }
     if (relativeChild(realSessionsDir, openedFile) === null) {
       await handle.close();
       return null;
@@ -191,17 +227,22 @@ async function resolveTranscript(sessionKey: string, home: string): Promise<File
     return handle;
   } catch (err) {
     await handle?.close().catch(() => {});
+    if (isMissingFile(err)) return null;
     throw err;
   }
 }
 
-async function readTail(handle: FileHandle, maxBytes: number): Promise<string> {
+async function readTail(handle: FileHandle, maxBytes: number, fileSize: number): Promise<string> {
   try {
-    const stat = await handle.stat();
-    const length = Math.min(stat.size, maxBytes);
-    const offset = stat.size - length;
+    const length = Math.min(fileSize, maxBytes);
+    const offset = fileSize - length;
     const buffer = Buffer.alloc(length);
-    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    let bytesRead = 0;
+    while (bytesRead < length) {
+      const result = await handle.read(buffer, bytesRead, length - bytesRead, offset + bytesRead);
+      if (result.bytesRead === 0) break;
+      bytesRead += result.bytesRead;
+    }
     let text = buffer.subarray(0, bytesRead).toString("utf8");
     // The bounded window can begin halfway through a JSON record. Throw away
     // only that fragment; every complete line after it is still canonical.
@@ -225,10 +266,35 @@ export async function loadSpokenHistory(
   options: LoadOptions = {},
 ): Promise<SpokenHistoryItem[]> {
   if (!sessionKey || sessionKey.length > 512 || /[\u0000-\u001f\u007f]/.test(sessionKey)) return [];
-  const transcriptHandle = await resolveTranscript(sessionKey, options.openclawHome ?? OPENCLAW_HOME);
+  const home = options.openclawHome ?? OPENCLAW_HOME;
+  const maxTailBytes = options.maxTailBytes ?? DEFAULT_TAIL_BYTES;
+  const transcriptHandle = await resolveTranscript(sessionKey, home);
   if (!transcriptHandle) return [];
 
-  const raw = await readTail(transcriptHandle, options.maxTailBytes ?? DEFAULT_TAIL_BYTES);
+  let identity: BigIntStats;
+  try {
+    identity = await transcriptHandle.stat({ bigint: true });
+  } catch (err) {
+    await transcriptHandle.close().catch(() => {});
+    if (isMissingFile(err)) return [];
+    throw err;
+  }
+  const cacheKey = [
+    home,
+    sessionKey,
+    maxTailBytes,
+    identity.dev,
+    identity.ino,
+    identity.size,
+    identity.mtimeNs,
+    identity.ctimeNs,
+  ].join("\u0000");
+  if (cachedHistory?.key === cacheKey) {
+    await transcriptHandle.close();
+    return cloneHistory(cachedHistory.items);
+  }
+
+  const raw = await readTail(transcriptHandle, maxTailBytes, Number(identity.size));
   const targets: AssistantTarget[] = [];
   const recovered = new Map<number, string[]>();
   let currentRunPrefix: string | undefined;
@@ -286,7 +352,7 @@ export async function loadSpokenHistory(
       const targetTimestamp = target?.timestamp ?? timestamp;
       if (targetTimestamp > 0) {
         const prior = recovered.get(targetTimestamp) ?? [];
-        recovered.set(targetTimestamp, [...new Set([...prior, ...audio])]);
+        recovered.set(targetTimestamp, [...new Set([...prior, ...audio])].slice(0, MAX_AUDIO_PER_REPLY));
       }
       // A marked or repeated media record supplements an earlier answer; it is
       // not another candidate for a later identical reply.
@@ -296,7 +362,9 @@ export async function loadSpokenHistory(
     if (text && timestamp > 0) targets.push({ text, timestamp, runPrefix: currentRunPrefix });
   }
 
-  return [...recovered.entries()]
+  const items = [...recovered.entries()]
     .slice(-MAX_RESULTS)
     .map(([targetTimestamp, audio]) => ({ targetTimestamp, audio }));
+  cachedHistory = { key: cacheKey, items: cloneHistory(items) };
+  return items;
 }

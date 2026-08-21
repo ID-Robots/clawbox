@@ -205,6 +205,7 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
         const chunks: Buffer[] = [];
         let fileBytes = 0;
         stream.on("data", (chunk: Buffer) => {
+          if (settled) return;
           fileBytes += chunk.byteLength;
           if (fileBytes > MAX_AUDIO_BYTES) {
             finish({ status: 413, error: "The recording is too long" }, true);
@@ -296,7 +297,9 @@ export async function POST(req: NextRequest) {
       method: "POST",
       headers: { Authorization: `Bearer ${token}` },
       body: upstream,
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      // A disconnected browser must not leave a paid upstream transcription
+      // running until the server timeout expires.
+      signal: AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]),
     });
   } catch (err) {
     // A box on a flaky uplink is the common case here, and the distinction

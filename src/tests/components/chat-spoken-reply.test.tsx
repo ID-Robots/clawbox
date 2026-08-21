@@ -23,6 +23,7 @@ import { resetHarnessCache } from "@/lib/client-harness";
 
 const VOICE = "/home/clawbox/.openclaw/media/outbound/voice-1787291821763---93f78bf1.wav";
 const SECOND_VOICE = "/home/clawbox/.openclaw/media/outbound/voice-1787291999999---0c1d2e3f.wav";
+const IMAGE = "/home/clawbox/.openclaw/media/tool-image-generation/crab.png";
 const SPOKEN_TEXT = "The lantern is green.";
 
 const playerSrc = (p: string) => `/setup-api/chat/media?path=${encodeURIComponent(p)}`;
@@ -36,6 +37,20 @@ function assistantMessage(text: string, timestamp: number, audioPath?: string) {
     });
   }
   return { role: "assistant", content, timestamp };
+}
+
+function assistantMessageWithAudio(text: string, timestamp: number, audioPaths: string[]) {
+  return {
+    role: "assistant",
+    timestamp,
+    content: [
+      { type: "text", text },
+      ...audioPaths.map((audioPath) => ({
+        type: "attachment",
+        attachment: { url: audioPath, kind: "audio", label: "voice.wav", mimeType: "audio/wav" },
+      })),
+    ],
+  };
 }
 
 /** What the gateway replays. Set per test before the component mounts. */
@@ -147,6 +162,12 @@ function deliver(message: unknown) {
 }
 
 const players = () => screen.queryAllByTestId("chat-audio") as HTMLAudioElement[];
+
+function messageBubble(element: Element): Element | null {
+  if (element instanceof HTMLAudioElement) return element.parentElement?.parentElement ?? null;
+  // img -> preview button -> image wrapper -> image list -> message bubble.
+  return element.parentElement?.parentElement?.parentElement?.parentElement ?? null;
+}
 
 describe("spoken replies in the mascot chat", () => {
   beforeEach(() => {
@@ -351,6 +372,93 @@ describe("spoken replies in the mascot chat", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
 
     await waitFor(() => expect(players()).toHaveLength(1));
+  });
+
+  it("keeps an audio-only history reply separate from a caption-free image", async () => {
+    history = [
+      assistantMessage(`MEDIA:${IMAGE}`, 100),
+      assistantMessage("", 200, VOICE),
+    ];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+
+    const image = await screen.findByAltText("chat.generatedImage");
+    await waitFor(() => expect(players()).toHaveLength(1));
+    expect(messageBubble(players()[0])).not.toBe(messageBubble(image));
+  });
+
+  it("does not text-match a live audio-only event to a caption-free image", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    deliver(assistantMessage(`MEDIA:${IMAGE}`, 100));
+    const image = await screen.findByAltText("chat.generatedImage");
+
+    history = [
+      assistantMessage(`MEDIA:${IMAGE}`, 100),
+      assistantMessage("", 200, VOICE),
+    ];
+    deliverSessionMessage(assistantMessage("", 200, VOICE));
+
+    await waitFor(() => expect(players()).toHaveLength(1));
+    expect(messageBubble(players()[0])).not.toBe(messageBubble(image));
+  });
+
+  it("does not text-match an audio-only final to a caption-free image", async () => {
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    deliver(assistantMessage(`MEDIA:${IMAGE}`, 100));
+    const image = await screen.findByAltText("chat.generatedImage");
+    deliver(assistantMessage("", 200, VOICE));
+
+    await waitFor(() => expect(players()).toHaveLength(1));
+    expect(messageBubble(players()[0])).not.toBe(messageBubble(image));
+  });
+
+  it("caps a live reply at four distinct audio players", async () => {
+    const sources = Array.from({ length: 6 }, (_, index) =>
+      `/home/clawbox/.openclaw/media/outbound/live-${index}.wav`);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+
+    deliver(assistantMessageWithAudio("Bounded live reply", 250, sources));
+
+    await waitFor(() => expect(players()).toHaveLength(4));
+    expect(players().map(player => player.getAttribute("src"))).toEqual(
+      sources.slice(0, 4).map(playerSrc),
+    );
+  });
+
+  it("deduplicates and caps durable audio at four players", async () => {
+    const sources = Array.from({ length: 5 }, (_, index) =>
+      `/home/clawbox/.openclaw/media/outbound/durable-${index}.wav`);
+    history = [assistantMessage("Bounded durable reply", 260)];
+    durableSpoken = [{
+      targetTimestamp: 260,
+      audio: [playerSrc(sources[0]), playerSrc(sources[0]), ...sources.slice(1).map(playerSrc)],
+    }];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+
+    await waitFor(() => expect(players()).toHaveLength(4));
+    expect(players().map(player => player.getAttribute("src"))).toEqual(
+      sources.slice(0, 4).map(playerSrc),
+    );
+  });
+
+  it("does not preserve stale audio-only state onto a caption-free image", async () => {
+    history = [assistantMessage("", 100, VOICE)];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(players()).toHaveLength(1));
+
+    history = [assistantMessage(`MEDIA:${IMAGE}`, 200)];
+    const before = historyReads;
+    deliverSessionMessage({
+      role: "user",
+      content: [{ type: "text", text: "refresh" }],
+      timestamp: 300,
+    });
+
+    await waitFor(() => expect(historyReads).toBeGreaterThan(before), { timeout: 3000 });
+    await screen.findByAltText("chat.generatedImage");
+    expect(players()).toHaveLength(0);
   });
 
   it("puts no filesystem path on screen", async () => {

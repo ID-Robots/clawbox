@@ -359,6 +359,30 @@ describe("/setup-api/chat/transcribe", () => {
     expect(fetchMock.mock.calls[0][1].signal).toBeTruthy();
   });
 
+  it("aborts the upstream transcription when the browser disconnects", async () => {
+    const caller = new AbortController();
+    let upstreamSignal: AbortSignal | undefined;
+    fetchMock.mockImplementation((_url: unknown, init: RequestInit) => {
+      upstreamSignal = init.signal ?? undefined;
+      return new Promise<Response>((_resolve, reject) => {
+        upstreamSignal?.addEventListener("abort", () => {
+          reject(new DOMException("aborted", "AbortError"));
+        }, { once: true });
+        caller.abort();
+      });
+    });
+    const form = new FormData();
+    form.set("file", new Blob([new Uint8Array(AUDIO)], { type: "audio/webm" }), "recording.webm");
+
+    await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
+      method: "POST",
+      body: form,
+      signal: caller.signal,
+    }));
+
+    expect(upstreamSignal?.aborted).toBe(true);
+  });
+
   it("reports an unreadable upstream response as a server-side fault", async () => {
     fetchMock.mockResolvedValue(new Response("<html>gateway</html>", { status: 200 }));
     const res = await POST(audioRequest());

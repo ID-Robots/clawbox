@@ -43,6 +43,11 @@ import {
 const MASCOT_LINES_KEY = 'clawbox-mascot-convo-lines'
 const MAX_RETRIES = 8
 const MAX_QUEUED_SENDS = 20
+const MAX_AUDIO_PER_MESSAGE = 4
+// The server gives its upstream two minutes. Leave enough room for the upload
+// and response body, while still guaranteeing that a browser-side stall ends
+// in the existing retry UI instead of spinning forever.
+const VOICE_TRANSCRIBE_TIMEOUT_MS = 180_000
 // During a skill install the gateway restarts to load the new skill, so
 // extend the retry budget to quadruple so the chat reconnects automatically
 // once it comes back instead of forcing the user to click Try again.
@@ -287,7 +292,7 @@ function preserveSpokenByOccurrence(previous: ChatMessage[], next: ChatMessage[]
         // copy; falling through would clone the same recording onto a later
         // identical reply.
         if (!restored[target].audio?.length) {
-          restored[target] = { ...restored[target], audio: prior.audio }
+          restored[target] = { ...restored[target], audio: boundedAudio(prior.audio) }
         }
         used.add(target)
         continue
@@ -295,18 +300,28 @@ function preserveSpokenByOccurrence(previous: ChatMessage[], next: ChatMessage[]
     }
     for (let j = restored.length - 1; j >= 0; j--) {
       const candidate = restored[j]
-      if (!used.has(j) && candidate.role === 'assistant' && !candidate.audio?.length
+      if (prior.text.length > 0 && !used.has(j) && candidate.role === 'assistant' && !candidate.audio?.length
           && candidate.text === prior.text) {
         target = j
         break
       }
     }
     if (target !== -1) {
-      restored[target] = { ...restored[target], audio: prior.audio }
+      restored[target] = { ...restored[target], audio: boundedAudio(prior.audio) }
       used.add(target)
     }
   }
   return restored
+}
+
+function boundedAudio(...groups: string[][]): string[] {
+  return [...new Set(groups.flat())].slice(0, MAX_AUDIO_PER_MESSAGE)
+}
+
+function finiteMessageTimestamp(message: unknown): number | null {
+  if (!message || typeof message !== 'object') return null
+  const timestamp = (message as { timestamp?: unknown }).timestamp
+  return typeof timestamp === 'number' && Number.isFinite(timestamp) ? timestamp : null
 }
 
 // The newest server timestamp currently on screen — the line a later message
@@ -1215,7 +1230,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             ? String((pushedMessage as Record<string, unknown>).role ?? '').toLowerCase()
             : ''
           const pushedRaw = extractText(pushedMessage)
-          const pushedAudio = extractAudioAttachments(pushedMessage)
+          const pushedAudio = boundedAudio(extractAudioAttachments(pushedMessage))
           if (pushedRole === 'assistant' && pushedAudio.length > 0
               && !isSentinel(pushedRaw) && !isInterSessionEnvelope(pushedRaw, pushedMessage)) {
             const pushedText = splitMediaDirectives(pushedRaw).text
@@ -1229,7 +1244,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               for (let i = prev.length - 1; i >= 0; i--) {
                 if (prev[i].role === 'user') { latestUser = i; break }
               }
-              for (let i = prev.length - 1; i > latestUser; i--) {
+              for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
                 const candidate = prev[i]
                 if (candidate.role !== 'assistant' || candidate.text !== pushedText) continue
                 if (candidate.audio?.length) return prev // duplicate push
@@ -1239,7 +1254,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }
               // A genuinely audio-only reply has no caption to wait for.
               if (!pushedText) {
-                return [...prev, { role: 'assistant' as const, text: '', timestamp: Date.now(), audio: pushedAudio }]
+                return [...prev, {
+                  role: 'assistant' as const,
+                  text: '',
+                  timestamp: finiteMessageTimestamp(pushedMessage) ?? Date.now(),
+                  audio: pushedAudio,
+                }]
               }
               return prev
             })
@@ -1279,10 +1299,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // A spoken reply is a structured attachment part, not a MEDIA:
             // line — see lib/chat-media.ts. Both are read; the harness uses
             // the first and image generation the second.
-            const audio = [...new Set([
-              ...extractAudioAttachments(msg),
-              ...directiveAudio,
-            ])]
+            const audio = boundedAudio(extractAudioAttachments(msg), directiveAudio)
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
@@ -1317,14 +1334,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 // the audio is folded into the bubble it belongs to when the
                 // text matches and that bubble has none yet.
                 const last = prev[prev.length - 1]
-                if (audio.length > 0 && !images.length && last && last.role === 'assistant'
+                if (text.length > 0 && audio.length > 0 && !images.length && last && last.role === 'assistant'
                     && last.text === text) {
-                  const mergedAudio = [...new Set([...(last.audio ?? []), ...audio])]
+                  const mergedAudio = boundedAudio(last.audio ?? [], audio)
                   if (last.audio?.length === mergedAudio.length
                       && last.audio.every((src, index) => src === mergedAudio[index])) return prev
                   return [...prev.slice(0, -1), { ...last, audio: mergedAudio }]
                 }
-                return [...prev, { role: 'assistant' as const, text, timestamp: Date.now(), images, audio }]
+                return [...prev, {
+                  role: 'assistant' as const,
+                  text,
+                  timestamp: finiteMessageTimestamp(msg) ?? Date.now(),
+                  images,
+                  audio,
+                }]
               })
               if (text) saveMascotSnippet(text)
               // The picture reached us over the socket after all — nothing
@@ -1529,14 +1552,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // Replayed history carries the same MEDIA: lines the live turn did, so
         // a reopened chat shows its pictures rather than a bare caption.
         const { text, images, audio: directiveAudio } = splitAssistantMedia(raw)
-        const audio = [...extractAudioAttachments(m), ...directiveAudio]
+        const audio = boundedAudio(extractAudioAttachments(m), directiveAudio)
         if (!text && images.length === 0 && audio.length === 0) continue
         // Replayed history repeats the live path's two-message shape: the
         // spoken reply is stored as its own message carrying the same text.
         // Folded into the preceding bubble so a reopened chat shows one answer
         // with a player rather than the answer twice.
         const previous = chatMsgs[chatMsgs.length - 1]
-        if (audio.length > 0 && images.length === 0 && previous && previous.role === 'assistant'
+        if (text.length > 0 && audio.length > 0 && images.length === 0 && previous && previous.role === 'assistant'
             && previous.text === text && (previous.audio?.length ?? 0) === 0) {
           previous.audio = audio
           continue
@@ -1559,8 +1582,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const candidate = item as { targetTimestamp?: unknown; audio?: unknown }
           if (typeof candidate.targetTimestamp !== 'number' || !Number.isFinite(candidate.targetTimestamp)
               || !Array.isArray(candidate.audio)) continue
-          const audio = candidate.audio.filter((src): src is string =>
-            typeof src === 'string' && src.length > 0 && src.length <= 4096)
+          const audio = boundedAudio(candidate.audio.filter((src): src is string =>
+            typeof src === 'string' && src.length > 0 && src.length <= 4096))
           if (audio.length) durableAudio.set(candidate.targetTimestamp, audio)
         }
       }
@@ -1794,6 +1817,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const transcribe = useCallback(async (blob: Blob, name: string) => {
     const generation = captureGenerationRef.current
     const controller = new AbortController()
+    const requestController = new AbortController()
+    const abortRequest = () => requestController.abort()
+    controller.signal.addEventListener('abort', abortRequest, { once: true })
+    const timeoutId = window.setTimeout(abortRequest, VOICE_TRANSCRIBE_TIMEOUT_MS)
     transcribeAbortRef.current?.abort()
     transcribeAbortRef.current = controller
     setVoice({ state: 'transcribing', error: null, message: null, canRetry: false })
@@ -1803,7 +1830,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const res = await fetch('/setup-api/chat/transcribe', {
         method: 'POST',
         body: form,
-        signal: controller.signal,
+        signal: requestController.signal,
       })
       const payload = await res.json().catch(() => null)
       if (captureGenerationRef.current !== generation || controller.signal.aborted) return
@@ -1842,6 +1869,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (captureGenerationRef.current !== generation || controller.signal.aborted) return
       setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: true })
     } finally {
+      window.clearTimeout(timeoutId)
+      controller.signal.removeEventListener('abort', abortRequest)
       if (transcribeAbortRef.current === controller) transcribeAbortRef.current = null
     }
   }, [])
@@ -2101,7 +2130,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         text: hermesReply.text || (hermesHasMedia ? '' : '(no response)'),
         timestamp: Date.now(),
         images: hermesReply.images,
-        audio: hermesReply.audio,
+        audio: boundedAudio(hermesReply.audio),
       }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
@@ -2147,7 +2176,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     startRun(trimmed, [])
   }, [sending, startRun])
-  sendVoiceTranscriptRef.current = sendVoiceTranscript
+  useEffect(() => {
+    sendVoiceTranscriptRef.current = sendVoiceTranscript
+  }, [sendVoiceTranscript])
 
   const sendMessage = useCallback(() => {
     const text = input.trim()

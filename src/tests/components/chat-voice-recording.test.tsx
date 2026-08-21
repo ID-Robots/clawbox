@@ -135,7 +135,7 @@ function installFetch(...transcripts: (string | null | Promise<string>)[]) {
   let calls = 0;
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: unknown) => {
+    vi.fn(async (input: unknown, init?: RequestInit) => {
       const url = String(input);
       fetchedUrls.push(url);
       if (url.includes("/setup-api/gateway/ws-config")) {
@@ -148,7 +148,15 @@ function installFetch(...transcripts: (string | null | Promise<string>)[]) {
         return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
       }
       if (url.includes("/setup-api/chat/transcribe")) {
-        const answer = await transcripts[Math.min(calls++, transcripts.length - 1)];
+        const configured = transcripts[Math.min(calls++, transcripts.length - 1)];
+        const signal = init?.signal;
+        const aborted = new Promise<never>((_, reject) => {
+          if (!signal) return;
+          const rejectAbort = () => reject(new DOMException("aborted", "AbortError"));
+          if (signal.aborted) rejectAbort();
+          else signal.addEventListener("abort", rejectAbort, { once: true });
+        });
+        const answer = await Promise.race([Promise.resolve(configured), aborted]);
         if (answer === null) return { ok: false, status: 500, json: async () => ({ error: "the box is busy" }) };
         return { ok: true, json: async () => ({ ok: true, text: answer }) };
       }
@@ -499,6 +507,22 @@ describe("chat voice recording", () => {
       if (frame.method !== "chat.send") return false;
       return (frame.params as { message?: unknown } | undefined)?.message === "late invisible message";
     })).toBe(false);
+  });
+
+  it("turns a stalled transcription upload into a retryable timeout", async () => {
+    installFetch(new Promise<string>(() => {}));
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await pressRecord(await readyToRecord());
+    const sendsBefore = sentFrames.filter(frame => frame.method === "chat.send").length;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.click(screen.getByTestId("voice-stop"));
+    await waitFor(() => expect(transcribeCalls()).toBe(1));
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(180_000); });
+
+    expect(await screen.findByTestId("voice-retry")).toBeTruthy();
+    expect(transcribeCalls()).toBe(1);
+    expect(sentFrames.filter(frame => frame.method === "chat.send")).toHaveLength(sendsBefore);
   });
 
   it("sends only the recording and preserves a draft typed while transcription is pending", async () => {

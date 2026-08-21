@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "crypto";
 import fs from "fs";
+import fsPromises, { type FileHandle } from "fs/promises";
 import os from "os";
 import path from "path";
 import { loadSpokenHistory } from "@/lib/chat-spoken-history";
@@ -52,6 +53,7 @@ describe("loadSpokenHistory", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -146,6 +148,123 @@ describe("loadSpokenHistory", () => {
     expect(await loadSpokenHistory(SESSION_KEY, { openclawHome: root })).toEqual([
       { targetTimestamp: 370, audio: [`/setup-api/chat/media?path=${encodeURIComponent(local)}`] },
     ]);
+  });
+
+  it("caps audio merged from repeated supplements for one reply", async () => {
+    const sources = Array.from({ length: 6 }, (_, index) =>
+      path.join(root, "media", "outbound", `part-${index}.wav`));
+    const markedSupplement = (timestamp: number, selected: string[]) => ({
+      role: "assistant",
+      timestamp,
+      content: [
+        { type: "text", text: "Audio reply" },
+        ...selected.map((source) => ({
+          type: "attachment",
+          attachment: { url: source, kind: "audio", mimeType: "audio/wav" },
+        })),
+      ],
+      openclawTtsSupplement: {
+        textSha256: createHash("sha256").update("Bounded").digest("hex"),
+        spokenText: "Bounded",
+      },
+    });
+    writeTranscript([
+      assistant("Bounded", 380),
+      markedSupplement(381, sources.slice(0, 2)),
+      markedSupplement(382, sources.slice(2, 4)),
+      markedSupplement(383, sources.slice(4, 6)),
+    ]);
+
+    expect(await loadSpokenHistory(SESSION_KEY, { openclawHome: root })).toEqual([{
+      targetTimestamp: 380,
+      audio: sources.slice(0, 4).map((source) =>
+        `/setup-api/chat/media?path=${encodeURIComponent(source)}`),
+    }]);
+  });
+
+  it("drops a truncated leading record from a bounded transcript tail", async () => {
+    const oldSource = path.join(root, "media", "outbound", "old.wav");
+    const source = path.join(root, "media", "outbound", "tail.wav");
+    const excluded = [
+      line("1", assistant("Old answer", 380)),
+      line("2", supplement("Old answer", 381, oldSource)),
+      line("3", assistant("x".repeat(4096), 384)),
+    ].join("\n");
+    const completeTail = [
+      line("4", assistant("Tail answer", 385)),
+      line("5", supplement("Tail answer", 386, source)),
+    ].join("\n") + "\n";
+    fs.writeFileSync(transcript, `${excluded}\n${completeTail}`);
+
+    expect(await loadSpokenHistory(SESSION_KEY, {
+      openclawHome: root,
+      maxTailBytes: Buffer.byteLength(completeTail) + 32,
+    })).toEqual([{
+      targetTimestamp: 385,
+      audio: [`/setup-api/chat/media?path=${encodeURIComponent(source)}`],
+    }]);
+  });
+
+  it("continues reading until the bounded tail is complete after short reads", async () => {
+    const source = path.join(root, "media", "outbound", "short-read.wav");
+    writeTranscript([
+      assistant("Short read", 387),
+      supplement("Short read", 388, source),
+    ]);
+    const originalOpen = fsPromises.open.bind(fsPromises);
+    vi.spyOn(fsPromises, "open").mockImplementation(async (...args) => {
+      const handle = await originalOpen(...args);
+      if (path.resolve(String(args[0])) === path.resolve(transcript)) {
+        const originalRead = handle.read.bind(handle);
+        handle.read = ((buffer: Uint8Array, offset: number, length: number, position: number) =>
+          originalRead(buffer, offset, Math.min(length, 7), position)) as FileHandle["read"];
+      }
+      return handle;
+    });
+
+    expect(await loadSpokenHistory(SESSION_KEY, { openclawHome: root })).toEqual([{
+      targetTimestamp: 387,
+      audio: [`/setup-api/chat/media?path=${encodeURIComponent(source)}`],
+    }]);
+  });
+
+  it("returns an empty history when the sessions index is not present yet", async () => {
+    fs.rmSync(path.join(sessionsDir, "sessions.json"));
+    await expect(loadSpokenHistory(SESSION_KEY, { openclawHome: root })).resolves.toEqual([]);
+  });
+
+  it("returns an empty history when the indexed transcript was rotated away", async () => {
+    fs.rmSync(transcript, { force: true });
+    await expect(loadSpokenHistory(SESSION_KEY, { openclawHome: root })).resolves.toEqual([]);
+  });
+
+  it("still surfaces a corrupt sessions index instead of treating it as missing", async () => {
+    fs.writeFileSync(path.join(sessionsDir, "sessions.json"), "{not-json");
+    await expect(loadSpokenHistory(SESSION_KEY, { openclawHome: root })).rejects.toBeInstanceOf(SyntaxError);
+  });
+
+  it("returns cloned cached results and invalidates them when the transcript grows", async () => {
+    const firstSource = path.join(root, "media", "outbound", "cached-one.wav");
+    const secondSource = path.join(root, "media", "outbound", "cached-two.wav");
+    writeTranscript([
+      assistant("Cached", 389),
+      supplement("Cached", 390, firstSource),
+    ]);
+
+    const first = await loadSpokenHistory(SESSION_KEY, { openclawHome: root });
+    first[0].audio[0] = "mutated by caller";
+    expect(await loadSpokenHistory(SESSION_KEY, { openclawHome: root })).toEqual([{
+      targetTimestamp: 389,
+      audio: [`/setup-api/chat/media?path=${encodeURIComponent(firstSource)}`],
+    }]);
+
+    writeTranscript([
+      assistant("Cached", 389),
+      supplement("Cached", 390, firstSource),
+      assistant("New cached", 391),
+      supplement("New cached", 392, secondSource),
+    ]);
+    expect(await loadSpokenHistory(SESSION_KEY, { openclawHome: root })).toHaveLength(2);
   });
 
   it("supports a realistic sessions index larger than the old four-megabyte ceiling", async () => {
