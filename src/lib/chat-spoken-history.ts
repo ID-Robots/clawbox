@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
-import fs from "fs/promises";
+import { constants } from "fs";
+import fs, { type FileHandle } from "fs/promises";
 import path from "path";
 import { extractAudioAttachments } from "@/lib/chat-media";
 import { OPENCLAW_HOME } from "@/lib/openclaw-config";
@@ -118,12 +119,27 @@ function localAudioUrls(message: Record<string, unknown>): string[] {
 }
 
 async function boundedJsonFile(file: string, maxBytes: number): Promise<unknown> {
-  const stat = await fs.stat(file);
-  if (!stat.isFile() || stat.size > maxBytes) return null;
-  return JSON.parse(await fs.readFile(file, "utf8"));
+  // Open once and validate/read through the same descriptor. A path-level
+  // stat followed by readFile lets another process replace the index between
+  // those calls, defeating both the type and size checks.
+  const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const buffer = Buffer.alloc(stat.size);
+    let read = 0;
+    while (read < buffer.length) {
+      const result = await handle.read(buffer, read, buffer.length - read, read);
+      if (result.bytesRead === 0) break;
+      read += result.bytesRead;
+    }
+    return JSON.parse(buffer.subarray(0, read).toString("utf8"));
+  } finally {
+    await handle.close();
+  }
 }
 
-async function resolveTranscript(sessionKey: string, home: string): Promise<string | null> {
+async function resolveTranscript(sessionKey: string, home: string): Promise<FileHandle | null> {
   const agentMatch = /^agent:([A-Za-z0-9_-]+):/.exec(sessionKey);
   const agentId = agentMatch?.[1] ?? "main";
   const sessionsDir = path.join(home, "agents", agentId, "sessions");
@@ -155,19 +171,38 @@ async function resolveTranscript(sessionKey: string, home: string): Promise<stri
   if (rel === null) return null;
   const realFile = await fs.realpath(path.join(realSessionsDir, rel));
   if (relativeChild(realSessionsDir, realFile) === null) return null;
-  const stat = await fs.stat(realFile);
-  return stat.isFile() ? realFile : null;
+  let handle: FileHandle | null = null;
+  try {
+    handle = await fs.open(realFile, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Re-check containment on what was actually opened, not on the pathname
+    // from before open(). This closes the rename/symlink race between realpath
+    // and use; the ClawBox runtime is Linux, where procfs exposes the pinned
+    // descriptor target without reopening the caller-controlled path.
+    const openedFile = await fs.realpath(`/proc/self/fd/${handle.fd}`);
+    if (relativeChild(realSessionsDir, openedFile) === null) {
+      await handle.close();
+      return null;
+    }
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      await handle.close();
+      return null;
+    }
+    return handle;
+  } catch (err) {
+    await handle?.close().catch(() => {});
+    throw err;
+  }
 }
 
-async function readTail(file: string, maxBytes: number): Promise<string> {
-  const stat = await fs.stat(file);
-  const length = Math.min(stat.size, maxBytes);
-  const offset = stat.size - length;
-  const handle = await fs.open(file, "r");
+async function readTail(handle: FileHandle, maxBytes: number): Promise<string> {
   try {
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, maxBytes);
+    const offset = stat.size - length;
     const buffer = Buffer.alloc(length);
-    await handle.read(buffer, 0, length, offset);
-    let text = buffer.toString("utf8");
+    const { bytesRead } = await handle.read(buffer, 0, length, offset);
+    let text = buffer.subarray(0, bytesRead).toString("utf8");
     // The bounded window can begin halfway through a JSON record. Throw away
     // only that fragment; every complete line after it is still canonical.
     if (offset > 0) {
@@ -190,10 +225,10 @@ export async function loadSpokenHistory(
   options: LoadOptions = {},
 ): Promise<SpokenHistoryItem[]> {
   if (!sessionKey || sessionKey.length > 512 || /[\u0000-\u001f\u007f]/.test(sessionKey)) return [];
-  const transcript = await resolveTranscript(sessionKey, options.openclawHome ?? OPENCLAW_HOME);
-  if (!transcript) return [];
+  const transcriptHandle = await resolveTranscript(sessionKey, options.openclawHome ?? OPENCLAW_HOME);
+  if (!transcriptHandle) return [];
 
-  const raw = await readTail(transcript, options.maxTailBytes ?? DEFAULT_TAIL_BYTES);
+  const raw = await readTail(transcriptHandle, options.maxTailBytes ?? DEFAULT_TAIL_BYTES);
   const targets: AssistantTarget[] = [];
   const recovered = new Map<number, string[]>();
   let currentRunPrefix: string | undefined;
