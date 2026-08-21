@@ -10,6 +10,8 @@
 // the one outcome this must never produce, so releasing the capture is tied to
 // leaving the state rather than to any particular button.
 
+import { sanitizeErrorPayload } from "./safe-error-text";
+
 export type VoiceState =
   /** Nothing is happening; the mic button is offered. */
   | "idle"
@@ -67,20 +69,10 @@ export function mergeTranscript(existing: string, transcript: string): string {
  * message, the caller gets null and shows its own generic line.
  */
 export function describeTranscribeFailure(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
-  const error = (payload as { error?: unknown }).error;
-  if (typeof error !== "string") return null;
-  const trimmed = error.trim();
-  if (!trimmed) return null;
-  // Anything that looks like a path, a URL, a bearer token or a stack frame is
-  // a leak, not a message. Errors are the classic way internals escape into a
-  // customer's screen, so this is a whitelist by shape rather than a blocklist
-  // of known-bad strings.
-  if (/(^|\s)\/[\w.-]+\//.test(trimmed)) return null;
-  if (/https?:\/\//i.test(trimmed)) return null;
-  if (/\b(claw_|sk-|Bearer\s)/i.test(trimmed)) return null;
-  if (/\bat\s+\w+\s+\(/.test(trimmed)) return null;
-  return trimmed;
+  // The leak rules live in sanitizeErrorPayload so the chat attachment path
+  // (TASK-380) enforces the identical whitelist rather than a second copy of
+  // these regexes that can drift from this one.
+  return sanitizeErrorPayload(payload);
 }
 
 /**
