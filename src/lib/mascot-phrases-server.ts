@@ -23,13 +23,22 @@ import { VALIDATOR_VERSION } from "./mascot-language";
 import { mergeWithPack, packFor } from "./mascot-packs";
 import { generatePhrasesLocally, type FailureKind } from "./mascot-generation-local";
 import {
+  GENERATION_DISABLED_REASON,
+  GENERATION_LOCALES,
   LANG_NAMES,
   PHRASE_CATEGORIES,
+  isGenerationLocale,
+  stripPackEchoes,
   validateBatch,
   type MascotPhraseSet,
 } from "./mascot-phrases";
 
 export type { FailureKind };
+
+// The allowlist itself lives in `mascot-phrases.ts` so the Settings UI can
+// import it; re-exported here because this module is where callers look for
+// anything about the generation schedule.
+export { GENERATION_DISABLED_REASON, GENERATION_LOCALES, isGenerationLocale };
 
 /** Per-locale cache key. INV-4: one envelope per locale, never a shared one. */
 const KV_PHRASE_PREFIX = "clawbox-mascot-phrase-set:";
@@ -181,16 +190,49 @@ function inFailureBackoff(locale: string): boolean {
 // ── Resource guards ────────────────────────────────────────────────────
 
 /**
+ * Does `pid` actually belong to a llama-server process?
+ *
+ * `isLlamaCppPidRunning` is `kill(pid, 0)`, which answers "some process has
+ * this id", not "OUR process is still alive". The pid file outlives an
+ * unclean shutdown — a Jetson losing power mid-run, an OOM kill, a crash
+ * before `clearLlamaCppPid` — and Linux recycles pids, so after enough
+ * process churn that stale number lands on something else entirely.
+ *
+ * The consequence was specific and bad: a recycled pid made
+ * `isLlamaCppServerRunning` say yes, which is exactly the "server up ==
+ * headroom" exemption below, so the memory gate was skipped and the box
+ * cold-loaded a ~3.8GB model with as little as 400MB free. That is the swap
+ * spiral the gate exists to prevent, on the hardware least able to survive it.
+ *
+ * Reading `/proc/<pid>/cmdline` costs one file read and settles it. Fails
+ * CLOSED on purpose: if we cannot confirm the process is llama-server — no
+ * /proc (a dev machine), a pid owned by another user, a race with exit — the
+ * caller loses the exemption and falls back to measuring MemAvailable, which
+ * is the safe direction to be wrong in.
+ */
+async function isLlamaServerCmdline(pid: number): Promise<boolean> {
+  try {
+    // argv is NUL-separated; argv[0] is the binary path.
+    const cmdline = await fs.readFile(`/proc/${pid}/cmdline`, "utf-8");
+    return cmdline.split("\0").some((arg) => arg.includes("llama-server"));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Is the on-device llama.cpp server already running?
  *
  * If it is, its model is already in RAM and we are about to reuse that exact
  * process — no new multi-GB allocation happens, so there is nothing for the
- * memory gate to protect against.
+ * memory gate to protect against. "That exact process" is the load-bearing
+ * part, hence the cmdline check: a recycled pid is a different program.
  */
 async function isLlamaCppServerRunning(): Promise<boolean> {
   try {
     const pid = await readLlamaCppPid();
-    return pid !== null && isLlamaCppPidRunning(pid);
+    if (pid === null || !isLlamaCppPidRunning(pid)) return false;
+    return await isLlamaServerCmdline(pid);
   } catch {
     return false;
   }
@@ -368,13 +410,16 @@ function mergeBatch(
 }
 
 /** Persist a batch, INV-6: nothing reaches the cache unvalidated. */
-function persistBatch(
+async function persistBatch(
   locale: string,
   cached: PhraseCacheEnvelope | null,
   fresh: Partial<MascotPhraseSet>,
   mode: GenerationMode,
-): Partial<MascotPhraseSet> | null {
-  const validated = validateBatch(fresh, locale);
+): Promise<Partial<MascotPhraseSet> | null> {
+  // Pack echoes are stripped BEFORE validation, so the survivor count counts
+  // NEW lines. See `stripPackEchoes` — the model copies the tone reference it
+  // is shown, and echoes used to pad a near-worthless batch past the gate.
+  const validated = validateBatch(stripPackEchoes(fresh, await packFor(locale)), locale);
   if (!validated.ok) {
     console.warn(`[mascot-phrases] discarding ${locale} batch: ${validated.reason} (dropped ${validated.dropped})`);
     recordFailure(locale, "malformed");
@@ -415,20 +460,36 @@ const inFlightGeneration = new Map<string, Promise<void>>();
 let generationInFlight = false;
 
 /**
- * Run `fn` iff no mascot generation is running anywhere and the model is idle.
- * Returns `null` without running otherwise.
+ * Why the lock said no. Two genuinely different situations that used to be
+ * one `null`, and therefore one message to the user:
+ *
+ *  - `refresh-in-progress` — the crab is already regenerating its own
+ *    phrases. Nobody's chat is involved. Telling the owner "the model is busy
+ *    with your chat" here is simply false, and it is the LIKELIER of the two
+ *    to be hit from a Settings button, because the page's own background
+ *    refresh may well have claimed the lock a moment earlier.
+ *  - `chat-busy` — the user's own chat owns the model. Their turn wins;
+ *    a cosmetic refresh is never worth making somebody wait.
+ */
+type LockRefusal = "refresh-in-progress" | "chat-busy";
+
+type LockOutcome<T> = { ran: true; value: T } | { ran: false; refusal: LockRefusal };
+
+/**
+ * Run `fn` iff no mascot generation is running anywhere and the model is idle,
+ * and say which of the two stopped it otherwise.
  *
  * The busy re-check lives INSIDE the lock on purpose: `isLocalAiBusy` is
  * check-then-act around a 10-60s `ensureLocalAiReady`, so two callers reading
  * it independently both pass. Flag and check are both synchronous here, so
  * nothing can interleave between them.
  */
-async function withGenerationLock<T>(fn: () => Promise<T>): Promise<T | null> {
-  if (generationInFlight) return null;
-  if (isLocalAiBusy()) return null; // the user's own chat always wins
+async function withGenerationLock<T>(fn: () => Promise<T>): Promise<LockOutcome<T>> {
+  if (generationInFlight) return { ran: false, refusal: "refresh-in-progress" };
+  if (isLocalAiBusy()) return { ran: false, refusal: "chat-busy" }; // the user's own chat always wins
   generationInFlight = true;
   try {
-    return await fn();
+    return { ran: true, value: await fn() };
   } finally {
     generationInFlight = false;
   }
@@ -453,6 +514,9 @@ export function maybeRegenerateInBackground(locale: string): Promise<void> {
     // and the common case (a cache that is simply still fresh) triggered it.
     await Promise.resolve();
     try {
+      // The cheapest gate first: a locale generation is switched off for never
+      // reaches the model, the memory check or the failure store at all.
+      if (!isGenerationLocale(locale)) return;
       const cached = readCache(locale);
       const { stale, mode } = isStale(cached);
       if (!stale) return;
@@ -478,7 +542,7 @@ export function maybeRegenerateInBackground(locale: string): Promise<void> {
           recordFailure(locale, outcome.failure);
           return;
         }
-        persistBatch(locale, cached, outcome.phrases, mode);
+        await persistBatch(locale, cached, outcome.phrases, mode);
       });
     } catch (err) {
       // Best-effort: callers fire-and-forget this, so it must never reject.
@@ -499,8 +563,17 @@ export function maybeRegenerateInBackground(locale: string): Promise<void> {
  */
 export type ForceRegenerateReason =
   | "generated"
-  /** Another mascot generation, or the user's own chat, holds the model. */
-  | "busy"
+  /**
+   * The user's own chat holds the model. NOT the same as the one below, and
+   * conflating them is the bug: a Settings button that says "busy with your
+   * chat" while the box is quietly refreshing its own phrases is telling the
+   * owner something they can see is untrue.
+   */
+  | "chat-busy"
+  /** Another MASCOT generation holds the model. Nobody's chat is involved. */
+  | "refresh-in-progress"
+  /** Generation does not run for this locale at all — see GENERATION_LOCALES. */
+  | "generation-disabled-for-locale"
   /** Not enough free RAM to cold-load the model. Clears on its own. */
   | "low-memory"
   /** Local AI is switched off, or no model is provisioned. */
@@ -534,6 +607,13 @@ const inFlightForceRegen = new Map<string, Promise<ForceRegenerateResult>>();
  */
 export async function forceRegenerate(requestedLocale?: string | null): Promise<ForceRegenerateResult> {
   const locale = await resolveLocale(requestedLocale);
+  // An explicit user action bypasses the failure backoff and the cache age,
+  // but not the allowlist: no model run can make a language it does not speak
+  // come out right, so this refuses immediately rather than spending three
+  // minutes proving it.
+  if (!isGenerationLocale(locale)) {
+    return { phrases: null, reason: "generation-disabled-for-locale", locale };
+  }
   const existing = inFlightForceRegen.get(locale);
   if (existing) return existing;
 
@@ -551,16 +631,19 @@ export async function forceRegenerate(requestedLocale?: string | null): Promise<
         if (!(await hasMemoryHeadroom())) return { phrases: null, reason: "low-memory", locale };
         const ctx = await gatherContext(locale);
         const outcome = await generatePhraseBatch(ctx, "full");
-        if (outcome.status === "deferred") return { phrases: null, reason: "busy", locale };
+        // "deferred" is specifically the generator finding the model claimed
+        // by a real request between our idle check and the call — a chat, not
+        // another crab refresh.
+        if (outcome.status === "deferred") return { phrases: null, reason: "chat-busy", locale };
         if (outcome.status === "failed") {
           recordFailure(locale, outcome.failure);
           return { phrases: null, reason: outcome.failure, locale };
         }
-        const persisted = persistBatch(locale, readCache(locale), outcome.phrases, "full");
+        const persisted = await persistBatch(locale, readCache(locale), outcome.phrases, "full");
         if (!persisted) return { phrases: null, reason: "malformed", locale };
         return { phrases: await mergeWithPack(persisted, locale), reason: "generated", locale };
       });
-      return result ?? { phrases: null, reason: "busy", locale };
+      return result.ran ? result.value : { phrases: null, reason: result.refusal, locale };
     } finally {
       inFlightForceRegen.delete(locale);
     }
@@ -596,6 +679,26 @@ export async function getMascotPhrases(
 ): Promise<{ phrases: MascotPhraseSet; meta: PhraseMeta }> {
   purgeLegacyKeys();
   const locale = await resolveLocale(requestedLocale);
+
+  // Generation is switched off for this language, so the pack IS the answer —
+  // complete, idiomatic, hand-written and reviewed. Any envelope an older
+  // build left behind is left on disk but not served: it was produced by the
+  // path this allowlist exists to stop trusting, and `meta.reason` would be
+  // lying about where the lines came from if we handed it back.
+  if (!isGenerationLocale(locale)) {
+    return {
+      phrases: await mergeWithPack(null, locale),
+      meta: {
+        source: "pack",
+        reason: GENERATION_DISABLED_REASON,
+        locale,
+        validatorVersion: VALIDATOR_VERSION,
+        lastFullRegen: null,
+        lastTopUp: null,
+      },
+    };
+  }
+
   const cached = readCache(locale);
 
   // Fire-and-forget: never make the mascot wait on the model.

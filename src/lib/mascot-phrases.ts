@@ -62,6 +62,44 @@ export const MIN_SURVIVING_CATEGORIES = 3;
  */
 export const MAX_ENGLISH_STOPWORD_RATIO = 0.35;
 
+/**
+ * The locales the on-device model is allowed to generate phrases for.
+ *
+ * English only, and that is a deliberate product decision rather than a
+ * temporary gap. Gemma 4 E2B is the only model that fits on the box, and in
+ * every other shipped language it either answered in English outright (which
+ * is what the stopword probe below exists to catch) or produced phrasing a
+ * native speaker would not: a 60-character sarcastic one-liner is close to the
+ * hardest thing to write in a language a 2B model barely speaks, and getting
+ * it wrong is far more visible than having no generated lines at all.
+ *
+ * The hand-written packs are already complete, idiomatic and reviewed in all
+ * ten languages, so a non-English box loses nothing by skipping generation —
+ * it just skips the part that was making things worse. Every guard downstream
+ * (the validator, the stopword probe, the language gate) still runs; this is
+ * the cheapest one, applied first, and it means a Bulgarian box never spends
+ * 180 seconds of Jetson on a batch that was going to be thrown away.
+ *
+ * Widening this list is a real change: it needs a model that can carry the
+ * tone in the new language, not just a config edit.
+ *
+ * It lives in this module — not the server one — because the Settings UI has
+ * to know whether to offer the refresh button, and this file is the only one
+ * of the pair a client component can import.
+ */
+export const GENERATION_LOCALES: readonly string[] = ["en"];
+
+/** True when the local model may generate phrases for `locale`. */
+export function isGenerationLocale(locale: string): boolean {
+  return GENERATION_LOCALES.includes(locale);
+}
+
+/**
+ * `meta.reason` served for a locale generation is switched off for. Shared so
+ * the route, the server and the Settings UI all name it the same way.
+ */
+export const GENERATION_DISABLED_REASON = "generation-disabled-for-locale";
+
 export const LANG_NAMES: Record<string, string> = {
   en: "English",
   bg: "Български",
@@ -112,6 +150,56 @@ export function sanitizeCategory(
     if (seen.has(trimmed)) continue;
     seen.add(trimmed);
     out.push(trimmed);
+  }
+  return out;
+}
+
+/**
+ * Fold a phrase to the form two entries are compared by when deciding whether
+ * one is an echo of the other: trimmed, case-folded, inner whitespace
+ * collapsed. Deliberately looser than the exact-string dedupe
+ * `mergeWithPackSync` does, because "Bug? Feature." and "bug? feature." are
+ * the same line as far as the crab's repertoire is concerned.
+ */
+function echoKey(phrase: string): string {
+  return phrase.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/**
+ * Drop every generated entry that is already in the pack.
+ *
+ * The prompt shows the model the locale's pack as a TONE REFERENCE, and the
+ * model copies it: a measured English run came back 76% echo. Those echoes
+ * used to count towards MIN_SURVIVORS_PER_CATEGORY, so a batch that added
+ * almost nothing passed the gate, was cached, and was then deduped away again
+ * by `mergeWithPackSync` on the way to the bubble — a whole 180-second model
+ * run spent to store lines the pack already had.
+ *
+ * Stripping them here, BEFORE the survivor count, makes that count mean what
+ * it says: how many NEW lines this run produced. A run that is nothing but
+ * echo now fails validation instead of masquerading as a success, which is
+ * the honest outcome.
+ *
+ * Nothing is lost by dropping them — the pack supplies those exact lines on
+ * every read anyway.
+ */
+export function stripPackEchoes(
+  set: Partial<MascotPhraseSet> | null | undefined,
+  pack: MascotPhraseSet,
+): Partial<MascotPhraseSet> {
+  const out: Partial<MascotPhraseSet> = {};
+  for (const category of PHRASE_CATEGORIES) {
+    const incoming = set?.[category];
+    if (!Array.isArray(incoming)) continue;
+    const packKeys = new Set(
+      (Array.isArray(pack[category]) ? pack[category] : [])
+        .filter((entry): entry is string => typeof entry === "string")
+        .map(echoKey),
+    );
+    // Non-strings are passed through untouched so `validateBatch` stays the
+    // single place that decides what a usable phrase is — and keeps counting
+    // them as dropped.
+    out[category] = incoming.filter((entry) => typeof entry !== "string" || !packKeys.has(echoKey(entry)));
   }
   return out;
 }

@@ -7,6 +7,7 @@ import {
   isValidPhrase,
   mergeWithPackSync,
   sanitizeCategory,
+  stripPackEchoes,
   validateBatch,
 } from "@/lib/mascot-phrases";
 import { en } from "@/lib/mascot-packs/en";
@@ -148,6 +149,46 @@ describe("validateBatch (INV-6 — nothing unvalidated reaches the cache)", () =
   it("can be asked to skip the stopword probe (cache re-validation)", () => {
     const english = ["You have to ship this", "Just make the thing", "What about the tests?", "They know"];
     expect(validateBatch({ sass: english, idle: english, jump: english }, "de", { stopwordProbe: false }).ok).toBe(true);
+  });
+});
+
+describe("stripPackEchoes", () => {
+  it("removes lines the pack already has and keeps the new ones", () => {
+    const result = stripPackEchoes(
+      { sass: [en.sass[0], "A line the pack has never seen.", en.sass[1]] },
+      en,
+    );
+    expect(result.sass).toEqual(["A line the pack has never seen."]);
+  });
+
+  it("matches on case and collapsed whitespace, not byte equality", () => {
+    const result = stripPackEchoes({ sass: [`  ${en.sass[0].toUpperCase()}  `] }, en);
+    expect(result.sass).toEqual([]);
+  });
+
+  it("compares within a category, not across the whole pack", () => {
+    // A power line is not an echo just because some other category has it.
+    const result = stripPackEchoes({ sass: [en.power[0]] }, en);
+    expect(result.sass).toEqual([en.power[0]]);
+  });
+
+  it("leaves categories the batch did not supply absent", () => {
+    const result = stripPackEchoes({ sass: ["something new entirely"] }, en);
+    expect(result.idle).toBeUndefined();
+    expect(Object.keys(result)).toEqual(["sass"]);
+  });
+
+  it("passes non-strings through for validateBatch to drop and count", () => {
+    const result = stripPackEchoes({ sass: [42, en.sass[0], "new"] as unknown as string[] }, en);
+    expect(result.sass).toEqual([42, "new"]);
+  });
+
+  it("turns an all-echo batch into one validateBatch rejects", () => {
+    // The end-to-end point: a run that only parroted the tone reference is a
+    // failed run, not a cacheable one.
+    const echo = { sass: en.sass.slice(0, 6), idle: en.idle.slice(0, 6), jump: en.jump.slice(0, 6) };
+    expect(validateBatch(echo, "en").ok).toBe(true);
+    expect(validateBatch(stripPackEchoes(echo, en), "en").ok).toBe(false);
   });
 });
 
