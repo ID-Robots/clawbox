@@ -20,13 +20,29 @@ const OPENCLAW_DIR = "/home/clawbox/.openclaw";
 //
 // network.env is hardware-specific and auto-generated.
 //
-// llamacpp/ holds the 3.2 GB offline Gemma GGUF — the same category as the
-// ~/.cache/huggingface voice models the home wipe deliberately keeps below:
-// a reset device reboots into AP mode with no internet, so a deleted model
-// cannot be re-downloaded and the box comes up with no on-device AI at all.
-// It is pure cache, not owner state — no tokens, no chats, no prompts — so
-// keeping it hands the next owner nothing.
+// llamacpp/ survives this top-level pass as a CONTAINER only — it is then
+// wiped entry-by-entry down to LLAMACPP_KEEP below. Spelling it here would
+// otherwise keep the whole subtree.
 const PRESERVE_FILES = new Set(["network.env", "llamacpp"]);
+
+// Entries under DATA_DIR/llamacpp to preserve: the models directory, nothing
+// else.
+//
+// models/ holds the 3.2 GB offline Gemma GGUF — the same category as the
+// ~/.cache/huggingface voice models the home wipe deliberately keeps below: a
+// reset device reboots into AP mode with no internet, so a deleted model
+// cannot be re-downloaded and the box comes up with no on-device AI at all.
+// Weights are pure cache, not owner state — no tokens, no chats, no prompts —
+// so keeping them hands the next owner nothing.
+//
+// Its siblings are a different matter. llamacpp/ is also llama-server's
+// runtime scratch (server.pid, server.log), and a log of a LOCAL MODEL is
+// owner-adjacent by nature — what the previous owner asked the offline model
+// is not something a resold box should carry. The shipped server config keeps
+// prompt text out of that log today; narrowing the keep to models/ is what
+// makes it stay true when the config changes, rather than something that has
+// to be re-verified every time llama.cpp is upgraded.
+const LLAMACPP_KEEP = new Set(["models"]);
 
 // Entries under ~/.hermes to preserve — see the .hermes entry in
 // HOME_CONTENT_WIPE_KEEP below for the full reasoning.
@@ -252,6 +268,28 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // on every box of this SKU. Everything Hermes writes about ITS OWNER lands
     // in the siblings above, which this wipe still removes.
     //
+    // KNOWN RESIDUAL, accepted deliberately: a previous owner with a shell
+    // could plant a file inside this one preserved directory and it would
+    // survive the reset. The obvious guard — assert `git status --porcelain`
+    // is empty and wipe the checkout when it is not — was tried and rejected,
+    // because both of its outcomes are worse than the hole:
+    //   * Wiping a "dirty" checkout recreates this very brick. A reset device
+    //     reboots into AP mode with no internet and nothing at boot reinstalls
+    //     the agent, so a false positive leaves the same crash-looping
+    //     dashboard — on every box of the SKU at once, the day upstream starts
+    //     writing into its own checkout. Whether it stays pristine is
+    //     NousResearch's choice, not ours.
+    //   * Reporting it as a failure instead is no better: a non-empty failure
+    //     list aborts the reset (500, no reboot), so the box could not be
+    //     factory reset at all until someone SSHed in.
+    // And it would not stop the attacker it is aimed at: the same shell can
+    // add the payload to .git/info/exclude, or drop it in venv/ — gitignored
+    // upstream, home to the interpreter, and invisible to --porcelain either
+    // way. A guard that a competent adversary steps over while a routine
+    // upstream commit bricks the fleet is a bad trade. Re-provisioning the
+    // agent from upstream after a reset is the real fix, and it needs network
+    // this device does not have at reset time.
+    //
     // Re-provisioning of the removed state is automatic: the dashboard unit
     // runs scripts/setup-hermes-dashboard-auth.sh as an ExecStartPre, which
     // recreates config.yaml and a fresh password/hash/signing-secret on the
@@ -375,6 +413,13 @@ export async function POST() {
     } catch (err: unknown) {
       if (!(err && typeof err === "object" && "code" in err && err.code === "ENOENT")) throw err;
     }
+    // …then take llamacpp/ down to the weights alone. Kept as a whole subtree
+    // above only so this pass can decide what inside it survives.
+    dataFailures.push(
+      ...(await removeDirectoryContents(path.join(DATA_DIR, "llamacpp"), LLAMACPP_KEEP)).map(
+        (f) => `llamacpp/${f}`,
+      ),
+    );
 
     const openclawFailures = await removeDirectoryContents(OPENCLAW_DIR);
     // ClawKeep state (token, config, passphrase, schedule) lives in its own

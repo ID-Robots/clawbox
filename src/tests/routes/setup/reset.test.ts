@@ -499,6 +499,8 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     mockFs.readdir.mockImplementation(((p: string) => {
       if (p === HERMES) return Promise.resolve(HERMES_ENTRIES);
       if (p === "/test/data") return Promise.resolve(["config.json", "network.env", "llamacpp", ".session-secret"]);
+      // llama-server's runtime scratch sits beside the weights.
+      if (p === "/test/data/llamacpp") return Promise.resolve(["models", "server.pid", "server.log"]);
       return Promise.resolve([]);
     }) as unknown as typeof fs.readdir);
     mockFs.rm.mockResolvedValue();
@@ -561,6 +563,36 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(targets).toContain("/test/data/.session-secret");
     // network.env was already preserved; assert it stayed that way.
     expect(targets).not.toContain("/test/data/network.env");
+  });
+
+  it("keeps only the weights inside data/llamacpp — runtime scratch still goes", async () => {
+    // The keep is for the 3.2 GB download a reset device cannot re-fetch, not
+    // for the directory it happens to live in. llamacpp/ is also llama-server's
+    // working directory: server.log is a log of what the previous owner asked
+    // the LOCAL model, which a resold box must not carry. Keeping models/
+    // rather than the subtree means that holds by construction instead of
+    // depending on the current llama-server logging config.
+    await resetPost();
+    const targets = rmTargets();
+
+    expect(targets).toContain("/test/data/llamacpp/server.pid");
+    expect(targets).toContain("/test/data/llamacpp/server.log");
+    expect(targets).not.toContain("/test/data/llamacpp/models");
+  });
+
+  it("removes anything new that appears next to the weights, by default", async () => {
+    // Same property as the ~/.hermes exception: a named allow-list of one, so
+    // whatever llama.cpp starts writing tomorrow is wiped without a code
+    // change rather than inherited by the next owner.
+    mockFs.readdir.mockImplementation(((p: string) => {
+      if (p === "/test/data") return Promise.resolve(["llamacpp"]);
+      if (p === "/test/data/llamacpp") return Promise.resolve(["models", "sessions.jsonl"]);
+      return Promise.resolve([]);
+    }) as unknown as typeof fs.readdir);
+
+    await resetPost();
+
+    expect(rmTargets()).toContain("/test/data/llamacpp/sessions.jsonl");
   });
 
   it("one undeletable entry under ~/.hermes does not stop the rest of the wipe", async () => {
