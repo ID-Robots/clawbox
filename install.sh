@@ -1133,6 +1133,10 @@ step_hermes_install() {
   local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
+  # One constant so the reachability precheck and the install itself can never
+  # drift onto different hosts — a precheck against a URL we then do not use
+  # would be worse than no precheck.
+  local installer_url="https://hermes-agent.nousresearch.com/install.sh"
 
   # `$shim` alone is NOT evidence of an install. It is a 4-line wrapper in
   # ~/.local/bin that execs $venv_python; the agent it points at lives under
@@ -1165,15 +1169,48 @@ step_hermes_install() {
     return 0
   fi
 
+  # NOTHING above this line has modified the disk, and nothing below it does
+  # until the installer is known to be fetchable.
+  #
+  # This matters now in a way it did not before: step_post_update calls this
+  # step on EVERY update on EVERY hermes/dual box, not just on a broken one. So
+  # a false-negative probe — the venv busy, a transient fork failure, anything
+  # that makes `--version` come back empty on a device that is actually fine —
+  # used to reach a `rm -rf "$agent_dir"` and then depend on a network install
+  # that is explicitly non-fatal. On a box with no internet that sequence turns
+  # a healthy agent into no agent, which is the very outcome this file exists
+  # to prevent. Check reachability FIRST and leave the disk alone if the
+  # installer cannot be had.
+  if ! runuser -u "$CLAWBOX_USER" -- \
+    curl -fsS --max-time 30 -o /dev/null "$installer_url"; then
+    echo "  Warning: cannot reach the Hermes installer — leaving the existing agent untouched" >&2
+    return 0
+  fi
+
   if [ -e "$agent_dir" ] || [ -e "$shim" ]; then
     echo "  Hermes is present but not runnable — reinstalling the agent"
-    # The husk has to go before the reinstall. The upstream installer refuses
-    # outright with "Directory exists but is not a git repository" when
-    # $agent_dir survives as an empty shell — exactly what a factory reset
-    # leaves behind — so without this the reinstall fails and the box stays
-    # bricked. Removing it as ROOT is also required: the root-owned __pycache__
-    # described above is undeletable by the clawbox user the installer runs as.
-    rm -rf "$agent_dir"
+    # The husk has to be out of the way before the reinstall: the upstream
+    # installer refuses outright with "Directory exists but is not a git
+    # repository" when $agent_dir survives as an empty shell — exactly what a
+    # factory reset leaves behind — so without this the reinstall fails and the
+    # box stays bricked.
+    #
+    # MOVED ASIDE, not deleted. The husk is the only copy of whatever state the
+    # box had, and this step is no longer only reached by a genuinely broken
+    # device; a rename is just as good for unblocking the installer and is
+    # recoverable when the diagnosis was wrong. A FIXED name rather than a
+    # timestamp keeps at most one husk on a device whose disk is not large — a
+    # per-run stamp would accumulate a git checkout plus a venv on every failed
+    # update. Renaming as ROOT is also required: the root-owned __pycache__
+    # described above is not movable by the clawbox user the installer runs as.
+    if [ -e "$agent_dir" ]; then
+      rm -rf "$agent_dir.broken"
+      if ! mv "$agent_dir" "$agent_dir.broken"; then
+        echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
+        return 0
+      fi
+      echo "  Moved the unusable agent to $agent_dir.broken"
+    fi
     rm -f "$shim"
   fi
 
@@ -1181,7 +1218,7 @@ step_hermes_install() {
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
   # the clawbox user so it lands in ~/.hermes and ~/.local/bin.
   runuser -u "$CLAWBOX_USER" -- bash -c \
-    'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' \
+    "curl -fsSL '$installer_url' | bash" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
@@ -1193,7 +1230,15 @@ step_hermes_install() {
     echo "  Hermes installed ($installed)"
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
+    # Say where the previous install went, so a wrong diagnosis is reversible
+    # by hand instead of needing a reflash.
+    if [ -e "$agent_dir.broken" ]; then
+      echo "  The previous agent is preserved at $agent_dir.broken" >&2
+    fi
   fi
+  # Explicit: the last command above is a test that is FALSE on the happy path,
+  # and step_post_update reports any non-zero return as a failed step.
+  return 0
 }
 
 # Re-cache ONLY the offline Gemma GGUF.

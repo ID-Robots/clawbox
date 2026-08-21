@@ -1,5 +1,7 @@
-import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
+import fs, { readFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 
 /**
@@ -31,7 +33,8 @@ import path from "node:path";
  *    repository" and the box stays broken.
  */
 const REPO = process.cwd();
-const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
+const INSTALL_SH_PATH = path.join(REPO, "install.sh");
+const INSTALL_SH = readFileSync(INSTALL_SH_PATH, "utf-8");
 const UPDATER_TS = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
 
 const NL = String.fromCharCode(10);
@@ -93,14 +96,45 @@ describe("step_hermes_install treats a shim without an agent as NOT installed", 
     expect(alreadyLine).not.toContain("--version");
   });
 
-  it("clears the stale agent husk before reinstalling", () => {
-    expect(HERMES_CODE).toMatch(/rm -rf "\$agent_dir"/);
+  it("moves the stale agent husk aside rather than deleting it", () => {
+    // step_post_update now runs this step on EVERY update on EVERY hermes/dual
+    // box, so the destructive branch is no longer reached only by a device
+    // that is genuinely broken. `rm -rf "$agent_dir"` followed by a network
+    // install that is explicitly non-fatal is a one-way door: one
+    // false-negative probe on a box with no internet and a healthy agent
+    // becomes no agent at all.
+    expect(HERMES_CODE).not.toMatch(/rm -rf "\$agent_dir"\s*$/m);
+    expect(HERMES_CODE).toMatch(/mv "\$agent_dir" "\$agent_dir\.broken"/);
+  });
+
+  it("checks the installer is reachable BEFORE it touches the disk", () => {
+    // Ordering is the whole guarantee: a precheck after the husk is gone
+    // protects nothing.
+    const precheckIdx = HERMES_CODE.indexOf("$installer_url");
+    const mvIdx = HERMES_CODE.indexOf('mv "$agent_dir"');
+    expect(precheckIdx).toBeGreaterThan(-1);
+    expect(mvIdx).toBeGreaterThan(precheckIdx);
+    // …and it must bail out rather than press on.
+    expect(HERMES_CODE).toMatch(/cannot reach the Hermes installer/);
+  });
+
+  it("prechecks and installs from the same URL", () => {
+    // A precheck against a host the install does not then use would be worse
+    // than no precheck — it would report reachable and still fail.
+    const urls = HERMES_CODE.match(/https:\/\/[^\s"']+/g) ?? [];
+    expect(urls.length).toBe(1);
+    expect(HERMES_CODE.match(/\$installer_url/g)?.length).toBe(2);
   });
 
   it("verifies the install afterwards instead of assuming it worked", () => {
     // The upstream installer is fetched over the network and its failure is
     // non-fatal, so the step has to check.
-    const afterInstall = HERMES_CODE.slice(HERMES_CODE.indexOf("hermes-agent.nousresearch.com"));
+    // Anchored on the install invocation itself, not on the URL — the URL now
+    // also appears in the `installer_url` declaration at the top of the
+    // function, which would make this assertion pass vacuously.
+    const installIdx = HERMES_CODE.indexOf("curl -fsSL");
+    expect(installIdx).toBeGreaterThan(-1);
+    const afterInstall = HERMES_CODE.slice(installIdx);
     expect(afterInstall).toContain("--version");
     expect(afterInstall).toMatch(/Warning: Hermes still does not run/);
   });
@@ -196,5 +230,201 @@ describe("llamacpp_model is a cheap, dispatchable step", () => {
     // The factory-reset route wipes data/ on all editions, so an openclaw box
     // needs exactly the same repair.
     expect(LLAMACPP_MODEL).not.toContain("has_hermes_harness");
+  });
+});
+
+/**
+ * Everything above reads install.sh as TEXT. That pins the shape of the code
+ * but not its behaviour: a regex cannot tell whether the branches actually go
+ * where the text suggests, and it is exactly the branch ordering — probe, then
+ * reachability, then move aside, then install — that decides whether a healthy
+ * box survives this step. So drive the real function, with a fake HOME and
+ * stubbed `runuser`/`curl`, and look at what it did to the filesystem.
+ *
+ * Same approach as install-llamacpp-prebuilt.test.ts: lift the one function
+ * out with sed, because sourcing install.sh would install a machine.
+ */
+describe("step_hermes_install — behaviour, driven against a fake HOME", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "hermes-guard-"));
+    // Stands in for both the venv interpreter and the shim: all either has to
+    // do here is exist, be executable, and answer --version.
+    fs.writeFileSync(path.join(tmp, "fake-py"), "#!/bin/sh\necho 'Hermes 9.9.9'\n", { mode: 0o755 });
+  });
+  afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
+
+  const agentDir = () => path.join(tmp, ".hermes", "hermes-agent");
+  const shimPath = () => path.join(tmp, ".local", "bin", "hermes");
+  const exists = (p: string) => fs.existsSync(p);
+
+  /** The shim survives a factory reset — it lives outside ~/.hermes. */
+  function giveShim() {
+    fs.mkdirSync(path.dirname(shimPath()), { recursive: true });
+    fs.copyFileSync(path.join(tmp, "fake-py"), shimPath());
+    fs.chmodSync(shimPath(), 0o755);
+  }
+
+  /** An agent checkout, with or without the venv the shim execs. */
+  function giveAgent({ venv }: { venv: boolean }) {
+    fs.mkdirSync(agentDir(), { recursive: true });
+    // Marks THIS checkout, so we can tell "moved aside" from "recreated".
+    fs.writeFileSync(path.join(agentDir(), "SENTINEL"), "original");
+    if (venv) {
+      const binDir = path.join(agentDir(), "venv", "bin");
+      fs.mkdirSync(binDir, { recursive: true });
+      fs.copyFileSync(path.join(tmp, "fake-py"), path.join(binDir, "python"));
+      fs.chmodSync(path.join(binDir, "python"), 0o755);
+    }
+  }
+
+  /**
+   * `reachable` decides what the reachability precheck sees; `installOk`
+   * whether the stubbed installer actually lays down a working agent. The stub
+   * records that it ran, so "did the network install happen at all" is
+   * directly observable.
+   */
+  function run({ reachable = true, installOk = true } = {}) {
+    const script = [
+      "set -u",
+      'CLAWBOX_HOME="$1"',
+      'CLAWBOX_USER="$(id -un)"',
+      'export MARKER="$1/installer-ran"',
+      'export AGENT_DIR="$1/.hermes/hermes-agent"',
+      'export SHIM="$1/.local/bin/hermes"',
+      'export FAKE_PY="$1/fake-py"',
+      'export PRECHECK_RC="$2"',
+      'export INSTALL_OK="$3"',
+      "has_hermes_harness() { return 0; }",
+      // Run the command as this user instead of switching: `runuser -u X -- cmd`.
+      'runuser() { shift 2; [ "$1" = "--" ] && shift; "$@"; }',
+      "curl() {",
+      //  The reachability precheck is the `-o /dev/null` call; anything else is
+      //  the real installer being piped into bash.
+      '  case " $* " in *" -o /dev/null "*) return "$PRECHECK_RC" ;; esac',
+      '  echo ran >> "$MARKER"',
+      '  if [ "$INSTALL_OK" = "1" ]; then',
+      '    mkdir -p "$AGENT_DIR/venv/bin" "$(dirname "$SHIM")"',
+      '    cp "$FAKE_PY" "$AGENT_DIR/venv/bin/python"',
+      '    cp "$FAKE_PY" "$SHIM"',
+      "  fi",
+      '  echo ":"',
+      "}",
+      "export -f curl",
+      "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
+      '. "$1/fn.sh"',
+      // Merged, because the warnings that matter here are all on stderr.
+      "step_hermes_install 2>&1",
+    ].join(NL);
+    try {
+      const out = execFileSync(
+        "bash",
+        ["-c", script, "bash", tmp, reachable ? "0" : "1", installOk ? "1" : "0", INSTALL_SH_PATH],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+      );
+      return { code: 0, out, installerRan: exists(path.join(tmp, "installer-ran")) };
+    } catch (e: unknown) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return {
+        code: err.status ?? 1,
+        out: `${err.stdout ?? ""}${err.stderr ?? ""}`,
+        installerRan: exists(path.join(tmp, "installer-ran")),
+      };
+    }
+  }
+
+  it("a healthy install is a no-op — nothing touched, nothing fetched", () => {
+    giveShim();
+    giveAgent({ venv: true });
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/already installed \(Hermes 9\.9\.9\)/);
+    // Why the reachability precheck sits AFTER the probe: a healthy box makes
+    // no network call at all, on every single update.
+    expect(r.installerRan).toBe(false);
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+  });
+
+  it("a shim with no venv is reinstalled — the factory-reset husk case", () => {
+    // What the bench box actually looked like: the shim survived in
+    // ~/.local/bin and ~/.hermes/hermes-agent was a shell with no venv.
+    giveShim();
+    giveAgent({ venv: false });
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.out).not.toMatch(/already installed/);
+    expect(r.installerRan).toBe(true);
+    // Moved aside, not deleted — the old checkout is still recoverable.
+    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
+    // …and a working agent is in its place.
+    expect(exists(path.join(agentDir(), "venv", "bin", "python"))).toBe(true);
+    expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\)/);
+  });
+
+  it("a shim with no agent directory reinstalls without inventing a husk", () => {
+    giveShim();
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    expect(r.installerRan).toBe(true);
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
+    expect(exists(path.join(agentDir(), "venv", "bin", "python"))).toBe(true);
+  });
+
+  it("an unreachable installer leaves the existing agent exactly where it is", () => {
+    // The regression this guards: post_update runs this step on every update on
+    // every hermes box, so a probe that comes back empty on a device with no
+    // internet must not be able to destroy a recoverable install.
+    giveShim();
+    giveAgent({ venv: false });
+
+    const r = run({ reachable: false });
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/cannot reach the Hermes installer/);
+    expect(r.installerRan).toBe(false);
+    // Untouched: not moved aside, not deleted, shim still present.
+    expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
+    expect(exists(shimPath())).toBe(true);
+  });
+
+  it("a failed install still succeeds as a step, and says where the old agent went", () => {
+    // Non-fatal by design — but it must not go quiet, and the husk it left
+    // behind is the difference between a hand repair and a reflash.
+    giveShim();
+    giveAgent({ venv: false });
+
+    const r = run({ installOk: false });
+
+    // step_post_update's `|| echo` depends on this not being a hard failure,
+    // and the trailing `[ -e ... ]` test must not leak a non-zero status.
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/Warning: Hermes still does not run/);
+    expect(r.out).toMatch(/preserved at .*hermes-agent\.broken/);
+    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("original");
+  });
+
+  it("only ever keeps one husk, so repeated failures cannot fill the disk", () => {
+    giveShim();
+    giveAgent({ venv: false });
+    run({ installOk: false });
+    // Second round: a new husk replaces the first rather than accumulating.
+    giveAgent({ venv: false });
+    fs.writeFileSync(path.join(agentDir(), "SENTINEL"), "second");
+
+    run({ installOk: false });
+
+    expect(fs.readFileSync(path.join(`${agentDir()}.broken`, "SENTINEL"), "utf8")).toBe("second");
+    expect(fs.readdirSync(path.join(tmp, ".hermes")).filter((e) => e.includes(".broken"))).toEqual([
+      "hermes-agent.broken",
+    ]);
   });
 });
