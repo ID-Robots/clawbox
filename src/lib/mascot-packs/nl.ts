@@ -122,4 +122,3 @@ export const nl: MascotPhraseSet = {
   ],
 };
 
-export default nl;

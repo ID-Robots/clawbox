@@ -21,4 +21,3 @@ export const neutral: MascotPhraseSet = {
   power: ["⚡", "🔥", "💪", "👑", "🦀👑", "⚡⚡⚡", "💎", "🔱", "✨💪", "🌟"],
 };
 
-export default neutral;

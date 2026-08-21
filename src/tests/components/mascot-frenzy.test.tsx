@@ -4,7 +4,7 @@ import Mascot from "@/components/Mascot";
 
 // The mascot pulls its name/phrases over the network and reads persisted UI
 // state — stub both so the component mounts deterministically in jsdom.
-vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en" }) }));
+vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en", localeResolved: true }) }));
 vi.mock("@/lib/client-kv", () => ({
   get: () => null,
   getJSON: () => null,

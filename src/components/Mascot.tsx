@@ -6,6 +6,7 @@ import { useT } from '@/lib/i18n'
 import { type MascotPhraseSet } from '@/lib/mascot-phrases'
 import { isPhraseCompatible } from '@/lib/mascot-language'
 import { NEUTRAL_PACK } from '@/lib/mascot-packs'
+import { frenzyQuotesFor } from '@/lib/mascot-frenzy'
 import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 
@@ -40,11 +41,20 @@ const POWER_PARTICLES = [
 ]
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
-  const { locale } = useT()
+  const { locale, localeResolved } = useT()
   // Read by `say()` — the language gate must judge against the locale the UI
   // is rendering RIGHT NOW, and `say` is a stable callback.
-  const localeRef = useRef(locale)
-  localeRef.current = locale
+  //
+  // Empty until the provider's `pref:ui_language` fetch lands. Every
+  // I18nProvider starts at a PROVISIONAL "en", and the first bubble is
+  // scheduled 500ms (sleep-resume) to 2000ms after mount — squarely inside
+  // that window. Gating against the provisional value would wave English
+  // through on a Bulgarian box; gating against "" fails closed, so only
+  // script-neutral lines (the neutral pack) render until the language is
+  // known. See `isPhraseCompatible`: an unknown locale allows "neutral" only.
+  const gateLocale = localeResolved ? locale : ''
+  const localeRef = useRef(gateLocale)
+  localeRef.current = gateLocale
   const frozenRef = useRef(false)
   const onPositionChangeRef = useRef(onPositionChange)
   onPositionChangeRef.current = onPositionChange
@@ -104,6 +114,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // quick succession) can't overwrite the phrase set with the wrong language.
   const phraseFetchTokenRef = useRef(0)
   useEffect(() => {
+    // Wait for the real locale. Seeding from the provisional "en" would hand
+    // a non-English box the full ENGLISH pack (`packForSync('en')` — `en` is
+    // the one pack bundled statically, so it is always "already loaded"), and
+    // the fetch would ask the server for `?locale=en`, which unconditionally
+    // kicks off a ~3 minute on-device generation for a language this box will
+    // never show — and leaves the model busy when the real locale's request
+    // arrives moments later. The refs stay on NEUTRAL_PACK until then.
+    if (!localeResolved) return
     const myToken = ++phraseFetchTokenRef.current
     const immediate = initialPhraseSet(locale)
     phrasesRef.current = immediate
@@ -113,7 +131,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       phrasesRef.current = phrases
       sassLinesRef.current = phrases.sass
     })
-  }, [locale])
+  }, [locale, localeResolved])
 
   // User name (from `ui_user_name` preference) — used in occasional name
   // greetings. Falls back to a randomly-picked friendly placeholder so
@@ -825,38 +843,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   }, [mounted, onPositionChange])
 
   useEffect(() => {
-    const FRENZY_QUOTES = [
-      '💰💰💰 MONEY RAIN!!!',
-      '🤑 SHOW ME THE MONEY!',
-      '🎰 JACKPOT BABY!!!',
-      '💸 ПАРИ ПАРИ ПАРИ!!!',
-      '🔥🔥🔥 ON FIRE!!!',
-      '💰 CHING CHING CHING!',
-      '🦀💸 CRAB GOT PAID!',
-      '🚀 REVENUE GO BRRR!!!',
-      '💎 DIAMOND CLAWS!',
-      '🤑 НОВА ПОРЪЧКА БЕЕЕЕ!',
-      '💰 €549 IN THE BAG!',
-      '🎉 КОЙ Е ШЕФЪТ?! АЗ!',
-      '💸 MAKE IT RAIN!',
-      '🏆 UNSTOPPABLE!!!',
-      '🐯 ООО ТИГРЕ ТИГРЕ ИМАШ ЛИ ПАРИ!',
-      '💸 БЕРЕМ ПАРИТЕ С ЛОПАТА!!!',
-      '🦀 CRAB GOES BRRRRRR!!!',
-      '🤑 КЕШЪТ ТЕЧЕ КАТО РЕКА!',
-      '🔥 SOMEBODY STOP ME!!!',
-      '💰 ПАРИ НА ВОЛЯ!!! СВОБОДА!!!',
-      '🚀 TO THE MOOOOON!!!',
-      '💎 НИЕ СМЕ BUILT DIFFERENT!',
-      '🤑 ANOTHER ONE! DJ KHALED!',
-      '💸 CTRL+P money.exe!!!',
-      '🦀💰 CRAB MANSION INCOMING!',
-      '🔥 ОГЪН!!! ЧИЛ!!! ПАРИ!!!',
-      '🏆 MVP! MVP! MVP!',
-      '💰 STONKS ONLY GO UP!!!',
-      '🤑 ПЕНСИЯ НА 30! EASY!',
-      '🚀 SPACEX ДА СЕ УЧАТ ОТ НАС!',
-    ]
     const moneyEmojis = ['💰', '💵', '💸', '🤑', '💎', '🪙', '💲', '€']
 
     const handleNewOrder = () => {
@@ -897,12 +883,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       }
       walkInterval.current = requestAnimationFrame(frenzyAnimate) as unknown as ReturnType<typeof setInterval>
 
-      // The frenzy quotes are a hardcoded easter egg in two languages, so
-      // pick the ones this locale can actually read (the gate in `say()`
-      // would otherwise silently drop half the cycle) and fall back to the
-      // locale's own power lines when none of them fits.
-      const localeQuotes = FRENZY_QUOTES.filter(q => isPhraseCompatible(q, localeRef.current))
-      const quotes = localeQuotes.length > 0 ? localeQuotes : phrasesRef.current.power
+      // The frenzy quotes are a hardcoded easter egg that only exists in two
+      // languages, so they are keyed BY LANGUAGE. Every other locale shouts
+      // its own pack's power lines. (This used to filter one flat array by
+      // SCRIPT, which let all 19 English lines through on de/es/fr/it/nl/sv.)
+      const quotes = frenzyQuotesFor(localeRef.current, phrasesRef.current, NEUTRAL_PACK)
 
       // Cycle through quotes every 5 seconds — longer display for readability
       let quoteIdx = 0

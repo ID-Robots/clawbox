@@ -17,14 +17,11 @@ import fs from "fs/promises";
 import { kvDelete, kvGet, kvSet } from "./kv-store";
 import * as config from "./config-store";
 import { getLocalAiRuntimeSnapshot } from "./local-ai-runtime";
+import { isLlamaCppPidRunning, readLlamaCppPid } from "./llamacpp-server";
 import { isPreferenceLanguage } from "./preference-schema";
 import { VALIDATOR_VERSION } from "./mascot-language";
 import { mergeWithPack, packFor } from "./mascot-packs";
-import {
-  GENERATION_TIMEOUT_MS,
-  generatePhrasesLocally,
-  type FailureKind,
-} from "./mascot-generation-local";
+import { generatePhrasesLocally, type FailureKind } from "./mascot-generation-local";
 import {
   LANG_NAMES,
   PHRASE_CATEGORIES,
@@ -32,7 +29,6 @@ import {
   type MascotPhraseSet,
 } from "./mascot-phrases";
 
-export { GENERATION_TIMEOUT_MS };
 export type { FailureKind };
 
 /** Per-locale cache key. INV-4: one envelope per locale, never a shared one. */
@@ -63,7 +59,11 @@ const FAILURE_BACKOFF_MS: Record<FailureKind, number> = {
   malformed: 24 * 60 * 60 * 1000,
 };
 
-/** Gemma 4 E2B peaks around 3.8 GB resident; do not even try below that. */
+/**
+ * Gemma 4 E2B peaks around 3.8 GB resident, so do not start a COLD load below
+ * that. This gate is deliberately not applied when the server is already up —
+ * see `hasMemoryHeadroom`.
+ */
 const MIN_AVAILABLE_MEM_KB = Math.round(3.8 * 1024 * 1024);
 const MAX_PHRASES_PER_CATEGORY = 24; // cap so the bag doesn't grow forever
 const TARGET_NEW_PER_CATEGORY = 8;
@@ -121,7 +121,12 @@ function readCache(locale: string): PhraseCacheEnvelope | null {
   try {
     const parsed = JSON.parse(raw) as PhraseCacheEnvelope;
     if (!parsed || typeof parsed !== "object") return null;
-    if (!parsed.phrases || typeof parsed.lastFullRegen !== "number") return null;
+    // Both timestamps, not just the first: `isStale` does arithmetic on each
+    // of them, and `now - undefined` is NaN — which compares false against
+    // every interval, so an envelope missing `lastTopUp` would silently never
+    // top up again until the weekly full regen came round.
+    if (!parsed.phrases) return null;
+    if (typeof parsed.lastFullRegen !== "number" || typeof parsed.lastTopUp !== "number") return null;
     // A payload stored under one locale's key that claims another locale is
     // corrupt; treat it as absent rather than rendering it.
     if (parsed.locale !== locale) return null;
@@ -176,10 +181,35 @@ function inFailureBackoff(locale: string): boolean {
 // ── Resource guards ────────────────────────────────────────────────────
 
 /**
- * True when the box has enough free RAM to load Gemma without swapping.
+ * Is the on-device llama.cpp server already running?
+ *
+ * If it is, its model is already in RAM and we are about to reuse that exact
+ * process — no new multi-GB allocation happens, so there is nothing for the
+ * memory gate to protect against.
+ */
+async function isLlamaCppServerRunning(): Promise<boolean> {
+  try {
+    const pid = await readLlamaCppPid();
+    return pid !== null && isLlamaCppPidRunning(pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the box has enough free RAM to LOAD Gemma without swapping.
  * Fails open on non-Linux (dev machines) or unreadable meminfo.
+ *
+ * The already-running case is the whole subtlety. A resident Gemma E2B eats
+ * its own headroom: `llamacpp.ts` measures peak RSS at 3780MB and MemAvailable
+ * settling around 3400-3670MB afterwards, i.e. permanently under this 3891MB
+ * gate. Checking MemAvailable in that state measures the very model we intend
+ * to reuse and always says no — so the ten-minute warm window after any chat,
+ * the one moment when generating is nearly free, was the one moment the
+ * mascot refused. Hence: server up == headroom, by definition.
  */
 async function hasMemoryHeadroom(): Promise<boolean> {
+  if (await isLlamaCppServerRunning()) return true;
   try {
     const meminfo = await fs.readFile("/proc/meminfo", "utf-8");
     const m = meminfo.match(/^MemAvailable:\s+(\d+)\s*kB/m);
@@ -210,7 +240,6 @@ function isLocalAiBusy(): boolean {
 export interface GenerationContext {
   locale: string;
   languageName: string;
-  userName: string | null;
   workspaceMemory: string;
   /** Locale-native examples the model should match the tone of. */
   toneReference: MascotPhraseSet;
@@ -218,13 +247,15 @@ export interface GenerationContext {
 
 /**
  * Everything the prompt is built from is read from THIS DEVICE only — the
- * language preference, the owner's name, the OpenClaw workspace memory. It is
- * fed to the on-device model and nowhere else.
+ * language preference and the OpenClaw workspace memory. It is fed to the
+ * on-device model and nowhere else.
+ *
+ * The owner's name is deliberately NOT here. `nameGreetings` are templates
+ * carrying a literal `{name}` that the client substitutes at render time, so
+ * the model has no use for the real name — and not reading `pref:ui_user_name`
+ * at all is one fewer piece of personal data in a prompt.
  */
 async function gatherContext(locale: string): Promise<GenerationContext> {
-  const userNameRaw = (await config.get("pref:ui_user_name")) as string | null;
-  const userName = userNameRaw && userNameRaw.trim().length > 0 ? userNameRaw.trim() : null;
-
   // OpenClaw workspace memory — concatenate USER.md + SOUL.md + MEMORY.md
   // if present, capped to keep prompts small.
   const memoryParts: string[] = [];
@@ -239,17 +270,17 @@ async function gatherContext(locale: string): Promise<GenerationContext> {
   return {
     locale,
     languageName: LANG_NAMES[locale] ?? "English",
-    userName,
     workspaceMemory,
     toneReference: await packFor(locale),
   };
 }
 
 /**
- * Exported because the generation hook below is the only caller today and the
- * next phase needs to unit-test the prompt independently of the transport.
+ * Build the model prompt from on-device context. Not exported: the prompt is
+ * covered end-to-end through the batch the generator is handed
+ * (`mascot-regeneration.test.ts` asserts on it), so there is no second reader.
  */
-export function buildPrompt(ctx: GenerationContext, mode: GenerationMode): string {
+function buildPrompt(ctx: GenerationContext, mode: GenerationMode): string {
   const toneLines = PHRASE_CATEGORIES
     .map((cat) => `${cat}: ${ctx.toneReference[cat].slice(0, 6).map((s) => `"${s}"`).join(", ")}`)
     .join("\n");
@@ -362,8 +393,46 @@ function persistBatch(
   return phrases;
 }
 
-/** One in-flight generation per locale. */
+/** One in-flight background generation per locale. */
 const inFlightGeneration = new Map<string, Promise<void>>();
+
+/**
+ * At most ONE mascot generation on the whole box, across every locale and
+ * every entry point.
+ *
+ * The per-locale maps above only stop a locale racing itself. The box has a
+ * single model and a single 180-second run, so N locales asked for at once —
+ * a user auditioning languages in Settings (each switch re-fetches), two
+ * browser tabs, or simply N crafted GETs — would each see `activeRequests === 0`,
+ * each await the same shared `ensureLocalAiReady` promise, and then all POST.
+ * llama-server serialises them, so the user's next chat turn ends up queued
+ * behind up to N x 180s. That is precisely the contention every other guard in
+ * this file exists to prevent.
+ *
+ * The loser does not queue, it skips: the next fetch for that locale picks it
+ * up, and a cosmetic refresh is never worth making somebody wait.
+ */
+let generationInFlight = false;
+
+/**
+ * Run `fn` iff no mascot generation is running anywhere and the model is idle.
+ * Returns `null` without running otherwise.
+ *
+ * The busy re-check lives INSIDE the lock on purpose: `isLocalAiBusy` is
+ * check-then-act around a 10-60s `ensureLocalAiReady`, so two callers reading
+ * it independently both pass. Flag and check are both synchronous here, so
+ * nothing can interleave between them.
+ */
+async function withGenerationLock<T>(fn: () => Promise<T>): Promise<T | null> {
+  if (generationInFlight) return null;
+  if (isLocalAiBusy()) return null; // the user's own chat always wins
+  generationInFlight = true;
+  try {
+    return await fn();
+  } finally {
+    generationInFlight = false;
+  }
+}
 
 /**
  * Trigger a generation for `locale` if its cache is stale. No-ops if one is
@@ -388,24 +457,29 @@ export function maybeRegenerateInBackground(locale: string): Promise<void> {
       const { stale, mode } = isStale(cached);
       if (!stale) return;
       if (inFailureBackoff(locale)) return;
-      if (isLocalAiBusy()) return; // the user's own chat always wins
-      if (!(await hasMemoryHeadroom())) {
-        recordFailure(locale, "unavailable"); // memory pressure: back off
-        return;
-      }
 
-      const ctx = await gatherContext(locale);
-      const outcome = await generatePhraseBatch(ctx, mode);
-      // "deferred" means the user's own chat claimed the model between our
-      // idle check and the call. Deliberately no recordFailure: that is a
-      // busy box, not a broken one, and arming a 12h backoff for it would
-      // punish exactly the people who use the device most.
-      if (outcome.status === "deferred") return;
-      if (outcome.status === "failed") {
-        recordFailure(locale, outcome.failure);
-        return;
-      }
-      persistBatch(locale, cached, outcome.phrases, mode);
+      await withGenerationLock(async () => {
+        // Transient, self-clearing, and NOT a fault: the box is under memory
+        // pressure right now. Recording a failure here armed a 12-hour backoff
+        // for a condition that resolves itself within the model's 10-minute
+        // idle-unload window — and it fired on the second locale of any
+        // multi-locale box, so merely viewing the UI in another language
+        // poisoned that language for half a day.
+        if (!(await hasMemoryHeadroom())) return;
+
+        const ctx = await gatherContext(locale);
+        const outcome = await generatePhraseBatch(ctx, mode);
+        // "deferred" means the user's own chat claimed the model between our
+        // idle check and the call. Deliberately no recordFailure: that is a
+        // busy box, not a broken one, and arming a 12h backoff for it would
+        // punish exactly the people who use the device most.
+        if (outcome.status === "deferred") return;
+        if (outcome.status === "failed") {
+          recordFailure(locale, outcome.failure);
+          return;
+        }
+        persistBatch(locale, cached, outcome.phrases, mode);
+      });
     } catch (err) {
       // Best-effort: callers fire-and-forget this, so it must never reject.
       console.error("[mascot-phrases-server] maybeRegenerateInBackground failed:", err);
@@ -417,39 +491,82 @@ export function maybeRegenerateInBackground(locale: string): Promise<void> {
   return run;
 }
 
+/**
+ * Why a forced regen ended the way it did. The caller shows one of these to a
+ * human, so "the model is busy with your chat" and "the model answered with
+ * junk" must not arrive as the same string: the first means "try again in a
+ * minute", the second means something is wrong.
+ */
+export type ForceRegenerateReason =
+  | "generated"
+  /** Another mascot generation, or the user's own chat, holds the model. */
+  | "busy"
+  /** Not enough free RAM to cold-load the model. Clears on its own. */
+  | "low-memory"
+  /** Local AI is switched off, or no model is provisioned. */
+  | "unavailable"
+  | "timeout"
+  | "transport"
+  /** The model answered, but not with a usable batch. */
+  | "malformed";
+
+export interface ForceRegenerateResult {
+  /** The new complete set, or null when nothing was generated. */
+  phrases: MascotPhraseSet | null;
+  reason: ForceRegenerateReason;
+  locale: string;
+}
+
 /** One in-flight forced regen per locale — double-clicking Settings must not stack runs. */
-const inFlightForceRegen = new Map<string, Promise<MascotPhraseSet | null>>();
+const inFlightForceRegen = new Map<string, Promise<ForceRegenerateResult>>();
 
 /**
- * Force a full regen regardless of cache age. Returns the new complete phrase
- * set, or null when generation is unavailable (caller keeps the pack).
+ * Force a full regen regardless of cache age, and say what happened.
+ *
+ * Keyed on the RESOLVED locale, not on the raw argument: `POST /regenerate`
+ * and `POST /regenerate?locale=en` name the same locale on an English box, and
+ * keying on the argument let them run two concurrent full generations.
+ *
+ * Resolving the locale means awaiting the config store, so two calls that
+ * arrive inside that await both miss the map. That is fine — the map is an
+ * optimisation that lets the second caller share the first's answer, while
+ * `withGenerationLock` is what actually guarantees a single run.
  */
-export function forceRegenerate(requestedLocale?: string | null): Promise<MascotPhraseSet | null> {
-  const key = requestedLocale ?? "";
-  const existing = inFlightForceRegen.get(key);
+export async function forceRegenerate(requestedLocale?: string | null): Promise<ForceRegenerateResult> {
+  const locale = await resolveLocale(requestedLocale);
+  const existing = inFlightForceRegen.get(locale);
   if (existing) return existing;
-  const run = (async () => {
+
+  const run = (async (): Promise<ForceRegenerateResult> => {
+    // Yield before anything else, for the same reason as the background path:
+    // an async function that returns without ever suspending runs its whole
+    // try/finally synchronously, deleting the map entry BEFORE the `set`
+    // below adds it — parking a resolved promise there forever. Every early
+    // return in this body is reached without awaiting.
+    await Promise.resolve();
     try {
-      const locale = await resolveLocale(requestedLocale);
       // An explicit user action bypasses the failure backoff, but still
       // refuses to load a model into a busy or memory-pressured box.
-      if (isLocalAiBusy()) return null;
-      if (!(await hasMemoryHeadroom())) return null;
-      const ctx = await gatherContext(locale);
-      const outcome = await generatePhraseBatch(ctx, "full");
-      if (outcome.status === "deferred") return null;
-      if (outcome.status === "failed") {
-        recordFailure(locale, outcome.failure);
-        return null;
-      }
-      const persisted = persistBatch(locale, readCache(locale), outcome.phrases, "full");
-      if (!persisted) return null;
-      return await mergeWithPack(persisted, locale);
+      const result = await withGenerationLock(async (): Promise<ForceRegenerateResult> => {
+        if (!(await hasMemoryHeadroom())) return { phrases: null, reason: "low-memory", locale };
+        const ctx = await gatherContext(locale);
+        const outcome = await generatePhraseBatch(ctx, "full");
+        if (outcome.status === "deferred") return { phrases: null, reason: "busy", locale };
+        if (outcome.status === "failed") {
+          recordFailure(locale, outcome.failure);
+          return { phrases: null, reason: outcome.failure, locale };
+        }
+        const persisted = persistBatch(locale, readCache(locale), outcome.phrases, "full");
+        if (!persisted) return { phrases: null, reason: "malformed", locale };
+        return { phrases: await mergeWithPack(persisted, locale), reason: "generated", locale };
+      });
+      return result ?? { phrases: null, reason: "busy", locale };
     } finally {
-      inFlightForceRegen.delete(key);
+      inFlightForceRegen.delete(locale);
     }
   })();
-  inFlightForceRegen.set(key, run);
+
+  inFlightForceRegen.set(locale, run);
   return run;
 }
 

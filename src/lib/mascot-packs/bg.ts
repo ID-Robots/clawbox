@@ -122,4 +122,3 @@ export const bg: MascotPhraseSet = {
   ],
 };
 
-export default bg;

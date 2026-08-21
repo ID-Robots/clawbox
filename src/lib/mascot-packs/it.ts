@@ -122,4 +122,3 @@ export const it: MascotPhraseSet = {
   ],
 };
 
-export default it;

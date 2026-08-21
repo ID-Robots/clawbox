@@ -36,6 +36,13 @@ vi.mock("@/lib/llamacpp", () => ({
   getDefaultLlamaCppModel: () => "gemma4-e2b-it-q4_0",
 }));
 
+// Devices configured with a non-default model alias exist; the request must
+// name the SAME one `ensureLocalAiReady` starts the server with.
+let configuredAlias: string | null = null;
+vi.mock("@/lib/llamacpp-server", () => ({
+  resolveConfiguredLlamaCppAlias: vi.fn(async () => configuredAlias),
+}));
+
 import {
   buildRequestBody,
   generatePhrasesLocally,
@@ -65,6 +72,7 @@ beforeEach(() => {
   runtime.begin = [];
   runtime.end = [];
   runtime.ensureThrows = null;
+  configuredAlias = null;
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -77,12 +85,12 @@ afterEach(() => {
 
 describe("request body", () => {
   it("disables thinking — it costs 8.4s/253 tokens for nothing here", () => {
-    const body = buildRequestBody("hello");
+    const body = buildRequestBody("hello", "gemma4-e2b-it-q4_0");
     expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
   });
 
   it("constrains the answer to the phrase-set schema", () => {
-    const body = buildRequestBody("hello") as {
+    const body = buildRequestBody("hello", "gemma4-e2b-it-q4_0") as {
       response_format: { type: string; json_schema: { schema: { required: string[] } } };
     };
     expect(body.response_format.type).toBe("json_schema");
@@ -91,7 +99,32 @@ describe("request body", () => {
   });
 
   it("does not stream — the caller wants one object, not a token feed", () => {
-    expect(buildRequestBody("hello").stream).toBe(false);
+    expect(buildRequestBody("hello", "gemma4-e2b-it-q4_0").stream).toBe(false);
+  });
+});
+
+describe("model alias", () => {
+  it("requests the alias the device is configured with, not the built-in default", async () => {
+    // `buildRequestBody` used to hardcode `getDefaultLlamaCppModel()` while
+    // `ensureLocalAiReady` started the server under the configured alias, so
+    // a customised box started one model and asked for another by name.
+    configuredAlias = "gemma4-e4b-it-q4_0";
+    fetchMock.mockResolvedValue(completion(JSON.stringify(GOOD_BATCH)));
+
+    await generatePhrasesLocally({ prompt: "p", locale: "de" });
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body.model).toBe("gemma4-e4b-it-q4_0");
+  });
+
+  it("falls back to the default when nothing is configured", async () => {
+    configuredAlias = null;
+    fetchMock.mockResolvedValue(completion(JSON.stringify(GOOD_BATCH)));
+
+    await generatePhrasesLocally({ prompt: "p", locale: "de" });
+
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as { body: string }).body);
+    expect(body.model).toBe("gemma4-e2b-it-q4_0");
   });
 });
 

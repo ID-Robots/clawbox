@@ -122,4 +122,3 @@ export const ja: MascotPhraseSet = {
   ],
 };
 
-export default ja;

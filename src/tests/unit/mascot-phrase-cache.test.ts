@@ -23,9 +23,14 @@ vi.mock("@/lib/config-store", () => ({
 vi.mock("@/lib/local-ai-runtime", () => ({
   getLocalAiRuntimeSnapshot: vi.fn(() => ({ activeRequests: 1 })),
 }));
+vi.mock("@/lib/llamacpp-server", () => ({
+  readLlamaCppPid: vi.fn(async () => null),
+  isLlamaCppPidRunning: vi.fn(() => false),
+}));
 
 import { VALIDATOR_VERSION } from "@/lib/mascot-language";
 import { neutral } from "@/lib/mascot-packs/neutral";
+import { bg } from "@/lib/mascot-packs/bg";
 import { en } from "@/lib/mascot-packs/en";
 
 type Server = typeof import("@/lib/mascot-phrases-server");
@@ -56,15 +61,31 @@ describe("mascot phrase cache", () => {
   it("reads and writes a key per locale", async () => {
     store.set(KEY("bg"), envelope("bg", { sass: ["Пак ли ти? 🙄", "Стига 😤"] }));
 
-    const bg = await server.getMascotPhrases("bg");
-    expect(bg.meta.locale).toBe("bg");
-    expect(bg.meta.source).toBe("local");
-    expect(bg.phrases.sass).toEqual(["Пак ли ти? 🙄", "Стига 😤"]);
+    const served = await server.getMascotPhrases("bg");
+    expect(served.meta.locale).toBe("bg");
+    expect(served.meta.source).toBe("local");
+    // Cached entries first, then the pack's — generation adds to the pack.
+    expect(served.phrases.sass).toEqual(["Пак ли ти? 🙄", "Стига 😤", ...bg.sass]);
 
     // The English box must not see the Bulgarian cache.
     const english = await server.getMascotPhrases("en");
     expect(english.meta.source).toBe("pack");
     expect(english.phrases.sass).toEqual(en.sass);
+  });
+
+  it("ignores an envelope missing either timestamp", async () => {
+    // `isStale` subtracts both, and `now - undefined` is NaN, which compares
+    // false against every interval — so an envelope without `lastTopUp` was
+    // served forever and never topped up again.
+    for (const field of ["lastFullRegen", "lastTopUp"]) {
+      store.clear();
+      const parsed = JSON.parse(envelope("bg", { sass: ["Пак ли ти? 🙄", "Стига 😤"] }));
+      delete parsed[field];
+      store.set(KEY("bg"), JSON.stringify(parsed));
+
+      const result = await server.getMascotPhrases("bg");
+      expect(result.meta.source, field).toBe("pack");
+    }
   });
 
   it("ignores an envelope filed under the wrong locale", async () => {

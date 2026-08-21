@@ -3,7 +3,7 @@
 // TEMPLATE FOR EVERY OTHER LOCALE PACK. The contract each pack must satisfy:
 //
 //   * one file per locale, `src/lib/mascot-packs/<locale>.ts`
-//   * `export const <locale>: MascotPhraseSet` (plus `export default`)
+//   * `export const <locale>: MascotPhraseSet`
 //   * every category in PHRASE_CATEGORIES present and NON-EMPTY
 //   * every entry <= 60 characters (it has to fit a small speech bubble)
 //   * every entry written in that locale's script — English technical terms
@@ -135,4 +135,3 @@ export const en: MascotPhraseSet = {
   ],
 };
 
-export default en;

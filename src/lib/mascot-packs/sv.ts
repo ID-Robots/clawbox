@@ -122,4 +122,3 @@ export const sv: MascotPhraseSet = {
   ],
 };
 
-export default sv;

@@ -122,4 +122,3 @@ export const zh: MascotPhraseSet = {
   ],
 };
 
-export default zh;

@@ -137,11 +137,25 @@ describe("validateBatch (INV-6 — nothing unvalidated reaches the cache)", () =
 describe("mergeWithPackSync (INV-3 — always complete, never another language)", () => {
   it("fills every missing category from the pack", () => {
     const merged = mergeWithPackSync({ sass: ["a fresh line"] }, en, "en");
-    expect(merged.sass).toEqual(["a fresh line"]);
     expect(merged.idle).toEqual(en.idle);
     for (const category of PHRASE_CATEGORIES) {
       expect(merged[category].length, category).toBeGreaterThan(0);
     }
+  });
+
+  it("ADDS generated lines to the pack rather than replacing it", () => {
+    // A full regen used to substitute its output for the pack outright, which
+    // SHRANK the repertoire — a measured English box went from 102 hand-written
+    // lines to 72 generated ones, most of them near-copies of the pack lines the
+    // prompt had shown the model as a tone reference. Net: fewer, samier lines.
+    const merged = mergeWithPackSync({ sass: ["a fresh line"] }, en, "en");
+    expect(merged.sass).toEqual(["a fresh line", ...en.sass]);
+    expect(merged.sass.length).toBeGreaterThan(en.sass.length);
+  });
+
+  it("de-duplicates a generated line the model copied straight off the pack", () => {
+    const merged = mergeWithPackSync({ sass: [en.sass[0]] }, en, "en");
+    expect(merged.sass).toEqual(en.sass);
   });
 
   it("drops incoming entries in the wrong language and uses the pack instead", () => {

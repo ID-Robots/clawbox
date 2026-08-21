@@ -83,7 +83,6 @@ export function initialPhraseSet(locale: string): MascotPhraseSet {
   return phraseCache.get(cacheKey(locale)) ?? lastByLocale.get(locale) ?? packForSync(locale);
 }
 
-export { NEUTRAL_PACK };
 
 /** A bubble the mascot can render: the template it was picked from, and the text to show. */
 export interface MascotLine {

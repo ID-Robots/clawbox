@@ -169,8 +169,16 @@ export function validateBatch(
 }
 
 /**
- * Validate `set` against `locale` and fill every category it could not supply
- * from `pack` — and, if the pack itself is short, from the neutral pack.
+ * Validate `set` against `locale` and UNION it with `pack` — falling back to
+ * the neutral pack for any category neither can supply.
+ *
+ * Union, not replace. A full regen used to substitute its output for the pack
+ * entirely, which SHRANK the crab's repertoire: a measured English box went
+ * from 102 hand-written lines to 72 generated ones, of which ~53 were near-
+ * copies of the pack lines the prompt had shown the model as a tone reference.
+ * Generation is meant to add variety on top of the pack, not trade it away.
+ * Generated lines come first so they are not buried, and the cap on how many
+ * are ever cached lives in `mascot-phrases-server.ts`.
  *
  * The result is always complete (INV-3: no empty category, ever) and always
  * locale-correct (INV-1/INV-2: nothing renderable in the wrong script).
@@ -184,17 +192,19 @@ export function mergeWithPackSync(
 ): MascotPhraseSet {
   const merged = {} as MascotPhraseSet;
   for (const category of PHRASE_CATEGORIES) {
-    const incoming = sanitizeCategory(set?.[category], category, locale);
-    if (incoming.length > 0) {
-      merged[category] = incoming;
-      continue;
-    }
     // The pack is hand-written, but it is still data: run it through the same
-    // gate so a bad pack entry cannot reach a bubble.
+    // gate as generated entries so a bad pack entry cannot reach a bubble.
+    const incoming = sanitizeCategory(set?.[category], category, locale);
     const fromPack = sanitizeCategory(pack[category], category, locale);
-    merged[category] = fromPack.length > 0
-      ? fromPack
+    const combined = dedupe([...incoming, ...fromPack]);
+    merged[category] = combined.length > 0
+      ? combined
       : sanitizeCategory(neutral[category], category, locale);
   }
   return merged;
+}
+
+/** First occurrence wins, order preserved. */
+function dedupe(entries: string[]): string[] {
+  return [...new Set(entries)];
 }

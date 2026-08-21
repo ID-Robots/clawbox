@@ -5,8 +5,8 @@
 // speech-bubble lines in the user's own language.
 //
 // There is NO cloud path here and there must never be one. The prompt this
-// module is handed carries the owner's name and their OpenClaw workspace
-// memory; both stay on the box. The previous implementation targeted Ollama,
+// module is handed carries the device's own OpenClaw workspace memory; it
+// stays on the box. The previous implementation targeted Ollama,
 // which is not installed on a shipped ClawBox, so the mascot has in practice
 // never had generated phrases at all.
 //
@@ -18,6 +18,7 @@
 
 import { beginLocalAiUse, endLocalAiUse, ensureLocalAiReady, getLocalAiRuntimeSnapshot } from "./local-ai-runtime";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "./llamacpp";
+import { resolveConfiguredLlamaCppAlias } from "./llamacpp-server";
 import { PHRASE_CATEGORIES, type MascotPhraseSet } from "./mascot-phrases";
 
 /**
@@ -71,6 +72,20 @@ export function buildResponseSchema(): Record<string, unknown> {
 }
 
 /**
+ * The model alias to ask for — the SAME resolution `ensureLocalAiReady` uses
+ * to start the server. Hardcoding the default here meant a device configured
+ * with a non-default alias (see `local-ai-runtime.ts`) started one model and
+ * then requested another by name.
+ */
+async function resolveModelAlias(): Promise<string> {
+  try {
+    return (await resolveConfiguredLlamaCppAlias()) || getDefaultLlamaCppModel();
+  } catch {
+    return getDefaultLlamaCppModel();
+  }
+}
+
+/**
  * The request body, exported so a test can assert on it without a server.
  *
  * `chat_template_kwargs.enable_thinking: false` is load-bearing, not a
@@ -78,9 +93,9 @@ export function buildResponseSchema(): Record<string, unknown> {
  * reasoning before the first phrase, versus 207ms and 4 tokens with it off.
  * The mascot has nothing to reason about.
  */
-export function buildRequestBody(prompt: string): Record<string, unknown> {
+export function buildRequestBody(prompt: string, model: string): Record<string, unknown> {
   return {
-    model: getDefaultLlamaCppModel(),
+    model,
     messages: [{ role: "user", content: prompt }],
     temperature: GENERATION_TEMPERATURE,
     max_tokens: MAX_OUTPUT_TOKENS,
@@ -215,6 +230,7 @@ async function requestBatch(
   timeoutMs: number,
 ): Promise<LocalGenerationOutcome> {
   const url = `${getLlamaCppBaseUrl().replace(/\/+$/, "")}/chat/completions`;
+  const model = await resolveModelAlias();
   const controller = new AbortController();
   // `signal.reason` is not reliable across runtimes, so track our own abort:
   // a timeout and a socket reset both surface as an AbortError otherwise.
@@ -228,7 +244,7 @@ async function requestBatch(
     const response = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildRequestBody(prompt)),
+      body: JSON.stringify(buildRequestBody(prompt, model)),
       signal: controller.signal,
     });
 
