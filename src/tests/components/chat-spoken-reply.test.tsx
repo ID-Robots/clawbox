@@ -40,6 +40,8 @@ function assistantMessage(text: string, timestamp: number, audioPath?: string) {
 
 /** What the gateway replays. Set per test before the component mounts. */
 let history: unknown[] = [];
+/** How many times the component has re-read it. */
+let historyReads = 0;
 
 class FakeGatewayWs {
   static readonly OPEN = 1;
@@ -63,6 +65,7 @@ class FakeGatewayWs {
       return;
     }
     if (frame.method === "chat.history") {
+      historyReads += 1;
       this.respond(id, { messages: history });
       return;
     }
@@ -100,6 +103,21 @@ function installFetch() {
   }));
 }
 
+/**
+ * Push the `session.message` event the harness sends for a spoken reply.
+ *
+ * This is where the audio actually is. Measured on box .65: the attachment
+ * part rides this event and `chat.history` never returns it, so a client that
+ * only reads the `chat` stream and the history replay renders no player at all.
+ */
+function deliverSessionMessage(message: unknown) {
+  socket?.emit({
+    type: "event",
+    event: "session.message",
+    payload: { sessionKey: "agent:main:main", agentId: "main", message },
+  });
+}
+
 /** Push one `final` chat event, the way a completed turn arrives. */
 function deliver(message: unknown) {
   socket?.emit({
@@ -120,6 +138,7 @@ const players = () => screen.queryAllByTestId("chat-audio") as HTMLAudioElement[
 describe("spoken replies in the mascot chat", () => {
   beforeEach(() => {
     history = [];
+    historyReads = 0;
     socket = null;
     resetHarnessCache();
     window.localStorage.clear();
@@ -143,7 +162,7 @@ describe("spoken replies in the mascot chat", () => {
 
     deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
     await screen.findByText(SPOKEN_TEXT);
-    deliver(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
+    deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
 
     await waitFor(() => expect(players()).toHaveLength(1));
     const player = players()[0];
@@ -163,15 +182,44 @@ describe("spoken replies in the mascot chat", () => {
 
     deliver(assistantMessage(SPOKEN_TEXT, 1787291821899));
     await screen.findByText(SPOKEN_TEXT);
-    deliver(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
+    deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
     await waitFor(() => expect(players()).toHaveLength(1));
 
     expect(screen.getAllByText(SPOKEN_TEXT)).toHaveLength(1);
   });
 
-  it("still shows the player after a reload, from history alone", async () => {
-    // The refresh case: nothing is delivered live, the transcript is rebuilt
-    // from what the gateway stored — including the same two-message shape.
+  it("keeps the player when the history reconcile that event triggers comes back without it", async () => {
+    // The trap this exists for: `session.message` schedules a history re-read,
+    // and the history the gateway returns has no attachment in it. Rebuilding
+    // the transcript from that answer alone takes the player back off the
+    // screen a few hundred milliseconds after it appeared — which reads as a
+    // flicker, not as a bug, and is worse than never showing it.
+    history = [assistantMessage(SPOKEN_TEXT, 1787291821899)];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket).not.toBeNull());
+    await screen.findByText(SPOKEN_TEXT);
+
+    deliverSessionMessage(assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE));
+    await waitFor(() => expect(players()).toHaveLength(1));
+
+    // The reconcile is debounced ~400ms behind the event. Asserting it really
+    // ran, not just that time passed: a test that silently never re-read
+    // history would pass on exactly the bug it is written to catch.
+    const before = historyReads;
+    await waitFor(() => expect(historyReads).toBeGreaterThan(before), { timeout: 3000 });
+    expect(players()).toHaveLength(1);
+    expect(players()[0].getAttribute("src")).toBe(playerSrc(VOICE));
+  });
+
+  it("would show the player from history alone, if history carried it", async () => {
+    // ⚠️ This does NOT prove the refresh case works on a real box, and must not
+    // be read as though it does. Measured on .65: `chat.history` returns the
+    // media message WITHOUT its attachment part — 16 messages back, not one
+    // containing `"type":"attachment"`, while the session file on disk has it.
+    // So the client half of the refresh path is ready and the data never
+    // arrives. Kept because the day the gateway does return it, this is what
+    // says the chat renders it; the gap itself is recorded on TASK-381 as a
+    // blocker against an OpenClaw change, outside this repository.
     history = [
       assistantMessage(SPOKEN_TEXT, 1787291821899),
       assistantMessage(SPOKEN_TEXT, 1787291825743, VOICE),

@@ -1159,6 +1159,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (!payload) return
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
+          // A spoken reply arrives HERE and only here. Measured on box .65:
+          // the harness appends an `assistant-media` message carrying the audio
+          // as an attachment part, it is pushed on this event with the
+          // attachment intact — and `chat.history` does not return it, so the
+          // reconcile below can never find it. Reading it off the event is the
+          // only way the player appears at all; see the task for the refresh
+          // half, which needs a gateway change.
+          const pushedAudio = extractAudioAttachments(payload.message)
+          if (pushedAudio.length > 0) {
+            const pushedText = splitMediaDirectives(extractText(payload.message)).text
+            setMessages(prev => {
+              // Fold into the bubble it belongs to. The media message repeats
+              // the text of the reply already on screen, so appending it would
+              // show every spoken answer twice, once silent.
+              const at = [...prev].reverse().findIndex(m =>
+                m.role === 'assistant' && m.text === pushedText && (m.audio?.length ?? 0) === 0)
+              if (at === -1) {
+                return [...prev, { role: 'assistant' as const, text: pushedText, timestamp: Date.now(), audio: pushedAudio }]
+              }
+              const index = prev.length - 1 - at
+              const next = [...prev]
+              next[index] = { ...next[index], audio: pushedAudio }
+              return next
+            })
+          }
           if (transcriptReconcileTimerRef.current !== null) {
             window.clearTimeout(transcriptReconcileTimerRef.current)
           }
@@ -1453,9 +1478,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // the server yet so chatMsgs doesn't include them.
       setMessages(prev => {
         if (prev.length === 0) return chatMsgs
-        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
+        // Carry spoken replies across the reconcile. `chat.history` does not
+        // return the media message (measured on .65 — the attachment part is
+        // pushed on `session.message` and is absent from every history read),
+        // so rebuilding the transcript from history alone would take the
+        // player back off the screen 400ms after it appeared. Matched on the
+        // text rather than the timestamp: the pushed message and the stored
+        // one are the same reply with different clocks on them.
+        const spoken = new Map<string, string[]>()
+        for (const m of prev) {
+          if (m.role === 'assistant' && m.audio?.length) spoken.set(m.text, m.audio)
+        }
+        const restored = spoken.size === 0 ? chatMsgs : chatMsgs.map(m => {
+          if (m.role !== 'assistant' || m.audio?.length) return m
+          const audio = spoken.get(m.text)
+          return audio ? { ...m, audio } : m
+        })
+        const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0
         const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
-        const next = inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+        const next = inFlight.length === 0 ? restored : [...restored, ...inFlight]
         // Returning `prev` when nothing changed makes React skip the render.
         return sameTranscript(prev, next) ? prev : next
       })
