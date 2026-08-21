@@ -35,4 +35,16 @@ export async function register() {
     // syntax error in dev), the rest of the app must still boot.
     console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
   }
+  try {
+    // Memory indexing is armed the same way, from its own persisted schedule.
+    // Rebuilding the timer at every boot is what makes the schedule survive a
+    // reboot and an update without a crontab entry to duplicate or orphan.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const memoryScheduler = require('./lib/clawkeep-memory-scheduler')
+    void memoryScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Memory index scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load memory index scheduler:', err instanceof Error ? err.message : err)
+  }
 }
