@@ -57,6 +57,23 @@ describe("isValidPhrase", () => {
     expect(isValidPhrase("dear friend", "nameFallbacks", "en")).toBe(false);
     expect(isValidPhrase("friend", "nameFallbacks", "en")).toBe(true);
   });
+
+  it("rejects placeholder tokens the renderer would never substitute", () => {
+    // Only `{name}`, and only in nameGreetings, is ever substituted. Anything
+    // else reaches the bubble as literal braces.
+    expect(isValidPhrase("Hi {user}!", "sass", "en")).toBe(false);
+    expect(isValidPhrase("Working, {name}?", "sass", "en")).toBe(false);
+    expect(isValidPhrase("Hey {name} {user}", "nameGreetings", "en")).toBe(false);
+    expect(isValidPhrase("Hey {name}!", "nameGreetings", "en")).toBe(true);
+  });
+
+  it("classifies decomposed (NFD) accented text by its base script, not as mixed", () => {
+    // "Kapitän" with the umlaut as a combining mark: the é/ä accent is its own
+    // code point, which the per-character script test would bucket as "other".
+    const nfd = "Kapitän";
+    expect(nfd.normalize("NFC")).not.toBe(nfd);
+    expect(isValidPhrase(nfd, "sass", "de")).toBe(true);
+  });
 });
 
 describe("sanitizeCategory", () => {

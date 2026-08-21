@@ -72,7 +72,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // Speech
   const [speech, setSpeech] = useState('')
   const speechTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const say = useCallback((line: string | MascotLine, ms = 3000) => {
+  const say = useCallback((line: string | MascotLine | null | undefined, ms = 3000) => {
+    // Call sites index phrase-category arrays; an empty category yields
+    // `undefined`, and the destructuring below would throw from inside a timer
+    // (the frenzy and sleep cycles both call `say` on an interval). Bail here,
+    // once, rather than guarding every call site.
+    if (line == null) return
     const template = typeof line === 'string' ? line : line.template
     const text = typeof line === 'string' ? line : line.text
     // ── INV-1 render gate ──

@@ -86,7 +86,14 @@ export function isValidPhrase(phrase: unknown, category: PhraseCategory, locale:
   const trimmed = phrase.trim();
   if (trimmed.length === 0 || trimmed.length > MAX_PHRASE_LENGTH) return false;
   if (category === "nameGreetings" && !trimmed.includes("{name}")) return false;
-  if (category === "nameFallbacks" && (/\s/.test(trimmed) || trimmed.includes("{"))) return false;
+  if (category === "nameFallbacks" && /\s/.test(trimmed)) return false;
+  // The only placeholder the renderer substitutes is `{name}`, and only in
+  // nameGreetings. Any other `{...}` token — `{user}`, a stray `{name}` in a
+  // non-greeting category — would reach the bubble as literal braces, so a
+  // generated phrase carrying one is rejected. Removing the allowed token
+  // first lets a legitimate greeting through.
+  const withoutName = category === "nameGreetings" ? trimmed.replace(/\{name\}/g, "") : trimmed;
+  if (/[{}]/.test(withoutName)) return false;
   return isPhraseCompatible(trimmed, locale);
 }
 

@@ -31,6 +31,18 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const requested = new URL(request.url).searchParams.get("locale");
   const locale = isPreferenceLanguage(requested) ? requested : null;
-  const { phrases, meta } = await getMascotPhrases(locale);
-  return NextResponse.json({ phrases, meta });
+  try {
+    const { phrases, meta } = await getMascotPhrases(locale);
+    return NextResponse.json({ phrases, meta });
+  } catch (err) {
+    // `getMascotPhrases` touches the KV file, the config store and a dynamic
+    // pack import; a failure in any of those should be logged once and return
+    // a structured 500, not bubble out as an unhandled Next error. The client
+    // already falls back to its in-memory pack when this is not a 200.
+    console.error("[mascot-lines] getMascotPhrases threw:", err);
+    return NextResponse.json(
+      { error: err instanceof Error ? err.message : "Failed to load mascot phrases" },
+      { status: 500 },
+    );
+  }
 }

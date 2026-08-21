@@ -22,7 +22,7 @@
  * already-cached phrase. Cache envelopes store the version they were written
  * with; a mismatch forces a re-filter on read instead of trusting old data.
  */
-export const VALIDATOR_VERSION = 1;
+export const VALIDATOR_VERSION = 2;
 
 /** Result of bucketing the letters left in a string after stripping noise. */
 export type ScriptBucket =
@@ -194,7 +194,12 @@ export function stripTechTerms(text: string): string {
  */
 export function classifyScript(text: string): ScriptBucket {
   if (typeof text !== "string" || text.length === 0) return "neutral";
-  const letters = text.replace(NOISE_RE, "");
+  // Fold decomposed forms first (a base letter + a combining accent). Model
+  // output can arrive as NFD, where the accent is its own code point that the
+  // per-character script tests bucket as "other" — turning "Kapitän" into a
+  // false "mixed". The hand-written packs are NFC, but generated text is not
+  // guaranteed to be.
+  const letters = text.normalize("NFC").replace(NOISE_RE, "");
   if (letters.length === 0) return "neutral";
 
   const buckets = new Set<ScriptBucket>();

@@ -49,6 +49,15 @@ import {
   parsePhrasePayload,
 } from "@/lib/mascot-generation-local";
 
+/** An OpenAI-shaped completion cut at the token budget (`finish_reason: length`). */
+function truncatedCompletion(partial: string) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({ choices: [{ message: { content: partial }, finish_reason: "length" }] }),
+  };
+}
+
 /** An OpenAI-shaped completion carrying `content` as the assistant message. */
 function completion(content: string) {
   return {
@@ -252,6 +261,18 @@ describe("failure classification", () => {
     expect(await generatePhrasesLocally({ prompt: "p", locale: "de" })).toEqual({
       status: "failed",
       failure: "malformed",
+    });
+  });
+
+  it("treats a completion truncated at the token budget as transient, not malformed", async () => {
+    // A grammar-constrained answer cut at MAX_OUTPUT_TOKENS parses as nothing,
+    // but it is a budget problem that clears on a shorter re-run — it must arm
+    // the 12h transient backoff, never the 24h malformed one that assumes the
+    // model keeps producing junk. CJK locales are the exposed ones.
+    fetchMock.mockResolvedValue(truncatedCompletion('{"sass":["半分だけ'));
+    expect(await generatePhrasesLocally({ prompt: "p", locale: "ja" })).toEqual({
+      status: "failed",
+      failure: "timeout",
     });
   });
 });

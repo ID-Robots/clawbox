@@ -112,19 +112,29 @@ export function buildRequestBody(prompt: string, model: string): Record<string, 
   };
 }
 
+interface ExtractedCompletion {
+  content: string | null;
+  /** OpenAI `finish_reason`; "length" means the answer was cut at the budget. */
+  finishReason: string | null;
+}
+
 /**
- * Pull the assistant's text out of an OpenAI-shaped completion.
- * Returns null for any shape we do not recognise — the caller treats that as
- * "malformed" rather than guessing.
+ * Pull the assistant's text — and why it stopped — out of an OpenAI-shaped
+ * completion. A null `content` is treated as malformed by the caller UNLESS
+ * `finishReason` is "length": that is a truncated answer, a transient budget
+ * problem, not junk.
  */
-function extractContent(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object") return null;
+function extractContent(payload: unknown): ExtractedCompletion {
+  const none: ExtractedCompletion = { content: null, finishReason: null };
+  if (!payload || typeof payload !== "object") return none;
   const choices = (payload as { choices?: unknown }).choices;
-  if (!Array.isArray(choices) || choices.length === 0) return null;
-  const message = (choices[0] as { message?: unknown })?.message;
-  if (!message || typeof message !== "object") return null;
+  if (!Array.isArray(choices) || choices.length === 0) return none;
+  const choice = choices[0] as { message?: unknown; finish_reason?: unknown };
+  const finishReason = typeof choice?.finish_reason === "string" ? choice.finish_reason : null;
+  const message = choice?.message;
+  if (!message || typeof message !== "object") return { content: null, finishReason };
   const content = (message as { content?: unknown }).content;
-  return typeof content === "string" ? content : null;
+  return { content: typeof content === "string" ? content : null, finishReason };
 }
 
 /**
@@ -260,14 +270,24 @@ async function requestBatch(
       return { status: "failed", failure: "malformed" };
     }
 
-    const content = extractContent(payload);
+    const { content, finishReason } = extractContent(payload);
+    // A grammar-constrained JSON answer cut at MAX_OUTPUT_TOKENS parses as
+    // nothing, but it is a budget problem that clears on a re-run, not "junk
+    // the model will keep producing" — so it must NOT arm the 24h malformed
+    // backoff. CJK locales (ja/zh) spend the most tokens and are the exposed
+    // ones. A shorter run may fit next time, so treat it as transient.
+    const truncated = finishReason === "length";
     if (content === null) {
-      console.warn(`[mascot-generation] ${locale}: no assistant content in the completion`);
-      return { status: "failed", failure: "malformed" };
+      console.warn(`[mascot-generation] ${locale}: no assistant content (finish_reason=${finishReason})`);
+      return { status: "failed", failure: truncated ? "timeout" : "malformed" };
     }
 
     const phrases = parsePhrasePayload(content);
     if (!phrases) {
+      if (truncated) {
+        console.warn(`[mascot-generation] ${locale}: answer truncated at the token budget`);
+        return { status: "failed", failure: "timeout" };
+      }
       console.warn(`[mascot-generation] ${locale}: could not parse a phrase object from the answer`);
       return { status: "failed", failure: "malformed" };
     }
