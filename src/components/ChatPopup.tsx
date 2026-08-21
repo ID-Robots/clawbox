@@ -17,7 +17,18 @@ import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/li
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName, extractAudioAttachments } from '@/lib/chat-media'
+import {
+  IDLE_STATUS,
+  MAX_RECORDING_MS,
+  classifyCaptureError,
+  describeTranscribeFailure,
+  formatRecordingClock,
+  mergeTranscript,
+  pickRecordingMimeType,
+  recordingFileName,
+  type VoiceStatus,
+} from '@/lib/chat-voice-input'
 import {
   type ThinkingLevel,
   type ProviderReasoningConfig,
@@ -242,6 +253,15 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
     const x = a[i], y = b[i]
     if (x.role !== y.role || x.text !== y.text || x.timestamp !== y.timestamp) return false
     if ((x.images?.length ?? 0) !== (y.images?.length ?? 0)) return false
+    // Without this a reply that gained its spoken half between two history
+    // reads compares equal, React skips the render, and the player never
+    // appears until something else forces one. Compared by URL and not only by
+    // count: a reply whose recording was replaced keeps the count and changes
+    // the file, and a player left pointing at the old one plays the wrong
+    // words convincingly.
+    const xa = x.audio ?? [], ya = y.audio ?? []
+    if (xa.length !== ya.length) return false
+    for (let j = 0; j < xa.length; j++) if (xa[j] !== ya[j]) return false
   }
   return true
 }
@@ -1144,6 +1164,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (!payload) return
           const sk = payload.sessionKey as string | undefined
           if (sk && sk !== sessionKeyRef.current) return
+          // A spoken reply arrives HERE and only here. Measured on box .65:
+          // the harness appends an `assistant-media` message carrying the audio
+          // as an attachment part, it is pushed on this event with the
+          // attachment intact — and `chat.history` does not return it, so the
+          // reconcile below can never find it. Reading it off the event is the
+          // only way the player appears at all; see the task for the refresh
+          // half, which needs a gateway change.
+          const pushedAudio = extractAudioAttachments(payload.message)
+          if (pushedAudio.length > 0) {
+            const pushedText = splitMediaDirectives(extractText(payload.message)).text
+            setMessages(prev => {
+              // Fold into the bubble it belongs to. The media message repeats
+              // the text of the reply already on screen, so appending it would
+              // show every spoken answer twice, once silent.
+              const at = [...prev].reverse().findIndex(m =>
+                m.role === 'assistant' && m.text === pushedText && (m.audio?.length ?? 0) === 0)
+              if (at === -1) {
+                return [...prev, { role: 'assistant' as const, text: pushedText, timestamp: Date.now(), audio: pushedAudio }]
+              }
+              const index = prev.length - 1 - at
+              const next = [...prev]
+              next[index] = { ...next[index], audio: pushedAudio }
+              return next
+            })
+          }
           if (transcriptReconcileTimerRef.current !== null) {
             window.clearTimeout(transcriptReconcileTimerRef.current)
           }
@@ -1175,7 +1220,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
             // text, not as a structured attachment — see lib/chat-media.ts.
-            const { text, images } = splitAssistantMedia(extractText(msg))
+            const { text, images, audio: directiveAudio } = splitAssistantMedia(extractText(msg))
+            // A spoken reply is a structured attachment part, not a MEDIA:
+            // line — see lib/chat-media.ts. Both are read; the harness uses
+            // the first and image generation the second.
+            const audio = [...extractAudioAttachments(msg), ...directiveAudio]
             // Suppress sentinel and "Sent." (delivery-mirror ack) from the
             // rendered transcript — the latter is just a server-side
             // acknowledgement that the real reply will follow via the
@@ -1184,23 +1233,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // the real reply replaces it.
             // An image with no caption is a real reply, not an ack — it must
             // not be mistaken for the empty "Sent." case and refetched away.
-            const isAckOnly = (!text && images.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            // Audio counts as content for the same reason a picture does: the
+            // harness delivers a spoken reply as its own message whose text is
+            // a repeat of the one already on screen, and treating that as an
+            // empty ack threw the recording away and refetched history instead.
+            const isAckOnly = (!text && images.length === 0 && audio.length === 0) || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
             // The reconcile often wins the race now: `session.message` lands
             // the stored reply, media intact, before this event arrives with
             // the same text and the media stripped. Appending it again showed
             // the reply twice — once with the picture, once without.
-            const alreadyShownWithMedia = images.length === 0 && text.length > 0 &&
+            const alreadyShownWithMedia = images.length === 0 && audio.length === 0 && text.length > 0 &&
               messagesRef.current.some(m =>
-                m.role === 'assistant' && m.text === text && (m.images?.length ?? 0) > 0)
+                m.role === 'assistant' && m.text === text && ((m.images?.length ?? 0) > 0 || (m.audio?.length ?? 0) > 0))
             // Envelope suppression (TASK-416) still applies on the live path, so
             // the bubble cannot appear in real time and an envelope can never be
             // cached as a mascot snippet. Checked on the ORIGINAL text: a routing
             // envelope carrying a MEDIA: line must be dropped whole, not split
             // into a picture plus its own machinery.
             if (!isAckOnly && !alreadyShownWithMedia && !isInterSessionEnvelope(extractText(msg), msg)) {
-              setMessages(prev => [...prev, {
-                role: 'assistant', text, timestamp: Date.now(), images,
-              }])
+              setMessages(prev => {
+                // The spoken half arrives as a SECOND message repeating the
+                // text of the one already rendered. Appending it verbatim
+                // showed the answer twice, once silent and once playable, so
+                // the audio is folded into the bubble it belongs to when the
+                // text matches and that bubble has none yet.
+                const last = prev[prev.length - 1]
+                if (audio.length > 0 && !images.length && last && last.role === 'assistant'
+                    && last.text === text && (last.audio?.length ?? 0) === 0) {
+                  return [...prev.slice(0, -1), { ...last, audio }]
+                }
+                return [...prev, { role: 'assistant' as const, text, timestamp: Date.now(), images, audio }]
+              })
               if (text) saveMascotSnippet(text)
               // The picture reached us over the socket after all — nothing
               // left to wait for, so take the banner down.
@@ -1398,10 +1461,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         }
         // Replayed history carries the same MEDIA: lines the live turn did, so
         // a reopened chat shows its pictures rather than a bare caption.
-        const { text, images } = splitAssistantMedia(raw)
-        if (!text && images.length === 0) continue
+        const { text, images, audio: directiveAudio } = splitAssistantMedia(raw)
+        const audio = [...extractAudioAttachments(m), ...directiveAudio]
+        if (!text && images.length === 0 && audio.length === 0) continue
+        // Replayed history repeats the live path's two-message shape: the
+        // spoken reply is stored as its own message carrying the same text.
+        // Folded into the preceding bubble so a reopened chat shows one answer
+        // with a player rather than the answer twice.
+        const previous = chatMsgs[chatMsgs.length - 1]
+        if (audio.length > 0 && images.length === 0 && previous && previous.role === 'assistant'
+            && previous.text === text && (previous.audio?.length ?? 0) === 0) {
+          previous.audio = audio
+          continue
+        }
         chatMsgs.push({
-          role: 'assistant', text, timestamp, images,
+          role: 'assistant', text, timestamp, images, audio,
         })
       }
       // Preserve any optimistic user turns appended after this load was
@@ -1409,9 +1483,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // the server yet so chatMsgs doesn't include them.
       setMessages(prev => {
         if (prev.length === 0) return chatMsgs
-        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
+        // Carry spoken replies across the reconcile. `chat.history` does not
+        // return the media message (measured on .65 — the attachment part is
+        // pushed on `session.message` and is absent from every history read),
+        // so rebuilding the transcript from history alone would take the
+        // player back off the screen 400ms after it appeared. Matched on the
+        // text rather than the timestamp: the pushed message and the stored
+        // one are the same reply with different clocks on them.
+        const spoken = new Map<string, string[]>()
+        for (const m of prev) {
+          if (m.role === 'assistant' && m.audio?.length) spoken.set(m.text, m.audio)
+        }
+        const restored = spoken.size === 0 ? chatMsgs : chatMsgs.map(m => {
+          if (m.role !== 'assistant' || m.audio?.length) return m
+          const audio = spoken.get(m.text)
+          return audio ? { ...m, audio } : m
+        })
+        const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0
         const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
-        const next = inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
+        const next = inFlight.length === 0 ? restored : [...restored, ...inFlight]
         // Returning `prev` when nothing changed makes React skip the render.
         return sameTranscript(prev, next) ? prev : next
       })
@@ -1550,6 +1640,234 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setAttachments(prev => prev.filter((_, i) => i !== idx))
   }, [])
 
+  // ── Voice input ───────────────────────────────────────────────────────
+  //
+  // Record in the composer, transcribe on the box, drop the text in the input
+  // for the user to read before they send it. Deliberately NOT send-on-stop:
+  // transcription gets words wrong, and a chat that fires off a misheard
+  // sentence before you can look at it is worse than no dictation at all.
+  const [voice, setVoice] = useState<VoiceStatus>(IDLE_STATUS)
+  const [recordingMs, setRecordingMs] = useState(0)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  // Set when the user cancels, so the recorder's stop handler knows to throw
+  // the audio away instead of transcribing it. `MediaRecorder.stop()` is the
+  // only way to end a capture, so cancel and finish arrive at the same place
+  // and something has to tell them apart.
+  const cancelledRef = useRef(false)
+  // The last recording, kept so a failed transcription can be retried without
+  // making the user say it all again.
+  const lastAudioRef = useRef<{ blob: Blob; name: string } | null>(null)
+  // Bumped every time the microphone is released, which is every way out of a
+  // capture including the panel closing and the component unmounting.
+  //
+  // `getUserMedia` resolves in a later task than the click that called it, and
+  // the stream it hands back does not exist until it does — so nothing the
+  // cleanup can reach is holding a microphone while the permission prompt is
+  // still open. Close the panel in that window and the stream arrives after
+  // there is any interface left to stop it: a live recorder with no indicator,
+  // which is the one outcome this feature must never produce. The resolver
+  // compares this counter against the value it captured and, if it moved,
+  // stops the tracks it was just handed instead of recording with them.
+  const captureGenerationRef = useRef(0)
+
+  /**
+   * Release the microphone.
+   *
+   * Every path out of recording goes through here — finish, cancel, error,
+   * unmount. A live capture with no visible indicator is the one thing this
+   * feature must never leave behind, so this is deliberately idempotent and
+   * called more often than strictly necessary.
+   */
+  const releaseMicrophone = useCallback(() => {
+    captureGenerationRef.current += 1
+    const stream = streamRef.current
+    streamRef.current = null
+    recorderRef.current = null
+    if (stream) for (const track of stream.getTracks()) track.stop()
+  }, [])
+
+  const transcribe = useCallback(async (blob: Blob, name: string) => {
+    setVoice({ state: 'transcribing', error: null, message: null, canRetry: false })
+    try {
+      const form = new FormData()
+      form.append('file', blob, name)
+      const res = await fetch('/setup-api/chat/transcribe', { method: 'POST', body: form })
+      const payload = await res.json().catch(() => null)
+      if (!res.ok) {
+        setVoice({
+          state: 'error',
+          error: 'transcribe',
+          message: describeTranscribeFailure(payload),
+          // The audio is still in hand, so this is worth offering again —
+          // most failures here are a flaky uplink, not a bad recording.
+          canRetry: true,
+        })
+        return
+      }
+      const text = typeof payload?.text === 'string' ? payload.text : ''
+      if (!text.trim()) {
+        // A successful call that heard nothing. Not an error, but silently
+        // returning to idle would look like the button did nothing at all.
+        //
+        // No retry offered: the call succeeded, so re-sending the same bytes
+        // buys the same empty transcript and one more paid transcription.
+        // Everything a retry could actually change — a flaky uplink, a
+        // timeout, an upstream 5xx — arrives on the !res.ok branch above.
+        lastAudioRef.current = null
+        setVoice({ state: 'error', error: 'empty', message: null, canRetry: false })
+        return
+      }
+      setInput(prev => mergeTranscript(prev, text))
+      setVoice(IDLE_STATUS)
+      lastAudioRef.current = null
+      setTimeout(() => inputRef.current?.focus(), 0)
+    } catch {
+      setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: true })
+    }
+  }, [])
+
+  const startRecording = useCallback(async () => {
+    if (voice.state === 'recording' || voice.state === 'requesting') return
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+      return
+    }
+    setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
+    const generation = captureGenerationRef.current
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (err) {
+      // Same staleness test as the success path below. A prompt that is still
+      // open when the panel closes can be denied afterwards, and an error
+      // pinned to a panel nobody is looking at is waiting on screen the next
+      // time it opens, describing a request that is no longer anyone's.
+      if (captureGenerationRef.current !== generation) { setVoice(IDLE_STATUS); return }
+      setVoice({ state: 'error', error: classifyCaptureError(err), message: null, canRetry: false })
+      return
+    }
+    if (captureGenerationRef.current !== generation) {
+      // The panel closed, or the component unmounted, while the prompt was up.
+      // Whoever released the microphone could not reach this stream because it
+      // did not exist yet, so it is stopped here instead of being recorded
+      // with. No error is shown: nothing went wrong and, more to the point,
+      // there may no longer be anywhere to show it.
+      for (const track of stream.getTracks()) track.stop()
+      setVoice(IDLE_STATUS)
+      return
+    }
+    const mimeType = pickRecordingMimeType()
+    let recorder: MediaRecorder
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+    } catch {
+      // The stream is already open at this point; letting it stay open would
+      // leave the microphone live with nothing on screen saying so.
+      for (const track of stream.getTracks()) track.stop()
+      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+      return
+    }
+    streamRef.current = stream
+    recorderRef.current = recorder
+    chunksRef.current = []
+    cancelledRef.current = false
+    recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data) }
+    recorder.onstop = () => {
+      releaseMicrophone()
+      const chunks = chunksRef.current
+      chunksRef.current = []
+      if (cancelledRef.current) { setVoice(IDLE_STATUS); return }
+      const type = recorder.mimeType || mimeType || 'audio/webm'
+      const blob = new Blob(chunks, { type })
+      if (blob.size === 0) {
+        setVoice({ state: 'error', error: 'empty', message: null, canRetry: false })
+        return
+      }
+      const name = recordingFileName(type)
+      lastAudioRef.current = { blob, name }
+      void transcribe(blob, name)
+    }
+    recorder.onerror = () => {
+      // `error` is not the end of the event sequence: the recorder still
+      // delivers `dataavailable` and then `stop`. Left attached, that stop
+      // handler uploads whatever partial audio the failure produced and
+      // replaces this error with a transcribing spinner — so a capture the
+      // browser said had failed is paid for and answered anyway. Detach both
+      // and drop the chunks before the error state is set.
+      recorder.ondataavailable = null
+      recorder.onstop = null
+      chunksRef.current = []
+      lastAudioRef.current = null
+      releaseMicrophone()
+      setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: false })
+    }
+    recorder.start()
+    setRecordingMs(0)
+    setVoice({ state: 'recording', error: null, message: null, canRetry: false })
+  }, [voice.state, releaseMicrophone, transcribe])
+
+  const stopRecording = useCallback(() => {
+    const recorder = recorderRef.current
+    cancelledRef.current = false
+    if (!recorder || recorder.state === 'inactive') { releaseMicrophone(); setVoice(IDLE_STATUS); return }
+    recorder.stop()
+  }, [releaseMicrophone])
+
+  const cancelRecording = useCallback(() => {
+    cancelledRef.current = true
+    const recorder = recorderRef.current
+    lastAudioRef.current = null
+    if (recorder && recorder.state !== 'inactive') recorder.stop()
+    else { releaseMicrophone(); setVoice(IDLE_STATUS) }
+  }, [releaseMicrophone])
+
+  const retryTranscribe = useCallback(() => {
+    const last = lastAudioRef.current
+    if (!last) { setVoice(IDLE_STATUS); return }
+    void transcribe(last.blob, last.name)
+  }, [transcribe])
+
+  const dismissVoiceError = useCallback(() => { lastAudioRef.current = null; setVoice(IDLE_STATUS) }, [])
+
+  // Elapsed time, so a recording always shows that it is running — and a hard
+  // ceiling on how long it can run. Finishing through `stopRecording` is the
+  // same finish the button performs, so a capture that hits the cap is still
+  // transcribed instead of thrown away; the alternative is a blob the route
+  // answers 413 to after the whole upload, which loses the dictation at the
+  // point it cost the most. Armed once per recording: `stopRecording` and the
+  // `releaseMicrophone` it closes over are stable callbacks, so the clock's
+  // re-renders cannot push the deadline back.
+  useEffect(() => {
+    if (voice.state !== 'recording') return
+    const started = Date.now()
+    const id = setInterval(() => setRecordingMs(Date.now() - started), 200)
+    const deadline = setTimeout(() => {
+      // Not through `stopRecording` blind: that clears the cancelled flag, and
+      // cancelling leaves a window where clearing it is wrong. `stop()` goes
+      // inactive at once but delivers `dataavailable`/`stop` in a later task,
+      // so between the user's Cancel and those events the state here is still
+      // `recording` and this deadline is still armed. Firing in that window
+      // would hand the recorder's stop handler a capture that no longer looks
+      // cancelled — uploading, and paying to transcribe, audio the user threw
+      // away. The button is unaffected: it only ever runs outside that window.
+      if (cancelledRef.current) return
+      stopRecording()
+    }, MAX_RECORDING_MS)
+    return () => { clearInterval(id); clearTimeout(deadline) }
+  }, [voice.state, stopRecording])
+
+  // Closing the panel, navigating away or unmounting must not leave the
+  // microphone running: at that point there is no interface left to stop it.
+  useEffect(() => releaseMicrophone, [releaseMicrophone])
+  useEffect(() => {
+    if (isOpen) return
+    const recorder = recorderRef.current
+    if (recorder && recorder.state !== 'inactive') { cancelledRef.current = true; recorder.stop() }
+    else releaseMicrophone()
+  }, [isOpen, releaseMicrophone])
+
   const dispatchSend = useCallback(async (
     text: string,
     sendAttachments: { name: string; path: string; type: string }[],
@@ -1646,11 +1964,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // way whichever edition answered. A reply that is nothing BUT a media
       // line is still a real answer — don't call it '(no response)'.
       const hermesReply = splitAssistantMedia(typeof data.text === 'string' ? data.text : '')
+      const hermesHasMedia = hermesReply.images.length > 0 || hermesReply.audio.length > 0
       setMessages(prev => [...prev, {
         role: 'assistant',
-        text: hermesReply.text || (hermesReply.images.length > 0 ? '' : '(no response)'),
+        text: hermesReply.text || (hermesHasMedia ? '' : '(no response)'),
         timestamp: Date.now(),
         images: hermesReply.images,
+        audio: hermesReply.audio,
       }])
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
@@ -2717,6 +3037,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   </div>
                 )}
                 {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text)) : null}
+                {msg.audio && msg.audio.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
+                    {msg.audio.map((src) => (
+                      // The browser's own player, not a bespoke one: play,
+                      // pause, scrub and duration are what "a normal playable
+                      // message" means, and every one of them already works
+                      // here and is reachable from the keyboard.
+                      //
+                      // `preload="metadata"` so the duration is on screen
+                      // before anything is played, without pulling the whole
+                      // file down for a reply nobody listens to. The src is
+                      // this box's own media route, which answers Range
+                      // requests — without that the scrubber does not move.
+                      //
+                      // Keyed by the URL: the harness names every file with a
+                      // uuid, so re-rendering a transcript cannot hand one
+                      // player another player's audio.
+                      <audio
+                        key={src}
+                        data-testid="chat-audio"
+                        controls
+                        preload="metadata"
+                        src={src}
+                        style={{ width: '100%', maxWidth: 280, height: 34 }}
+                      >
+                        <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
+                      </audio>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -2835,6 +3185,90 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {/* Hidden file input */}
       <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
 
+      {/* Voice status. Always rendered while anything is happening: a capture
+          that is running, uploading or failed must be visible, because the
+          alternative is a microphone the user cannot tell is live. It is a live
+          region for the same reason: the pulsing dot and the running clock are
+          the only signal that the microphone opened, and a screen reader sees
+          neither. Polite rather than an alert — the row also hosts the cancel,
+          retry and dismiss buttons, which an assertive interrupt talks over. */}
+      {harnessMode !== 'hermes' && voice.state !== 'idle' && (
+        <div
+          data-testid="voice-status"
+          role="status"
+          aria-live="polite"
+          style={{
+            padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 8,
+            background: 'rgba(0,0,0,0.2)', fontSize: 11.5,
+            color: voice.state === 'error' ? '#f87171' : '#f97316',
+          }}
+        >
+          {voice.state === 'recording' && (
+            <span
+              aria-hidden
+              style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'claw-pulse 1s ease-in-out infinite' }}
+            />
+          )}
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {voice.state === 'requesting' && t("chat.voice.requesting")}
+            {voice.state === 'recording' && <>{t("chat.voice.recording")}{' '}
+              {/* The clock is kept out of the accessibility tree, not out of
+                  the page. `role="status"` is implicitly atomic, so a live
+                  region re-announces ALL of its text on any change inside it:
+                  with the elapsed time in here the row would be read out in
+                  full every second, for as long as the capture runs — ten
+                  minutes of a screen reader talking over everything else the
+                  user is doing. Hidden, its ticking is not a change the tree
+                  can see, so the announcement fires on what a listener
+                  actually needs: the state going recording → transcribing →
+                  error. Sighted users lose nothing; this renders as before. */}
+              <span aria-hidden data-testid="voice-clock">{formatRecordingClock(recordingMs)}</span>
+            </>}
+            {voice.state === 'transcribing' && t("chat.voice.transcribing")}
+            {voice.state === 'error' && (
+              voice.message
+              || (voice.error === 'permission' ? t("chat.voice.permissionDenied")
+                : voice.error === 'unsupported' ? t("chat.voice.unsupported")
+                : voice.error === 'empty' ? t("chat.voice.nothingHeard")
+                : t("chat.voice.failed"))
+            )}
+          </span>
+          {voice.state === 'recording' && (
+            <button
+              onClick={cancelRecording}
+              data-testid="voice-cancel"
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontSize: 11.5 }}
+            >{t("chat.voice.cancel")}</button>
+          )}
+          {voice.state === 'error' && voice.canRetry && (
+            <button
+              onClick={retryTranscribe}
+              data-testid="voice-retry"
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontSize: 11.5 }}
+            >{t("chat.retry")}</button>
+          )}
+          {voice.state === 'error' && (
+            <button
+              onClick={dismissVoiceError}
+              data-testid="voice-dismiss"
+              aria-label={t("chat.voice.dismiss")}
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, display: 'flex' }}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* The cloud-privacy line. Voice leaves the box: the recording goes to
+          ClawBox AI to be turned into text. That has to be said on the surface
+          where it happens, not only in a settings page nobody opens. */}
+      {harnessMode !== 'hermes' && (voice.state === 'recording' || voice.state === 'transcribing') && (
+        <div data-testid="voice-privacy" style={{ padding: '0 14px 6px', background: 'rgba(0,0,0,0.2)', fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>
+          {t("chat.voice.privacy")}
+        </div>
+      )}
+
       {/* Input area */}
       <div style={{
         padding: '10px 14px 12px',
@@ -2862,6 +3296,49 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
         </button>
+        )}
+        {/* Voice input. Hidden on the Hermes path for the same reason as the
+            attach control: that harness has no transcription route behind it,
+            so offering the button would promise something that cannot work. */}
+        {harnessMode !== 'hermes' && (
+          voice.state === 'recording' ? (
+            <button
+              onClick={stopRecording}
+              title={t("chat.voice.stop")}
+              aria-label={t("chat.voice.stop")}
+              data-testid="voice-stop"
+              style={{
+                width: 36, height: 36, borderRadius: 10, border: 'none',
+                background: 'rgba(239,68,68,0.25)', color: '#ef4444',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>stop_circle</span>
+            </button>
+          ) : (
+            <button
+              onClick={startRecording}
+              disabled={status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'}
+              title={t("chat.voice.record")}
+              aria-label={t("chat.voice.record")}
+              data-testid="voice-record"
+              style={{
+                width: 36, height: 36, borderRadius: 10, border: 'none',
+                background: 'rgba(255,255,255,0.06)',
+                color: voice.state === 'transcribing' ? '#f97316' : 'rgba(255,255,255,0.4)',
+                cursor: status === 'connected' && voice.state === 'idle' ? 'pointer' : 'default',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, transition: 'all 0.15s',
+              }}
+              onMouseEnter={(e) => { if (status === 'connected' && voice.state === 'idle') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; if (voice.state !== 'transcribing') e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+                {voice.state === 'transcribing' ? 'hourglass_top' : 'mic'}
+              </span>
+            </button>
+          )
         )}
         <textarea
           ref={inputRef}

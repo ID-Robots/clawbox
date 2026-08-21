@@ -7,6 +7,11 @@ export interface ChatMessage {
   // Inline display only: data URLs for images the user attached, or
   // /setup-api/chat/media URLs for ones the agent generated.
   images?: string[];
+  // /setup-api/chat/media URLs for spoken replies, rendered as players. Kept
+  // separate from `images` rather than a single `media` list: the two are
+  // different elements with different affordances, and merging them would make
+  // every existing `images.length` check quietly wrong.
+  audio?: string[];
 }
 
 export function uuid(): string {

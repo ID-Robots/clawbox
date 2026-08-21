@@ -5,6 +5,8 @@ import {
   isImageMedia,
   mediaUrl,
   mediaFileName,
+  isAudioMedia,
+  extractAudioAttachments,
 } from "@/lib/chat-media";
 
 // The exact reply shape the image tool produced on the device: a caption, a
@@ -159,16 +161,116 @@ describe("chat-media", () => {
       ]);
     });
 
-    it("drops media the bubbles cannot render", () => {
-      const { text, images } = splitAssistantMedia("Listen:\nMEDIA:/a/x.mp3");
+    it("keeps audio out of the image list", () => {
+      // The two go to different elements. Before audio was rendered at all this
+      // asserted the sound was dropped; now it must be routed, not merged —
+      // an <img> pointed at a .wav renders a broken-image icon.
+      const { text, images, audio } = splitAssistantMedia("Listen:\nMEDIA:/a/x.mp3");
       expect(text).toBe("Listen:");
       expect(images).toEqual([]);
+      expect(audio).toEqual([`/setup-api/chat/media?path=${encodeURIComponent("/a/x.mp3")}`]);
+    });
+
+    it("still drops media no bubble can render", () => {
+      const { text, images, audio } = splitAssistantMedia("Clip:\nMEDIA:/a/x.mp4");
+      expect(text).toBe("Clip:");
+      expect(images).toEqual([]);
+      expect(audio).toEqual([]);
     });
 
     it("yields an image with an empty caption when the reply is only a directive", () => {
       const { text, images } = splitAssistantMedia("MEDIA:/a/x.png");
       expect(text).toBe("");
       expect(images).toHaveLength(1);
+    });
+  });
+
+  // ── Spoken replies ────────────────────────────────────────────────────────
+  //
+  // Every fixture below is the shape a real box produced, copied out of
+  // ~/.openclaw/agents/main/sessions/*.jsonl after asking the mascot chat on
+  // .65 to speak a line. TTS does not use MEDIA: at all — it appends a second
+  // assistant message with a structured attachment part — which is why the
+  // spoken half of every reply was silently discarded before TASK-381.
+
+  describe("isAudioMedia", () => {
+    it("recognises what the box actually writes", () => {
+      expect(isAudioMedia("/home/clawbox/.openclaw/media/outbound/voice-1---a.wav")).toBe(true);
+    });
+
+    it("covers the other formats a provider swap could produce", () => {
+      for (const ext of ["mp3", "ogg", "oga", "opus", "m4a", "aac", "flac", "weba"]) {
+        expect(isAudioMedia(`/a/clip.${ext}`), ext).toBe(true);
+      }
+    });
+
+    it("ignores a query string when reading the extension", () => {
+      expect(isAudioMedia("https://example.com/a.mp3?token=1")).toBe(true);
+    });
+
+    it("does not claim an image or a video", () => {
+      expect(isAudioMedia("/a/cat.png")).toBe(false);
+      expect(isAudioMedia("/a/clip.mp4")).toBe(false);
+      expect(isAudioMedia("/a/notes.wavefront")).toBe(false);
+    });
+  });
+
+  describe("extractAudioAttachments", () => {
+    const spoken = {
+      role: "assistant",
+      content: [
+        { type: "text", text: "The lantern is green." },
+        {
+          type: "attachment",
+          attachment: {
+            url: "/home/clawbox/.openclaw/media/outbound/voice-1787291821763---93f78bf1.wav",
+            kind: "audio",
+            label: "voice-1787291821763---93f78bf1.wav",
+            mimeType: "audio/wav",
+          },
+        },
+      ],
+    };
+
+    it("returns a playable URL for the attachment the harness sends", () => {
+      expect(extractAudioAttachments(spoken)).toEqual([
+        `/setup-api/chat/media?path=${encodeURIComponent("/home/clawbox/.openclaw/media/outbound/voice-1787291821763---93f78bf1.wav")}`,
+      ]);
+    });
+
+    it("accepts an attachment identified only by its MIME type", () => {
+      // `kind` is a convention, not a contract. A reply whose audio vanishes
+      // because a provider labelled it differently is the whole failure here.
+      expect(extractAudioAttachments({
+        content: [{ type: "attachment", attachment: { url: "/a/b", mimeType: "AUDIO/MPEG" } }],
+      })).toHaveLength(1);
+    });
+
+    it("accepts an attachment identified only by its extension", () => {
+      expect(extractAudioAttachments({
+        content: [{ type: "attachment", attachment: { url: "/a/b.opus" } }],
+      })).toHaveLength(1);
+    });
+
+    it("ignores image attachments and plain text", () => {
+      expect(extractAudioAttachments({
+        content: [
+          { type: "text", text: "hi" },
+          { type: "attachment", attachment: { url: "/a/cat.png", kind: "image", mimeType: "image/png" } },
+        ],
+      })).toEqual([]);
+    });
+
+    it("survives anything that is not a message", () => {
+      for (const junk of [null, undefined, "text", 7, {}, { content: "text" }, { content: [null, 1] }]) {
+        expect(extractAudioAttachments(junk)).toEqual([]);
+      }
+    });
+
+    it("skips an attachment with no url", () => {
+      expect(extractAudioAttachments({
+        content: [{ type: "attachment", attachment: { kind: "audio", mimeType: "audio/wav" } }],
+      })).toEqual([]);
     });
   });
 });

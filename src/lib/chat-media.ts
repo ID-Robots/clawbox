@@ -129,10 +129,68 @@ export function mediaFileName(url: string): string {
 
 /**
  * Convenience for the chat components: caption plus the ready-to-render image
- * URLs the reply named. Non-image media (audio, video, documents) is dropped —
- * the chat bubbles have nowhere to put it yet.
+ * and audio URLs the reply named. Video and documents are still dropped — the
+ * bubbles have nowhere to put them yet.
  */
-export function splitAssistantMedia(raw: string): { text: string; images: string[] } {
+export function splitAssistantMedia(raw: string): { text: string; images: string[]; audio: string[] } {
   const { text, media } = splitMediaDirectives(raw);
-  return { text, images: media.filter(isImageMedia).map(mediaUrl) };
+  return {
+    text,
+    images: media.filter(isImageMedia).map(mediaUrl),
+    audio: media.filter(isAudioMedia).map(mediaUrl),
+  };
+}
+
+// ── Spoken replies ──────────────────────────────────────────────────────────
+//
+// TTS does NOT arrive the way a generated picture does. Measured on a real box
+// (TASK-381): the harness appends a second assistant message whose content
+// carries a structured part —
+//
+//   { type: "attachment",
+//     attachment: { url: "/home/clawbox/.openclaw/media/outbound/voice-….wav",
+//                   kind: "audio", mimeType: "audio/wav", label: "voice-….wav" } }
+//
+// — and no MEDIA: line at all. `extractText` reads text parts and nothing else,
+// so before this the spoken half of a reply was simply dropped: the box did the
+// work, wrote the file, and the chat showed a caption with no way to hear it.
+//
+// Both shapes are read anyway. The directive form costs one filter and covers a
+// provider that names its output the way image generation does.
+
+/** Extensions rendered with an `<audio>` element. */
+const AUDIO_EXT_RE = /\.(?:mp3|wav|ogg|oga|opus|m4a|aac|flac|weba)$/i;
+
+/** True if `source` names something this chat can play. */
+export function isAudioMedia(source: string): boolean {
+  const bare = source.split(/[?#]/, 1)[0];
+  return AUDIO_EXT_RE.test(bare);
+}
+
+/**
+ * Playable URLs for the audio attachments on one gateway message.
+ *
+ * Both `kind` and `mimeType` are consulted: the local TTS provider sets both,
+ * but neither is guaranteed by anything stronger than convention, and a reply
+ * whose audio silently vanishes is the failure this exists to prevent. The
+ * extension is the last resort rather than the first test, because a URL is
+ * allowed not to have one.
+ */
+export function extractAudioAttachments(msg: unknown): string[] {
+  if (!msg || typeof msg !== "object") return [];
+  const content = (msg as { content?: unknown }).content;
+  if (!Array.isArray(content)) return [];
+  const urls: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== "object") continue;
+    const b = block as { type?: unknown; attachment?: unknown };
+    if (b.type !== "attachment" || !b.attachment || typeof b.attachment !== "object") continue;
+    const a = b.attachment as { url?: unknown; kind?: unknown; mimeType?: unknown };
+    if (typeof a.url !== "string" || !a.url) continue;
+    const isAudio = a.kind === "audio"
+      || (typeof a.mimeType === "string" && a.mimeType.toLowerCase().startsWith("audio/"))
+      || isAudioMedia(a.url);
+    if (isAudio) urls.push(mediaUrl(a.url));
+  }
+  return urls;
 }

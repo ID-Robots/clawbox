@@ -1382,3 +1382,10 @@ input[type="range"].appearance-none::-moz-range-track {
     scroll-behavior: auto !important;
   }
 }
+
+/* Live-recording dot in the chat composer. A capture must be visible at a
+   glance; a static dot reads as decoration, a pulsing one reads as "on". */
+@keyframes claw-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.82); }
+}
