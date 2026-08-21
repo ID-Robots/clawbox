@@ -20,6 +20,7 @@ import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/c
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
+  MAX_RECORDING_MS,
   classifyCaptureError,
   describeTranscribeFailure,
   formatRecordingClock,
@@ -1617,7 +1618,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!text.trim()) {
         // A successful call that heard nothing. Not an error, but silently
         // returning to idle would look like the button did nothing at all.
-        setVoice({ state: 'error', error: 'empty', message: null, canRetry: true })
+        //
+        // No retry offered: the call succeeded, so re-sending the same bytes
+        // buys the same empty transcript and one more paid transcription.
+        // Everything a retry could actually change — a flaky uplink, a
+        // timeout, an upstream 5xx — arrives on the !res.ok branch above.
+        lastAudioRef.current = null
+        setVoice({ state: 'error', error: 'empty', message: null, canRetry: false })
         return
       }
       setInput(prev => mergeTranscript(prev, text))
@@ -1706,13 +1713,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const dismissVoiceError = useCallback(() => { lastAudioRef.current = null; setVoice(IDLE_STATUS) }, [])
 
-  // Elapsed time, so a recording always shows that it is running.
+  // Elapsed time, so a recording always shows that it is running — and a hard
+  // ceiling on how long it can run. Finishing through `stopRecording` is the
+  // same finish the button performs, so a capture that hits the cap is still
+  // transcribed instead of thrown away; the alternative is a blob the route
+  // answers 413 to after the whole upload, which loses the dictation at the
+  // point it cost the most. Armed once per recording: `stopRecording` and the
+  // `releaseMicrophone` it closes over are stable callbacks, so the clock's
+  // re-renders cannot push the deadline back.
   useEffect(() => {
     if (voice.state !== 'recording') return
     const started = Date.now()
     const id = setInterval(() => setRecordingMs(Date.now() - started), 200)
-    return () => clearInterval(id)
-  }, [voice.state])
+    const deadline = setTimeout(stopRecording, MAX_RECORDING_MS)
+    return () => { clearInterval(id); clearTimeout(deadline) }
+  }, [voice.state, stopRecording])
 
   // Closing the panel, navigating away or unmounting must not leave the
   // microphone running: at that point there is no interface left to stop it.
@@ -3011,10 +3026,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
       {/* Voice status. Always rendered while anything is happening: a capture
           that is running, uploading or failed must be visible, because the
-          alternative is a microphone the user cannot tell is live. */}
+          alternative is a microphone the user cannot tell is live. It is a live
+          region for the same reason: the pulsing dot and the running clock are
+          the only signal that the microphone opened, and a screen reader sees
+          neither. Polite rather than an alert — the row also hosts the cancel,
+          retry and dismiss buttons, which an assertive interrupt talks over. */}
       {harnessMode !== 'hermes' && voice.state !== 'idle' && (
         <div
           data-testid="voice-status"
+          role="status"
+          aria-live="polite"
           style={{
             padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 8,
             background: 'rgba(0,0,0,0.2)', fontSize: 11.5,
@@ -3024,7 +3045,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           {voice.state === 'recording' && (
             <span
               aria-hidden
-              style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'clawPulse 1s ease-in-out infinite' }}
+              style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'claw-pulse 1s ease-in-out infinite' }}
             />
           )}
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -3057,7 +3078,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             <button
               onClick={dismissVoiceError}
               data-testid="voice-dismiss"
-              aria-label={t("chat.closePreview")}
+              aria-label={t("chat.voice.dismiss")}
               style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, display: 'flex' }}
             >
               <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>

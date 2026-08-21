@@ -118,6 +118,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.voice.nothingHeard": "Nothing was heard. Try recording again.",
     "chat.voice.failed": "Could not turn that recording into text.",
     "chat.voice.privacy": "Voice input sends your recording to ClawBox AI to be transcribed. It leaves this ClawBox.",
+    "chat.voice.dismiss": "Dismiss",
 
     // === TerminalApp ===
     "terminal.connecting": "Connecting to terminal server…",

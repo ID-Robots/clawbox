@@ -45,6 +45,15 @@ export const TRANSCRIBE_MODEL =
 // a header the caller controls.
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
 
+// The cap above can only be applied to a part once the body has been parsed,
+// and parsing means the bytes are already in memory -- so the request as a
+// whole needs a second bound, applied while it arrives. Nothing in front of
+// this route provides one: the box serves its web UI from Next itself with no
+// reverse proxy trimming bodies, and a route handler gets no default body
+// limit. The spare megabyte is multipart framing and the `model` field, the
+// same headroom the attachment route next door allows itself.
+const MAX_REQUEST_BYTES = MAX_AUDIO_BYTES + 1024 * 1024;
+
 // Long enough that a slow uplink on a busy box still finishes, short enough
 // that a wedged upstream cannot pin the recording UI in "transcribing" for
 // minutes with no way out.
@@ -69,21 +78,85 @@ async function readProxyToken(): Promise<string | null> {
 }
 
 /**
+ * Meter the body and cut the stream off past `MAX_REQUEST_BYTES`.
+ *
+ * Counting the bytes as they pass rather than trusting Content-Length: a
+ * chunked upload declares no length at all, so a header check bounds only the
+ * callers that were never the problem. Erroring the transform cancels the
+ * source, so someone pushing gigabytes stops being read one chunk after the
+ * cap instead of at the end of their upload.
+ *
+ * The overflow is reported by the flag rather than by matching on what the
+ * parser rethrows, because what a parser makes of a cancelled source is its
+ * own business and not something to pin an HTTP status on.
+ */
+function boundedBody(body: ReadableStream<Uint8Array>): {
+  stream: ReadableStream<Uint8Array>;
+  overflowed: () => boolean;
+} {
+  let total = 0;
+  let over = false;
+  const stream = body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        total += chunk.byteLength;
+        if (total > MAX_REQUEST_BYTES) {
+          over = true;
+          controller.error(new Error("request body exceeds the transcription size limit"));
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return { stream, overflowed: () => over };
+}
+
+/**
  * Read the audio part out of the request.
  *
- * `request.formData()` is used rather than a streaming parser because, unlike
- * the attachment route next door, nothing is written to disk here: the bytes
- * go straight back out to the proxy. There is no partial file to clean up and
- * no staged path to hand back, so the streaming machinery would buy nothing.
+ * A streaming parser like the attachment route's busboy would still buy
+ * nothing here: nothing is written to disk, so there is no partial file to
+ * clean up and no staged path to hand back. What the read does need is a
+ * ceiling. `formData()` will not say how big a part is until the entire body
+ * is buffered, so on its own the size check below fires only after the memory
+ * has been spent -- which on a box with a couple of gigabytes free and a model
+ * already loaded is the whole of the damage. So the bytes are counted on the
+ * way in and the parser is handed the metered stream instead of the request.
  */
 async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string } | Failure> {
+  // Content-Length is worth believing when it is offered -- an honest client
+  // is turned away before a byte is read -- but it is a courtesy, not a bound:
+  // a chunked body declares nothing, and a dishonest one declares whatever
+  // gets it past this line. The counted read is what actually holds.
+  const declared = Number(req.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_REQUEST_BYTES) {
+    return { status: 413, error: "The recording is too long" };
+  }
+  let bounded: ReturnType<typeof boundedBody> | null = null;
   let form: FormData;
   try {
-    form = await req.formData();
+    // Inside the try because a body that is already locked or consumed makes
+    // `pipeThrough` throw, and that is the same "this request cannot be read"
+    // failure as a malformed one -- not a 500.
+    bounded = req.body ? boundedBody(req.body) : null;
+    form = bounded
+      ? await new Response(bounded.stream, {
+          headers: { "content-type": req.headers.get("content-type") ?? "" },
+        }).formData()
+      : await req.formData();
   } catch (err) {
+    if (bounded?.overflowed()) {
+      return { status: 413, error: "The recording is too long" };
+    }
     // A truncated or malformed multipart body is the caller's to fix, so it is
-    // a 400 -- reporting it as a 500 sends the user off debugging the box.
-    return { status: 400, error: `Could not read the recording: ${err instanceof Error ? err.message : String(err)}` };
+    // a 400 -- reporting it as a 500 sends the user off debugging the box. The
+    // parser's own wording for it ("Failed to parse body as FormData.") is not
+    // written for a person and is not translated on its way to the composer,
+    // so it stays in the box's log, where it is worth something, and out of the
+    // status line, where it is not.
+    console.warn("[chat/transcribe] could not parse the multipart body:", err);
+    return { status: 400, error: "Could not read the recording." };
   }
   const file = form.get("file");
   if (!file || typeof file === "string") {

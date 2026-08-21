@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 
 // POST /setup-api/chat/transcribe — voice input for device chat.
 //
@@ -26,9 +27,16 @@ function writeConfig(config: unknown): void {
   fs.writeFileSync(path.join(openclawHome, "openclaw.json"), JSON.stringify(config, null, 2));
 }
 
-/** A config with the device linked to ClawBox AI, which is the normal state. */
+/**
+ * A config with the device linked to ClawBox AI, which is the normal state.
+ *
+ * The provider key comes from the same constant the route resolves the
+ * credential through. Hardcoding "deepseek" here would mean a rename of that
+ * constant leaves every test in this file failing as "device not linked",
+ * which points at the fixture rather than at the rename that caused it.
+ */
 function linkedConfig(token = "claw_testtoken0000000000000000000") {
-  return { models: { providers: { deepseek: { baseUrl: "https://clawbox.com/api/ai", apiKey: token } } } };
+  return { models: { providers: { [CLAWBOX_AI_PROVIDER]: { baseUrl: "https://clawbox.com/api/ai", apiKey: token } } } };
 }
 
 function request(body: BodyInit | null, contentType?: string): NextRequest {
@@ -151,6 +159,26 @@ describe("/setup-api/chat/transcribe", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("does not put the multipart parser's own words on the user's screen", async () => {
+    // A truncated upload is ordinary on a flaky uplink. What the runtime says
+    // about it — "Failed to parse body as FormData." — carries no path, URL or
+    // token, so the composer's shape-based filter passes it straight through to
+    // the status line, untranslated and meaningless to whoever is reading it.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await POST(request(
+      "------b\r\nContent-Disposition: form-dat",
+      "multipart/form-data; boundary=----b",
+    ));
+
+    expect(res.status).toBe(400);
+    const { error } = await res.json();
+    expect(error).toBe("Could not read the recording.");
+    expect(error).not.toMatch(/FormData|parse/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The detail is worth keeping, just not on a user's screen.
+    expect(warn).toHaveBeenCalled();
+  });
+
   it("rejects a multipart body with no file part", async () => {
     const form = new FormData();
     form.set("note", "no audio here");
@@ -180,6 +208,75 @@ describe("/setup-api/chat/transcribe", () => {
 
     expect(res.status).toBe(413);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body that declares itself oversized before reading it", async () => {
+    // The cheap half of the guard: a client that announces its size honestly
+    // is turned away before a byte of it is read. The upstream is armed so
+    // that a route which forwards this anyway fails on the status, not on a
+    // mock that returned nothing.
+    fetchMock.mockResolvedValue(jsonResponse({ text: "hi" }));
+    const form = new FormData();
+    form.set("file", new Blob([new Uint8Array(AUDIO)], { type: "audio/webm" }), "recording.webm");
+    const serialised = new Response(form);
+    const body = Buffer.from(await serialised.arrayBuffer());
+    const res = await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
+      method: "POST",
+      headers: {
+        "content-type": serialised.headers.get("content-type") ?? "",
+        "content-length": "999999999",
+      },
+      body,
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]));
+
+    expect(res.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("stops reading an oversized chunked body instead of buffering all of it", async () => {
+    // The half that matters: a chunked upload declares no length, so the
+    // header check above never sees it and the bytes have to be counted as
+    // they arrive. Nothing in front of this route would stop them — the box
+    // has no reverse proxy trimming request bodies.
+    const boundary = "----clawbox-oversized";
+    const CHUNK = 1024 * 1024;
+    const CHUNKS = 40;
+    let pulled = 0;
+    let sent = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent === 0) {
+          controller.enqueue(new Uint8Array(Buffer.from(
+            `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="r.webm"\r\n`
+            + "Content-Type: audio/webm\r\n\r\n",
+          )));
+        } else if (sent <= CHUNKS) {
+          pulled += CHUNK;
+          controller.enqueue(new Uint8Array(CHUNK));
+        } else {
+          controller.enqueue(new Uint8Array(Buffer.from(`\r\n--${boundary}--\r\n`)));
+          controller.close();
+        }
+        sent += 1;
+      },
+    });
+    const res = await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
+      method: "POST",
+      headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+      body,
+      duplex: "half",
+    } as unknown as ConstructorParameters<typeof NextRequest>[1]));
+
+    expect(res.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // The status is 413 whether the body was cut off or swallowed whole, so it
+    // proves nothing on its own. The byte count is the assertion that does: on
+    // a device with a couple of gigabytes free, reading all 40 MB and then
+    // refusing them is the failure this test exists to catch. A cut-off read
+    // stops around 27 MB — the 26 MB cap plus whatever the parser had already
+    // asked for — so the bound here is loose enough not to count chunks and
+    // tight enough that the whole 40 MB cannot slip under it.
+    expect(pulled).toBeLessThan(32 * 1024 * 1024);
   });
 
   it("never relays an upstream error body, which can echo the bearer token back", async () => {

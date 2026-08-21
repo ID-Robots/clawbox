@@ -147,3 +147,16 @@ export function formatRecordingClock(elapsedMs: number): string {
   const seconds = total % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
+
+/**
+ * The longest a single capture may run.
+ *
+ * Nothing else bounds a recording: `MediaRecorder` buffers until it is stopped,
+ * and the transcribe route only discovers an oversized blob (`MAX_AUDIO_BYTES`,
+ * 25 MB) after the whole upload has already gone up — so a capture left running
+ * costs the user the upload and then the words. A minute of Opus at the bitrate
+ * MediaRecorder picks is well under a megabyte, so ten minutes lands around a
+ * tenth of the cap: far enough under it that no browser's default bitrate can
+ * reach the wall, and long enough that no real dictation is cut short.
+ */
+export const MAX_RECORDING_MS = 10 * 60 * 1000;
