@@ -146,6 +146,34 @@ describe("the memory index panel in ClawKeep", () => {
     expect(await screen.findByLabelText("Time")).toBeTruthy();
   });
 
+  it("does not save a half-typed time, so the field cannot jump under the user", async () => {
+    // `<input type="time">` fires onChange while the value is still being
+    // entered and reports an incomplete entry as "". Sent as-is, the server
+    // sanitises it to 03:00 and the panel adopts that — the field jumps to a
+    // time the customer never chose, mid-keystroke.
+    memory = { ...LOCAL_MEMORY, schedule: { enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 } };
+    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    const time = await screen.findByLabelText("Time");
+    fireEvent.change(time, { target: { value: "" } });
+    await waitFor(() => expect((time as HTMLInputElement).value).toBe(""));
+    expect(scheduleCalls).toEqual([]);
+
+    fireEvent.change(time, { target: { value: "04:45" } });
+    await waitFor(() => expect(scheduleCalls).toEqual([
+      { enabled: true, frequency: "daily", timeOfDay: "04:45", weekday: 0 },
+    ]));
+  });
+
+  it("names the weekday picker as a group, since no single control owns that label", async () => {
+    memory = { ...LOCAL_MEMORY, schedule: { enabled: true, frequency: "weekly", timeOfDay: "03:00", weekday: 2 } };
+    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    const group = await screen.findByRole("group", { name: "Day" });
+    expect(group).toBeTruthy();
+    // And the chosen day is announced as chosen, not merely coloured.
+    expect(screen.getByRole("button", { name: "Tue" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Wed" }).getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("surfaces a mismatched index as something to fix, not as a healthy box", async () => {
     memory = {
       ...LOCAL_MEMORY,

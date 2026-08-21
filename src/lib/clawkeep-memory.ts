@@ -528,10 +528,15 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
 export async function resolveIndexMode(requested: MemoryIndexMode): Promise<MemoryIndexMode> {
   if (requested === "full") return "full";
   try {
-    return (await getMemoryStatus()).chunks === 0 ? "full" : "incremental";
+    const status = await getMemoryStatus();
+    // `available` is load-bearing: a failed CLI probe returns the unavailable
+    // status, which also reports zero chunks. Without this check a probe
+    // timeout would silently turn a scheduled incremental pass into a --force
+    // re-embed of an index that was perfectly fine.
+    return status.available && status.chunks === 0 ? "full" : requested;
   } catch {
-    // If the status cannot be read, run what was asked rather than silently
-    // upgrading to a full reindex on a box we know nothing about.
+    // Same rule when the probe throws: run what was asked rather than
+    // upgrading on a box we know nothing about.
     return requested;
   }
 }
@@ -604,7 +609,18 @@ export async function startMemoryIndex(
     { env: openclawEnv(), stdio: "ignore" },
   );
   state = { ...state, childPid: child.pid ?? 0 };
-  await writeRunState(state);
+  try {
+    await writeRunState(state);
+  } catch (err) {
+    // Without this, the child keeps indexing unsupervised while the lock stays
+    // on disk with childPid 0; LOCK_START_GRACE_MS later the reconcile calls
+    // the live run interrupted and frees the lock, and a second index starts
+    // on top of the first.
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
+    invalidateMemoryStatusCache();
+    throw err;
+  }
   invalidateMemoryStatusCache();
 
   let settled = false;

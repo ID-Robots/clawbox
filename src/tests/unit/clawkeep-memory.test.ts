@@ -170,7 +170,10 @@ describe("run state", () => {
     await fs.mkdir(tmpDir, { recursive: true });
     await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
       status: "running", mode: "full", trigger: "manual",
-      startedAtMs: Date.now() - 10 * 60_000, finishedAtMs: 0, durationMs: 0,
+      // Older than INDEX_TIMEOUT_MS as well as naming a dead pid: on a kernel
+      // with a large pid_max, 999999 can exist and the age is what makes the
+      // reconcile deterministic.
+      startedAtMs: Date.now() - 3 * 60 * 60_000, finishedAtMs: 0, durationMs: 0,
       error: "", childPid: 999_999,
     }));
     const run = await readMemoryRunState();
@@ -222,6 +225,20 @@ describe("what the first Index now click actually runs", () => {
 
   it("leaves an existing index alone", async () => {
     const { resolveIndexMode } = await withStatusChunks(512);
+    expect(await resolveIndexMode("incremental")).toBe("incremental");
+  });
+
+  it("does not turn a failed status probe into a full reindex", async () => {
+    // getMemoryStatus() answers with the unavailable status when the probe
+    // fails, and that fallback also reports zero chunks. Promoting on chunks
+    // alone would re-embed a perfectly good index every time the CLI hiccuped
+    // — including on the unattended schedule.
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
+    vi.resetModules();
+    const { resolveIndexMode, getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    const status = await getMemoryStatus();
+    expect(status.available).toBe(false);
+    expect(status.chunks).toBe(0);
     expect(await resolveIndexMode("incremental")).toBe("incremental");
   });
 

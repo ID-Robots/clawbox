@@ -124,6 +124,10 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     const body = await res.json();
     expect(body.accepted).toBe(false);
     expect(body.run.status).toBe("running");
+    // No status payload on this path: attaching it made every accept/decline
+    // pay for a fresh 90s-bounded CLI probe on an 8 GB box, and the panel
+    // refetches the status straight afterwards anyway.
+    expect(body.status).toBeUndefined();
   });
 
   it("never returns the pid it is running under", async () => {

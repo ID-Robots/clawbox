@@ -24,6 +24,13 @@ import {
 
 let armed: NodeJS.Timeout | null = null;
 let armedFor = 0;
+/**
+ * Discards a re-arm whose schedule read was overtaken by a newer one. Two
+ * saves in quick succession both clear the timer and both await the file; if
+ * the older read resolves last it would arm the schedule the user just
+ * replaced.
+ */
+let rearmGeneration = 0;
 
 function clear(): void {
   if (armed) {
@@ -34,6 +41,10 @@ function clear(): void {
 }
 
 function fire(): void {
+  // Drop the consumed slot first. Otherwise `armedFor` keeps pointing at a
+  // time that has already passed for as long as the index runs, and the panel
+  // shows a "next run" in the past.
+  clear();
   // Incremental, never a full reindex: a scheduled run must not spend hours
   // re-embedding everything unattended. The one exception is a box with no
   // index at all, where an incremental pass cannot succeed — resolveIndexMode
@@ -53,8 +64,11 @@ function fire(): void {
 }
 
 async function rearm(): Promise<void> {
+  const generation = ++rearmGeneration;
   clear();
-  arm(await readMemorySchedule());
+  const schedule = await readMemorySchedule();
+  if (generation !== rearmGeneration) return;
+  arm(schedule);
 }
 
 function arm(schedule: MemoryIndexSchedule): void {
@@ -70,8 +84,9 @@ function arm(schedule: MemoryIndexSchedule): void {
 
 /** Boot hook — call once at process start. Idempotent. */
 export async function start(): Promise<void> {
-  clear();
-  arm(await readMemorySchedule());
+  // Through the same serialised path, so a boot racing a save cannot arm the
+  // older of the two schedules.
+  await rearm();
 }
 
 /** Re-read the persisted schedule and re-arm, after the user saves one. */

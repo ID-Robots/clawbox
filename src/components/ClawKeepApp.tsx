@@ -883,26 +883,42 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   const [draft, setDraft] = useState<MemoryIndexSchedule | null>(null);
   const [savingSchedule, setSavingSchedule] = useState(false);
 
+  // Read through refs, not through the closure: `load` is called from an
+  // interval, and a poll that started before the user touched the schedule
+  // would otherwise still be holding `savingSchedule === false` and would
+  // stamp the pre-edit value back over the control.
+  const savingScheduleRef = useRef(false);
+  const loadInFlightRef = useRef(false);
+
   const load = useCallback(async () => {
+    // The status route can block for up to 90s on a cache miss while the CLI
+    // probe runs, and the fast tick is 3s. Without this guard the ticks stack
+    // concurrent probes on an 8 GB box, which is exactly what they are
+    // competing with the indexer for.
+    if (loadInFlightRef.current) return;
+    loadInFlightRef.current = true;
     try {
       const body = await jsonOrError<ClawKeepMemoryStatus>(await fetch("/setup-api/clawkeep/memory"));
       setStatus(body);
       // Only adopt the server's schedule while the user is not mid-edit, or a
       // poll landing between two clicks would throw their change away.
-      setDraft((prev) => (prev && savingSchedule ? prev : body.schedule));
+      setDraft((prev) => (prev && savingScheduleRef.current ? prev : body.schedule));
     } catch {
       // A failed poll is not worth a red banner: the panel keeps the last good
       // reading and the next tick corrects it.
+    } finally {
+      loadInFlightRef.current = false;
     }
-  }, [savingSchedule]);
-
-  useEffect(() => { void load(); }, [load]);
+  }, []);
 
   // Poll fast while a run is in flight so "running" turns into a real outcome
   // on its own, and slowly the rest of the time — the status probe shells out
-  // to the OpenClaw CLI and this box has 8 GB.
+  // to the OpenClaw CLI and this box has 8 GB. The first read happens here too
+  // rather than in an effect of its own, which also keeps this off
+  // react-hooks/set-state-in-effect.
   const running = status?.run.status === "running";
   useEffect(() => {
+    void load();
     const id = setInterval(() => { void load(); }, running ? 3_000 : 30_000);
     return () => clearInterval(id);
   }, [load, running]);
@@ -932,6 +948,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
 
   const saveSchedule = async (next: MemoryIndexSchedule) => {
     setDraft(next);
+    savingScheduleRef.current = true;
     setSavingSchedule(true);
     try {
       const body = await jsonOrError<{ schedule: MemoryIndexSchedule; nextRunAtMs: number }>(
@@ -947,6 +964,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
       onError(t("clawkeep.memory.scheduleSaveFailed"));
       await load();
     } finally {
+      savingScheduleRef.current = false;
       setSavingSchedule(false);
     }
   };
@@ -1101,19 +1119,31 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                 type="time"
                 value={schedule.timeOfDay}
                 disabled={savingSchedule}
-                onChange={(e) => void saveSchedule({ ...schedule, timeOfDay: e.target.value })}
+                onChange={(e) => {
+                  // A half-entered time arrives as "" (or out of range). Sent
+                  // as-is, the server sanitises it to 03:00 and the field
+                  // jumps to a time the customer never chose, mid-keystroke.
+                  const next = e.target.value;
+                  setDraft({ ...schedule, timeOfDay: next });
+                  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(next)) {
+                    void saveSchedule({ ...schedule, timeOfDay: next });
+                  }
+                }}
                 className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
               />
               <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
             </div>
             {schedule.frequency === "weekly" && (
               <div className="flex items-center gap-3">
-                <label className="text-xs text-[var(--text-muted)] w-16">{t("clawkeep.schedule.day")}</label>
-                <div className="flex gap-1 flex-wrap">
+                <span id="clawkeep-memory-day-label" className="text-xs text-[var(--text-muted)] w-16">
+                  {t("clawkeep.schedule.day")}
+                </span>
+                <div className="flex gap-1 flex-wrap" role="group" aria-labelledby="clawkeep-memory-day-label">
                   {WEEKDAY_LABEL_KEYS.map((labelKey, idx) => (
                     <button
                       key={idx}
                       type="button"
+                      aria-pressed={schedule.weekday === idx}
                       disabled={savingSchedule}
                       onClick={() => void saveSchedule({ ...schedule, weekday: idx })}
                       className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer disabled:opacity-50 ${

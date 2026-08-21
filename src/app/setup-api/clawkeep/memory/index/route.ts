@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { getMemoryStatus, resolveIndexMode, startMemoryIndex } from "@/lib/clawkeep-memory";
+import { resolveIndexMode, startMemoryIndex } from "@/lib/clawkeep-memory";
 
 export const dynamic = "force-dynamic";
 
@@ -15,20 +15,23 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}));
-  const requested = (body as { mode?: unknown }).mode === "full" ? "full" : "incremental";
+  // `request.json()` resolves a literal `null` body to null, which the cast
+  // does not change — reading `.mode` off it threw and the outer catch turned
+  // that into a 500.
+  const requested = (body as { mode?: unknown } | null)?.mode === "full" ? "full" : "incremental";
   try {
     // On a box with no index yet, an incremental pass cannot succeed — see
     // resolveIndexMode. The run reports the mode it actually used.
     const { accepted, run } = await startMemoryIndex(await resolveIndexMode(requested), "manual");
-    if (!accepted) {
-      return NextResponse.json(
-        { accepted: false, run, status: await getMemoryStatus() },
-        { status: 409, headers: { "Cache-Control": "no-store" } },
-      );
-    }
+    // The run state only. Attaching the status here made the accept path pay
+    // for a fresh `openclaw memory status --deep` probe — startMemoryIndex
+    // invalidates the cache as it spawns, so it always missed — and that probe
+    // is bounded at 90s and would compete with the indexing child it had just
+    // started, on a box with 8 GB. The panel refetches the status straight
+    // after this resolves anyway.
     return NextResponse.json(
-      { accepted: true, run, status: await getMemoryStatus() },
-      { headers: { "Cache-Control": "no-store" } },
+      { accepted, run },
+      { status: accepted ? 200 : 409, headers: { "Cache-Control": "no-store" } },
     );
   } catch {
     // Deliberately a fixed string: the underlying failure can carry a path or
