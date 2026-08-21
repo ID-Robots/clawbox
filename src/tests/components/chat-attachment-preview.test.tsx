@@ -386,6 +386,24 @@ describe("device chat attachment preview", () => {
     expect(screen.queryByTestId("chat-attachment-error")).toBeFalsy();
   });
 
+  it("drops an upload that lands after the chat unmounted", async () => {
+    // The unmount twin of the close case. A request in flight is not in
+    // `attachments` yet, so revoking that list cannot reach its object URL —
+    // only invalidating the generation can.
+    const release = holdStaging();
+    const view = render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const textarea = await screen.findByRole("textbox");
+    await connected();
+
+    pasteImage(textarea);
+    await waitFor(() => expect(nextBlobId).toBe(1));
+
+    view.unmount();
+    release();
+
+    await waitFor(() => expect(revoked).toContain("blob:preview-1"));
+  });
+
   it("treats a 200 whose path is not a string as a failure", async () => {
     // The route is ours, but a truthy non-string would otherwise reach the
     // strip and be sent to the agent as "[object Object]".

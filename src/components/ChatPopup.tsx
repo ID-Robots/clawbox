@@ -1917,7 +1917,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // an effect with `[]` deps closes over the first render's empty array.
   const attachmentsRef = useRef<ChatAttachment[]>([])
   useEffect(() => { attachmentsRef.current = attachments }, [attachments])
-  useEffect(() => () => { revokePreviews(attachmentsRef.current) }, [])
+  useEffect(() => () => {
+    // Same bump as the close path, for the same reason: an upload still in
+    // flight is not in `attachmentsRef` yet, so revoking that list alone would
+    // let the late completion keep its object URL — and hand it to a
+    // `setAttachments` on a component that no longer exists.
+    uploadGenerationRef.current += 1
+    revokePreviews(attachmentsRef.current)
+  }, [])
   useEffect(() => {
     if (isOpen) return
     // Bump first: an upload still in flight must see a stale generation the
