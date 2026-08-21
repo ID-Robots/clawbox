@@ -42,6 +42,11 @@ const PRESERVE_FILES = new Set(["network.env", "llamacpp"]);
 // prompt text out of that log today; narrowing the keep to models/ is what
 // makes it stay true when the config changes, rather than something that has
 // to be re-verified every time llama.cpp is upgraded.
+//
+// Same KNOWN RESIDUAL as the ~/.hermes exception, for the same reasons and
+// with the same verdict — see the "KNOWN RESIDUAL" paragraph in
+// HOME_CONTENT_WIPE_KEEP below: a previous owner with a shell can plant a file
+// in a preserved directory and it survives the reset.
 const LLAMACPP_KEEP = new Set(["models"]);
 
 // Entries under ~/.hermes to preserve — see the .hermes entry in
