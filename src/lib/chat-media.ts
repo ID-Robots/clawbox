@@ -227,9 +227,28 @@ export function extractAudioAttachments(msg: unknown): string[] {
 /** `[Attached file: /path]` as the composer writes it, one per line. */
 const ATTACHED_FILE_LINE_RE = /^\[Attached file:\s*([^\]]+)\]$/;
 
-/** The last path segment, which is the only part a customer ever chose. */
-function baseName(source: string): string {
-  return source.replace(/\/+$/, "").split("/").pop() || source;
+/**
+ * The display name for an attachment, from the path it was stored under.
+ *
+ * The staging route writes `<uuid>-<sanitised leaf>` so two files uploaded in
+ * the same millisecond cannot collide, and answers with the bare leaf as
+ * `name`. The live composer shows that `name`; only a replay has to recover it
+ * from the path. Without stripping the prefix the SAME attachment reads
+ * `report.pdf` while it is being sent and
+ * `4f1c…-report.pdf` after a reload — the label changing under a customer who
+ * did nothing but refresh.
+ *
+ * The prefix is matched exactly — 8-4-4-4-12 hex followed by a hyphen — so a
+ * file the customer actually named something UUID-shaped is left alone unless
+ * it matches the whole shape, and any other name is untouched.
+ */
+const UUID_PREFIX_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-/i;
+
+function displayName(source: string): string {
+  const leaf = source.replace(/\/+$/, "").split("/").pop() || source;
+  const stripped = leaf.replace(UUID_PREFIX_RE, "");
+  // A file whose whole name was the prefix would otherwise become "".
+  return stripped || leaf;
 }
 
 /**
@@ -267,7 +286,7 @@ export function splitUserAttachments(
       continue;
     }
     if (isImageMedia(source)) images.push(mediaUrl(source));
-    else files.push(baseName(source));
+    else files.push(displayName(source));
   }
   const text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
   return { text, images, files };

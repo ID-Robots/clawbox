@@ -52,6 +52,26 @@ describe("splitUserAttachments", () => {
     expect(out.images).toHaveLength(1);
   });
 
+  it("shows the name the customer sees, not the name the box stored it under", () => {
+    // The staging route writes `<uuid>-<leaf>` so two uploads in the same
+    // millisecond cannot collide, and answers with the bare leaf as `name`.
+    // The live composer shows that name. Without stripping the prefix here the
+    // SAME attachment read "report.pdf" while being sent and
+    // "5830d658-…-report.pdf" after a refresh — the label changing under a
+    // customer who did nothing but reload. Observed on box .177: the staged
+    // path was …/5830d658-c344-4515-bf01-4dc529a62528-paste-1787348034172-0.png
+    // for an attachment the composer labelled paste-1787348034172-0.png.
+    const stored = "/home/clawbox/.openclaw/media/chat-attachments/5830d658-c344-4515-bf01-4dc529a62528-report.pdf";
+    expect(splitUserAttachments(`[Attached file: ${stored}]\nsummarise`).files).toEqual(["report.pdf"]);
+  });
+
+  it("leaves a name that merely looks uuid-ish alone", () => {
+    // Only the exact 8-4-4-4-12 storage prefix is removed, so a file the
+    // customer really named this way keeps its name.
+    const near = "/home/clawbox/.openclaw/media/chat-attachments/5830d658-notes.pdf";
+    expect(splitUserAttachments(`[Attached file: ${near}]\nx`).files).toEqual(["5830d658-notes.pdf"]);
+  });
+
   it("leaves a turn that has no attachments completely alone", () => {
     expect(splitUserAttachments("just a question")).toEqual({
       text: "just a question", images: [], files: [],
