@@ -108,20 +108,33 @@ function staged(): string[] {
 }
 
 /**
- * Wait until the staging directory is empty, or fail once the deadline passes.
+ * Require the staging directory to be empty and to STAY empty for a window.
  *
- * Cleanup finishes after the response, so these assertions need to wait for
+ * Cleanup finishes after the response, so these assertions have to wait for
  * something. A fixed sleep is the wrong instrument twice over: too short and it
- * flakes on a loaded CI box, too long and every run pays for it. Polling
- * returns as soon as the directory is actually clean, and a real leak still
- * fails -- one `expect` on the last read, either way.
+ * flakes on a loaded CI box, too long and every run pays for it.
+ *
+ * But "poll until empty" is worse than the sleep it replaces, because the
+ * regressions these tests exist for stage the orphan file *after* the response
+ * resolves -- so the first read is empty, a stop-on-empty poll returns
+ * immediately, and the test passes while the orphan lands a moment later. It
+ * would have gone green on the very bug it was written to catch.
+ *
+ * So: empty is necessary but not sufficient. The directory has to read empty
+ * continuously for `settleMs`, and any file appearing inside that window resets
+ * it. Clean runs still finish in about the settle time rather than the timeout.
  */
-async function expectStagingDrains(timeoutMs = 5000): Promise<void> {
+async function expectStagingDrains(timeoutMs = 5000, settleMs = 300): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let listed = staged();
-  while (listed.length && Date.now() < deadline) {
+  let emptySince = listed.length ? null : Date.now();
+  while (Date.now() < deadline) {
+    if (emptySince !== null && Date.now() - emptySince >= settleMs) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
     listed = staged();
+    // A file appearing after an empty read is exactly the leak under test:
+    // restart the window rather than accept the earlier reading.
+    emptySince = listed.length ? null : (emptySince ?? Date.now());
   }
   expect(listed).toEqual([]);
 }
@@ -452,6 +465,9 @@ describe("/setup-api/chat/attachments", () => {
     const spy = vi.spyOn(fs.promises, "readdir").mockRejectedValueOnce(new Error("EACCES"));
     const res = await POST(request(multipart("shapes.png", PNG)));
     expect(res.status).toBe(200);
+    // Without this the test would still pass if the sweep stopped running at
+    // all: a route that never reads the directory cannot fail on a read.
+    expect(spy).toHaveBeenCalled();
     expect(fs.existsSync((await res.json()).path)).toBe(true);
     spy.mockRestore();
   });
