@@ -171,3 +171,61 @@ export function normalizeClawboxAiPlan(value: unknown): ClawboxAiPlan | null {
 export function monthlyImageLimitForPlan(plan: ClawboxAiPlan | null): number | null {
   return plan ? CLAWBOX_AI_MONTHLY_IMAGE_LIMITS[plan] : null;
 }
+
+/* ---------------------------------------------------------------------------
+ * ClawBox AI vision (image understanding)
+ * ------------------------------------------------------------------------ */
+
+/**
+ * Model the device uses to *look at* an image the user attached in chat.
+ *
+ * Registered under `CLAWBOX_AI_PROVIDER` (`deepseek`) rather than `openai`,
+ * even though the id is an OpenAI one, because that provider entry is really
+ * "the ClawBox AI proxy": it already carries `api: "openai-completions"`, the
+ * proxy `baseUrl` and the `claw_` subscription token, which is exactly the
+ * transport a vision request needs. OpenClaw's `openai` provider defaults to
+ * `openai-responses` (`dist/model-C3gzf-T3.js` on 2026.7.1), an API the proxy
+ * does not speak, so an entry there would have to re-declare the api, the
+ * baseUrl and the auth to end up in the same place.
+ *
+ * It cannot leak into the chat model picker: the device catalogue for
+ * `clawai` is the hardcoded two-entry `CLAWAI_STATIC_MODELS` in
+ * src/app/setup-api/ai-models/catalog/route.ts, not a read of
+ * `models.providers.deepseek.models`.
+ *
+ * Env-overridable for the same reason the chat and image slugs are — the proxy
+ * matches the BARE id against its allowlist, so this value must always name
+ * something production already allows.
+ */
+export const CLAWBOX_AI_VISION_MODEL_ID =
+  process.env.CLAWBOX_AI_VISION_MODEL_ID?.trim() || "gpt-5.6-luna";
+
+/** `name` on the model entry. Required by OpenClaw's schema — see the image label. */
+export const CLAWBOX_AI_VISION_MODEL_LABEL = "ClawBox AI Vision";
+
+/** Fully-qualified ref written to `agents.defaults.imageModel.primary`. */
+export const CLAWBOX_AI_VISION_MODEL = `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_VISION_MODEL_ID}`;
+
+/**
+ * Input modalities. `image` is the whole point of the entry: OpenClaw's
+ * `resolveImageRuntime` (`dist/image-Bg-2ezSd.js:99` on 2026.7.1) refuses a
+ * media-understanding model whose catalog entry does not advertise it, with
+ * "Model does not support images".
+ */
+export const CLAWBOX_AI_VISION_INPUT_MODALITIES = ["text", "image"] as const;
+
+/**
+ * Completion-token ceiling the upstream actually enforces, measured against the
+ * live proxy from a device on 2026-08-21: `max_tokens: 128000` is accepted,
+ * `200000` and `400000` both come back 400 "max_tokens is too large … This
+ * model supports at most 128000 completion tokens".
+ *
+ * 200,000 is not an arbitrary counter-example: it is the generic default a
+ * configured provider entry falls through to when it omits the field, because
+ * an entry in `models.providers` overrides OpenClaw's bundled catalog outright.
+ * The media-understanding path in 2026.7.1 happens not to send `max_tokens` at
+ * all — verified on a real box, the describe call succeeds with this field
+ * removed — so this is a guard against any caller that does start sending it,
+ * not the thing that makes vision work today.
+ */
+export const CLAWBOX_AI_VISION_MAX_TOKENS = 128_000;
