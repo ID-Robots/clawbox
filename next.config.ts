@@ -92,8 +92,17 @@ const nextConfig: NextConfig = {
             value: "strict-origin-when-cross-origin",
           },
           {
+            // `microphone=(self)` and nothing wider. Voice input in the chat
+            // composer is a first-party feature of this UI, and a policy of
+            // `microphone=()` disables it for the document itself: the browser
+            // then answers getUserMedia with NotAllowedError even in a secure
+            // context with the permission already granted, so the mic button
+            // is a control that can never work. `self` restores it for this
+            // origin only — a cross-origin frame still gets nothing unless the
+            // embedder delegates AND this list names it, which it does not.
+            // Camera and geolocation stay off: nothing in the UI asks for them.
             key: "Permissions-Policy",
-            value: "camera=(), microphone=(), geolocation=()",
+            value: "camera=(), microphone=(self), geolocation=()",
           },
           {
             key: "Content-Security-Policy",
