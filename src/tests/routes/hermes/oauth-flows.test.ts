@@ -135,6 +135,12 @@ describe("hermes provider-OAuth relay routes", () => {
       expect(mockDashboardFetch).not.toHaveBeenCalled();
     });
 
+    it("refuses an oversized body before parsing it", async () => {
+      const res = await startPOST(jsonRequest("start", "POST", { providerId: "a".repeat(32 * 1024) }));
+      expect(res.status).toBe(400);
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
     it("rejects a non-JSON body", async () => {
       const res = await startPOST(
         new Request("http://localhost/setup-api/hermes/oauth/start", { method: "POST", body: "nope" }),

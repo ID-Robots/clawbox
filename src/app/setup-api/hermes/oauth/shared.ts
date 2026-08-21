@@ -24,6 +24,47 @@ export function isValidSessionId(value: unknown): value is string {
   return typeof value === "string" && SESSION_ID_RE.test(value);
 }
 
+// Bound the request body BEFORE JSON.parse — Route Handlers have no built-in
+// body-size limit, and this server runs on a memory-constrained Jetson.
+// Anything the wizard legitimately sends is under a kilobyte.
+export const MAX_BODY_BYTES = 16 * 1024;
+
+/** Parse a JSON object body, refusing oversized or malformed input with null. */
+export async function readJsonBody(request: Request): Promise<Record<string, unknown> | null> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) return null;
+  let text: string;
+  if (request.body) {
+    // Read the stream with a running cap so a chunked body with no (or a lying)
+    // content-length can never be buffered past the limit.
+    const reader = request.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      chunks.push(value);
+    }
+    text = Buffer.concat(chunks).toString("utf8");
+  } else {
+    text = await request.text();
+    if (text.length > MAX_BODY_BYTES) return null;
+  }
+  try {
+    const value: unknown = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 404 unless the device runs Hermes — same gate as ../route.ts. */
 export async function hermesGate(): Promise<NextResponse | null> {
   if ((await getActiveHarness()) !== "hermes") {

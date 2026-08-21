@@ -2,7 +2,14 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
-import { dashboardUnreachable, hermesGate, isValidProviderId, isValidSessionId, relayJson } from "../shared";
+import {
+  dashboardUnreachable,
+  hermesGate,
+  isValidProviderId,
+  isValidSessionId,
+  readJsonBody,
+  relayJson,
+} from "../shared";
 
 // Complete a PKCE session with the code the user pasted from the provider's
 // consent page (Anthropic redirects to console.anthropic.com/oauth/code/callback
@@ -20,10 +27,8 @@ export async function POST(request: Request) {
   const gate = await hermesGate();
   if (gate) return gate;
 
-  let body: { providerId?: unknown; sessionId?: unknown; code?: unknown };
-  try {
-    body = await request.json();
-  } catch {
+  const body = await readJsonBody(request);
+  if (!body) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
   if (!isValidProviderId(body.providerId)) {

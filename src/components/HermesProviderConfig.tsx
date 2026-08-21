@@ -61,8 +61,23 @@ type OauthSignin =
       userCode: string;
       verificationUrl: string;
       pollMs: number;
+      /** Epoch ms; the poll loop's hard deadline, from the session's expires_in. */
+      expiresAt: number;
     }
   | { stage: "failed"; providerId: string; message: string };
+
+/** Only ever open or render a dashboard-supplied URL if it is plain http(s) —
+ *  anything else (javascript:, data:, a bare token) must not reach window.open
+ *  or an href. */
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 interface Props {
   embedded?: boolean;
@@ -174,6 +189,11 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [oauthCode, setOauthCode] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
+  // Bumped by every reset/unmount so a /start response that lands AFTER the
+  // user moved on (switched rows, hit Start over, left the panel) knows it was
+  // abandoned and hands its session straight back to the dashboard instead of
+  // resurrecting a flow nobody is looking at.
+  const signinGenRef = useRef(0);
 
   const cancelOauthSession = useCallback((sessionId: string) => {
     // Best-effort; keepalive lets the request outlive an unmounting page.
@@ -187,6 +207,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
 
   const resetSignin = useCallback(() => {
     const s = signinRef.current;
+    signinGenRef.current += 1;
     if (s && (s.stage === "pkce" || s.stage === "device")) cancelOauthSession(s.sessionId);
     setSignin(null);
     setOauthCode("");
@@ -197,6 +218,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     // Panel going away mid-flow: don't leave a half-open session on the
     // dashboard until its expiry.
     const s = signinRef.current;
+    signinGenRef.current += 1;
     if (s && (s.stage === "pkce" || s.stage === "device")) cancelOauthSession(s.sessionId);
   }, [cancelOauthSession]);
 
@@ -356,6 +378,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
 
   async function startOauth(providerId: string) {
     resetSignin();
+    const gen = signinGenRef.current;
     setSignin({ stage: "starting", providerId });
     try {
       const res = await fetch("/setup-api/hermes/oauth/start", {
@@ -368,7 +391,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
         throw new Error(typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
       }
       const sessionId = typeof data.session_id === "string" ? data.session_id : "";
-      if (data.flow === "pkce" && sessionId && typeof data.auth_url === "string") {
+      if (gen !== signinGenRef.current) {
+        // Abandoned mid-start: give the session back instead of leaking it.
+        if (sessionId) cancelOauthSession(sessionId);
+        return;
+      }
+      if (data.flow === "pkce" && sessionId && isHttpUrl(data.auth_url)) {
         // The provider's consent page ends by SHOWING a code the user copies
         // back here (Anthropic's redirect_uri is its own console) — nothing
         // ever redirects back to this origin, which is why the flow survives
@@ -378,18 +406,22 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       } else if (data.flow === "device_code" && sessionId) {
         const interval =
           typeof data.poll_interval === "number" && data.poll_interval > 0 ? data.poll_interval : 5;
+        const expiresIn =
+          typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : 900;
         setSignin({
           stage: "device",
           providerId,
           sessionId,
           userCode: typeof data.user_code === "string" ? data.user_code : "",
-          verificationUrl: typeof data.verification_url === "string" ? data.verification_url : "",
+          verificationUrl: isHttpUrl(data.verification_url) ? data.verification_url : "",
           pollMs: Math.max(3, interval) * 1000,
+          expiresAt: Date.now() + expiresIn * 1000,
         });
       } else {
         throw new Error("Unexpected response from Hermes");
       }
     } catch (e) {
+      if (gen !== signinGenRef.current) return;
       setSignin({
         stage: "failed",
         providerId,
@@ -434,11 +466,22 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   // an interval: a slow relay must never stack requests.
   useEffect(() => {
     if (!signin || signin.stage !== "device") return;
-    const { providerId, sessionId, pollMs } = signin;
+    const { providerId, sessionId, pollMs, expiresAt } = signin;
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     const tick = async () => {
       let terminal = false;
+      // Hard deadline from the session's own expires_in: even if every poll
+      // errors (relay down, dashboard restarting), the loop cannot outlive the
+      // session it is polling for.
+      if (Date.now() >= expiresAt) {
+        setSignin({
+          stage: "failed",
+          providerId,
+          message: "The sign-in request expired. Try again.",
+        });
+        return;
+      }
       try {
         const res = await fetch(
           `/setup-api/hermes/oauth/poll?providerId=${encodeURIComponent(providerId)}&sessionId=${encodeURIComponent(sessionId)}`,

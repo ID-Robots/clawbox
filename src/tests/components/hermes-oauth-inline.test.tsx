@@ -205,6 +205,48 @@ describe("HermesProviderConfig inline OAuth", () => {
     expect(openMock).not.toHaveBeenCalled();
   });
 
+  it("cancels the dashboard session when the user starts over mid-flow", async () => {
+    const fetchMock = stubFetch();
+
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Sign in$/ }));
+    await screen.findByPlaceholderText("Paste the code from Anthropic");
+
+    fireEvent.click(screen.getByRole("button", { name: /Start over/ }));
+
+    await waitFor(() => {
+      const cancelCall = fetchMock.mock.calls.find(([u]) => String(u) === "/setup-api/hermes/oauth/cancel");
+      expect(cancelCall).toBeTruthy();
+      expect(JSON.parse(String(cancelCall?.[1]?.body))).toEqual({ sessionId: "sess-anthropic-1" });
+    });
+    // Back to the idle state, ready to start a fresh session.
+    expect(await screen.findByRole("button", { name: /^Sign in$/ })).toBeInTheDocument();
+  });
+
+  it("copies the device code and confirms with Copied", async () => {
+    stubFetch();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /OpenAI/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Sign in$/ }));
+    await screen.findByTestId("hermes-oauth-user-code");
+
+    fireEvent.click(screen.getByRole("button", { name: /Copy code/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Copied/ })).toBeInTheDocument();
+    });
+    expect(writeText).toHaveBeenCalledWith("ABCD-1234");
+  });
+
   it("shows the CLI command instead of a Sign in button for an external-flow provider", async () => {
     stubFetch();
 
