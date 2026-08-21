@@ -54,7 +54,7 @@ type Outcome =
 interface GenerationArgs { prompt: string; locale: string }
 
 let nextOutcome: Outcome = { status: "deferred", reason: "busy" };
-const defaultGeneration = async (_args: GenerationArgs): Promise<Outcome> => nextOutcome;
+const defaultGeneration = async (): Promise<Outcome> => nextOutcome;
 const generateSpy = vi.fn(defaultGeneration);
 
 vi.mock("@/lib/mascot-generation-local", () => ({
