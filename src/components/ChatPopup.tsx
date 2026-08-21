@@ -19,6 +19,16 @@ import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName } from '@/lib/chat-media'
 import {
+  IDLE_STATUS,
+  classifyCaptureError,
+  describeTranscribeFailure,
+  formatRecordingClock,
+  mergeTranscript,
+  pickRecordingMimeType,
+  recordingFileName,
+  type VoiceStatus,
+} from '@/lib/chat-voice-input'
+import {
   type ThinkingLevel,
   type ProviderReasoningConfig,
   THINKING_LEVEL_LABELS,
@@ -1550,6 +1560,170 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setAttachments(prev => prev.filter((_, i) => i !== idx))
   }, [])
 
+  // ── Voice input ───────────────────────────────────────────────────────
+  //
+  // Record in the composer, transcribe on the box, drop the text in the input
+  // for the user to read before they send it. Deliberately NOT send-on-stop:
+  // transcription gets words wrong, and a chat that fires off a misheard
+  // sentence before you can look at it is worse than no dictation at all.
+  const [voice, setVoice] = useState<VoiceStatus>(IDLE_STATUS)
+  const [recordingMs, setRecordingMs] = useState(0)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  // Set when the user cancels, so the recorder's stop handler knows to throw
+  // the audio away instead of transcribing it. `MediaRecorder.stop()` is the
+  // only way to end a capture, so cancel and finish arrive at the same place
+  // and something has to tell them apart.
+  const cancelledRef = useRef(false)
+  // The last recording, kept so a failed transcription can be retried without
+  // making the user say it all again.
+  const lastAudioRef = useRef<{ blob: Blob; name: string } | null>(null)
+
+  /**
+   * Release the microphone.
+   *
+   * Every path out of recording goes through here — finish, cancel, error,
+   * unmount. A live capture with no visible indicator is the one thing this
+   * feature must never leave behind, so this is deliberately idempotent and
+   * called more often than strictly necessary.
+   */
+  const releaseMicrophone = useCallback(() => {
+    const stream = streamRef.current
+    streamRef.current = null
+    recorderRef.current = null
+    if (stream) for (const track of stream.getTracks()) track.stop()
+  }, [])
+
+  const transcribe = useCallback(async (blob: Blob, name: string) => {
+    setVoice({ state: 'transcribing', error: null, message: null, canRetry: false })
+    try {
+      const form = new FormData()
+      form.append('file', blob, name)
+      const res = await fetch('/setup-api/chat/transcribe', { method: 'POST', body: form })
+      const payload = await res.json().catch(() => null)
+      if (!res.ok) {
+        setVoice({
+          state: 'error',
+          error: 'transcribe',
+          message: describeTranscribeFailure(payload),
+          // The audio is still in hand, so this is worth offering again —
+          // most failures here are a flaky uplink, not a bad recording.
+          canRetry: true,
+        })
+        return
+      }
+      const text = typeof payload?.text === 'string' ? payload.text : ''
+      if (!text.trim()) {
+        // A successful call that heard nothing. Not an error, but silently
+        // returning to idle would look like the button did nothing at all.
+        setVoice({ state: 'error', error: 'empty', message: null, canRetry: true })
+        return
+      }
+      setInput(prev => mergeTranscript(prev, text))
+      setVoice(IDLE_STATUS)
+      lastAudioRef.current = null
+      setTimeout(() => inputRef.current?.focus(), 0)
+    } catch {
+      setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: true })
+    }
+  }, [])
+
+  const startRecording = useCallback(async () => {
+    if (voice.state === 'recording' || voice.state === 'requesting') return
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+      return
+    }
+    setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
+    let stream: MediaStream
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    } catch (err) {
+      setVoice({ state: 'error', error: classifyCaptureError(err), message: null, canRetry: false })
+      return
+    }
+    const mimeType = pickRecordingMimeType()
+    let recorder: MediaRecorder
+    try {
+      recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined)
+    } catch {
+      // The stream is already open at this point; letting it stay open would
+      // leave the microphone live with nothing on screen saying so.
+      for (const track of stream.getTracks()) track.stop()
+      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+      return
+    }
+    streamRef.current = stream
+    recorderRef.current = recorder
+    chunksRef.current = []
+    cancelledRef.current = false
+    recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data) }
+    recorder.onstop = () => {
+      releaseMicrophone()
+      const chunks = chunksRef.current
+      chunksRef.current = []
+      if (cancelledRef.current) { setVoice(IDLE_STATUS); return }
+      const type = recorder.mimeType || mimeType || 'audio/webm'
+      const blob = new Blob(chunks, { type })
+      if (blob.size === 0) {
+        setVoice({ state: 'error', error: 'empty', message: null, canRetry: false })
+        return
+      }
+      const name = recordingFileName(type)
+      lastAudioRef.current = { blob, name }
+      void transcribe(blob, name)
+    }
+    recorder.onerror = () => {
+      releaseMicrophone()
+      setVoice({ state: 'error', error: 'transcribe', message: null, canRetry: false })
+    }
+    recorder.start()
+    setRecordingMs(0)
+    setVoice({ state: 'recording', error: null, message: null, canRetry: false })
+  }, [voice.state, releaseMicrophone, transcribe])
+
+  const stopRecording = useCallback(() => {
+    const recorder = recorderRef.current
+    cancelledRef.current = false
+    if (!recorder || recorder.state === 'inactive') { releaseMicrophone(); setVoice(IDLE_STATUS); return }
+    recorder.stop()
+  }, [releaseMicrophone])
+
+  const cancelRecording = useCallback(() => {
+    cancelledRef.current = true
+    const recorder = recorderRef.current
+    lastAudioRef.current = null
+    if (recorder && recorder.state !== 'inactive') recorder.stop()
+    else { releaseMicrophone(); setVoice(IDLE_STATUS) }
+  }, [releaseMicrophone])
+
+  const retryTranscribe = useCallback(() => {
+    const last = lastAudioRef.current
+    if (!last) { setVoice(IDLE_STATUS); return }
+    void transcribe(last.blob, last.name)
+  }, [transcribe])
+
+  const dismissVoiceError = useCallback(() => { lastAudioRef.current = null; setVoice(IDLE_STATUS) }, [])
+
+  // Elapsed time, so a recording always shows that it is running.
+  useEffect(() => {
+    if (voice.state !== 'recording') return
+    const started = Date.now()
+    const id = setInterval(() => setRecordingMs(Date.now() - started), 200)
+    return () => clearInterval(id)
+  }, [voice.state])
+
+  // Closing the panel, navigating away or unmounting must not leave the
+  // microphone running: at that point there is no interface left to stop it.
+  useEffect(() => releaseMicrophone, [releaseMicrophone])
+  useEffect(() => {
+    if (isOpen) return
+    const recorder = recorderRef.current
+    if (recorder && recorder.state !== 'inactive') { cancelledRef.current = true; recorder.stop() }
+    else releaseMicrophone()
+  }, [isOpen, releaseMicrophone])
+
   const dispatchSend = useCallback(async (
     text: string,
     sendAttachments: { name: string; path: string; type: string }[],
@@ -2835,6 +3009,72 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {/* Hidden file input */}
       <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
 
+      {/* Voice status. Always rendered while anything is happening: a capture
+          that is running, uploading or failed must be visible, because the
+          alternative is a microphone the user cannot tell is live. */}
+      {harnessMode !== 'hermes' && voice.state !== 'idle' && (
+        <div
+          data-testid="voice-status"
+          style={{
+            padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 8,
+            background: 'rgba(0,0,0,0.2)', fontSize: 11.5,
+            color: voice.state === 'error' ? '#f87171' : '#f97316',
+          }}
+        >
+          {voice.state === 'recording' && (
+            <span
+              aria-hidden
+              style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'clawPulse 1s ease-in-out infinite' }}
+            />
+          )}
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {voice.state === 'requesting' && t("chat.voice.requesting")}
+            {voice.state === 'recording' && `${t("chat.voice.recording")} ${formatRecordingClock(recordingMs)}`}
+            {voice.state === 'transcribing' && t("chat.voice.transcribing")}
+            {voice.state === 'error' && (
+              voice.message
+              || (voice.error === 'permission' ? t("chat.voice.permissionDenied")
+                : voice.error === 'unsupported' ? t("chat.voice.unsupported")
+                : voice.error === 'empty' ? t("chat.voice.nothingHeard")
+                : t("chat.voice.failed"))
+            )}
+          </span>
+          {voice.state === 'recording' && (
+            <button
+              onClick={cancelRecording}
+              data-testid="voice-cancel"
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontSize: 11.5 }}
+            >{t("chat.voice.cancel")}</button>
+          )}
+          {voice.state === 'error' && voice.canRetry && (
+            <button
+              onClick={retryTranscribe}
+              data-testid="voice-retry"
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontSize: 11.5 }}
+            >{t("chat.retry")}</button>
+          )}
+          {voice.state === 'error' && (
+            <button
+              onClick={dismissVoiceError}
+              data-testid="voice-dismiss"
+              aria-label={t("chat.closePreview")}
+              style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, display: 'flex' }}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>close</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* The cloud-privacy line. Voice leaves the box: the recording goes to
+          ClawBox AI to be turned into text. That has to be said on the surface
+          where it happens, not only in a settings page nobody opens. */}
+      {harnessMode !== 'hermes' && (voice.state === 'recording' || voice.state === 'transcribing') && (
+        <div data-testid="voice-privacy" style={{ padding: '0 14px 6px', background: 'rgba(0,0,0,0.2)', fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>
+          {t("chat.voice.privacy")}
+        </div>
+      )}
+
       {/* Input area */}
       <div style={{
         padding: '10px 14px 12px',
@@ -2862,6 +3102,49 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         >
           <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
         </button>
+        )}
+        {/* Voice input. Hidden on the Hermes path for the same reason as the
+            attach control: that harness has no transcription route behind it,
+            so offering the button would promise something that cannot work. */}
+        {harnessMode !== 'hermes' && (
+          voice.state === 'recording' ? (
+            <button
+              onClick={stopRecording}
+              title={t("chat.voice.stop")}
+              aria-label={t("chat.voice.stop")}
+              data-testid="voice-stop"
+              style={{
+                width: 36, height: 36, borderRadius: 10, border: 'none',
+                background: 'rgba(239,68,68,0.25)', color: '#ef4444',
+                cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>stop_circle</span>
+            </button>
+          ) : (
+            <button
+              onClick={startRecording}
+              disabled={status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'}
+              title={t("chat.voice.record")}
+              aria-label={t("chat.voice.record")}
+              data-testid="voice-record"
+              style={{
+                width: 36, height: 36, borderRadius: 10, border: 'none',
+                background: 'rgba(255,255,255,0.06)',
+                color: voice.state === 'transcribing' ? '#f97316' : 'rgba(255,255,255,0.4)',
+                cursor: status === 'connected' && voice.state === 'idle' ? 'pointer' : 'default',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0, transition: 'all 0.15s',
+              }}
+              onMouseEnter={(e) => { if (status === 'connected' && voice.state === 'idle') { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; if (voice.state !== 'transcribing') e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+                {voice.state === 'transcribing' ? 'hourglass_top' : 'mic'}
+              </span>
+            </button>
+          )
         )}
         <textarea
           ref={inputRef}
