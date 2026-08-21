@@ -270,6 +270,66 @@ function sameTranscript(a: ChatMessage[], b: ChatMessage[]): boolean {
   return true
 }
 
+/** The gateway suffixes its stored copy by role; the client holds the bare run id. */
+function runIdOf(key: string | undefined): string | undefined {
+  if (!key) return undefined
+  return key.endsWith(':user') ? key.slice(0, -':user'.length) : key
+}
+
+/**
+ * Which locally-appended user turns the server has NOT echoed back yet.
+ *
+ * A turn is added to the transcript the moment it is sent, so a history read
+ * that lands before the write completes must not erase it. Deciding that by
+ * timestamp alone is not possible: the local copy is stamped with the browser's
+ * clock and the server's with the device's, and a browser running ahead makes
+ * every local copy look newer than everything the server returned.
+ *
+ * Identity settles it — both sides carry the run's idempotency key. Text is
+ * kept only as the fallback for turns without one (other harnesses, older
+ * gateways), and cannot be the primary test: an attachment turn displays
+ * "📎 pic.png\nwhat is this" locally while the gateway stores the prompt alone.
+ */
+export function unechoedUserTurns(
+  previous: ChatMessage[],
+  restored: ChatMessage[],
+  lastServerTs: number,
+): ChatMessage[] {
+  const serverRunIds = new Set<string>()
+  // Per-text stock of server copies. Counting rather than a boolean so the
+  // same words sent twice keep the second bubble.
+  const unclaimed = new Map<string, number>()
+  for (const message of restored) {
+    if (message.role !== 'user') continue
+    const runId = runIdOf(message.idempotencyKey)
+    if (runId) serverRunIds.add(runId)
+    unclaimed.set(message.text, (unclaimed.get(message.text) ?? 0) + 1)
+  }
+  const claimText = (text: string): boolean => {
+    const left = unclaimed.get(text) ?? 0
+    if (left <= 0) return false
+    unclaimed.set(text, left - 1)
+    return true
+  }
+  const pending: ChatMessage[] = []
+  for (const message of previous) {
+    if (message.role !== 'user') continue
+    const runId = runIdOf(message.idempotencyKey)
+    if (runId && serverRunIds.has(runId)) {
+      // Also spend this text's stock, so a later identical turn is not matched
+      // against the copy this one already accounted for.
+      claimText(message.text)
+      continue
+    }
+    if (claimText(message.text)) continue
+    // Nothing on the server matches. Keep it only if it is newer than the whole
+    // replay — an older unmatched turn has aged out of the history window and
+    // re-appending it would put it back in the wrong place.
+    if (message.timestamp > lastServerTs) pending.push(message)
+  }
+  return pending
+}
+
 // A live TTS supplement can arrive before an older gateway's history
 // projection learns about it. Carry players across that short reconcile by
 // message occurrence, never by a text->audio map: common replies such as
@@ -1082,9 +1142,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 pendingModelSwitchResetRef.current = null
                 if (pendingModelSwitch) {
                   try {
-                    await wsRequest('sessions.reset', { key: mainSessionKey, reason: 'new' })
-                    setMessages([])
-                    greetedRef.current = true
+                    await resetSessionRef.current(mainSessionKey)
                   } catch (err) {
                     setMessages(prev => [...prev, {
                       role: 'system',
@@ -1483,6 +1541,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
+  const [startingSession, setStartingSession] = useState(false)
   const loadHistory = useCallback(async () => {
     // Optimistically show the typing bubble if an auto-greet might still run,
     // so the user sees feedback during the history round-trip (and is locked
@@ -1546,7 +1605,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (role === 'user') {
           const cleaned = raw.replace(/^\[[^\]]+\]\s*/, '')
           if (!cleaned) continue
-          chatMsgs.push({ role: 'user', text: cleaned, timestamp })
+          const idempotencyKey = typeof m.idempotencyKey === 'string' ? m.idempotencyKey : undefined
+          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey })
           continue
         }
         // Replayed history carries the same MEDIA: lines the live turn did, so
@@ -1603,7 +1663,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // keyed by text put the newest recording on every historical "Sure.".
         const restored = preserveSpokenByOccurrence(prev, chatMsgs)
         const lastServerTs = restored.length > 0 ? restored[restored.length - 1].timestamp : 0
-        const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
+        const inFlight = unechoedUserTurns(prev, restored, lastServerTs)
         const next = inFlight.length === 0 ? restored : [...restored, ...inFlight]
         // Returning `prev` when nothing changed makes React skip the render.
         return sameTranscript(prev, next) ? prev : next
@@ -1661,6 +1721,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [loadHistory, endImageWait])
 
   useEffect(() => { reconcileTranscriptRef.current = reconcileTranscript }, [reconcileTranscript])
+
+  // Make the agent forget the thread, rather than the UI merely hiding it.
+  // Shared with the provider switch, which needs the same reset: when the two
+  // were written out separately they drifted, and the switch stopped clearing
+  // the previous model's half-streamed reply off the screen. Throws on
+  // failure so each caller can word its own banner.
+  const resetSession = useCallback(async (key: string) => {
+    await wsRequest('sessions.reset', { key, reason: 'new' })
+    setMessages([])
+    setStreaming('')
+    // The auto-greet opens a FIRST conversation; re-arming it here would drop
+    // an unasked-for "hi" into the chat the moment it was cleared.
+    greetedRef.current = true
+  }, [wsRequest])
+  const resetSessionRef = useRef(resetSession)
+  useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
+
+  const startNewSession = useCallback(async () => {
+    setStartingSession(true)
+    try {
+      await resetSession(sessionKeyRef.current)
+    } catch (err) {
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `Could not start a new chat: ${err instanceof Error ? err.message : 'unknown error'}`,
+        timestamp: Date.now(),
+        variant: 'error',
+      }])
+    } finally {
+      setStartingSession(false)
+    }
+  }, [resetSession])
 
   // While a picture is being generated, go and look for it. The background run
   // that produces it does not deliver renderable media over this socket, so a
@@ -2148,10 +2240,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const startRun = useCallback((text: string, sendAttachments: { name: string; path: string; type: string }[]) => {
     const fileNames = sendAttachments.map(a => `📎 ${a.name}`).join('\n')
     const displayText = [fileNames, text].filter(Boolean).join('\n')
-    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now() }])
+    const idempotencyKey = uuid()
+    // Stamped onto the bubble, not just sent with the request: it is how the
+    // reconcile recognises the server's copy of this exact turn. Text cannot
+    // do that job here — `displayText` carries the 📎 filenames while the
+    // gateway stores and returns the prompt alone.
+    setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey }])
     setSending(true)
     setStreaming('')
-    const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
     if (harnessRef.current === 'hermes') {
       void dispatchHermes(text)
@@ -3042,6 +3138,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        <button
+          onPointerDown={stopHeaderDrag}
+          onClick={() => { void startNewSession() }}
+          disabled={startingSession}
+          title="New chat"
+          aria-label="New chat"
+          style={{
+            background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
+            cursor: 'pointer', padding: 4, borderRadius: 6,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.1)' }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </button>
         {!mobile && (
           <button
             onPointerDown={stopHeaderDrag}
