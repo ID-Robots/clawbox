@@ -12,6 +12,11 @@ export interface ChatMessage {
   // different elements with different affordances, and merging them would make
   // every existing `images.length` check quietly wrong.
   audio?: string[];
+  // The run this turn belongs to. Set locally when the turn is sent and read
+  // back off the gateway's own record, so a turn can be recognised as "the one
+  // already on the server" without comparing text or clocks. The gateway
+  // suffixes its copy by role (`<runId>:user`); `runIdOf` normalises that.
+  idempotencyKey?: string;
 }
 
 export function uuid(): string {
