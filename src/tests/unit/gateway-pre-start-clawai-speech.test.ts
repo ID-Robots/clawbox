@@ -157,6 +157,74 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     expect(speech(cfg)).toEqual({ speakerVoice: "cedar", baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN });
   });
 
+  describe("takes the cloud voice back when the box stops being entitled", () => {
+    // Without this the migration is one-way: a box that was Max and is not any
+    // more keeps an entry pointing at an endpoint that now answers 403, so
+    // every spoken reply buys a refused round trip before falling back, and the
+    // panel calls the cloud voice configured while it does it.
+    const ours = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN };
+
+    it("removes the entry it wrote when the plan drops to Pro", () => {
+      const { cfg, changed, log } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: PRO_DEVICE_TIER },
+      );
+
+      expect(changed).toBe(true);
+      expect(speech(cfg)).toBeUndefined();
+      expect(log).toContain("no longer includes it");
+    });
+
+    it("leaves the customer's chosen primary alone so the downgrade is visible", () => {
+      const { cfg } = migrate(
+        {
+          messages: {
+            tts: {
+              provider: "openai",
+              providers: { openai: ours, "tts-local-cli": { command: "/x" } },
+            },
+          },
+        },
+        { deviceTier: PRO_DEVICE_TIER },
+      );
+
+      const tts = (cfg.messages as { tts: { provider: string; providers: Record<string, unknown> } }).tts;
+      // Rewriting their pick would hide the downgrade. The panel's job is to
+      // show that the chosen voice is gone and the box is speaking locally.
+      expect(tts.provider).toBe("openai");
+      expect(tts.providers.openai).toBeUndefined();
+      expect(tts.providers["tts-local-cli"]).toEqual({ command: "/x" });
+    });
+
+    it("does not take an owner's own cloud voice away with it", () => {
+      const own = { baseUrl: "https://api.openai.com/v1", model: "tts-1-hd", apiKey: "sk-owner" };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: own } } } },
+        { deviceTier: PRO_DEVICE_TIER },
+      );
+
+      // Their voice is theirs whatever their ClawBox AI plan says.
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(own);
+    });
+
+    it("does nothing on an unentitled box that never had one", () => {
+      const { cfg, changed } = migrate({}, { deviceTier: PRO_DEVICE_TIER });
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toBeUndefined();
+    });
+
+    it("stays out of a box whose openai slot belongs to its owner", () => {
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: ours } } } },
+        { deviceTier: PRO_DEVICE_TIER, routeIsOurs: false },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(ours);
+    });
+  });
+
   describe("does not touch a box that is not entitled to the cloud voice", () => {
     // The proxy gates speech to Max (SPEECH_MODEL_TIERS) and answers 403 to
     // everyone else. Pointing a Pro box at it would make the panel call the

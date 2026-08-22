@@ -920,7 +920,9 @@ def _clawai_device_tier():
     return _tier.strip() if isinstance(_tier, str) else None
 
 
-if _clawai_openai_route_is_ours and _clawai_device_tier() == CLAWBOX_SPEECH_DEVICE_TIER:
+_clawai_speech_entitled = _clawai_device_tier() == CLAWBOX_SPEECH_DEVICE_TIER
+
+if _clawai_openai_route_is_ours and _clawai_speech_entitled:
     _messages = cfg.get("messages")
     if not isinstance(_messages, dict):
         _messages = {}
@@ -959,6 +961,37 @@ if _clawai_openai_route_is_ours and _clawai_device_tier() == CLAWBOX_SPEECH_DEVI
             _tts["providers"] = _tts_providers
             _messages["tts"] = _tts
             cfg["messages"] = _messages
+            changed = True
+
+elif _clawai_openai_route_is_ours:
+    # The other direction, and it has to exist or this migration is one-way.
+    # A box that was Max and is not any more keeps an entry pointing at an
+    # endpoint that now answers 403, so every spoken reply buys a refused round
+    # trip before falling back — and the panel calls the cloud voice configured
+    # while it does it. Take back only what we wrote: an entry whose baseUrl is
+    # our proxy. An owner's own voice is theirs whatever their ClawBox AI plan
+    # says, and is matched by exactly the same rule as above.
+    #
+    # `messages.tts.provider` is deliberately NOT touched here either. If the
+    # customer had explicitly chosen the cloud voice, the panel's job is to show
+    # them that their choice is no longer available and that the box is speaking
+    # locally instead — which is precisely what it does once the entry is gone.
+    # Silently rewriting their pick would hide the downgrade.
+    _messages = cfg.get("messages")
+    _tts = _messages.get("tts") if isinstance(_messages, dict) else None
+    _tts_providers = _tts.get("providers") if isinstance(_tts, dict) else None
+    _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
+    if isinstance(_speech, dict):
+        _speech_base_url = _speech.get("baseUrl")
+        if (
+            isinstance(_speech_base_url, str)
+            and _speech_base_url.strip()
+            and _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+        ):
+            del _tts_providers["openai"]
+            print(
+                "  Removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+            )
             changed = True
 
 

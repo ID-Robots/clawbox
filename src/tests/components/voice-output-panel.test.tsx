@@ -28,7 +28,7 @@ function status(over: Record<string, unknown> = {}) {
     drifted: false,
     engines: [
       engine(),
-      engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", usable: false, configured: false, detail: "The cloud voice comes with ClawBox AI Max. This box is not set up to call one, so it speaks with its own voice." }),
+      engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", usable: false, configured: false, detail: "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one." }),
     ],
     lastCheck: null,
     warning: null,

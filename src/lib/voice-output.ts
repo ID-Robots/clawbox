@@ -318,7 +318,13 @@ function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEng
     // true for every box that still lands here: it holds a ClawBox AI key, and
     // that key does not open a cloud voice for it. The upgrade prompt at the
     // point of USE is TASK-486's, deliberately not duplicated here.
-    detail = "The cloud voice comes with ClawBox AI Max. This box is not set up to call one, so it speaks with its own voice.";
+    //
+    // It stops there rather than adding "so it speaks with its own voice".
+    // This branch knows nothing about the local engine, and a box with no
+    // installed voice would have been promised one it does not have — the same
+    // class of confident wrong sentence this line replaced. The local row sits
+    // directly above it in the panel and answers that question itself.
+    detail = "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one.";
   } else if (failure) {
     detail = `The last voice check failed: ${failure}`;
   } else if (proven) {
