@@ -3710,7 +3710,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'claw-pulse 1s ease-in-out infinite' }}
             />
           )}
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {/* One line while a capture is live — the row sits over the composer
+              and a wrapping status would push the input around every second.
+              An ERROR is the opposite case: it is the only place the reason and
+              the remedy are written, and a sentence cut off at "Open this
+              ClawBox…" tells the owner a problem exists and hides the fix. */}
+          <span style={voice.state === 'error'
+            ? { flex: 1, whiteSpace: 'normal' }
+            : { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {voice.state === 'requesting' && t("chat.voice.requesting")}
             {voice.state === 'recording' && <>{t("chat.voice.recording")}{' '}
               {/* The clock is kept out of the accessibility tree, not out of

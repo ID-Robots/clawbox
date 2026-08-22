@@ -198,6 +198,14 @@ describe("chat voice status row", () => {
     // The remedy has to be in the sentence — an accurate diagnosis the owner
     // cannot act on is no better than the wrong one.
     expect(translations.en["chat.voice.insecureContext"]).toContain("Remote Desktop");
+
+    // …and it has to be READABLE. The row is one ellipsised line while a
+    // capture is live, which on a real box cut this sentence off at "Open
+    // this ClawBox…" — the half with the fix in it. Errors wrap.
+    const line = panel.querySelector("span");
+    expect(line).not.toBeNull();
+    expect((line as HTMLElement).style.whiteSpace).toBe("normal");
+    expect((line as HTMLElement).style.textOverflow).not.toBe("ellipsis");
   });
 
   it("labels the mic button with the reason before anyone clicks it", async () => {
