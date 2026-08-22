@@ -129,7 +129,18 @@ function verifySignedCookie(cookie: string, secret: string, expectedGen: number)
   }
 }
 
-/** True when the request carries a valid session cookie or the MCP bearer. */
+/**
+ * True when the request carries a valid session cookie or the MCP bearer.
+ *
+ * Deliberately does NOT honour `CLAWBOX_TEST_MODE`, unlike `requireSession`
+ * below. The two answer different questions: `requireSession` is a GATE ("may
+ * this request run at all"), and test mode is the documented escape hatch that
+ * opens the whole /setup-api surface to the e2e-install harness. This is an
+ * IDENTITY question ("is this the owner"), asked by handlers that shape their
+ * response — `setup/status` serves a trimmed payload to anyone who isn't. A
+ * harness that can reach a route still isn't the owner, and letting test mode
+ * say otherwise would mean the trimmed payload is never exercised end-to-end.
+ */
 export async function hasValidSession(request: Request | undefined): Promise<boolean> {
   // Next.js always hands a Request to a route handler; a caller that doesn't
   // (an older test, a direct invocation) gets "not authenticated" rather than
