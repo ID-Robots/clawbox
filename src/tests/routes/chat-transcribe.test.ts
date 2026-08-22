@@ -17,6 +17,7 @@ let tmpHome: string;
 let openclawHome: string;
 let originalHome: string | undefined;
 let originalOpenclawHome: string | undefined;
+let originalClawboxRoot: string | undefined;
 let POST: (req: NextRequest) => Promise<Response>;
 let TRANSCRIBE_MODEL: string;
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -25,6 +26,23 @@ const AUDIO = Buffer.from("fake-opus-bytes-that-stand-in-for-a-recording");
 
 function writeConfig(config: unknown): void {
   fs.writeFileSync(path.join(openclawHome, "openclaw.json"), JSON.stringify(config, null, 2));
+}
+
+/**
+ * Put a token in the OTHER store — the app's own `data/config.json`, which is
+ * where the Hermes flow persists the same device credential.
+ *
+ * A Hermes SKU has no `~/.openclaw` tree at all, so this is the only place the
+ * route can find anything, and reaching it is exactly what turned the
+ * microphone on for that edition.
+ */
+function writeHermesToken(token: string | null): void {
+  const dataDir = path.join(tmpHome, "data");
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dataDir, "config.json"),
+    JSON.stringify(token === null ? {} : { clawai_token: token }, null, 2),
+  );
 }
 
 /**
@@ -67,12 +85,18 @@ describe("/setup-api/chat/transcribe", () => {
   beforeEach(async () => {
     originalHome = process.env.HOME;
     originalOpenclawHome = process.env.OPENCLAW_HOME;
+    originalClawboxRoot = process.env.CLAWBOX_ROOT;
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-stt-"));
     openclawHome = path.join(tmpHome, ".openclaw");
     fs.mkdirSync(openclawHome, { recursive: true });
     process.env.HOME = tmpHome;
     process.env.OPENCLAW_HOME = openclawHome;
+    // The route now consults BOTH edition stores, so the second one has to be
+    // pointed at the sandbox too — otherwise these tests would read the real
+    // device's config.json and pass or fail on whether THAT box is linked.
+    process.env.CLAWBOX_ROOT = tmpHome;
     writeConfig(linkedConfig());
+    writeHermesToken(null);
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     vi.resetModules();
@@ -87,6 +111,8 @@ describe("/setup-api/chat/transcribe", () => {
     else process.env.HOME = originalHome;
     if (originalOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
     else process.env.OPENCLAW_HOME = originalOpenclawHome;
+    if (originalClawboxRoot === undefined) delete process.env.CLAWBOX_ROOT;
+    else process.env.CLAWBOX_ROOT = originalClawboxRoot;
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -144,12 +170,43 @@ describe("/setup-api/chat/transcribe", () => {
 
   it("says the device is not linked rather than failing obscurely", async () => {
     writeConfig({ models: { providers: {} } });
+    writeHermesToken(null);
     const res = await POST(audioRequest());
 
     expect(res.status).toBe(503);
     expect((await res.json()).error).toContain("not linked");
     // Nothing should have been sent anywhere without a credential.
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("transcribes on a box that keeps its token in the OTHER edition's store", async () => {
+    // The Hermes case, and the whole reason voice input was dark there: this
+    // route used to read openclaw.json and nothing else, so a device holding
+    // the same credential somewhere else could only ever be told it was not
+    // linked. Nothing about transcription is edition-specific — the lookup was.
+    writeConfig({ models: { providers: {} } });
+    writeHermesToken("claw_token_from_the_hermes_store");
+    fetchMock.mockResolvedValue(jsonResponse({ text: "It works on this edition too." }));
+
+    const res = await POST(audioRequest());
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).text).toBe("It works on this edition too.");
+    expect(fetchMock.mock.calls[0][1].headers.Authorization)
+      .toBe("Bearer claw_token_from_the_hermes_store");
+  });
+
+  it("still prefers the OpenClaw store on a box that has both", async () => {
+    // A dual box holds the same credential in both places — they are written by
+    // the same portal hand-off — so the order only decides which read answers
+    // first, never which token goes on the wire.
+    writeConfig(linkedConfig("claw_token_from_openclaw"));
+    writeHermesToken("claw_token_from_hermes");
+    fetchMock.mockResolvedValue(jsonResponse({ text: "ok" }));
+
+    await POST(audioRequest());
+
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe("Bearer claw_token_from_openclaw");
   });
 
   it("rejects a request that is not multipart", async () => {

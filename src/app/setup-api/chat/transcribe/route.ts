@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
 import { Readable } from "stream";
-import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
-import { CLAWBOX_AI_PROXY_URL } from "@/lib/hermes-clawai";
-import { readConfig } from "@/lib/openclaw-config";
+import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 
 export const dynamic = "force-dynamic";
 
@@ -14,10 +12,17 @@ export const dynamic = "force-dynamic";
 // text through the ordinary chat-turn path.
 //
 // Why the device proxies instead of the browser calling out directly: the
-// ClawBox AI token lives in `~/.openclaw/openclaw.json` and is the device's
-// credential, not the page's. Handing it to client JavaScript would put it in
-// every devtools network panel and in the memory of any script the chat surface
-// ever loads. The browser talks to the box; only the box talks to the proxy.
+// ClawBox AI token is the device's credential, not the page's. Handing it to
+// client JavaScript would put it in every devtools network panel and in the
+// memory of any script the chat surface ever loads. The browser talks to the
+// box; only the box talks to the proxy.
+//
+// WHERE that token lives differs by edition, and this route no longer knows or
+// cares — `resolveClawaiToken` does. It used to read `openclaw.json` and
+// nothing else, which is the entire reason voice input was dark on a Hermes
+// box: nothing about transcription is OpenClaw-specific, but the lookup was,
+// so the route could only ever answer "not linked" and the microphone was
+// hidden to cover for it.
 //
 // The upstream is the same ClawBox AI proxy that serves chat and vision, and it
 // speaks OpenAI's transcription shape: multipart with a `file` part, answering
@@ -64,21 +69,6 @@ const UPSTREAM_TIMEOUT_MS = 120_000;
 
 /** Everything the caller needs to be told, without saying how we are built. */
 type Failure = { status: number; error: string };
-
-/**
- * The device's ClawBox AI credential.
- *
- * Read per request rather than cached: the gateway rewrites `openclaw.json`
- * on restart and a token can be re-minted by the portal at any time, so a
- * value captured at module load goes stale exactly when someone re-links the
- * device and least expects to have to reboot it.
- */
-async function readProxyToken(): Promise<string | null> {
-  const config = await readConfig();
-  const provider = config.models?.providers?.[CLAWBOX_AI_PROVIDER];
-  const key = provider?.apiKey;
-  return typeof key === "string" && key.trim() ? key.trim() : null;
-}
 
 /**
  * Meter the body and cut the stream off past `MAX_REQUEST_BYTES`.
@@ -277,7 +267,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: audio.error }, { status: audio.status });
   }
 
-  const token = await readProxyToken();
+  const token = await resolveClawaiToken();
   if (!token) {
     // Actionable on purpose: this is the one failure the user can actually do
     // something about, and "transcription failed" would send them nowhere.
