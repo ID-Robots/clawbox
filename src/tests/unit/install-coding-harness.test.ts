@@ -123,8 +123,21 @@ describe("Claude Code is installed the way Anthropic supports", () => {
   });
 
   it("short-circuits when Claude Code is already there, so updates stay cheap", () => {
-    expect(fn).toContain("command -v claude");
     expect(fn).toContain("already installed");
+  });
+
+  it("asks a LOGIN shell whether the CLI exists", () => {
+    // `sudo -u clawbox bash -c` reads neither ~/.profile nor ~/.bashrc, so
+    // ~/.local/bin — where the native installer puts `claude` — is not on its
+    // PATH. Observed on .65 on 2026-08-22: Claude Code 2.1.239 was installed
+    // and working, and this probe still said it was missing, so the fast path
+    // never fired and every update re-downloaded the CLI. It is the same false
+    // negative the task warns about for ssh.
+    for (const probe of ["ensure_claude_code", "step_coding_harness"]) {
+      const body = extractShellFunction(probe);
+      expect(body, probe).toContain('as_clawbox_login "command -v claude"');
+      expect(body, probe).not.toMatch(/sudo -u "\$CLAWBOX_USER" bash -c 'command -v claude'/);
+    }
   });
 });
 

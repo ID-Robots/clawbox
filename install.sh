@@ -3082,7 +3082,13 @@ step_chromium_install() {
 # Returns 0 when `claude` is present afterwards, 1 otherwise. Callers decide
 # whether that is fatal — for every caller today it is not.
 ensure_claude_code() {
-  if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
+  # A LOGIN shell, like the two probes below it and like the in-UI terminal.
+  # `sudo -u clawbox bash -c` is non-interactive and non-login: it reads
+  # neither ~/.profile nor ~/.bashrc, so ~/.local/bin is not on its PATH and it
+  # answers "not installed" on a box where Claude Code works perfectly. That
+  # made this fast path dead — every install and every update re-downloaded the
+  # CLI — and it is the same false negative the task warns about for ssh.
+  if as_clawbox_login "command -v claude" &>/dev/null; then
     echo "  Claude Code already installed"
     return 0
   fi
@@ -3164,7 +3170,7 @@ step_coding_harness() {
   # this very step again — a loop with no diagnosis in it.
   if is_test_mode; then
     :
-  elif sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
+  elif as_clawbox_login "command -v claude" &>/dev/null; then
     echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
   else
     echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is"
