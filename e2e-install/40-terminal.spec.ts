@@ -112,22 +112,38 @@ test.describe("terminal app happy path", () => {
   });
   /**
    * Run one command in a real PTY through /terminal-ws and return everything
-   * the shell wrote until `done` matches.
+   * the shell wrote.
+   *
+   * The end marker is SPLIT in the line we type. A pty echoes what you type
+   * before the shell has run any of it, so a helper that waits for a plain
+   * marker is satisfied by its own echo — the first version of this waited on
+   * a pattern that appeared in the command itself and then asserted against
+   * output the shell had not produced yet. `"__CB_TERM""_END__"` is two string
+   * literals on the wire and one word on the screen, so only the shell's own
+   * `echo` can end the wait.
    */
-  async function runInTerminal(command: string, done: RegExp): Promise<string> {
+  const END_MARKER = "__CB_TERM_END__";
+
+  async function runInTerminal(command: string): Promise<string> {
     const ws = new WebSocket(TERMINAL_WS_URL, { headers: { cookie: sessionCookie } });
     const output: string[] = [];
     return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => { ws.close(); reject(new Error(`timed out running: ${command}`)); }, 30_000);
+      const timer = setTimeout(() => {
+        ws.close();
+        reject(new Error(`timed out running: ${command}\n--- saw ---\n${output.join("")}`));
+      }, 30_000);
       ws.on("open", () => {
-        setTimeout(() => ws.send(JSON.stringify({ type: "input", data: `${command}\n` })), 500);
+        setTimeout(
+          () => ws.send(JSON.stringify({ type: "input", data: `${command}; echo "__CB_TERM""_END__"\n` })),
+          500,
+        );
       });
       ws.on("message", (raw) => {
         const msg = JSON.parse(raw.toString()) as { type: string; data?: string };
         if (msg.type !== "output" || !msg.data) return;
         output.push(msg.data);
         const joined = output.join("");
-        if (done.test(joined)) {
+        if (joined.includes(END_MARKER)) {
           clearTimeout(timer);
           ws.close();
           resolve(joined);
@@ -143,10 +159,7 @@ test.describe("terminal app happy path", () => {
     // over ssh answers "missing" on a box where the harness works fine. The
     // in-UI terminal spawns a login shell, which is the environment the owner
     // actually gets.
-    const out = await runInTerminal(
-      "command -v claude-ds || echo CLAUDE_DS_MISSING",
-      /\.local\/bin\/claude-ds|CLAUDE_DS_MISSING/,
-    );
+    const out = await runInTerminal("command -v claude-ds");
     expect(out, "install.sh must put claude-ds on the login shell's PATH").toContain(
       "/home/clawbox/.local/bin/claude-ds",
     );
@@ -155,11 +168,9 @@ test.describe("terminal app happy path", () => {
   test("the harness refuses clearly when ClawBox AI is not connected", async () => {
     // The container has no portal token, which is also the state of a box
     // whose owner has not signed in yet. The failure must name the screen that
-    // fixes it rather than dumping a stack trace into the terminal.
-    const out = await runInTerminal(
-      "claude-ds --version 2>&1 | head -5",
-      /claude-ds:|command not found/,
-    );
+    // fixes it rather than dumping a stack trace into the terminal — and it
+    // must be the wrapper answering, not the shell saying it does not exist.
+    const out = await runInTerminal("claude-ds --version 2>&1 | head -5");
     expect(out).not.toMatch(/command not found/);
     expect(out).toMatch(/ClawBox AI is not connected|Claude Code is not installed/);
   });
