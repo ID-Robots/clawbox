@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import type { HarnessFacts } from "@/lib/harness/capabilities";
-import { hermesSupportsImages } from "@/lib/harness/hermes-features";
+import { hermesHasVisionRoute, hermesSupportsImages } from "@/lib/harness/hermes-features";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +32,15 @@ export async function GET() {
     // and the probe would spend a spawn (and a failure) to compute a fact that
     // no OpenClaw capability reads.
     hermesSupportsImages: harness === "hermes" ? await hermesSupportsImages() : false,
+    // The second half of the same question: whether anything on this box would
+    // LOOK at the picture the flag above lets the turn carry. Read from
+    // `auxiliary.vision.model`, which is the store the agent's own image
+    // routing reads, through the mtime-keyed config memo — so linking ClawBox
+    // AI flips it on the next re-probe rather than on the next restart.
+    //
+    // Not asked on an OpenClaw box, for the same reason as above: `hermes` may
+    // not be installed there, and no OpenClaw capability reads this.
+    hermesHasVisionRoute: harness === "hermes" ? await hermesHasVisionRoute() : false,
   };
   return NextResponse.json({ harness, facts });
 }

@@ -28,6 +28,18 @@ export interface HarnessFacts {
    * files into a turn that would silently ignore them.
    */
   hermesSupportsImages: boolean;
+  /**
+   * There is somewhere for an attached picture to be LOOKED AT
+   * (`auxiliary.vision.model` in `~/.hermes/config.yaml`).
+   *
+   * The other half of the same capability, and a separate fact because it has a
+   * separate cause: the flag above says the turn will carry the file, this says
+   * something will read it. An unlinked box passes the first and fails the
+   * second — `image_routing.py` falls back to `vision_analyze` for a chat model
+   * that is not vision-capable, and with nothing named there the picture
+   * arrives nowhere.
+   */
+  hermesHasVisionRoute: boolean;
 }
 
 /**
@@ -67,7 +79,15 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // patch — see `reasoningScope` for what Hermes has instead.
       canPatchSessionDefaults: false,
       reasoningScope: "per-turn",
-      canAttachImages: facts.hermesSupportsImages,
+      // BOTH halves, because a picture needs both to be answered about: a turn
+      // that CARRIES it (`chat --image`) and something that LOOKS at it
+      // (`auxiliary.vision`). Gating on the flag alone shipped the attach
+      // button on an unlinked box, where the file reached the agent and no
+      // vision route existed — the model reached for a `vision_analyze` tool
+      // that was not installed and finally hand-wrote pixel-scanning code to
+      // answer at all. The composer promising something the box half-does is
+      // the failure this table exists to stop.
+      canAttachImages: facts.hermesSupportsImages && facts.hermesHasVisionRoute,
       // `--image` is image-only, and the agent's own path-in-prompt resolver
       // matches picture extensions by design. A document has no way in.
       canAttachDocuments: false,
@@ -129,6 +149,7 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
 export const UNKNOWN_FACTS: HarnessFacts = {
   hasClawaiToken: false,
   hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
 };
 
 /**

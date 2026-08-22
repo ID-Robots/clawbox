@@ -16,14 +16,20 @@ const file = (name: string, type: string) => new File([new Uint8Array([1])], nam
 const HERMES_WITH_IMAGES = capabilitiesFor("hermes", {
   hasClawaiToken: true,
   hermesSupportsImages: true,
+  // Both halves: a turn that carries the picture and somewhere that looks at
+  // it. Without the second the composer offers nothing — see the capability
+  // table's own tests.
+  hermesHasVisionRoute: true,
 });
 const HERMES_BARE = capabilitiesFor("hermes", {
   hasClawaiToken: false,
   hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
 });
 const OPENCLAW = capabilitiesFor("openclaw", {
   hasClawaiToken: true,
   hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
 });
 
 describe("partitionAttachments", () => {

@@ -18,7 +18,11 @@ import { HarnessError } from "@/lib/harness/transport";
  * state. Here it is a method, and these are its unit tests.
  */
 
-const caps = capabilitiesFor("hermes", { hasClawaiToken: true, hermesSupportsImages: true });
+const caps = capabilitiesFor("hermes", {
+  hasClawaiToken: true,
+  hermesSupportsImages: true,
+  hermesHasVisionRoute: true,
+});
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },
   modelsReady: true,

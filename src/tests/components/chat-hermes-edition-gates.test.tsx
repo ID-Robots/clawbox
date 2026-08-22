@@ -34,8 +34,10 @@ let hasClawaiToken = false;
  * — real behaviour, tested on its own below, and noise in every other test here.
  */
 let storedTranscript: Record<string, unknown>[] = [];
-/** Whether the installed `hermes` takes `chat --image` — the attach button's gate. */
+/** Whether the installed `hermes` takes `chat --image` — half the attach gate. */
 let hermesSupportsImages = false;
+/** Whether anything on this box would LOOK at it — the other half. */
+let hermesHasVisionRoute = false;
 /** DELETEs of the stored transcript, so "new chat" can be shown to reach it. */
 let transcriptDeletes = 0;
 
@@ -68,7 +70,7 @@ function installFetch() {
           ok: true,
           json: async () => ({
             harness: "hermes",
-            facts: { hasClawaiToken, hermesSupportsImages },
+            facts: { hasClawaiToken, hermesSupportsImages, hermesHasVisionRoute },
           }),
         };
       }
@@ -151,6 +153,7 @@ beforeEach(() => {
   // AI credential, so nothing on it can turn a recording into text.
   hasClawaiToken = false;
   hermesSupportsImages = false;
+  hermesHasVisionRoute = false;
   storedTranscript = [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }];
   transcriptDeletes = 0;
   resetHarnessCache();
@@ -175,8 +178,22 @@ describe("what the composer offers when the box cannot do it", () => {
     expect(screen.queryByTitle("Attach file")).toBeNull();
   });
 
-  it("DOES offer the attach button once the installed agent can take an image", async () => {
+  it("offers no attach button where the picture would arrive but nothing could see it", async () => {
+    // The half that shipped wrong. `hermes chat --image` exists on an unlinked
+    // box, so the flag probe says yes — but with no `auxiliary.vision` model
+    // configured, `image_routing.py` has no route to fall back to for a chat
+    // model that is not vision-capable. Observed on the bench box: the file
+    // reached the agent, the model reached for a `vision_analyze` tool that was
+    // not there, and finally hand-wrote pixel-scanning code to answer at all.
     hermesSupportsImages = true;
+    hermesHasVisionRoute = false;
+    await mountHermes();
+    expect(screen.queryByTitle("Attach file")).toBeNull();
+  });
+
+  it("DOES offer the attach button once the picture can both arrive and be seen", async () => {
+    hermesSupportsImages = true;
+    hermesHasVisionRoute = true;
     await mountHermes();
     await screen.findByTitle("Attach file");
   });

@@ -60,6 +60,7 @@ async function fetchFacts(signal?: AbortSignal): Promise<HarnessFacts | null> {
     return {
       hasClawaiToken: data.facts?.hasClawaiToken === true,
       hermesSupportsImages: data.facts?.hermesSupportsImages === true,
+      hermesHasVisionRoute: data.facts?.hermesHasVisionRoute === true,
     };
   } catch {
     // A box that cannot answer keeps the cautious defaults: a hidden control
@@ -121,6 +122,8 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
 
 function sameFacts(a: HarnessFacts, b: HarnessFacts): boolean {
   return (
-    a.hasClawaiToken === b.hasClawaiToken && a.hermesSupportsImages === b.hermesSupportsImages
+    a.hasClawaiToken === b.hasClawaiToken
+    && a.hermesSupportsImages === b.hermesSupportsImages
+    && a.hermesHasVisionRoute === b.hermesHasVisionRoute
   );
 }

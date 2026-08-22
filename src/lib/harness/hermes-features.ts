@@ -1,4 +1,5 @@
 import { runHermesCli } from "@/lib/hermes-cli";
+import { hermesConfigGet } from "@/lib/hermes-config-cache";
 
 /**
  * What the INSTALLED `hermes` can do — asked, not assumed. SERVER ONLY.
@@ -61,4 +62,73 @@ export async function hermesSupportsImages(): Promise<boolean> {
 /** Test seam: forget the probe so the next call runs it again. */
 export function resetHermesFeatureProbe(): void {
   probe = null;
+}
+
+/**
+ * The config key that names the model an attached picture is actually LOOKED AT
+ * with. Written by `applyClawaiToHermes`; empty on a box nobody has linked.
+ */
+const VISION_MODEL_KEY = "auxiliary.vision.model";
+
+/**
+ * Is there anywhere for an attached picture to be looked at?
+ *
+ * The `--image` flag above only says the turn will CARRY the file. Whether
+ * anything then reads it is a second question with a second answer, and on an
+ * unlinked box the answer is no: `agent/image_routing.py` runs in `auto` mode,
+ * attaches the image natively only when the ACTIVE model reports
+ * `supports_vision`, and otherwise routes it through `vision_analyze` using
+ * whatever `auxiliary.vision` names. With nothing named there, the file reaches
+ * the agent and no route exists — observed on the bench box as the model
+ * reaching for a `vision_analyze` tool that was not there and finally
+ * hand-writing pixel-scanning Python to answer at all.
+ *
+ * WHY THE CONFIG AND NOT THE CLAWBOX AI TOKEN. The token is what CAUSES the
+ * vision keys to be written (`applyClawaiToHermes` writes them and nothing else
+ * does), which makes it tempting as a proxy. It is the wrong fact in both
+ * directions:
+ *
+ *   - a box can hold the token WITHOUT the config — `hasClawaiToken` also
+ *     resolves OpenClaw's `openclaw.json`, so a dual box linked through the
+ *     OpenClaw path has the credential and no Hermes vision keys, and an apply
+ *     that failed part-way leaves the same state. That is the dangerous
+ *     direction: an attach button over a route that does not exist;
+ *   - a box can hold the config WITHOUT the token — a customer who pointed
+ *     `auxiliary.vision` at their own provider. Reading the token would hide a
+ *     working button.
+ *
+ * The config is also simply what the agent itself reads at turn time, so this
+ * asks the same store the behaviour comes from rather than a thing correlated
+ * with it.
+ *
+ * WHY `model` AND NOT "the block is present". Verified on the live box
+ * (2026-08-22, unlinked): `hermes config get auxiliary` prints the whole block
+ * from the schema defaults — `vision: {provider: auto, model: '', base_url: '',
+ * api_key: '', …}` — so presence says nothing at all, and `provider` reads as
+ * the literal string `auto` rather than as empty. The model id is the one field
+ * that stays empty until something configures it.
+ *
+ * KNOWN AND ACCEPTED FALSE NEGATIVE: a box whose CHAT model is itself
+ * vision-capable needs no auxiliary route, and this reports false there and
+ * hides a button that would have worked. That is the same asymmetry the flag
+ * probe above is built on — a wrong `false` costs a hidden control, a wrong
+ * `true` costs the customer's file and an answer about a picture nobody looked
+ * at. Reading `supports_vision` for the active model would be the refinement;
+ * it needs a per-provider capability lookup that does not exist here yet.
+ *
+ * Not memoised in this module ON PURPOSE. `hermesConfigGet` keys its cache on
+ * config.yaml's mtime, and linking ClawBox AI rewrites that file — so the
+ * answer flips as soon as the customer links, which is exactly when the chat
+ * re-asks (`use-harness-adapter` re-probes on the model-state event). A
+ * process-lifetime cache like the flag probe's would keep the attach button
+ * hidden until the next restart on a box that can now see.
+ */
+export async function hermesHasVisionRoute(): Promise<boolean> {
+  try {
+    return (await hermesConfigGet(VISION_MODEL_KEY)).trim().length > 0;
+  } catch {
+    // `hermesConfigGet` answers "" rather than throwing, so this is belt and
+    // braces — and it fails closed for the same reason the probe above does.
+    return false;
+  }
 }

@@ -17,8 +17,22 @@ import {
  *    combination, or a button appears that promises something impossible.
  */
 
-const linked: HarnessFacts = { hasClawaiToken: true, hermesSupportsImages: false };
-const bare: HarnessFacts = { hasClawaiToken: false, hermesSupportsImages: false };
+const linked: HarnessFacts = {
+  hasClawaiToken: true,
+  hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
+};
+const bare: HarnessFacts = {
+  hasClawaiToken: false,
+  hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
+};
+/** The box the attach button is honest on: the flag AND somewhere to look. */
+const seeing: HarnessFacts = {
+  hasClawaiToken: true,
+  hermesSupportsImages: true,
+  hermesHasVisionRoute: true,
+};
 
 describe("capabilitiesFor", () => {
   it("follows the credential, not the edition, for transcription", () => {
@@ -47,7 +61,7 @@ describe("capabilitiesFor", () => {
   });
 
   it("keeps genuinely absent things absent whatever the facts say", () => {
-    for (const facts of [linked, bare, { hasClawaiToken: true, hermesSupportsImages: true }]) {
+    for (const facts of [linked, bare, seeing]) {
       const caps = capabilitiesFor("hermes", facts);
       // TTS is a gateway capability with no Hermes equivalent.
       expect(caps.canSpeakReplies).toBe(false);
@@ -63,9 +77,54 @@ describe("capabilitiesFor", () => {
 
   it("never hides the attach button on the strength of a guess", () => {
     expect(capabilitiesFor("hermes", bare).canAttachImages).toBe(false);
+    expect(capabilitiesFor("hermes", seeing).canAttachImages).toBe(true);
+  });
+
+  it("needs somewhere to LOOK at a picture, not just a turn that carries one", () => {
+    // The bug this pins: on an unlinked box `hermes chat --image` exists, so the
+    // flag probe said yes and the attach button appeared — but nothing had
+    // `auxiliary.vision` configured, so `image_routing.py` had no
+    // `vision_analyze` route to fall back to. The file reached the agent and
+    // the model, with no way to see it, reached for a tool that was not there
+    // and finally hand-wrote pixel-scanning code to answer at all.
     expect(
-      capabilitiesFor("hermes", { hasClawaiToken: false, hermesSupportsImages: true })
-        .canAttachImages,
+      capabilitiesFor("hermes", {
+        hasClawaiToken: false,
+        hermesSupportsImages: true,
+        hermesHasVisionRoute: false,
+      }).canAttachImages,
+    ).toBe(false);
+    // And the mirror: a vision route on an agent whose turn cannot carry the
+    // file is just as useless.
+    expect(
+      capabilitiesFor("hermes", {
+        hasClawaiToken: true,
+        hermesSupportsImages: false,
+        hermesHasVisionRoute: true,
+      }).canAttachImages,
+    ).toBe(false);
+  });
+
+  it("reads the vision route rather than the credential that usually writes it", () => {
+    // `applyClawaiToHermes` is what normally writes `auxiliary.vision`, which
+    // makes the token tempting as a proxy for it. It is the wrong fact both
+    // ways: `hasClawaiToken` also resolves OpenClaw's store, so a dual box
+    // linked through the OpenClaw path holds the credential with no Hermes
+    // vision keys — and a customer can point `auxiliary.vision` at their own
+    // provider with no ClawBox AI credential at all.
+    expect(
+      capabilitiesFor("hermes", {
+        hasClawaiToken: true,
+        hermesSupportsImages: true,
+        hermesHasVisionRoute: false,
+      }).canAttachImages,
+    ).toBe(false);
+    expect(
+      capabilitiesFor("hermes", {
+        hasClawaiToken: false,
+        hermesSupportsImages: true,
+        hermesHasVisionRoute: true,
+      }).canAttachImages,
     ).toBe(true);
   });
 
@@ -88,6 +147,7 @@ describe("capabilitiesFor", () => {
   it("assumes nothing before the box has answered", () => {
     expect(UNKNOWN_FACTS.hasClawaiToken).toBe(false);
     expect(UNKNOWN_FACTS.hermesSupportsImages).toBe(false);
+    expect(UNKNOWN_FACTS.hermesHasVisionRoute).toBe(false);
   });
 });
 
