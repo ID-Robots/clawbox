@@ -29,10 +29,20 @@ describe("capabilitiesFor", () => {
     expect(capabilitiesFor("openclaw", bare).canTranscribe).toBe(true);
   });
 
-  it("reports image generation from the credential on BOTH editions", () => {
+  it("reports image generation from the credential where there is a tool to spend it on", () => {
+    // OpenClaw: the agent has its own image tool, so the only open question is
+    // whether the box can pay for a picture.
     expect(capabilitiesFor("openclaw", linked).canGenerateImages).toBe(true);
     expect(capabilitiesFor("openclaw", bare).canGenerateImages).toBe(false);
-    expect(capabilitiesFor("hermes", linked).canGenerateImages).toBe(true);
+  });
+
+  it("does not promise pictures on a harness with nothing to ask for one", () => {
+    // Hermes has no image-generation plugin and no provider slot for one, so
+    // there is nothing a request for a picture could reach. A credential does
+    // not change that, and computing this from the token would report an
+    // ability the box does not have — the same shape of lie the microphone
+    // used to tell in the other direction.
+    expect(capabilitiesFor("hermes", linked).canGenerateImages).toBe(false);
     expect(capabilitiesFor("hermes", bare).canGenerateImages).toBe(false);
   });
 

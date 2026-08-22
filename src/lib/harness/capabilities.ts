@@ -76,7 +76,24 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // AI proxy, which both editions can reach. What a Hermes box may lack is
       // the credential, so that is exactly what this asks about.
       canTranscribe: facts.hasClawaiToken,
-      canGenerateImages: facts.hasClawaiToken,
+      // FALSE, and not because of the credential.
+      //
+      // On OpenClaw a picture is made by the AGENT reaching for its own image
+      // tool — the user just asks. That tool is a bundled OpenClaw plugin
+      // configured through `agents.defaults.imageGenerationModel`, and Hermes
+      // has no such plugin and no image-generation provider slot to put one in.
+      // So there is nothing on this edition that a request for a picture could
+      // reach, and a `true` here computed from the token would be describing a
+      // credential rather than an ability.
+      //
+      // The credential is genuinely not the blocker: the ClawBox AI proxy
+      // serves `POST /images/generations` (`gpt-image-1-mini`, on every plan)
+      // with the same device token `canTranscribe` above reads. What is missing
+      // is a TRIGGER — the Hermes agent needs a tool it can call, the way the
+      // OpenClaw agent has one — and the enablement plan is in the PR. Until
+      // that lands this stays false, because a composer that offered to draw
+      // and then could not would be the same lie the microphone used to tell.
+      canGenerateImages: false,
       // Speaking replies is a gateway capability with no Hermes equivalent.
       // Genuinely absent, and note this is voice OUTPUT: voice INPUT is
       // `canTranscribe` above and is a different feature with a different
