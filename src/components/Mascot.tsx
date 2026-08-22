@@ -9,6 +9,9 @@ import { NEUTRAL_PACK } from '@/lib/mascot-packs'
 import { frenzyQuotesFor } from '@/lib/mascot-frenzy'
 import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
+import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
+import { PET_POWER_LINES } from '@/lib/mascot-pet-voice'
+import PetSprite from '@/components/PetSprite'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -107,6 +110,36 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   })
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null)
   const ctxOpenedAt = useRef(0)
+
+  // ── Which body this mascot wears ──
+  //
+  // OpenClaw boxes wear the crab and nothing here changes for them: the route
+  // answers `supported: false` from the edition lock, so no pet code runs.
+  // Hermes boxes wear the pet the user picked in Settings — the crab is
+  // ClawBox's own brand and is not offered on a device that does not run
+  // ClawBox's own harness.
+  //
+  // `null` means "not known yet". We hold the whole mascot back for that one
+  // round-trip rather than painting a crab and swapping it: a Hermes box must
+  // never flash the crab, and on OpenClaw the delay is a local fetch on a
+  // decoration that idles for two seconds before its first move anyway.
+  //
+  // A fresh Hermes box has no pet installed (upstream installs none, and the
+  // first one is a ~2.2 MB download), so `supported && !active` means "no
+  // mascot at all until you pick one in Settings → Appearance". That is the
+  // deliberate answer to "the crab is OpenClaw-only": no crab, no empty
+  // silhouette, and a picker one click away.
+  const [petStatus, setPetStatus] = useState<PetStatus | null>(null)
+  const petStatusRef = useRef<PetStatus | null>(null)
+  petStatusRef.current = petStatus
+  useEffect(() => {
+    let cancelled = false
+    const load = () => { fetchPetStatus().then(s => { if (!cancelled) setPetStatus(s) }) }
+    load()
+    window.addEventListener(PET_CHANGED_EVENT, load)
+    return () => { cancelled = true; window.removeEventListener(PET_CHANGED_EVENT, load) }
+  }, [])
+  const pet = petStatus?.supported ? petStatus.active : null
 
   // Categorized phrase set for the current locale. Starts on whatever can be
   // had synchronously — the locale's pack if it is already in memory, the
@@ -755,9 +788,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       xRef.current = bx
       setX(bx)
       setFacingDirect(Math.random() > 0.5 ? 'left' : 'right')
-      const powerLines = phrasesRef.current.power.length > 0
-        ? phrasesRef.current.power
-        : NEUTRAL_PACK.power
+      // A pet shouts the language-free power lines instead of the locale
+      // pack's — those are the one category with crab-literal strings in them
+      // ("KING CRAB", "SUPER CLAW"), which read as a bug out of a penguin.
+      const powerLines = petStatusRef.current?.active
+        ? PET_POWER_LINES
+        : phrasesRef.current.power.length > 0
+          ? phrasesRef.current.power
+          : NEUTRAL_PACK.power
       say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
     } else if (action.state === 'idle') {
       const line = getSpeech('idle')
@@ -978,6 +1016,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const bodyAnim = (() => {
+    // A pet animates by STEPPING THROUGH SPRITESHEET FRAMES, so none of these
+    // keyframes apply to it: every one of them transforms a whole image
+    // (rotate/translate/skew), which would wobble the sheet rather than select
+    // a frame. PetSprite carries its own animation; the shell adds none.
+    if (pet) return undefined
     // Thinking animation overrides when bot is processing
     if (thinking) return 'mascot-thinking 1.5s ease-in-out infinite'
     switch (state) {
@@ -1095,6 +1138,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   if (!mounted) return null // avoid hydration mismatch — render only on client
   if (hidden) return null
+  // Waiting on /setup-api/pets — see the petStatus comment above.
+  if (petStatus === null) return null
+  // Hermes edition with nothing picked yet: no crab, no placeholder.
+  if (petStatus.supported && !pet) return null
 
   return (
     <>
@@ -1138,9 +1185,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       }}>
         {/* Body */}
         <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
-          <img src="/clawbox-crab.png" alt="" style={{
-            width: 150, height: 150, objectFit: 'contain',
-          }} />
+          {pet ? (
+            <PetSprite pet={pet} state={state} thinking={thinking} facing={facing} />
+          ) : (
+            <img src="/clawbox-crab.png" alt="" style={{
+              width: 150, height: 150, objectFit: 'contain',
+            }} />
+          )}
           {/* FRENZY MODE — money rain + shockwaves */}
           {frenzy && (
             <>
