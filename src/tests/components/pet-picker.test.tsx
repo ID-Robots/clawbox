@@ -6,7 +6,16 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, cleanup, fireEvent } from "@/tests/helpers/test-utils";
 import PetPicker from "@/components/PetPicker";
 
-vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en", localeResolved: true }) }));
+// Keys pass through as themselves, except the one that carries a placeholder —
+// the byline is interpolated in the component, so the test needs the real
+// English string to prove the author's name actually lands on the tile.
+vi.mock("@/lib/i18n", () => ({
+  useT: () => ({
+    t: (k: string) => (k === "settings.mascot.petBy" ? "by {author}" : k),
+    locale: "en",
+    localeResolved: true,
+  }),
+}));
 
 const CURATED = [
   { slug: "boba", displayName: "Boba", kind: "creature", submittedBy: "railly", curated: true, installed: false },
