@@ -32,7 +32,10 @@ function slice(from: string, to: string): string {
 
 /** The speech-to-text migration, verbatim. */
 const POLICY = hasPython3
-  ? slice("# Migration: ClawBox AI speech to text.", "if isinstance(ds_models, list):")
+  // Ends at the cloud-voice migration that now follows it, not at the DeepSeek
+  // block further down: the two speech migrations are adjacent, and slicing
+  // past this one would run the text-to-speech writes inside these fixtures.
+  ? slice("# Migration: ClawBox AI speech to text.", "# Migration: ClawBox AI cloud voice")
   : "";
 
 let dir: string;
