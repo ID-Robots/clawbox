@@ -6,7 +6,7 @@ import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
 import { randomUUID } from "crypto";
-import { OPENCLAW_HOME } from "@/lib/openclaw-config";
+import { chatAttachmentDir } from "@/lib/harness/media-root";
 
 export const dynamic = "force-dynamic";
 
@@ -33,11 +33,18 @@ export const dynamic = "force-dynamic";
 // ~/.openclaw there -- correctly, since that tree also holds openclaw.json, the
 // identity keys and every transcript -- and relaxing that guard to land one
 // attachment would expose the credentials with it. Same reasoning, and the same
-// OPENCLAW_HOME rooting, as the sibling media reader in ../media/route.ts.
+// resolved rooting, as the sibling media reader in ../media/route.ts.
 //
 // Session-gated by middleware, which lists /setup-api/chat among the surfaces
 // that stay closed even during the pre-setup AP window.
-const ATTACHMENT_DIR = path.join(OPENCLAW_HOME, "media", "chat-attachments");
+//
+// The root is RESOLVED per request rather than fixed at module load, because
+// the answer differs by edition: `~/.openclaw/media` on an OpenClaw box (the
+// allowlisted tree described above), and `<DATA_DIR>/chat-media` on a Hermes
+// SKU, where `~/.openclaw` holds `openclaw.json` and nothing else. Staging into
+// a directory that edition does not have is why a Hermes box could not accept
+// an attachment at all. On OpenClaw the resolved value is byte-identical to the
+// constant this replaced.
 
 // OpenClaw refuses an inline chat image over 6 MB
 // (`attachment-normalize-CpH9LzfB.js`), but this path is not the inline one --
@@ -215,10 +222,11 @@ export async function POST(req: NextRequest) {
   // all.
   let dirReal: string;
   try {
-    await fsp.mkdir(ATTACHMENT_DIR, { recursive: true });
+    const attachmentDir = await chatAttachmentDir();
+    await fsp.mkdir(attachmentDir, { recursive: true });
     // Resolve AFTER mkdir: realpath on a directory that does not exist yet
     // throws, and ~/.openclaw is a symlink on shared-identity installs.
-    dirReal = await fsp.realpath(ATTACHMENT_DIR);
+    dirReal = await fsp.realpath(attachmentDir);
   } catch (err) {
     return NextResponse.json(
       { error: `Could not prepare the attachment directory: ${err instanceof Error ? err.message : String(err)}` },
