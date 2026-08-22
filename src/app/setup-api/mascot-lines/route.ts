@@ -1,8 +1,20 @@
 import { NextResponse } from "next/server";
 import { isPreferenceLanguage } from "@/lib/preference-schema";
 import { getMascotPhrases } from "@/lib/mascot-phrases-server";
+import { hasHermesHarness } from "@/lib/edition-source";
+import { isPetActive } from "@/lib/hermes-pets";
+import { petSafePhrases } from "@/lib/mascot-pet-voice";
 
 export const dynamic = "force-dynamic";
+
+/**
+ * Who is speaking. An OpenClaw box short-circuits to the crab without touching
+ * the Hermes config at all, so nothing about the pet subsystem runs there.
+ */
+async function speakerIsPet(): Promise<boolean> {
+  if (!hasHermesHarness()) return false;
+  return isPetActive();
+}
 
 /**
  * GET /setup-api/mascot-lines?locale=<locale>
@@ -33,7 +45,15 @@ export async function GET(request: Request) {
   const locale = isPreferenceLanguage(requested) ? requested : null;
   try {
     const { phrases, meta } = await getMascotPhrases(locale);
-    return NextResponse.json({ phrases, meta });
+    // A pet never speaks as a crab — in any category, in any locale. Filtered
+    // here as well as on the client because this response is the mascot's
+    // whole vocabulary for the session, and a bubble is picked from it long
+    // after the fetch. The crab is served the set untouched.
+    const pet = await speakerIsPet();
+    return NextResponse.json({
+      phrases: pet ? await petSafePhrases(phrases, meta.locale) : phrases,
+      meta: { ...meta, voice: pet ? "pet" : "crab" },
+    });
   } catch (err) {
     // `getMascotPhrases` touches the KV file, the config store and a dynamic
     // pack import; a failure in any of those should be logged once and return
