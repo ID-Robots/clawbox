@@ -54,6 +54,7 @@
 // indistinguishable from a box paired at the terminal.
 
 import { spawn } from "child_process";
+import { existsSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
 import { hermesHome } from "@/lib/hermes-env";
@@ -444,6 +445,25 @@ function bridgeEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: merged.join(path.delimiter) };
 }
 
+/**
+ * The Node binary to run the bridge with.
+ *
+ * Mirrors hermes_constants.find_node_executable, which prefers Hermes' own
+ * managed Node over whatever PATH resolves to. Where Hermes has no managed
+ * Node we use the interpreter already running this server — a stronger
+ * guarantee than a PATH lookup, since it is known to exist and to be a version
+ * this codebase runs on.
+ *
+ * Resolving it here rather than passing a "node" literal to spawn() is also
+ * what keeps the build working: Turbopack treats a literal `spawn("node", [x])`
+ * as a request to trace `x` as a module, and the bridge lives in ~/.hermes,
+ * outside this tree.
+ */
+function nodeBinary(): string {
+  const managed = path.join(hermesHome(), "node", "bin", "node");
+  return existsSync(managed) ? managed : process.execPath;
+}
+
 async function pathExists(target: string): Promise<boolean> {
   try {
     await fs.stat(target);
@@ -499,14 +519,10 @@ export function createRealDeps(): PairingDeps {
     },
 
     spawnBridge() {
-      // The script path is built at runtime rather than written as a literal.
-      // Turbopack scans child_process arguments for module specifiers and tries
-      // to resolve a bare "bridge.js" at build time, which fails the build —
-      // the file lives in ~/.hermes, not in this tree. An absolute path is also
-      // simply the more honest argument. cwd stays the bridge directory so node
-      // resolves its own node_modules.
+      // Absolute script path, and cwd kept at the bridge directory so node
+      // resolves the bridge's own node_modules.
       const script = path.join(bridgeDir(), "bridge.js");
-      const child = spawn("node", [script, "--pair-only", "--pair-json", "--session", sessionDir()], {
+      const child = spawn(nodeBinary(), [script, "--pair-only", "--pair-json", "--session", sessionDir()], {
         cwd: bridgeDir(),
         env: bridgeEnv(),
         stdio: ["ignore", "pipe", "pipe"],
