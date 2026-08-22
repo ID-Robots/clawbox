@@ -46,7 +46,9 @@ describe("/setup-api/ai-models/status", () => {
     vi.stubGlobal("fetch", fetchSpy);
     const mod = await import("@/app/setup-api/ai-models/status/route");
     GET = mod.GET;
-    resetPortalTierCache = mod._resetPortalTierCache;
+    // The portal-tier cache lives in the shared lib, not the route — a
+    // route.ts may only export handlers and route config.
+    resetPortalTierCache = (await import("@/lib/clawbox-ai-portal-tier"))._resetPortalTierCache;
     resetPortalTierCache();
   });
 
