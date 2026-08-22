@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { signSessionCookie } from "@/tests/helpers/session";
 
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-setup-status-tests-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "data");
@@ -11,16 +12,32 @@ const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 
 type RouteGet = (request?: Request) => Promise<Response>;
 
-let statusGet: RouteGet;
+const SESSION_SECRET = "status-test-secret-0123456789abcdef";
+
+function anonymousRequest(): Request {
+  return new Request("http://localhost/setup-api/setup/status");
+}
+
+function authedRequest(): Request {
+  return new Request("http://localhost/setup-api/setup/status", {
+    headers: { Cookie: `clawbox_session=${signSessionCookie({ secret: SESSION_SECRET })}` },
+  });
+}
+
+let statusRoute: RouteGet;
+// The route trims its payload for unauthenticated callers (TASK-446), so the
+// existing assertions — which all cover the full shape — go through a session.
+const statusGet: RouteGet = (request) => statusRoute(request ?? authedRequest());
 
 beforeAll(async () => {
   process.env.CLAWBOX_ROOT = TEST_ROOT;
   process.env.OPENCLAW_HOME = OPENCLAW_HOME;
+  process.env.SESSION_SECRET = SESSION_SECRET;
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   await fs.writeFile(OPENCLAW_CONFIG_PATH, JSON.stringify({}), "utf-8");
   vi.resetModules();
-  ({ GET: statusGet } = await import("@/app/setup-api/setup/status/route"));
+  ({ GET: statusRoute } = await import("@/app/setup-api/setup/status/route"));
 });
 
 beforeEach(async () => {
@@ -31,7 +48,64 @@ beforeEach(async () => {
 afterAll(async () => {
   delete process.env.CLAWBOX_ROOT;
   delete process.env.OPENCLAW_HOME;
+  delete process.env.SESSION_SECRET;
   await fs.rm(TEST_ROOT, { recursive: true, force: true });
+});
+
+describe("GET /setup-api/setup/status — unauthenticated payload", () => {
+  // This route is public by design (the /login page and the desktop bootstrap
+  // read it before a session exists) AND it is served through the cloudflared
+  // tunnel, so whatever it returns is readable by anyone holding that URL.
+  // Only the wizard's own progress belongs there. TASK-446.
+  const OPERATIONAL_FIELDS = [
+    "local_ai_configured",
+    "local_ai_provider",
+    "local_ai_model",
+    "ai_model_configured",
+    "ai_model_provider",
+    "telegram_configured",
+  ];
+
+  it("returns only setup progress to a caller with no session", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({
+      setup_complete: true,
+      password_configured: true,
+      local_ai_configured: true,
+      local_ai_provider: "ollama",
+      local_ai_model: "ollama/llama3.2:3b",
+      ai_model_provider: "anthropic",
+      telegram_bot_token: "12345:secret",
+    }), "utf-8");
+
+    const body = await (await statusRoute(anonymousRequest())).json();
+
+    expect(body).toEqual({
+      setup_complete: true,
+      password_configured: true,
+      update_completed: false,
+      wifi_configured: false,
+      setup_progress_step: null,
+    });
+    for (const field of OPERATIONAL_FIELDS) {
+      expect(body).not.toHaveProperty(field);
+    }
+    // And nothing that looks like the token leaks through some other key.
+    expect(JSON.stringify(body)).not.toContain("12345:secret");
+  });
+
+  it("returns the full payload to a caller with a session", async () => {
+    await fs.writeFile(CONFIG_PATH, JSON.stringify({
+      setup_complete: true,
+      local_ai_configured: true,
+      local_ai_provider: "ollama",
+      telegram_bot_token: "12345:secret",
+    }), "utf-8");
+
+    const body = await (await statusRoute(authedRequest())).json();
+
+    expect(body.local_ai_provider).toBe("ollama");
+    expect(body.telegram_configured).toBe(true);
+  });
 });
 
 describe("GET /setup-api/setup/status", () => {

@@ -333,8 +333,16 @@ describe("middleware", () => {
       "/setup-api/system/power",
       "/setup-api/install/run-step",
       "/setup-api/ollama/pull",
+      // The telemetry family (TASK-446). Every one of these answered 200 with
+      // no session while the open AP was up: hostname, kernel, CPU model, RAM,
+      // uptime, disk, the LAN address, raw UI state, and which AI provider and
+      // Telegram bot the box is wired to.
       "/setup-api/system/info",
+      "/setup-api/system/stats",
+      "/setup-api/wifi/status",
       "/setup-api/kv",
+      "/setup-api/ai-models/status",
+      "/setup-api/telegram/status",
     ])("gates %s even during setup wizard bootstrap", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();

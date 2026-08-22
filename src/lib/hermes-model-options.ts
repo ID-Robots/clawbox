@@ -69,6 +69,20 @@ const COLD_START_MODELS: Record<string, string[]> = {
 
 export type ModelOptionsSource = "dashboard" | "catalog-file" | "cold-start";
 
+/**
+ * How much a payload is worth, high to low. Used to stop a degraded read from
+ * evicting a better cached one — see `load()`.
+ *
+ * `dashboard` is the live catalogue (47 providers on the QA box). `catalog-file`
+ * is Hermes' on-disk manifest, which in practice holds 2. `cold-start` is the
+ * hardcoded floor.
+ */
+const SOURCE_RANK: Record<ModelOptionsSource, number> = {
+  dashboard: 3,
+  "catalog-file": 2,
+  "cold-start": 1,
+};
+
 export interface HermesModelOption {
   id: string;
   description: string;
@@ -81,8 +95,28 @@ export interface HermesModelOption {
 export interface HermesProviderRow {
   id: string;
   name: string;
-  /** null when the source can't tell (the on-disk catalog carries no auth state). */
+  /**
+   * Hermes' `authenticated` flag, verbatim.
+   *
+   * It means "this provider has an API key set, or is a user-defined
+   * endpoint" — credential PRESENCE, not a working credential. Hermes derives
+   * it from `not is_skeleton`, never from a call to the provider. A row can be
+   * `authenticated: true` and still 403 on every turn, which is exactly what
+   * made a bogus user-defined provider look healthy in the picker. Prefer
+   * `credentialPresent` when reading this; see `verified` for the other half.
+   *
+   * null when the source can't tell (the on-disk catalog carries no auth state).
+   */
   authenticated: boolean | null;
+  /**
+   * Whether a credential was actually exercised against the provider:
+   * `true`/`false` when something upstream probed it, `null` when nobody did.
+   *
+   * ClawBox performs no probe of its own, so this is `null` unless the Hermes
+   * envelope carries it — but it is a distinct field so a consumer can no
+   * longer read "has a key" as "works". TASK-446.
+   */
+  verified: boolean | null;
   isUserDefined: boolean;
   source: string;
   total: number;
@@ -101,6 +135,13 @@ export interface ModelOptionsPayload {
   source: ModelOptionsSource;
   /** True when the payload did not come from the live dashboard. */
   stale: boolean;
+  /**
+   * Set when a live read failed and the caller is being served the previous,
+   * better cached payload instead of the thin fallback. The client can say
+   * "couldn't refresh" rather than silently rendering 2 providers where 47
+   * were a moment ago.
+   */
+  degraded?: "dashboard-unreachable";
 }
 
 export interface ProviderScope {
@@ -188,6 +229,7 @@ interface DashboardProviderRow {
   total_models?: unknown;
   source?: unknown;
   authenticated?: unknown;
+  verified?: unknown;
   is_user_defined?: unknown;
   warning?: unknown;
   featured_models?: unknown;
@@ -314,6 +356,7 @@ function normalizeRow(raw: DashboardProviderRow, localModelId: string): HermesPr
     id,
     name: asString(raw.name) || id,
     authenticated: typeof raw.authenticated === "boolean" ? raw.authenticated : null,
+    verified: typeof raw.verified === "boolean" ? raw.verified : null,
     isUserDefined: raw.is_user_defined === true,
     source: asString(raw.source) || "unknown",
     // `total_models` is the dashboard's count; after seeding it would understate
@@ -413,6 +456,7 @@ async function readDiskCatalog(): Promise<HermesProviderRow[] | null> {
       name: slug,
       // The manifest carries no credential state — say "unknown", never "yes".
       authenticated: null,
+      verified: null,
       isUserDefined: false,
       source: "catalog-file",
       total: models.length,
@@ -480,6 +524,7 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
       id,
       name: id,
       authenticated: null,
+      verified: null,
       isUserDefined: true,
       source: "cold-start",
       total: ids.length,
@@ -493,6 +538,19 @@ async function buildPayload(refresh: boolean): Promise<ModelOptionsPayload> {
   };
 }
 
+/**
+ * True when `next` is a worse answer than the `previous` one still in cache and
+ * that cached answer has not aged out.
+ *
+ * Only downgrades are refused. An equal-or-better source always installs, so a
+ * dashboard read that legitimately returns fewer providers (a key was removed)
+ * still lands, and a stale-but-good cache still expires on its own schedule.
+ */
+function isDowngrade(next: ModelOptionsPayload, previous: ModelOptionsPayload): boolean {
+  if (SOURCE_RANK[next.source] >= SOURCE_RANK[previous.source]) return false;
+  return Date.now() - previous.fetchedAt < STALE_MS;
+}
+
 function load(refresh: boolean): Promise<ModelOptionsPayload> {
   // Single-flight PER MODE. Concurrent callers share one dashboard round-trip,
   // but an explicit refresh must never be satisfied by a plain in-flight load:
@@ -504,8 +562,21 @@ function load(refresh: boolean): Promise<ModelOptionsPayload> {
   if (existing) return existing;
 
   const gen = generation;
+  const previous = cached;
   const run = buildPayload(refresh)
     .then((payload) => {
+      // A dashboard timeout makes buildPayload fall back to the 2-provider disk
+      // manifest. Installing that over a healthy 47-provider cache — which is
+      // what used to happen, unconditionally — turns one transient 8 s timeout
+      // into a device that has apparently lost 45 providers, and a `?refresh=1`
+      // an anonymous caller could trigger into a catalogue-poisoning primitive.
+      // Serve the better payload we already have and SAY that the refresh
+      // failed. TASK-446.
+      if (previous && isDowngrade(payload, previous)) {
+        const kept: ModelOptionsPayload = { ...previous, degraded: "dashboard-unreachable" };
+        if (gen === generation) cached = kept;
+        return kept;
+      }
       // A config write landed while we were reading, so this payload's
       // `current` is pre-write. Hand it to the caller that asked for it, but
       // never let it become the cache for everyone else.
