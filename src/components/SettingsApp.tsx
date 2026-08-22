@@ -317,6 +317,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [versionInfo, setVersionInfo] = useState<{
     clawbox: { current: string; target: string | null; updateAvailable?: boolean };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+    // Both optional: a device that has not been updated yet still answers
+    // /update/versions with the old two-key shape.
+    hermes?: { current: string | null; target: string | null; updateAvailable?: boolean };
+    edition?: "openclaw" | "hermes" | "dual";
   } | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
   const [updateBranch, setUpdateBranch] = useState<string | null>(null);
@@ -3039,10 +3043,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className="text-[var(--text-muted)]">{t("settings.version")}</span>
                   <span className="text-[var(--text-primary)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
-                </div>
+                {/* Harness version, per edition. The Hermes SKU ships no
+                    OpenClaw at all, so its row could only ever read "not
+                    installed" — a meaningless line about software the device
+                    was never supposed to have. Show the harness this box
+                    actually runs instead; `dual` has both, so it shows both.
+                    A server that predates the `edition` field falls through to
+                    the OpenClaw row exactly as before. */}
+                {versionInfo?.edition !== "hermes" && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-[var(--text-muted)]">OpenClaw</span>
+                    <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
+                  </div>
+                )}
+                {versionInfo?.hermes && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-[var(--text-muted)]">Hermes</span>
+                    <span className="text-[var(--text-primary)]">{versionInfo.hermes.current ?? t("settings.notInstalled")}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
                   <span className="text-[var(--text-primary)]">Next.js + Bun</span>
