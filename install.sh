@@ -3089,6 +3089,14 @@ ensure_claude_code() {
 
   local installer rc=1
   installer="$(mktemp)"
+  # mktemp creates the file as ROOT at mode 0600, and the installer is then run
+  # AS the clawbox user — who could not read it. Every run answered
+  # "bash: /tmp/tmp.XXXX: Permission denied" and then "installer ran but
+  # failed", which is why no ClawBox in the field has `claude` on it: the
+  # missing post_update caller was only half the reason. Hand the file to the
+  # user who has to execute it. Proven on .65 on 2026-08-22 — the same command
+  # that failed there succeeds after this chown.
+  chown "$CLAWBOX_USER" "$installer"
   if curl -fsSL https://claude.ai/install.sh -o "$installer" 2>/dev/null \
      && [ -s "$installer" ] \
      && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
@@ -3142,6 +3150,17 @@ step_coding_harness() {
   fi
   install_claude_ds_wrapper || true
   ensure_clawbox_bashrc_path
+
+  # Say plainly whether the harness can actually run. Without this the only
+  # symptom of a failed CLI install is the wrapper telling the owner to run
+  # this very step again — a loop with no diagnosis in it.
+  if is_test_mode; then
+    :
+  elif sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
+    echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
+  else
+    echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is"
+  fi
 }
 
 step_ai_tools_install() {

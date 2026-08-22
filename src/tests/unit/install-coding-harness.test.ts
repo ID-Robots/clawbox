@@ -93,6 +93,18 @@ describe("Claude Code is installed the way Anthropic supports", () => {
     expect(fn).toContain("<!doctype");
   });
 
+  it("hands the downloaded installer to the user that will execute it", () => {
+    // mktemp creates the file as ROOT at 0600 and the installer runs AS the
+    // clawbox user, so without this every single run answered
+    // "bash: /tmp/tmp.XXXX: Permission denied" and then reported "installer ran
+    // but failed". Observed on .65 on 2026-08-22; it is why no box in the field
+    // has `claude` on it. The chown has to come BEFORE the run, not after.
+    const chown = 'chown "$CLAWBOX_USER" "$installer"';
+    const run = 'sudo -u "$CLAWBOX_USER" bash "$installer"';
+    expect(fn).toContain(chown);
+    expect(fn.indexOf(chown)).toBeLessThan(fn.indexOf(run));
+  });
+
   it("short-circuits when Claude Code is already there, so updates stay cheap", () => {
     expect(fn).toContain("command -v claude");
     expect(fn).toContain("already installed");
@@ -121,6 +133,18 @@ describe("the wrapper lands where the desktop expects it", () => {
 
   it("copies rather than symlinks, so a half-checked-out repo cannot break the harness", () => {
     expect(fn).not.toContain("ln -s");
+  });
+});
+
+describe("the step says whether the harness can actually run", () => {
+  it("reports a missing CLI instead of leaving the owner in a repair loop", () => {
+    // The wrapper's failure tells the owner to run this step. If the step then
+    // finishes quietly on a box where the CLI install failed, the two point at
+    // each other forever with no diagnosis anywhere.
+    const fn = extractShellFunction("step_coding_harness");
+    expect(fn).toContain("command -v claude");
+    expect(fn).toMatch(/WARN: claude-ds is installed but Claude Code is NOT/);
+    expect(fn).toMatch(/Coding harness ready/);
   });
 });
 
