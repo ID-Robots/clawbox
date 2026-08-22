@@ -31,9 +31,9 @@ export async function POST() {
     console.info("[whatsapp/unpair] cleared session and disabled channel");
     return NextResponse.json({ success: true });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to unpair" },
-      { status: 500 },
-    );
+    // Same contract as /whatsapp/pair: a code the panel can translate, and the
+    // real EPERM/ENOENT in the server log where support can read it.
+    console.error("[whatsapp/unpair] failed:", err);
+    return NextResponse.json({ error: "unpair_failed" }, { status: 500 });
   }
 }

@@ -47,10 +47,12 @@ export async function POST(request: Request) {
     const snapshot = await getPairingManager().start({ force });
     return NextResponse.json({ supported: true, ...snapshot });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to start pairing" },
-      { status: 500 },
-    );
+    // Machine-readable code out, real cause to the server log. The panel maps
+    // these codes to translated text and never shows the raw string, so
+    // echoing an exception message only ever leaked paths and syscall names
+    // to whoever holds the session cookie.
+    console.error("[whatsapp/pair] start failed:", err);
+    return NextResponse.json({ error: "start_failed" }, { status: 500 });
   }
 }
 
@@ -60,10 +62,8 @@ export async function GET() {
     if (blocked) return blocked;
     return NextResponse.json({ supported: true, ...getPairingManager().poll() });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to read pairing status" },
-      { status: 500 },
-    );
+    console.error("[whatsapp/pair] status read failed:", err);
+    return NextResponse.json({ error: "status_failed" }, { status: 500 });
   }
 }
 
@@ -73,9 +73,7 @@ export async function DELETE() {
     if (blocked) return blocked;
     return NextResponse.json({ supported: true, ...getPairingManager().stop() });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to cancel pairing" },
-      { status: 500 },
-    );
+    console.error("[whatsapp/pair] cancel failed:", err);
+    return NextResponse.json({ error: "cancel_failed" }, { status: 500 });
   }
 }

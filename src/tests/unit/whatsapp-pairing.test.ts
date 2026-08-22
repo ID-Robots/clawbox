@@ -3,6 +3,8 @@ import {
   WhatsappPairingManager,
   REAP_AFTER_MS,
   RESTART_DELAY_MS,
+  RESTART_DELAY_MAX_MS,
+  TICK_MS,
   type BridgeProcessHandle,
   type PairingDeps,
 } from "@/lib/whatsapp-pairing";
@@ -41,6 +43,10 @@ interface Harness {
   bridges: FakeBridge[];
   latest(): FakeBridge;
   advance(ms: number): void;
+  /** Make the next credsExist() hang. Returns the release. */
+  gateCreds(): () => void;
+  /** Bridges the manager spawned but never killed. */
+  live(): FakeBridge[];
   state: {
     installed: boolean;
     scriptExists: boolean;
@@ -55,6 +61,9 @@ interface Harness {
 function makeHarness(overrides: Partial<Harness["state"]> = {}): Harness {
   let clock = 1_000_000;
   const bridges: FakeBridge[] = [];
+  // A latch on credsExist(), which is the first await inside launch() and
+  // therefore the window a DELETE has to land in.
+  let credsGate: Promise<void> | null = null;
   const state = {
     installed: true,
     scriptExists: true,
@@ -76,7 +85,10 @@ function makeHarness(overrides: Partial<Harness["state"]> = {}): Harness {
       if (state.installFails) throw new Error("install_failed");
       state.installed = true;
     },
-    credsExist: async () => state.creds,
+    async credsExist() {
+      if (credsGate) await credsGate;
+      return state.creds;
+    },
     async clearSession() {
       state.cleared += 1;
     },
@@ -99,6 +111,17 @@ function makeHarness(overrides: Partial<Harness["state"]> = {}): Harness {
     advance: (ms: number) => {
       clock += ms;
     },
+    gateCreds: () => {
+      let release!: () => void;
+      credsGate = new Promise<void>((r) => {
+        release = () => {
+          credsGate = null;
+          r();
+        };
+      });
+      return release;
+    },
+    live: () => bridges.filter((b) => !b.killed),
     state,
   };
 }
@@ -452,5 +475,217 @@ describe("WhatsappPairingManager — cancel", () => {
 
     expect(snap.phase).toBe("starting");
     expect(h.bridges).toHaveLength(2);
+  });
+});
+
+/*
+ * Process lifecycle.
+ *
+ * The bug these cover was not a wrong snapshot, it was orphaned `node
+ * bridge.js` processes: 20 interleaved start/cancel calls left three bridges
+ * running, an explicit cancel killed exactly one, and the reaper never reached
+ * the rest — they held Baileys websockets and wrote pre-keys into the same auth
+ * directory the next attempt would use. Every case below asserts on processes,
+ * not on phases.
+ */
+describe("WhatsappPairingManager — process lifecycle", () => {
+  it("spawns exactly one bridge for simultaneous starts", async () => {
+    const h = makeHarness();
+
+    // Three POSTs in one tick. They all clear the `starting || proc` guard
+    // before any of them yields, so the guard is only worth anything if the
+    // flag is claimed before the first await.
+    await Promise.all([h.manager.start(), h.manager.start(), h.manager.start()]);
+
+    expect(h.bridges).toHaveLength(1);
+    expect(h.live()).toHaveLength(1);
+  });
+
+  it("leaves nothing running when a cancel overtakes a start", async () => {
+    const h = makeHarness();
+    const release = h.gateCreds();
+
+    const started = h.manager.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    h.manager.stop(); // the DELETE lands while launch() is still awaiting
+    release();
+    await started;
+
+    expect(h.live()).toHaveLength(0);
+  });
+
+  it("leaves a consistent snapshot when a cancel overtakes a start", async () => {
+    const h = makeHarness();
+    const release = h.gateCreds();
+
+    const started = h.manager.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    h.manager.stop();
+    release();
+    await started;
+
+    // Not "waiting with startedAt: null" — cancelled means idle, all the way.
+    const snap = h.manager.peek();
+    expect(snap.phase).toBe("idle");
+    expect(snap.startedAt).toBeNull();
+    expect(snap.qr).toBeNull();
+  });
+
+  it("does not leave an unreapable bridge when a cancel lands mid-restart", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+    h.manager.poll();
+    h.latest().exit(1); // schedules the respawn
+
+    const release = h.gateCreds();
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS); // respawn starts, blocks on credsExist
+    h.manager.stop(); // cancel: tears the ticker down, sees no process to kill
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Let a full minute of no polling pass, and let the real interval run.
+    h.advance(REAP_AFTER_MS * 10);
+    await vi.advanceTimersByTimeAsync(TICK_MS * 4);
+
+    expect(h.live()).toHaveLength(0);
+  });
+
+  it("re-arms the reaper on the restart path", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+    h.manager.poll();
+    h.latest().exit(1);
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS);
+    expect(h.bridges).toHaveLength(2);
+
+    // Panel closed. Nobody polls again. Drive the interval, not tick().
+    h.advance(REAP_AFTER_MS + 1);
+    await vi.advanceTimersByTimeAsync(TICK_MS * 2);
+
+    expect(h.live()).toHaveLength(0);
+    expect(h.manager.peek().phase).toBe("idle");
+  });
+
+  it("ignores stdout from a bridge it no longer owns", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+    const orphan = h.latest();
+
+    h.manager.stop();
+    await h.manager.start(); // a fresh session with a fresh bridge
+
+    orphan.emit({ event: "qr", qr: "2@FROM_A_DEAD_SOCKET" });
+    expect(h.manager.peek().qr).toBeNull();
+
+    // The dangerous one: `connected` from an orphan writes WHATSAPP_ENABLED.
+    orphan.emit({ event: "connected", user: { id: "1@s.whatsapp.net", name: null } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.manager.peek().phase).not.toBe("paired");
+    expect(h.state.enabled).toBe(0);
+  });
+
+  it("survives interleaved start/cancel calls without accumulating bridges", async () => {
+    const h = makeHarness();
+
+    // The reviewer's "20 rapid clicks": POST, DELETE, POST, DELETE …
+    for (let i = 0; i < 20; i += 1) {
+      const started = h.manager.start();
+      if (i % 2 === 1) h.manager.stop();
+      await started;
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    h.manager.stop();
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MAX_MS);
+
+    expect(h.live()).toHaveLength(0);
+  });
+});
+
+describe("WhatsappPairingManager — failure backoff", () => {
+  it("wipes a revoked session instead of relaunching over the same credentials", async () => {
+    const h = makeHarness({ creds: true });
+    await h.manager.start();
+    expect(h.state.cleared).toBe(0); // a real pairing is never wiped by accident
+
+    h.manager.poll();
+    h.latest().emit({ event: "error", error: "logged_out", reason: 401 });
+    h.latest().exit(1);
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS);
+
+    // Without this the respawn re-presents the revoked creds.json and earns the
+    // same 401, every two seconds, forever.
+    expect(h.state.cleared).toBe(1);
+    expect(h.bridges).toHaveLength(2);
+  });
+
+  it("backs off a bridge that never gets as far as a QR", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+
+    // 20 rounds of two seconds, with the bridge dying before it emits anything.
+    for (let i = 0; i < 20; i += 1) {
+      h.manager.poll();
+      h.latest().exit(1);
+      await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS);
+    }
+
+    // Flat 2 s retries spawned 21 node processes over this window on a Jetson.
+    expect(h.bridges.length).toBeLessThanOrEqual(8);
+    expect(h.bridges.length).toBeGreaterThan(1);
+  });
+
+  it("still has no attempt ceiling once it has backed off", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+    for (let i = 0; i < 20; i += 1) {
+      h.manager.poll();
+      h.latest().exit(1);
+      await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS);
+    }
+
+    const before = h.bridges.length;
+    h.manager.poll();
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MAX_MS * 2);
+
+    expect(h.bridges.length).toBeGreaterThan(before);
+    expect(h.manager.peek().phase).not.toBe("error");
+  });
+
+  it("resets the backoff as soon as a QR appears", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+
+    // Two failures, then a round that reaches a QR.
+    for (let i = 0; i < 2; i += 1) {
+      h.manager.poll();
+      h.latest().exit(1);
+      await vi.advanceTimersByTimeAsync(RESTART_DELAY_MAX_MS);
+    }
+    h.manager.poll();
+    h.latest().emit({ event: "qr", qr: "2@PROGRESS" });
+    h.latest().exit(1);
+
+    // Back to the fast delay, because the last bridge demonstrably worked.
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS);
+    expect(h.manager.peek().phase).toBe("starting");
+    expect(h.bridges).toHaveLength(4);
+  });
+
+  it("stamps startedAt on every non-idle snapshot", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+    expect(h.manager.peek().startedAt).not.toBeNull();
+
+    h.manager.poll();
+    h.latest().exit(1);
+    await vi.advanceTimersByTimeAsync(RESTART_DELAY_MS);
+    h.latest().emit({ event: "qr", qr: "2@AFTER" });
+
+    const snap = h.manager.peek();
+    expect(snap.phase).toBe("waiting");
+    expect(snap.startedAt).not.toBeNull();
   });
 });

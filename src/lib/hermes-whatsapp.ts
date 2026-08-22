@@ -67,11 +67,84 @@ export function whatsappSessionDirs(): string[] {
   return [path.join(home, "platforms", "whatsapp", "session"), path.join(home, "whatsapp", "session")];
 }
 
-/** The Baileys bridge that ships inside the Hermes checkout. */
-export function whatsappBridgeDir(): string {
+/** The Baileys bridge as it ships inside the Hermes checkout. May be read-only. */
+export function whatsappBridgeInstallDir(): string {
   const agent =
     process.env.HERMES_AGENT_DIR || path.join(hermesHome(), "hermes-agent");
   return path.join(agent, "scripts", "whatsapp-bridge");
+}
+
+/** Where upstream mirrors the bridge when the install tree cannot be written. */
+export function whatsappBridgeMirrorDir(): string {
+  return path.join(hermesHome(), "scripts", "whatsapp-bridge");
+}
+
+let resolvedBridgeDir: string | null = null;
+
+/**
+ * The bridge directory to actually work in.
+ *
+ * A straight `$HERMES_AGENT_DIR/scripts/whatsapp-bridge` is only right where
+ * that tree is writable, and upstream knows it is not always: gateway/platforms/
+ * whatsapp_common.py `resolve_whatsapp_bridge_dir()` probes the install tree
+ * with a touch, and on failure (Docker's read-only /opt/hermes) mirrors the
+ * bridge into HERMES_HOME and uses that copy instead. Every upstream caller —
+ * the CLI wizard, the adapter, doctor, the web server — goes through it.
+ *
+ * That distinction did not matter while pairing was a terminal-only affair.
+ * It matters now, because enabling the channel from the panel runs `npm
+ * install` in this directory, and running it inside a read-only install tree
+ * fails with nothing an owner could act on. So mirror upstream's resolution,
+ * including the copy, and cache the answer: spawnBridge() needs it
+ * synchronously, and start() always resolves before anything else touches
+ * the directory.
+ */
+export async function resolveWhatsappBridgeDir(): Promise<string> {
+  const install = whatsappBridgeInstallDir();
+  const mirror = whatsappBridgeMirrorDir();
+
+  // Upstream's own probe: writability is the only property the caller cares
+  // about, and stat() cannot tell you about a read-only mount.
+  const probe = path.join(install, ".write_test");
+  try {
+    await fs.writeFile(probe, "");
+    await fs.rm(probe, { force: true });
+    resolvedBridgeDir = install;
+    return install;
+  } catch {
+    // read-only (or absent) — fall through to the mirror
+  }
+
+  if (await exists(mirror)) {
+    resolvedBridgeDir = mirror;
+    return mirror;
+  }
+
+  try {
+    await fs.mkdir(path.dirname(mirror), { recursive: true });
+    await fs.cp(install, mirror, { recursive: true, errorOnExist: true, force: false });
+    resolvedBridgeDir = mirror;
+    return mirror;
+  } catch {
+    // Nothing writable anywhere, or no install tree to copy. Returning the
+    // install path keeps every read-only check honest and lets the install
+    // fail as install_failed rather than against a directory we invented.
+    resolvedBridgeDir = install;
+    return install;
+  }
+}
+
+/**
+ * The resolved bridge directory, synchronously. Falls back to the install tree
+ * until resolveWhatsappBridgeDir() has run at least once in this process.
+ */
+export function whatsappBridgeDir(): string {
+  return resolvedBridgeDir ?? whatsappBridgeInstallDir();
+}
+
+/** Tests only: forget the cached resolution. */
+export function resetWhatsappBridgeDirForTests(): void {
+  resolvedBridgeDir = null;
 }
 
 async function exists(target: string): Promise<boolean> {

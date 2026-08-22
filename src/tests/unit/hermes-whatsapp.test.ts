@@ -10,7 +10,10 @@ import {
   normalizeWhatsappNumber,
   parseAllowedUsers,
   readHermesWhatsappStatus,
+  resetWhatsappBridgeDirForTests,
+  resolveWhatsappBridgeDir,
   setHermesWhatsappConfig,
+  whatsappBridgeDir,
   whatsappBridgeReady,
   whatsappPaired,
   whatsappSessionDirs,
@@ -240,5 +243,75 @@ describe("setHermesWhatsappConfig", () => {
   it("is a no-op for an empty update", async () => {
     expect(await setHermesWhatsappConfig({})).toEqual([]);
     expect(await readHermesEnv()).toEqual({});
+  });
+});
+
+/*
+ * Read-only install trees.
+ *
+ * Upstream never uses the install path directly — gateway/platforms/
+ * whatsapp_common.py resolve_whatsapp_bridge_dir() probes it for writability
+ * and mirrors the bridge into HERMES_HOME when it is read-only (Docker's
+ * /opt/hermes). That mattered little while pairing was terminal-only; it
+ * matters now, because enabling the channel from the panel runs `npm install`
+ * in whatever directory this returns.
+ */
+describe("resolveWhatsappBridgeDir", () => {
+  let dir: string;
+  const originalHome = process.env.HERMES_HOME;
+  const originalAgent = process.env.HERMES_AGENT_DIR;
+
+  const installDir = () => path.join(dir, "hermes-agent", "scripts", "whatsapp-bridge");
+  const mirrorDir = () => path.join(dir, "scripts", "whatsapp-bridge");
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-wa-bridge-"));
+    process.env.HERMES_HOME = dir;
+    process.env.HERMES_AGENT_DIR = path.join(dir, "hermes-agent");
+    resetWhatsappBridgeDirForTests();
+    await fs.mkdir(installDir(), { recursive: true });
+    await fs.writeFile(path.join(installDir(), "bridge.js"), "// bridge");
+    await fs.writeFile(path.join(installDir(), "package.json"), "{}");
+  });
+
+  afterEach(async () => {
+    resetWhatsappBridgeDirForTests();
+    if (originalHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = originalHome;
+    if (originalAgent === undefined) delete process.env.HERMES_AGENT_DIR;
+    else process.env.HERMES_AGENT_DIR = originalAgent;
+    await fs.chmod(installDir(), 0o755).catch(() => {});
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("uses the install tree when it can be written", async () => {
+    expect(await resolveWhatsappBridgeDir()).toBe(installDir());
+    expect(whatsappBridgeDir()).toBe(installDir());
+  });
+
+  it("leaves no probe file behind", async () => {
+    await resolveWhatsappBridgeDir();
+    expect(await fs.readdir(installDir())).toEqual(["bridge.js", "package.json"]);
+  });
+
+  it("mirrors the bridge into HERMES_HOME when the install tree is read-only", async () => {
+    await fs.chmod(installDir(), 0o555);
+
+    const resolved = await resolveWhatsappBridgeDir();
+
+    expect(resolved).toBe(mirrorDir());
+    // The mirror has to be a usable bridge, not an empty directory: this is
+    // where `npm install` and `node bridge.js` are about to run.
+    expect(await fs.readFile(path.join(mirrorDir(), "bridge.js"), "utf8")).toBe("// bridge");
+    expect(whatsappBridgeDir()).toBe(mirrorDir());
+  });
+
+  it("reuses an existing mirror instead of copying over it", async () => {
+    await fs.mkdir(mirrorDir(), { recursive: true });
+    await fs.writeFile(path.join(mirrorDir(), "bridge.js"), "// already mirrored");
+    await fs.chmod(installDir(), 0o555);
+
+    expect(await resolveWhatsappBridgeDir()).toBe(mirrorDir());
+    expect(await fs.readFile(path.join(mirrorDir(), "bridge.js"), "utf8")).toBe("// already mirrored");
   });
 });

@@ -93,10 +93,20 @@ describe("POST /setup-api/whatsapp/pair", () => {
   });
 
   it("returns 500 rather than a half-answer when the manager throws", async () => {
-    start.mockRejectedValue(new Error("spawn EACCES"));
+    start.mockRejectedValue(new Error("spawn EACCES /home/clawbox/.hermes/..."));
     const res = await POST(req({}));
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toBe("spawn EACCES");
+    // A code the panel can translate — not the exception. The raw message
+    // carries syscall names and absolute paths, and the client never rendered
+    // it anyway.
+    expect((await res.json()).error).toBe("start_failed");
+  });
+
+  it("does not echo the exception text to the client", async () => {
+    start.mockRejectedValue(new Error("spawn EACCES /home/clawbox/.hermes/hermes-agent"));
+    const body = JSON.stringify(await (await POST(req({}))).json());
+    expect(body).not.toContain("EACCES");
+    expect(body).not.toContain("/home/clawbox");
   });
 });
 
@@ -165,10 +175,12 @@ describe("POST /setup-api/whatsapp/unpair", () => {
   });
 
   it("reports a failure instead of claiming success", async () => {
-    unpair.mockRejectedValue(new Error("EPERM"));
+    unpair.mockRejectedValue(new Error("EPERM: /home/clawbox/.hermes/whatsapp/session"));
     const res = await UNPAIR();
 
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toBe("EPERM");
+    const body = await res.json();
+    expect(body.error).toBe("unpair_failed");
+    expect(JSON.stringify(body)).not.toContain("/home/clawbox");
   });
 });

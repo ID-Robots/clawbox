@@ -18,14 +18,16 @@
 // event from human output to one JSON object per line on stdout:
 //
 //     {"ts":…,"event":"started","session":"…"}
-//     {"ts":…,"event":"qr","qr":"2@r+S+UAaO14iA…,cXuvu…,zbSBe…,TrmodF…,1"}
+//     {"ts":…,"event":"qr","qr":"https://wa.me/settings/linked_devices#2@r+S+UAaO14iA…,cXuvu…,zbSBe…,TrmodF…,1"}
 //     {"ts":…,"event":"disconnected","reason":515}
 //     {"ts":…,"event":"connected","user":{"id":"…","name":"…"}}
 //     {"ts":…,"event":"error","error":"logged_out","reason":401}
 //
 // `qr` carries the RAW payload Baileys emits — the same string qrcode-terminal
-// renders as ASCII in the wizard. So the UI can render a real QR from the real
-// payload; nothing here screen-scrapes ASCII art, and no PTY is involved.
+// renders as ASCII in the wizard. On this Baileys version it is a ~277-character
+// `https://wa.me/settings/linked_devices#…` deep link whose fragment holds the
+// five comma-separated pairing fields. So the UI can render a real QR from the
+// real payload; nothing here screen-scrapes ASCII art, and no PTY is involved.
 //
 // THE TIMEOUT PROBLEM, WHICH IS THE ACTUAL FEATURE
 //
@@ -58,13 +60,24 @@ import { existsSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
 import { hermesHome } from "@/lib/hermes-env";
-import { whatsappBridgeDir, WHATSAPP_ENV_ENABLED } from "@/lib/hermes-whatsapp";
+import { resolveWhatsappBridgeDir, whatsappBridgeDir, WHATSAPP_ENV_ENABLED } from "@/lib/hermes-whatsapp";
 import { setHermesEnvValues } from "@/lib/hermes-env";
 
 /** Stop the bridge this long after the last status poll. */
 export const REAP_AFTER_MS = 60_000;
 /** Delay before respawning a bridge that exited without pairing. */
 export const RESTART_DELAY_MS = 2_000;
+/**
+ * Ceiling on the *delay* between respawns — never on the number of them.
+ *
+ * A bridge that dies before it can emit a QR (bad install, revoked session, a
+ * Jetson under memory pressure) used to respawn every 2 s forever, which on
+ * this hardware is a node process every two seconds for as long as the panel
+ * is open. Backing the interval off preserves the promise the feature makes —
+ * no attempt limit, no visible timeout — while making a broken box cost a
+ * spawn every half minute instead of thirty a minute.
+ */
+export const RESTART_DELAY_MAX_MS = 30_000;
 /** How often the reaper/restart watchdog runs. */
 export const TICK_MS = 5_000;
 /** npm install ceiling. A cold Baileys install on a Jetson is minutes, not seconds. */
@@ -159,6 +172,10 @@ export class WhatsappPairingManager {
   private stopping = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
+  /** Respawns since the last sign of progress. Drives the backoff, nothing else. */
+  private consecutiveFailures = 0;
+  /** WhatsApp revoked the stored session; the next launch must start blank. */
+  private sessionRevoked = false;
 
   constructor(deps: PairingDeps) {
     this.deps = deps;
@@ -189,61 +206,117 @@ export class WhatsappPairingManager {
     if (this.snap.phase === "paired" && !opts.force) return this.peek();
     if (this.starting || this.proc) return this.peek();
 
-    if (!(await this.deps.bridgeScriptExists())) {
-      this.snap = { ...IDLE, phase: "error", error: "bridge_missing" };
-      return this.peek();
-    }
-
+    // Claim the slot BEFORE the first await, not after it. Two POSTs that land
+    // in the same tick both clear the guard above before either one yields, so
+    // anything asynchronous between the guard and the flag lets every caller
+    // through — and each of them spawns a bridge into the same auth directory,
+    // which is precisely the key corruption the idempotence above exists to
+    // prevent. The flag is released in the `finally` at the bottom, after
+    // launch() has published this.proc, so the window never reopens.
     this.starting = true;
     this.stopping = false;
-    this.snap = { ...IDLE, phase: "preparing", startedAt: this.deps.now() };
 
     try {
-      if (opts.force) await this.deps.clearSession();
-
-      // Upstream installs the bridge's dependencies from the wizard rather than
-      // vendoring them (cmd_whatsapp step 4: `npm install --no-fund --no-audit
-      // --progress=false` in the bridge directory). A fresh box therefore has
-      // no node_modules until someone pairs, which is exactly the gap this
-      // flow has to close — so we run the same install, and the panel shows
-      // "preparing" while it does.
-      if (!(await this.deps.bridgeInstalled())) {
-        await this.deps.install();
+      if (!(await this.deps.bridgeScriptExists())) {
+        this.snap = { ...IDLE, phase: "error", error: "bridge_missing" };
+        return this.peek();
       }
-    } catch (err) {
-      this.starting = false;
-      this.snap = {
-        ...this.snap,
-        phase: "error",
-        error: err instanceof Error && err.message === "install_failed" ? "install_failed" : "prepare_failed",
-      };
-      return this.peek();
-    }
 
-    this.starting = false;
-    await this.launch();
-    this.ensureTicker();
-    return this.peek();
+      this.snap = { ...IDLE, phase: "preparing", startedAt: this.deps.now() };
+
+      try {
+        if (opts.force) {
+          await this.deps.clearSession();
+          this.sessionRevoked = false;
+        }
+
+        // Upstream installs the bridge's dependencies from the wizard rather
+        // than vendoring them (cmd_whatsapp step 4: `npm install --no-fund
+        // --no-audit --progress=false` in the bridge directory). A fresh box
+        // therefore has no node_modules until someone pairs, which is exactly
+        // the gap this flow has to close — so we run the same install, and the
+        // panel shows "preparing" while it does.
+        if (!(await this.deps.bridgeInstalled())) {
+          await this.deps.install();
+        }
+      } catch (err) {
+        this.snap = {
+          ...this.snap,
+          phase: "error",
+          error: err instanceof Error && err.message === "install_failed" ? "install_failed" : "prepare_failed",
+        };
+        return this.peek();
+      }
+
+      this.consecutiveFailures = 0;
+      await this.launch();
+      return this.peek();
+    } finally {
+      this.starting = false;
+    }
   }
 
   /** Spawn one bridge and wire its event stream. */
   private async launch(): Promise<void> {
+    if (this.stopping) return;
+
     // A session directory with no creds.json holds only ephemeral pre-keys from
     // an attempt nobody completed. Clearing it guarantees the next spawn starts
     // a clean registration and produces a QR immediately, instead of resuming
     // half-state that can sit silent. Never clear once creds.json exists —
-    // that is the pairing we were asked to protect.
-    if (!(await this.deps.credsExist())) {
+    // that is the pairing we were asked to protect — UNLESS WhatsApp has told
+    // us the credentials are revoked, in which case keeping them only buys
+    // another 401 on every respawn, forever.
+    if (this.sessionRevoked || !(await this.deps.credsExist())) {
+      if (this.stopping) return;
       await this.deps.clearSession();
+      this.sessionRevoked = false;
     }
+    if (this.stopping) return;
 
     this.stdoutBuf = "";
-    this.snap = { ...this.snap, phase: "starting", qr: null, qrIssuedAt: null, error: null };
+    this.snap = {
+      ...this.snap,
+      phase: "starting",
+      qr: null,
+      qrIssuedAt: null,
+      error: null,
+      // stop() resets the snapshot to IDLE. A launch already in flight when
+      // that happened would otherwise go on to serve a live QR over a snapshot
+      // whose startedAt is null — a state no reader can make sense of.
+      startedAt: this.snap.startedAt ?? this.deps.now(),
+    };
 
     const proc = this.deps.spawnBridge();
+
+    // Every await above is a place a DELETE can land. stop() tore down
+    // everything it could see, and this child did not exist yet, so handing it
+    // to this.proc now would create a bridge nothing tracks, nothing reaps and
+    // nothing can kill — it would just sit there holding a Baileys websocket
+    // and writing pre-keys into the session directory the next attempt uses.
+    if (this.stopping) {
+      try {
+        proc.kill();
+      } catch {
+        // already gone
+      }
+      this.snap = { ...IDLE };
+      return;
+    }
+
     this.proc = proc;
-    proc.onLine((line) => this.onStdout(line));
+    // Identity guard, matching onExit's. A bridge we abandoned or replaced must
+    // not keep rewriting the shared snapshot — and above all must not reach the
+    // `connected` branch, which writes WHATSAPP_ENABLED=true.
+    proc.onLine((line) => {
+      if (this.proc !== proc) return;
+      this.onStdout(line);
+    });
     proc.onExit(() => this.onExit(proc));
+    // Armed here rather than in start(): the restart path reaches launch()
+    // through a timer, and a respawned bridge with no ticker behind it can
+    // never be reaped.
+    this.ensureTicker();
   }
 
   /** Split the raw stdout stream into lines. */
@@ -288,6 +361,10 @@ export class WhatsappPairingManager {
           qrCount: this.snap.qrCount + 1,
           error: null,
         };
+        // A QR on screen is the only proof this bridge got as far as it needed
+        // to. Whatever went wrong before it is forgiven, and the next respawn
+        // starts from the fast delay again.
+        this.consecutiveFailures = 0;
         return;
       }
 
@@ -321,9 +398,22 @@ export class WhatsappPairingManager {
 
       case "error": {
         const reason = typeof event.error === "string" ? event.error : "bridge_error";
-        // logged_out means the stored session was revoked. It is recoverable
-        // by starting over from a blank session, which the restart path does.
-        this.snap = { ...this.snap, error: reason, qr: null, qrIssuedAt: null };
+        // logged_out means WhatsApp revoked the stored session. Recovering does
+        // need a blank session — but the restart path will not produce one on
+        // its own, because launch() only wipes a directory with no creds.json
+        // and a revoked session still has one. Say so explicitly, or every
+        // respawn re-presents the same dead credentials and earns the same 401.
+        if (reason === "logged_out") this.sessionRevoked = true;
+        this.snap = {
+          ...this.snap,
+          // Leaving the phase alone left "waiting" on screen with the QR pulled
+          // out from under it. The bridge is on its way down and a respawn is
+          // what comes next, which is what "starting" means.
+          phase: this.snap.phase === "paired" ? this.snap.phase : "starting",
+          error: reason,
+          qr: null,
+          qrIssuedAt: null,
+        };
         return;
       }
 
@@ -361,23 +451,38 @@ export class WhatsappPairingManager {
       return;
     }
 
-    // The bridge gave up. The owner has not. Respawn — no ceiling, because an
-    // attempt limit IS the timeout this feature exists to remove.
+    // The bridge gave up. The owner has not. Respawn — no ceiling on attempts,
+    // because an attempt limit IS the timeout this feature exists to remove.
+    // The ceiling is on the delay instead: a bridge that keeps dying without
+    // ever showing a QR gets progressively more time, up to RESTART_DELAY_MAX_MS.
     this.snap = { ...this.snap, phase: "starting", qr: null, qrIssuedAt: null, restarts: this.snap.restarts + 1 };
+    const delay = Math.min(RESTART_DELAY_MS * 2 ** this.consecutiveFailures, RESTART_DELAY_MAX_MS);
+    this.consecutiveFailures += 1;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
       if (this.stopping || this.proc) return;
       void this.launch();
-    }, RESTART_DELAY_MS);
+    }, delay);
     if (typeof this.restartTimer === "object" && "unref" in this.restartTimer) this.restartTimer.unref();
   }
 
   /** Reaper. Public so tests can drive it without a real clock. */
   tick(): void {
-    if (this.snap.phase === "idle") return;
+    // A paired session owns no bridge (onPaired kills it) and its snapshot is
+    // the answer the panel wants for as long as it keeps asking.
     if (this.snap.phase === "paired") return;
     if (this.deps.now() - this.lastPollAt <= REAP_AFTER_MS) return;
+
+    // Liveness decides, not phase. A bridge can be running while the snapshot
+    // reads "idle" — a DELETE that raced an in-flight launch(), a respawn that
+    // landed after a reset — and gating the reaper on the phase is exactly what
+    // let those processes become uncollectable. Only stand down when there is
+    // demonstrably nothing to collect.
+    if (this.snap.phase === "idle" && !this.proc && !this.restartTimer) {
+      this.clearTimers();
+      return;
+    }
     this.stop();
   }
 
@@ -417,6 +522,7 @@ export class WhatsappPairingManager {
     this.teardownProcess();
     this.snap = { ...IDLE };
     this.stdoutBuf = "";
+    this.consecutiveFailures = 0;
     return this.peek();
   }
 }
@@ -481,7 +587,14 @@ export function createRealDeps(): PairingDeps {
     bridgeDir,
     sessionDir,
     bridgeInstalled: () => pathExists(path.join(bridgeDir(), "node_modules")),
-    bridgeScriptExists: () => pathExists(path.join(bridgeDir(), "bridge.js")),
+
+    // start() calls this first, and it is where the read-only-install-tree
+    // resolution happens: everything below — the install, the spawn — then
+    // reads the cached answer synchronously.
+    async bridgeScriptExists() {
+      const dir = await resolveWhatsappBridgeDir();
+      return pathExists(path.join(dir, "bridge.js"));
+    },
 
     async install() {
       await new Promise<void>((resolve, reject) => {
