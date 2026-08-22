@@ -26,6 +26,10 @@ const MESSAGES: Record<ForceRegenerateReason, string> = {
   timeout: "The on-device model took too long to answer. The mascot keeps its built-in phrases.",
   transport: "Could not reach the on-device model. The mascot keeps its built-in phrases.",
   malformed: "The on-device model did not return usable phrases. The mascot keeps its built-in phrases.",
+  // Not a failure of the box, and it must not read like one: the model ran and
+  // answered, it just repeated lines the crab already had.
+  "no-new-phrases":
+    "The on-device model only came up with phrases the mascot already knows. Nothing new this time.",
 };
 
 /** Only "generated" produced anything; everything else leaves the pack in place. */

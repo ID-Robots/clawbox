@@ -80,6 +80,7 @@ describe("POST /setup-api/mascot-lines/regenerate", () => {
       "timeout",
       "transport",
       "malformed",
+      "no-new-phrases",
     ] as const;
     const messages = new Set<string>();
     for (const reason of reasons) {
@@ -104,6 +105,20 @@ describe("POST /setup-api/mascot-lines/regenerate", () => {
     forceRegenerate.mockResolvedValue({ phrases: null, reason: "chat-busy", locale: "en" });
     const chat = await (await POST(request("?locale=en"))).json();
     expect(chat.reason).toMatch(/your chat/i);
+  });
+
+  it("does not call a working model broken when it merely had nothing new", async () => {
+    // The model ran and answered a well-formed batch; every line was one the
+    // crab already had. Reporting that as junk sends the owner looking for a
+    // broken install that is not there.
+    forceRegenerate.mockResolvedValue({ phrases: null, reason: "no-new-phrases", locale: "en" });
+
+    const body = await (await POST(request("?locale=en"))).json();
+
+    expect(body.ok).toBe(false);
+    expect(body.meta.reason).toBe("no-new-phrases");
+    expect(body.reason).toMatch(/already knows/i);
+    expect(body.reason).not.toMatch(/did not return usable/i);
   });
 
   it("explains that generation is English-only rather than reporting a fault", async () => {

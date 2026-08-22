@@ -181,12 +181,19 @@ describe("mascot regeneration schedule", () => {
         lastFullRegen: Date.now(),
         lastTopUp: Date.now(),
       }));
+      store.set(FAILURE("bg"), JSON.stringify({ at: Date.now(), kind: "malformed" }));
 
       const { phrases, meta } = await server.getMascotPhrases("bg");
 
       expect(meta.source).toBe("pack");
       expect(meta.reason).toBe("generation-disabled-for-locale");
       expect(phrases.sass).not.toContain("Стара реплика 1");
+      // Deleted, not merely skipped. Left on disk it is unreachable data no
+      // code path can ever fix: the validator-version re-filter lives after
+      // this early return, so it would sit at an old validator version for
+      // good, and the failure record beside it could never be cleared.
+      expect(store.has(CACHE("bg"))).toBe(false);
+      expect(store.has(FAILURE("bg"))).toBe(false);
     });
 
     it("refuses a forced regen for a disabled locale without touching the model", async () => {
@@ -371,6 +378,73 @@ describe("mascot regeneration schedule", () => {
       const envelope = JSON.parse(store.get(CACHE("en"))!);
       expect(envelope.phrases.sass).toEqual(BATCH.sass);
       expect(envelope.phrases.sass).not.toContain(en.sass[0]);
+    });
+
+    it("keeps the batch shape the on-device model actually produces", async () => {
+      // Measured on the reference box: roughly three quarters of every run is
+      // a copy of the tone reference, leaving a handful of new lines spread
+      // thinly across the categories. Demanding four NEW lines in each of
+      // three categories made that run — the only run the hardware produces —
+      // fail, so the Settings button had no reachable success path at all.
+      // One new line in a category is a real addition; the pack tops the
+      // category back up on the way to the bubble.
+      nextOutcome = {
+        status: "ok",
+        phrases: {
+          sass: [...en.sass.slice(0, 8), BATCH.sass[0]],
+          idle: [...en.idle.slice(0, 8), BATCH.idle[0]],
+          jump: [...en.jump.slice(0, 8), BATCH.jump[0], BATCH.jump[1]],
+          power: en.power.slice(0, 8),
+        },
+      };
+
+      await server.maybeRegenerateInBackground("en");
+
+      const envelope = JSON.parse(store.get(CACHE("en"))!);
+      expect(envelope.phrases.sass).toEqual([BATCH.sass[0]]);
+      expect(envelope.phrases.jump).toEqual([BATCH.jump[0], BATCH.jump[1]]);
+      // All echo, so it contributed nothing and is not in the envelope.
+      expect(envelope.phrases.power).toBeUndefined();
+      expect(store.has(FAILURE("en"))).toBe(false);
+    });
+
+    it("calls an all-echo run 'nothing new' rather than 'malformed'", async () => {
+      // The model ran and answered correctly. Reporting that as junk sends the
+      // owner looking for a broken install that is not there.
+      nextOutcome = {
+        status: "ok",
+        phrases: { sass: en.sass.slice(0, 6), idle: en.idle.slice(0, 6), jump: en.jump.slice(0, 6) },
+      };
+
+      const result = await server.forceRegenerate("en");
+
+      expect(result.reason).toBe("no-new-phrases");
+      expect(store.has(CACHE("en"))).toBe(false);
+      expect(JSON.parse(store.get(FAILURE("en"))!).kind).toBe("no-new-phrases");
+    });
+
+    it("does not count a line an earlier run already cached as new", async () => {
+      // Top-up mode. Stripping against the pack alone left the cached lines
+      // looking new, so a run that re-produced yesterday's output cleared the
+      // gate and was written back as a fresh success.
+      const day = 24 * 60 * 60 * 1000;
+      store.set(CACHE("en"), JSON.stringify({
+        phrases: BATCH,
+        locale: "en",
+        validatorVersion: VALIDATOR_VERSION,
+        lastFullRegen: Date.now() - day, // recent enough that only a top-up is due
+        lastTopUp: Date.now() - 2 * day,
+      }));
+      nextOutcome = { status: "ok", phrases: { sass: BATCH.sass, idle: BATCH.idle, jump: BATCH.jump } };
+
+      await server.maybeRegenerateInBackground("en");
+
+      expect(generateSpy).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(store.get(FAILURE("en"))!).kind).toBe("no-new-phrases");
+      // The envelope is untouched — including its timestamps, so the next
+      // top-up is still due rather than pushed a day out by a no-op run.
+      const envelope = JSON.parse(store.get(CACHE("en"))!);
+      expect(envelope.lastTopUp).toBeLessThanOrEqual(Date.now() - 2 * day);
     });
 
     it("treats a case- and whitespace-only variation as an echo", async () => {

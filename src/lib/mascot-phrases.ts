@@ -49,10 +49,38 @@ export type PhraseCategory = (typeof PHRASE_CATEGORIES)[number];
 /** A speech bubble is small. Anything longer is clipped on a phone. */
 export const MAX_PHRASE_LENGTH = 60;
 
-/** A generated category is only kept if this many entries survive validation. */
-export const MIN_SURVIVORS_PER_CATEGORY = 4;
+/**
+ * A category is only kept if this many entries survive validation.
+ *
+ * One. This was four, from the era when a generated set REPLACED the pack: a
+ * category with two lines made the crab repeat itself, so topping it up from
+ * the pack was strictly better. Neither half of that is true any more —
+ * `mergeWithPackSync` UNIONS the generated lines with the pack, so every
+ * category the crab renders is pack-sized whatever generation contributed,
+ * and `stripEchoes` now removes the pack copies before this count is taken,
+ * so the number being compared is "NEW lines", not "lines".
+ *
+ * Four NEW lines per category is a bar the on-device model does not clear: a
+ * measured English run on the reference box came back ~76% echo, leaving 1-16
+ * new lines spread across nine categories, and demanding four of them in each
+ * of three categories turned every real run into an error message. One new
+ * line in a category is a real addition to the repertoire — it is exactly
+ * what the owner sees when the crab says something it has never said before.
+ * Zero is still zero, and still fails: that is `MIN_SURVIVING_CATEGORIES`
+ * below doing its job.
+ */
+export const MIN_SURVIVORS_PER_CATEGORY = 1;
 
-/** A generated batch is only kept if this many categories survive. */
+/**
+ * A batch is only kept if this many categories survive.
+ *
+ * With the per-category bar at one, this is what stops a worthless run
+ * passing: a batch that echoed the pack everywhere contributes zero
+ * categories and is rejected. It is also a structural sanity check — the JSON
+ * grammar makes a healthy run emit all nine categories, so a batch that lands
+ * new lines in fewer than three of them is a truncated or malformed answer
+ * rather than a thin one.
+ */
 export const MIN_SURVIVING_CATEGORIES = 3;
 
 /**
@@ -166,7 +194,7 @@ function echoKey(phrase: string): string {
 }
 
 /**
- * Drop every generated entry that is already in the pack.
+ * Drop every generated entry the crab can already say.
  *
  * The prompt shows the model the locale's pack as a TONE REFERENCE, and the
  * model copies it: a measured English run came back 76% echo. Those echoes
@@ -177,22 +205,32 @@ function echoKey(phrase: string): string {
  *
  * Stripping them here, BEFORE the survivor count, makes that count mean what
  * it says: how many NEW lines this run produced. A run that is nothing but
- * echo now fails validation instead of masquerading as a success, which is
- * the honest outcome.
+ * echo fails validation instead of masquerading as a success, which is the
+ * honest outcome.
  *
- * Nothing is lost by dropping them — the pack supplies those exact lines on
- * every read anyway.
+ * `known` is variadic because "already said" has two sources, and using only
+ * the first was a half-truth: the pack, and — in top-up mode — the lines a
+ * previous run already put in the cache envelope. A line the model produced
+ * again yesterday is not new either, and counting it as new would put the
+ * survivor gate back to measuring something other than what it claims.
+ *
+ * Nothing is lost by dropping them — the pack and the envelope both supply
+ * their own lines on every read anyway.
  */
-export function stripPackEchoes(
+export function stripEchoes(
   set: Partial<MascotPhraseSet> | null | undefined,
-  pack: MascotPhraseSet,
+  ...known: Array<Partial<MascotPhraseSet> | null | undefined>
 ): Partial<MascotPhraseSet> {
   const out: Partial<MascotPhraseSet> = {};
   for (const category of PHRASE_CATEGORIES) {
     const incoming = set?.[category];
     if (!Array.isArray(incoming)) continue;
     const packKeys = new Set(
-      (Array.isArray(pack[category]) ? pack[category] : [])
+      known
+        .flatMap((source) => {
+          const entries = source?.[category];
+          return Array.isArray(entries) ? entries : [];
+        })
         .filter((entry): entry is string => typeof entry === "string")
         .map(echoKey),
     );
@@ -218,10 +256,11 @@ export interface BatchValidation {
 /**
  * Gate a freshly generated batch before it is written to the cache.
  *
- * A category needs MIN_SURVIVORS_PER_CATEGORY survivors to be kept at all —
- * a category with two usable lines makes the crab repeat itself, and topping
- * it up from the pack is strictly better. A batch needs
- * MIN_SURVIVING_CATEGORIES kept categories to be persisted at all.
+ * A category needs MIN_SURVIVORS_PER_CATEGORY survivors to be kept, and a
+ * batch needs MIN_SURVIVING_CATEGORIES kept categories to be persisted at
+ * all. Callers that have already run the entries through `stripEchoes` are
+ * therefore counting NEW lines, which is the only count worth gating on: see
+ * both constants for why the per-category bar is one rather than four.
  *
  * `stopwordProbe` catches the failure the script check structurally cannot:
  * a model asked for German that answered in English.

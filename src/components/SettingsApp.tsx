@@ -51,6 +51,7 @@ const MASCOT_REGEN_MESSAGE_KEYS: Record<string, string> = {
   timeout: "settings.mascotRefreshFailed",
   transport: "settings.mascotRefreshFailed",
   malformed: "settings.mascotRefreshFailed",
+  "no-new-phrases": "settings.mascotRefreshNothingNew",
 };
 
 /* ── Types ── */

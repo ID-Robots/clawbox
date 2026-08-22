@@ -292,6 +292,9 @@ describe("SettingsApp mascot phrase refresh", () => {
       ["timeout", "settings.mascotRefreshFailed"],
       ["transport", "settings.mascotRefreshFailed"],
       ["malformed", "settings.mascotRefreshFailed"],
+      // Its own message, NOT the generic failure one: the model worked and
+      // simply had nothing to add, which is not a fault to go debugging.
+      ["no-new-phrases", "settings.mascotRefreshNothingNew"],
       // A reason a future server adds must not render blank.
       ["something-new", "settings.mascotRefreshFailed"],
     ];
