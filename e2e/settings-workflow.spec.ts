@@ -7,7 +7,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 // and the dialog-driven assertions in the original test went stale.
 // A focused AI-Provider test belongs in its own spec; until then this
 // test still gives us the bulk of SettingsApp's render coverage.
-test("settings covers appearance, network, local AI, telegram, system, and about flows", async ({ page }) => {
+test("settings covers appearance, network, local AI, local models, telegram, system, and about flows", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,
@@ -64,6 +64,21 @@ test("settings covers appearance, network, local AI, telegram, system, and about
   // Gemma is now the sole local engine — Ollama is no longer offered here.
   await expect(localProviderGroup.getByText("Ollama")).toHaveCount(0);
   await expect(localProviderGroup.getByText("ClawBox AI")).toHaveCount(0);
+
+  // Local Models: the inventory behind the Local AI selector. The assertion
+  // that matters is the NEGATIVE one — an engine the box does not have must
+  // read as absent and must not come with a switch, because offering a control
+  // that cannot work is the drift this tab was built to end.
+  await settingsWindow.getByRole("button", { name: "Local Models" }).click();
+  const ollamaRow = settingsWindow.getByTestId("local-model-ollama");
+  await expect(ollamaRow.getByText("Running", { exact: true })).toBeVisible();
+  await expect(ollamaRow.getByText(/Disk 609 MB/)).toBeVisible();
+  // aria-checked, not just visible: the fixture has Ollama enabled, so a switch
+  // that rendered stuck-off would still pass a visibility-only assertion.
+  await expect(ollamaRow.getByRole("switch", { name: /Ollama enabled/i })).toHaveAttribute("aria-checked", "true");
+  const kokoroRow = settingsWindow.getByTestId("local-model-kokoro");
+  await expect(kokoroRow.getByText("Not installed", { exact: true })).toBeVisible();
+  await expect(kokoroRow.getByRole("switch")).toHaveCount(0);
 
   await settingsWindow.getByRole("button", { name: "Telegram" }).click();
   await settingsWindow.locator("#settings-tg-token").fill("123456789:ABCdefGHI");
