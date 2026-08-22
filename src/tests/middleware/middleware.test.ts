@@ -484,6 +484,9 @@ describe("middleware", () => {
       // in onboarding — during the setup window the device is broadcasting an
       // OPEN AP, so anyone in radio range would otherwise reach it.
       "/setup-api/local-models",
+      // POST rewrites messages.tts.provider and spawns the openclaw CLI. Same
+      // radio-range reasoning as local-models: onboarding never calls it.
+      "/setup-api/tts",
       "/setup-api/gateway",
       "/setup-api/gateway/", // trailing slash must not dodge the exact match
     ])("gates sensitive %s during the setup window", async (p) => {

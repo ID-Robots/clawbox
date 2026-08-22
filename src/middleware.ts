@@ -144,6 +144,7 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/gateway/ws-config", // hands back the live gateway auth token
   "/setup-api/chat",        // reads generated media out of the harness media tree
   "/setup-api/local-models", // POST enables/disables real systemd units through sudo
+  "/setup-api/tts",         // POST rewrites messages.tts.provider and spawns the openclaw CLI
   // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
   // AP, so anything left pre-auth is reachable by anyone in radio range.
   //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.

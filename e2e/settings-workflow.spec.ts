@@ -80,6 +80,18 @@ test("settings covers appearance, network, local AI, local models, telegram, sys
   await expect(kokoroRow.getByText("Not installed", { exact: true })).toBeVisible();
   await expect(kokoroRow.getByRole("switch")).toHaveCount(0);
 
+  // Voice: which engine speaks, and which one actually did. Same negative
+  // assertion as Local Models — a cloud voice this box cannot call must read as
+  // unavailable, because "chosen quietly becoming something else" is the exact
+  // failure this section exists to prevent.
+  await settingsWindow.getByRole("button", { name: "Voice" }).click();
+  await expect(settingsWindow.getByTestId("voice-speaking-now")).toContainText("On this box");
+  await expect(settingsWindow.getByTestId("voice-choice-auto")).toHaveAttribute("aria-checked", "true");
+  const cloudChoice = settingsWindow.getByTestId("voice-choice-cloud");
+  await expect(cloudChoice.getByText("Not available")).toBeVisible();
+  await expect(cloudChoice).toHaveAttribute("aria-disabled", "true");
+  await expect(settingsWindow.getByTestId("voice-last-check")).toContainText("On this box spoke in 14.9s.");
+
   await settingsWindow.getByRole("button", { name: "Telegram" }).click();
   await settingsWindow.locator("#settings-tg-token").fill("123456789:ABCdefGHI");
   await settingsWindow.getByRole("button", { name: /Connect$/ }).click();
