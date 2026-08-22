@@ -499,7 +499,14 @@ export function createRealDeps(): PairingDeps {
     },
 
     spawnBridge() {
-      const child = spawn("node", ["bridge.js", "--pair-only", "--pair-json", "--session", sessionDir()], {
+      // The script path is built at runtime rather than written as a literal.
+      // Turbopack scans child_process arguments for module specifiers and tries
+      // to resolve a bare "bridge.js" at build time, which fails the build —
+      // the file lives in ~/.hermes, not in this tree. An absolute path is also
+      // simply the more honest argument. cwd stays the bridge directory so node
+      // resolves its own node_modules.
+      const script = path.join(bridgeDir(), "bridge.js");
+      const child = spawn("node", [script, "--pair-only", "--pair-json", "--session", sessionDir()], {
         cwd: bridgeDir(),
         env: bridgeEnv(),
         stdio: ["ignore", "pipe", "pipe"],
