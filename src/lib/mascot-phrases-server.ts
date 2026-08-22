@@ -448,10 +448,17 @@ async function persistBatch(
 ): Promise<PersistOutcome> {
   // Echoes are stripped BEFORE validation, so the survivor count counts NEW
   // lines. See `stripEchoes` — the model copies the tone reference it is
-  // shown, and echoes used to pad a near-worthless batch past the gate. The
-  // cached envelope is a second source of "already said": in top-up mode a
-  // line yesterday's run produced is not new today either.
-  const stripped = stripEchoes(fresh, await packFor(locale), cached?.phrases);
+  // shown, and echoes used to pad a near-worthless batch past the gate.
+  //
+  // The cached envelope counts as "already said" in TOP-UP mode only, and the
+  // asymmetry is not an oversight. A top-up PREPENDS to the envelope, so a
+  // line yesterday's run already put there adds nothing today. A full regen
+  // REPLACES it, so the old lines are gone the moment this batch is written —
+  // and a line the model produced again is the only reason it survives at
+  // all. Stripping against the envelope there would delete lines for being
+  // good enough to reproduce, and would make a second press of the refresh
+  // button harder to pass than the first.
+  const stripped = stripEchoes(fresh, await packFor(locale), mode === "topup" ? cached?.phrases : null);
   const validated = validateBatch(stripped, locale);
   if (!validated.ok) {
     const echoed = countEntries(fresh) - countEntries(stripped);

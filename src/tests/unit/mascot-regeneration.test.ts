@@ -447,6 +447,29 @@ describe("mascot regeneration schedule", () => {
       expect(envelope.lastTopUp).toBeLessThanOrEqual(Date.now() - 2 * day);
     });
 
+    it("still counts a re-produced line as new when the whole set is being replaced", async () => {
+      // The other side of the rule above. A FULL regen replaces the envelope,
+      // so a line the model produced again is the only reason it survives at
+      // all — striking it out for being in the envelope it is about to
+      // overwrite would delete lines for being good enough to reproduce, and
+      // would make a second press of the refresh button harder to pass than
+      // the first.
+      store.set(CACHE("en"), JSON.stringify({
+        phrases: BATCH,
+        locale: "en",
+        validatorVersion: VALIDATOR_VERSION,
+        lastFullRegen: 0, // ancient -> a FULL regen is due
+        lastTopUp: 0,
+      }));
+      nextOutcome = { status: "ok", phrases: { sass: BATCH.sass, idle: BATCH.idle, jump: BATCH.jump } };
+
+      await server.maybeRegenerateInBackground("en");
+
+      const envelope = JSON.parse(store.get(CACHE("en"))!);
+      expect(envelope.phrases.sass).toEqual(BATCH.sass);
+      expect(store.has(FAILURE("en"))).toBe(false);
+    });
+
     it("treats a case- and whitespace-only variation as an echo", async () => {
       // "Bug? Feature. 🫡" and "bug?  feature. 🫡" are the same line as far as
       // the crab's repertoire goes, and keeping both is exactly the padding
