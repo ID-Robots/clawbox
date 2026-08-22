@@ -4,6 +4,8 @@
 // do not each pay for it, and one event so a pick in Settings reaches the
 // mascot without a page reload.
 
+import { normaliseRowMetrics, type PetRowMetrics } from "@/lib/pet-sheet-metrics";
+
 export interface PetDescriptor {
   slug: string;
   displayName: string;
@@ -15,6 +17,13 @@ export interface PetDescriptor {
   rows: number;
   framesPerState: number;
   loopMs: number;
+  /** Where the art really sits in each row's cells — measured off the sheet on
+   *  the device, once per revision. Without it the pet's feet float above the
+   *  bar and the blank tail cells of a ragged row get animated.
+   *
+   *  Optional so a descriptor built by hand (a test, an older payload) is still
+   *  a valid one: every reader falls back to the un-measured cell geometry. */
+  rowMetrics?: PetRowMetrics[];
 }
 
 export interface PetStatus {
@@ -43,21 +52,28 @@ function coerce(data: unknown): PetStatus {
   const d = (data ?? {}) as Record<string, unknown>;
   if (d.supported !== true) return { ...OFF, edition: typeof d.edition === "string" ? d.edition : "openclaw" };
   const a = d.active as Record<string, unknown> | null | undefined;
-  const active: PetDescriptor | null =
-    a && typeof a.slug === "string" && typeof a.revision === "string"
-      ? {
-          slug: a.slug,
-          displayName: String(a.displayName ?? a.slug),
-          submittedBy: String(a.submittedBy ?? ""),
-          revision: a.revision,
-          frameW: Number(a.frameW) || 192,
-          frameH: Number(a.frameH) || 208,
-          cols: Number(a.cols) || 8,
-          rows: Number(a.rows) || 9,
-          framesPerState: Number(a.framesPerState) || 6,
-          loopMs: Number(a.loopMs) || 1100,
-        }
-      : null;
+  let active: PetDescriptor | null = null;
+  if (a && typeof a.slug === "string" && typeof a.revision === "string") {
+    const grid = {
+      frameW: Number(a.frameW) || 192,
+      frameH: Number(a.frameH) || 208,
+      cols: Number(a.cols) || 8,
+      rows: Number(a.rows) || 9,
+      framesPerState: Number(a.framesPerState) || 6,
+    };
+    active = {
+      ...grid,
+      slug: a.slug,
+      displayName: String(a.displayName ?? a.slug),
+      submittedBy: String(a.submittedBy ?? ""),
+      revision: a.revision,
+      loopMs: Number(a.loopMs) || 1100,
+      // A descriptor from an older device (or a cache file an older build
+      // wrote) simply has no metrics; `normaliseRowMetrics` answers with the
+      // pre-measurement behaviour rather than dropping the pet.
+      rowMetrics: normaliseRowMetrics(a.rowMetrics, grid),
+    };
+  }
   return {
     supported: true,
     edition: typeof d.edition === "string" ? d.edition : "hermes",

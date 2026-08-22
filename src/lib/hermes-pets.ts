@@ -32,6 +32,12 @@ import {
   LOOP_MS,
   stateRowsForGrid,
 } from "@/lib/pet-state-map";
+import {
+  fallbackRowMetrics,
+  scanRowMetrics,
+  type PetRowMetrics,
+  type SheetGrid,
+} from "@/lib/pet-sheet-metrics";
 
 const HOME_DIR = process.env.HOME || "/home/clawbox";
 const HERMES_HOME = process.env.HERMES_HOME || path.join(HOME_DIR, ".hermes");
@@ -63,6 +69,9 @@ export interface PetGeometry {
   rows: number;
   framesPerState: number;
   loopMs: number;
+  /** Per animation ROW: how many frames are really drawn, and how far the art
+   *  sits from the cell's edges. See src/lib/pet-sheet-metrics.ts. */
+  rowMetrics: PetRowMetrics[];
 }
 
 /** What the mascot needs to render a pet. */
@@ -205,14 +214,43 @@ export async function readPetConfig(): Promise<PetConfig> {
 
 const geometryMemo = new Map<string, PetGeometry>();
 
-const DEFAULT_GEOMETRY: PetGeometry = {
-  frameW: FRAME_W,
-  frameH: FRAME_H,
-  cols: 8,
-  rows: 9,
-  framesPerState: FRAMES_PER_STATE,
-  loopMs: LOOP_MS,
-};
+/** The canonical Codex atlas, with no measurements — what an unreadable sheet
+ *  falls back to. Built fresh each call so no caller can mutate the default. */
+function defaultGeometry(): PetGeometry {
+  const grid: SheetGrid = {
+    frameW: FRAME_W,
+    frameH: FRAME_H,
+    cols: 8,
+    rows: 9,
+    framesPerState: FRAMES_PER_STATE,
+  };
+  return { ...grid, loopMs: LOOP_MS, rowMetrics: fallbackRowMetrics(grid) };
+}
+
+/**
+ * Where the art is inside every cell of a sheet.
+ *
+ * One decode of the ALPHA channel only — a 1536x1872 sheet is 2.9 MB as one
+ * byte per pixel, against ~11.5 MB for RGBA and against upstream's 72 separate
+ * PIL cell extractions. The scan itself is a plain loop over the first six
+ * columns of each row. Runs once per sheet revision and is cached to disk, so a
+ * Jetson pays it on install and never again.
+ */
+async function readRowMetrics(sheetPath: string, grid: SheetGrid): Promise<PetRowMetrics[] | null> {
+  try {
+    const sharp = (await import("sharp")).default;
+    const { data, info } = await sharp(sheetPath)
+      .ensureAlpha()
+      .extractChannel("alpha")
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (info.channels !== 1 || info.width <= 0 || info.height <= 0) return null;
+    return scanRowMetrics({ data, width: info.width, height: info.height }, grid);
+  } catch (err) {
+    console.warn("[pets] could not measure sheet insets:", err);
+    return null;
+  }
+}
 
 /**
  * Cell grid of a sheet, derived from its real pixel size.
@@ -223,10 +261,12 @@ const DEFAULT_GEOMETRY: PetGeometry = {
  * same reason upstream caps it: a sheet may physically carry more columns, and
  * only the first six are animation frames.
  *
- * Blank trailing frames are NOT trimmed (upstream does, with PIL, at 72 cell
- * extractions per sheet). The cost of not trimming is a pet that occasionally
- * holds an empty frame for ~180 ms; the cost of trimming is 72 sharp extracts
- * on a Jetson. Left for a follow-up — see the PR.
+ * `rowMetrics` measures the same thing upstream's PIL trim does — how many
+ * frames a row really has, and where the drawing sits inside each cell — but
+ * from ONE alpha-channel decode rather than 72 cell extractions. Without it the
+ * renderer aligns the CELL to the taskbar (feet float 3-30 px) and steps six
+ * frames over rows that only carry four or five (the pet vanishes for 183-367
+ * ms at a time, every loop).
  *
  * Cached on disk under the ClawBox cache dir, keyed by the sheet revision, so a
  * re-install re-derives and nothing else does.
@@ -239,7 +279,16 @@ export async function readPetGeometry(pet: InstalledPet): Promise<PetGeometry> {
   const cacheFile = path.join(CACHE_DIR, `${pet.slug}-${pet.revision.replace(/:/g, "_")}.json`);
   try {
     const cached = JSON.parse(await fsp.readFile(cacheFile, "utf-8")) as PetGeometry;
-    if (cached && cached.cols > 0 && cached.rows > 0) {
+    // A cache file an older build wrote has no `rowMetrics`; re-derive rather
+    // than serve a pet whose feet float. The revision key cannot catch this —
+    // the sheet did not change, our reading of it did.
+    if (
+      cached &&
+      cached.cols > 0 &&
+      cached.rows > 0 &&
+      Array.isArray(cached.rowMetrics) &&
+      cached.rowMetrics.length === cached.rows
+    ) {
       geometryMemo.set(key, cached);
       return cached;
     }
@@ -247,19 +296,23 @@ export async function readPetGeometry(pet: InstalledPet): Promise<PetGeometry> {
     // no cache yet
   }
 
-  let geometry = DEFAULT_GEOMETRY;
+  let geometry = defaultGeometry();
   try {
     const sharp = (await import("sharp")).default;
     const meta = await sharp(pet.sheetPath).metadata();
     const cols = Math.max(1, Math.floor((meta.width || 0) / FRAME_W));
     const rows = Math.max(1, Math.floor((meta.height || 0) / FRAME_H));
-    geometry = {
+    const grid: SheetGrid = {
       frameW: FRAME_W,
       frameH: FRAME_H,
       cols,
       rows,
       framesPerState: Math.max(1, Math.min(FRAMES_PER_STATE, cols)),
+    };
+    geometry = {
+      ...grid,
       loopMs: LOOP_MS,
+      rowMetrics: (await readRowMetrics(pet.sheetPath, grid)) ?? fallbackRowMetrics(grid),
     };
   } catch (err) {
     // An unreadable sheet must not break the desktop: fall back to the
