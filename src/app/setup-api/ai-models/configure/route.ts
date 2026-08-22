@@ -54,6 +54,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
+import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 // The model name on this route arrives in the request body. For a local
@@ -1101,8 +1102,43 @@ export async function POST(request: Request) {
     // Inlining the same `?? storedTier ?? DEFAULT_TIER` chain in two
     // places previously let the two sites drift on a half-applied edit;
     // a single source of truth keeps them in lockstep.
+    //
+    // `requestedClawboxAiTier` is the wizard's plan PICKER, and during a first
+    // pairing that is whatever the card defaulted to before anyone had an
+    // account to look at — "flash" (Pro). Trusting it wrote the €9 model onto
+    // boxes paired with a €49 Max token, with no way to reach the frontier
+    // model afterwards: the picker had already been consulted and the account
+    // never was (TASK-481). We hold the token and the portal will answer
+    // truthfully, so ask it, exactly as the Codex branch below asks ChatGPT
+    // for entitlement and for the same reason.
+    //
+    // Only a definitive PAID answer overrides the picker. `unreachable`
+    // (offline, timeout, 401/403 — deliberately ambiguous, see fetchPortalTier)
+    // and a Free/unrecognised verdict both leave the existing chain alone, so
+    // a portal outage can never downgrade a paying box mid-setup. The portal's
+    // own `deviceTier` stamp is honoured inside mapPortalTier, which is what
+    // keeps "Max subscriber who deliberately runs Flash on this device"
+    // working rather than being force-promoted here.
+    let portalConfirmedTier: ClawboxAiTier | null = null;
+    if (isClawAI && clawboxAiToken) {
+      try {
+        const lookup = await fetchPortalTier(clawboxAiToken);
+        if (lookup.source === "portal" && lookup.tier) {
+          portalConfirmedTier = lookup.tier;
+          if (requestedClawboxAiTier && requestedClawboxAiTier !== lookup.tier) {
+            console.log(
+              `[configure] ClawBox AI plan picker said "${requestedClawboxAiTier}", portal says "${lookup.tier}" — using the account`,
+            );
+          }
+        }
+      } catch (err) {
+        // Never let a tier probe break pairing; fall through to the picker.
+        console.warn("[configure] ClawBox AI portal tier probe failed:", err);
+      }
+    }
     const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
-      ? (requestedClawboxAiTier
+      ? (portalConfirmedTier
+          ?? requestedClawboxAiTier
           ?? normalizeClawboxAiTier(configStore[CLAWBOX_AI_TIER_CONFIG_KEY])
           ?? CLAWBOX_AI_DEFAULT_TIER)
       : null;
