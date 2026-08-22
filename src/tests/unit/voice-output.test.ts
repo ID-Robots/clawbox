@@ -8,6 +8,7 @@ import {
   configuredTtsProviderId,
   DEFAULT_VOICE_STATE,
   engineForProviderId,
+  engineSignatures,
   failedVoiceCheck,
   isVoiceChoice,
   LOCAL_TTS_PROVIDER_ID,
@@ -42,7 +43,7 @@ const config = (over: Record<string, unknown> = {}) => ({
       },
     },
   },
-  models: { providers: { openai: { apiKey: "claw_84d065b" } } },
+  models: { providers: { openai: { apiKey: "claw_example_not_a_real_token" } } },
   ...over,
 }) as unknown as VoiceConfigView;
 
@@ -112,7 +113,7 @@ describe("a portal token is not a cloud voice key", () => {
 
   it("accepts the same token once a speech endpoint is configured for it", () => {
     const withEndpoint = config({
-      models: { providers: { openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai" } } },
+      models: { providers: { openai: { apiKey: "claw_example_not_a_real_token", baseUrl: "https://clawbox.com/api/ai" } } },
     });
     expect(cloudCredentialIsUnusable(withEndpoint, "openai")).toBe(false);
   });
@@ -158,7 +159,7 @@ describe("status", () => {
   it("marks an engine unusable after a real check through it failed, and says so", () => {
     const failed = state({
       engineChecks: {
-        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: false, message: "no voice model", latencyMs: 12, at: 5 },
+        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: false, message: "no voice model", latencyMs: 12, at: 5, signature: engineSignatures(config(), healthyLocal).local },
       },
     });
     const local = buildVoiceOutputStatus(config(), healthyLocal, failed).engines.find(e => e.id === "local")!;
@@ -169,7 +170,7 @@ describe("status", () => {
   it("marks an engine proven once a real check through it succeeded", () => {
     const proven = state({
       engineChecks: {
-        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: true, message: null, latencyMs: 900, at: 5 },
+        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: true, message: null, latencyMs: 900, at: 5, signature: engineSignatures(config(), healthyLocal).local },
       },
     });
     const local = buildVoiceOutputStatus(config(), healthyLocal, proven).engines.find(e => e.id === "local")!;
@@ -265,7 +266,7 @@ describe("reading a real check", () => {
       attempts: [{
         provider: "openai",
         outcome: "error",
-        error: "Incorrect API key provided: claw_84d065b0000000000000000000063c.",
+        error: "Incorrect API key provided: claw_example_not_a_real_token0000000000000000000063c.",
       }],
     }, 100);
     expect(check.ok).toBe(false);
@@ -293,7 +294,7 @@ describe("reading a real check", () => {
         { provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 },
       ],
     }, 42);
-    const next = applyCheck(state(), check);
+    const next = applyCheck(state(), check, engineSignatures(config(), healthyLocal));
     expect(next.engineChecks.cloud?.ok).toBe(false);
     expect(next.engineChecks.local?.ok).toBe(true);
     expect(next.engineChecks.local?.at).toBe(42);
@@ -327,5 +328,74 @@ describe("refusing an explicit pick", () => {
     // say "On this box" rather than keep claiming the cloud voice.
     const broken = [engine({ id: "local" }), engine({ id: "cloud", usable: false })];
     expect(resolvePreferredEngine("cloud", broken)).toBe("local");
+  });
+});
+
+describe("a recorded failure cannot outlive its cause", () => {
+  const cloudKey = (key: string) => config({ models: { providers: { openai: { apiKey: key } } } });
+
+  it("keeps the record of an engine this check did not attempt", () => {
+    // Clearing it instead would let a known-bad engine drift back to
+    // "unproven" every time the other one is checked, and Auto would keep
+    // choosing it.
+    const sigs = engineSignatures(config(), healthyLocal);
+    const withCloudFailure = applyCheck(state(), parseVoiceCheck({
+      ok: false,
+      attempts: [{ provider: "openai", outcome: "error", error: "rejected" }],
+    }, 1), sigs);
+    const thenLocalOnly = applyCheck(withCloudFailure, parseVoiceCheck({
+      ok: true,
+      attempts: [{ provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 }],
+    }, 2), sigs);
+    expect(thenLocalOnly.engineChecks.cloud?.ok).toBe(false);
+    expect(thenLocalOnly.engineChecks.local?.ok).toBe(true);
+  });
+
+  it("stops applying the failure once the thing that caused it changed", () => {
+    // The trap this closes: a failure marks the cloud voice unusable, Auto
+    // stops choosing it, no later check routes through it — so without this
+    // the customer who fixes it by adding a real key is still told it is
+    // unavailable, forever.
+    // A real-looking key, so the recorded failure is the reason shown. A
+    // ClawBox portal token would surface its own, more specific line instead.
+    const broken = cloudKey("sk-rejected-key");
+    const failure = applyCheck(state(), parseVoiceCheck({
+      ok: false,
+      attempts: [{ provider: "openai", outcome: "error", error: "rejected" }],
+    }, 1), engineSignatures(broken, healthyLocal));
+
+    const stillBroken = buildVoiceOutputStatus(broken, healthyLocal, failure);
+    expect(stillBroken.engines.find(e => e.id === "cloud")!.detail).toContain("rejected");
+
+    const fixed = buildVoiceOutputStatus(cloudKey("sk-a-different-key"), healthyLocal, failure);
+    const cloud = fixed.engines.find(e => e.id === "cloud")!;
+    expect(cloud.usable).toBe(true);
+    expect(cloud.detail).toContain("not proven on this box yet");
+  });
+
+  it("does not carry a proven badge across a swapped credential", () => {
+    const first = cloudKey("sk-first-key");
+    const proven = applyCheck(state(), parseVoiceCheck({
+      ok: true,
+      attempts: [{ provider: "openai", outcome: "success", latencyMs: 800 }],
+    }, 1), engineSignatures(first, healthyLocal));
+    expect(buildVoiceOutputStatus(first, healthyLocal, proven).engines.find(e => e.id === "cloud")!.proven).toBe(true);
+    expect(buildVoiceOutputStatus(cloudKey("sk-second-key"), healthyLocal, proven).engines.find(e => e.id === "cloud")!.proven).toBe(false);
+  });
+
+  it("records the shape of a credential, never the credential", () => {
+    const sig = engineSignatures(cloudKey("sk-live-super-secret"), healthyLocal);
+    expect(sig.cloud).not.toContain("super-secret");
+    expect(sig.cloud).toContain("sk");
+  });
+
+  it("re-opens the local voice once a missing voice is installed", () => {
+    const bare = { ...healthyLocal, engineNames: [] as string[] };
+    const failure = applyCheck(state(), parseVoiceCheck({
+      ok: false,
+      attempts: [{ provider: LOCAL_TTS_PROVIDER_ID, outcome: "error", error: "no voice model" }],
+    }, 1), engineSignatures(config(), bare));
+    expect(buildVoiceOutputStatus(config(), bare, failure).engines.find(e => e.id === "local")!.usable).toBe(false);
+    expect(buildVoiceOutputStatus(config(), healthyLocal, failure).engines.find(e => e.id === "local")!.usable).toBe(true);
   });
 });

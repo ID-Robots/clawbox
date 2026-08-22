@@ -93,8 +93,13 @@ export async function readVoiceState(): Promise<VoiceOutputState> {
       const entry = (rawChecks as Record<string, unknown>)[engine];
       const attempt = readAttempt(entry);
       const at = (entry as { at?: unknown })?.at;
+      const signature = (entry as { signature?: unknown })?.signature;
       if (attempt && typeof at === "number" && Number.isFinite(at)) {
-        engineChecks[engine] = { ...attempt, at };
+        engineChecks[engine] = {
+          ...attempt,
+          at,
+          ...(typeof signature === "string" ? { signature } : {}),
+        };
       }
     }
   }
@@ -112,7 +117,18 @@ export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
   // customer's choice to Auto.
   const tmp = `${VOICE_STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`;
   try {
-    await fs.writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    // rename() makes the swap atomic against a reader; it does not make the new
+    // bytes durable. This runs on a Jetson that gets unplugged, and a rename
+    // that outlives its own contents leaves a truncated file — which reads as
+    // corrupt and silently resets the customer's choice to Auto, exactly the
+    // loss the atomic write is here to prevent. So sync before swapping.
+    const handle = await fs.open(tmp, "w", 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(state, null, 2));
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await fs.rename(tmp, VOICE_STATE_PATH);
   } catch (err) {
     await fs.unlink(tmp).catch(() => {});

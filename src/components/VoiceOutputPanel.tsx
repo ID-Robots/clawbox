@@ -40,6 +40,22 @@ function isEngine(value: unknown): value is VoiceEngine {
 }
 
 /**
+ * An attempt is only adopted when every field the list below reads is really
+ * there. `attempts: [null]` used to pass the array check and then throw on
+ * `attempt.engine` one render later — the same guard-the-envelope-then-read-a-
+ * sibling mistake this validator exists to prevent.
+ */
+function isAttempt(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const a = value as Record<string, unknown>;
+  if (typeof a.providerId !== "string") return false;
+  if (a.engine !== null && !ENGINE_ORDER.includes(a.engine as VoiceEngineId)) return false;
+  if (typeof a.ok !== "boolean") return false;
+  if (a.message !== null && typeof a.message !== "string") return false;
+  return a.latencyMs === null || typeof a.latencyMs === "number";
+}
+
+/**
  * Validate every field the render reads, not just the first one.
  *
  * `{ engines: [] }` passing here and throwing one render later on
@@ -63,7 +79,12 @@ export function isVoiceStatus(value: unknown): value is VoiceOutputStatus {
     if (!last || typeof last !== "object") return false;
     const c = last as Record<string, unknown>;
     if (typeof c.at !== "number" || typeof c.ok !== "boolean") return false;
-    if (!Array.isArray(c.attempts)) return false;
+    if (!Array.isArray(c.attempts) || !c.attempts.every(isAttempt)) return false;
+    // Rendered directly when no engine matched, so an unvalidated value shows
+    // the customer the literal word "undefined".
+    if (c.servedByProviderId !== null && typeof c.servedByProviderId !== "string") return false;
+    if (c.servedEngine !== null && !ENGINE_ORDER.includes(c.servedEngine as VoiceEngineId)) return false;
+    if (c.message !== null && typeof c.message !== "string") return false;
   }
   return true;
 }

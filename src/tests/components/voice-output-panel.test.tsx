@@ -167,6 +167,25 @@ describe("status validation", () => {
 
   it("rejects a last check that is missing the fields the render reads", () => {
     expect(isVoiceStatus({ ...status(), lastCheck: { ok: true } })).toBe(false);
-    expect(isVoiceStatus({ ...status(), lastCheck: { at: 1, ok: true, attempts: [] } })).toBe(true);
+    expect(isVoiceStatus({ ...status(), lastCheck: { at: 1, ok: true, attempts: [], servedByProviderId: null, servedEngine: null, message: null } })).toBe(true);
+  });
+});
+
+describe("a damaged check record cannot take the window down", () => {
+  const withCheck = (attempts: unknown[], over: Record<string, unknown> = {}) => ({
+    ...status(),
+    lastCheck: { at: 1, ok: true, servedByProviderId: "tts-local-cli", servedEngine: "local", attempts, message: null, ...over },
+  });
+
+  it("rejects a check whose attempts are not attempts", () => {
+    expect(isVoiceStatus(withCheck([null]))).toBe(false);
+    expect(isVoiceStatus(withCheck([{ providerId: "openai" }]))).toBe(false);
+    expect(isVoiceStatus(withCheck([{ providerId: "openai", engine: "cloud", ok: false, message: null, latencyMs: null }]))).toBe(true);
+  });
+
+  it("rejects a served provider the panel would print as `undefined`", () => {
+    expect(isVoiceStatus(withCheck([], { servedByProviderId: 7 }))).toBe(false);
+    expect(isVoiceStatus(withCheck([], { servedEngine: "quantum" }))).toBe(false);
+    expect(isVoiceStatus(withCheck([], { message: 7 }))).toBe(false);
   });
 });

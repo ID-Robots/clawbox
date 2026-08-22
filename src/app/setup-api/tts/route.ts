@@ -22,6 +22,7 @@ import {
 import {
   applyCheck,
   buildVoiceOutputStatus,
+  engineSignatures,
   failedVoiceCheck,
   isVoiceChoice,
   localCommandPath,
@@ -68,9 +69,8 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-async function status(): Promise<VoiceOutputStatus> {
-  const [config, state] = await Promise.all([readConfig(), readVoiceState()]);
-  const models = await buildTtsInventory();
+async function probeBox() {
+  const [config, models] = await Promise.all([readConfig(), buildTtsInventory()]);
   const command = localCommandPath(config);
   // The provider entry names a script; if that script is gone the box cannot
   // speak locally however healthy the voices look. Fall back to the installer's
@@ -78,7 +78,12 @@ async function status(): Promise<VoiceOutputStatus> {
   const commandPresent = command
     ? await exists(command)
     : (await exists(PIPER_BINARY)) || (await exists(KOKORO_STAMP));
-  return buildVoiceOutputStatus(config, localProbeFrom(config, models, commandPresent), state);
+  return { config, probe: localProbeFrom(config, models, commandPresent) };
+}
+
+async function status(): Promise<VoiceOutputStatus> {
+  const [{ config, probe }, state] = await Promise.all([probeBox(), readVoiceState()]);
+  return buildVoiceOutputStatus(config, probe, state);
 }
 
 export async function GET() {
@@ -160,6 +165,24 @@ async function runCheck() {
   }
 }
 
+/**
+ * One check at a time, per box.
+ *
+ * A check spawns a real synthesis that can run for a minute and a half on an
+ * Orin. Two of them at once means two engines competing for the same GPU on an
+ * 8 GB board, and the client-side busy flag cannot prevent it — a second tab,
+ * a reload mid-check or a stray retry all bypass it. Callers join the run in
+ * flight instead of starting another.
+ */
+let checkInFlight: Promise<Awaited<ReturnType<typeof runCheck>>> | null = null;
+
+function currentCheck() {
+  if (!checkInFlight) {
+    checkInFlight = runCheck().finally(() => { checkInFlight = null; });
+  }
+  return checkInFlight;
+}
+
 export async function POST(req: Request) {
   let body: unknown;
   try {
@@ -170,9 +193,13 @@ export async function POST(req: Request) {
   const action = (body as { action?: unknown })?.action;
 
   if (action === "check") {
-    const state = await readVoiceState();
-    const check = await runCheck();
-    await writeVoiceState(applyCheck(state, check));
+    const check = await currentCheck();
+    // Read the state AFTER the run, not before it. A check holds no snapshot
+    // across its own 90 seconds: a customer who changes the voice while it is
+    // running would otherwise have that choice overwritten by the stale copy
+    // this handler started with.
+    const [state, { config, probe }] = await Promise.all([readVoiceState(), probeBox()]);
+    await writeVoiceState(applyCheck(state, check, engineSignatures(config, probe)));
     return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
   }
 

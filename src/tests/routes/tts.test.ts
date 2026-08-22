@@ -228,6 +228,82 @@ describe("POST /setup-api/tts — check", () => {
     expect(writeStateMock.mock.calls[0][0].lastCheck.ok).toBe(false);
   });
 
+
+  it("records a failure when the openclaw binary cannot be started at all", async () => {
+    spawnMock.mockImplementation(() => {
+      const handlers: Record<string, ((arg: unknown) => void)[]> = {};
+      setTimeout(() => (handlers.error ?? []).forEach(cb => cb(new Error("spawn ENOENT"))), 0);
+      return {
+        stdout: { on: () => {} },
+        stderr: { on: () => {} },
+        kill: () => {},
+        on: (event: string, cb: (arg: unknown) => void) => { (handlers[event] ??= []).push(cb); },
+      };
+    });
+    const { POST } = await route();
+    const res = await POST(post({ action: "check" }));
+    // A box with no CLI must record "no voice could speak", not throw a 500 out
+    // of the handler and leave the panel with the previous success on screen.
+    expect(res.status).toBe(200);
+    expect(writeStateMock.mock.calls[0][0].lastCheck.ok).toBe(false);
+  });
+
+  it("kills a conversion that never finishes and records that", async () => {
+    vi.useFakeTimers();
+    let killed = false;
+    spawnMock.mockImplementation(() => ({
+      stdout: { on: () => {} },
+      stderr: { on: () => {} },
+      kill: () => { killed = true; },
+      on: () => {},                       // never closes, never errors
+    }));
+    const { POST } = await route();
+    const pending = POST(post({ action: "check" }));
+    await vi.advanceTimersByTimeAsync(121_000);
+    const res = await pending;
+    vi.useRealTimers();
+    expect(killed).toBe(true);
+    expect(res.status).toBe(200);
+    const saved = writeStateMock.mock.calls[0][0].lastCheck;
+    expect(saved.ok).toBe(false);
+    expect(saved.message).toContain("took too long");
+  });
+
+  it("joins a check already in flight instead of starting a second synthesis", async () => {
+    // Two of these at once means two engines competing for the same GPU on an
+    // 8 GB board, and the client-side busy flag cannot stop a second tab.
+    spawnMock.mockImplementation(cliEmits(JSON.stringify({
+      ok: true, provider: LOCAL, attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 900 }],
+    })));
+    const { POST } = await route();
+    const [a, b] = await Promise.all([POST(post({ action: "check" })), POST(post({ action: "check" }))]);
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the state after the run, so a choice made during it survives", async () => {
+    // The handler must not hold a snapshot across its own 90 seconds: a
+    // customer who picks a different voice while the check runs would
+    // otherwise have that choice written back over by the stale copy.
+    const order: string[] = [];
+    spawnMock.mockImplementation((...args: unknown[]) => {
+      order.push("spawn");
+      return cliEmits(JSON.stringify({
+        ok: true, provider: LOCAL, attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 900 }],
+      }))(...(args as []));
+    });
+    readStateMock.mockImplementation(async () => {
+      order.push("read");
+      // What the customer picked mid-run.
+      return { choice: "local", engineChecks: {}, lastCheck: null };
+    });
+    const { POST } = await route();
+    await POST(post({ action: "check" }));
+    expect(order.indexOf("spawn")).toBeLessThan(order.indexOf("read"));
+    expect(writeStateMock.mock.calls[0][0].choice).toBe("local");
+  });
+
   it("asks the CLI for the real chain rather than pinning one provider", async () => {
     spawnMock.mockImplementation(cliEmits(JSON.stringify({ ok: true, attempts: [{ provider: LOCAL, outcome: "success" }] })));
     const { POST } = await route();
