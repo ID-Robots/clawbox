@@ -234,3 +234,30 @@ describe("a damaged check record cannot take the window down", () => {
     expect(isVoiceStatus(withCheck([], { message: 7 }))).toBe(false);
   });
 });
+
+describe("absent and broken are different answers", () => {
+  it("offers a voice whose last check failed, and says so", async () => {
+    mockFetch([status({
+      engines: [
+        engine(),
+        engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: true, usable: false, detail: "The last voice check failed: provider_error" }),
+      ],
+    })]);
+    render(<VoiceOutputPanel active />);
+    const cloud = await screen.findByTestId("voice-choice-cloud");
+    expect(within(cloud).getByText("Last check failed")).toBeTruthy();
+    expect(within(cloud).queryByText("Not available")).toBeNull();
+    // Still pickable: refusing it would make the failure permanent, since
+    // nothing else would ever route a check through it again.
+    expect(cloud.getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("does not offer a voice the box does not have", async () => {
+    mockFetch([status()]);
+    render(<VoiceOutputPanel active />);
+    const cloud = await screen.findByTestId("voice-choice-cloud");
+    expect(within(cloud).getByText("Not available")).toBeTruthy();
+    expect(within(cloud).queryByText("Last check failed")).toBeNull();
+    expect(cloud.getAttribute("aria-disabled")).toBe("true");
+  });
+});

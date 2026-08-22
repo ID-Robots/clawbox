@@ -225,7 +225,12 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         {CHOICES.map(choice => {
           const selected = status.choice === choice.id;
           const engine = choice.id === "auto" ? null : engineById(choice.id as VoiceEngineId);
-          const unavailable = engine !== null && !engine.usable;
+          // Absent and broken are different answers, and only one of them
+          // means "you cannot pick this". A voice whose last check failed is
+          // still offered — refusing it would make the failure permanent,
+          // because nothing else would ever route a check through it again.
+          const unavailable = engine !== null && !engine.configured;
+          const failing = engine !== null && engine.configured && !engine.usable;
           return (
             <button
               key={choice.id}
@@ -252,6 +257,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
                 {unavailable && (
                   <span className="text-[11px] px-2 py-0.5 rounded-full border bg-amber-500/10 text-amber-300 border-amber-400/20">
                     Not available
+                  </span>
+                )}
+                {failing && (
+                  <span className="text-[11px] px-2 py-0.5 rounded-full border bg-amber-500/10 text-amber-300 border-amber-400/20">
+                    Last check failed
                   </span>
                 )}
                 {engine?.proven && (
