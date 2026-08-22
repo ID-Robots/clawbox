@@ -7,6 +7,7 @@ import {
   isValidPhrase,
   mergeWithPackSync,
   sanitizeCategory,
+  stripEchoes,
   validateBatch,
 } from "@/lib/mascot-phrases";
 import { en } from "@/lib/mascot-packs/en";
@@ -95,24 +96,36 @@ describe("sanitizeCategory", () => {
 describe("validateBatch (INV-6 — nothing unvalidated reaches the cache)", () => {
   const good = (prefix: string) => [`${prefix} one`, `${prefix} two`, `${prefix} three`, `${prefix} four`];
 
-  it("keeps categories that have enough survivors and drops the thin ones", () => {
+  it("keeps categories that have survivors and drops the ones left empty", () => {
     const result = validateBatch(
       {
         sass: good("sass"),
         idle: good("idle"),
         jump: good("jump"),
-        dance: ["only one"], // below MIN_SURVIVORS_PER_CATEGORY
+        dance: ["x".repeat(80)], // nothing valid survives
       },
       "en",
     );
     expect(result.ok).toBe(true);
     expect(Object.keys(result.categories).sort()).toEqual(["idle", "jump", "sass"]);
-    expect(result.categories.sass).toHaveLength(MIN_SURVIVORS_PER_CATEGORY);
+    expect(result.categories.sass).toHaveLength(4);
     expect(result.dropped).toBe(1);
   });
 
+  // The regression this whole gate got wrong: the per-category bar was four,
+  // which the on-device model never clears once its pack echoes are stripped.
+  // One NEW line in a category is a real addition — the pack tops the category
+  // back up on the way to the bubble, so a thin category cannot make the crab
+  // repeat itself.
+  it("keeps a category that produced a single new line", () => {
+    const result = validateBatch({ sass: ["just the one"], idle: ["one here too"], jump: ["and one"] }, "en");
+    expect(result.ok).toBe(true);
+    expect(result.categories.sass).toEqual(["just the one"]);
+    expect(MIN_SURVIVORS_PER_CATEGORY).toBe(1);
+  });
+
   it("discards a batch that could not fill three categories", () => {
-    const result = validateBatch({ sass: good("sass"), idle: ["nope"] }, "en");
+    const result = validateBatch({ sass: good("sass"), idle: ["x".repeat(80)] }, "en");
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("too-few-categories");
     expect(result.categories).toEqual({});
@@ -148,6 +161,102 @@ describe("validateBatch (INV-6 — nothing unvalidated reaches the cache)", () =
   it("can be asked to skip the stopword probe (cache re-validation)", () => {
     const english = ["You have to ship this", "Just make the thing", "What about the tests?", "They know"];
     expect(validateBatch({ sass: english, idle: english, jump: english }, "de", { stopwordProbe: false }).ok).toBe(true);
+  });
+});
+
+describe("stripEchoes", () => {
+  it("removes lines the pack already has and keeps the new ones", () => {
+    const result = stripEchoes(
+      { sass: [en.sass[0], "A line the pack has never seen.", en.sass[1]] },
+      en,
+    );
+    expect(result.sass).toEqual(["A line the pack has never seen."]);
+  });
+
+  it("matches on case and collapsed whitespace, not byte equality", () => {
+    const result = stripEchoes({ sass: [`  ${en.sass[0].toUpperCase()}  `] }, en);
+    expect(result.sass).toEqual([]);
+  });
+
+  it("treats a pack line with an emoji glued on as an echo", () => {
+    // Measured on the reference box: the model returns "I do all the work
+    // here. \u{1F644}" against the pack's "I do all the work here.". A trailing
+    // emoji is decoration, not a new line, and keeping both variants is how
+    // the crab ends up saying the same thing twice in a row.
+    const result = stripEchoes(
+      { sass: [`${en.sass[0]} \u{1F644}`, `${en.sass[1]}\u{1F4A8}`, "Genuinely different."] },
+      en,
+    );
+    expect(result.sass).toEqual(["Genuinely different."]);
+  });
+
+  it("treats a difference in end punctuation alone as an echo", () => {
+    const bare = en.sass[0].replace(/[.!?]+$/, "");
+    const result = stripEchoes({ sass: [`${bare}!`, `${bare}?!`] }, en);
+    expect(result.sass).toEqual([]);
+  });
+
+  it("keeps emoji-only lines apart from each other", () => {
+    // The idle pack is mostly bare emoji. Stripping every pictograph folds
+    // them all to the empty string, which would make each one an echo of all
+    // the others — so those fall back to the plain fold.
+    const result = stripEchoes({ idle: ["\u{1F634}", "\u{1F914}"] }, { ...en, idle: ["\u{1F914}"] });
+    expect(result.idle).toEqual(["\u{1F634}"]);
+  });
+
+  it("compares within a category, not across the whole pack", () => {
+    // A power line is not an echo just because some other category has it.
+    const result = stripEchoes({ sass: [en.power[0]] }, en);
+    expect(result.sass).toEqual([en.power[0]]);
+  });
+
+  it("leaves categories the batch did not supply absent", () => {
+    const result = stripEchoes({ sass: ["something new entirely"] }, en);
+    expect(result.idle).toBeUndefined();
+    expect(Object.keys(result)).toEqual(["sass"]);
+  });
+
+  it("passes non-strings through for validateBatch to drop and count", () => {
+    const result = stripEchoes({ sass: [42, en.sass[0], "new"] as unknown as string[] }, en);
+    expect(result.sass).toEqual([42, "new"]);
+  });
+
+  it("turns an all-echo batch into one validateBatch rejects", () => {
+    // The end-to-end point: a run that only parroted the tone reference is a
+    // failed run, not a cacheable one.
+    const echo = { sass: en.sass.slice(0, 6), idle: en.idle.slice(0, 6), jump: en.jump.slice(0, 6) };
+    expect(validateBatch(echo, "en").ok).toBe(true);
+    expect(validateBatch(stripEchoes(echo, en), "en").ok).toBe(false);
+  });
+
+  // The other half of that: a run that echoed MOST of the pack but landed a
+  // few genuinely new lines is a success. This is what the on-device model
+  // actually produces — roughly three quarters echo — and demanding four new
+  // lines per category turned every real run into an error message.
+  it("keeps a mostly-echo batch that still produced new lines", () => {
+    const mostlyEcho = {
+      sass: [...en.sass.slice(0, 6), "A line the pack has never seen."],
+      idle: [...en.idle.slice(0, 6), "Another brand new one."],
+      jump: [...en.jump.slice(0, 6), "Third of its kind."],
+    };
+    const stripped = stripEchoes(mostlyEcho, en);
+    const result = validateBatch(stripped, "en");
+    expect(result.ok).toBe(true);
+    expect(result.categories.sass).toEqual(["A line the pack has never seen."]);
+  });
+
+  it("also strips lines an earlier run already cached", () => {
+    // Top-up mode: a line yesterday's run produced is not new today, and
+    // counting it as new would put the survivor gate back to measuring
+    // something other than what it claims.
+    const cached = { sass: ["Cached from yesterday."] };
+    const result = stripEchoes({ sass: ["Cached from yesterday.", "Genuinely new."] }, en, cached);
+    expect(result.sass).toEqual(["Genuinely new."]);
+  });
+
+  it("tolerates a missing second source", () => {
+    const result = stripEchoes({ sass: [en.sass[0], "new"] }, en, null);
+    expect(result.sass).toEqual(["new"]);
   });
 });
 
