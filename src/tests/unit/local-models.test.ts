@@ -55,6 +55,10 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // In afterEach rather than inline at the end of a test: an inline call is
+  // skipped when an assertion above it fails, and the stubbed fetch then leaks
+  // into the next test, turning one failure into several.
+  vi.unstubAllGlobals();
   delete process.env.CLAWBOX_HOME;
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
@@ -206,7 +210,6 @@ describe("local model inventory", () => {
     expect(ollama.diskBytes).toBe(639_000_000);
     expect(ollama.detail).toContain("qwen3-embedding:0.6b");
     expect(ollama.control).toBe("system-unit");
-    vi.unstubAllGlobals();
   });
 });
 
@@ -298,6 +301,5 @@ describe("embeddings are checked against the engine that serves them", () => {
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("running");
     expect(emb.detail).toMatch(/on the box/i);
-    vi.unstubAllGlobals();
   });
 });

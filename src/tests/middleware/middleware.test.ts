@@ -480,6 +480,10 @@ describe("middleware", () => {
       "/setup-api/gateway/ws-config",
       // Reads generated images straight off the harness media tree.
       "/setup-api/chat/media",
+      // POST turns real systemd units on and off through sudo, and has no part
+      // in onboarding — during the setup window the device is broadcasting an
+      // OPEN AP, so anyone in radio range would otherwise reach it.
+      "/setup-api/local-models",
       "/setup-api/gateway",
       "/setup-api/gateway/", // trailing slash must not dodge the exact match
     ])("gates sensitive %s during the setup window", async (p) => {

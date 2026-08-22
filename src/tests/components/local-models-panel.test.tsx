@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import LocalModelsPanel from "@/components/LocalModelsPanel";
 
 /**
@@ -28,7 +28,7 @@ function mockFetch(payloads: unknown[]) {
 }
 
 beforeEach(() => { vi.useRealTimers(); });
-afterEach(() => { vi.unstubAllGlobals(); });
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("Local Models panel", () => {
   it("shows a running engine with its footprint", async () => {
@@ -99,17 +99,41 @@ describe("Local Models panel", () => {
     // front of an older build. Adopting that as state read `.models` off
     // nothing on the next render and took the WHOLE window down, backups and
     // all. This drives a real second poll rather than trusting the first one.
-    const fn = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ models: [model()], unavailable: [] }) })
-      .mockResolvedValue({ ok: true, json: async () => ({}) });
-    vi.stubGlobal("fetch", fn);
-    render(<LocalModelsPanel active />);
-    const row = await screen.findByTestId("local-model-ollama");
-    expect(within(row).getByText("Running")).toBeTruthy();
+    await expectSecondPollIgnored({});
+  });
 
-    await waitFor(() => expect(fn.mock.calls.length).toBeGreaterThan(1), { timeout: 8000 });
-    // Still the engine from the good payload, and the panel is still standing.
-    const after = await screen.findByTestId("local-model-ollama");
-    expect(within(after).getByText("Running")).toBeTruthy();
-  }, 15000);
+  it("refuses a payload that has models but no unavailable list", async () => {
+    // Narrower than the case above and worth its own test: `{ models: [] }`
+    // satisfies a guard that only checks `models`, is then stored, and the very
+    // next render reads `.unavailable.length` off nothing. Guarding the field
+    // you read first is not the same as guarding the shape you rely on.
+    await expectSecondPollIgnored({ models: [] });
+  });
 });
+
+/**
+ * Render with a good inventory, let one more poll return `bad`, and assert the
+ * panel is still showing the good reading afterwards.
+ */
+async function expectSecondPollIgnored(bad: unknown) {
+  const fn = vi.fn()
+    .mockResolvedValueOnce({ ok: true, json: async () => ({ models: [model()], unavailable: [] }) })
+    .mockResolvedValue({ ok: true, json: async () => bad });
+  vi.stubGlobal("fetch", fn);
+
+  // Fake timers BEFORE the render, because the poll's setInterval is created
+  // during it - installed afterwards they would not own that timer and
+  // advancing them would do nothing. shouldAdvanceTime keeps Testing Library's
+  // own async plumbing working.
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  render(<LocalModelsPanel active />);
+  const row = await screen.findByTestId("local-model-ollama");
+  expect(within(row).getByText("Running")).toBeTruthy();
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+  expect(fn.mock.calls.length).toBeGreaterThan(1);
+
+  // Still the engine from the good payload, and the panel is still standing.
+  const after = screen.getByTestId("local-model-ollama");
+  expect(within(after).getByText("Running")).toBeTruthy();
+}

@@ -7,7 +7,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 // and the dialog-driven assertions in the original test went stale.
 // A focused AI-Provider test belongs in its own spec; until then this
 // test still gives us the bulk of SettingsApp's render coverage.
-test("settings covers appearance, network, local AI, telegram, system, and about flows", async ({ page }) => {
+test("settings covers appearance, network, local AI, local models, telegram, system, and about flows", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: {
       setup_complete: true,

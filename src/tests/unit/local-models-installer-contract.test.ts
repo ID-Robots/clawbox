@@ -64,7 +64,7 @@ describe("local-models agrees with the sudoers grants", () => {
         .split("\n")
         .some(line => line.trim().startsWith("clawbox ")
           && /\/usr\/bin\/systemctl/.test(line)
-          && new RegExp(`\\b${verb}\\s+--now\\s+${OLLAMA_UNIT.replace(".", "\\.")}\\s*$`).test(line));
+          && new RegExp(`\\b${verb}\\s+--now\\s+${OLLAMA_UNIT.replace(/[.]/g, "\\.")}\\s*$`).test(line));
       expect(granted, `no NOPASSWD grant for systemctl ${verb} --now ${OLLAMA_UNIT}`).toBe(true);
     }
   });

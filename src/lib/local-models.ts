@@ -221,8 +221,11 @@ function shortModelName(name: string): string {
 }
 
 async function piperEntry(): Promise<LocalModelEntry> {
-  const [binary, voiceBytes] = await Promise.all([exists(PIPER_BINARY), dirBytes(PIPER_VOICE_DIR)]);
-  const voices = await listVoices();
+  const [binary, voiceBytes, voices] = await Promise.all([
+    exists(PIPER_BINARY),
+    dirBytes(PIPER_VOICE_DIR),
+    listVoices(),
+  ]);
   // Piper is a binary invoked per utterance, not a server. "idle" would imply
   // something that could be running and isn't; on-demand is the truth.
   const installed = binary && voices.length > 0;
@@ -424,24 +427,31 @@ export interface InventoryProbes {
  * a subordinate panel caused in ClawKeep on TASK-398.
  */
 export async function buildLocalModelInventory(probes: InventoryProbes): Promise<LocalModelsSnapshot> {
-  // Order matters for one reason only: the embedding row is checked against the
-  // engine that serves it, so that engine's row has to exist by then.
-  const builders: [string, (built: LocalModelEntry[]) => Promise<LocalModelEntry>][] = [
+  // Concurrent, not sequential: every engine costs at least two systemctl
+  // round-trips and some cost an HTTP probe, and on a Jetson a serial pass adds
+  // up to seconds on a panel that refreshes every five. The engines do not
+  // depend on each other, so nothing is gained by waiting.
+  const builders: [string, () => Promise<LocalModelEntry>][] = [
     ["llamacpp", () => llamaCppEntry(probes.llamacpp)],
     ["ollama", () => ollamaEntry(probes.ollamaBaseUrl)],
     ["kokoro", kokoroEntry],
     ["piper", piperEntry],
     ["whisper", whisperEntry],
-    ["embeddings", async built => embeddingEntry(probes.embeddings, built)],
   ];
-  const models: LocalModelEntry[] = [];
-  const unavailable: string[] = [];
-  for (const [id, build] of builders) {
+  const settled = await Promise.all(builders.map(async ([id, build]) => {
     try {
-      models.push(await build(models));
+      return { id, entry: await build() };
     } catch {
-      unavailable.push(id);
+      return { id, entry: null };
     }
+  }));
+  const models = settled.map(r => r.entry).filter((e): e is LocalModelEntry => e !== null);
+  const unavailable = settled.filter(r => r.entry === null).map(r => r.id);
+  // Embeddings last and alone: it is the only row read against another row.
+  try {
+    models.push(embeddingEntry(probes.embeddings, models));
+  } catch {
+    unavailable.push("embeddings");
   }
   return { models, unavailable };
 }

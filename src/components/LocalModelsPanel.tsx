@@ -54,11 +54,19 @@ export function formatBytes(bytes: number | null): string | null {
   return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
-/** A payload is only adopted when it is really an inventory. */
+/**
+ * A payload is only adopted when it is really an inventory — EVERY field the
+ * render reads, not just the one it reads first. `{ "models": [] }` used to
+ * pass here and then threw on `snapshot.unavailable.length` a few lines later,
+ * which is the same "guard the shape, then read an ungarded sibling" mistake
+ * that took the whole ClawKeep window down on TASK-398.
+ */
 function isSnapshot(value: unknown): value is LocalModelsSnapshot {
   if (!value || typeof value !== "object") return false;
   const models = (value as { models?: unknown }).models;
-  if (!Array.isArray(models)) return false;
+  const unavailable = (value as { unavailable?: unknown }).unavailable;
+  if (!Array.isArray(models) || !Array.isArray(unavailable)) return false;
+  if (!unavailable.every(u => typeof u === "string")) return false;
   return models.every(m =>
     !!m && typeof m === "object"
     && typeof (m as LocalModelEntry).id === "string"
