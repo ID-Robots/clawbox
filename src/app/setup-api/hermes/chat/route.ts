@@ -29,6 +29,7 @@ import {
 import { appendTranscript } from "@/lib/harness/transcript-store";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { stripReasoningPanels } from "@/lib/hermes-reasoning-panel";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 
 /**
@@ -540,11 +541,17 @@ export async function POST(request: Request) {
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
+    // `chat -q` prints the model's internal monologue above the answer, in a
+    // box-drawing panel, because `display.show_reasoning` defaults to true and
+    // there is no flag that turns the panel off for one turn. Stripped ONCE,
+    // here, so the bubble and the stored record are the same text — doing it in
+    // the browser would have left the monologue in the transcript forever.
+    const answer = stripReasoningPanels(text);
     // The ANSWER, and only on success. Media is split here rather than stored
     // raw so that the record holds exactly what the bubble renders, and a
     // refreshed transcript is byte-identical to the live one instead of showing
     // a MEDIA: directive as text.
-    const reply = splitAssistantMedia(text);
+    const reply = splitAssistantMedia(answer);
     await appendTranscript({
       role: "assistant",
       text: reply.text,
@@ -553,7 +560,7 @@ export async function POST(request: Request) {
       ...(reply.audio.length ? { audio: reply.audio } : {}),
     });
     return NextResponse.json({
-      text,
+      text: answer,
       harness: "hermes",
       ...(threaded ? { sessionId: threaded } : {}),
     });

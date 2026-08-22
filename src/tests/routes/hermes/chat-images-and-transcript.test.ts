@@ -216,4 +216,54 @@ describe("POST /setup-api/hermes/chat", () => {
     expect(user.media).toHaveLength(1);
     expect(user.media[0]).toContain("/setup-api/chat/media");
   });
+
+  // ── The CLI's reasoning panel ─────────────────────────────────────────────
+  //
+  // `display.show_reasoning` defaults to true, so `chat -q … -Q` prints the
+  // model's internal monologue to STDOUT above the answer, framed in a
+  // box-drawing panel. The route reads that whole stream as "the reply", so
+  // every bubble opened with the monologue — and once the transcript landed,
+  // every stored exchange did too.
+  //
+  // The frame is built in `HermesCLI.chat()` as `┌─{' Reasoning '}{'─'…}┐` /
+  // `└{'─'…}┘` and printed through prompt_toolkit, which (piped) drops the ANSI
+  // and ends every line with CRLF. That is what these fixtures are.
+
+  /** Every line prompt_toolkit prints ends CRLF when the output is piped. */
+  const CRLF = String.fromCharCode(13, 10);
+  const PANEL_TOP = `┌─ Reasoning ${"─".repeat(45)}┐`;
+  const PANEL_BOTTOM = `└${"─".repeat(58)}┘`;
+
+  it("keeps the reasoning panel out of the reply and out of the record", async () => {
+    stdoutReply = [
+      PANEL_TOP,
+      "The user wants the number. I should just say it.",
+      PANEL_BOTTOM,
+      "41.",
+    ].join(CRLF);
+
+    const res = await post({ message: "what was the number?" });
+    expect(res.status).toBe(200);
+    expect((await res.json()).text).toBe("41.");
+
+    const assistant = transcript().find((row) => row.role === "assistant");
+    // Stripped ONCE, server-side, so the bubble and the stored record are the
+    // same text. Cleaning it in the browser would have left the monologue in
+    // the transcript for good.
+    expect(assistant.text).toBe("41.");
+    expect(assistant.text).not.toContain("Reasoning");
+  });
+
+  it("still records something when the whole reply was a panel", async () => {
+    // An answer we cannot see. Showing the monologue is poor; storing an empty
+    // assistant bubble is worse — it reads as the box having said nothing.
+    stdoutReply = [PANEL_TOP, "Thinking, and nothing else made it out.", PANEL_BOTTOM].join(CRLF);
+
+    const res = await post({ message: "hello" });
+    expect(res.status).toBe(200);
+    expect((await res.json()).text).not.toBe("");
+
+    const assistant = transcript().find((row) => row.role === "assistant");
+    expect(assistant.text).toContain("nothing else made it out");
+  });
 });
