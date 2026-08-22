@@ -6,6 +6,7 @@ const cloudflaredMock = {
   stopTunnelService: vi.fn(),
   getTunnelServiceState: vi.fn(),
   readTunnelUrl: vi.fn(),
+  readTunnelUrlHistory: vi.fn(),
 };
 const heartbeatMock = {
   pushHeartbeatIfChanged: vi.fn(),
@@ -26,6 +27,10 @@ describe("/setup-api/portal/status", () => {
     cloudflaredMock.readTunnelUrl.mockResolvedValue(
       "https://abc.trycloudflare.com",
     );
+    cloudflaredMock.readTunnelUrlHistory.mockResolvedValue([
+      { at: "2026-08-22T09:00:00Z", url: "https://abc.trycloudflare.com" },
+      { at: "2026-08-21T09:00:00Z", url: "https://old.trycloudflare.com" },
+    ]);
 
     const mod = await import("@/app/setup-api/portal/status/route");
     const res = await mod.GET();
@@ -35,6 +40,10 @@ describe("/setup-api/portal/status", () => {
       installed: true,
       service: "active",
       url: "https://abc.trycloudflare.com",
+      history: [
+        { at: "2026-08-22T09:00:00Z", url: "https://abc.trycloudflare.com" },
+        { at: "2026-08-21T09:00:00Z", url: "https://old.trycloudflare.com" },
+      ],
     });
     expect(body.portalAddDeviceUrl).toMatch(/clawbox\.com.*addDevice/);
     expect(body.portalWeb).toMatch(/clawbox\.com/);
@@ -47,6 +56,12 @@ describe("/setup-api/portal/status", () => {
     cloudflaredMock.isInstalled.mockResolvedValue(false);
     cloudflaredMock.getTunnelServiceState.mockResolvedValue("inactive");
     cloudflaredMock.readTunnelUrl.mockResolvedValue(null);
+    // A stopped tunnel still has to say which hostnames it HAS published —
+    // that is the question a stray, still-serving quick-tunnel URL raises, and
+    // `url` alone can never answer it.
+    cloudflaredMock.readTunnelUrlHistory.mockResolvedValue([
+      { at: "2026-08-21T09:00:00Z", url: "https://retired.trycloudflare.com" },
+    ]);
 
     const mod = await import("@/app/setup-api/portal/status/route");
     const res = await mod.GET();
@@ -54,6 +69,9 @@ describe("/setup-api/portal/status", () => {
     expect(body.tunnel.installed).toBe(false);
     expect(body.tunnel.service).toBe("inactive");
     expect(body.tunnel.url).toBeNull();
+    expect(body.tunnel.history).toEqual([
+      { at: "2026-08-21T09:00:00Z", url: "https://retired.trycloudflare.com" },
+    ]);
   });
 
   it("returns 500 when an underlying call throws", async () => {

@@ -14,6 +14,12 @@ ExecStart=/home/clawbox/clawbox/scripts/run-tunnel.sh
 # rather than the user noticing remote access is silently down.
 Restart=always
 RestartSec=5
+# Same reason as clawbox-setup.service: a SIGTERM stop exited 143 and systemd
+# recorded `Failed with result 'exit-code'`, which the Remote Access panel then
+# renders as a red "Tunnel failed to start" alert after the user themselves
+# pressed Stop. run-tunnel.sh now returns 0 on a signalled stop; this keeps the
+# unit honest either way.
+SuccessExitStatus=143 SIGTERM
 TimeoutStartSec=30
 TimeoutStopSec=15
 StandardOutput=journal
