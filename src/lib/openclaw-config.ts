@@ -3,7 +3,6 @@ import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
 import { promisify } from "util";
-import { DATA_DIR } from "@/lib/config-store";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
@@ -722,6 +721,22 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
 
 /** Env var the gateway resolves the Discord credential from. */
 export const DISCORD_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN";
+
+// The data dir is re-derived here rather than imported from config-store, and
+// that is load-bearing, not a style choice. This module is imported (via
+// updater.ts and the setup-api routes) by test files that replace
+// "@/lib/config-store" with a factory mock listing only the store functions
+// they use. `DATA_DIR` is then `undefined`, and a top-level
+// `path.join(DATA_DIR, …)` throws while merely IMPORTING this file — killing
+// whole unrelated test files. The resolution below matches config-store.ts
+// exactly, so both still write under the same root; every other lib that needs
+// the data dir without depending on the store does the same (tunnel.ts,
+// sqlite-store.ts, mcp-token.ts).
+const DATA_DIR = path.join(
+  process.env.CLAWBOX_ROOT ||
+    (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox"),
+  "data",
+);
 
 /** EnvironmentFile the gateway unit loads the Discord token from. */
 export const DISCORD_ENV_PATH = path.join(DATA_DIR, "discord.env");
