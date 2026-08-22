@@ -601,11 +601,19 @@ export async function startMemoryIndex(
 
   const args = ["memory", "index", "--agent", "main"];
   if (mode === "full") args.push("--force");
-  // `flock -n -E 75` so a busy migration comes back as its own exit code
-  // instead of looking like an indexing failure the customer should retry.
+  // `-n -E 75` so a busy migration comes back as its own exit code rather than
+  // looking like an indexing failure the customer should retry.
+  //
+  // `--no-fork` is load-bearing, not tidiness. util-linux `flock` defaults to
+  // forking the command and waiting on it, so `child.pid` would be the WRAPPER:
+  // killing it on the timeout or on a failed state write would leave
+  // `openclaw memory index` running unsupervised while the lock it was holding
+  // is released with the wrapper — the exact opposite of what both of those
+  // paths are trying to achieve. With `--no-fork` flock execs into openclaw, so
+  // the pid we record, supervise and signal is the indexer itself.
   const child = spawn(
     "flock",
-    ["-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, openclawBin(), ...args],
+    ["--no-fork", "-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, openclawBin(), ...args],
     { env: openclawEnv(), stdio: "ignore" },
   );
   state = { ...state, childPid: child.pid ?? 0 };

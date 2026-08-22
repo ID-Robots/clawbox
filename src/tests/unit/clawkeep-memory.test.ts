@@ -247,3 +247,57 @@ describe("what the first Index now click actually runs", () => {
     expect(await resolveIndexMode("full")).toBe("full");
   });
 });
+
+describe("the process the run supervises", () => {
+  it("is the indexer itself, not a flock wrapper around it", async () => {
+    /**
+     * util-linux `flock` defaults to forking the command and waiting on it.
+     * Without `--no-fork` the pid this module records and signals would be the
+     * WRAPPER: the timeout handler and the failed-state-write cleanup would
+     * kill it and leave `openclaw memory index` running unsupervised, while
+     * the lock it was holding is released along with the wrapper — the exact
+     * opposite of what both paths are for.
+     *
+     * Asserted against the real spawn, by giving the run a "binary" that
+     * writes its own pid: with `--no-fork` that pid is the child we recorded.
+     */
+    const marker = path.join(tmpDir, "who-am-i");
+    const script = path.join(tmpDir, "fake-index");
+    // Lives just long enough for the module to record its pid; the test then
+    // waits for it to exit before the fixture directory is torn down.
+    await fs.writeFile(script, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(marker)}\nsleep 0.5\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+
+    const { accepted } = await startMemoryIndex("full", "manual");
+    expect(accepted).toBe(true);
+    for (let i = 0; i < 100 && !(await fs.readFile(marker, "utf8").catch(() => "")); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    const execPid = Number(await fs.readFile(marker, "utf8"));
+    expect(execPid).toBeGreaterThan(0);
+
+    // Settle before asserting and before the fixture directory is torn down —
+    // the run writes the lock and the state file from its own close handler,
+    // and racing that is how this test used to fail the suite with ENOTEMPTY.
+    let persisted: { childPid: number; status: string } | null = null;
+    for (let i = 0; i < 200; i++) {
+      persisted = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8"));
+      if (persisted && persisted.childPid) break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // The pid this module recorded is the one the script saw as its own — so
+    // the thing we supervise and signal is the indexer, not a wrapper.
+    expect(persisted?.childPid).toBe(execPid);
+    for (let i = 0; i < 200; i++) {
+      const now = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8"));
+      if (now.status !== "running") break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+  });
+});
