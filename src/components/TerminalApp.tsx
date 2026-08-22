@@ -3,6 +3,12 @@
 /**
  * TerminalApp — xterm.js terminal emulator connected to a WebSocket PTY backend.
  * Auto-started via instrumentation.ts (no manual server needed).
+ *
+ * `initialCommand` types one line into the shell as soon as it is alive, which
+ * is how the Coding app opens straight into `claude-ds` instead of asking the
+ * owner to remember a command. It is TYPED, not injected: the shell echoes it,
+ * so what ran is on screen and the window is still an ordinary terminal
+ * afterwards.
  */
 
 import React, {
@@ -14,7 +20,12 @@ import React, {
 import dynamic from "next/dynamic";
 import "@xterm/xterm/css/xterm.css";
 
-function TerminalInner() {
+export interface TerminalAppProps {
+  /** Command typed into the shell once, per connection, after it first speaks. */
+  initialCommand?: string;
+}
+
+function TerminalInner({ initialCommand }: TerminalAppProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<import("@xterm/xterm").Terminal | null>(null);
   const fitAddonRef = useRef<import("@xterm/addon-fit").FitAddon | null>(null);
@@ -26,6 +37,18 @@ function TerminalInner() {
   const inputDisposableRef = useRef<{ dispose: () => void } | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const connectLockRef = useRef(false);
+  // Held from connect until the shell's FIRST byte of output. Sending on
+  // `onopen` instead would type into a PTY whose shell has not been exec'd
+  // yet on a loaded Orin; waiting for output means the shell demonstrably
+  // exists. Re-armed on every connection so a reconnect after a crash
+  // restarts the app rather than dropping the owner at a bare prompt.
+  const pendingCommandRef = useRef<string | null>(null);
+  // Read through a ref so a changed prop cannot invalidate `connect` and tear
+  // down a live socket.
+  const initialCommandRef = useRef(initialCommand);
+  useEffect(() => {
+    initialCommandRef.current = initialCommand;
+  }, [initialCommand]);
 
   // Connect to the terminal WebSocket through the same origin that served
   // the page — the production server proxies `/terminal-ws` upgrades to
@@ -157,6 +180,7 @@ function TerminalInner() {
 
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
+    pendingCommandRef.current = initialCommandRef.current?.trim() || null;
     updateStatus("connecting");
 
     ws.onopen = () => {
@@ -194,6 +218,11 @@ function TerminalInner() {
         const msg = JSON.parse(event.data);
         if (msg.type === "output" && typeof msg.data === "string") {
           term.write(msg.data);
+          const pending = pendingCommandRef.current;
+          if (pending && ws.readyState === WebSocket.OPEN) {
+            pendingCommandRef.current = null;
+            ws.send(JSON.stringify({ type: "input", data: `${pending}\r` }));
+          }
         } else if (msg.type === "exit") {
           term.writeln(`\r\n\x1b[33m[Process exited with code ${msg.code}]\x1b[0m`);
           updateStatus("disconnected");

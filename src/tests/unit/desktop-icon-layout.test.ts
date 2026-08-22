@@ -22,6 +22,7 @@ const CANONICAL = [
   "desktop-openclaw",
   "desktop-hermes",
   "desktop-terminal",
+  "desktop-coding",
   "desktop-files",
   "desktop-clawkeep",
   "desktop-system_update",

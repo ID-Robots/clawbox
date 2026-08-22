@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+#
+# claude-ds — the ClawBox coding harness.
+#
+# Runs Claude Code (the CLI) against ClawBox AI instead of Anthropic, so the
+# box's own portal token pays for the coding agent and the owner never has to
+# find a second API key. ClawBox AI speaks Anthropic's protocol at
+# <proxy>/anthropic and forwards to DeepSeek under our key.
+#
+# WHY THIS IS A WRAPPER AND NEVER AN ENVIRONMENT EXPORT
+#
+# OpenClaw runs `claude-cli` through the SAME `claude` binary this script
+# execs. A global ANTHROPIC_BASE_URL — in ~/.bashrc, /etc/environment or
+# ~/.openclaw/.env — would silently reroute every OpenClaw Claude call to
+# DeepSeek: no error, no warning, just a different model answering. Every
+# variable below is exported into THIS process only and dies with it.
+#
+# WHICH MODEL YOU GET
+#
+# The plan decides, not this script. ClawBox AI gates deepseek-v4-pro to the
+# Max plan and answers 403 for Free and Pro, so hard-wiring pro would ship a
+# harness that is broken for most owners. The device already records which
+# plan it is on (`clawai_tier`), and the chat path already maps that to a
+# model — this reads the same field and applies the same rule.
+#
+# Usage:  claude-ds [any claude argument]     e.g.  claude-ds -p "explain this repo"
+#
+# Overrides (all optional):
+#   CLAUDE_DS_MODEL         model for the main slot
+#   CLAUDE_DS_SMALL_MODEL   model for the haiku / subagent slots
+#   CLAUDE_DS_EFFORT        reasoning effort passed to Claude Code
+#   CLAUDE_DS_CONFIG_DIR    where this harness keeps its own state
+#   CLAWBOX_AI_PROXY_URL    ClawBox AI base URL (same var the device uses)
+#   CLAWBOX_ROOT            device checkout that holds data/config.json
+#
+set -euo pipefail
+
+CLAWBOX_ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
+CONFIG_JSON="$CLAWBOX_ROOT/data/config.json"
+
+# Same variable the device's own provider config uses, so one override moves
+# both. The `/anthropic` suffix is the protocol surface; Claude Code appends
+# /v1/messages itself.
+PROXY_URL="${CLAWBOX_AI_PROXY_URL:-https://clawbox.com/api/ai}"
+
+die() { printf 'claude-ds: %s\n' "$*" >&2; exit 1; }
+
+# The portal token is about to be handed to whatever this URL names, so refuse
+# to speak plaintext to anything but the loopback. Without this an
+# CLAWBOX_AI_PROXY_URL of http://... would put a live credential on the wire in
+# the clear, and the wrapper would look like it was working.
+case "$PROXY_URL" in
+  https://*) ;;
+  http://127.0.0.1[:/]*|http://127.0.0.1|http://localhost[:/]*|http://localhost) ;;
+  *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $PROXY_URL" ;;
+esac
+
+if ! command -v claude >/dev/null 2>&1; then
+  die "Claude Code is not installed on this ClawBox.
+  Install it with:  sudo bash $CLAWBOX_ROOT/install.sh --step coding_harness"
+fi
+
+if [ ! -r "$CONFIG_JSON" ]; then
+  die "cannot read $CONFIG_JSON — is this a ClawBox? (set CLAWBOX_ROOT to override)"
+fi
+
+# Read the token and the plan in ONE pass. The token is never echoed, never
+# written to a second file and never passed on argv, where `ps` would show it.
+#
+# The helper always exits 0 and answers on three lines — status, then either
+# the token or the reason, then the tier. Signalling through the exit code
+# instead would collapse "no token yet" and "config.json is corrupt" into one
+# message, and those need different answers from the owner.
+command -v python3 >/dev/null 2>&1 || die "python3 is missing; cannot read $CONFIG_JSON"
+
+CREDS="$(python3 - "$CONFIG_JSON" <<'PYEOF'
+import json, sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+except Exception as exc:                       # unreadable or malformed
+    print("ERR")
+    print(f"{sys.argv[1]} is not readable JSON: {exc}")
+    print("")
+    raise SystemExit(0)
+
+token = str(cfg.get("clawai_token") or "").strip()
+if not token:
+    print("ERR")
+    print("ClawBox AI is not connected yet. Open Settings -> AI Models on this "
+          "ClawBox and sign in to ClawBox AI first.")
+    print("")
+    raise SystemExit(0)
+
+print("OK")
+print(token)
+print(str(cfg.get("clawai_tier") or "").strip())
+PYEOF
+)"
+
+STATUS="$(printf '%s' "$CREDS" | sed -n 1p)"
+[ "$STATUS" = "OK" ] || die "$(printf '%s' "$CREDS" | sed -n 2p)"
+
+TOKEN="$(printf '%s' "$CREDS" | sed -n 2p)"
+TIER="$(printf '%s' "$CREDS" | sed -n 3p)"
+
+# "pro" is the device's name for the Max plan — the only tier ClawBox AI lets
+# reach deepseek-v4-pro. Anything else (flash, free, unset) gets flash, which
+# every plan can use. The [1m] suffix selects the 1M-context variant.
+case "$TIER" in
+  pro) TIER_MODEL="deepseek-v4-pro[1m]" ;;
+  *)   TIER_MODEL="deepseek-v4-flash" ;;
+esac
+
+MODEL="${CLAUDE_DS_MODEL:-$TIER_MODEL}"
+SMALL_MODEL="${CLAUDE_DS_SMALL_MODEL:-deepseek-v4-flash}"
+
+# Claude Code does not know these model names, so on a plain `deepseek-v4-flash`
+# it warns once and assumes a 200k window for auto-compact. That warning is left
+# in place deliberately. `[1m]` is accepted upstream for flash too, but accepted
+# is not the same as honoured, and declaring a window the model does not have
+# turns an early compact — a nuisance — into a failed request. Anyone who
+# measures the real flash window can set CLAUDE_DS_MODEL=deepseek-v4-flash[1m].
+
+# An inherited Anthropic credential outranks ANTHROPIC_AUTH_TOKEN, so a
+# leftover key in the environment would send this run to Anthropic with the
+# wrong model name and fail in a way that looks like a proxy bug.
+unset ANTHROPIC_API_KEY ANTHROPIC_OAUTH_TOKEN ANTHROPIC_AUTH_TOKEN
+
+export CLAUDE_CONFIG_DIR="${CLAUDE_DS_CONFIG_DIR:-$HOME/.claude-ds}"
+export ANTHROPIC_BASE_URL="${PROXY_URL%/}/anthropic"
+export ANTHROPIC_AUTH_TOKEN="$TOKEN"
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
+export CLAUDE_CODE_SUBAGENT_MODEL="$SMALL_MODEL"
+export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_DS_EFFORT:-max}"
+
+mkdir -p "$CLAUDE_CONFIG_DIR"
+chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
+
+# Say which model is actually about to answer. "Chosen vs actually used" is the
+# question this banner exists to close: the plan, not the wrapper, picks it.
+printf 'claude-ds: ClawBox AI (%s) — state in %s\n' "$MODEL" "$CLAUDE_CONFIG_DIR" >&2
+
+exec claude "$@"

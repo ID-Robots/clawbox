@@ -2327,6 +2327,11 @@ step_post_update() {
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
   step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
+  # step_post_update never ran step_ai_tools_install, which is exactly why no
+  # already-shipped box has `claude` on it today. Idempotent — a present
+  # `claude` short-circuits after one `command -v`, and the wrapper is a copy.
+  step_coding_harness || echo "  Warning: coding_harness step failed (non-fatal)"
   # On-device TTS: installs/refreshes the Piper fallback and seeds the
   # tts-local-cli provider. Without this call the whole of TASK-383 would be
   # fresh-install-only, and every already-shipped box would keep answering a
@@ -3058,6 +3063,126 @@ step_chromium_install() {
 }
 
 
+# Claude Code, via Anthropic's NATIVE installer (Yanko, 2026-08-22 — not npm).
+#
+# Anthropic GEO-BLOCKS some regions and serves an HTML "App unavailable in
+# region" page with HTTP 200, so `curl -f` does NOT catch it. Piping that HTML
+# into `bash` yields `syntax error near unexpected token '<'`, and under
+# `set -euo pipefail` that aborted the ENTIRE reinstall — the later steps that
+# (re)start the gateway never ran and the box came up as an nginx 404 (Discord
+# "broke my clawbox", step [18/23]). Guard it: download to a file, verify it
+# looks like a shell script and not an HTML/region-block page, only then run
+# it, and never let failure escape.
+#
+# Runs AS the clawbox user, never under sudo: the installer installs into
+# $HOME and refuses to run as root from a user shell. It also wants ~512MB
+# free, so exit 137 on a Jetson means the OOM killer rather than a broken
+# install.
+#
+# Returns 0 when `claude` is present afterwards, 1 otherwise. Callers decide
+# whether that is fatal — for every caller today it is not.
+ensure_claude_code() {
+  # A LOGIN shell, like the two probes below it and like the in-UI terminal.
+  # `sudo -u clawbox bash -c` is non-interactive and non-login: it reads
+  # neither ~/.profile nor ~/.bashrc, so ~/.local/bin is not on its PATH and it
+  # answers "not installed" on a box where Claude Code works perfectly. That
+  # made this fast path dead — every install and every update re-downloaded the
+  # CLI — and it is the same false negative the task warns about for ssh.
+  if as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  Claude Code already installed"
+    return 0
+  fi
+
+  local installer rc=1
+  installer="$(mktemp)"
+  # --max-time bounds a STALLED vendor: this runs inside step_post_update, and
+  # every recovery step after it waits behind this download. --proto-redir keeps
+  # a redirect from stepping down to plain HTTP on the way to something we then
+  # execute as the clawbox user.
+  if curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --max-time 300 \
+       https://claude.ai/install.sh -o "$installer" 2>/dev/null \
+     && [ -s "$installer" ] \
+     && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region' \
+     && chown "$CLAWBOX_USER" "$installer"; then
+    # The chown is why this ever works, and it has to be HERE — after the
+    # download, before the run.
+    #
+    # mktemp makes the file root:root 0600 and the installer is executed AS the
+    # clawbox user, so without it every run on every box answered
+    # "bash: /tmp/tmp.XXXX: Permission denied" and then "installer ran but
+    # failed". That is the other half of why no ClawBox in the field has
+    # `claude`: the missing post_update caller was only the first half.
+    #
+    # And it cannot move earlier. /tmp is sticky and world-writable, and these
+    # devices run fs.protected_regular=2 (verified on .65), under which even
+    # root may not write a file in such a directory that it does not own — a
+    # chown before the download turns the curl into
+    # "(23) Failure writing output to destination". Both failure modes were
+    # observed on hardware on 2026-08-22, one after the other.
+    if sudo -u "$CLAWBOX_USER" bash "$installer" </dev/null; then
+      echo "  Claude Code installed"
+      rc=0
+    else
+      echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
+    fi
+  else
+    echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
+  fi
+  rm -f "$installer"
+  return "$rc"
+}
+
+# The `claude-ds` wrapper — Claude Code pointed at ClawBox AI (TASK-378).
+#
+# COPIED out of the checkout rather than symlinked. A symlink would break the
+# harness for as long as any update leaves the repo mid-checkout, and the copy
+# is refreshed on every install and every in-app update, so it cannot drift.
+install_claude_ds_wrapper() {
+  local src="$PROJECT_DIR/scripts/claude-ds"
+  local dest="$CLAWBOX_HOME/.local/bin/claude-ds"
+
+  if [ ! -f "$src" ]; then
+    echo "  WARN: $src missing; claude-ds not installed"
+    return 1
+  fi
+
+  install -d -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$CLAWBOX_HOME/.local/bin"
+  install -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$src" "$dest"
+  echo "  claude-ds installed at $dest"
+}
+
+# The ClawBox coding harness: Claude Code plus the claude-ds wrapper that
+# drives it through ClawBox AI.
+#
+# Split out of step_ai_tools_install and dispatchable on its own because
+# step_post_update calls THIS and not the bigger step: an in-app update should
+# deliver the harness without also reinstalling the Codex and Gemini CLIs on
+# every box that updates.
+step_coding_harness() {
+  # Test mode has no network for claude.ai and no reason to download a binary,
+  # but the wrapper is a file copy — install it so e2e-install exercises the
+  # real delivery path instead of skipping the whole step.
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the Claude Code download"
+  else
+    ensure_claude_code || true
+  fi
+  install_claude_ds_wrapper || true
+  ensure_clawbox_bashrc_path
+
+  # Say plainly whether the harness can actually run. Without this the only
+  # symptom of a failed CLI install is the wrapper telling the owner to run
+  # this very step again — a loop with no diagnosis in it.
+  if is_test_mode; then
+    :
+  elif as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
+  else
+    echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is"
+  fi
+}
+
 step_ai_tools_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
@@ -3069,32 +3194,7 @@ step_ai_tools_install() {
   # `set -euo pipefail`, so every risky command is guarded inside an `if`
   # (where errexit is suspended) and failures only log a WARN.
 
-  # Claude Code — Anthropic GEO-BLOCKS some regions and serves an HTML
-  # "App unavailable in region" page with HTTP 200 (so `curl -f` does NOT
-  # catch it). Piping that HTML into `bash` yields
-  # `syntax error near unexpected token '<'`, and under `set -euo pipefail`
-  # that aborted the ENTIRE reinstall right here — so the later steps that
-  # (re)start the gateway never ran and the box came up as an nginx 404
-  # (Discord "broke my clawbox", step [18/23]). Guard it: download to a file,
-  # verify it looks like a shell script and not an HTML/region-block page,
-  # only then run it, and never let failure escape this step.
-  if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
-    echo "  Claude Code already installed"
-  else
-    _claude_installer="$(mktemp)"
-    if curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" 2>/dev/null \
-       && [ -s "$_claude_installer" ] \
-       && ! head -c 512 "$_claude_installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
-      if sudo -u "$CLAWBOX_USER" bash "$_claude_installer" </dev/null; then
-        echo "  Claude Code installed"
-      else
-        echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
-      fi
-    else
-      echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
-    fi
-    rm -f "$_claude_installer"
-  fi
+  ensure_claude_code || true
 
   # OpenAI Codex CLI (optional)
   if as_clawbox_login "command -v codex" &>/dev/null; then
@@ -3114,9 +3214,13 @@ step_ai_tools_install() {
     echo "  WARN: Gemini CLI install failed; skipping (optional, continuing)"
   fi
 
-  # Make claude / codex / gemini resolvable in the in-UI terminal's interactive
-  # shell (covers the standalone `step_ai_tools_install` invocation path where
-  # step_openclaw_install hasn't run).
+  # The claude-ds wrapper is deliberately NOT installed here. step_coding_harness
+  # owns it, and this step early-returns in test mode — which is exactly the
+  # environment e2e-install proves the delivery path in.
+
+  # Make claude / claude-ds / codex / gemini resolvable in the in-UI terminal's
+  # interactive shell (covers the standalone `step_ai_tools_install` invocation
+  # path where step_openclaw_install hasn't run).
   ensure_clawbox_bashrc_path
 }
 
@@ -3583,7 +3687,7 @@ step_validate_services() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
-  chromium_install ai_tools_install vnc_install vnc_refresh
+  chromium_install ai_tools_install coding_harness vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
@@ -3698,6 +3802,9 @@ step_cloudflared_install
 
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install
+
+log "Installing the ClawBox coding harness (claude-ds)..."
+step_coding_harness
 
 log "Installing VNC server..."
 step_vnc_install
