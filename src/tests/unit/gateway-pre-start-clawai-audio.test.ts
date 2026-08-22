@@ -153,6 +153,25 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
     expect(audio(cfg)).toEqual(owner);
   });
 
+  it("normalizes one harmless trailing slash on our managed endpoint", () => {
+    const { cfg, changed } = migrate({
+      tools: { media: { audio: { baseUrl: `${PROXY}/`, models: OURS } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(audio(cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+  });
+
+  it("leaves repeated trailing slashes alone as a distinct owner route", () => {
+    // Removing every trailing slash would turn this into PROXY and overwrite a
+    // route the owner explicitly entered. Only one optional slash is syntax.
+    const owner = { baseUrl: `${PROXY}//`, models: OURS };
+    const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+
   it("keeps an endpoint it cannot make sense of", () => {
     // We cannot say where it points, so we cannot say our token is safe there.
     const owner = { baseUrl: "not a url" };

@@ -813,9 +813,13 @@ if _clawai_openai_route_is_ours:
         # The WHOLE endpoint, not just its host. An owner who pointed
         # transcription at https://clawbox.com/their-own-route chose that path
         # deliberately, and a host-only match would stamp over it while
-        # reporting success. A trailing slash is the one difference that means
-        # nothing.
-        return _a.rstrip("/") == _b.rstrip("/")
+        # reporting success. One trailing slash is the only difference that
+        # means nothing; stripping every slash would also treat an owner's
+        # deliberate `.../api/ai//` route as ours and stamp over it.
+        def _without_one_trailing_slash(_value):
+            return _value[:-1] if _value.endswith("/") else _value
+
+        return _without_one_trailing_slash(_a) == _without_one_trailing_slash(_b)
 
     _audio_base_url = _audio.get("baseUrl")
     _audio_models = _audio.get("models")
