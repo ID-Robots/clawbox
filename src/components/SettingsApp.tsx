@@ -13,6 +13,7 @@ import { dispatchOpenApp } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
+import LocalModelsPanel from "./LocalModelsPanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
@@ -70,7 +71,7 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "telegram", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "telegram", "remote", "system", "about"] as const;
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -84,6 +85,7 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string 
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
   { id: "localAi", icon: "memory", label: "Local AI" },
+  { id: "localModels", icon: "deployed_code", label: "Local Models" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
@@ -2428,6 +2430,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               }}
             /></I18nProvider>
           </div>
+        )}
+
+        {/* ─── Local Models ─── */}
+        {activeSection === "localModels" && (
+          <LocalModelsPanel active={activeSection === "localModels"} />
         )}
 
         {/* ─── Telegram ─── */}

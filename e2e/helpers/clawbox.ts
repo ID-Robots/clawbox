@@ -1117,6 +1117,32 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    // Settings -> Local Models. A realistic inventory rather than an empty
+    // one: the tab's whole point is telling "installed and stopped" apart from
+    // "not installed", so the mock has to contain both or the spec proves
+    // nothing. Without this handler the fallthrough below answers `{}` and the
+    // panel correctly refuses to adopt it, leaving the tab on its skeleton.
+    if (path === "/setup-api/local-models") {
+      await fulfillJson(route, {
+        models: [
+          {
+            id: "ollama", name: "Ollama", kind: "llm", runtime: "System service",
+            installed: true, enabled: true, running: "running",
+            diskBytes: 639_000_000, memoryBytes: 1_073_741_824,
+            control: "system-unit", detail: "Serving 1 model: qwen3-embedding:0.6b.",
+          },
+          {
+            id: "kokoro", name: "Kokoro", kind: "tts", runtime: "systemd user service",
+            installed: false, enabled: null, running: "not-installed",
+            diskBytes: null, memoryBytes: null, control: "none",
+            detail: "Not installed on this box. Speech falls back to Piper.",
+          },
+        ],
+        unavailable: [],
+      });
+      return;
+    }
+
     await fulfillJson(route, {});
   });
 }
