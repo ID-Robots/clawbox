@@ -230,8 +230,8 @@ describe("the privacy notice is the chat one, not a second one", () => {
     expect(notice).toContain("may use ClawBox AI cloud TTS");
   });
 
-  it("says nothing when no cloud voice can be reached at all", () => {
-    const engines = [engine({ id: "local" }), engine({ id: "cloud", usable: false })];
+  it("says nothing when the box has no cloud voice at all", () => {
+    const engines = [engine({ id: "local" }), engine({ id: "cloud", usable: false, configured: false })];
     expect(buildVoiceDisclosure(LOCAL_TTS_PROVIDER_ID, engines)).toBeNull();
   });
 });
@@ -393,5 +393,32 @@ describe("a failure must not lock the customer out of retrying", () => {
     const retried = forgetEngineCheck(both, "cloud");
     expect(retried.engineChecks.cloud).toBeUndefined();
     expect(retried.engineChecks.local?.ok).toBe(true);
+  });
+});
+
+describe("the privacy notice follows what the box will attempt", () => {
+  it("still warns when the cloud primary is failing, because the text is still sent to it", () => {
+    // Found on a real box: the gateway posts the text to the configured primary,
+    // that call fails, and only then does the on-device voice speak. Dropping
+    // the notice because the engine is "not usable" would tell the customer
+    // nothing left the box while every reply was still being sent to the cloud.
+    const engines = [
+      engine({ id: "local" }),
+      engine({ id: "cloud", usable: false, configured: true }),
+    ];
+    expect(buildVoiceDisclosure("openai", engines)).toContain("Voice uses ClawBox AI cloud TTS");
+  });
+
+  it("warns conditionally when a failing cloud engine is only the fallback", () => {
+    const engines = [
+      engine({ id: "local" }),
+      engine({ id: "cloud", usable: false, configured: true }),
+    ];
+    expect(buildVoiceDisclosure(LOCAL_TTS_PROVIDER_ID, engines)).toContain("may use ClawBox AI cloud TTS");
+  });
+
+  it("says nothing when the box does not have a cloud voice at all", () => {
+    const engines = [engine({ id: "local" }), engine({ id: "cloud", usable: false, configured: false })];
+    expect(buildVoiceDisclosure(LOCAL_TTS_PROVIDER_ID, engines)).toBeNull();
   });
 });

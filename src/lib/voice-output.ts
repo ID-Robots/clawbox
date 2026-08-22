@@ -344,11 +344,19 @@ export function resolvePreferredEngine(
  *
  * The payload is the shape `tts.status` returns, assembled from what this panel
  * already measured: the primary is the provider actually configured, and the
- * other engine is a fallback only when the box could really use it — which is
- * exactly how the gateway derives its own chain. `enabled` is passed as true
- * because the question here is "who would speak", not "is speech switched on":
- * a customer choosing a cloud voice must see the notice at the moment they
- * choose it, not only once the box has spoken.
+ * other engine is a fallback when the box HAS it — which is exactly how the
+ * gateway derives its own chain.
+ *
+ * `configured`, not `usable`, and that distinction is the whole point of a
+ * privacy notice. A cloud voice whose last check failed is still in the chain:
+ * the gateway sends it the text, it fails, and only then does the on-device
+ * voice speak. The words left the box either way. Found on .177 with a failing
+ * cloud primary, where filtering by `usable` silently dropped the notice while
+ * every spoken reply was still being posted to the cloud first.
+ *
+ * `enabled` is passed as true because the question here is "who would speak",
+ * not "is speech switched on": a customer choosing a cloud voice must see the
+ * notice at the moment they choose it, not only once the box has spoken.
  */
 export function buildVoiceDisclosure(
   activeProviderId: string | null,
@@ -359,10 +367,10 @@ export function buildVoiceDisclosure(
     .map(engine => ({
       id: engine.providerId as string,
       label: engine.id === "cloud" ? CLOUD_DISCLOSURE_LABEL : engine.label,
-      configured: engine.usable,
+      configured: engine.configured,
     }));
   const fallbackProviders = engines
-    .filter(engine => engine.usable && engine.providerId && engine.providerId !== activeProviderId)
+    .filter(engine => engine.configured && engine.providerId && engine.providerId !== activeProviderId)
     .map(engine => engine.providerId as string);
   return buildCloudTtsWarning({
     enabled: true,
