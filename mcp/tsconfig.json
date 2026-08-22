@@ -15,6 +15,7 @@
     "../src/lib/config-store.ts",
     "../src/lib/hermes-skills.ts",
     "../src/lib/hermes-reasoning.ts",
+    "../src/lib/local-model-profile.ts",
     "../src/lib/hermes-providers.ts"
   ],
   "exclude": []
