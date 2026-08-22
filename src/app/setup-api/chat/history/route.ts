@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
-import { capabilitiesFor } from "@/lib/harness/capabilities";
-import { UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { clearTranscript, readTranscript, type TranscriptRecord } from "@/lib/harness/transcript-store";
 
 export const dynamic = "force-dynamic";
