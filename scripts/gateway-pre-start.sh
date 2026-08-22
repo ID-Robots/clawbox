@@ -898,6 +898,16 @@ if _clawai_openai_route_is_ours:
 # is TASK-486 and deliberately not written here.
 CLAWBOX_SPEECH_MODEL_ID = "gpt-4o-mini-tts"
 CLAWBOX_SPEECH_DEVICE_TIER = "pro"
+# Stamped on the entry we write, and the ONLY thing that authorises removing
+# one later. Ownership of `models.providers.openai` is decided upstream by the
+# image migration, but that says nothing about who wrote
+# `messages.tts.providers.openai`, and the downgrade path below is the one
+# irreversible action in this file. Matching on the proxy URL alone would let
+# it delete a hand-written entry that happens to point at the same host.
+# Verified harmless on a real box on 2026-08-22: an unknown key on a speech
+# provider entry survives `openclaw config set`, is not stripped, does not
+# upset `openclaw doctor`, and the entry still synthesises.
+CLAWBOX_SPEECH_MANAGED_KEY = "clawboxManaged"
 
 def _clawai_device_tier():
     """The portal-confirmed plan stamp, or None when the store cannot be read.
@@ -956,6 +966,11 @@ if _clawai_openai_route_is_ours and _clawai_speech_entitled:
         _speech["baseUrl"] = _clawai_proxy_base_url
         _speech["model"] = CLAWBOX_SPEECH_MODEL_ID
         _speech["apiKey"] = _clawai_token
+        # Adopt and normalise an unmarked entry that already points at us — a
+        # hand repair, or one written before this stamp existed — rather than
+        # leave a box with a half-configured voice. Writing is recoverable and
+        # deleting is not, which is why only the delete below insists on it.
+        _speech[CLAWBOX_SPEECH_MANAGED_KEY] = True
         if _speech != _speech_before:
             _tts_providers["openai"] = _speech
             _tts["providers"] = _tts_providers
@@ -968,9 +983,11 @@ elif _clawai_openai_route_is_ours:
     # A box that was Max and is not any more keeps an entry pointing at an
     # endpoint that now answers 403, so every spoken reply buys a refused round
     # trip before falling back — and the panel calls the cloud voice configured
-    # while it does it. Take back only what we wrote: an entry whose baseUrl is
-    # our proxy. An owner's own voice is theirs whatever their ClawBox AI plan
-    # says, and is matched by exactly the same rule as above.
+    # while it does it. Take back only what we wrote, and "what we wrote" means
+    # our own stamp plus our own proxy, not the proxy alone: an entry pointing
+    # at this host that we did not stamp is somebody's hand-written config, and
+    # this is the one place in the file that destroys configuration. An owner's
+    # own voice is theirs whatever their ClawBox AI plan says.
     #
     # `messages.tts.provider` is deliberately NOT touched here either. If the
     # customer had explicitly chosen the cloud voice, the panel's job is to show
@@ -984,7 +1001,8 @@ elif _clawai_openai_route_is_ours:
     if isinstance(_speech, dict):
         _speech_base_url = _speech.get("baseUrl")
         if (
-            isinstance(_speech_base_url, str)
+            _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True
+            and isinstance(_speech_base_url, str)
             and _speech_base_url.strip()
             and _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
         ):

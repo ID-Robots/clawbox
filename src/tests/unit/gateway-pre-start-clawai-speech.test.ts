@@ -20,6 +20,8 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 
 const PROXY = "https://clawbox.com/api/ai";
 const SPEECH_MODEL = "gpt-4o-mini-tts";
+/** The stamp that says we wrote this entry, and the only licence to remove it. */
+const MANAGED = { clawboxManaged: true };
 const TOKEN = "claw_test_token";
 /** The device tier stamp of the MAX plan. The two names are off by one on purpose. */
 const MAX_DEVICE_TIER = "pro";
@@ -112,7 +114,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     // without the model pin the proxy answers 400 because it serves exactly
     // one speech model; and the documented apiKey fallback for OpenAI TTS is
     // the OPENAI_API_KEY environment variable, which a ClawBox does not set.
-    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN });
+    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
   });
 
   it("leaves the on-device voice and the customer's chosen primary untouched", () => {
@@ -127,7 +129,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     // had deliberately picked its own voice.
     expect(tts.provider).toBe("tts-local-cli");
     expect(tts.providers["tts-local-cli"]).toEqual(local);
-    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN });
+    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
   });
 
   it("is idempotent — a second start rewrites nothing", () => {
@@ -135,12 +137,24 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     const second = migrate(first.cfg);
 
     expect(second.changed).toBe(false);
-    expect(speech(second.cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN });
+    expect(speech(second.cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+  });
+
+  it("adopts and stamps an unmarked entry that already points at us", () => {
+    // A hand repair, or one written before the stamp existed. Writing is
+    // recoverable and deleting is not, which is why only the removal path
+    // insists on the stamp.
+    const { cfg, changed } = migrate({
+      messages: { tts: { providers: { openai: { baseUrl: PROXY, model: "stale-model" } } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
   });
 
   it("re-points a box whose token was rotated", () => {
     const { cfg, changed } = migrate({
-      messages: { tts: { providers: { openai: { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: "claw_stale" } } } },
+      messages: { tts: { providers: { openai: { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: "claw_stale", ...MANAGED } } } },
     });
 
     expect(changed).toBe(true);
@@ -152,9 +166,9 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       messages: { tts: { providers: { openai: { speakerVoice: "cedar" } } } },
     });
 
-    // Only the three fields this migration owns are written. A customer who
-    // picked a voice keeps it.
-    expect(speech(cfg)).toEqual({ speakerVoice: "cedar", baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN });
+    // Only the three fields this migration owns, plus its stamp, are written.
+    // A customer who picked a voice keeps it.
+    expect(speech(cfg)).toEqual({ speakerVoice: "cedar", baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
   });
 
   describe("takes the cloud voice back when the box stops being entitled", () => {
@@ -162,7 +176,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     // more keeps an entry pointing at an endpoint that now answers 403, so
     // every spoken reply buys a refused round trip before falling back, and the
     // panel calls the cloud voice configured while it does it.
-    const ours = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN };
+    const ours = { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED };
 
     it("removes the entry it wrote when the plan drops to Pro", () => {
       const { cfg, changed, log } = migrate(
@@ -194,6 +208,21 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
       expect(tts.provider).toBe("openai");
       expect(tts.providers.openai).toBeUndefined();
       expect(tts.providers["tts-local-cli"]).toEqual({ command: "/x" });
+    });
+
+    it("leaves an unstamped entry on our own host alone", () => {
+      // Ownership of models.providers.openai is decided upstream and says
+      // nothing about who wrote this. An entry pointing here that we did not
+      // stamp is somebody's hand-written config, and deleting it is the one
+      // irreversible thing this migration can do.
+      const unstamped = { baseUrl: PROXY, model: "some-other-tts", apiKey: "claw_theirs" };
+      const { cfg, changed } = migrate(
+        { messages: { tts: { providers: { openai: unstamped } } } },
+        { deviceTier: PRO_DEVICE_TIER },
+      );
+
+      expect(changed).toBe(false);
+      expect(speech(cfg)).toEqual(unstamped);
     });
 
     it("does not take an owner's own cloud voice away with it", () => {
@@ -292,7 +321,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
 
     it("still recognises our own route written with a trailing slash", () => {
       const { cfg, changed } = migrate({
-        messages: { tts: { providers: { openai: { baseUrl: `${PROXY}/`, model: SPEECH_MODEL, apiKey: TOKEN } } } },
+        messages: { tts: { providers: { openai: { baseUrl: `${PROXY}/`, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } } },
       });
 
       // One trailing slash is the only difference that means nothing, so this
@@ -317,7 +346,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     const { cfg, changed } = migrate({ messages: { tts: { providers: "nonsense" } } });
 
     expect(changed).toBe(true);
-    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN });
+    expect(speech(cfg)).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
   });
 
   it("honours a staging proxy rather than dragging the box to production", () => {
