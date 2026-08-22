@@ -29,6 +29,7 @@ import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
+import { CODING_HARNESS_COMMAND } from "@/lib/coding-harness";
 import {
   layoutIcons,
   layoutsEqual,
@@ -46,7 +47,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -65,6 +66,12 @@ const apps: AppDef[] = [
   // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
   { id: "hermes-skills", name: "Skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
+  // The coding harness (TASK-378): a terminal that opens straight into
+  // `claude-ds`, Claude Code driven by this box's own ClawBox AI plan. Pinned
+  // like OpenClaw because it is a headline capability, not a power-user
+  // shortcut, and it is shown on both harnesses — the wrapper needs only the
+  // portal token and the CLI, both of which every edition installs.
+  { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
@@ -200,6 +207,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     settings: "settings",
     setup: "construction",
     terminal: "terminal",
+    coding: "code",
     files: "folder",
     clawkeep: "shield_lock",
     system_update: "system_update",
@@ -1548,6 +1556,8 @@ function ChromeDesktopInner() {
         );
       case "terminal":
         return <TerminalApp />;
+      case "coding":
+        return <TerminalApp initialCommand={CODING_HARNESS_COMMAND} />;
       case "store":
         return (
           <AppStore
@@ -2504,6 +2514,9 @@ function ChromeDesktopInner() {
               )}
               <button onClick={() => openApp("terminal")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> Terminal
+              </button>
+              <button onClick={() => openApp("coding")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>code</span> {t("app.codingAgent")}
               </button>
               <div className="border-t border-white/10 my-1" />
               {!harnessHiddenAppIds.includes("hermes") && (

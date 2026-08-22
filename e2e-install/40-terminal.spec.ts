@@ -110,4 +110,57 @@ test.describe("terminal app happy path", () => {
     );
     expect(outcome).toMatch(/401/);
   });
+  /**
+   * Run one command in a real PTY through /terminal-ws and return everything
+   * the shell wrote until `done` matches.
+   */
+  async function runInTerminal(command: string, done: RegExp): Promise<string> {
+    const ws = new WebSocket(TERMINAL_WS_URL, { headers: { cookie: sessionCookie } });
+    const output: string[] = [];
+    return new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => { ws.close(); reject(new Error(`timed out running: ${command}`)); }, 30_000);
+      ws.on("open", () => {
+        setTimeout(() => ws.send(JSON.stringify({ type: "input", data: `${command}\n` })), 500);
+      });
+      ws.on("message", (raw) => {
+        const msg = JSON.parse(raw.toString()) as { type: string; data?: string };
+        if (msg.type !== "output" || !msg.data) return;
+        output.push(msg.data);
+        const joined = output.join("");
+        if (done.test(joined)) {
+          clearTimeout(timer);
+          ws.close();
+          resolve(joined);
+        }
+      });
+      ws.on("error", (err) => { clearTimeout(timer); reject(err); });
+    });
+  }
+
+  test("the coding harness is on the terminal's PATH", async () => {
+    // TASK-378's acceptance is deliberately typed into THIS terminal and not
+    // into ssh: a non-interactive ssh session skips ~/.bashrc, so `command -v`
+    // over ssh answers "missing" on a box where the harness works fine. The
+    // in-UI terminal spawns a login shell, which is the environment the owner
+    // actually gets.
+    const out = await runInTerminal(
+      "command -v claude-ds || echo CLAUDE_DS_MISSING",
+      /\.local\/bin\/claude-ds|CLAUDE_DS_MISSING/,
+    );
+    expect(out, "install.sh must put claude-ds on the login shell's PATH").toContain(
+      "/home/clawbox/.local/bin/claude-ds",
+    );
+  });
+
+  test("the harness refuses clearly when ClawBox AI is not connected", async () => {
+    // The container has no portal token, which is also the state of a box
+    // whose owner has not signed in yet. The failure must name the screen that
+    // fixes it rather than dumping a stack trace into the terminal.
+    const out = await runInTerminal(
+      "claude-ds --version 2>&1 | head -5",
+      /claude-ds:|command not found/,
+    );
+    expect(out).not.toMatch(/command not found/);
+    expect(out).toMatch(/ClawBox AI is not connected|Claude Code is not installed/);
+  });
 });

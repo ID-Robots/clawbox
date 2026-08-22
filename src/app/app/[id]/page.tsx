@@ -6,6 +6,7 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
+import { CODING_HARNESS_COMMAND } from "@/lib/coding-harness";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
 const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false });
@@ -71,6 +72,8 @@ export default function StandaloneAppPage() {
     switch (id) {
       case "terminal":
         return <TerminalApp />;
+      case "coding":
+        return <TerminalApp initialCommand={CODING_HARNESS_COMMAND} />;
       case "files":
         return <FilesApp />;
       case "browser":
