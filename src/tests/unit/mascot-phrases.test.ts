@@ -178,6 +178,32 @@ describe("stripEchoes", () => {
     expect(result.sass).toEqual([]);
   });
 
+  it("treats a pack line with an emoji glued on as an echo", () => {
+    // Measured on the reference box: the model returns "I do all the work
+    // here. \u{1F644}" against the pack's "I do all the work here.". A trailing
+    // emoji is decoration, not a new line, and keeping both variants is how
+    // the crab ends up saying the same thing twice in a row.
+    const result = stripEchoes(
+      { sass: [`${en.sass[0]} \u{1F644}`, `${en.sass[1]}\u{1F4A8}`, "Genuinely different."] },
+      en,
+    );
+    expect(result.sass).toEqual(["Genuinely different."]);
+  });
+
+  it("treats a difference in end punctuation alone as an echo", () => {
+    const bare = en.sass[0].replace(/[.!?]+$/, "");
+    const result = stripEchoes({ sass: [`${bare}!`, `${bare}?!`] }, en);
+    expect(result.sass).toEqual([]);
+  });
+
+  it("keeps emoji-only lines apart from each other", () => {
+    // The idle pack is mostly bare emoji. Stripping every pictograph folds
+    // them all to the empty string, which would make each one an echo of all
+    // the others — so those fall back to the plain fold.
+    const result = stripEchoes({ idle: ["\u{1F634}", "\u{1F914}"] }, { ...en, idle: ["\u{1F914}"] });
+    expect(result.idle).toEqual(["\u{1F634}"]);
+  });
+
   it("compares within a category, not across the whole pack", () => {
     // A power line is not an echo just because some other category has it.
     const result = stripEchoes({ sass: [en.power[0]] }, en);

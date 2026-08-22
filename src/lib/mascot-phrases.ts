@@ -184,13 +184,32 @@ export function sanitizeCategory(
 
 /**
  * Fold a phrase to the form two entries are compared by when deciding whether
- * one is an echo of the other: trimmed, case-folded, inner whitespace
- * collapsed. Deliberately looser than the exact-string dedupe
- * `mergeWithPackSync` does, because "Bug? Feature." and "bug? feature." are
- * the same line as far as the crab's repertoire is concerned.
+ * one is an echo of the other. Deliberately looser than the exact-string
+ * dedupe `mergeWithPackSync` does, because "Bug? Feature." and "bug? feature."
+ * are the same line as far as the crab's repertoire is concerned.
+ *
+ * Emoji and trailing punctuation come off too, because the decorated echo is
+ * what the model actually produces: a measured run returned "I do all the work
+ * here. 🙄", "Ship faster, humans. 💨" and "I need a raise. 💸" against pack
+ * lines identical but for the emoji. Counting those as new lines is the same
+ * untruth this module exists to stop telling, one notch finer — and keeping
+ * both variants in the bag is exactly how the crab ends up saying the same
+ * thing twice in a row.
+ *
+ * A line that is NOTHING but emoji (the idle pack is full of them) folds to
+ * the empty string, which would make every such line an echo of every other.
+ * Those fall back to the plain fold, so "🤔" and "😴" stay different lines.
  */
 function echoKey(phrase: string): string {
-  return phrase.trim().toLowerCase().replace(/\s+/g, " ");
+  const folded = phrase.trim().toLowerCase().replace(/\s+/g, " ");
+  const bare = folded
+    // Variation selector-16 and ZWJ are written as escapes on purpose: both
+    // are invisible in a source file, so a literal one is impossible to spot.
+    .replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D]/gu, "")
+    .replace(/[.!?,;\u2026"'*]+/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return bare === "" ? folded : bare;
 }
 
 /**
