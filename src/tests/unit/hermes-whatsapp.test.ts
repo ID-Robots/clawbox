@@ -281,6 +281,7 @@ describe("resolveWhatsappBridgeDir", () => {
     if (originalAgent === undefined) delete process.env.HERMES_AGENT_DIR;
     else process.env.HERMES_AGENT_DIR = originalAgent;
     await fs.chmod(installDir(), 0o755).catch(() => {});
+    await fs.chmod(mirrorDir(), 0o755).catch(() => {});
     await fs.rm(dir, { recursive: true, force: true });
   });
 
@@ -304,6 +305,8 @@ describe("resolveWhatsappBridgeDir", () => {
     // where `npm install` and `node bridge.js` are about to run.
     expect(await fs.readFile(path.join(mirrorDir(), "bridge.js"), "utf8")).toBe("// bridge");
     expect(whatsappBridgeDir()).toBe(mirrorDir());
+    // Writable, or the copy solved nothing: `npm install` runs in here next.
+    await fs.writeFile(path.join(mirrorDir(), "probe"), "");
   });
 
   it("reuses an existing mirror instead of copying over it", async () => {

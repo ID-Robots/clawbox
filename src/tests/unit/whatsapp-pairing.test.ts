@@ -14,6 +14,7 @@ class FakeBridge implements BridgeProcessHandle {
   lineCb: ((line: string) => void) | null = null;
   exitCb: ((code: number | null) => void) | null = null;
   killed = false;
+  exited = false;
 
   onLine(cb: (line: string) => void) {
     this.lineCb = cb;
@@ -33,6 +34,7 @@ class FakeBridge implements BridgeProcessHandle {
     this.write(JSON.stringify({ ts: 1, ...event }) + "\n");
   }
   exit(code: number | null = 1) {
+    this.exited = true;
     this.exitCb?.(code);
   }
 }
@@ -45,7 +47,7 @@ interface Harness {
   advance(ms: number): void;
   /** Make the next credsExist() hang. Returns the release. */
   gateCreds(): () => void;
-  /** Bridges the manager spawned but never killed. */
+  /** Bridges still holding a socket: spawned, not killed, not exited. */
   live(): FakeBridge[];
   state: {
     installed: boolean;
@@ -121,7 +123,7 @@ function makeHarness(overrides: Partial<Harness["state"]> = {}): Harness {
       });
       return release;
     },
-    live: () => bridges.filter((b) => !b.killed),
+    live: () => bridges.filter((b) => !b.killed && !b.exited),
     state,
   };
 }

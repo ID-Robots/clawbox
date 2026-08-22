@@ -123,6 +123,11 @@ export async function resolveWhatsappBridgeDir(): Promise<string> {
   try {
     await fs.mkdir(path.dirname(mirror), { recursive: true });
     await fs.cp(install, mirror, { recursive: true, errorOnExist: true, force: false });
+    // The copy inherits the source's mode, and a bridge mirrored out of a tree
+    // that was read-only by permission would arrive read-only too — which
+    // defeats the whole point, since the next thing to run in here is
+    // `npm install`.
+    await fs.chmod(mirror, 0o755);
     resolvedBridgeDir = mirror;
     return mirror;
   } catch {
