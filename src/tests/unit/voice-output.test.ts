@@ -129,7 +129,11 @@ describe("status", () => {
     const status = buildVoiceOutputStatus(config(), healthyLocal, state());
     const cloud = status.engines.find(e => e.id === "cloud")!;
     expect(cloud.usable).toBe(false);
-    expect(cloud.detail).toContain("does not serve the voice yet");
+    // The old copy said ClawBox AI "does not serve the voice yet". It does, on
+    // Max, since 2026-08-22 — so what a box landing here has to be told is that
+    // ITS key does not open one, not that the product has none (TASK-490).
+    expect(cloud.detail).toContain("comes with ClawBox AI Max");
+    expect(cloud.detail).not.toContain("does not serve the voice yet");
     expect(cloud.detail).not.toContain("claw_");
   });
 
