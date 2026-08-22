@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * TASK-434 — /setup-api/tts.
@@ -106,6 +106,13 @@ beforeEach(() => {
   writeStateMock.mockReset().mockResolvedValue(undefined);
 });
 
+// Fake timers installed by one test must not survive a failing assertion: the
+// tests after it drive `cliEmits`, whose close event is a setTimeout, and would
+// hang and report a second, misleading failure.
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("GET /setup-api/tts", () => {
   it("reports the engines and never caches them", async () => {
     const { GET } = await route();
@@ -197,7 +204,10 @@ describe("POST /setup-api/tts — check", () => {
     })));
     const { POST } = await route();
     const body = await (await POST(post({ action: "check" }))).json();
-    expect(body.lastCheck).toBeNull(); // status is re-read from the (mocked) store
+    // The answer carries the run that just happened, rather than a status
+    // re-read from disk that would cost the box a third probe.
+    expect(body.lastCheck.servedEngine).toBe("local");
+    expect(body.engines.find((e: { id: string }) => e.id === "local").proven).toBe(true);
     const saved = writeStateMock.mock.calls[0][0];
     expect(saved.lastCheck.ok).toBe(true);
     expect(saved.lastCheck.servedEngine).toBe("local");
@@ -261,7 +271,6 @@ describe("POST /setup-api/tts — check", () => {
     const pending = POST(post({ action: "check" }));
     await vi.advanceTimersByTimeAsync(121_000);
     const res = await pending;
-    vi.useRealTimers();
     expect(killed).toBe(true);
     expect(res.status).toBe(200);
     const saved = writeStateMock.mock.calls[0][0].lastCheck;
@@ -314,5 +323,35 @@ describe("POST /setup-api/tts — check", () => {
     // answer includes the fallback.
     expect(args).not.toContain("--model");
     expect(args).toContain("--json");
+  });
+});
+
+describe("POST /setup-api/tts — failure boundary", () => {
+  it("answers with a message the panel can show when the box cannot be written to", async () => {
+    // A read-only data dir or a full disk must not surface as a framework error
+    // page: the panel would fall back to its own generic line and the box would
+    // log nothing worth reading.
+    writeStateMock.mockRejectedValue(new Error("EROFS: read-only file system"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "local" }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "Could not change the voice on this box." });
+  });
+
+  it("lets the customer ask again for an engine whose last check failed", async () => {
+    readConfigMock.mockResolvedValue(config({
+      models: { providers: { openai: { apiKey: "sk-live-abc" } } },
+    }));
+    readStateMock.mockResolvedValue({
+      choice: "auto",
+      engineChecks: { cloud: { providerId: "openai", engine: "cloud", ok: false, message: "rejected", latencyMs: null, at: 1 } },
+      lastCheck: null,
+    });
+    const { POST } = await route();
+    const res = await POST(post({ action: "select", choice: "cloud" }));
+    expect(res.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", "openai"]);
+    // And the box stops reporting the old failure about a choice just re-made.
+    expect(writeStateMock.mock.calls[0][0].engineChecks.cloud).toBeUndefined();
   });
 });

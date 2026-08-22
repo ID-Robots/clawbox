@@ -137,10 +137,55 @@ describe("Voice panel", () => {
     expect(screen.queryByTestId("voice-cloud-warning")).toBeNull();
   });
 
-  it("tells the customer their choice has somewhere to move to", async () => {
-    mockFetch([status({ preferredEngine: "cloud", drifted: true, engines: [engine(), engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud" })] })]);
+  it("names the engine that will actually speak, not the one in the config", async () => {
+    // The chosen cloud voice broke, so the gateway will fall back at request
+    // time. Naming the configured primary here would tell the customer the one
+    // thing this panel exists to stop them believing.
+    mockFetch([status({
+      choice: "cloud",
+      activeProviderId: "openai",
+      activeEngine: "cloud",
+      preferredEngine: "local",
+      drifted: true,
+    })]);
     render(<VoiceOutputPanel active />);
-    expect(await screen.findByTestId("voice-drift")).toHaveTextContent(/ClawBox cloud/);
+    const speaking = await screen.findByTestId("voice-speaking-now");
+    expect(within(speaking).getByText("On this box")).toBeTruthy();
+    expect(await screen.findByTestId("voice-drift"))
+      .toHaveTextContent(/You chose ClawBox cloud, but it cannot speak right now, so On this box answers instead/);
+  });
+
+  it("says nothing about a fallback when the chosen voice is the one speaking", async () => {
+    mockFetch([status({ choice: "local", preferredEngine: "local" })]);
+    render(<VoiceOutputPanel active />);
+    await screen.findByTestId("voice-speaking-now");
+    expect(screen.queryByTestId("voice-drift")).toBeNull();
+  });
+
+  it("moves the box itself when Auto resolves somewhere else, instead of asking the customer to re-pick", async () => {
+    const both = [engine(), engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud" })];
+    const fn = mockFetch([status({ preferredEngine: "cloud", drifted: true, engines: both })]);
+    fn.mockResolvedValueOnce({
+      ok: true,
+      json: async () => status({ activeProviderId: "openai", activeEngine: "cloud", preferredEngine: "cloud", drifted: false, engines: both }),
+    });
+    render(<VoiceOutputPanel active />);
+    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
+    expect(JSON.parse((fn.mock.calls[1][1] as { body: string }).body)).toEqual({ action: "select", choice: "auto" });
+    const speaking = await screen.findByTestId("voice-speaking-now");
+    expect(within(speaking).getByText("ClawBox cloud")).toBeTruthy();
+  });
+
+  it("does not keep rewriting the box when the drift will not clear", async () => {
+    // A write that does not resolve the drift must not become a loop.
+    const both = [engine(), engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud" })];
+    const drifting = status({ preferredEngine: "cloud", drifted: true, engines: both });
+    const fn = mockFetch([drifting]);
+    fn.mockResolvedValue({ ok: true, json: async () => drifting });
+    render(<VoiceOutputPanel active />);
+    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
+    await new Promise(r => setTimeout(r, 300));
+    expect(fn).toHaveBeenCalledTimes(2);
   });
 
   it("keeps its last good reading when the box answers something that is not a status", async () => {

@@ -8,13 +8,13 @@ import {
   configuredTtsProviderId,
   DEFAULT_VOICE_STATE,
   engineForProviderId,
-  engineSignatures,
   failedVoiceCheck,
   isVoiceChoice,
   LOCAL_TTS_PROVIDER_ID,
   localCommandPath,
   parseVoiceCheck,
   providerIdForChoice,
+  forgetEngineCheck,
   resolvePreferredEngine,
   selectionError,
   type LocalVoiceProbe,
@@ -159,7 +159,7 @@ describe("status", () => {
   it("marks an engine unusable after a real check through it failed, and says so", () => {
     const failed = state({
       engineChecks: {
-        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: false, message: "no voice model", latencyMs: 12, at: 5, signature: engineSignatures(config(), healthyLocal).local },
+        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: false, message: "no voice model", latencyMs: 12, at: 5 },
       },
     });
     const local = buildVoiceOutputStatus(config(), healthyLocal, failed).engines.find(e => e.id === "local")!;
@@ -170,7 +170,7 @@ describe("status", () => {
   it("marks an engine proven once a real check through it succeeded", () => {
     const proven = state({
       engineChecks: {
-        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: true, message: null, latencyMs: 900, at: 5, signature: engineSignatures(config(), healthyLocal).local },
+        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: true, message: null, latencyMs: 900, at: 5 },
       },
     });
     const local = buildVoiceOutputStatus(config(), healthyLocal, proven).engines.find(e => e.id === "local")!;
@@ -198,7 +198,10 @@ describe("choice resolution", () => {
   });
 
   it("resolves to nothing when neither engine can speak", () => {
-    const none = [engine({ id: "local", usable: false }), engine({ id: "cloud", usable: false })];
+    const none = [
+      engine({ id: "local", usable: false, configured: false }),
+      engine({ id: "cloud", usable: false, configured: false }),
+    ];
     expect(resolvePreferredEngine("auto", none)).toBeNull();
     expect(providerIdForChoice("local", none)).toBeNull();
   });
@@ -294,7 +297,7 @@ describe("reading a real check", () => {
         { provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 },
       ],
     }, 42);
-    const next = applyCheck(state(), check, engineSignatures(config(), healthyLocal));
+    const next = applyCheck(state(), check);
     expect(next.engineChecks.cloud?.ok).toBe(false);
     expect(next.engineChecks.local?.ok).toBe(true);
     expect(next.engineChecks.local?.at).toBe(42);
@@ -311,15 +314,18 @@ describe("refusing an explicit pick", () => {
     expect(selectionError("auto", both)).toBeNull();
   });
 
-  it("refuses a named engine the box cannot use instead of substituting the other", () => {
-    const noCloud = [engine({ id: "local" }), engine({ id: "cloud", usable: false })];
+  it("refuses a named engine the box does not have instead of substituting the other", () => {
+    const noCloud = [engine({ id: "local" }), engine({ id: "cloud", usable: false, configured: false })];
     expect(selectionError("cloud", noCloud)).toContain("not available");
     // Auto is still fine — resolving to whatever works is what Auto means.
     expect(selectionError("auto", noCloud)).toBeNull();
   });
 
   it("refuses Auto only when the box has no voice at all", () => {
-    const none = [engine({ id: "local", usable: false }), engine({ id: "cloud", usable: false })];
+    const none = [
+      engine({ id: "local", usable: false, configured: false }),
+      engine({ id: "cloud", usable: false, configured: false }),
+    ];
     expect(selectionError("auto", none)).toContain("no voice");
   });
 
@@ -331,71 +337,61 @@ describe("refusing an explicit pick", () => {
   });
 });
 
-describe("a recorded failure cannot outlive its cause", () => {
+describe("a failure must not lock the customer out of retrying", () => {
   const cloudKey = (key: string) => config({ models: { providers: { openai: { apiKey: key } } } });
+  const failedCloud = () => applyCheck(state(), parseVoiceCheck({
+    ok: false,
+    attempts: [{ provider: "openai", outcome: "error", error: "rejected" }],
+  }, 1));
 
   it("keeps the record of an engine this check did not attempt", () => {
-    // Clearing it instead would let a known-bad engine drift back to
-    // "unproven" every time the other one is checked, and Auto would keep
-    // choosing it.
-    const sigs = engineSignatures(config(), healthyLocal);
-    const withCloudFailure = applyCheck(state(), parseVoiceCheck({
-      ok: false,
-      attempts: [{ provider: "openai", outcome: "error", error: "rejected" }],
-    }, 1), sigs);
-    const thenLocalOnly = applyCheck(withCloudFailure, parseVoiceCheck({
+    // Clearing it here would let a known-bad engine read as merely unproven
+    // every time the other one is checked, and Auto would keep choosing it.
+    const thenLocalOnly = applyCheck(failedCloud(), parseVoiceCheck({
       ok: true,
       attempts: [{ provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 }],
-    }, 2), sigs);
+    }, 2));
     expect(thenLocalOnly.engineChecks.cloud?.ok).toBe(false);
     expect(thenLocalOnly.engineChecks.local?.ok).toBe(true);
   });
 
-  it("stops applying the failure once the thing that caused it changed", () => {
-    // The trap this closes: a failure marks the cloud voice unusable, Auto
-    // stops choosing it, no later check routes through it — so without this
-    // the customer who fixes it by adding a real key is still told it is
-    // unavailable, forever.
-    // A real-looking key, so the recorded failure is the reason shown. A
-    // ClawBox portal token would surface its own, more specific line instead.
-    const broken = cloudKey("sk-rejected-key");
-    const failure = applyCheck(state(), parseVoiceCheck({
-      ok: false,
-      attempts: [{ provider: "openai", outcome: "error", error: "rejected" }],
-    }, 1), engineSignatures(broken, healthyLocal));
+  it("stops Auto choosing a failed engine but still lets the customer ask for it", () => {
+    // The trap this closes: if a failure also removed the ability to pick the
+    // engine, it would be permanent by construction — Auto stops choosing it,
+    // so no later check routes through it, so nothing can ever clear it.
+    const engines = buildVoiceOutputStatus(cloudKey("sk-live-abc"), healthyLocal, failedCloud()).engines;
+    expect(resolvePreferredEngine("auto", engines)).toBe("local");
+    expect(selectionError("cloud", engines)).toBeNull();
+    expect(providerIdForChoice("cloud", engines)).toBe("openai");
+  });
 
-    const stillBroken = buildVoiceOutputStatus(broken, healthyLocal, failure);
-    expect(stillBroken.engines.find(e => e.id === "cloud")!.detail).toContain("rejected");
+  it("still refuses an engine the box genuinely does not have", () => {
+    // A stock ClawBox: the portal token is not a cloud voice key, so there is
+    // nothing to retry and the refusal stands.
+    const engines = buildVoiceOutputStatus(config(), healthyLocal, state()).engines;
+    expect(selectionError("cloud", engines)).toContain("not available");
+    expect(providerIdForChoice("cloud", engines)).toBeNull();
+  });
 
-    const fixed = buildVoiceOutputStatus(cloudKey("sk-a-different-key"), healthyLocal, failure);
-    const cloud = fixed.engines.find(e => e.id === "cloud")!;
+  it("forgets what it observed about an engine the customer picks again", () => {
+    const retried = forgetEngineCheck(failedCloud(), "cloud");
+    expect(retried.engineChecks.cloud).toBeUndefined();
+    const cloud = buildVoiceOutputStatus(cloudKey("sk-live-abc"), healthyLocal, retried)
+      .engines.find(e => e.id === "cloud")!;
     expect(cloud.usable).toBe(true);
     expect(cloud.detail).toContain("not proven on this box yet");
   });
 
-  it("does not carry a proven badge across a swapped credential", () => {
-    const first = cloudKey("sk-first-key");
-    const proven = applyCheck(state(), parseVoiceCheck({
+  it("leaves the other engine's record alone when one is retried", () => {
+    const both = applyCheck(state(), parseVoiceCheck({
       ok: true,
-      attempts: [{ provider: "openai", outcome: "success", latencyMs: 800 }],
-    }, 1), engineSignatures(first, healthyLocal));
-    expect(buildVoiceOutputStatus(first, healthyLocal, proven).engines.find(e => e.id === "cloud")!.proven).toBe(true);
-    expect(buildVoiceOutputStatus(cloudKey("sk-second-key"), healthyLocal, proven).engines.find(e => e.id === "cloud")!.proven).toBe(false);
-  });
-
-  it("records the shape of a credential, never the credential", () => {
-    const sig = engineSignatures(cloudKey("sk-live-super-secret"), healthyLocal);
-    expect(sig.cloud).not.toContain("super-secret");
-    expect(sig.cloud).toContain("sk");
-  });
-
-  it("re-opens the local voice once a missing voice is installed", () => {
-    const bare = { ...healthyLocal, engineNames: [] as string[] };
-    const failure = applyCheck(state(), parseVoiceCheck({
-      ok: false,
-      attempts: [{ provider: LOCAL_TTS_PROVIDER_ID, outcome: "error", error: "no voice model" }],
-    }, 1), engineSignatures(config(), bare));
-    expect(buildVoiceOutputStatus(config(), bare, failure).engines.find(e => e.id === "local")!.usable).toBe(false);
-    expect(buildVoiceOutputStatus(config(), healthyLocal, failure).engines.find(e => e.id === "local")!.usable).toBe(true);
+      attempts: [
+        { provider: "openai", outcome: "error", error: "rejected" },
+        { provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 },
+      ],
+    }, 3));
+    const retried = forgetEngineCheck(both, "cloud");
+    expect(retried.engineChecks.cloud).toBeUndefined();
+    expect(retried.engineChecks.local?.ok).toBe(true);
   });
 });

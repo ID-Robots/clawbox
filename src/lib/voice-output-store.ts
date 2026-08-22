@@ -93,13 +93,8 @@ export async function readVoiceState(): Promise<VoiceOutputState> {
       const entry = (rawChecks as Record<string, unknown>)[engine];
       const attempt = readAttempt(entry);
       const at = (entry as { at?: unknown })?.at;
-      const signature = (entry as { signature?: unknown })?.signature;
       if (attempt && typeof at === "number" && Number.isFinite(at)) {
-        engineChecks[engine] = {
-          ...attempt,
-          at,
-          ...(typeof signature === "string" ? { signature } : {}),
-        };
+        engineChecks[engine] = { ...attempt, at };
       }
     }
   }

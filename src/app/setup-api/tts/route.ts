@@ -22,7 +22,7 @@ import {
 import {
   applyCheck,
   buildVoiceOutputStatus,
-  engineSignatures,
+  forgetEngineCheck,
   failedVoiceCheck,
   isVoiceChoice,
   localCommandPath,
@@ -30,6 +30,7 @@ import {
   providerIdForChoice,
   selectionError,
   type LocalVoiceProbe,
+  type VoiceChoice,
   type VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
@@ -183,36 +184,26 @@ function currentCheck() {
   return checkInFlight;
 }
 
-export async function POST(req: Request) {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
-  }
-  const action = (body as { action?: unknown })?.action;
+async function handleCheck() {
+  const check = await currentCheck();
+  // Read the state AFTER the run, not before it. A check holds no snapshot
+  // across its own 90 seconds: a customer who changes the voice while it is
+  // running would otherwise have that choice overwritten by the stale copy this
+  // handler started with. The box is probed once and reused, rather than read a
+  // third time for a status this function can already assemble.
+  const [state, { config, probe }] = await Promise.all([readVoiceState(), probeBox()]);
+  const next = applyCheck(state, check);
+  await writeVoiceState(next);
+  return NextResponse.json(buildVoiceOutputStatus(config, probe, next), {
+    headers: { "Cache-Control": "no-store" },
+  });
+}
 
-  if (action === "check") {
-    const check = await currentCheck();
-    // Read the state AFTER the run, not before it. A check holds no snapshot
-    // across its own 90 seconds: a customer who changes the voice while it is
-    // running would otherwise have that choice overwritten by the stale copy
-    // this handler started with.
-    const [state, { config, probe }] = await Promise.all([readVoiceState(), probeBox()]);
-    await writeVoiceState(applyCheck(state, check, engineSignatures(config, probe)));
-    return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
-  }
+async function handleSelect(choice: VoiceChoice) {
+  const { config, probe } = await probeBox();
+  const state = await readVoiceState();
+  const before = buildVoiceOutputStatus(config, probe, state);
 
-  if (action !== "select") {
-    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
-  }
-
-  const choice = (body as { choice?: unknown })?.choice;
-  if (!isVoiceChoice(choice)) {
-    return NextResponse.json({ error: "Pick Auto, this box, or ClawBox cloud." }, { status: 400 });
-  }
-
-  const before = await status();
   // Refuse rather than write a primary the box cannot honour, and refuse rather
   // than quietly substitute the other engine: an engine that is not installed
   // must read as not installed, not as a selected option that never speaks.
@@ -232,15 +223,43 @@ export async function POST(req: Request) {
     if (openclawIsAbsent()) {
       return NextResponse.json({ error: "This box cannot change the voice." }, { status: 409 });
     }
-    try {
-      await runOpenclawConfigSet(["messages.tts.provider", providerId]);
-    } catch (err) {
-      console.warn("[setup-api/tts] could not set the speech provider:", err);
-      return NextResponse.json({ error: "Could not change the voice on this box." }, { status: 500 });
-    }
+    await runOpenclawConfigSet(["messages.tts.provider", providerId]);
   }
 
-  const state = await readVoiceState();
-  await writeVoiceState({ ...state, choice });
+  // Picking an engine again is a request to retry it, so this box stops
+  // reporting what it observed last time until the next check says otherwise.
+  const next = choice === "auto"
+    ? { ...state, choice }
+    : { ...forgetEngineCheck(state, choice), choice };
+  await writeVoiceState(next);
   return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
+}
+
+export async function POST(req: Request) {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const action = (body as { action?: unknown })?.action;
+  const choice = (body as { choice?: unknown })?.choice;
+
+  if (action !== "check" && action !== "select") {
+    return NextResponse.json({ error: "Unknown action." }, { status: 400 });
+  }
+  if (action === "select" && !isVoiceChoice(choice)) {
+    return NextResponse.json({ error: "Pick Auto, this box, or ClawBox cloud." }, { status: 400 });
+  }
+
+  // One boundary for both branches. Every step here is filesystem work or a
+  // spawn: a full disk, a read-only data dir or a missing CLI must come back as
+  // a message the panel can show, not as a framework error page that leaves the
+  // box with nothing in its log.
+  try {
+    return action === "check" ? await handleCheck() : await handleSelect(choice as VoiceChoice);
+  } catch (err) {
+    console.warn(`[setup-api/tts] ${action} failed:`, err);
+    return NextResponse.json({ error: "Could not change the voice on this box." }, { status: 500 });
+  }
 }

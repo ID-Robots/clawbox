@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   VoiceChoice,
   VoiceEngine,
@@ -123,6 +123,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     load();
   }, [active, load]);
 
+
   const post = useCallback(async (body: Record<string, unknown>, kind: "select" | "check") => {
     setBusy(kind);
     setError(null);
@@ -145,6 +146,20 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     }
   }, []);
 
+  // Auto is a standing instruction, not a one-off write: if the engine it
+  // resolves to is not the one the box is configured for — because a cloud
+  // voice appeared, or the one in use stopped working — move the box rather
+  // than telling the customer to click their own choice again. Once per mount,
+  // so a write that does not clear the drift cannot become a loop.
+  const reconciled = useRef(false);
+  useEffect(() => {
+    if (!active || !status || busy) return;
+    if (status.choice !== "auto" || !status.drifted) return;
+    if (reconciled.current) return;
+    reconciled.current = true;
+    void post({ action: "select", choice: "auto" }, "select");
+  }, [active, status, busy, post]);
+
   if (!status) {
     return (
       <div className="max-w-2xl space-y-3" data-testid="voice-output-loading">
@@ -160,8 +175,13 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
 
   const engineById = (id: VoiceEngineId | null) =>
     id ? status.engines.find(e => e.id === id) ?? null : null;
-  const speaking = engineById(status.activeEngine);
-  const preferred = engineById(status.preferredEngine);
+  // What will ACTUALLY speak, not what is written in the config. When a chosen
+  // engine stops working the gateway falls back at request time, so naming the
+  // configured primary here would tell the customer the one thing this panel
+  // exists to stop them believing.
+  const speaking = engineById(status.preferredEngine) ?? engineById(status.activeEngine);
+  const chosen = status.choice === "auto" ? null : engineById(status.choice as VoiceEngineId);
+  const fellBack = chosen !== null && speaking !== null && chosen.id !== speaking.id;
   const last = status.lastCheck;
   const servedEngine = engineById(last?.servedEngine ?? null);
   const warning = status.warning;
@@ -188,9 +208,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         <div className="text-sm font-semibold text-[var(--text-primary)] mt-1">
           {speaking ? speaking.label : "No voice is selected on this box."}
         </div>
-        {status.drifted && preferred && (
+        {fellBack && (
           <p className="text-sm text-amber-200 mt-2" data-testid="voice-drift">
-            Your choice would use {preferred.label}. Pick it again to move this box over.
+            You chose {chosen.label}, but it cannot speak right now, so {speaking.label} answers
+            instead.
           </p>
         )}
         {warning && (

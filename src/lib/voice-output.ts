@@ -32,7 +32,6 @@
  * produced the audio, which is what makes "chosen vs actually used" a fact
  * rather than a label.
  */
-import { createHash } from "crypto";
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { buildCloudTtsWarning } from "@/lib/tts-cloud-warning";
 
@@ -85,19 +84,6 @@ export function isVoiceChoice(value: unknown): value is VoiceChoice {
   return typeof value === "string" && (VOICE_CHOICES as readonly string[]).includes(value);
 }
 
-/**
- * What a recorded attempt was an attempt AT.
- *
- * Without this, a failure is permanent by construction: once the cloud voice is
- * marked unusable, Auto stops choosing it, so no later check routes through it,
- * so nothing can ever clear the failure — and a customer who fixes the cause by
- * adding a real key would still be told the voice is unavailable. Tying the
- * record to the configuration it describes makes a fix take effect, and keeps a
- * "proven" badge from surviving a swapped credential it says nothing about.
- *
- * Deliberately shape, never secret: whether a key is present and which family
- * it belongs to, not the key.
- */
 export interface VoiceAttempt {
   providerId: string;
   engine: VoiceEngineId | null;
@@ -105,11 +91,6 @@ export interface VoiceAttempt {
   /** Customer-safe, or null when the raw reason could not be shown. */
   message: string | null;
   latencyMs: number | null;
-}
-
-export interface EngineSignatures {
-  local: string;
-  cloud: string;
 }
 
 export interface VoiceCheck {
@@ -159,7 +140,7 @@ export interface VoiceOutputStatus {
 export interface VoiceOutputState {
   choice: VoiceChoice;
   /** The most recent real attempt through each engine, by engine id. */
-  engineChecks: Partial<Record<VoiceEngineId, VoiceAttempt & { at: number; signature?: string }>>;
+  engineChecks: Partial<Record<VoiceEngineId, VoiceAttempt & { at: number }>>;
   lastCheck: VoiceCheck | null;
 }
 
@@ -266,57 +247,16 @@ export function localCommandPath(config: VoiceConfigView): string | null {
   return typeof command === "string" && command.trim() ? command.trim() : null;
 }
 
-/**
- * Identify a credential without recording it.
- *
- * The family alone is not enough: swapping a rejected OpenAI key for a working
- * one leaves both as "sk", the old failure would keep applying, and the
- * customer who just fixed the problem would still be told the voice is
- * unavailable. So the signature also carries a short SHA-256 prefix — enough to
- * notice the key changed, not enough to be a copy of it, and it lives in the
- * same 0600 file as the rest of this state.
- */
-function keyFingerprint(key: string | null): string {
-  if (!key) return "none";
-  const family = key.startsWith("claw_") ? "claw" : key.startsWith("sk-") ? "sk" : "other";
-  return `${family}:${createHash("sha256").update(key).digest("hex").slice(0, 12)}`;
-}
-
-export function engineSignatures(config: VoiceConfigView, probe: LocalVoiceProbe): EngineSignatures {
-  const cloudId = cloudProviderIdFor(config);
-  const cloudKey = cloudId ? credentialFor(config, cloudId) : null;
-  return {
-    local: [
-      LOCAL_TTS_PROVIDER_ID,
-      probe.providerConfigured ? "wired" : "unwired",
-      probe.commandPresent ? "present" : "absent",
-      [...probe.engineNames].sort().join(","),
-    ].join("|"),
-    cloud: [
-      cloudId ?? "none",
-      keyFingerprint(cloudKey),
-      cloudId && cloudEndpointConfigured(config, cloudId) ? "endpoint" : "no-endpoint",
-    ].join("|"),
-  };
-}
-
-/** The stored attempt, but only while it still describes today's configuration. */
-function currentAttempt(state: VoiceOutputState, engine: VoiceEngineId, signature: string) {
+function lastFailure(state: VoiceOutputState, engine: VoiceEngineId): string | null {
   const attempt = state.engineChecks[engine];
-  if (!attempt) return null;
-  return attempt.signature === signature ? attempt : null;
-}
-
-function lastFailure(state: VoiceOutputState, engine: VoiceEngineId, signature: string): string | null {
-  const attempt = currentAttempt(state, engine, signature);
   if (!attempt || attempt.ok) return null;
   return attempt.message ?? "The last voice check through it did not produce audio.";
 }
 
-function localEngine(probe: LocalVoiceProbe, state: VoiceOutputState, signature: string): VoiceEngine {
+function localEngine(probe: LocalVoiceProbe, state: VoiceOutputState): VoiceEngine {
   const configured = probe.providerConfigured && probe.commandPresent && probe.engineInstalled;
-  const failure = lastFailure(state, "local", signature);
-  const proven = currentAttempt(state, "local", signature)?.ok === true;
+  const failure = lastFailure(state, "local");
+  const proven = state.engineChecks.local?.ok === true;
   const voices = probe.engineNames.join(", ");
   let detail: string;
   if (!probe.engineInstalled) {
@@ -346,12 +286,12 @@ function localEngine(probe: LocalVoiceProbe, state: VoiceOutputState, signature:
   };
 }
 
-function cloudEngine(config: VoiceConfigView, state: VoiceOutputState, signature: string): VoiceEngine {
+function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEngine {
   const providerId = cloudProviderIdFor(config);
   const hasKey = providerId ? Boolean(credentialFor(config, providerId)) : false;
   const unusableKey = providerId ? cloudCredentialIsUnusable(config, providerId) : false;
-  const failure = lastFailure(state, "cloud", signature);
-  const proven = currentAttempt(state, "cloud", signature)?.ok === true;
+  const failure = lastFailure(state, "cloud");
+  const proven = state.engineChecks.cloud?.ok === true;
   const configured = Boolean(providerId) && hasKey && !unusableKey;
 
   let detail: string;
@@ -437,11 +377,7 @@ export function buildVoiceOutputStatus(
   probe: LocalVoiceProbe,
   state: VoiceOutputState,
 ): VoiceOutputStatus {
-  const signatures = engineSignatures(config, probe);
-  const engines = [
-    localEngine(probe, state, signatures.local),
-    cloudEngine(config, state, signatures.cloud),
-  ];
+  const engines = [localEngine(probe, state), cloudEngine(config, state)];
   const activeProviderId = configuredTtsProviderId(config);
   const preferredEngine = resolvePreferredEngine(state.choice, engines);
   const preferredProviderId = preferredEngine
@@ -462,33 +398,61 @@ export function buildVoiceOutputStatus(
 /**
  * Why an explicit pick cannot be honoured, or null when it can.
  *
- * Auto is always selectable — resolving to whatever works IS what it means.
- * An explicit pick is not: scope line 3 of this task says "selecting Local and
- * silently getting cloud is the failure mode to avoid", and the mirror is just
- * as bad, so a named engine the box cannot use has to be refused out loud
- * rather than quietly turned into the other one.
+ * The gate is CONFIGURED, not usable, and the difference is the whole point. An
+ * engine the box does not have is refused out loud rather than quietly turned
+ * into the other one — scope line 3 of this task says a choice that silently
+ * becomes something else is the failure to avoid, and the mirror is just as
+ * bad. But an engine that merely FAILED its last check is still offered: a
+ * failure that also removed the customer's ability to retry would be permanent
+ * by construction, since Auto stops choosing a failed engine, so no later check
+ * would ever route through it and nothing could clear the record.
  *
- * Note this is about the moment of CHOOSING. Once chosen, the gateway still
- * falls back if the picked engine fails mid-request — which is why the panel
+ * This is about the moment of choosing. Once chosen, the gateway still falls
+ * back if the picked engine fails mid-request — which is why the panel
  * separately reports the engine that actually spoke.
  */
 export function selectionError(choice: VoiceChoice, engines: VoiceEngine[]): string | null {
   if (choice === "auto") {
-    return engines.some(e => e.usable) ? null : "This box has no voice it can use.";
+    return engines.some(e => e.configured) ? null : "This box has no voice it can use.";
   }
   const engine = engines.find(e => e.id === choice);
-  if (!engine) return "That voice is not available on this box.";
-  return engine.usable ? null : "That voice is not available on this box.";
+  if (!engine || !engine.configured) return "That voice is not available on this box.";
+  return null;
 }
 
-/** The provider id a choice should write, or null when nothing is usable. */
+/**
+ * The provider id a choice should write, or null when nothing can be written.
+ *
+ * An explicit pick writes THAT engine, even if its last check failed — the
+ * customer asked for it, and the alternative is a selector that reads back
+ * something the customer did not choose. Auto instead resolves to whatever can
+ * actually speak.
+ */
 export function providerIdForChoice(
   choice: VoiceChoice,
   engines: VoiceEngine[],
 ): string | null {
-  const engine = resolvePreferredEngine(choice, engines);
-  if (!engine) return null;
-  return engines.find(e => e.id === engine)?.providerId ?? null;
+  if (choice !== "auto") {
+    const engine = engines.find(e => e.id === choice);
+    return engine?.configured ? engine.providerId : null;
+  }
+  const preferred = resolvePreferredEngine("auto", engines);
+  return preferred ? engines.find(e => e.id === preferred)?.providerId ?? null : null;
+}
+
+/**
+ * Drop what this box observed about one engine.
+ *
+ * Called when the customer deliberately picks an engine again: they are asking
+ * for a retry, and continuing to say "the last check failed" about a choice
+ * they have just re-made would be reporting history as if it were the present.
+ * The next check writes a fresh record either way.
+ */
+export function forgetEngineCheck(state: VoiceOutputState, engine: VoiceEngineId): VoiceOutputState {
+  if (!state.engineChecks[engine]) return state;
+  const engineChecks = { ...state.engineChecks };
+  delete engineChecks[engine];
+  return { ...state, engineChecks };
 }
 
 interface RawAttempt {
@@ -568,20 +532,16 @@ export function failedVoiceCheck(rawMessage: unknown, at: number): VoiceCheck {
  * Fold a check's attempts into the per-engine memory the status reads.
  *
  * An engine this check did not attempt keeps its previous record: clearing it
- * would let a known-bad engine drift back to "unproven" every time the other
- * one is checked, and Auto would keep choosing it. The record ages out by
- * SIGNATURE instead — it stops applying the moment the configuration it
- * describes changes, which is the only event that can actually have fixed it.
+ * would let a known-bad engine read as merely unproven every time the other one
+ * is checked, and Auto would keep choosing it. The record is cleared by
+ * {@link forgetEngineCheck} instead, when the customer deliberately asks for
+ * that engine again.
  */
-export function applyCheck(
-  state: VoiceOutputState,
-  check: VoiceCheck,
-  signatures: EngineSignatures,
-): VoiceOutputState {
+export function applyCheck(state: VoiceOutputState, check: VoiceCheck): VoiceOutputState {
   const engineChecks = { ...state.engineChecks };
   for (const attempt of check.attempts) {
     if (!attempt.engine) continue;
-    engineChecks[attempt.engine] = { ...attempt, at: check.at, signature: signatures[attempt.engine] };
+    engineChecks[attempt.engine] = { ...attempt, at: check.at };
   }
   return { ...state, engineChecks, lastCheck: check };
 }
