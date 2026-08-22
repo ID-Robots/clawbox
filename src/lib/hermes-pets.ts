@@ -24,6 +24,7 @@ import fsp from "fs/promises";
 import path from "path";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
+import { PETDEX_ASSET_HOSTS, petdexSheetUrl } from "@/lib/petdex-manifest";
 import {
   FRAME_H,
   FRAME_W,
@@ -310,6 +311,23 @@ export async function activePetDescriptor(
   }
 }
 
+/**
+ * Is a pet wearing the mascot's body right now?
+ *
+ * The cheap half of `activePetDescriptor`: the config memo plus a directory
+ * listing, with none of sharp's geometry work. Callers that only need "crab or
+ * pet?" — the phrase route, for one — should use this.
+ */
+export async function isPetActive(): Promise<boolean> {
+  try {
+    const config = await readPetConfig();
+    if (!config.enabled) return false;
+    return resolveActivePet(config.slug) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export interface PetCliOutcome {
   ok: boolean;
   /** A short, already-safe reason for the UI. CLI stderr is logged, not shown. */
@@ -373,14 +391,12 @@ export async function disablePet(): Promise<PetCliOutcome> {
 // ── Thumbnails ──
 //
 // The picker cannot point an <img> at the CDN: the sheets are 2.0-2.4 MB each,
-// sixteen of them is ~35 MB over a home link onto a Jetson, and hotlinking
+// thirteen of them is ~27 MB over a home link onto a Jetson, and hotlinking
 // third-party art from our own UI is exactly the redistribution posture we are
 // avoiding. So the server crops cell (0,0) — the idle frame — to a ~5 KB PNG
 // and caches that. Same trick as upstream's `pet.thumb` RPC.
 
 const THUMB_DIR = path.join(CACHE_DIR, "thumbs");
-/** Only ever fetched from Petdex, mirroring `store.py`'s host pin. */
-const PETDEX_ASSET_HOSTS = new Set(["assets.petdex.dev", "petdex.dev"]);
 const REMOTE_SHEET_TIMEOUT_MS = 20_000;
 const MAX_REMOTE_SHEET_BYTES = 8 * 1024 * 1024;
 /** A Jetson decoding several 1536x1872 webps at once is how you spike its RAM. */
@@ -402,10 +418,6 @@ async function withRemoteSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function curatedSheetUrl(slug: string): string {
-  return `https://assets.petdex.dev/curated/${slug}/sprite-v2.webp`;
-}
-
 async function cropIdleFrame(input: Buffer | string): Promise<Buffer> {
   const sharp = (await import("sharp")).default;
   return sharp(input)
@@ -418,7 +430,7 @@ async function cropIdleFrame(input: Buffer | string): Promise<Buffer> {
  * A PNG of the pet's idle frame, or null.
  *
  * Installed pets are cropped from the local sheet. A pet that is NOT installed
- * yet still needs a preview — otherwise the picker is sixteen name-only tiles —
+ * yet still needs a preview — otherwise the picker is thirteen name-only tiles —
  * so its sheet is fetched once from Petdex, cropped, and the 2.2 MB body
  * discarded. Only the thumbnail is kept on disk; the full sheet is never
  * cached, because caching unlicensed art we were not asked to install is the
@@ -460,8 +472,11 @@ export async function petThumbnail(rawSlug: string): Promise<Buffer | null> {
 }
 
 async function fetchRemoteThumb(slug: string): Promise<Buffer | null> {
-  const url = curatedSheetUrl(slug);
-  if (!PETDEX_ASSET_HOSTS.has(new URL(url).hostname)) return null;
+  // Resolved from the Petdex manifest, never composed from the slug: the
+  // curated pets are split across `sprite-v2.webp` and `spritesheet.webp`
+  // with no rule connecting the two, so guessing 404s six of thirteen.
+  const url = await petdexSheetUrl(slug);
+  if (!url || !PETDEX_ASSET_HOSTS.has(new URL(url).hostname)) return null;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REMOTE_SHEET_TIMEOUT_MS);
   try {

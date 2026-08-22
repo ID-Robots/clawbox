@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { CURATED_PETS } from "@/lib/pet-curated";
 
 let tmpHome: string;
 let petsDir: string;
@@ -87,7 +88,7 @@ describe("GET /setup-api/pets — edition gating", () => {
     const res = await (await getRoute())(new Request("http://localhost/setup-api/pets?gallery=1"));
     const body = await res.json();
     expect(body.supported).toBe(true);
-    expect(body.pets.length).toBe(16);
+    expect(body.pets.length).toBe(CURATED_PETS.length);
     expect(body.pets.every((p: { curated: boolean }) => p.curated)).toBe(true);
     // Attribution travels with every tile — Petdex asks that pets keep credit.
     expect(body.pets.every((p: { submittedBy: string }) => p.submittedBy.length > 0)).toBe(true);
@@ -123,7 +124,7 @@ describe("GET /setup-api/pets — edition gating", () => {
     // without needing the fallback.
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     const res = await (await getRoute())(new Request("http://localhost/setup-api/pets?gallery=1"));
-    expect((await res.json()).pets.length).toBe(16);
+    expect((await res.json()).pets.length).toBe(CURATED_PETS.length);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

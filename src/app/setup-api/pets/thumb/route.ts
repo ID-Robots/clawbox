@@ -10,7 +10,7 @@ import { petThumbnail, safePetSlug } from "@/lib/hermes-pets";
  * One 192x208 PNG: the pet's idle frame, cropped server-side.
  *
  * The picker cannot simply `<img src>` the Petdex CDN — each sheet is 2.0-2.4
- * MB, sixteen tiles would be ~35 MB onto a Jetson, and hotlinking third-party
+ * MB, thirteen tiles would be ~27 MB onto a Jetson, and hotlinking third-party
  * art from our own UI is the redistribution posture we are deliberately not
  * taking. Cropping here costs one fetch per pet, ever, and keeps ~5 KB.
  *
