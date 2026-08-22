@@ -3089,17 +3089,25 @@ ensure_claude_code() {
 
   local installer rc=1
   installer="$(mktemp)"
-  # mktemp creates the file as ROOT at mode 0600, and the installer is then run
-  # AS the clawbox user — who could not read it. Every run answered
-  # "bash: /tmp/tmp.XXXX: Permission denied" and then "installer ran but
-  # failed", which is why no ClawBox in the field has `claude` on it: the
-  # missing post_update caller was only half the reason. Hand the file to the
-  # user who has to execute it. Proven on .65 on 2026-08-22 — the same command
-  # that failed there succeeds after this chown.
-  chown "$CLAWBOX_USER" "$installer"
   if curl -fsSL https://claude.ai/install.sh -o "$installer" 2>/dev/null \
      && [ -s "$installer" ] \
-     && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
+     && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region' \
+     && chown "$CLAWBOX_USER" "$installer"; then
+    # The chown is why this ever works, and it has to be HERE — after the
+    # download, before the run.
+    #
+    # mktemp makes the file root:root 0600 and the installer is executed AS the
+    # clawbox user, so without it every run on every box answered
+    # "bash: /tmp/tmp.XXXX: Permission denied" and then "installer ran but
+    # failed". That is the other half of why no ClawBox in the field has
+    # `claude`: the missing post_update caller was only the first half.
+    #
+    # And it cannot move earlier. /tmp is sticky and world-writable, and these
+    # devices run fs.protected_regular=2 (verified on .65), under which even
+    # root may not write a file in such a directory that it does not own — a
+    # chown before the download turns the curl into
+    # "(23) Failure writing output to destination". Both failure modes were
+    # observed on hardware on 2026-08-22, one after the other.
     if sudo -u "$CLAWBOX_USER" bash "$installer" </dev/null; then
       echo "  Claude Code installed"
       rc=0

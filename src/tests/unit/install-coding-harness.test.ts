@@ -93,16 +93,33 @@ describe("Claude Code is installed the way Anthropic supports", () => {
     expect(fn).toContain("<!doctype");
   });
 
-  it("hands the downloaded installer to the user that will execute it", () => {
-    // mktemp creates the file as ROOT at 0600 and the installer runs AS the
-    // clawbox user, so without this every single run answered
-    // "bash: /tmp/tmp.XXXX: Permission denied" and then reported "installer ran
-    // but failed". Observed on .65 on 2026-08-22; it is why no box in the field
-    // has `claude` on it. The chown has to come BEFORE the run, not after.
+  it("hands the downloaded installer to the user that will execute it, after the download", () => {
+    // Two real failures, both seen on .65 on 2026-08-22, one after the other.
+    //
+    // Without the chown: mktemp makes the file root:root 0600 and the installer
+    // runs AS the clawbox user, so every run answered
+    // "bash: /tmp/tmp.XXXX: Permission denied" then "installer ran but failed".
+    //
+    // With the chown moved before the curl: these devices run
+    // fs.protected_regular=2, under which even root may not write a file it
+    // does not own in sticky world-writable /tmp — curl exits 23, "Failure
+    // writing output to destination", and the step reports a region block that
+    // never happened.
+    //
+    // So the ordering is the fix, and both halves of it are pinned.
     const chown = 'chown "$CLAWBOX_USER" "$installer"';
+    const curl = "curl -fsSL https://claude.ai/install.sh";
     const run = 'sudo -u "$CLAWBOX_USER" bash "$installer"';
     expect(fn).toContain(chown);
+    expect(fn.indexOf(curl)).toBeLessThan(fn.indexOf(chown));
     expect(fn.indexOf(chown)).toBeLessThan(fn.indexOf(run));
+  });
+
+  it("treats a failed chown as a failed install rather than running anyway", () => {
+    // A chown that silently fails would put us straight back in the
+    // Permission-denied case with "Claude Code installed" printed over it.
+    const guard = fn.slice(fn.indexOf("curl -fsSL"), fn.indexOf('sudo -u "$CLAWBOX_USER" bash "$installer"'));
+    expect(guard).toMatch(/&&\s*chown "\$CLAWBOX_USER" "\$installer"; then/);
   });
 
   it("short-circuits when Claude Code is already there, so updates stay cheap", () => {
