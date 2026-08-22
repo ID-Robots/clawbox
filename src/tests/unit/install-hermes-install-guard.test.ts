@@ -237,6 +237,26 @@ describe("step_hermes_install installs one pinned Hermes release", () => {
   });
 });
 
+describe("step_hermes_install's log does not contradict itself", () => {
+  it("never calls the agent it moved aside unusable", () => {
+    // The move block is shared by two devices that have nothing in common: an
+    // agent that will not run, and an agent that runs fine and is merely on the
+    // wrong commit. Hardcoding the noun in it meant a healthy box being
+    // upgraded printed "Moving the working agent aside" and then "Moved the
+    // unusable agent to …/hermes-agent.broken" — an owner reading that has
+    // every reason to believe the update found a fault on their device.
+    //
+    // Read as text rather than driven, because the message that is left is the
+    // one the behavioural harness cannot reach: it only prints when `mv` itself
+    // fails, which needs a filesystem the fake HOME does not have.
+    for (const line of HERMES_CODE.split(NL).filter((l) => l.includes("echo"))) {
+      expect(line, `the moved agent must not be named inline: ${line}`).not.toContain(
+        "unusable agent",
+      );
+    }
+  });
+});
+
 describe("step_hermes_install never runs hermes as root", () => {
   it("every hermes invocation goes through runuser as the clawbox user", () => {
     const invocations = HERMES_CODE.split(NL).filter(
@@ -359,6 +379,8 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
 
   const agentDir = () => path.join(tmp, ".hermes", "hermes-agent");
   const shimPath = () => path.join(tmp, ".local", "bin", "hermes");
+  /** Upstream's WhatsApp bridge, inside the agent checkout the step replaces. */
+  const bridgeDir = () => path.join(agentDir(), "scripts", "whatsapp-bridge");
   const exists = (p: string) => fs.existsSync(p);
 
   /**
@@ -418,6 +440,14 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     installHead = PIN,
     // The value of the shipped constant, overridable the way QA overrides it.
     pin = PIN,
+    // What the fresh checkout the installer lays down contains at
+    // scripts/whatsapp-bridge: "none" for a release that has no bridge at all,
+    // "fresh" for the real shape of a clone (tracked sources, NO node_modules),
+    // "warm" for a tree whose dependencies are somehow already there.
+    bridge = "none" as "none" | "fresh" | "warm",
+    // Whether the stubbed npm succeeds. A registry that is down must cost the
+    // owner a warning and nothing else.
+    npmOk = true,
   } = {}) {
     // The reachability precheck is the `-o /dev/null` call; anything else is
     // the real installer being fetched to be piped into bash.
@@ -438,10 +468,31 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
         // The real installer's `--commit` leaves the checkout detached at that
         // commit; this is the only part of that the step can observe.
         '  if [ -n "$INSTALL_HEAD" ]; then printf %s "$INSTALL_HEAD" > "$AGENT_DIR/.fake-head"; fi',
+        // A clone carries the bridge's SOURCES and never its node_modules —
+        // that directory is untracked upstream, which is the whole reason the
+        // warm-up exists.
+        '  if [ "$BRIDGE" != "none" ]; then',
+        '    mkdir -p "$AGENT_DIR/scripts/whatsapp-bridge"',
+        '    echo "{}" > "$AGENT_DIR/scripts/whatsapp-bridge/package.json"',
+        '    if [ "$BRIDGE" = "warm" ]; then',
+        '      mkdir -p "$AGENT_DIR/scripts/whatsapp-bridge/node_modules"',
+        "    fi",
+        "  fi",
         "fi",
         'echo ":"',
         "",
       ].join(NL),
+      { mode: 0o755 },
+    );
+    // npm has to be a real executable on PATH for the same reason curl does:
+    // the warm-up reaches it through `env`, which only ever does a PATH lookup.
+    // The marker is written to the process's CWD rather than to a fixed path,
+    // so WHERE it lands is the assertion that the install ran in the bridge
+    // directory — no path-shape comparison, which would not survive the two
+    // separator conventions this suite runs under.
+    fs.writeFileSync(
+      path.join(tmp, "bin", "npm"),
+      ["#!/bin/sh", 'printf "%s\\n" "$*" > npm-ran', 'exit "$NPM_RC"', ""].join(NL),
       { mode: 0o755 },
     );
     // `git -C <dir> rev-parse HEAD` is the only git the step runs, and it runs
@@ -490,8 +541,10 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       // Merged, because the warnings that matter here are all on stderr.
       "step_hermes_install 2>&1",
     ].join(NL);
+    let code = 0;
+    let out: string;
     try {
-      const out = execFileSync(
+      out = execFileSync(
         "bash",
         [
           "-c",
@@ -505,17 +558,26 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
           installHead,
           pin,
         ],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...process.env, BRIDGE: bridge, NPM_RC: npmOk ? "0" : "1" },
+        },
       );
-      return { code: 0, out, installerRan: exists(path.join(tmp, "installer-ran")) };
     } catch (e: unknown) {
       const err = e as { status?: number; stdout?: string; stderr?: string };
-      return {
-        code: err.status ?? 1,
-        out: `${err.stdout ?? ""}${err.stderr ?? ""}`,
-        installerRan: exists(path.join(tmp, "installer-ran")),
-      };
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
     }
+    const npmMarker = path.join(bridgeDir(), "npm-ran");
+    return {
+      code,
+      out,
+      installerRan: exists(path.join(tmp, "installer-ran")),
+      // Read out of the BRIDGE directory, so a non-null value is already proof
+      // that npm ran with the bridge as its working directory.
+      npmArgs: exists(npmMarker) ? fs.readFileSync(npmMarker, "utf8").trim() : null,
+    };
   }
 
   it("a healthy install on the pin is a no-op — nothing touched, nothing fetched", () => {
@@ -792,6 +854,90 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
     expect(r.out).toMatch(/Hermes install failed \(non-fatal\)/);
     // …and the box is still whole.
     expect(fs.readFileSync(path.join(agentDir(), "SENTINEL"), "utf8")).toBe("original");
+  });
+
+  it("a healthy agent moved aside for an upgrade is not called unusable", () => {
+    // Both messages come out of the same move block, and it used to hardcode
+    // the noun: a box whose agent works fine was told, one line after "Moving
+    // the working agent aside", that its agent was unusable. Nothing is broken
+    // on this device — it is simply not on the build we ship.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run();
+
+    expect(r.code).toBe(0);
+    const moveLine = r.out.split(NL).find((l) => l.includes("hermes-agent.broken"));
+    expect(moveLine).toMatch(/Moved the working agent to .*hermes-agent\.broken/);
+    // Scoped to the line that names it, so an unrelated future message using
+    // the word does not fail this.
+    expect(moveLine).not.toContain("unusable");
+    // A release with no bridge asks nothing of npm — the default every other
+    // run in this file uses.
+    expect(r.npmArgs).toBeNull();
+  });
+
+  it("a pinned upgrade warms up the WhatsApp bridge the fresh clone deleted", () => {
+    // The upgrade is a move-aside plus a fresh clone, and the bridge's ~80 MB
+    // node_modules is untracked, so it does not come back with the checkout.
+    // ClawBox does self-heal — the pairing manager runs this same install the
+    // first time a QR is asked for, observed on hardware — but that puts the
+    // whole install in front of an owner who has just clicked Pair, and an
+    // OFFLINE box at that moment fails to pair where it would have paired
+    // before the upgrade. So the updater pays for it, while it has the network.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ bridge: "fresh" });
+
+    expect(r.code).toBe(0);
+    expect(r.installerRan).toBe(true);
+    expect(r.out).toMatch(/Warming up the WhatsApp bridge/);
+    // npmArgs is read out of the bridge directory itself, so a non-null value
+    // is already proof the install ran there and not in some inherited cwd.
+    expect(r.npmArgs).not.toBeNull();
+    // The flags the pairing manager uses, so the warm cache is the one the
+    // on-demand path would have built.
+    expect(r.npmArgs).toContain("install");
+    expect(r.npmArgs).toContain("--no-fund");
+    expect(r.npmArgs).toContain("--no-audit");
+    expect(r.npmArgs).toContain("--progress=false");
+    // …and the step still reports what it is actually for.
+    expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\) at the pinned commit/);
+  });
+
+  it("a warm-up that fails is a warning — the install still counts as a success", () => {
+    // A down registry, a proxy, an npm that dies on a low-memory device. The
+    // on-demand path still works, so this must not turn a good Hermes install
+    // into a failed step: step_post_update reports any non-zero return as a
+    // failed update step, on every hermes box on every update.
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ bridge: "fresh", npmOk: false });
+
+    expect(r.code).toBe(0);
+    expect(r.npmArgs).not.toBeNull();
+    expect(r.out).toMatch(/WhatsApp bridge warm-up failed \(non-fatal\)/);
+    // The agent install itself is untouched by the bridge's bad luck.
+    expect(r.out).toMatch(/Hermes installed \(Hermes 9\.9\.9\) at the pinned commit/);
+    expect(headOf(agentDir())).toBe(PIN);
+    expect(exists(`${agentDir()}.broken`)).toBe(false);
+  });
+
+  it("a bridge that already has its node_modules is left alone", () => {
+    // The warm-up is repair, not routine work: node_modules that survived must
+    // not be reinstalled on top of itself. (The release-with-no-bridge case is
+    // the `bridge: "none"` default every other run in this file already uses,
+    // and is asserted on the upgrade above.)
+    giveShim();
+    giveAgent({ venv: true, head: OTHER_COMMIT });
+
+    const r = run({ bridge: "warm" });
+
+    expect(r.code).toBe(0);
+    expect(r.npmArgs).toBeNull();
+    expect(r.out).not.toMatch(/Warming up the WhatsApp bridge/);
   });
 });
 

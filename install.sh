@@ -1508,9 +1508,19 @@ step_hermes_install() {
   # diagnosis costs nothing. Renaming as ROOT is also required — the root-owned
   # __pycache__ above is not movable by the clawbox user the installer runs as.
   if [ -e "$agent_dir" ]; then
+    # One noun for whatever is being moved, set on the same arm that announces
+    # it. The move block below is shared by two very different devices — an
+    # agent that does not run, and an agent that runs fine and is merely on the
+    # wrong commit — and it used to call both of them "the unusable agent" one
+    # line after announcing "Moving the working agent aside". An owner reading
+    # that log on a healthy box has every reason to think the upgrade found
+    # something wrong with their device.
+    local moved_what
     if [ -n "$installed" ]; then
-      echo "  Moving the working agent aside so the pinned install can be undone"
+      moved_what="working agent"
+      echo "  Moving the $moved_what aside so the pinned install can be undone"
     else
+      moved_what="unusable agent"
       echo "  Hermes is present but not runnable — reinstalling the agent"
     fi
     if [ -e "$agent_dir.broken" ]; then
@@ -1526,9 +1536,9 @@ step_hermes_install() {
         return 0
       fi
     elif mv "$agent_dir" "$agent_dir.broken"; then
-      echo "  Moved the unusable agent to $agent_dir.broken"
+      echo "  Moved the $moved_what to $agent_dir.broken"
     else
-      echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
+      echo "  Warning: could not move the $moved_what aside — leaving it in place" >&2
       return 0
     fi
     # The husk MUST be deletable by the clawbox user: the factory-reset route
@@ -1588,6 +1598,50 @@ step_hermes_install() {
     # (checkout plus venv) on a disk-constrained device and is one more
     # directory a later factory reset has to be able to delete.
     rm -rf "$agent_dir.broken"
+
+    # The upgrade above is a move-aside plus a FRESH clone, and the bridge's
+    # ~80 MB node_modules is untracked — so every pinned upgrade deletes it.
+    # Nothing is broken by that: the pairing manager runs this same `npm
+    # install` the first time somebody asks for a WhatsApp QR, and it was
+    # watched doing so on hardware (bridgeReady false→true, QRs rotating).
+    # But it moves the cost to the worst possible moment — the owner has just
+    # clicked Pair and is waiting on a code — and a box that happens to be
+    # OFFLINE right then gets a pairing FAILURE where the same box would have
+    # paired before the upgrade. So pay for it here instead, while the updater
+    # demonstrably has the network and nobody is waiting.
+    #
+    # From the registry, NOT from the husk we just deleted. The husk's
+    # node_modules belongs to a DIFFERENT commit; moving it across would carry
+    # the old release's dependency tree into the new one's package.json.
+    #
+    # This runs only on the update that actually re-clones — a box already on
+    # the pin returns above and never reaches here — so a warm-up that fails
+    # falls back to the on-demand path, not to the next update.
+    #
+    # Best-effort in every direction, and deliberately so: skipped when there
+    # is nothing to warm (no bridge in this release, or its node_modules
+    # survived), time-boxed, and its failure is a WARNING. A successful Hermes
+    # install must never be reported as a failed step because an npm mirror was
+    # down — the on-demand path is still there and still works.
+    #
+    # 300s, not longer: step_post_update's budget is 900s total
+    # (src/lib/updater.ts) and this step is followed inside it by the Gemma
+    # re-cache, so a stalled registry must not be able to eat the rest of the
+    # update. An 80 MB install over a working link is far inside that, and what
+    # would consume the difference is npm's own retry backoff — exactly the
+    # case this block already declares non-fatal.
+    local bridge_dir="$agent_dir/scripts/whatsapp-bridge"
+    if [ -d "$bridge_dir" ] && [ ! -d "$bridge_dir/node_modules" ]; then
+      echo "  Warming up the WhatsApp bridge so the first pairing does not pay for it..."
+      # `env -C` gives the install its working directory without a wrapper
+      # shell to quote the path into, and leaves npm as timeout's direct child
+      # so the time box actually lands on it. HOME is explicit for the same
+      # reason as every other command in this step: npm caches under $HOME/.npm
+      # and this function's HOME is /root, which the clawbox user cannot write.
+      runuser -u "$CLAWBOX_USER" -- env -C "$bridge_dir" HOME="$CLAWBOX_HOME" \
+        timeout 300 npm install --no-fund --no-audit --progress=false \
+        || echo "  Warning: WhatsApp bridge warm-up failed (non-fatal) — the first pairing will install it on demand" >&2
+    fi
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
     # The diagnosis may simply have been wrong — an empty probe on a loaded
