@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import AIModelsStep from "@/components/AIModelsStep";
 import { CLAWAI_TIER_STORAGE_KEY } from "@/lib/clawbox-ai-tiers";
 
@@ -140,6 +140,11 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     // already happened — the wizard is where someone upgrades.
     let releaseStatus: (() => void) | null = null;
     const gate = new Promise<void>((resolve) => { releaseStatus = resolve; });
+    // Resolves once the panel has actually READ the late answer. Asserting on
+    // "fetch was called" alone would pass before the response ever came back,
+    // which would make this test green for the wrong reason.
+    let statusConsumed: (() => void) | null = null;
+    const statusRead = new Promise<void>((resolve) => { statusConsumed = resolve; });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
       if (url.includes("/setup-api/ai-models/oauth/providers")) {
@@ -147,7 +152,13 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
       }
       if (url.includes("/setup-api/ai-models/status")) {
         await gate;
-        return { ok: true, json: async () => ({ clawaiConfigured: true, tierSource: "portal", clawaiAccountTier: "flash" }) };
+        return {
+          ok: true,
+          json: async () => {
+            statusConsumed?.();
+            return { clawaiConfigured: true, tierSource: "portal", clawaiAccountTier: "flash" };
+          },
+        };
       }
       return { ok: true, json: async () => ({}) };
     }));
@@ -158,14 +169,18 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     fireEvent.click(getByRole("radio", { name: /Max tier/i }));
     await waitFor(() => expect(window.localStorage.getItem(CLAWAI_TIER_STORAGE_KEY)).toBe("pro"));
 
-    releaseStatus?.();
-    // Give the resolved status every chance to land before asserting it did
-    // not win — an assertion that races the fetch would pass for the wrong
-    // reason.
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+    expect(fetch).toHaveBeenCalledWith(
       "/setup-api/ai-models/status",
       expect.objectContaining({ cache: "no-store" }),
-    ));
+    );
+
+    releaseStatus?.();
+    // Wait until the panel has read the late answer, then let React drain, so
+    // this asserts the reconcile DECLINED to move the card rather than that it
+    // simply had not run yet.
+    await statusRead;
+    await act(async () => { await Promise.resolve(); });
+
     // The account says flash; the user just said Max. The user wins.
     expect(window.localStorage.getItem(CLAWAI_TIER_STORAGE_KEY)).toBe("pro");
     expect(queryByText("Pro plan · €9/month")).not.toBeInTheDocument();
