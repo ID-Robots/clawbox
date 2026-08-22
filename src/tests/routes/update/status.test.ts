@@ -39,6 +39,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0" },
       openclaw: { current: "0.5.0", target: "0.5.1" },
+      edition: "openclaw",
     });
 
     const mod = await import("@/app/setup-api/update/status/route");
@@ -64,6 +65,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.1.0", target: null, updateAvailable: false },
       openclaw: { current: "0.5.1", target: null, updateAvailable: false },
+      edition: "openclaw",
     });
 
     const res = await updateStatusGet();
@@ -80,6 +82,7 @@ describe("GET /setup-api/update/status", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "1.0.0", target: "1.1.0", updateAvailable: true },
       openclaw: { current: "0.5.1", target: null, updateAvailable: false },
+      edition: "openclaw",
     });
 
     const res = await updateStatusGet();
