@@ -370,6 +370,27 @@ BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 OPENCLAW_VERSION="2026.7.1-2"
+# Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
+# the fleet runs the build WE chose instead of whatever
+# NousResearch/hermes-agent had on `main` the second a box was flashed.
+# Upstream lands ~150 commits a day and cuts a tag two or three times a week,
+# so every unpinned install lands on a different, untested tree.
+#
+# The value is the 40-char COMMIT the release tag points at — not the tag
+# name, and not the annotated tag object's own SHA. The upstream installer's
+# `--commit` takes a commit only and rejects abbreviated SHAs, while
+# `--branch <tag>` is worse than useless on an existing checkout: it rewrites
+# remote.origin.fetch to a refspec with no matching head and leaves
+# origin/main stale, which breaks the agent's own `hermes update` later.
+#
+# Overridable from the environment so QA can aim one device at another commit
+# without editing the file (`HERMES_PIN_COMMIT=<sha> sudo -E bash install.sh
+# --step hermes_install`), exactly as OPENCLAW_PIN_VERSION does for OpenClaw.
+# Bump the default in a PR, ship it through beta -> main, and the fleet
+# follows on its next update.
+#
+# Current pin: upstream tag v2026.8.19 == "Hermes Agent v0.20.5".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101}"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
@@ -1389,9 +1410,25 @@ step_hermes_install() {
   local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
+  local pin="$HERMES_PIN_COMMIT"
+
+  # The pin is spliced into a URL below and the file that URL returns is piped
+  # into bash, so it is validated before it is used. A malformed value — a tag
+  # name, a truncated SHA, an env override carrying a slash — would otherwise
+  # fetch some other path from the same host and run it. Refuse, and leave
+  # whatever agent the device already has alone.
+  if ! printf '%s' "$pin" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+    echo "  Warning: the Hermes pin is not a 40-char commit SHA — leaving the existing agent untouched" >&2
+    return 0
+  fi
+
   # One constant so the reachability precheck and the install itself can never
-  # drift onto different hosts.
-  local installer_url="https://hermes-agent.nousresearch.com/install.sh"
+  # drift onto different hosts — and it is served FROM the pinned tree, so the
+  # installer that runs is the one that shipped with the commit being asked
+  # for. The vanity host (hermes-agent.nousresearch.com/install.sh) serves
+  # main's copy of the same file: identical today, free to change its flags
+  # under us tomorrow.
+  local installer_url="https://raw.githubusercontent.com/NousResearch/hermes-agent/$pin/scripts/install.sh"
 
   # `$shim` alone is NOT evidence of an install: it is a 4-line wrapper in
   # ~/.local/bin that execs $venv_python, and the agent it points at lives
@@ -1423,9 +1460,30 @@ step_hermes_install() {
       "$shim" --version 2>/dev/null | head -1) || installed=""
   fi
 
+  # A version string cannot answer "is this the pinned build?": upstream prints
+  # the same `v0.20.5` for the tag and for every untagged commit after it, and
+  # there are hundreds of those a week. The checkout's HEAD is the only proof,
+  # so HEAD is what decides. Read as the clawbox user for the same reason the
+  # probe is: git refuses to operate on a repository owned by somebody else
+  # ("detected dubious ownership"), and root reading a clawbox-owned tree is
+  # exactly that case. `|| at_commit=""` for the errexit reason above — a
+  # checkout that is not a git repository must fall through, not abort.
+  local at_commit=""
   if [ -n "$installed" ]; then
-    echo "  Hermes already installed ($installed)"
-    return 0
+    at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
+    if [ "$at_commit" = "$pin" ]; then
+      echo "  Hermes already installed at the pinned commit ($installed)"
+      return 0
+    fi
+    # A working agent on the wrong commit takes the SAME path the unrunnable
+    # one takes — reachability precheck, current checkout moved aside,
+    # install, and the move undone if no working agent comes back. An upgrade
+    # that dies halfway must leave the owner with the agent they already had,
+    # which is the whole reason this step is built the way it is.
+    echo "  Hermes runs but is not on the pinned commit — upgrading"
+    echo "    have: ${at_commit:-unknown (not a git checkout)}"
+    echo "    want: $pin"
   fi
 
   # NOTHING above this line has modified the disk, and nothing below it does
@@ -1450,7 +1508,11 @@ step_hermes_install() {
   # diagnosis costs nothing. Renaming as ROOT is also required — the root-owned
   # __pycache__ above is not movable by the clawbox user the installer runs as.
   if [ -e "$agent_dir" ]; then
-    echo "  Hermes is present but not runnable — reinstalling the agent"
+    if [ -n "$installed" ]; then
+      echo "  Moving the working agent aside so the pinned install can be undone"
+    else
+      echo "  Hermes is present but not runnable — reinstalling the agent"
+    fi
     if [ -e "$agent_dir.broken" ]; then
       # An existing husk means an earlier repair was interrupted between the
       # move and the restore: the husk is the owner's original checkout and
@@ -1480,7 +1542,7 @@ step_hermes_install() {
       || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
   fi
 
-  echo "  Installing Hermes agent (NousResearch)..."
+  echo "  Installing Hermes agent (NousResearch) at $pin..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
   # the clawbox user so it lands in ~/.hermes and ~/.local/bin. The URL is
   # passed as an argument rather than spliced into the -c string, so it stays a
@@ -1488,8 +1550,18 @@ step_hermes_install() {
   # because `curl | bash` otherwise exits 0 when the fetch fails (bash just
   # reads empty stdin) and the warning below could never fire; the timeouts
   # because the caller is a systemd unit with TimeoutStartSec=7200.
+  #
+  # `--force-commit` is not optional. For an existing checkout the upstream
+  # installer fetches, checks out and fast-forwards its branch (main) FIRST
+  # and only then applies `--commit`, skipping it with "Ignoring --commit …:
+  # the checkout is already newer" whenever the pin is an ancestor of what it
+  # just pulled — which is always, a tag being older than the main it was cut
+  # from. Without the flag the pin is a silent no-op on every install,
+  # including fresh ones, and boxes keep landing on random main commits.
+  # `bash -s --` is what gets the flags through the pipe to the script.
   runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
-    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash' _ "$installer_url" \
+    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash -s -- --commit "$2" --force-commit' \
+    _ "$installer_url" "$pin" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
@@ -1500,7 +1572,18 @@ step_hermes_install() {
   installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
     "$shim" --version 2>/dev/null | head -1) || installed=""
   if [ -n "$installed" ]; then
-    echo "  Hermes installed ($installed)"
+    at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
+    if [ "$at_commit" = "$pin" ]; then
+      echo "  Hermes installed ($installed) at the pinned commit"
+    else
+      # The agent RUNS, so it is NOT rolled back: a working unpinned agent is
+      # worth more than the copy moved aside, which was unpinned too. Loud,
+      # because it means the pin did not take — upstream dropping
+      # `--force-commit` would look exactly like this — and the next update
+      # will pay for the whole upgrade again.
+      echo "  Warning: Hermes installed ($installed) but HEAD is ${at_commit:-unknown}, not the pin $pin" >&2
+    fi
     # Diagnosis confirmed, so the insurance copy goes: it costs ~1.9 GB
     # (checkout plus venv) on a disk-constrained device and is one more
     # directory a later factory reset has to be able to delete.
@@ -2614,8 +2697,13 @@ step_post_update() {
   # ~/.local/bin/hermes is not runnable — so the agent has to be repaired first
   # or the repair and the provisioning would fight each other.
   #
-  # Both are fast no-ops on a healthy box: step_hermes_install returns after a
-  # `--version` probe, step_llamacpp_model after a single `[ -f ]` test.
+  # Both are fast no-ops on a box that is already where it should be:
+  # step_hermes_install returns after a `--version` probe plus one
+  # `git rev-parse`, step_llamacpp_model after a single `[ -f ]` test. The one
+  # exception is a box whose agent predates $HERMES_PIN_COMMIT (or was moved
+  # off it by a hand-run `hermes update`, which reattaches to main): that box
+  # takes the reversible pinned upgrade ONCE — a clone plus venv build, ~90s
+  # measured — and is a no-op on every update after it.
   # step_hermes_install self-gates on has_hermes_harness; step_llamacpp_model
   # deliberately does not (see its comment).
   step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
