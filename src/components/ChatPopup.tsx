@@ -166,10 +166,12 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 import { renderText, plainTextForLabel } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
+  attachmentAcceptAttribute,
   type ChatAttachment,
   classifyStagingFailure,
   createPreviewUrl,
   isPreviewableImage,
+  partitionAttachments,
   revokePreviews,
   type StagingFailure,
 } from '@/lib/chat-attachments'
@@ -821,6 +823,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
   const runIdRef = useRef<string | null>(null)
+  /**
+   * `dispatchTurn`, reachable from `loadHistory` above it.
+   *
+   * The auto-greet used to call `adapter.sendTurn` directly, which is only
+   * correct for a harness that answers on an event stream: the gateway ACKs,
+   * its socket handler paints the reply and clears `sending`. A harness that
+   * RESOLVES with the reply has no such handler, so the greeting arrived, was
+   * dropped on the floor, and the composer stayed disabled forever with a Stop
+   * button and nothing running. Going through `dispatchTurn` means both
+   * editions end the run the same way — it already reads `acknowledgedOnly` to
+   * tell the two apart.
+   */
+  const dispatchTurnRef = useRef<(text: string, attachments: ChatAttachment[], key: string) => Promise<void>>(
+    async () => {},
+  )
   // Timer for the ack-only `chat.history` refetch — single-flight so a
   // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
   // cancellable on unmount.
@@ -1642,12 +1659,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setSending(true)
         const idempotencyKey = uuid()
         runIdRef.current = idempotencyKey
-        try {
-          await adapter.sendTurn({ text: 'hi', attachments: [], idempotencyKey })
-        } catch {
-          setSending(false)
-          runIdRef.current = null
-        }
+        await dispatchTurnRef.current('hi', [], idempotencyKey)
       } else if (mightAutoGreet) {
         setIsBootstrappingHistory(false)
       }
@@ -1764,13 +1776,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // A new attempt clears the previous complaint. Leaving a stale error above
     // a strip that now holds a good attachment reads as "this one failed too".
     setAttachmentError(null)
+    // What this box can actually pass to the model. Refused BEFORE the upload,
+    // not after: a document staged on a harness that has no way to show it to
+    // the model would sit on the customer's disk and be named in a turn nobody
+    // could read it from. The refusal names the real limit — pictures, not
+    // documents — rather than failing silently.
+    const { accepted, refused } = partitionAttachments(files, caps)
+    if (refused.length > 0) {
+      setAttachmentError({ reason: 'imagesOnly', detail: null, file: refused[0].name || '' })
+    }
+    if (accepted.length === 0) return
     // Which composer these uploads belong to. Closing the chat bumps it, so a
     // request that resolves afterwards releases its thumbnail and drops
     // instead of pushing an attachment nobody can see back into a strip the
     // user has already dismissed.
     const generation = uploadGenerationRef.current
     const isCurrent = () => uploadGenerationRef.current === generation
-    const tasks = files.map(async (rawFile, idx) => {
+    const tasks = accepted.map(async (rawFile, idx) => {
       // Clipboard images come in as the generic "image.png"; stamp them so
       // a burst of pastes in the same millisecond doesn't collide on disk.
       // FormData's third arg sets the filename without copying the Blob.
@@ -1831,7 +1853,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }
     })
     void Promise.all(tasks)
-  }, [])
+  }, [caps])
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -2245,6 +2267,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setStreaming('')
     runIdRef.current = null
   }, [adapter])
+  useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
     // Pictures render in the bubble; everything else keeps its 📎 line, because
@@ -2589,6 +2612,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!harnessLoaded) return
     void adapter.connect()
   }, [adapter, harnessLoaded])
+
+  // Replay the stored conversation on a harness that has no handshake to hang
+  // it on.
+  //
+  // The gateway path bootstraps its history from the moment auth resolves —
+  // there IS a moment there, and the socket handler owns it. A harness with no
+  // live connection has no such event: `connect()` resolves immediately, so the
+  // only thing left that means "the user is looking at this now" is the surface
+  // being mounted with a harness resolved. Without this the store is written on
+  // every turn and read by nobody, and the refresh bug it exists to fix stays
+  // exactly as it was.
+  //
+  // Once per resolved harness, not once per open: `greetedRef` makes the
+  // auto-greet fire at most once anyway, and re-reading on every open would
+  // fight the optimistic bubbles `loadHistory` reconciles against.
+  const replayedRef = useRef(false)
+  useEffect(() => {
+    if (!harnessLoaded) return
+    if (caps.hasLiveConnection || !caps.canListHistory) return
+    if (replayedRef.current) return
+    replayedRef.current = true
+    void loadHistory()
+  }, [harnessLoaded, caps, loadHistory])
 
   useEffect(() => {
     if (isOpen) {
@@ -3548,7 +3594,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       )}
 
       {/* Hidden file input */}
-      <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
+      <input ref={fileInputRef} type="file" multiple accept={attachmentAcceptAttribute(caps)} style={{ display: 'none' }} onChange={handleFileSelect} />
 
       {/* Voice status. Always rendered while anything is happening: a capture
           that is running, uploading or failed must be visible, because the

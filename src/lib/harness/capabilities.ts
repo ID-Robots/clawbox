@@ -31,14 +31,16 @@ export interface HarnessFacts {
 }
 
 /**
- * Hermes has no durable transcript yet, so a refresh empties the screen while
- * the agent still remembers the conversation.
+ * Hermes keeps a durable transcript: `transcript-store.ts`, written by the chat
+ * route as each turn goes out and comes back, read by `/setup-api/chat/history`.
  *
- * Named rather than inlined as `false`: the store that fixes it is a separate
- * piece of work, and when it lands this is the single line that flips —
- * nothing else in the surface has to be found and changed.
+ * It used to be false, and this was the single line to flip when the store
+ * landed. It stays a named constant rather than being inlined as `true` for the
+ * same reason it was named while false: what it records is that Hermes' history
+ * is OURS to keep, not the transport's — the one thing about this capability
+ * that a reader would otherwise have to go and discover.
  */
-export const HERMES_DURABLE_TRANSCRIPT = false;
+export const HERMES_DURABLE_TRANSCRIPT = true;
 
 /**
  * How many files one turn may carry.

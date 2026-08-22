@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import type { HarnessFacts } from "@/lib/harness/capabilities";
+import { hermesSupportsImages } from "@/lib/harness/hermes-features";
 
 export const dynamic = "force-dynamic";
 
@@ -22,11 +23,15 @@ export async function GET() {
   const harness = await getActiveHarness();
   const facts: HarnessFacts = {
     hasClawaiToken: await hasClawaiToken(),
-    // Whether the installed `hermes` understands `chat --image`. Reported as
-    // false until the version probe that answers it honestly lands: an attach
-    // button shown on a guess would stage files into a turn that ignores them,
-    // which is worse than no button at all.
-    hermesSupportsImages: false,
+    // Whether the installed `hermes` understands `chat --image` — PROBED, once
+    // per process, and only where the answer can matter. An attach button shown
+    // on a guess would stage files into a turn that ignores them, which is
+    // worse than no button at all.
+    //
+    // Not asked on an OpenClaw box: `hermes` may not be installed there at all,
+    // and the probe would spend a spawn (and a failure) to compute a fact that
+    // no OpenClaw capability reads.
+    hermesSupportsImages: harness === "hermes" ? await hermesSupportsImages() : false,
   };
   return NextResponse.json({ harness, facts });
 }

@@ -28,6 +28,16 @@ let fetchedUrls: string[] = [];
 let socketsOpened = 0;
 /** Whether this box holds a ClawBox AI credential — the microphone's real gate. */
 let hasClawaiToken = false;
+/**
+ * What the durable transcript holds. A NON-empty one by default, because an
+ * empty transcript is the "first conversation" signal that fires the auto-greet
+ * — real behaviour, tested on its own below, and noise in every other test here.
+ */
+let storedTranscript: Record<string, unknown>[] = [];
+/** Whether the installed `hermes` takes `chat --image` — the attach button's gate. */
+let hermesSupportsImages = false;
+/** DELETEs of the stored transcript, so "new chat" can be shown to reach it. */
+let transcriptDeletes = 0;
 
 class ForbiddenWs {
   static readonly OPEN = 1;
@@ -58,7 +68,7 @@ function installFetch() {
           ok: true,
           json: async () => ({
             harness: "hermes",
-            facts: { hasClawaiToken, hermesSupportsImages: false },
+            facts: { hasClawaiToken, hermesSupportsImages },
           }),
         };
       }
@@ -82,6 +92,14 @@ function installFetch() {
       }
       if (url.includes("/setup-api/chat/spoken-history")) {
         return { ok: true, json: async () => ({ items: [] }) };
+      }
+      if (url.includes("/setup-api/chat/history")) {
+        if (init?.method === "DELETE") {
+          transcriptDeletes += 1;
+          storedTranscript = [];
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, json: async () => ({ messages: storedTranscript }) };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         chatPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
@@ -132,6 +150,9 @@ beforeEach(() => {
   // The default box below is a customer on their own provider key: no ClawBox
   // AI credential, so nothing on it can turn a recording into text.
   hasClawaiToken = false;
+  hermesSupportsImages = false;
+  storedTranscript = [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }];
+  transcriptDeletes = 0;
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
@@ -147,8 +168,17 @@ afterEach(() => {
 
 describe("what the composer offers when the box cannot do it", () => {
   it("offers no attach button where a staged file could not reach the model", async () => {
+    // `hermesSupportsImages: false` in the capabilities mock — the installed
+    // agent takes no image on a turn, so staging one would put a chip on screen
+    // for a file the model never sees.
     await mountHermes();
     expect(screen.queryByTitle("Attach file")).toBeNull();
+  });
+
+  it("DOES offer the attach button once the installed agent can take an image", async () => {
+    hermesSupportsImages = true;
+    await mountHermes();
+    await screen.findByTitle("Attach file");
   });
 
   it("offers no microphone on a box with no transcription credential", async () => {
@@ -216,6 +246,10 @@ describe("New chat where there is no gateway to reset", () => {
     // that was never cleared.
     expect(screen.queryByText(/Could not start a new chat/)).toBeNull();
     expect(socketsOpened).toBe(0);
+    // Forgetting has to reach the DISK too. Dropping only the session id would
+    // make the agent forget while the screen refilled with the old conversation
+    // on the next refresh — the two halves of "new chat" drifting apart.
+    await waitFor(() => expect(transcriptDeletes).toBe(1));
   });
 
   it("makes the next turn a new session rather than a resumed one", async () => {
@@ -233,5 +267,41 @@ describe("New chat where there is no gateway to reset", () => {
     // Blanking the screen while the agent still holds the thread is the worst
     // outcome of the two: the customer believes the box forgot and it has not.
     expect(chatPosts[2]).not.toHaveProperty("sessionId");
+  });
+});
+
+describe("the conversation surviving a refresh", () => {
+  it("replays what the box recorded, on a harness with no socket to ask", async () => {
+    // THE bug this fixes: a reload emptied the screen while the agent still
+    // remembered the thread, so the customer's next message read as a non
+    // sequitur to a conversation only one side could see.
+    storedTranscript = [
+      { role: "user", text: "remember the number 41", timestamp: 10 },
+      { role: "assistant", text: "Noted — 41.", timestamp: 20 },
+    ];
+    await mountHermes();
+    await screen.findByText("remember the number 41");
+    await screen.findByText("Noted — 41.");
+    // Replayed from the store, not from a gateway that is not there.
+    expect(socketsOpened).toBe(0);
+  });
+
+  it("greets once on a genuinely first conversation, and completes the turn", async () => {
+    // An empty transcript is the only "first conversation" signal there is now.
+    // The greeting must also END: a harness that resolves with its reply has no
+    // socket handler to paint it, so a greet that went straight to the adapter
+    // left the composer disabled with a Stop button and nothing running.
+    storedTranscript = [];
+    const textarea = await mountHermes();
+    await waitFor(() => expect(chatPosts.length).toBe(1));
+    expect(chatPosts[0].message).toBe("hi");
+    await screen.findByText("hello back");
+    await waitFor(() => expect(textarea).not.toBeDisabled());
+  });
+
+  it("does not greet a conversation that already exists", async () => {
+    await mountHermes();
+    await screen.findByText("Earlier in this chat.");
+    expect(chatPosts).toHaveLength(0);
   });
 });

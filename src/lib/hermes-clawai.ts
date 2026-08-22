@@ -4,6 +4,7 @@ import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
+  CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 
@@ -63,6 +64,34 @@ export async function applyClawaiToHermes(
     // so it doesn't shadow the clawai provider block.
     ["config", "unset", "model.base_url"],
     ["config", "unset", "model.api_key"],
+    // ── Looking at a picture ────────────────────────────────────────────────
+    //
+    // Without these two, an attached image is quietly degraded to a text
+    // description of itself. `agent/image_routing.py` runs in `auto` mode: it
+    // attaches the image natively when the ACTIVE model reports
+    // `supports_vision`, and otherwise routes it through `vision_analyze` using
+    // whatever `auxiliary.vision` names. The chat model here is a bare DeepSeek
+    // id, which is not vision-capable — so with `auxiliary.vision` unset there
+    // is no second model to fall back to and the user gets an answer about an
+    // image nobody looked at.
+    //
+    // Verified on the live box (2026-08-22): `hermes config get auxiliary`
+    // reports the block exists with `vision: { provider: auto, model: '',
+    // base_url: '', api_key: '', … }` — i.e. present in the schema and unset,
+    // which is exactly the state that degrades a picture to a description.
+    //
+    // Only provider and model are written. `base_url` and `api_key` are left
+    // empty ON PURPOSE so they inherit from the `providers.clawai` block set
+    // above, for the same reason the two `unset` lines above exist: a spelled-out
+    // endpoint shadows the provider block, and this one would shadow it with no
+    // credential beside it. Naming the provider is what carries the URL and the
+    // token together.
+    //
+    // This is the Hermes spelling of what `agents.defaults.imageModel` does on
+    // the OpenClaw side — one capability, two harnesses, no second provider to
+    // credential.
+    ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
+    ["config", "set", "auxiliary.vision.model", CLAWBOX_AI_VISION_MODEL_ID],
   ];
 
   for (const args of steps) {

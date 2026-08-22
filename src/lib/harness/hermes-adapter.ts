@@ -7,6 +7,8 @@ import {
   type HarnessAdapter,
   type HarnessCapabilities,
   type HarnessStatus,
+  type HistoryMessage,
+  type HistoryOptions,
   type HistoryPage,
   type TurnEvent,
   type TurnRequest,
@@ -38,6 +40,25 @@ export interface HermesTurnContext {
 }
 
 const CHAT_ROUTE = "/setup-api/hermes/chat";
+const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
+
+/**
+ * One row off the wire, or not a message at all.
+ *
+ * The store is a file on a disk a shell can reach and the route re-validates
+ * on the way out, but this is the last gate before a value becomes a rendered
+ * bubble, and a `role` the UI has no branch for renders as nothing at all —
+ * a silently missing message rather than a visible fault.
+ */
+function isHistoryMessage(row: unknown): row is HistoryMessage {
+  if (!row || typeof row !== "object") return false;
+  const value = row as Record<string, unknown>;
+  return (
+    (value.role === "user" || value.role === "assistant" || value.role === "system") &&
+    typeof value.text === "string" &&
+    typeof value.timestamp === "number"
+  );
+}
 
 export class HermesAdapter implements HarnessAdapter {
   readonly id = "hermes" as const;
@@ -149,6 +170,16 @@ export class HermesAdapter implements HarnessAdapter {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: outbound,
+          // Only when the two differ, so the ordinary turn carries no extra
+          // field: the switch note is written for the AGENT and must not be
+          // replayed out of the transcript as something the user typed.
+          ...(switched ? { displayText: req.text } : {}),
+          // Staged absolute paths. The route re-resolves every one of them
+          // against the staging root before any of it reaches argv — this side
+          // is a convenience, not a check.
+          ...(req.attachments.length
+            ? { imagePaths: req.attachments.map((a) => a.path) }
+            : {}),
           ...(model ? { model } : {}),
           ...(provider ? { provider } : {}),
           ...(reasoning ? { reasoning } : {}),
@@ -208,13 +239,57 @@ export class HermesAdapter implements HarnessAdapter {
     this.sessionId = "";
     this.sentProvider = "";
     this.sentModel = "";
+    // …and the replay log with it. Clearing only the session id would make the
+    // agent forget while the screen refilled with the old conversation on the
+    // next refresh — the worst of both, and exactly the split the durable
+    // transcript could introduce if the two halves of "forget" ever drifted.
+    //
+    // Deliberately not fatal. The agent has ALREADY forgotten by the time this
+    // runs (the three lines above are the reset that matters), so throwing here
+    // would report a failed reset that in fact succeeded, and the (+) button is
+    // double-clickable precisely so this stays idempotent.
+    try {
+      const res = await this.fetchImpl(TRANSCRIPT_ROUTE, { method: "DELETE" });
+      if (!res.ok) {
+        console.warn("[hermes-adapter] could not clear the stored transcript:", res.status);
+      }
+    } catch {
+      console.warn("[hermes-adapter] could not reach the transcript store to clear it");
+    }
   }
 
-  async loadHistory(): Promise<HistoryPage> {
-    throw new HarnessError(
-      "unsupported",
-      "This box does not keep a chat transcript across refreshes yet.",
-    );
+  /**
+   * The conversation as the box recorded it, so a refresh does not empty a
+   * screen the agent still remembers.
+   *
+   * This reads OUR replay log, never the agent's own session database. The two
+   * answer different questions and only one of them may decide what is drawn:
+   * see the note at the top of `transcript-store.ts`.
+   */
+  async loadHistory(options?: HistoryOptions): Promise<HistoryPage> {
+    const limit = options?.limit ?? 50;
+    try {
+      const res = await this.fetchImpl(`${TRANSCRIPT_ROUTE}?limit=${encodeURIComponent(String(limit))}`, {
+        // The transcript is the one thing on this surface that MUST NOT be
+        // served from a cache: a reset writes an empty store and a stale 200
+        // would repaint the conversation the user just deleted.
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        throw new HarnessError("upstream", "Could not read the stored transcript.");
+      }
+      const data = await res.json();
+      const rows = Array.isArray(data?.messages) ? data.messages : [];
+      return {
+        messages: rows.filter(isHistoryMessage),
+        // There is no image-generation wait to resolve on this path: the
+        // OpenClaw failure notice this reports is a gateway artefact with no
+        // Hermes equivalent, so the honest answer is always "no verdict".
+        imageGenerationFailed: false,
+      };
+    } catch (err) {
+      throw asHarnessError(err, "upstream");
+    }
   }
 
   async patchSessionDefaults(_patch: { thinkingLevel?: string | null }): Promise<void> {

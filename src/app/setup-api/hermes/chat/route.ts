@@ -26,6 +26,18 @@ import {
   shouldEnforcePairing,
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
+import { appendTranscript } from "@/lib/harness/transcript-store";
+import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+
+/**
+ * How many images one turn may carry — the same number the composer is told,
+ * read from the capability table rather than written down twice. Only the FIRST
+ * rides `--image`; the rest are resolved out of the prompt text, which is why
+ * the Hermes number is the lower of the two.
+ */
+const MAX_IMAGES_PER_TURN = capabilitiesFor("hermes", UNKNOWN_FACTS).maxAttachmentsPerTurn;
 
 // Chat turn against the Hermes harness, via `hermes chat -q <message> -Q`
 // (single query, non-interactive). The message is passed as an argv element
@@ -281,6 +293,18 @@ function parseSessionId(stderr: string): string {
 export async function POST(request: Request) {
   let body: {
     message?: string;
+    /**
+     * What the USER's bubble shows, when that differs from what the agent is
+     * sent. Today the one case is the mid-conversation model-switch note the
+     * adapter prefixes onto the prompt: the agent has to read it, and the
+     * transcript must not replay it as something the customer typed.
+     *
+     * Only ever narrows what is recorded — the turn itself always runs on
+     * `message`.
+     */
+    displayText?: string;
+    /** Absolute paths of staged images to attach to this turn. */
+    imagePaths?: unknown;
     model?: string;
     provider?: string;
     reasoning?: string;
@@ -437,7 +461,63 @@ export async function POST(request: Request) {
   // "is it removed now?" was answered with "what are we trying to remove?".
   // `chat -q` threads: resuming returns the SAME session id and the prior
   // turns are in context. `-Q` is its documented programmatic/quiet mode.
-  const args = ["chat", "-q", safeMessage, "-Q"];
+  // ── Images ──────────────────────────────────────────────────────────────
+  //
+  // Two mechanisms, both native to the agent and both verified against the
+  // checkout on the live box (`~/.hermes/hermes-agent` @ 1091472, 2026-08-22):
+  //
+  //   1. `--image IMAGE  Optional local image path to attach to a single
+  //      query` — one image, explicit, straight into the request.
+  //   2. `agent/image_routing.py:extract_image_refs()` scans the PROMPT for
+  //      absolute or `~/`-rooted paths with a picture extension that exist on
+  //      disk, skipping anything inside backticks or a fence, and `cli.py`
+  //      dedupes the result against `--image`. So the extras ride as one bare
+  //      path per line.
+  //
+  // (The old "attachments are OpenClaw-only" note in the composer was about
+  // `-z/--oneshot`, which really does take no image flag. This route stopped
+  // using `-z` when it needed session threading, and `chat` has had `--image`
+  // all along.)
+  //
+  // Every path is re-resolved against the staging root here rather than
+  // trusted from the body: it is about to become an argv element, and the
+  // agent opens any readable absolute path it is handed.
+  const requestedImages = Array.isArray(body.imagePaths)
+    ? body.imagePaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)
+    : [];
+  const imagePaths: string[] = [];
+  for (const requested of requestedImages) {
+    const safe = await resolveInMediaRoot(requested);
+    // A path that does not resolve is dropped rather than 400-ing the turn.
+    // The alternative is worse than it sounds: the staging tree is swept on a
+    // retention schedule, so a file that aged out between being attached and
+    // being sent would turn an ordinary message into a failed one.
+    if (safe && !imagePaths.includes(safe)) imagePaths.push(safe);
+  }
+  const [firstImage, ...extraImages] = imagePaths;
+
+  const promptWithImages = extraImages.length
+    ? `${safeMessage}\n\n${extraImages.join("\n")}`
+    : safeMessage;
+
+  // ── The transcript ──────────────────────────────────────────────────────
+  //
+  // The QUESTION is recorded before the child is spawned, so a turn whose
+  // process dies mid-run leaves a question with no answer — visibly incomplete
+  // — rather than vanishing or, worse, leaving an answer to nothing. It is also
+  // why this is written here and not in the browser: a customer who closes the
+  // tab on a 600-second turn still gets the exchange back on their next visit.
+  await appendTranscript({
+    role: "user",
+    text: typeof body.displayText === "string" && body.displayText.trim()
+      ? body.displayText.trim()
+      : message,
+    timestamp: Date.now(),
+    ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
+  });
+
+  const args = ["chat", "-q", promptWithImages, "-Q"];
+  if (firstImage) args.push("--image", firstImage);
   // No model → omit -m and let hermes use config.yaml's model.default, which is
   // by definition valid for the configured provider. (The previous hardcoded
   // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
@@ -460,6 +540,18 @@ export async function POST(request: Request) {
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
+    // The ANSWER, and only on success. Media is split here rather than stored
+    // raw so that the record holds exactly what the bubble renders, and a
+    // refreshed transcript is byte-identical to the live one instead of showing
+    // a MEDIA: directive as text.
+    const reply = splitAssistantMedia(text);
+    await appendTranscript({
+      role: "assistant",
+      text: reply.text,
+      timestamp: Date.now(),
+      ...(reply.images.length ? { media: reply.images } : {}),
+      ...(reply.audio.length ? { audio: reply.audio } : {}),
+    });
     return NextResponse.json({
       text,
       harness: "hermes",
@@ -467,12 +559,22 @@ export async function POST(request: Request) {
     });
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      // Client hit Stop / disconnected; the child was already killed.
+      // Client hit Stop / disconnected; the child was already killed. Nothing
+      // is recorded: the user cancelled, and the question they typed is already
+      // in the transcript above where an unanswered question belongs.
       return new NextResponse(null, { status: 499 });
     }
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Hermes chat failed" },
-      { status: 502 },
-    );
+    const detail = err instanceof Error ? err.message : "Hermes chat failed";
+    // A failure is recorded too. Without this a refresh shows a question with
+    // nothing under it and no hint that the box tried and failed — the same
+    // screen a still-running turn produces, which is the worse of the two to
+    // be wrong about.
+    await appendTranscript({
+      role: "system",
+      text: `Error: ${detail}`,
+      timestamp: Date.now(),
+      variant: "error",
+    });
+    return NextResponse.json({ error: detail }, { status: 502 });
   }
 }
