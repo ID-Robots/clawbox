@@ -21,13 +21,14 @@ import {
   normalizeProviderId,
   type VoiceAttempt,
   type VoiceCheck,
+  VOICE_ENGINE_IDS,
   type VoiceEngineId,
   type VoiceOutputState,
 } from "@/lib/voice-output";
 
 export const VOICE_STATE_PATH = path.join(DATA_DIR, "voice-output.json");
 
-const ENGINE_IDS: VoiceEngineId[] = ["local", "cloud"];
+const ENGINE_IDS = VOICE_ENGINE_IDS;
 
 function readAttempt(value: unknown): VoiceAttempt | null {
   if (!value || typeof value !== "object") return null;

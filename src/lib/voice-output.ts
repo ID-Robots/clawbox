@@ -79,6 +79,7 @@ export type VoiceChoice = "auto" | "local" | "cloud";
 export type VoiceEngineId = "local" | "cloud";
 
 export const VOICE_CHOICES: readonly VoiceChoice[] = ["auto", "local", "cloud"];
+export const VOICE_ENGINE_IDS: readonly VoiceEngineId[] = ["local", "cloud"];
 
 export function isVoiceChoice(value: unknown): value is VoiceChoice {
   return typeof value === "string" && (VOICE_CHOICES as readonly string[]).includes(value);
@@ -458,8 +459,17 @@ export function providerIdForChoice(
  */
 export function forgetEngineCheck(state: VoiceOutputState, engine: VoiceEngineId): VoiceOutputState {
   if (!state.engineChecks[engine]) return state;
-  const engineChecks = { ...state.engineChecks };
-  delete engineChecks[engine];
+  // Rebuilt from the fixed list of engine ids rather than spread-and-delete.
+  // `engine` reaches here from a request body — validated, but the shape that
+  // makes that safe is not visible to a static analyser, and writing a key
+  // derived from a request is worth avoiding on principle rather than
+  // defending. Every key written below is a literal from a constant.
+  const engineChecks: VoiceOutputState["engineChecks"] = {};
+  for (const id of VOICE_ENGINE_IDS) {
+    if (id === engine) continue;
+    const entry = state.engineChecks[id];
+    if (entry) engineChecks[id] = entry;
+  }
   return { ...state, engineChecks };
 }
 
