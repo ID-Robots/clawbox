@@ -1218,4 +1218,165 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect.stringContaining("oauth-device-tokens.json"),
     );
   });
+
+  // ---------------------------------------------------------------------
+  // TASK-481 — the ClawBox AI tier the box is configured for must come from
+  // the ACCOUNT, not from the wizard's plan picker.
+  //
+  // The picker is pre-pairing UI: on a first setup it holds whatever the card
+  // defaulted to before there was an account to look at ("flash" = Pro, EUR 9).
+  // Sending that as `clawaiTier` while pasting a Max token wrote the EUR 9
+  // model onto a EUR 49 box, and the customer had no way to reach the frontier
+  // model afterwards. The route already holds the token one line earlier, so
+  // it can just ask.
+  //
+  // Every case below asserts the PRIMARY MODEL that gets written, because that
+  // is what the customer actually feels — a stored tier string that no model
+  // follows is exactly the half-fixed state this bug lived in.
+  describe("ClawBox AI tier reconciliation against the portal", () => {
+    const deviceInfo = (body: unknown, status = 200) =>
+      vi.fn(async (input: string | URL) =>
+        String(input).includes("/api/clawbox-ai/device-info")
+          ? new Response(JSON.stringify(body), { status })
+          : Promise.reject(new Error("network disabled in tests")),
+      );
+
+    const primaryModelWritten = () =>
+      vi.mocked(runOpenclawConfigSet).mock.calls
+        .map((call) => call[0] ?? [])
+        .find((args) => args[0] === "agents.defaults.model.primary")?.[1];
+
+    it("configures the Max model when the portal says Max, even though the picker said Pro", async () => {
+      vi.stubGlobal("fetch", deviceInfo({ tier: "max" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_max_account",
+        clawaiTier: "flash",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ clawai_tier: "pro" }),
+      );
+    });
+
+    it("configures the Pro model when the portal says Pro, even though the picker said Max", async () => {
+      // The mirror image, and the reason this is a reconcile rather than a
+      // promote: clicking the Max card does not entitle you to the Max model.
+      vi.stubGlobal("fetch", deviceInfo({ tier: "pro" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_pro_account",
+        clawaiTier: "pro",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ clawai_tier: "flash" }),
+      );
+    });
+
+    it("honours the portal's deviceTier stamp so a Max subscriber can run Flash on this box", async () => {
+      // Deliberate downgrade, expressed on the portal side at pair time. The
+      // fix must not force such a device up to the plan's headline model.
+      vi.stubGlobal("fetch", deviceInfo({ tier: "max", deviceTier: "flash" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_max_running_flash",
+        clawaiTier: "pro",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-flash");
+    });
+
+    it("keeps the picker's choice when the portal is unreachable", async () => {
+      // A portal outage during setup must never quietly downgrade a paying
+      // box. `fetchPortalTier` reports network failures as `unreachable`.
+      vi.stubGlobal("fetch", vi.fn(async () => {
+        throw new Error("portal down");
+      }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_offline",
+        clawaiTier: "pro",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+    });
+
+    it("keeps the picker's choice when the portal answers 401", async () => {
+      // 401/403 is ambiguous — genuinely Free, or a revoked/migrated token on
+      // a still-paid account. fetchPortalTier maps it to `unreachable` for
+      // that reason and this route must inherit the same caution.
+      vi.stubGlobal("fetch", deviceInfo({}, 401));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_bad_auth",
+        clawaiTier: "pro",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+    });
+
+    it("keeps the picker's choice when the portal reports an unpaid account", async () => {
+      // mapPortalTier returns null for Free. Null is "no paid entitlement to
+      // reconcile against", not "downgrade them", so the existing chain wins.
+      vi.stubGlobal("fetch", deviceInfo({ tier: "free" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_free_account",
+        clawaiTier: "pro",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+    });
+
+    it("reaches the primary model from the portal alone when the request omits clawaiTier", async () => {
+      // CodeRabbit's catch on #430, and a fair one: every other case here
+      // sends a picker value, so none of them proves the portal result can
+      // drive the model on its own. With `clawaiTier` absent,
+      // `requestedClawboxAiTier` is null and the whole chain past
+      // `portalConfirmedTier` is the stored value then the hardcoded default
+      // — both of which are "flash". So if the reconcile ever stopped
+      // feeding this branch, this is the only test that would notice.
+      vi.stubGlobal("fetch", deviceInfo({ tier: "max" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_max_no_picker",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ clawai_tier: "pro" }),
+      );
+    });
+
+    it("does not consult the portal for a non-ClawBox provider", async () => {
+      const fetchMock = deviceInfo({ tier: "max" });
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: "sk-ant-key",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(fetchMock.mock.calls.some(([url]) =>
+        String(url).includes("/api/clawbox-ai/device-info"))).toBe(false);
+    });
+  });
 });

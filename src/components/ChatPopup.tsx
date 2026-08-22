@@ -23,7 +23,9 @@ import {
   describeTranscribeFailure,
   formatRecordingClock,
   pickRecordingMimeType,
+  readCaptureAvailability,
   recordingFileName,
+  type CaptureAvailability,
   type VoiceStatus,
 } from '@/lib/chat-voice-input'
 import {
@@ -1958,7 +1960,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Telegram-like record -> stop -> send flow Yanko requested; Cancel remains
   // available for anything the user does not want uploaded.
   const [voice, setVoice] = useState<VoiceStatus>(IDLE_STATUS)
+  // Whether this ORIGIN can capture audio at all (TASK-470). Resolved after
+  // mount because the server has no `window` to ask, and it starts at "ok" so
+  // the first paint on a perfectly capable box never flashes a refusal.
+  const [captureAvailability, setCaptureAvailability] = useState<CaptureAvailability>('ok')
   const [recordingMs, setRecordingMs] = useState(0)
+  useEffect(() => {
+    setCaptureAvailability(readCaptureAvailability())
+  }, [])
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -2085,8 +2094,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const startRecording = useCallback(async () => {
     if (voice.state === 'recording' || voice.state === 'requesting') return
-    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+    // Read live rather than from `captureAvailability`: the state exists to
+    // label the button before anyone clicks, and a stale render must never be
+    // what decides whether the microphone is opened.
+    const availability = readCaptureAvailability()
+    if (availability !== 'ok') {
+      setVoice({ state: 'error', error: availability, message: null, canRetry: false })
       return
     }
     setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
@@ -3697,7 +3710,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'claw-pulse 1s ease-in-out infinite' }}
             />
           )}
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {/* One line while a capture is live — the row sits over the composer
+              and a wrapping status would push the input around every second.
+              An ERROR is the opposite case: it is the only place the reason and
+              the remedy are written, and a sentence cut off at "Open this
+              ClawBox…" tells the owner a problem exists and hides the fix. */}
+          <span style={voice.state === 'error'
+            ? { flex: 1, whiteSpace: 'normal' }
+            : { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {voice.state === 'requesting' && t("chat.voice.requesting")}
             {voice.state === 'recording' && <>{t("chat.voice.recording")}{' '}
               {/* The clock is kept out of the accessibility tree, not out of
@@ -3716,6 +3736,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             {voice.state === 'error' && (
               voice.message
               || (voice.error === 'permission' ? t("chat.voice.permissionDenied")
+                : voice.error === 'insecure' ? t("chat.voice.insecureContext")
                 : voice.error === 'unsupported' ? t("chat.voice.unsupported")
                 : voice.error === 'empty' ? t("chat.voice.nothingHeard")
                 : t("chat.voice.failed"))
@@ -3808,8 +3829,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             <button
               onClick={startRecording}
               disabled={status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'}
-              title={t("chat.voice.record")}
-              aria-label={t("chat.voice.record")}
+              // On an origin the browser will not open a microphone on, the
+              // button says WHY on hover and to a screen reader, instead of
+              // naming an action it cannot perform. It stays clickable so the
+              // same reason lands in the status row for anyone who tries.
+              title={captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")}
+              aria-label={captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")}
               data-testid="voice-record"
               style={{
                 width: 36, height: 36, borderRadius: 10, border: 'none',

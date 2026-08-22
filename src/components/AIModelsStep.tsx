@@ -33,7 +33,8 @@ import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 // the Hermes provider panel renders the SAME experience instead of a lookalike.
 import {
   CLAWAI_TIER_STORAGE_KEY,
-  normalizeClawaiUiTier,
+  readStoredUiTier,
+  resolveUiTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
 
@@ -592,11 +593,17 @@ export default function AIModelsStep({
     }
   }, [activeCatalog, currentModel, modelTouched, selectedProvider]);
   const [configuringState, setConfiguringState] = useState<ConfiguringState | null>(null);
-  const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => {
-    if (typeof window === "undefined") return "flash";
-    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
-  });
+  // Seeded from local storage because that is all this panel can know before it
+  // has asked the box anything; the effect below reconciles it against the
+  // portal-confirmed account as soon as an answer arrives. Local storage alone
+  // is NOT the answer for a paired box — see TASK-468.
+  const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => readStoredUiTier());
+  // Set the moment the user touches the plan picker. The reconcile below must
+  // never yank the card out from under a pick that already happened — on the
+  // wizard this picker is someone CHOOSING a plan they do not have yet.
+  const userPickedTierRef = useRef(false);
   const persistClawaiTier = useCallback((tier: ClawaiTier) => {
+    userPickedTierRef.current = true;
     setClawaiTier(tier);
     if (typeof window !== "undefined") {
       try {
@@ -665,6 +672,43 @@ export default function AIModelsStep({
     setSaving(false);
     setStatus((current) => (current?.type === "error" ? null : current));
   }, [normalizedCurrentProvider, stopClawaiLogin, resetClawaiLogin]);
+
+  // ── Make the plan card agree with the account ─────────────────────────────
+  //
+  // This panel used to seed the plan purely from local storage and never ask
+  // the box anything, so on a browser that had never stored a tier — every
+  // customer's first visit, and every visit after clearing site data — it fell
+  // back to the hardcoded "flash" and rendered "Pro plan · €9/month". On a Max
+  // box that sat directly under a MAX badge in the same panel, contradicting
+  // it, and the same state is what `payload.clawaiTier` writes on save, so a
+  // save from that screen downgraded a €49 account off the frontier weights
+  // without saying so. (TASK-468.)
+  //
+  // `resolveUiTier` is the rule the Hermes panel has always used; it now lives
+  // in the shared tier module so these two panels cannot drift again. It reads
+  // the account only when the box is actually paired, so the wizard's
+  // choose-a-plan flow on an unpaired box is untouched.
+  useEffect(() => {
+    if (userPickedTierRef.current) return;
+    const controller = new AbortController();
+    fetch("/setup-api/ai-models/status", { cache: "no-store", signal: controller.signal })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!data || typeof data !== "object") return;
+        // Only a live portal answer may move the card. `tierSource: "picker"`
+        // means the status route never reached the portal this cycle, and the
+        // stored device tier cannot tell Free from "we never asked" — guessing
+        // from it is how a Free user got shown a paid plan in the first place.
+        if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
+        if (userPickedTierRef.current) return;
+        setClawaiTier(resolveUiTier(true, data.clawaiAccountTier ?? null));
+      })
+      .catch(() => {
+        // Offline or mid-restart: keep the stored intent rather than blanking
+        // or guessing at someone's subscription.
+      });
+    return () => controller.abort();
+  }, []);
 
   useEffect(() => {
     fetch("/setup-api/ai-models/oauth/providers")

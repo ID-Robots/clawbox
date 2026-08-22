@@ -126,3 +126,44 @@ export function uiTierToDeviceTier(tier: ClawaiTier): ClawboxAiTier {
 export function deviceTierToUiTier(stored: string | null | undefined): ClawaiTier {
   return stored === "pro" ? "pro" : stored === "flash" ? "flash" : "free";
 }
+
+/**
+ * The UI tier the customer last chose, or the safe default.
+ *
+ * "flash" ("Pro plan") is the default only because it is what the connect flow
+ * pre-selects for someone who has not paired anything yet. It must never be
+ * used as the answer for a box that IS paired — see `resolveUiTier`.
+ */
+export function readStoredUiTier(): ClawaiTier {
+  if (typeof window === "undefined") return "flash";
+  try {
+    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
+  } catch {
+    return "flash";
+  }
+}
+
+/**
+ * Which PLAN card to show for a paired device.
+ *
+ * The device tier cannot represent Free: `uiTierToDeviceTier` maps both "free"
+ * and "flash" to the device's "flash" (Free and Pro run the same DeepSeek V4
+ * Flash weights), so a stored "flash" means Free OR Pro. Trusting local storage
+ * blindly showed "Pro plan — €9/month" to a Free user; trusting it on a paired
+ * Max box shows "Pro plan — €9/month" to someone paying €49 (TASK-468). "pro"
+ * (Max) is unambiguous and always wins over local storage.
+ *
+ * `hasToken` is what makes this safe for the wizard: an UNPAIRED box has no
+ * account to reconcile against, and the picker there is the customer choosing a
+ * plan they do not have yet, so their stored intent must survive untouched.
+ *
+ * Shared by both provider panels on purpose. The OpenClaw panel read only local
+ * storage for months while the Hermes panel had this rule, which is exactly the
+ * drift this module exists to prevent.
+ */
+export function resolveUiTier(hasToken: boolean, tierStored: string | null | undefined): ClawaiTier {
+  if (!hasToken) return readStoredUiTier();
+  const device = deviceTierToUiTier(tierStored);
+  if (device !== "flash") return device;
+  return readStoredUiTier() === "free" ? "free" : "flash";
+}

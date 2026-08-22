@@ -6,6 +6,7 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import { copyToClipboard } from "@/lib/clipboard";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
 import {
   HERMES_PANEL_PROVIDERS,
@@ -15,8 +16,7 @@ import {
 import {
   CLAWAI_TIER_INFO,
   CLAWAI_TIER_STORAGE_KEY,
-  deviceTierToUiTier,
-  normalizeClawaiUiTier,
+  resolveUiTier,
   uiTierToDeviceTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
@@ -45,6 +45,39 @@ interface ClawaiState {
 
 type Status = { kind: "ok" | "err"; msg: string } | null;
 
+// One in-flight provider sign-in, driven entirely from this panel through the
+// same-origin /setup-api/hermes/oauth/* routes. The Hermes dashboard's own
+// OAuth page sits behind the :8090 auth proxy, which remote access
+// (clawbox-tunnel on :80, Cloudflare quick tunnel) does not forward — sending
+// the browser there gave tunnel users a blank tab and no credentials.
+type OauthSignin =
+  | { stage: "starting"; providerId: string }
+  | { stage: "pkce"; providerId: string; sessionId: string; authUrl: string; error?: string }
+  | {
+      stage: "device";
+      providerId: string;
+      sessionId: string;
+      userCode: string;
+      verificationUrl: string;
+      pollMs: number;
+      /** Epoch ms; the poll loop's hard deadline, from the session's expires_in. */
+      expiresAt: number;
+    }
+  | { stage: "failed"; providerId: string; message: string };
+
+/** Only ever open or render a dashboard-supplied URL if it is plain http(s) —
+ *  anything else (javascript:, data:, a bare token) must not reach window.open
+ *  or an href. */
+function isHttpUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 interface Props {
   embedded?: boolean;
   onNext?: () => void;
@@ -56,32 +89,6 @@ interface Props {
 // "connected" state to register and short enough not to feel stalled. This panel
 // is the SAME step on a Hermes device, so it advances the same way.
 const AUTO_ADVANCE_DELAY_MS = 900;
-
-function readStoredUiTier(): ClawaiTier {
-  if (typeof window === "undefined") return "flash";
-  try {
-    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
-  } catch {
-    return "flash";
-  }
-}
-
-/**
- * Which PLAN card to show for a paired device.
- *
- * The device tier cannot represent Free: `uiTierToDeviceTier` maps both "free"
- * and "flash" to the device's "flash" (Free and Pro run the same DeepSeek V4
- * Flash weights), so a stored "flash" means Free OR Pro. Trusting it blindly
- * showed "Pro plan — €9/month" to a Free user, and made this panel disagree
- * with the OpenClaw wizard, which reads the stored UI intent. "pro" (Max) is
- * unambiguous and always wins over local storage.
- */
-function resolveUiTier(hasToken: boolean, tierStored: string | null): ClawaiTier {
-  if (!hasToken) return readStoredUiTier();
-  const device = deviceTierToUiTier(tierStored);
-  if (device !== "flash") return device;
-  return readStoredUiTier() === "free" ? "free" : "flash";
-}
 
 export default function HermesProviderConfig({ embedded, onNext, testId }: Props) {
   const uid = useId();
@@ -145,12 +152,57 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     notifyHermesModelState();
   }, []);
 
+  // ── Inline provider OAuth ──────────────────────────────────────────────────
+  //
+  // Held in a ref as well so unmount cleanup can abandon the dashboard-side
+  // session without the cleanup effect re-running on every state change.
+  const [signin, setSignin] = useState<OauthSignin | null>(null);
+  const signinRef = useRef<OauthSignin | null>(null);
+  useEffect(() => { signinRef.current = signin; }, [signin]);
+  const [oauthCode, setOauthCode] = useState("");
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [codeCopied, setCodeCopied] = useState(false);
+  // Bumped by every reset/unmount so a /start response that lands AFTER the
+  // user moved on (switched rows, hit Start over, left the panel) knows it was
+  // abandoned and hands its session straight back to the dashboard instead of
+  // resurrecting a flow nobody is looking at.
+  const signinGenRef = useRef(0);
+
+  const cancelOauthSession = useCallback((sessionId: string) => {
+    // Best-effort; keepalive lets the request outlive an unmounting page.
+    void fetch("/setup-api/hermes/oauth/cancel", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+      keepalive: true,
+    }).catch(() => {});
+  }, []);
+
+  const resetSignin = useCallback(() => {
+    const s = signinRef.current;
+    signinGenRef.current += 1;
+    if (s && (s.stage === "pkce" || s.stage === "device")) cancelOauthSession(s.sessionId);
+    setSignin(null);
+    setOauthCode("");
+    setCodeCopied(false);
+  }, [cancelOauthSession]);
+
+  useEffect(() => () => {
+    // Panel going away mid-flow: don't leave a half-open session on the
+    // dashboard until its expiry.
+    const s = signinRef.current;
+    signinGenRef.current += 1;
+    if (s && (s.stage === "pkce" || s.stage === "device")) cancelOauthSession(s.sessionId);
+  }, [cancelOauthSession]);
+
   const pickProvider = useCallback((id: string) => {
     userPickedProviderRef.current = true;
     setSelectedProvider(id);
     setPicked("");
     setSaveStatus(null);
-  }, []);
+    // A half-finished sign-in belongs to the row being left.
+    resetSignin();
+  }, [resetSignin]);
 
   const isClawaiSelected = selectedProvider === CLAWAI_PROVIDER;
 
@@ -167,7 +219,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const [loginBusy, setLoginBusy] = useState(false);
 
   // Hermes native provider-OAuth status (anthropic PKCE, openai-codex device-code, …).
-  const [oauth, setOauth] = useState<Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }>>({});
+  const [oauth, setOauth] = useState<Record<string, { loggedIn: boolean; flow: string; docsUrl?: string; cliCommand?: string }>>({});
 
   // ClawBox AI has no model dropdown: its model is derived from the tier and
   // must stay a BARE id (a vendor-prefixed slug gets HTTP 400 "Model not
@@ -245,10 +297,11 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       const res = await fetch("/setup-api/hermes/oauth", { cache: "no-store" });
       if (!res.ok) return;
       const d = (await res.json()) as {
-        providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string }[];
+        providers?: { id: string; loggedIn: boolean; flow: string; docsUrl?: string; cliCommand?: string }[];
       };
-      const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string }> = {};
-      for (const p of d.providers ?? []) map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl };
+      const map: Record<string, { loggedIn: boolean; flow: string; docsUrl?: string; cliCommand?: string }> = {};
+      for (const p of d.providers ?? [])
+        map[p.id] = { loggedIn: p.loggedIn, flow: p.flow, docsUrl: p.docsUrl, cliCommand: p.cliCommand };
       setOauth(map);
     } catch {
       /* OAuth affordances just won't show; non-fatal */
@@ -282,6 +335,186 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     return () => window.removeEventListener("focus", onFocus);
   }, [loadOauth, refreshModels, notifyChatHeader]);
 
+  // A finished sign-in is a credential appearing server-side — the panel, the
+  // model cache and the chat header all have to re-read, same as the old
+  // return-from-dashboard-tab case. Flip the local flag first so Connected
+  // shows immediately instead of after the status round-trip.
+  const onOauthConnected = useCallback((providerId: string) => {
+    setSignin(null);
+    setOauthCode("");
+    setCodeCopied(false);
+    setOauth((m) => ({ ...m, [providerId]: { ...(m[providerId] ?? { flow: "" }), loggedIn: true } }));
+    void loadOauth();
+    refreshModels();
+    notifyChatHeader();
+  }, [loadOauth, refreshModels, notifyChatHeader]);
+
+  async function startOauth(providerId: string) {
+    resetSignin();
+    const gen = signinGenRef.current;
+    setSignin({ stage: "starting", providerId });
+    try {
+      const res = await fetch("/setup-api/hermes/oauth/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerId }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok) {
+        throw new Error(typeof data.error === "string" && data.error ? data.error : `HTTP ${res.status}`);
+      }
+      const sessionId = typeof data.session_id === "string" ? data.session_id : "";
+      if (gen !== signinGenRef.current) {
+        // Abandoned mid-start: give the session back instead of leaking it.
+        if (sessionId) cancelOauthSession(sessionId);
+        return;
+      }
+      if (data.flow === "pkce" && sessionId && isHttpUrl(data.auth_url)) {
+        // The provider's consent page ends by SHOWING a code the user copies
+        // back here (Anthropic's redirect_uri is its own console) — nothing
+        // ever redirects back to this origin, which is why the flow survives
+        // any tunnel.
+        window.open(data.auth_url, "_blank", "noopener,noreferrer");
+        setSignin({ stage: "pkce", providerId, sessionId, authUrl: data.auth_url });
+      } else if (data.flow === "device_code" && sessionId) {
+        const interval =
+          typeof data.poll_interval === "number" && data.poll_interval > 0 ? data.poll_interval : 5;
+        const expiresIn =
+          typeof data.expires_in === "number" && data.expires_in > 0 ? data.expires_in : 900;
+        setSignin({
+          stage: "device",
+          providerId,
+          sessionId,
+          userCode: typeof data.user_code === "string" ? data.user_code : "",
+          verificationUrl: isHttpUrl(data.verification_url) ? data.verification_url : "",
+          pollMs: Math.max(3, interval) * 1000,
+          expiresAt: Date.now() + expiresIn * 1000,
+        });
+      } else {
+        throw new Error("Unexpected response from Hermes");
+      }
+    } catch (e) {
+      if (gen !== signinGenRef.current) return;
+      setSignin({
+        stage: "failed",
+        providerId,
+        message: e instanceof Error ? e.message : "Could not start sign-in",
+      });
+    }
+  }
+
+  async function submitOauthCode() {
+    const s = signin;
+    if (!s || s.stage !== "pkce") return;
+    const code = oauthCode.trim();
+    if (!code) return;
+    setOauthBusy(true);
+    try {
+      const res = await fetch("/setup-api/hermes/oauth/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerId: s.providerId, sessionId: s.sessionId, code }),
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (!res.ok || data.ok === false) {
+        const msg =
+          typeof data.message === "string" && data.message
+            ? data.message
+            : typeof data.error === "string" && data.error
+              ? data.error
+              : `HTTP ${res.status}`;
+        throw new Error(msg);
+      }
+      onOauthConnected(s.providerId);
+    } catch (e) {
+      // Stay on the paste step: a mistyped code must not force a new session.
+      setSignin({ ...s, error: e instanceof Error ? e.message : "Code was not accepted" });
+    } finally {
+      setOauthBusy(false);
+    }
+  }
+
+  // Device-code sessions resolve out of band (the user approves on the
+  // provider's site), so poll until a terminal status. Recursive timeout, not
+  // an interval: a slow relay must never stack requests.
+  useEffect(() => {
+    if (!signin || signin.stage !== "device") return;
+    const { providerId, sessionId, pollMs, expiresAt } = signin;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      let terminal = false;
+      // Hard deadline from the session's own expires_in: even if every poll
+      // errors (relay down, dashboard restarting), the loop cannot outlive the
+      // session it is polling for.
+      if (Date.now() >= expiresAt) {
+        setSignin({
+          stage: "failed",
+          providerId,
+          message: "The sign-in request expired. Try again.",
+        });
+        return;
+      }
+      try {
+        const res = await fetch(
+          `/setup-api/hermes/oauth/poll?providerId=${encodeURIComponent(providerId)}&sessionId=${encodeURIComponent(sessionId)}`,
+          { cache: "no-store" },
+        );
+        const data = (await res.json().catch(() => ({}))) as {
+          status?: unknown;
+          error_message?: unknown;
+          error?: unknown;
+        };
+        if (!alive) return;
+        const status = typeof data.status === "string" ? data.status : "";
+        // A 4xx is the relay's verdict on THIS session — not found, expired, or
+        // minted for another provider — and it answers with `error`, never
+        // `status`. Reading `status` alone made those bodies indistinguishable
+        // from "keep polling", so a session that was already dead sat behind
+        // "Waiting for approval..." until the deadline above. 5xx stays
+        // transient (the dashboard may be mid-restart) and the deadline still
+        // bounds that case.
+        if (!res.ok && res.status < 500) {
+          terminal = true;
+          setSignin({
+            stage: "failed",
+            providerId,
+            message:
+              typeof data.error === "string" && data.error
+                ? data.error
+                : "Sign-in failed. Try again.",
+          });
+        } else if (status === "approved") {
+          terminal = true;
+          onOauthConnected(providerId);
+        } else if (status === "error" || status === "expired") {
+          terminal = true;
+          setSignin({
+            stage: "failed",
+            providerId,
+            message:
+              typeof data.error_message === "string" && data.error_message
+                ? data.error_message
+                : status === "expired"
+                  ? "The sign-in request expired. Try again."
+                  : "Sign-in failed. Try again.",
+          });
+        }
+      } catch {
+        // Transient relay error: keep polling until the session itself expires.
+      }
+      if (alive && !terminal) timer = setTimeout(tick, pollMs);
+    };
+    timer = setTimeout(tick, pollMs);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [signin, onOauthConnected]);
+
+  function copyUserCode(code: string) {
+    // copyToClipboard, not navigator.clipboard directly: the device is served
+    // over plain http on the LAN, where the async clipboard API doesn't exist.
+    void copyToClipboard(code).then((ok) => setCodeCopied(ok));
+  }
+
   const changeUiTier = useCallback((tier: ClawaiTier) => {
     setUiTier(tier);
     setClawaiStatus(null);
@@ -314,8 +547,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     onError: (msg) => setClawaiStatus({ kind: "err", msg }),
   });
 
-  // Open the Hermes dashboard's /env page (via the auth-gated proxy on :8090),
-  // where its native OAuth (PKCE / device-code) runs. Same host, dashboard port.
+  // ADVANCED FALLBACK ONLY: the Hermes dashboard's /env page via its auth-gated
+  // proxy on :8090. LAN-only — tunnels don't forward that port, which is
+  // exactly why the inline flow above exists; nothing depends on this link.
   // The flag is what the focus listener above keys on: we only re-check (and
   // pay for a live provider re-enumeration) when the user actually went off to
   // sign in, not on every incidental tab switch.
@@ -586,34 +820,166 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           ) : (
             <div className="space-y-4">
               {selectedDef?.oauthId && (() => {
-                const st = oauth[selectedDef.oauthId];
+                const oauthId = selectedDef.oauthId;
+                const st = oauth[oauthId];
                 const connected = st?.loggedIn;
+                const external = st?.flow === "external";
+                const flow = signin && signin.providerId === oauthId ? signin : null;
+                const showSignInButton = !connected && !external && (!flow || flow.stage === "failed");
                 return (
                   <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)]/50 p-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-gray-200">Sign in with {selectedDef.name}</p>
                         <p className="text-xs text-[var(--text-muted)]">
-                          {connected ? "Connected — OAuth credentials active." : "OAuth through Hermes (no API key needed)."}
+                          {connected
+                            ? "Connected. OAuth credentials active."
+                            : external
+                              ? "This provider signs in through the Hermes CLI."
+                              : "OAuth through Hermes (no API key needed)."}
                         </p>
                       </div>
-                      {connected ? (
+                      {connected && (
                         <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400">
                           <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
                           Connected
                         </span>
-                      ) : (
+                      )}
+                      {showSignInButton && (
                         <button
                           type="button"
-                          onClick={openHermesOAuth}
+                          onClick={() => { void startOauth(oauthId); }}
                           className="shrink-0 rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity"
                         >
-                          Sign in ↗
+                          {flow?.stage === "failed" ? "Try again" : "Sign in"}
                         </button>
                       )}
                     </div>
+                    {!connected && external && st?.cliCommand && (
+                      <div className="mt-3">
+                        <p className="text-xs text-[var(--text-muted)]">
+                          Run this in the device terminal, then reopen this panel:
+                        </p>
+                        <code className="mt-1.5 block rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-xs font-mono text-[var(--text-primary)] overflow-x-auto">
+                          {st.cliCommand}
+                        </code>
+                      </div>
+                    )}
+                    {!connected && flow?.stage === "starting" && (
+                      <p className="mt-3 text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
+                        Starting sign-in with {selectedDef.name}...
+                      </p>
+                    )}
+                    {!connected && flow?.stage === "pkce" && (
+                      <div className="mt-3 space-y-2">
+                        <p className="text-xs text-[var(--text-muted)]">
+                          A {selectedDef.name} sign-in tab has opened. Approve access there, copy the code it
+                          shows, and paste it here.{" "}
+                          <a
+                            href={flow.authUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline text-[var(--text-secondary)]"
+                          >
+                            Reopen the sign-in page
+                          </a>
+                        </p>
+                        <label className="sr-only" htmlFor={`${uid}-oauth-code`}>
+                          Paste the code from {selectedDef.name}
+                        </label>
+                        <input
+                          id={`${uid}-oauth-code`}
+                          type="text"
+                          className={selectCls}
+                          placeholder={`Paste the code from ${selectedDef.name}`}
+                          value={oauthCode}
+                          autoComplete="off"
+                          onChange={(e) => setOauthCode(e.target.value)}
+                        />
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => { void submitOauthCode(); }}
+                            disabled={oauthBusy || !oauthCode.trim()}
+                            className="rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                          >
+                            {oauthBusy ? "Submitting..." : "Submit code"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={resetSignin}
+                            className="text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
+                          >
+                            Start over
+                          </button>
+                        </div>
+                        {flow.error && (
+                          <p role="alert" aria-live="polite" className="text-xs text-red-400">{flow.error}</p>
+                        )}
+                      </div>
+                    )}
+                    {!connected && flow?.stage === "device" && (
+                      <div className="mt-3 space-y-2">
+                        <p className="text-xs text-[var(--text-muted)]">
+                          Enter this code on the {selectedDef.name} verification page. This panel updates by
+                          itself once you approve.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <span
+                            data-testid="hermes-oauth-user-code"
+                            className="rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-base font-mono font-semibold tracking-widest text-[var(--text-primary)]"
+                          >
+                            {flow.userCode}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => copyUserCode(flow.userCode)}
+                            className="rounded-lg border border-[var(--border-subtle)] px-2.5 py-2 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--surface-card)] transition-colors"
+                          >
+                            {codeCopied ? "Copied" : "Copy code"}
+                          </button>
+                        </div>
+                        {flow.verificationUrl && (
+                          <a
+                            href={flow.verificationUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-block text-xs font-semibold text-[var(--coral-bright)] underline"
+                          >
+                            Open the verification page
+                          </a>
+                        )}
+                        <div className="flex items-center gap-3">
+                          <p className="text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
+                            Waiting for approval...
+                          </p>
+                          <button
+                            type="button"
+                            onClick={resetSignin}
+                            className="text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
+                          >
+                            Start over
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {!connected && flow?.stage === "failed" && (
+                      <p role="alert" aria-live="polite" className="mt-2 text-xs text-red-400">{flow.message}</p>
+                    )}
                     {selectedDef.keyProvider && (
                       <p className="text-[11px] text-[var(--text-muted)] mt-2">…or paste an API key below instead.</p>
+                    )}
+                    {!connected && !external && (
+                      <p className="mt-2 text-[11px] text-[var(--text-muted)]">
+                        Advanced:{" "}
+                        <button
+                          type="button"
+                          onClick={openHermesOAuth}
+                          className="underline hover:text-[var(--text-secondary)]"
+                        >
+                          Hermes dashboard (LAN only)
+                        </button>
+                      </p>
                     )}
                   </div>
                 );

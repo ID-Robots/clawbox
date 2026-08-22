@@ -7,7 +7,10 @@
 #   sudo bash install.sh --step NAME  — run a single step (used by systemd)
 #
 # Environment variables:
-#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
+#   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main). When
+#                          set explicitly it is also persisted to
+#                          $PROJECT_DIR/.update-branch, so the device keeps
+#                          updating on the branch it was built with.
 #   NETWORK_INTERFACE    — WiFi interface override (default: auto-detect)
 set -euo pipefail
 
@@ -71,25 +74,88 @@ CLAWBOX_HOME="/home/clawbox"
 # exits non-zero, and a machine-readable marker is left for the flash host.
 PROVISION_FAILURES=()
 PROVISION_STATUS_FILE="${CLAWBOX_PROVISION_STATUS_FILE:-/etc/clawbox/provision-status}"
+# Identifies THIS run. Stamped into the marker and printed on stdout, so a
+# reader holding both can tell whose verdict it is looking at.
+PROVISION_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)-$$"
+# Set when the marker channel could not be made to describe this run. The final
+# verdict folds this in: a verdict we cannot publish is not a success.
+PROVISION_STATUS_UNPUBLISHED=0
 
 record_provision_failure() {
   PROVISION_FAILURES+=("$1")
+}
+
+# ── The marker must never speak for a run other than this one ────────────────
+# The flash host reads $PROVISION_STATUS_FILE INSTEAD of parsing stdout, so the
+# file has to satisfy two properties, neither of which "write it at the end and
+# hope" provides:
+#
+#   1. Never stale. A run that cannot write the marker (read-only /etc, a file
+#      owned by another user, a full disk) used to leave the PREVIOUS run's
+#      STATUS=ok sitting there, and the flash host read it as this run's verdict
+#      — the same false-healthy result this whole block exists to prevent. So
+#      the marker is DELETED before provisioning starts: if the file exists at
+#      the end, this run wrote it.
+#   2. Never half-written. Temp file + rename in the same directory, so a reader
+#      sees the whole old marker or the whole new one, and a truncated write
+#      cannot leave "STATUS=ok" with the rest of the record missing.
+#
+# When either cannot be guaranteed, that is itself a reason not to ship the box:
+# the run says so on stdout and its verdict becomes "incomplete". Staying quiet
+# is what produced the false "ok".
+
+# Drop any marker left behind by an earlier run. Called once, before the first
+# provisioning step of a full install.
+invalidate_provision_status() {
+  rm -f "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  # `rm -f` reports success for an already-absent file and failure for one it
+  # could not remove, so test the outcome rather than its exit status.
+  if [ -e "$PROVISION_STATUS_FILE" ]; then
+    PROVISION_STATUS_UNPUBLISHED=1
+    echo "  WARNING: could not clear the previous provisioning marker"
+    echo "           $PROVISION_STATUS_FILE — its contents describe an EARLIER"
+    echo "           run and must not be read as this one's verdict."
+    return 1
+  fi
+  return 0
 }
 
 # Persist the final provisioning verdict where the flash host (or an operator,
 # or the next update) can read it without re-parsing install.sh's stdout.
 write_provision_status() {
   local status="$1"; shift
-  local dir
+  local dir tmp failed=0
   dir="$(dirname "$PROVISION_STATUS_FILE")"
+  tmp="$PROVISION_STATUS_FILE.tmp.$$"
   mkdir -p "$dir" 2>/dev/null || true
-  {
+  if ! {
     echo "# Written by install.sh at the end of a full install. Machine-readable."
+    echo "# One marker per run: the previous one is removed before provisioning"
+    echo "# starts, so this file always describes the run named by RUN_ID."
+    echo "RUN_ID=$PROVISION_RUN_ID"
     echo "STATUS=$status"
     echo "FAILED_STEPS=$*"
     echo "TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"
-  } > "$PROVISION_STATUS_FILE" 2>/dev/null || true
-  chmod 644 "$PROVISION_STATUS_FILE" 2>/dev/null || true
+  } > "$tmp" 2>/dev/null; then
+    failed=1
+  else
+    chmod 644 "$tmp" 2>/dev/null || true
+    # Rename last: until this succeeds the live path holds nothing (it was
+    # cleared at the start), never a partial record.
+    mv -f "$tmp" "$PROVISION_STATUS_FILE" 2>/dev/null || failed=1
+  fi
+  # Either half failing means the same thing to the caller and wants the same
+  # answer, so there is one branch for both rather than two that must be kept
+  # saying the same thing.
+  if [ "$failed" -ne 0 ]; then
+    rm -f "$tmp" 2>/dev/null || true
+    PROVISION_STATUS_UNPUBLISHED=1
+    echo "  WARNING: could not publish $PROVISION_STATUS_FILE (status=$status)."
+    echo "           This run has no marker. Use install.sh's exit code or the"
+    echo "           [provision-status] line on stdout instead."
+    return 1
+  fi
+  return 0
 }
 
 # ── Edition (single-harness lock) ────────────────────────────────────────────
@@ -304,6 +370,27 @@ BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 OPENCLAW_VERSION="2026.7.1-2"
+# Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
+# the fleet runs the build WE chose instead of whatever
+# NousResearch/hermes-agent had on `main` the second a box was flashed.
+# Upstream lands ~150 commits a day and cuts a tag two or three times a week,
+# so every unpinned install lands on a different, untested tree.
+#
+# The value is the 40-char COMMIT the release tag points at — not the tag
+# name, and not the annotated tag object's own SHA. The upstream installer's
+# `--commit` takes a commit only and rejects abbreviated SHAs, while
+# `--branch <tag>` is worse than useless on an existing checkout: it rewrites
+# remote.origin.fetch to a refspec with no matching head and leaves
+# origin/main stale, which breaks the agent's own `hermes update` later.
+#
+# Overridable from the environment so QA can aim one device at another commit
+# without editing the file (`HERMES_PIN_COMMIT=<sha> sudo -E bash install.sh
+# --step hermes_install`), exactly as OPENCLAW_PIN_VERSION does for OpenClaw.
+# Bump the default in a PR, ship it through beta -> main, and the fleet
+# follows on its next update.
+#
+# Current pin: upstream tag v2026.8.19 == "Hermes Agent v0.20.5".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101}"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
@@ -995,7 +1082,27 @@ step_set_hostname() {
 is_safe_git_ref() {
   local ref="${1:-}"
   [ -n "$ref" ] || return 1
-  git check-ref-format --branch "$ref" >/dev/null 2>&1
+  # Two gates, and both are load-bearing.
+  #
+  # The character class mirrors src/lib/update-branch.ts. It is not redundant
+  # with git's check below: git happily accepts `feat/a+b`, the runtime updater
+  # refuses it, and a pin the updater refuses does not fail the update — it
+  # falls through to `main`. So install.sh must never write a ref the runtime
+  # would reject, or the device drifts while its pin still reads correct.
+  #
+  # git's own grammar check then rejects the names that are spelled with legal
+  # characters but are not branches: `HEAD`, `a..b`, `x/`, `a.lock`.
+  case "$ref" in
+    -*|/*|*[!A-Za-z0-9._/-]*) return 1 ;;
+  esac
+  # `-C /` so the answer depends on the ref and nothing else. check-ref-format
+  # needs no repository, but git still runs repository discovery from the
+  # working directory first, and a broken .git there (a moved worktree, a
+  # half-restored backup) makes it exit 128 for EVERY ref — which would look
+  # exactly like "no valid branch": no pin written, and the device falls back to
+  # main. install.sh is run from whatever directory the operator happened to be
+  # in, so that must not be able to decide this.
+  git -C / check-ref-format --branch "$ref" >/dev/null 2>&1
 }
 
 resolve_update_branch() {
@@ -1028,6 +1135,163 @@ resolve_update_branch() {
       UPDATE_TARGET_UPSTREAM="$upstream"
     fi
   fi
+}
+
+# The branch this checkout is already sitting on, when that is worth recording.
+# Prints nothing (and succeeds) when it is not.
+#
+# Deliberately narrow, because this runs without anyone having asked for a
+# branch. Every condition below is a case where writing a pin would be a guess
+# rather than a record:
+#   - not a repo, or HEAD is detached → there is no branch name to record. A
+#     detached device still falls through to `main`; see step_git_pull.
+#   - `main` → rule 3's fallback is already main, so a pin changes nothing today
+#     and would only freeze a device an operator later moves by hand.
+#   - not a ref both resolvers accept → a pin the updater refuses resolves to
+#     `main`, which is the very drift this function exists to prevent.
+#   - origin does not carry the branch → today such a device falls back to main
+#     and keeps updating. Pinning it would turn that into a hard failure at
+#     `reset --hard origin/<branch>` on every future update.
+adoptable_checkout_branch() {
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+  local current
+  current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ -n "$current" ] || return 0
+  [ "$current" != "main" ] || return 0
+  is_safe_git_ref "$current" || return 0
+  git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1 || return 0
+  printf '%s\n' "$current"
+}
+
+# Record the branch this device updates from, so the answer survives.
+#
+# resolve_update_branch() has always READ $PROJECT_DIR/.update-branch and never
+# written it, so the pin existed only if a human created it. Without one, a box
+# falls through to rule 2 — the current branch, and only if that branch tracks a
+# remote. That upstream *link* does not survive a re-clone even though the
+# branch does, so a device built from CLAWBOX_BRANCH=<x> could later resolve to
+# `main` and update itself onto a branch it was never built for. Two freshly
+# provisioned devices reached an operator with no pin at all.
+#
+# Three cases, in precedence order:
+#   - explicit CLAWBOX_BRANCH → write the pin, including OVER a different
+#     existing one. This is the precedence already documented in
+#     resolve_update_branch (CLAWBOX_BRANCH > .update-branch > current > main),
+#     and the repo is about to be hard-reset onto that branch; a pin still
+#     naming the old branch would make the very next unattended update pull the
+#     device straight back off it.
+#   - no CLAWBOX_BRANCH and NO pin at all → adopt the checked-out branch, if
+#     adoptable_checkout_branch vouches for it. This does not move the device;
+#     it records where it already is, before sync_repo_to_update_target
+#     overwrites the only evidence. It also settles a disagreement inside a
+#     single install run: the bootstrap block at the top of this file follows
+#     the checked-out branch with no upstream requirement and resets to it,
+#     while resolve_update_branch's rule 2 would then send the same box to main.
+#   - no CLAWBOX_BRANCH and a pin already present → never rewrite, never delete.
+#     An existing pin is somebody's explicit choice (operator, Settings UI, an
+#     earlier flash); a bare `sudo bash install.sh` and every updater-triggered
+#     `--step` must leave it exactly as found.
+persist_update_branch_pin() {
+  [ -d "$PROJECT_DIR" ] || return 0
+
+  local pin_file="$PROJECT_DIR/.update-branch"
+
+  # $PROJECT_DIR belongs to $CLAWBOX_USER and this function runs as root, so
+  # every path under it is writable by an account the writer outranks. A symlink
+  # left at the pin path would redirect the write, the chown and the chmod onto
+  # whatever it points at, and `[ -f ]` follows one. Refuse instead. The write
+  # goes through a temp file whose name mktemp chooses (see below), and `mv`
+  # replaces the pin's directory entry rather than following it.
+  if [ -L "$pin_file" ]; then
+    echo "  WARN: not pinning update branch — $pin_file is a symlink" >&2
+    return 0
+  fi
+
+  local existing=""
+  if [ -f "$pin_file" ]; then
+    existing=$(head -n 1 "$pin_file" | tr -d '[:space:]')
+  fi
+
+  local branch="${CLAWBOX_BRANCH:-}"
+  local pin_source="explicit CLAWBOX_BRANCH"
+  if [ -n "$branch" ]; then
+    if ! is_safe_git_ref "$branch"; then
+      echo "  WARN: not pinning update branch — '$branch' is not a valid git ref" >&2
+      branch=""
+    fi
+  elif [ -z "$existing" ]; then
+    branch="$(adoptable_checkout_branch)"
+    pin_source="the branch this checkout is on"
+  fi
+
+  if [ -n "$branch" ] && [ "$branch" != "$existing" ]; then
+    if [ -n "$existing" ]; then
+      # Repinning a device is never silent — an operator watching this run has
+      # to be able to see the branch it will follow from here on.
+      echo "  Re-pinning update branch '$existing' -> '$branch' ($pin_source)"
+    else
+      echo "  Pinning update branch to '$branch' ($pin_source)"
+    fi
+    # Stage the write in a directory of our own rather than beside the pin.
+    #
+    # A temp file placed directly in $PROJECT_DIR can be swapped for a symlink
+    # before the printf/chown/chmod land, because $PROJECT_DIR is writable by
+    # $CLAWBOX_USER. With a fixed name that needs no timing at all; the staging
+    # directory means an attacker must instead win a race on the directory
+    # entry between the mkdir and the write. The final step is a rename, which
+    # replaces the pin's directory entry and never follows a symlink left at it.
+    #
+    # It does NOT close that race, and 0700 is not what stops it: unlinking an
+    # entry is governed by the parent's write bit, which $CLAWBOX_USER has, so
+    # $stage can still be rmdir'd and replaced between the two lines below.
+    # Closing it needs descriptor-bound openat/renameat with no-follow
+    # semantics, which POSIX shell cannot express.
+    #
+    # That residual is accepted deliberately, and the reason is three lines
+    # further down: sync_repo_to_update_target runs `git reset --hard` as root
+    # inside this same app-writable tree and then `chown -R` over all of it.
+    # Whoever can win the race below already has a far larger version of the
+    # same primitive in the same step. Hardening the pin write past this point
+    # while that stands would be motion, not progress — if this class is worth
+    # closing it has to be closed for the tree, not for one file in it.
+    local stage="$PROJECT_DIR/.update-branch.stage" tmp_pin
+    rm -rf "$stage"
+    if ! (umask 077 && mkdir "$stage"); then
+      echo "  WARN: could not stage the update-branch pin write" >&2
+      return 0
+    fi
+    tmp_pin="$stage/pin"
+    if printf '%s\n' "$branch" > "$tmp_pin" \
+      && chown "$CLAWBOX_USER:$CLAWBOX_USER" "$tmp_pin" \
+      && chmod 644 "$tmp_pin" \
+      && mv -f "$tmp_pin" "$pin_file"; then
+      rm -rf "$stage"
+      return 0
+    fi
+    # Never leave the device's working tree holding staging litter.
+    rm -rf "$stage"
+    echo "  WARN: failed to write the update-branch pin" >&2
+    return 0
+  fi
+
+  # Nothing to write. Still re-assert owner and mode on an existing pin, and do
+  # it whether or not a branch was given: the web app runs as $CLAWBOX_USER and
+  # rewrites this file itself through /setup-api/system/update-branch, so a
+  # root-owned pin turns that POST into an EACCES — the same class of bug a
+  # root-owned data/ caused in the config store. Worse, a pin the app user
+  # cannot READ is invisible to the updater, which then resolves to `main` while
+  # this script (running as root) still reads the pin and disagrees. Repairing
+  # it unconditionally is what makes a pin left behind by a hand-written
+  # `sudo sh -c 'echo beta > .update-branch'` heal on the next run. 0644, not
+  # 0600: this is a build record, not a secret, and root reads it during the
+  # bootstrap re-exec before it drops to $CLAWBOX_USER.
+  [ -n "$existing" ] || return 0
+  if [ -n "$branch" ]; then
+    echo "  Update branch already pinned to '$branch'"
+  fi
+  chown "$CLAWBOX_USER:$CLAWBOX_USER" "$pin_file"
+  chmod 644 "$pin_file"
 }
 
 sync_repo_to_update_target() {
@@ -1067,22 +1331,35 @@ step_bootstrap_updater() {
 }
 
 step_git_pull() {
+  local fresh_clone=0
   if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "  Cloning from $REPO_URL (branch: $REPO_BRANCH)..."
     git clone --branch "$REPO_BRANCH" "$REPO_URL" "$PROJECT_DIR"
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
-  else
-    # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
-    # current branch > main) instead of a fast-forward-only merge. The old
-    # `merge --ff-only ... || echo continuing` silently kept stale code whenever
-    # the box had any local divergence, which then pinned config/openclaw-target.txt,
-    # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
-    # robust path the in-app updater takes: fetch, drop local changes, checkout,
-    # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
-    resolve_update_branch
-    echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
-    sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
+    fresh_clone=1
   fi
+
+  # Record the pin BEFORE anything moves the repo. sync_repo_to_update_target
+  # below checks out and hard-resets, so on an unpinned device the checked-out
+  # branch — the only surviving record of what this unit was built from — is
+  # gone by the time it returns. Writing the pin here also feeds
+  # resolve_update_branch's rule 1 on this very run, so the branch the device
+  # keeps is the branch this run installs. Early enough, too, that a later
+  # failed step still leaves a correctly pinned device.
+  persist_update_branch_pin
+
+  [ "$fresh_clone" -eq 0 ] || return 0
+
+  # Hard-sync to the resolved update branch (CLAWBOX_BRANCH > .update-branch >
+  # current branch > main) instead of a fast-forward-only merge. The old
+  # `merge --ff-only ... || echo continuing` silently kept stale code whenever
+  # the box had any local divergence, which then pinned config/openclaw-target.txt,
+  # OpenClaw, and the gateway to the old version (issue #202). Reuse the same
+  # robust path the in-app updater takes: fetch, drop local changes, checkout,
+  # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
+  resolve_update_branch
+  echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
+  sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 
 step_install_bun() {
@@ -1133,9 +1410,25 @@ step_hermes_install() {
   local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
   local venv_python="$agent_dir/venv/bin/python"
   local installed=""
+  local pin="$HERMES_PIN_COMMIT"
+
+  # The pin is spliced into a URL below and the file that URL returns is piped
+  # into bash, so it is validated before it is used. A malformed value — a tag
+  # name, a truncated SHA, an env override carrying a slash — would otherwise
+  # fetch some other path from the same host and run it. Refuse, and leave
+  # whatever agent the device already has alone.
+  if ! printf '%s' "$pin" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+    echo "  Warning: the Hermes pin is not a 40-char commit SHA — leaving the existing agent untouched" >&2
+    return 0
+  fi
+
   # One constant so the reachability precheck and the install itself can never
-  # drift onto different hosts.
-  local installer_url="https://hermes-agent.nousresearch.com/install.sh"
+  # drift onto different hosts — and it is served FROM the pinned tree, so the
+  # installer that runs is the one that shipped with the commit being asked
+  # for. The vanity host (hermes-agent.nousresearch.com/install.sh) serves
+  # main's copy of the same file: identical today, free to change its flags
+  # under us tomorrow.
+  local installer_url="https://raw.githubusercontent.com/NousResearch/hermes-agent/$pin/scripts/install.sh"
 
   # `$shim` alone is NOT evidence of an install: it is a 4-line wrapper in
   # ~/.local/bin that execs $venv_python, and the agent it points at lives
@@ -1167,9 +1460,30 @@ step_hermes_install() {
       "$shim" --version 2>/dev/null | head -1) || installed=""
   fi
 
+  # A version string cannot answer "is this the pinned build?": upstream prints
+  # the same `v0.20.5` for the tag and for every untagged commit after it, and
+  # there are hundreds of those a week. The checkout's HEAD is the only proof,
+  # so HEAD is what decides. Read as the clawbox user for the same reason the
+  # probe is: git refuses to operate on a repository owned by somebody else
+  # ("detected dubious ownership"), and root reading a clawbox-owned tree is
+  # exactly that case. `|| at_commit=""` for the errexit reason above — a
+  # checkout that is not a git repository must fall through, not abort.
+  local at_commit=""
   if [ -n "$installed" ]; then
-    echo "  Hermes already installed ($installed)"
-    return 0
+    at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
+    if [ "$at_commit" = "$pin" ]; then
+      echo "  Hermes already installed at the pinned commit ($installed)"
+      return 0
+    fi
+    # A working agent on the wrong commit takes the SAME path the unrunnable
+    # one takes — reachability precheck, current checkout moved aside,
+    # install, and the move undone if no working agent comes back. An upgrade
+    # that dies halfway must leave the owner with the agent they already had,
+    # which is the whole reason this step is built the way it is.
+    echo "  Hermes runs but is not on the pinned commit — upgrading"
+    echo "    have: ${at_commit:-unknown (not a git checkout)}"
+    echo "    want: $pin"
   fi
 
   # NOTHING above this line has modified the disk, and nothing below it does
@@ -1194,7 +1508,21 @@ step_hermes_install() {
   # diagnosis costs nothing. Renaming as ROOT is also required — the root-owned
   # __pycache__ above is not movable by the clawbox user the installer runs as.
   if [ -e "$agent_dir" ]; then
-    echo "  Hermes is present but not runnable — reinstalling the agent"
+    # One noun for whatever is being moved, set on the same arm that announces
+    # it. The move block below is shared by two very different devices — an
+    # agent that does not run, and an agent that runs fine and is merely on the
+    # wrong commit — and it used to call both of them "the unusable agent" one
+    # line after announcing "Moving the working agent aside". An owner reading
+    # that log on a healthy box has every reason to think the upgrade found
+    # something wrong with their device.
+    local moved_what
+    if [ -n "$installed" ]; then
+      moved_what="working agent"
+      echo "  Moving the $moved_what aside so the pinned install can be undone"
+    else
+      moved_what="unusable agent"
+      echo "  Hermes is present but not runnable — reinstalling the agent"
+    fi
     if [ -e "$agent_dir.broken" ]; then
       # An existing husk means an earlier repair was interrupted between the
       # move and the restore: the husk is the owner's original checkout and
@@ -1208,9 +1536,9 @@ step_hermes_install() {
         return 0
       fi
     elif mv "$agent_dir" "$agent_dir.broken"; then
-      echo "  Moved the unusable agent to $agent_dir.broken"
+      echo "  Moved the $moved_what to $agent_dir.broken"
     else
-      echo "  Warning: could not move the unusable agent aside — leaving it in place" >&2
+      echo "  Warning: could not move the $moved_what aside — leaving it in place" >&2
       return 0
     fi
     # The husk MUST be deletable by the clawbox user: the factory-reset route
@@ -1224,7 +1552,7 @@ step_hermes_install() {
       || echo "  Warning: could not give $agent_dir.broken to $CLAWBOX_USER" >&2
   fi
 
-  echo "  Installing Hermes agent (NousResearch)..."
+  echo "  Installing Hermes agent (NousResearch) at $pin..."
   # Official installer clones NousResearch/hermes-agent + builds a venv. Runs as
   # the clawbox user so it lands in ~/.hermes and ~/.local/bin. The URL is
   # passed as an argument rather than spliced into the -c string, so it stays a
@@ -1232,8 +1560,18 @@ step_hermes_install() {
   # because `curl | bash` otherwise exits 0 when the fetch fails (bash just
   # reads empty stdin) and the warning below could never fire; the timeouts
   # because the caller is a systemd unit with TimeoutStartSec=7200.
+  #
+  # `--force-commit` is not optional. For an existing checkout the upstream
+  # installer fetches, checks out and fast-forwards its branch (main) FIRST
+  # and only then applies `--commit`, skipping it with "Ignoring --commit …:
+  # the checkout is already newer" whenever the pin is an ancestor of what it
+  # just pulled — which is always, a tag being older than the main it was cut
+  # from. Without the flag the pin is a silent no-op on every install,
+  # including fresh ones, and boxes keep landing on random main commits.
+  # `bash -s --` is what gets the flags through the pipe to the script.
   runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
-    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash' _ "$installer_url" \
+    'curl -fsSL --connect-timeout 15 --max-time 600 "$1" | bash -s -- --commit "$2" --force-commit' \
+    _ "$installer_url" "$pin" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
   # Verify rather than assume. The installer is fetched over the network and is
@@ -1244,11 +1582,66 @@ step_hermes_install() {
   installed=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
     "$shim" --version 2>/dev/null | head -1) || installed=""
   if [ -n "$installed" ]; then
-    echo "  Hermes installed ($installed)"
+    at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
+      git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
+    if [ "$at_commit" = "$pin" ]; then
+      echo "  Hermes installed ($installed) at the pinned commit"
+    else
+      # The agent RUNS, so it is NOT rolled back: a working unpinned agent is
+      # worth more than the copy moved aside, which was unpinned too. Loud,
+      # because it means the pin did not take — upstream dropping
+      # `--force-commit` would look exactly like this — and the next update
+      # will pay for the whole upgrade again.
+      echo "  Warning: Hermes installed ($installed) but HEAD is ${at_commit:-unknown}, not the pin $pin" >&2
+    fi
     # Diagnosis confirmed, so the insurance copy goes: it costs ~1.9 GB
     # (checkout plus venv) on a disk-constrained device and is one more
     # directory a later factory reset has to be able to delete.
     rm -rf "$agent_dir.broken"
+
+    # The upgrade above is a move-aside plus a FRESH clone, and the bridge's
+    # ~80 MB node_modules is untracked — so every pinned upgrade deletes it.
+    # Nothing is broken by that: the pairing manager runs this same `npm
+    # install` the first time somebody asks for a WhatsApp QR, and it was
+    # watched doing so on hardware (bridgeReady false→true, QRs rotating).
+    # But it moves the cost to the worst possible moment — the owner has just
+    # clicked Pair and is waiting on a code — and a box that happens to be
+    # OFFLINE right then gets a pairing FAILURE where the same box would have
+    # paired before the upgrade. So pay for it here instead, while the updater
+    # demonstrably has the network and nobody is waiting.
+    #
+    # From the registry, NOT from the husk we just deleted. The husk's
+    # node_modules belongs to a DIFFERENT commit; moving it across would carry
+    # the old release's dependency tree into the new one's package.json.
+    #
+    # This runs only on the update that actually re-clones — a box already on
+    # the pin returns above and never reaches here — so a warm-up that fails
+    # falls back to the on-demand path, not to the next update.
+    #
+    # Best-effort in every direction, and deliberately so: skipped when there
+    # is nothing to warm (no bridge in this release, or its node_modules
+    # survived), time-boxed, and its failure is a WARNING. A successful Hermes
+    # install must never be reported as a failed step because an npm mirror was
+    # down — the on-demand path is still there and still works.
+    #
+    # 300s, not longer: step_post_update's budget is 900s total
+    # (src/lib/updater.ts) and this step is followed inside it by the Gemma
+    # re-cache, so a stalled registry must not be able to eat the rest of the
+    # update. An 80 MB install over a working link is far inside that, and what
+    # would consume the difference is npm's own retry backoff — exactly the
+    # case this block already declares non-fatal.
+    local bridge_dir="$agent_dir/scripts/whatsapp-bridge"
+    if [ -d "$bridge_dir" ] && [ ! -d "$bridge_dir/node_modules" ]; then
+      echo "  Warming up the WhatsApp bridge so the first pairing does not pay for it..."
+      # `env -C` gives the install its working directory without a wrapper
+      # shell to quote the path into, and leaves npm as timeout's direct child
+      # so the time box actually lands on it. HOME is explicit for the same
+      # reason as every other command in this step: npm caches under $HOME/.npm
+      # and this function's HOME is /root, which the clawbox user cannot write.
+      runuser -u "$CLAWBOX_USER" -- env -C "$bridge_dir" HOME="$CLAWBOX_HOME" \
+        timeout 300 npm install --no-fund --no-audit --progress=false \
+        || echo "  Warning: WhatsApp bridge warm-up failed (non-fatal) — the first pairing will install it on demand" >&2
+    fi
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
     # The diagnosis may simply have been wrong — an empty probe on a loaded
@@ -2327,6 +2720,11 @@ step_post_update() {
   # `pip install` is a no-op even after restore/scheduler bug fixes land —
   # we have to force-reinstall.
   step_clawkeep_install || echo "  Warning: clawkeep_install step failed (non-fatal)"
+  # The coding harness. WITHOUT this call TASK-378 would be fresh-install-only:
+  # step_post_update never ran step_ai_tools_install, which is exactly why no
+  # already-shipped box has `claude` on it today. Idempotent — a present
+  # `claude` short-circuits after one `command -v`, and the wrapper is a copy.
+  step_coding_harness || echo "  Warning: coding_harness step failed (non-fatal)"
   # On-device TTS: installs/refreshes the Piper fallback and seeds the
   # tts-local-cli provider. Without this call the whole of TASK-383 would be
   # fresh-install-only, and every already-shipped box would keep answering a
@@ -2353,8 +2751,13 @@ step_post_update() {
   # ~/.local/bin/hermes is not runnable — so the agent has to be repaired first
   # or the repair and the provisioning would fight each other.
   #
-  # Both are fast no-ops on a healthy box: step_hermes_install returns after a
-  # `--version` probe, step_llamacpp_model after a single `[ -f ]` test.
+  # Both are fast no-ops on a box that is already where it should be:
+  # step_hermes_install returns after a `--version` probe plus one
+  # `git rev-parse`, step_llamacpp_model after a single `[ -f ]` test. The one
+  # exception is a box whose agent predates $HERMES_PIN_COMMIT (or was moved
+  # off it by a hand-run `hermes update`, which reattaches to main): that box
+  # takes the reversible pinned upgrade ONCE — a clone plus venv build, ~90s
+  # measured — and is a no-op on every update after it.
   # step_hermes_install self-gates on has_hermes_harness; step_llamacpp_model
   # deliberately does not (see its comment).
   step_hermes_install || echo "  Warning: hermes_install step failed (non-fatal)"
@@ -3058,6 +3461,126 @@ step_chromium_install() {
 }
 
 
+# Claude Code, via Anthropic's NATIVE installer (Yanko, 2026-08-22 — not npm).
+#
+# Anthropic GEO-BLOCKS some regions and serves an HTML "App unavailable in
+# region" page with HTTP 200, so `curl -f` does NOT catch it. Piping that HTML
+# into `bash` yields `syntax error near unexpected token '<'`, and under
+# `set -euo pipefail` that aborted the ENTIRE reinstall — the later steps that
+# (re)start the gateway never ran and the box came up as an nginx 404 (Discord
+# "broke my clawbox", step [18/23]). Guard it: download to a file, verify it
+# looks like a shell script and not an HTML/region-block page, only then run
+# it, and never let failure escape.
+#
+# Runs AS the clawbox user, never under sudo: the installer installs into
+# $HOME and refuses to run as root from a user shell. It also wants ~512MB
+# free, so exit 137 on a Jetson means the OOM killer rather than a broken
+# install.
+#
+# Returns 0 when `claude` is present afterwards, 1 otherwise. Callers decide
+# whether that is fatal — for every caller today it is not.
+ensure_claude_code() {
+  # A LOGIN shell, like the two probes below it and like the in-UI terminal.
+  # `sudo -u clawbox bash -c` is non-interactive and non-login: it reads
+  # neither ~/.profile nor ~/.bashrc, so ~/.local/bin is not on its PATH and it
+  # answers "not installed" on a box where Claude Code works perfectly. That
+  # made this fast path dead — every install and every update re-downloaded the
+  # CLI — and it is the same false negative the task warns about for ssh.
+  if as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  Claude Code already installed"
+    return 0
+  fi
+
+  local installer rc=1
+  installer="$(mktemp)"
+  # --max-time bounds a STALLED vendor: this runs inside step_post_update, and
+  # every recovery step after it waits behind this download. --proto-redir keeps
+  # a redirect from stepping down to plain HTTP on the way to something we then
+  # execute as the clawbox user.
+  if curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --max-time 300 \
+       https://claude.ai/install.sh -o "$installer" 2>/dev/null \
+     && [ -s "$installer" ] \
+     && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region' \
+     && chown "$CLAWBOX_USER" "$installer"; then
+    # The chown is why this ever works, and it has to be HERE — after the
+    # download, before the run.
+    #
+    # mktemp makes the file root:root 0600 and the installer is executed AS the
+    # clawbox user, so without it every run on every box answered
+    # "bash: /tmp/tmp.XXXX: Permission denied" and then "installer ran but
+    # failed". That is the other half of why no ClawBox in the field has
+    # `claude`: the missing post_update caller was only the first half.
+    #
+    # And it cannot move earlier. /tmp is sticky and world-writable, and these
+    # devices run fs.protected_regular=2 (verified on .65), under which even
+    # root may not write a file in such a directory that it does not own — a
+    # chown before the download turns the curl into
+    # "(23) Failure writing output to destination". Both failure modes were
+    # observed on hardware on 2026-08-22, one after the other.
+    if sudo -u "$CLAWBOX_USER" bash "$installer" </dev/null; then
+      echo "  Claude Code installed"
+      rc=0
+    else
+      echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
+    fi
+  else
+    echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
+  fi
+  rm -f "$installer"
+  return "$rc"
+}
+
+# The `claude-ds` wrapper — Claude Code pointed at ClawBox AI (TASK-378).
+#
+# COPIED out of the checkout rather than symlinked. A symlink would break the
+# harness for as long as any update leaves the repo mid-checkout, and the copy
+# is refreshed on every install and every in-app update, so it cannot drift.
+install_claude_ds_wrapper() {
+  local src="$PROJECT_DIR/scripts/claude-ds"
+  local dest="$CLAWBOX_HOME/.local/bin/claude-ds"
+
+  if [ ! -f "$src" ]; then
+    echo "  WARN: $src missing; claude-ds not installed"
+    return 1
+  fi
+
+  install -d -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$CLAWBOX_HOME/.local/bin"
+  install -o "$CLAWBOX_USER" -g "$CLAWBOX_USER" -m 755 "$src" "$dest"
+  echo "  claude-ds installed at $dest"
+}
+
+# The ClawBox coding harness: Claude Code plus the claude-ds wrapper that
+# drives it through ClawBox AI.
+#
+# Split out of step_ai_tools_install and dispatchable on its own because
+# step_post_update calls THIS and not the bigger step: an in-app update should
+# deliver the harness without also reinstalling the Codex and Gemini CLIs on
+# every box that updates.
+step_coding_harness() {
+  # Test mode has no network for claude.ai and no reason to download a binary,
+  # but the wrapper is a file copy — install it so e2e-install exercises the
+  # real delivery path instead of skipping the whole step.
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping the Claude Code download"
+  else
+    ensure_claude_code || true
+  fi
+  install_claude_ds_wrapper || true
+  ensure_clawbox_bashrc_path
+
+  # Say plainly whether the harness can actually run. Without this the only
+  # symptom of a failed CLI install is the wrapper telling the owner to run
+  # this very step again — a loop with no diagnosis in it.
+  if is_test_mode; then
+    :
+  elif as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
+  else
+    echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is"
+  fi
+}
+
 step_ai_tools_install() {
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping Claude/Codex/Gemini CLI install"
@@ -3069,32 +3592,7 @@ step_ai_tools_install() {
   # `set -euo pipefail`, so every risky command is guarded inside an `if`
   # (where errexit is suspended) and failures only log a WARN.
 
-  # Claude Code — Anthropic GEO-BLOCKS some regions and serves an HTML
-  # "App unavailable in region" page with HTTP 200 (so `curl -f` does NOT
-  # catch it). Piping that HTML into `bash` yields
-  # `syntax error near unexpected token '<'`, and under `set -euo pipefail`
-  # that aborted the ENTIRE reinstall right here — so the later steps that
-  # (re)start the gateway never ran and the box came up as an nginx 404
-  # (Discord "broke my clawbox", step [18/23]). Guard it: download to a file,
-  # verify it looks like a shell script and not an HTML/region-block page,
-  # only then run it, and never let failure escape this step.
-  if sudo -u "$CLAWBOX_USER" bash -c 'command -v claude' &>/dev/null; then
-    echo "  Claude Code already installed"
-  else
-    _claude_installer="$(mktemp)"
-    if curl -fsSL https://claude.ai/install.sh -o "$_claude_installer" 2>/dev/null \
-       && [ -s "$_claude_installer" ] \
-       && ! head -c 512 "$_claude_installer" | grep -qiE '<!doctype|<html|unavailable in region'; then
-      if sudo -u "$CLAWBOX_USER" bash "$_claude_installer" </dev/null; then
-        echo "  Claude Code installed"
-      else
-        echo "  WARN: Claude Code installer ran but failed; skipping (optional, continuing)"
-      fi
-    else
-      echo "  WARN: Claude Code installer unavailable or region-blocked (non-script response); skipping (optional, continuing)"
-    fi
-    rm -f "$_claude_installer"
-  fi
+  ensure_claude_code || true
 
   # OpenAI Codex CLI (optional)
   if as_clawbox_login "command -v codex" &>/dev/null; then
@@ -3114,9 +3612,13 @@ step_ai_tools_install() {
     echo "  WARN: Gemini CLI install failed; skipping (optional, continuing)"
   fi
 
-  # Make claude / codex / gemini resolvable in the in-UI terminal's interactive
-  # shell (covers the standalone `step_ai_tools_install` invocation path where
-  # step_openclaw_install hasn't run).
+  # The claude-ds wrapper is deliberately NOT installed here. step_coding_harness
+  # owns it, and this step early-returns in test mode — which is exactly the
+  # environment e2e-install proves the delivery path in.
+
+  # Make claude / claude-ds / codex / gemini resolvable in the in-UI terminal's
+  # interactive shell (covers the standalone `step_ai_tools_install` invocation
+  # path where step_openclaw_install hasn't run).
   ensure_clawbox_bashrc_path
 }
 
@@ -3583,7 +4085,7 @@ step_validate_services() {
 # Steps available for --step dispatch (must have a corresponding step_NAME function)
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
-  chromium_install ai_tools_install vnc_install vnc_refresh
+  chromium_install ai_tools_install coding_harness vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # Edition steps must be dispatchable or no in-app update can ever re-bake the
   # lock, install Hermes, or repair a Hermes appliance — which is how a Hermes
@@ -3629,6 +4131,12 @@ log() {
 }
 
 echo "=== ClawBox Installer ==="
+
+# Clear the previous run's verdict BEFORE provisioning anything. From here until
+# the summary at the bottom there is deliberately no marker on disk, so a run
+# that dies mid-way (or cannot write its own marker at the end) leaves the flash
+# host with "no verdict" rather than with the last run's "ok".
+invalidate_provision_status || true
 
 log "Ensuring clawbox user exists..."
 step_ensure_user
@@ -3698,6 +4206,9 @@ step_cloudflared_install
 
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install
+
+log "Installing the ClawBox coding harness (claude-ds)..."
+step_coding_harness
 
 log "Installing VNC server..."
 step_vnc_install
@@ -3771,7 +4282,9 @@ echo ""
 # success by the caller (the flash host's "Setup: N/N succeeded"). The marker
 # file carries the same verdict for a caller that reads a file instead of the
 # exit code, and the sentinel line ([provision-status] ...) for one that greps
-# stdout. Keep all three in agreement.
+# stdout. Keep all three in agreement — including when the marker cannot be
+# written at all, in which case the other two must report "incomplete" rather
+# than a success no reader of the file can see.
 FINAL_RC=0
 if [ "${#PROVISION_FAILURES[@]}" -gt 0 ] || [ "${VALIDATE_RC:-0}" -ne 0 ]; then
   FINAL_RC=1
@@ -3789,11 +4302,29 @@ if [ "$FINAL_RC" -ne 0 ]; then
     echo "  # Service validation FAILED (see the checks listed above)."
   fi
   echo "  ############################################################"
-  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}"
+  write_provision_status incomplete "${PROVISION_FAILURES[*]:-}" || true
+  # The sentinel lines below are a stdout contract with the flash host: keep the
+  # prefix and the verdict word byte-identical. The run id goes on its own line.
   echo "[provision-status] INCOMPLETE${PROVISION_FAILURES[*]:+ (${PROVISION_FAILURES[*]})}"
+  echo "[provision-run] $PROVISION_RUN_ID"
 else
-  write_provision_status ok ""
-  echo "[provision-status] OK"
+  write_provision_status ok "" || true
+  if [ "$PROVISION_STATUS_UNPUBLISHED" -ne 0 ]; then
+    # Every step passed, but the channel the flash host reads cannot be made to
+    # say so for THIS run. Reporting success here is how a stale marker gets
+    # read as a fresh verdict, so downgrade instead: an install whose result
+    # cannot be published is not an install anyone should ship.
+    FINAL_RC=1
+    echo "  ############################################################"
+    echo "  # PROVISIONING INCOMPLETE — every step passed, but this run"
+    echo "  # could not publish its verdict to $PROVISION_STATUS_FILE."
+    echo "  # Do NOT ship this box as healthy; fix the path and re-run."
+    echo "  ############################################################"
+    echo "[provision-status] INCOMPLETE (marker unwritable)"
+  else
+    echo "[provision-status] OK"
+  fi
+  echo "[provision-run] $PROVISION_RUN_ID"
 fi
 
 exit "$FINAL_RC"

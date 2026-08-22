@@ -23,6 +23,7 @@ describe("GET /setup-api/update/versions", () => {
     mockGetVersionInfo.mockResolvedValue({
       clawbox: { current: "v2.2.2", target: "v2.2.3" },
       openclaw: { current: "2026.4.5", target: "2026.4.6" },
+      edition: "openclaw",
     });
 
     const mod = await import("@/app/setup-api/update/versions/route");
@@ -36,8 +37,28 @@ describe("GET /setup-api/update/versions", () => {
     await expect(response.json()).resolves.toEqual({
       clawbox: { current: "v2.2.2", target: "v2.2.3" },
       openclaw: { current: "2026.4.5", target: "2026.4.6" },
+      edition: "openclaw",
     });
     expect(mockInvalidateVersionCache).not.toHaveBeenCalled();
+  });
+
+  // The About screen reads the harness version from this route; it must carry
+  // the hermes component through untouched rather than flattening it away.
+  it("passes the Hermes component through on a hermes device", async () => {
+    mockGetVersionInfo.mockResolvedValue({
+      clawbox: { current: "v3.1.0", target: null },
+      openclaw: { current: null, target: null },
+      hermes: { current: "v0.20.5", target: null, updateAvailable: false },
+      edition: "hermes",
+    });
+
+    const response = await getVersions(makeRequest());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      hermes: { current: "v0.20.5", target: null, updateAvailable: false },
+      edition: "hermes",
+    });
   });
 
   it("force=1 invalidates the cache before reading versions", async () => {

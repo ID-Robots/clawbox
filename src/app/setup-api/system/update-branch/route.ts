@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
 import { readFile, writeFile, unlink } from "fs/promises";
 import path from "path";
+import { isSafeBranch } from "@/lib/update-branch";
 
 export const dynamic = "force-dynamic";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
-// Reject a leading '-' (or '/') so an attacker-chosen branch can't smuggle a
-// git option flag (e.g. "-D"/"--all") into the updater's checkout/fetch and
-// brick it. Mirrors SAFE_BRANCH in src/lib/updater.ts.
-const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
 
 function isEnoent(err: unknown): boolean {
   return !!(err && typeof err === "object" && "code" in err && err.code === "ENOENT");
@@ -42,7 +39,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true, branch: null });
     }
 
-    if (typeof branch !== "string" || !SAFE_BRANCH.test(branch)) {
+    // Shared with the updater and mirrored by install.sh — a value accepted
+    // here but refused there does not error, it silently resolves to `main`.
+    if (typeof branch !== "string" || !isSafeBranch(branch)) {
       return NextResponse.json({ error: "Invalid branch name" }, { status: 400 });
     }
 

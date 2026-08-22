@@ -148,6 +148,8 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes
   "/setup-api/gateway/ws-config", // hands back the live gateway auth token
   "/setup-api/chat",        // reads generated media out of the harness media tree
+  "/setup-api/local-models", // POST enables/disables real systemd units through sudo
+  "/setup-api/tts",         // POST rewrites messages.tts.provider and spawns the openclaw CLI
   // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
   // AP, so anything left pre-auth is reachable by anyone in radio range.
   //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.
@@ -180,6 +182,15 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
 // gateway token into HTML, so it stays gated.
 const PRE_AUTH_SENSITIVE_EXACT = new Set([
   "/setup-api/gateway",
+  // The leaf only, NOT the `/setup-api/mascot-lines` subtree: the GET is what
+  // the crab reads its phrases from and it runs on the wizard, so gating the
+  // subtree would leave the mascot mute during setup. The POST is the
+  // expensive half — each call cold-loads a ~3.8 GB model on a Jetson for up
+  // to three minutes — and it has no onboarding role at all: its only caller
+  // is the Settings button, which is desktop-only and therefore post-setup.
+  // Left ungated it was a free way for anyone in radio range of the open
+  // `ClawBox-Setup` AP to pin the box's memory and CPU.
+  "/setup-api/mascot-lines/regenerate",
 ]);
 
 function isSensitiveSetupApi(pathname: string): boolean {

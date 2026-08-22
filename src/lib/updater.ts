@@ -9,8 +9,11 @@ import {
   openclawIsAbsent,
   gatewayIsAbsent,
 } from "./openclaw-config";
-import { hasHermesHarness } from "./edition-source";
+import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
+import { runHermesCli } from "./hermes-cli";
 import { isPortOpen } from "./port-probe";
+import { parseHermesVersion } from "./version-utils";
+import { isSafeBranch } from "./update-branch";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -195,18 +198,28 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
   });
 }
 
-/** Validate branch name — only safe git ref characters allowed (prevents shell injection). */
-// The negative lookahead rejects a leading '-' (or '/'): a branch token that
-// starts with '-' is parsed by git as an option flag (e.g. "-D", "--all")
-// rather than a ref, which smuggles switches into the checkout/fetch commands
-// and bricks the updater. Real branch names never start with '-' or '/'.
-const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
-
 /**
  * Determine which branch to update to, in priority order:
  * 1. `.update-branch` file in project root (survives factory reset + git reset)
  * 2. Current branch if it tracks a remote
  * 3. "main" as the default fallback
+ *
+ * Rule 1 survives a factory reset because the reset route wipes `data/`,
+ * `~/.openclaw`, `~/.clawkeep` and a list of home dotfiles — never the project
+ * root itself — and survives `git reset --hard` because the file is gitignored.
+ * Both are pinned by src/tests/unit/install-update-branch-pin.test.ts.
+ *
+ * The pin is written by install.sh (persist_update_branch_pin) and by the
+ * operator through /setup-api/system/update-branch. install.sh writes it for an
+ * explicit CLAWBOX_BRANCH, and — when the device carries no pin at all — adopts
+ * the branch the checkout is already sitting on, because rule 2 is weak: a
+ * branch's upstream *link* does not survive a re-clone even though the branch
+ * does, and an unpinned device then falls silently through to `main`.
+ *
+ * Rules 2 and 3 are why a rejected pin is worse than no pin: an unreadable or
+ * malformed value does not fail the update, it quietly becomes `main`. The
+ * validator is therefore shared with the Settings route and mirrored by
+ * install.sh's `is_safe_git_ref` — see src/lib/update-branch.ts.
  */
 interface ResolvedBranch {
   /** Local branch to checkout */
@@ -221,7 +234,7 @@ async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
   // 1. Check .update-branch file
   try {
     const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
-    if (pinned && SAFE_BRANCH.test(pinned)) {
+    if (pinned && isSafeBranch(pinned)) {
       return { local: pinned, upstream: `origin/${pinned}` };
     }
   } catch { /* file doesn't exist */ }
@@ -233,14 +246,14 @@ async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
       { timeout: 10_000 },
     );
     const current = branchOut.trim();
-    if (!current || current === "main" || !SAFE_BRANCH.test(current)) return main;
+    if (!current || current === "main" || !isSafeBranch(current)) return main;
 
     const { stdout: upstreamOut } = await execShell(
       `${gitCmd} rev-parse --abbrev-ref ${current}@{u}`,
       { timeout: 10_000 },
     );
     const upstream = upstreamOut.trim();
-    if (upstream && SAFE_BRANCH.test(upstream)) {
+    if (upstream && isSafeBranch(upstream)) {
       return { local: current, upstream };
     }
   } catch {
@@ -607,6 +620,22 @@ interface ComponentVersionInfo {
 interface VersionInfo {
   clawbox: ComponentVersionInfo & { current: string };
   openclaw: ComponentVersionInfo;
+  /**
+   * The Hermes agent, reported ONLY on the SKUs that ship it (`hermes` and
+   * `dual`). Absent — not null — on `openclaw`, so the field's presence is
+   * itself the "this device has a Hermes to talk about" signal and the UI
+   * never has to guess.
+   */
+  hermes?: ComponentVersionInfo;
+  /**
+   * Which harnesses this device actually has. The About screen needs it to
+   * decide which version rows are meaningful: a Hermes box has no OpenClaw
+   * at all, so an "OpenClaw: not installed" row there is noise, not news.
+   *
+   * Additive: an older client that ignores this field renders exactly as
+   * before.
+   */
+  edition: EditionName;
 }
 
 let cachedVersionInfo: VersionInfo | null = null;
@@ -667,6 +696,30 @@ async function readClawboxVersion(): Promise<string> {
   return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
 }
 
+/**
+ * The installed Hermes agent version, or null if it cannot be determined.
+ *
+ * The caller MUST gate this on the edition: `openclaw` boxes have no Hermes
+ * binary, and spawning one there would be a guaranteed ENOENT on every
+ * version read. It is only ever reached from getVersionInfo(), whose whole
+ * result is cached for TARGET_VERSION_CACHE_TTL, so the About screen polling
+ * for versions cannot turn into a subprocess storm.
+ *
+ * Never throws: a device mid-upgrade (the Hermes installer briefly replaces
+ * the venv the shim execs) should report an unknown version for a few
+ * seconds, not fail the whole version endpoint that ClawBox's own update
+ * tile also depends on.
+ */
+async function readHermesVersion(): Promise<string | null> {
+  try {
+    const { code, stdout } = await runHermesCli(["--version"], { timeoutMs: 10_000 });
+    if (code !== 0) return null;
+    return parseHermesVersion(stdout);
+  } catch {
+    return null;
+  }
+}
+
 async function getPinnedBranchTarget(gitCmd: string): Promise<{
   branch: string;
   currentSha: string;
@@ -678,7 +731,7 @@ async function getPinnedBranchTarget(gitCmd: string): Promise<{
   } catch {
     return null;
   }
-  if (!branch || !SAFE_BRANCH.test(branch)) return null;
+  if (!branch || !isSafeBranch(branch)) return null;
 
   try {
     await execShell(`${gitCmd} fetch --quiet origin ${branch}`, { timeout: 20_000 }).catch(() => {});
@@ -701,7 +754,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   }
 
   const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
-  const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
+  const edition = readEdition();
+  const hasHermes = hasHermesHarness();
+  const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent] = await Promise.all([
     getTargetVersion(),
     // The Hermes edition ships no openclaw binary, so skip the spawn and read
     // the version from the installed package.json (absent there too → null,
@@ -726,6 +781,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       }
     })(),
     readClawboxVersion(),
+    // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
+    // hermes binary, so this must never spawn there.
+    hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
   const pinnedBranchTarget = await getPinnedBranchTarget(gitCmd);
 
@@ -753,6 +811,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
       updateAvailable: !!(openclawTarget && openclawCurrent && !openclawCurrent.includes(openclawTarget)),
     },
+    // Hermes ships from its own upstream installer, not from a ClawBox pin, so
+    // there is no target to converge on and nothing to offer an update for —
+    // only the installed version is reportable.
+    ...(hasHermes
+      ? { hermes: { current: hermesCurrent, target: null, updateAvailable: false } }
+      : {}),
+    edition,
   };
   versionInfoCacheTime = Date.now();
   return cachedVersionInfo;

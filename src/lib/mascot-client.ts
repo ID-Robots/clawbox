@@ -74,6 +74,21 @@ export async function fetchPhraseSet(locale: string): Promise<MascotPhraseSet> {
 }
 
 /**
+ * Forget the fetched phrases so the next `fetchPhraseSet` goes back to the
+ * server.
+ *
+ * Needed because the cache key is `${date}:${locale}` — without this, phrases
+ * the owner just asked Settings to regenerate would not appear until the date
+ * rolled over. `lastByLocale` is cleared too: it is the stale-day fallback,
+ * and after a deliberate regen the OLD lines are exactly what nobody wants
+ * back.
+ */
+export function clearPhraseCache(): void {
+  phraseCache.clear();
+  lastByLocale.clear();
+}
+
+/**
  * The phrases to render right now, without awaiting anything: the locale's
  * pack if it is already in memory, the neutral (emoji-only) pack otherwise.
  * Used for the mascot's very first tick — it must never be English on a

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_RECORDING_MS,
   RECORDING_MIME_CANDIDATES,
+  classifyCaptureAvailability,
   classifyCaptureError,
   describeTranscribeFailure,
   formatRecordingClock,
@@ -156,5 +157,56 @@ describe("MAX_RECORDING_MS", () => {
     // its way into a 413, and long enough that no dictation a person actually
     // speaks gets cut off mid-sentence.
     expect(MAX_RECORDING_MS).toBe(10 * 60 * 1000);
+  });
+});
+
+describe("classifyCaptureAvailability", () => {
+  // TASK-470. `http://<ip>/` and `http://clawbox.local/` — the ordinary way a
+  // customer reaches their box on the LAN — are not secure contexts, so the
+  // browser deletes `navigator.mediaDevices` outright. Telling that owner
+  // "this browser cannot record audio" sends them to check a browser that is
+  // working perfectly, and no permission they grant can ever help.
+  it("blames the insecure origin when the capture API is missing there", () => {
+    expect(classifyCaptureAvailability({
+      secureContext: false,
+      hasMediaDevices: false,
+      hasMediaRecorder: true,
+    })).toBe("insecure");
+  });
+
+  it("still blames the browser when a SECURE origin has no capture API", () => {
+    // Same missing API, different cause: on https or localhost the origin is
+    // not the problem, so the old message is the honest one.
+    expect(classifyCaptureAvailability({
+      secureContext: true,
+      hasMediaDevices: false,
+      hasMediaRecorder: true,
+    })).toBe("unsupported");
+  });
+
+  it("reports unsupported when MediaRecorder is missing on a secure origin", () => {
+    expect(classifyCaptureAvailability({
+      secureContext: true,
+      hasMediaDevices: true,
+      hasMediaRecorder: false,
+    })).toBe("unsupported");
+  });
+
+  it("allows capture when the browser has both halves", () => {
+    expect(classifyCaptureAvailability({
+      secureContext: true,
+      hasMediaDevices: true,
+      hasMediaRecorder: true,
+    })).toBe("ok");
+  });
+
+  it("does not refuse a working insecure-origin browser it cannot explain", () => {
+    // Belt and braces: if a browser ever DID expose capture on an insecure
+    // origin, the availability check must not be what takes it away.
+    expect(classifyCaptureAvailability({
+      secureContext: false,
+      hasMediaDevices: true,
+      hasMediaRecorder: true,
+    })).toBe("ok");
   });
 });

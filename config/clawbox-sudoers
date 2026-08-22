@@ -63,6 +63,16 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel
 
+# Ollama, for Settings -> Local Models. Ollama is a system unit and it holds
+# real RAM on an 8 GB box, so the owner has to be able to stop it and have it
+# stay stopped; until this grant existed nothing in the UI could. `--now` is
+# part of the command string because sudoers matches the argument list exactly
+# and the UI always issues enable/disable together with it, so a grant without
+# --now would never match and the toggle would fail closed on a password
+# prompt no one can answer.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  --now ollama.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable --now ollama.service
+
 # Update / power / install paths.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed *
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block *
