@@ -71,6 +71,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Ask Discord who this token belongs to.
  *
+ * Sending a stored credential outward is the whole point of this function, so
+ * the status route's "a value read from disk reaches an outbound request" shape
+ * is the feature rather than a leak. What keeps it that way: the destination is
+ * DISCORD_API_BASE, a module constant that no caller and no request can steer;
+ * the token travels only in the Authorization header; and the one caller that
+ * takes an operator-supplied token has already run it through
+ * isSafeDiscordToken. Same class as the other credential-check calls in the
+ * tree.
+ *
  * @throws {DiscordAuthError} the token is not valid (HTTP 401).
  * @throws {DiscordUnavailableError} Discord could not be reached or did not
  *   answer usefully — the caller must NOT treat this as a bad token.

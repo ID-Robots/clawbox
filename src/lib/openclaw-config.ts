@@ -751,6 +751,13 @@ export const DISCORD_ENV_PATH = path.join(DATA_DIR, "discord.env");
  * The value is interpolated unquoted, which is safe only because the caller has
  * already restricted the token to `[A-Za-z0-9._-]` (isSafeDiscordToken) — no
  * newline can split the line, no quote can escape it.
+ *
+ * That same guard is the answer to "a request body ends up in a file here". The
+ * destination is DISCORD_ENV_PATH, a module constant, so nothing request-derived
+ * chooses where this lands; the only request-derived part is the token, which
+ * has to BE the credential for the write to be worth doing at all. The configure
+ * route rejects anything outside that charset before reaching this, and Discord
+ * itself has to accept the token before the write happens.
  */
 export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true });

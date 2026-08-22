@@ -1421,9 +1421,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // + embed links + send in threads + add reactions: what the agent needs to
   // hold a conversation, and nothing that can moderate or manage a server.
   const DISCORD_INVITE_PERMISSIONS = "274878286912";
-  const dcAppIdValid = /^\d{15,25}$/.test(dcAppId.trim());
+  // Trim once and build the link from that exact string: the digits-only test
+  // and the interpolation have to see the same value for the guard to mean
+  // anything. Bound to one const, "only 15-25 digits, behind a literal
+  // https://discord.com/ prefix, ever reaches href" holds by construction.
+  const dcAppIdTrimmed = dcAppId.trim();
+  const dcAppIdValid = /^\d{15,25}$/.test(dcAppIdTrimmed);
   const dcInviteUrl = dcAppIdValid
-    ? `https://discord.com/oauth2/authorize?client_id=${dcAppId.trim()}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`
+    ? `https://discord.com/oauth2/authorize?client_id=${dcAppIdTrimmed}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`
     : null;
 
   const saveDiscord = async () => {
