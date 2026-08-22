@@ -16,8 +16,7 @@ import {
 import {
   CLAWAI_TIER_INFO,
   CLAWAI_TIER_STORAGE_KEY,
-  deviceTierToUiTier,
-  normalizeClawaiUiTier,
+  resolveUiTier,
   uiTierToDeviceTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
@@ -90,32 +89,6 @@ interface Props {
 // "connected" state to register and short enough not to feel stalled. This panel
 // is the SAME step on a Hermes device, so it advances the same way.
 const AUTO_ADVANCE_DELAY_MS = 900;
-
-function readStoredUiTier(): ClawaiTier {
-  if (typeof window === "undefined") return "flash";
-  try {
-    return normalizeClawaiUiTier(window.localStorage?.getItem(CLAWAI_TIER_STORAGE_KEY)) ?? "flash";
-  } catch {
-    return "flash";
-  }
-}
-
-/**
- * Which PLAN card to show for a paired device.
- *
- * The device tier cannot represent Free: `uiTierToDeviceTier` maps both "free"
- * and "flash" to the device's "flash" (Free and Pro run the same DeepSeek V4
- * Flash weights), so a stored "flash" means Free OR Pro. Trusting it blindly
- * showed "Pro plan — €9/month" to a Free user, and made this panel disagree
- * with the OpenClaw wizard, which reads the stored UI intent. "pro" (Max) is
- * unambiguous and always wins over local storage.
- */
-function resolveUiTier(hasToken: boolean, tierStored: string | null): ClawaiTier {
-  if (!hasToken) return readStoredUiTier();
-  const device = deviceTierToUiTier(tierStored);
-  if (device !== "flash") return device;
-  return readStoredUiTier() === "free" ? "free" : "flash";
-}
 
 export default function HermesProviderConfig({ embedded, onNext, testId }: Props) {
   const uid = useId();
