@@ -15,14 +15,22 @@ Get from a sealed box to a working AI assistant in a few minutes.
 <Steps>
   <Step title="Power on">
     Connect the included USB-C power supply and (optionally) an Ethernet cable.
-    The status light comes on and ClawBox boots in under a minute.
+    ClawBox boots in about a minute; the `ClawBox-Setup` network appearing in your Wi-Fi list is the signal that it is ready.
   </Step>
-  <Step title="Open the setup page">
-    From a phone or laptop on the same network, visit [http://clawbox.local](http://clawbox.local).
-    If that doesn't resolve, use the device's IP address (see [First Boot](/setup/first-boot)).
+  <Step title="Join the setup hotspot and open the wizard">
+    On first boot the box has not joined your network yet — it hosts its own. From a phone
+    or laptop, join the open **`ClawBox-Setup`** Wi-Fi network and browse to
+    **`http://10.42.0.1`** (`http://10.43.0.1` if your network already uses `10.42.0.0/24`).
+    See [First Boot](/setup/first-boot).
   </Step>
   <Step title="Connect to the internet">
-    Join your Wi-Fi or confirm the Ethernet connection. See [Connect to a Network](/setup/connect-network).
+    Join your Wi-Fi or confirm the Ethernet connection, then rejoin your own network to
+    continue. See [Connect to a Network](/setup/connect-network). Afterwards the box lives at
+    `http://<device-ip>`, or `http://clawbox.local` where mDNS works.
+  </Step>
+  <Step title="Update and set your password">
+    The wizard runs a system update, then asks you to set the device password — the same one
+    for the browser login and for SSH.
   </Step>
   <Step title="Pick your AI provider">
     ClawBox AI works out of the box. To use Claude, GPT, Gemini, or a local model,
