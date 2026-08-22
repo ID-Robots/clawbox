@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useEffect, useState, useCallback, useRef, memo } from 'react'
+import React, { useEffect, useLayoutEffect, useState, useCallback, useRef, memo } from 'react'
 import * as kv from '@/lib/client-kv'
 import { useT } from '@/lib/i18n'
 import { type MascotPhraseSet } from '@/lib/mascot-phrases'
@@ -11,7 +11,8 @@ import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
 import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
-import PetSprite, { PET_BODY_PX } from '@/components/PetSprite'
+import PetSprite from '@/components/PetSprite'
+import { petLayout, widestFreeSpan, PET_BODY_PX, type PetLayout, type Span } from '@/lib/pet-layout'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -63,19 +64,71 @@ const CRAB_BOUNDS = { min: 2, max: 92 }
 const CRAB_BODY_PX = 150
 
 /**
- * Clearance between the top of a pet's CELL and the bottom of its bubble.
+ * Clearance between the top of the pet's VISIBLE ART and its bubble.
  *
- * Measured off the cell, not the visible art: a Petdex sheet insets its
- * character inside the 192x208 cell by an amount that differs per pet and per
- * animation row, and nothing on this side can know it. Anchoring to the cell is
- * the only offset that guarantees the bubble clears the topmost pixel of EVERY
- * pet in EVERY state — it just reads as a slightly bigger gap for a pet that
- * sits low in its cell. Large enough to swallow the bubble's own 6px tail and
- * still leave an obvious gap.
+ * Measured off the drawing, not the cell. A Petdex sheet insets its character
+ * inside the 192x208 cell by an amount that differs per pet and per animation
+ * row, so anchoring to the cell made the same 26px read as anything from 29px
+ * (boba) to 56px (cash-cuy facepalming). `petLayout().headPx` is how far the
+ * row's tallest frame actually reaches above the ground line, so the gap above
+ * the head is now the same number for every pet in every state. Large enough to
+ * swallow the bubble's own 6px tail and still leave an obvious gap.
  */
 const PET_BUBBLE_GAP_PX = 26
+/** Breathing room between a bubble and the edge of the screen. */
+const BUBBLE_EDGE_MARGIN_PX = 8
+
+/**
+ * Where the mascot paints.
+ *
+ * The crab sits above the shelf (10000) and always has — it is ClawBox's own
+ * decoration and OpenClaw's rendering does not move. A pet lives BELOW the
+ * window layer: windows start at z 100 (page.tsx `useState(100)`), and a pet
+ * walking the shelf's top edge is exactly where a window dragged low ends up,
+ * so at 10001 it painted over window content — over the Settings sidebar and
+ * over its own dock. 50 keeps it above the desktop surface (z 1) and its icons
+ * and below every window.
+ */
+const PET_Z_INDEX = 50
+const CRAB_Z_INDEX = 10001
+
+/**
+ * A pet falls harder than the crab.
+ *
+ * The crab's 800 px/s² is a deliberately floaty, cartoon arc for a mascot that
+ * lives on the open desktop. A pet is thrown at a taskbar a few hundred pixels
+ * below it, and the same numbers left it drifting: ~390 px above the bar 2.6 s
+ * after release, ~6 s to settle. These land it in about a second without
+ * turning the throw into a drop.
+ */
+const PET_PHYSICS = { gravity: 2400, friction: 420, bounciness: 0.42 }
+/** The crab's, unchanged — its arc is part of how OpenClaw's desktop reads. */
+const CRAB_PHYSICS = { gravity: 800, friction: 200, bounciness: 0.6 }
+
+/** A pet strolls at a fixed px/s, so it does not sprint on a wide screen. */
+const PET_WALK_SPEED_PX_S = 42
+/** How far one stroll travels, in px, before the lane clamps it. */
+const PET_WALK_DISTANCE_PX = { min: 90, max: 280 }
+const PET_WALK_MS = { min: 2500, max: 12000 }
 
 interface Range { min: number; max: number }
+
+/**
+ * Take pointer capture, tolerating a pointer id that is not live.
+ *
+ * `setPointerCapture` throws `NotFoundError` when no active pointer carries the
+ * id — a programmatic `element.click()` and an assistive-technology activation
+ * both reach the handler with one. The optional call only ever guarded a
+ * MISSING METHOD, so those paths surfaced an uncaught error out of the mascot.
+ */
+function capturePointer(e: React.PointerEvent) {
+  try {
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+  } catch {
+    // Nothing to capture. Real pointers are unaffected; a synthetic click has
+    // no drag to retarget in the first place.
+  }
+}
 
 const clampTo = (range: Range, v: number) => Math.min(range.max, Math.max(range.min, v))
 
@@ -192,68 +245,149 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // mirrored into state because the resting `bottom` is a rendered style.
   const groundRef = useRef(CRAB_GROUND_PX)
   const [groundPx, setGroundPx] = useState(CRAB_GROUND_PX)
-  const walkRangeRef = useRef<Range>(CRAB_WALK_RANGE)
-  const boundsRef = useRef<Range>(CRAB_BOUNDS)
+  const walkRangeRef = useRef<Range>({ ...CRAB_WALK_RANGE })
+  const boundsRef = useRef<Range>({ ...CRAB_BOUNDS })
   /** A pet has no ClawBox prop — see the render block. */
   const hasBoxRef = useRef(true)
   hasBoxRef.current = !pet
+  /** The body box currently worn. Read by the physics loop, which used to
+   *  hardcode the crab's 150 and stopped a flung pet 38px short of the ceiling. */
+  const bodyPxRef = useRef(CRAB_BODY_PX)
+  bodyPxRef.current = pet ? PET_BODY_PX : CRAB_BODY_PX
+  /**
+   * How far the body is ABOVE its ground line, in px.
+   *
+   * The single vertical truth. It used to be split between an imperative
+   * `bottom: 0px` + `translateY(-posY)` written by the physics loop and a
+   * declarative `bottom: physicsActive ? 0 : groundPx` written by React, and
+   * the two disagreed on every path where one ran without the other: the
+   * mascot settled 56px INTO the taskbar (the imperative `bottom` stuck while
+   * the translateY was gone), or dropped a whole ground height the instant
+   * physics turned on with a stale `posY`. Now `bottom` is always `groundPx`
+   * and every writer — physics, drag, the jump hop, the React render — puts
+   * its offset here, so there is nothing left to desynchronise.
+   */
+  const liftRef = useRef(0)
+  /** Re-run the ground/lane measurement. Set by the effect below. */
+  const measureRef = useRef<(() => boolean) | null>(null)
 
-  useEffect(() => {
+  // The ground line and the roaming lane are LAID OUT, not animated, so this is
+  // a layout effect: an ordinary effect let the pet paint one frame at the
+  // crab's 8px desktop floor and then visibly jump onto the bar.
+  useLayoutEffect(() => {
     if (!pet) {
       groundRef.current = CRAB_GROUND_PX
-      walkRangeRef.current = CRAB_WALK_RANGE
-      boundsRef.current = CRAB_BOUNDS
+      walkRangeRef.current = { ...CRAB_WALK_RANGE }
+      boundsRef.current = { ...CRAB_BOUNDS }
+      measureRef.current = null
       setGroundPx(CRAB_GROUND_PX)
       return
     }
-    const bar = document.querySelector('[data-mascot-ground]')
-    const measure = () => {
+    let observer: ResizeObserver | null = null
+    let observed: Element | null = null
+    let watchable = true
+    // Wrapped because this is decoration: a runtime without ResizeObserver —
+    // or with a partial stand-in for one — must cost the mascot a live
+    // remeasure, not its whole existence. An effect that throws unmounts the
+    // tree, and the desktop would lose its mascot over a resize listener.
+    const watch = (el: Element) => {
+      if (observed === el || !watchable) return
+      try {
+        if (typeof ResizeObserver !== 'function') { watchable = false; return }
+        observer?.disconnect()
+        observer = new ResizeObserver(() => { measure() })
+        observer.observe(el)
+        observed = el
+      } catch (err) {
+        // Said once: `measure` runs on every resize, and a runtime with a
+        // half-implemented stand-in would otherwise log on each one.
+        console.warn('[mascot] could not watch the shelf for resizes:', err)
+        watchable = false
+        observer = null
+        observed = null
+      }
+    }
+
+    const measure = (): boolean => {
       const el = document.querySelector('[data-mascot-ground]') as HTMLElement | null
-      if (!el) return
+      if (!el) return false
       const rect = el.getBoundingClientRect()
       const vw = window.innerWidth || 1
-      if (rect.width <= 0 || rect.height <= 0) return
+      if (rect.width <= 0 || rect.height <= 0) return false
+      // The shelf can REMOUNT (the dock re-renders when an app is installed),
+      // which left the observer holding a detached node and only
+      // `window.resize` still working. Re-point it at what is on screen now.
+      watch(el)
       // The pet's feet sit on the bar's top edge; `bottom` is measured from
       // the viewport bottom, which is what the mascot's `position: fixed` uses.
       const ground = Math.max(0, Math.round(window.innerHeight - rect.top))
       groundRef.current = ground
       setGroundPx(ground)
+
+      // The desktop icon grid's bottom padding is exactly the bar height, so
+      // its lowest icons stand IN the pet's band — the pet covered the bottom
+      // icon and, at a body box of `pointer-events: auto`, swallowed its clicks.
+      // Subtract whatever actually intrudes rather than assuming a column
+      // width: the grid is centred and its geometry changes with the viewport.
+      const half = PET_BODY_PX / 2
+      const bandTop = rect.top - PET_BODY_PX
+      const blockers: Span[] = []
+      document.querySelectorAll('[data-desktop-icon-id]').forEach((node) => {
+        const r = (node as HTMLElement).getBoundingClientRect()
+        if (r.width <= 0 || r.height <= 0) return
+        if (r.bottom <= bandTop || r.top >= rect.top) return
+        blockers.push({ lo: r.left, hi: r.right })
+      })
+      const free = widestFreeSpan(rect.left, rect.right, blockers)
+      // Only honour the gap if a pet can actually stroll in it; a desktop
+      // packed edge to edge should leave it on the bar, not pin it to a point.
+      const usable = free.hi - free.lo >= PET_BODY_PX * 3 ? free : { lo: rect.left, hi: rect.right }
+
       // The shelf is full-bleed today, so this mostly reproduces the crab's
       // own range — but it is derived from the bar rather than assumed, which
       // is what keeps the pet ON it if the bar is ever inset or centred.
-      const half = PET_BODY_PX / 2
       const onBar: Range = {
-        min: ((rect.left + half) / vw) * 100,
-        max: ((rect.right - half) / vw) * 100,
+        min: ((usable.lo + half) / vw) * 100,
+        max: ((usable.hi - half) / vw) * 100,
       }
-      walkRangeRef.current = intersectRange(onBar, CRAB_WALK_RANGE)
-      boundsRef.current = intersectRange(onBar, CRAB_BOUNDS)
-      const lane = boundsRef.current
-      xRef.current = clampTo(lane, xRef.current)
+      // Mutated in place, never replaced: an in-flight walk captures the range
+      // object once and clamps against it for the next 6-12 s, so handing out
+      // a NEW object on resize left that walk driving the pet off the new bar.
+      const walk = intersectRange(onBar, CRAB_WALK_RANGE)
+      walkRangeRef.current.min = walk.min
+      walkRangeRef.current.max = walk.max
+      const bounds = intersectRange(onBar, CRAB_BOUNDS)
+      boundsRef.current.min = bounds.min
+      boundsRef.current.max = bounds.max
+      xRef.current = clampTo(boundsRef.current, xRef.current)
       updateCrabPosRef.current?.()
+      return true
     }
-    measure()
-    window.addEventListener('resize', measure)
-    // The shelf's height carries `env(safe-area-inset-bottom)`, which can
-    // change after first paint (and on rotation), so watch the element itself
-    // rather than trusting the one measurement.
-    //
-    // Wrapped because this is decoration: a runtime without ResizeObserver —
-    // or with a partial stand-in for one — must cost the mascot a live
-    // remeasure, not its whole existence. An effect that throws unmounts the
-    // tree, and the desktop would lose its mascot over a resize listener.
-    let observer: ResizeObserver | null = null
-    try {
-      if (bar && typeof ResizeObserver === 'function') {
-        observer = new ResizeObserver(measure)
-        observer.observe(bar)
+    measureRef.current = measure
+
+    // The shelf can mount after the mascot does. A single failed
+    // querySelector used to leave the pet standing at the crab's 8px floor,
+    // behind the bar, for the rest of the session — this effect only re-runs
+    // when the PET changes, which it never did.
+    let retries = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const attempt = () => {
+      timer = null
+      if (measure()) return
+      if (++retries > 40) {
+        console.warn('[mascot] no [data-mascot-ground] on this surface; the pet keeps the desktop floor')
+        return
       }
-    } catch (err) {
-      console.warn('[mascot] could not watch the shelf for resizes:', err)
-      observer = null
+      timer = setTimeout(attempt, 100)
     }
+    attempt()
+
+    const onResize = () => { measure() }
+    window.addEventListener('resize', onResize)
     return () => {
-      window.removeEventListener('resize', measure)
+      if (timer) clearTimeout(timer)
+      measureRef.current = null
+      window.removeEventListener('resize', onResize)
       try { observer?.disconnect() } catch { /* same reason as above */ }
     }
   }, [pet])
@@ -355,6 +489,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const boxElRef = useRef<HTMLDivElement>(null)
   const jumpYRef = useRef(0)
   const facingRef = useRef<'left' | 'right'>('right')
+  /** The pet's bubble, its measured width, and the clamp that keeps it on
+   *  screen — see `positionBubble`. */
+  const bubbleElRef = useRef<HTMLDivElement>(null)
+  const bubbleWRef = useRef(0)
+  const positionBubbleRef = useRef<(() => void) | null>(null)
 
   // ─── Render state (only for things that need React re-render) ───
   const [boxKick, setBoxKick] = useState<false | 'left' | 'right'>(false)
@@ -362,7 +501,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const [crabOnBox, setCrabOnBox] = useState(false)
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [state, setState] = useState<MascotState>('idle')
-  const [physicsActive, setPhysicsActive] = useState(false)
   const [frenzy, setFrenzy] = useState(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; duration: number; emoji: string}[]>([])
   const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
@@ -381,6 +519,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     velX: 0,        // px/s
     velY: 0,        // px/s
     posY: 0,        // px from bottom of screen
+    /** Ignore platforms until the next real landing — how the mascot steps
+     *  OFF a desktop icon it settled on instead of re-landing on it forever. */
+    dropThrough: false,
     gravity: 800,   // px/s² — lighter, more floaty
     friction: 200,  // px/s decel — less friction, slides more
     bounciness: 0.6,
@@ -410,14 +551,65 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     kv.setJSON('clawbox-crab-pos', { x: xRef.current, bx: boxXRef.current })
   }, [])
 
-  const updateCrabPos = useCallback(() => {
-    if (!crabElRef.current) return
+  /**
+   * The mascot's transform, and the only place it is written.
+   *
+   * `translateY` is not optional here. It used to be missing from this path
+   * entirely, so `jumpYRef` was written 60x/s by the jump and frenzy loops and
+   * read by nothing — the pet played its `jumping` row glued to the ground
+   * line. And `scaleX` used to be missing from the PHYSICS path, so a bubble
+   * that spoke mid-throw (an impact reaction does) counter-flipped a flip that
+   * was not applied and rendered its text mirror-reversed.
+   */
+  const writeCrabTransform = useCallback(() => {
+    const el = crabElRef.current
+    if (!el) return
     // A pet perches where it stands: there is no box to climb onto.
     const posX = onBoxRef.current && hasBoxRef.current ? boxXRef.current : xRef.current
     const scaleX = facingRef.current === 'left' ? -1 : 1
-    crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) scaleX(${scaleX})`
+    const y = jumpYRef.current - liftRef.current
+    el.style.transform = `translateX(calc(${posX}vw - 50%)) translateY(${y.toFixed(2)}px) scaleX(${scaleX})`
+    positionBubbleRef.current?.()
+  }, [])
+
+  const updateCrabPos = useCallback(() => {
+    writeCrabTransform()
     saveCrabPos()
-  }, [saveCrabPos])
+  }, [writeCrabTransform, saveCrabPos])
+
+  /**
+   * Keep the pet's bubble on screen.
+   *
+   * It is centred on the body and capped at 210px with nothing clamping it
+   * against the viewport, so at the left end of the lane it ran off the edge —
+   * border, corner and leading glyph sliced off at x=0. Wrapping caps the
+   * WIDTH; it never repositions. The shift is expressed in the shell's own
+   * coordinate space, which is mirrored when the pet faces left, hence the sign.
+   *
+   * Imperative for the same reason the position is: the pet walks inside a rAF
+   * loop that deliberately never re-renders React.
+   */
+  const bubbleTransformRef = useRef('')
+  const positionBubble = useCallback(() => {
+    const el = bubbleElRef.current
+    const width = bubbleWRef.current
+    if (!el || width <= 0) return
+    const vw = window.innerWidth || 1
+    const centre = (xRef.current / 100) * vw
+    const m = BUBBLE_EDGE_MARGIN_PX
+    let shift = 0
+    if (centre - width / 2 < m) shift = m - (centre - width / 2)
+    else if (centre + width / 2 > vw - m) shift = vw - m - (centre + width / 2)
+    const mirrored = facingRef.current === 'left'
+    const local = (shift * (mirrored ? -1 : 1)).toFixed(2)
+    const next = `translateX(calc(-50% + ${local}px)) scaleX(${mirrored ? -1 : 1})`
+    // Called from the position writer, which runs every animation frame; most
+    // frames do not move the bubble at all.
+    if (next === bubbleTransformRef.current) return
+    bubbleTransformRef.current = next
+    el.style.transform = next
+  }, [])
+  positionBubbleRef.current = positionBubble
   // The ground/lane measurement runs before this callback exists in source
   // order, and re-clamps the mascot into the taskbar the moment it resolves.
   const updateCrabPosRef = useRef<(() => void) | null>(null)
@@ -443,14 +635,70 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   const setJumpY = useCallback((v: number) => {
     jumpYRef.current = v
-    updateCrabPos()
-  }, [updateCrabPos])
+    // Position has not changed — no reason to touch localStorage 60x/s.
+    writeCrabTransform()
+  }, [writeCrabTransform])
+
+  /**
+   * Face a direction. Ref AND state, always.
+   *
+   * The rendered transform reads the ref; the speech bubble's counter-flip
+   * reads the state. The physics loop used to write only the ref, so after a
+   * throw changed direction the two disagreed and the bubble rendered its text
+   * (and its tail) mirrored until something else called this.
+   */
+  const faceTowards = useCallback((dir: 'left' | 'right') => {
+    if (facingRef.current === dir) return
+    facingRef.current = dir
+    setFacing(dir)
+  }, [])
 
   const setFacingDirect = useCallback((dir: 'left' | 'right') => {
-    facingRef.current = dir
-    setFacing(dir) // still needed for speech bubble flip
+    faceTowards(dir)
     updateCrabPos()
-  }, [updateCrabPos])
+  }, [faceTowards, updateCrabPos])
+
+  /**
+   * The landing squash.
+   *
+   * The crab deforms its `<img>`. A pet has no `<img>` — it is a
+   * background-image div carrying its own centring and facing transform — so
+   * the crab's version silently never played for one, and a pet landed dead
+   * flat. The pet rides two custom properties the sprite's transform already
+   * multiplies in, so the squash cannot clobber the centring or the flip.
+   */
+  const squashBody = useCallback(() => {
+    const root = crabElRef.current
+    if (!root) return
+    const img = root.querySelector('img')
+    if (img) {
+      img.style.transition = 'transform 0.1s'
+      img.style.transform = 'scaleY(0.7) scaleX(1.3)'
+      setTimeout(() => { img.style.transform = ''; img.style.transition = '' }, 150)
+      return
+    }
+    const sprite = root.querySelector('[data-pet]') as HTMLElement | null
+    if (!sprite) return
+    sprite.style.transition = 'transform 0.1s'
+    sprite.style.setProperty('--pet-squash-x', '1.3')
+    sprite.style.setProperty('--pet-squash-y', '0.7')
+    setTimeout(() => {
+      sprite.style.removeProperty('--pet-squash-x')
+      sprite.style.removeProperty('--pet-squash-y')
+      sprite.style.transition = ''
+    }, 150)
+  }, [])
+
+  // A pet is thrown AT a bar a few hundred pixels below it, where the crab's
+  // deliberately floaty arc read as drifting: ~390px above the bar 2.6s after
+  // release and ~6s to come to rest. The crab keeps its own numbers exactly.
+  useEffect(() => {
+    const p = physicsRef.current
+    const tuning = pet ? PET_PHYSICS : CRAB_PHYSICS
+    p.gravity = tuning.gravity
+    p.friction = tuning.friction
+    p.bounciness = tuning.bounciness
+  }, [pet])
 
   // ─── Impact damage: take health damage when hitting surfaces at high speed ───
   const IMPACT_THRESHOLD = 600  // px/s — below this, no damage
@@ -508,12 +756,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const crabRight = crabPxX + crabHitW / 2
     let landedOnPlatform = false
 
-    const platforms = document.querySelectorAll('[data-crab-platform]')
+    const platforms: Element[] = p.dropThrough
+      ? []
+      : Array.from(document.querySelectorAll('[data-crab-platform]'))
     platforms.forEach((el) => {
       const rect = (el as HTMLElement).getBoundingClientRect()
       // Horizontal overlap check with tight hitbox
       if (crabRight > rect.left && crabLeft < rect.right) {
         const platformTop = rect.top
+        // A "platform" at or below the ground line is not one — the shelf's own
+        // app buttons carry `data-crab-platform` and their tops sit a few px
+        // INSIDE the bar, which is how a pet ended up resting sunk into it.
+        if (platformTop >= vh - groundRef.current) return
         // Falling onto platform: crab feet crossing platform top
         if (p.velY > 0 && crabBottom >= platformTop && crabBottom <= platformTop + rect.height * 0.5) {
           p.posY = vh - platformTop
@@ -531,18 +785,17 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       applyImpactDamage(p.velY)
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
         p.velY *= -p.bounciness
-        if (crabElRef.current) {
-          const img = crabElRef.current.querySelector('img')
-          if (img) {
-            img.style.transition = 'transform 0.1s'
-            img.style.transform = 'scaleY(0.7) scaleX(1.3)'
-            setTimeout(() => { img.style.transform = ''; img.style.transition = '' }, 150)
-          }
-        }
+        squashBody()
       } else {
         p.velY = 0
         if (Math.abs(p.velX) < 5) {
-          p.active = false; setPhysicsActive(false)
+          // Perch. The resting height lives in `liftRef` like every other
+          // vertical offset, so settling on an icon no longer means "settle,
+          // then get teleported down to the shelf by the next React render" —
+          // there IS a state for standing on a platform now. The next action
+          // steps off it (see doAction).
+          p.active = false
+          liftRef.current = Math.max(0, p.posY - groundRef.current)
           updateCrabPos()
           setTimeout(() => doActionRef.current(), 2000)
           return
@@ -558,20 +811,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       applyImpactDamage(p.velY)
       if (p.bounciness > 0 && Math.abs(p.velY) > p.minBounceVel) {
         p.velY *= -p.bounciness
-        // Squash effect on bounce
-        if (crabElRef.current) {
-          const img = crabElRef.current.querySelector('img')
-          if (img) {
-            img.style.transition = 'transform 0.1s'
-            img.style.transform = 'scaleY(0.7) scaleX(1.3)'
-            setTimeout(() => { img.style.transform = ''; img.style.transition = '' }, 150)
-          }
-        }
+        squashBody()
       } else {
         p.velY = 0
         // Landed — stop physics if X vel is also ~0
         if (Math.abs(p.velX) < 5) {
-          p.active = false; setPhysicsActive(false)
+          p.active = false
+          p.dropThrough = false
+          liftRef.current = 0
           updateCrabPos()
           setTimeout(() => doActionRef.current(), 2000)
           return
@@ -581,8 +828,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
     // ─── Collision: ceiling ───
     const crabVh = window.innerHeight
-    if (p.posY >= crabVh - 150) { // 150 = crab size
-      p.posY = crabVh - 150
+    // The body box, not the crab's 150: a pet's is smaller, and hardcoding the
+    // crab's stopped a flung pet nearly 40px short of the ceiling.
+    const bodyBox = bodyPxRef.current
+    if (p.posY >= crabVh - bodyBox) {
+      p.posY = crabVh - bodyBox
       applyImpactDamage(p.velY)
       if (Math.abs(p.velY) > p.minBounceVel) p.velY = Math.abs(p.velY) * p.bounciness
       else p.velY = 0
@@ -610,18 +860,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       }
     }
 
-    // Update facing based on velocity (ref only, no React re-render during physics)
-    if (p.velX > 30) facingRef.current = 'right'
-    else if (p.velX < -30) facingRef.current = 'left'
+    // Update facing based on velocity. `faceTowards` no-ops unless the
+    // direction really changed, so this is one setState per turn, not per frame.
+    if (p.velX > 30) faceTowards('right')
+    else if (p.velX < -30) faceTowards('left')
 
-    // Render
-    if (crabElRef.current) {
-      crabElRef.current.style.bottom = '0px'
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-p.posY}px)`
-    }
+    // Render. `bottom` is never touched — it is `groundPx` for the whole life
+    // of the element and the height lives in the transform.
+    liftRef.current = p.posY - groundRef.current
+    writeCrabTransform()
 
     physicsRAF.current = requestAnimationFrame(runPhysicsLoop)
-  }, [updateCrabPos, applyImpactDamage])
+  }, [updateCrabPos, applyImpactDamage, faceTowards, squashBody, writeCrabTransform])
 
   // ─── Crab drag + tap detection ───
   const dragStartPos = useRef({ x: 0, y: 0 })
@@ -631,16 +881,19 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // Right-click — let onContextMenu handle it, don't start drag/tap
     if (e.button === 2) return
     e.preventDefault(); e.stopPropagation()
-    // NOTE: do NOT enter physics mode here. physicsActive makes React render
-    // `transform: undefined`, which strips the crab's translateX and snaps it to
-    // the far-left edge. On a plain tap (no move) pointerMove never re-applies a
-    // transform, so the crab would visibly teleport left then back. We only flip
-    // physicsActive on once a real drag is detected (see handlePointerMove).
+    // A press is not yet a drag: real drag/physics only starts once the pointer
+    // crosses the threshold in handlePointerMove, so a plain TAP (to open the
+    // chat) leaves the mascot exactly where it stands.
     draggingRef.current = true
     didDragRef.current = false
     dragStartPos.current = { x: e.clientX, y: e.clientY }
     const p = physicsRef.current
     p.active = false
+    p.dropThrough = false
+    // Seed the physics' idea of where the body is. A stale `posY` of 0 was
+    // read by the very next render and dropped the mascot a whole ground
+    // height before the loop corrected it.
+    p.posY = groundRef.current + liftRef.current
     if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
     if (stateTimeout.current) clearTimeout(stateTimeout.current)
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
@@ -649,7 +902,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (rect) dragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
-    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    capturePointer(e)
   }, [])
 
   const handlePointerMove = useCallback((e: React.PointerEvent) => {
@@ -664,7 +917,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (!didDragRef.current) {
       if (dx * dx + dy * dy <= 25) return
       didDragRef.current = true
-      setPhysicsActive(true)
       const pp = physicsRef.current
       pp.lastPointerX = e.clientX; pp.lastPointerY = e.clientY; pp.lastPointerTime = performance.now()
     }
@@ -679,12 +931,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     xRef.current = clampTo(boundsRef.current, ((e.clientX - dragOffsetRef.current.x) / vw) * 100)
     onPositionChangeRef.current?.(xRef.current)
     const posY = Math.max(0, vh - e.clientY - 20)
-    if (crabElRef.current) {
-      crabElRef.current.style.bottom = '0px'
-      crabElRef.current.style.transform = `translateX(calc(${xRef.current}vw - 50%)) translateY(${-posY}px)`
-    }
     physicsRef.current.posY = posY
-  }, [])
+    liftRef.current = posY - groundRef.current
+    writeCrabTransform()
+  }, [writeCrabTransform])
 
   const handlePointerUp = useCallback(() => {
     if (!draggingRef.current) return
@@ -692,7 +942,6 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
     // Tap detection — if pointer barely moved, trigger sass/chat
     if (!didDragRef.current) {
-      setPhysicsActive(false)
       // Open chat on tap — works even when sleeping
       if (onTap) onTap(xRef.current)
       if (!isSleepingRef.current) {
@@ -783,7 +1032,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (rect) boxDragOffsetRef.current = { x: e.clientX - rect.left - rect.width / 2, y: e.clientY - rect.top - rect.height / 2 }
     p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = performance.now()
     p.velX = 0; p.velY = 0
-    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    capturePointer(e)
   }, [])
 
   const handleBoxPointerMove = useCallback((e: React.PointerEvent) => {
@@ -845,6 +1094,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
     return opts[Math.floor(Math.random() * opts.length)]
   }
+
+  // The clamp needs the bubble's real width, and only its TEXT can change it.
+  // Measured once per bubble rather than read back every animation frame.
+  useLayoutEffect(() => {
+    const el = bubbleElRef.current
+    if (!el) { bubbleWRef.current = 0; bubbleTransformRef.current = ''; return }
+    bubbleWRef.current = el.offsetWidth
+    bubbleTransformRef.current = ''
+    positionBubble()
+  }, [speech, pet, positionBubble])
 
   const pickAction = useCallback(() => {
     const total = MASCOT_ACTIONS.reduce((s, a) => s + a.weight, 0)
@@ -908,8 +1167,33 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (isSleepingRef.current) return // No random actions while sleeping
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
+    // The lane comes from live geometry — the bar, and the desktop icons that
+    // stand in the pet's band. Both move (a resize, a dragged icon), so re-read
+    // them before committing to a 6-12 s walk.
+    measureRef.current?.()
+
+    // Standing on a desktop icon rather than the ground? Step off first: the
+    // resting `bottom` is the shelf, and walking from up here is walking on air.
+    // The physics settle schedules the next action, so this just defers.
+    if (liftRef.current > 0.5) {
+      const pp = physicsRef.current
+      pp.velX = 0
+      pp.velY = 0
+      pp.posY = groundRef.current + liftRef.current
+      // Fall THROUGH the icon that is currently underfoot, or the collision
+      // test would land the mascot straight back on it, every two seconds.
+      pp.dropThrough = true
+      pp.lastTime = performance.now()
+      pp.active = true
+      if (physicsRAF.current) cancelAnimationFrame(physicsRAF.current)
+      physicsRAF.current = requestAnimationFrame(physicsLoop)
+      return
+    }
+
     const action = pickAction()
     const duration = randRange(action.dur[0], action.dur[1])
+    /** What the next action is scheduled off — a pet's walk sets its own. */
+    let actionMs = duration
 
     // ─── Leave box smoothly: only if we WERE on it ───
     if (onBoxRef.current && action.state !== 'idle') {
@@ -955,12 +1239,30 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (action.state === 'waddle') {
       const startX = xRef.current
       const bx = boxXRef.current
-      const walk = walkRangeRef.current
+      const walk = walkRangeRef.current // live object — mutated in place by measure()
       let newTarget: number
 
       if (!hasBoxRef.current) {
         // No box to chase: the pet strolls up and down its stretch of taskbar.
-        newTarget = startX + randRange(-18, 18)
+        //
+        // Distance is picked in PIXELS and the duration follows from it, so the
+        // stroll reads at one speed on every screen. The old `randRange(-18,18)`
+        // vw over a fixed 6-12 s covered 345px on a 1920 desktop and 144px on
+        // an 800 one — the same pet, sprinting or crawling by viewport width.
+        const vw = window.innerWidth || 1
+        const distPx = randRange(PET_WALK_DISTANCE_PX.min, PET_WALK_DISTANCE_PX.max)
+        const dir = Math.random() < 0.5 ? -1 : 1
+        newTarget = clampTo(walk, startX + ((dir * distPx) / vw) * 100)
+        // Already flat against that end of the lane? Turn round, rather than
+        // "walking" nowhere for ten seconds.
+        if (Math.abs(newTarget - startX) < 0.2) {
+          newTarget = clampTo(walk, startX - ((dir * distPx) / vw) * 100)
+        }
+        const travelPx = (Math.abs(newTarget - startX) / 100) * vw
+        actionMs = Math.min(
+          PET_WALK_MS.max,
+          Math.max(PET_WALK_MS.min, (travelPx / PET_WALK_SPEED_PX_S) * 1000),
+        )
       } else {
         // Always chase the box — crab wants to be near it
         const dist = Math.abs(startX - bx)
@@ -974,15 +1276,23 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         }
       }
       newTarget = clampTo(walk, newTarget)
-      setFacingDirect(newTarget > startX ? 'right' : 'left')
+      // Facing follows the actual travel, not the intent. A target that clamped
+      // onto the pet's own position used to send it LEFT (`88 > 88` is false)
+      // and play the running-left row for the whole walk without moving — a
+      // moonwalk in place at the end of the lane.
+      if (Math.abs(newTarget - startX) >= 0.05) {
+        setFacingDirect(newTarget > startX ? 'right' : 'left')
+      }
 
       // Use requestAnimationFrame for smooth GPU-friendly movement
       const startTime = performance.now()
       const animate = (now: number) => {
         const elapsed = now - startTime
-        const t = Math.min(elapsed / duration, 1)
+        const t = Math.min(elapsed / actionMs, 1)
         const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
-        const cx = clampTo(walk, startX + (newTarget - startX) * ease)
+        // Read the lane every frame. Captured once, a mid-walk resize left this
+        // clamping against a range the bar no longer has.
+        const cx = clampTo(walkRangeRef.current, startX + (newTarget - startX) * ease)
         xRef.current = cx
         setX(cx)
 
@@ -1004,7 +1314,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         if (t < 1) {
           walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
         } else {
-          xRef.current = clampTo(walk, newTarget)
+          xRef.current = clampTo(walkRangeRef.current, newTarget)
           setX(xRef.current)
         }
       }
@@ -1021,8 +1331,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       requestAnimationFrame(jumpLoop)
     }
 
-    stateTimeout.current = setTimeout(() => doActionRef.current(), duration + randRange(2000, 6000))
-  }, [pickAction])
+    stateTimeout.current = setTimeout(() => doActionRef.current(), actionMs + randRange(2000, 6000))
+  }, [pickAction, physicsLoop])
   useEffect(() => {
     doActionRef.current = doAction
   }, [doAction])
@@ -1072,11 +1382,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         if (dt >= 16) { // ~60fps cap
           lastFrenzyFrame = now
           const speed = 0.4 * (dt / 25) // normalize speed to frame time
+          // The measured lane, not a hardcoded 5-88: those are the CRAB's vw
+          // margins, and at a narrow viewport 5vw hangs a third of a pet's body
+          // off the screen. For the crab the two are the same numbers.
+          const lane = walkRangeRef.current
           const next = xRef.current + (frenzyDir === 'right' ? speed : -speed)
-          xRef.current = Math.min(88, Math.max(5, next))
+          xRef.current = clampTo(lane, next)
           setX(xRef.current)
-          if (next >= 88) { frenzyDir = 'left'; setFacingDirect('left') }
-          if (next <= 5) { frenzyDir = 'right'; setFacingDirect('right') }
+          if (next >= lane.max) { frenzyDir = 'left'; setFacingDirect('left') }
+          if (next <= lane.min) { frenzyDir = 'right'; setFacingDirect('right') }
         }
         walkInterval.current = requestAnimationFrame(frenzyAnimate) as unknown as ReturnType<typeof setInterval>
       }
@@ -1258,7 +1572,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const HALF = (pet ? PET_BODY_PX : CRAB_BODY_PX) / 2
     const GAP = 24       // breathing room between mascot and panel edge
     const maxCenterPx = vw - inset - GAP - HALF
-    const maxXvw = Math.max(5, (maxCenterPx / vw) * 100)
+    // Clamped into the lane rather than to a bare 5vw floor, so a wide chat
+    // panel cannot push the mascot past the left end of the bar it stands on.
+    const lane = walkRangeRef.current
+    const maxXvw = Math.max(lane.min, Math.min(lane.max, (maxCenterPx / vw) * 100))
 
     const startCrab = xRef.current
     const startBox = boxXRef.current
@@ -1276,7 +1593,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const step = (now: number) => {
       const t = Math.min((now - t0) / dur, 1)
       const e = 1 - Math.pow(1 - t, 3) // easeOutCubic
-      if (moveCrab) { xRef.current = startCrab + (targetCrab - startCrab) * e; updateCrabPos() }
+      if (moveCrab) { xRef.current = clampTo(boundsRef.current, startCrab + (targetCrab - startCrab) * e); updateCrabPos() }
       if (moveBox) { boxXRef.current = startBox + (targetBox - startBox) * e; updateBoxPos() }
       if (t < 1) raf = requestAnimationFrame(step)
     }
@@ -1303,6 +1620,18 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   /** The body box this mascot occupies. Every offset below is relative to it. */
   const bodyPx = pet ? PET_BODY_PX : CRAB_BODY_PX
   const bodyHalf = bodyPx / 2
+  /**
+   * Where the pet's ART is inside that box, for the pose being drawn.
+   *
+   * The cell is 192x208 with the character inset inside it by a different
+   * amount per pet, per row and per frame, so anything hung off the CELL —
+   * the bubble, the thinking dots, the ZZZ cluster, the drag hit-box — was
+   * hung off empty space. `headPx` is how far the drawing really reaches above
+   * the ground line; `artInsetPx` is how far in from the cell's sides it sits.
+   */
+  const layout: PetLayout | null = pet ? petLayout(pet, { state, thinking, facing }, bodyPx) : null
+  /** Where the visible head is, measured from the body box's TOP. */
+  const headTopPx = layout ? Math.max(0, bodyPx - layout.headPx) : 0
 
   return (
     <>
@@ -1321,23 +1650,24 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         style={{
         position: 'fixed', left: 0,
         // The crab's shelf is the desktop floor; a pet's is the taskbar's top
-        // edge, measured from the bar itself. During physics the element sits
-        // at 0 and the loop carries the offset in `translateY`.
-        bottom: physicsActive ? 0 : groundPx,
-        // Keep the crab's real translateX (and hop height) while physics/drag is
-        // active instead of dropping to `undefined`. Clearing the transform
-        // reverts the crab to its base `left:0` — so a plain TAP (which flips
-        // physicsActive on pointerdown, before any imperative transform is set)
-        // snapped the crab to the bottom-LEFT corner for the ~100ms the pointer
-        // was held, reading as "the crab teleports to the corner" before the
-        // chat opens. The physics/drag rAF loop still overrides this per-frame.
-        transform: physicsActive
-          ? `translateX(calc(${xRef.current}vw - 50%)) translateY(${-physicsRef.current.posY}px)`
-          : `translateX(calc(${crabOnBox && !pet ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
-        zIndex: 10001, pointerEvents: 'auto',
+        // edge, measured from the bar itself. This is the ONLY thing that sets
+        // the element's `bottom` — every vertical offset (drag, throw, hop,
+        // perching on an icon) is carried in the transform below, so the
+        // imperative and declarative paths cannot contradict each other.
+        bottom: groundPx,
+        // Written from the same refs, in the same shape, as
+        // `writeCrabTransform` — a re-render during a drag or a throw must
+        // reproduce the frame the rAF loop just drew, not a different one.
+        transform: `translateX(calc(${crabOnBox && !pet ? boxXRef.current : xRef.current}vw - 50%)) translateY(${(jumpYRef.current - liftRef.current).toFixed(2)}px) scaleX(${facing === 'left' ? -1 : 1})`,
+        zIndex: pet ? PET_Z_INDEX : CRAB_Z_INDEX,
+        // A pet's box is mostly transparent, and at `auto` its 104px square
+        // took the click meant for whatever stands behind it — a desktop icon's
+        // label, most visibly. Only the drawn art is grabbable; see the hit box
+        // inside the body div. The crab fills its own box, so it keeps `auto`.
+        pointerEvents: pet ? 'none' : 'auto',
         cursor: 'grab',
         touchAction: 'none',
-        willChange: 'transform, bottom, filter',
+        willChange: 'transform, filter',
         filter: isSleeping
           ? 'drop-shadow(0 0 10px rgba(147,197,253,0.3))'
           : frenzy
@@ -1353,8 +1683,27 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             measured off `bodyPx` rather than the crab's 150 so the whole
             composition scales together. */}
         <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnim, width: bodyPx, height: bodyPx, position: 'relative', willChange: 'transform' }}>
-          {pet ? (
-            <PetSprite pet={pet} state={state} thinking={thinking} facing={facing} />
+          {pet && layout ? (
+            <>
+              <PetSprite pet={pet} state={state} thinking={thinking} facing={facing} />
+              {/* Grab handle: the drawn art, not the cell. Symmetric on
+                  purpose — the sprite cancels the shell's flip on directional
+                  rows, so a left/right-specific box would land on the wrong
+                  side of the pet half the time. */}
+              <div
+                data-mascot-hit=""
+                style={{
+                  position: 'absolute',
+                  bottom: 0,
+                  left: bodyHalf - layout.dispW / 2 + layout.artInsetPx,
+                  width: Math.max(24, layout.dispW - layout.artInsetPx * 2),
+                  height: Math.max(24, layout.headPx),
+                  pointerEvents: 'auto',
+                  cursor: 'grab',
+                  touchAction: 'none',
+                }}
+              />
+            </>
           ) : (
             <img src="/clawbox-crab.png" alt="" style={{
               width: CRAB_BODY_PX, height: CRAB_BODY_PX, objectFit: 'contain',
@@ -1445,9 +1794,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
           if (pet) {
             const bg = frenzy ? 'rgba(41,27,3,0.96)' : 'rgba(17,19,26,0.96)'
+            const vw = typeof window !== 'undefined' ? window.innerWidth : 0
             return (
-              <div style={{
-                position: 'absolute', bottom: bodyPx + PET_BUBBLE_GAP_PX, left: bodyHalf,
+              <div ref={bubbleElRef} style={{
+                // Off the top of the DRAWING, so the gap above the head reads
+                // the same 26px for a pet that fills its cell and one that sits
+                // low in it. Off the cell it measured 29px for boba and 56px
+                // for cash-cuy mid-facepalm.
+                position: 'absolute', bottom: (layout?.headPx ?? bodyPx) + PET_BUBBLE_GAP_PX, left: bodyHalf,
+                // Overwritten by `positionBubble` as soon as the width is
+                // known; this is the un-clamped first paint.
                 transform: flip,
                 zIndex: 10,
                 // `width: max-content` is load-bearing. The shell is only as
@@ -1457,7 +1813,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 // its bubble is `nowrap` and simply overflows. Sizing to the
                 // content first, then capping, wraps at 210px instead.
                 width: 'max-content',
-                maxWidth: 210,
+                // Never wider than the screen it has to fit inside.
+                maxWidth: vw > 0 ? Math.min(210, vw - BUBBLE_EDGE_MARGIN_PX * 2) : 210,
               }}>
                 <div data-speech="1" style={{
                   background: bg,
@@ -1518,7 +1875,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         {/* ZZZ floating animation when sleeping */}
         {isSleeping && (
           <div style={{
-            position: 'absolute', top: 30, right: 15,
+            // 30/15 were measured against the crab's 150px illustration. A pet
+            // is a smaller box with the art inset inside it, so the cluster is
+            // hung off the drawn head instead.
+            position: 'absolute',
+            top: pet ? headTopPx + 4 : 30,
+            right: pet ? Math.round(bodyPx * 0.12) : 15,
             pointerEvents: 'none', zIndex: 11,
           }}>
             {[0, 1.2, 2.4].map((delay, i) => (
@@ -1538,7 +1900,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         {/* Thinking indicator — dots above mascot head */}
         {thinking && (
           <div style={{
-            position: 'absolute', top: -5, left: '50%', transform: 'translateX(-50%)',
+            position: 'absolute', top: pet ? headTopPx - 14 : -5, left: '50%', transform: 'translateX(-50%)',
             display: 'flex', gap: 5, alignItems: 'center', zIndex: 11,
             pointerEvents: 'none',
           }}>

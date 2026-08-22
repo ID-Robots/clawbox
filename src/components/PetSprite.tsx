@@ -1,38 +1,38 @@
 'use client'
 
 import React, { memo } from 'react'
-import { petFrameFor, type MascotStateName } from '@/lib/pet-state-map'
+import { type MascotStateName } from '@/lib/pet-state-map'
+import { petKeyframes, petLayout, PET_BODY_PX } from '@/lib/pet-layout'
 import type { PetDescriptor } from '@/lib/pet-client'
 
 // ── The pet body ──
 //
-// A Petdex sheet is a grid of 192x208 cells: one animation state per row, six
+// A Petdex sheet is a grid of 192x208 cells: one animation state per row,
 // stepped frames per state, 1100 ms per loop. That is a frame-SELECTION
 // animation, which is why none of the crab's keyframes can be reused here —
 // `mascot-waddle` and friends transform a whole image, and applying one to a
 // spritesheet would wobble the sheet, not step through it.
 //
-// Rendered with CSS `steps()` over `background-position-x` rather than a
+// Rendered with CSS keyframes over `background-position-x` rather than a
 // canvas: it is what the Petdex web client itself does, it needs no rAF loop of
 // its own (the mascot already runs one for roaming), and it keeps animating
 // across React re-renders instead of restarting.
+//
+// Two things the naive version of this got wrong, both fixed by the per-row
+// measurements in the descriptor (see src/lib/pet-sheet-metrics.ts):
+//
+//   - it stepped a sheet-wide SIX frames over every row. The atlases are
+//     ragged — `waving` draws four, `jumping` five — so the last steps landed
+//     on empty cells and the pet disappeared for 183-367 ms every loop.
+//   - it pinned the CELL's bottom edge to the ground line, not the artwork's.
+//     Every sheet insets its character, by a different amount per row and per
+//     frame, so the feet floated 3-30 px above the taskbar and the pet bobbed
+//     whenever the state changed.
+//
+// The same animation now carries the frame's own foot offset in `bottom`, so
+// frame selection and foot alignment can never drift out of phase.
 
-/** Rendered cell height, in px.
- *
- *  Deliberately SMALLER than the crab's 150px body. Matching the crab was the
- *  original choice, so that every offset in Mascot.tsx kept working untouched —
- *  but the two bodies are not the same shape. The crab is one illustration that
- *  fills its box; a Petdex cell is 192x208 with the character inset inside it,
- *  so at 150 the pet read as oversized next to its own speech bubble and left
- *  no room above its head. Mascot.tsx sizes the pet branch off THIS number, so
- *  changing it moves the bubble and the effects with it.
- *
- *  Hermes' own `display.pet.scale` (0.33) is still not used: it is a shared
- *  scalar tuned for a terminal corner sprite, and writing to it would resize
- *  the CLI and TUI too. */
-export const PET_BODY_PX = 112
-
-const TARGET_H = PET_BODY_PX
+export { PET_BODY_PX }
 
 export interface PetSpriteProps {
   pet: PetDescriptor
@@ -42,12 +42,8 @@ export interface PetSpriteProps {
 }
 
 function PetSpriteImpl({ pet, state, thinking, facing }: PetSpriteProps) {
-  const scale = TARGET_H / pet.frameH
-  const dispW = pet.frameW * scale
-  const dispH = pet.frameH * scale
-  const frames = Math.max(1, pet.framesPerState)
-
-  const { rowIndex, mirror } = petFrameFor({ state, thinking, facing }, pet.rows)
+  const layout = petLayout(pet, { state, thinking, facing })
+  const { rowIndex, mirror, dispW, dispH, offsets, loopMs } = layout
 
   // The mascot shell already applies `scaleX(-1)` to face left. Codex sheets
   // carry dedicated `running-left` / `running-right` rows that face their own
@@ -56,32 +52,37 @@ function PetSpriteImpl({ pet, state, thinking, facing }: PetSpriteProps) {
   const shellFlip = facing === 'left' ? -1 : 1
   const flipX = (mirror ? -1 : 1) * shellFlip
 
-  const travel = Math.round(frames * dispW)
-  const keyframe = `pet-steps-${frames}-${travel}`
+  const { name: keyframe, css } = petKeyframes(layout)
 
   return (
     <>
-      <style>{`@keyframes ${keyframe}{from{background-position-x:0px}to{background-position-x:-${travel}px}}`}</style>
+      <style>{css}</style>
       <div
         data-pet={pet.slug}
         data-pet-row={rowIndex}
+        data-pet-frames={layout.frames}
         aria-hidden="true"
         style={{
           position: 'absolute',
           left: '50%',
-          bottom: 0,
+          // The animation overrides this per frame with that frame's own foot
+          // offset; the static value is the un-measured floor.
+          bottom: -offsets[0],
           width: dispW,
           height: dispH,
-          transform: `translateX(-50%) scaleX(${flipX})`,
+          // The squash on a hard landing rides the two custom properties, so it
+          // can play without clobbering the centring or the facing flip.
+          transform: `translateX(-50%) scaleX(${flipX}) scale(var(--pet-squash-x, 1), var(--pet-squash-y, 1))`,
+          transformOrigin: '50% 100%',
           backgroundImage: `url(/setup-api/pets/sprite?slug=${encodeURIComponent(pet.slug)}&rev=${encodeURIComponent(pet.revision)})`,
           backgroundRepeat: 'no-repeat',
           backgroundSize: `${pet.cols * dispW}px ${pet.rows * dispH}px`,
           backgroundPositionX: 0,
           backgroundPositionY: -rowIndex * dispH,
-          // Pixel art. Smoothing it turns a 192px sprite scaled to 138px into mush.
+          // Pixel art. Smoothing it turns a 192px sprite scaled to 96px into mush.
           imageRendering: 'pixelated',
-          animation: `${keyframe} ${pet.loopMs}ms steps(${frames}) infinite`,
-          willChange: 'background-position',
+          animation: `${keyframe} ${loopMs}ms step-end infinite`,
+          willChange: 'background-position, bottom',
         }}
       />
     </>

@@ -10,11 +10,17 @@
 
 import { type ComponentProps } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, waitFor, cleanup } from "@/tests/helpers/test-utils";
+import { render, waitFor, cleanup, fireEvent } from "@/tests/helpers/test-utils";
 import Mascot from "@/components/Mascot";
 import PetSprite, { PET_BODY_PX } from "@/components/PetSprite";
 import { invalidatePetStatus } from "@/lib/pet-client";
 import { CODEX_STATE_ROWS, LEGACY_STATE_ROWS } from "@/lib/pet-state-map";
+import type { PetRowMetrics } from "@/lib/pet-sheet-metrics";
+
+/** A row with `frames` real frames, each drawn `bottom` px above the cell floor. */
+function row(frames: number, bottom: number, head = 148): PetRowMetrics {
+  return { frames, bottom: new Array(frames).fill(bottom), head, left: 20, right: 20 };
+}
 
 vi.mock("@/lib/i18n", () => ({ useT: () => ({ t: (k: string) => k, locale: "en", localeResolved: true }) }));
 vi.mock("@/lib/client-kv", () => ({
@@ -46,6 +52,16 @@ const CODEX_PET = {
   rows: 9,
   framesPerState: 6,
   loopMs: 1100,
+};
+
+/** The shape every installed Petdex sheet really has: `waving` (row 3) draws
+ *  four frames, `jumping` (row 4) five, and every row insets its art. */
+const MEASURED_PET = {
+  ...CODEX_PET,
+  rowMetrics: [
+    row(6, 30), row(6, 12), row(6, 12), row(4, 8), row(5, 20),
+    row(6, 30), row(6, 30), row(6, 12), row(6, 30),
+  ],
 };
 
 function stubPetsRoute(payload: unknown) {
@@ -202,6 +218,80 @@ describe("edition gating", () => {
     }
   });
 
+  it("hangs the bubble off the pet's visible head, not its cell", async () => {
+    // Off the CELL, the same 26px gap read as 29px for a pet that fills its
+    // cell and 56px for one drawn low in it (cash-cuy, mid-facepalm).
+    const removeShelf = installShelf();
+    try {
+      stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: MEASURED_PET });
+      const { container } = render(<Mascot />);
+      const hit = await waitFor(() => {
+        const el = container.querySelector("[data-mascot-hit]") as HTMLElement | null;
+        expect(el).toBeTruthy();
+        return el as HTMLElement;
+      });
+      // A tap makes the mascot talk; the neutral pack is emoji-only, so the
+      // language gate always lets it through whatever the locale.
+      fireEvent.pointerDown(hit, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+      fireEvent.pointerUp(hit, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+      const bubble = await waitFor(() => {
+        const el = container.querySelector('[data-speech="1"]')?.parentElement as HTMLElement | null;
+        expect(el).toBeTruthy();
+        return el as HTMLElement;
+      });
+      // The idle row draws 148 source px of art -> 74 CSS px above the ground
+      // line, plus the 26px gap. Nothing here is measured off the 104px cell.
+      expect(bubble.style.bottom).toBe("100px");
+    } finally {
+      removeShelf();
+    }
+  });
+
+  it("paints a pet below the window layer and the crab above the shelf", async () => {
+    // Windows start at z 100 (page.tsx). At 10001 the pet painted over window
+    // content — over the Settings sidebar, and over its own dock.
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const withPet = render(<Mascot />);
+    await waitFor(() => expect(withPet.container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    const petShell = withPet.container.querySelector('[data-mascot="pet"]') as HTMLElement;
+    expect(Number(petShell.style.zIndex)).toBeLessThan(100);
+    // Only the drawn art is grabbable; the transparent rest of the box is not,
+    // so a desktop icon standing behind it keeps its clicks.
+    expect(petShell.style.pointerEvents).toBe("none");
+    expect(withPet.container.querySelector("[data-mascot-hit]")).toBeTruthy();
+
+    cleanup();
+    invalidatePetStatus();
+    stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
+    const crab = render(<Mascot />);
+    await waitFor(() => expect(crab.container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    const crabShell = crab.container.querySelector('[data-mascot="crab"]') as HTMLElement;
+    expect(crabShell.style.zIndex).toBe("10001");
+    expect(crabShell.style.pointerEvents).toBe("auto");
+  });
+
+  it("keeps one vertical convention: bottom is the ground line, always", async () => {
+    // The old render swapped `bottom` between 0 and the ground depending on a
+    // `physicsActive` flag the imperative loop also wrote to, and the two
+    // disagreed — the mascot settled 56px sunk into the taskbar.
+    const removeShelf = installShelf();
+    try {
+      stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+      const { container } = render(<Mascot />);
+      await waitFor(() => expect(container.querySelector('[data-pet="boba"]')).toBeTruthy());
+      const shell = await waitFor(() => {
+        const el = container.querySelector('[data-mascot="pet"]') as HTMLElement;
+        expect(el.style.bottom).toBe("100px");
+        return el;
+      });
+      // ...and the height it is NOT carrying is in the transform, where the
+      // physics loop writes it too.
+      expect(shell.style.transform).toContain("translateY(0.00px)");
+    } finally {
+      removeShelf();
+    }
+  });
+
   it("stands a pet on the bottom bar's top edge", async () => {
     const removeShelf = installShelf();
     try {
@@ -282,9 +372,43 @@ describe("PetSprite", () => {
     // own grid; 8 cols x 9 rows of that size here.
     expect(style).toContain(`height: ${PET_BODY_PX}px`);
     expect(style).toContain(`background-size: ${8 * (PET_BODY_PX * 192 / 208)}px ${9 * PET_BODY_PX}px`);
-    expect(style).toContain("steps(6)");
     expect(style).toContain("1100ms");
     expect(style).toContain("pixelated");
+  });
+
+  it("scales the 208px cell by exactly a half, so the frames step on integers", async () => {
+    // 112/208 = 0.538461…: `round(6 * 103.3846) / 6` drifted a quarter pixel by
+    // the last frame, and a fractional step under `image-rendering: pixelated`
+    // re-rounded which source rows survived — a foot line that jittered.
+    expect(PET_BODY_PX / 208).toBe(0.5);
+    expect(Number.isInteger((PET_BODY_PX * 192) / 208)).toBe(true);
+  });
+
+  it("steps only the frames a row really draws, never a blank cell", async () => {
+    // Every installed sheet leaves r3c4, r3c5 and r4c5 empty. Stepped as six,
+    // the pet rendered NOTHING for 2/6 of the waving loop and 1/6 of jumping.
+    const waving = render(<PetSprite pet={MEASURED_PET} state="dance" facing="right" />);
+    const el = waving.container.querySelector("[data-pet]") as HTMLElement;
+    expect(el.dataset.petRow).toBe(String(CODEX_STATE_ROWS.indexOf("waving")));
+    expect(el.dataset.petFrames).toBe("4");
+    // Four frames at the sheet's own frame rate, not four stretched over six.
+    expect(css(el)).toContain(`${Math.round((1100 * 4) / 6)}ms`);
+    // The last drawn column, and no further.
+    const keyframes = waving.container.querySelector("style")?.textContent ?? "";
+    expect(keyframes).toContain(`background-position-x:${-3 * ((PET_BODY_PX * 192) / 208)}px`);
+    expect(keyframes).not.toContain(`background-position-x:${-4 * ((PET_BODY_PX * 192) / 208)}px`);
+  });
+
+  it("puts each frame's own feet on the ground line", async () => {
+    // The cell is aligned to the bar; the ART is inset above the cell floor by
+    // a different amount per row, so aligning the cell floated every pet.
+    const jumping = render(<PetSprite pet={MEASURED_PET} state="jump" facing="right" />);
+    const el = jumping.container.querySelector("[data-pet]") as HTMLElement;
+    const keyframes = jumping.container.querySelector("style")?.textContent ?? "";
+    // row 4 insets its art 20 source px; at a half scale that is 10 CSS px of
+    // downward shift, carried by the SAME animation that selects the frame.
+    expect(keyframes).toContain("bottom:-10px");
+    expect(css(el)).toContain("bottom: -10px");
   });
 
   it("selects the row for the mood", async () => {
@@ -315,6 +439,14 @@ describe("PetSprite", () => {
     // convention — so rightward travel IS mirrored, and the shell adds no flip.
     expect(css(el)).toContain("scaleX(-1)");
     expect(css(el)).toContain(`background-size: ${9 * (PET_BODY_PX * 192 / 208)}px ${8 * PET_BODY_PX}px`);
+  });
+
+  it("keeps the un-measured cell geometry for a descriptor with no metrics", async () => {
+    // An older device (or a hand-built descriptor) simply has none. That costs
+    // a pet its foot alignment; it must not cost it its existence.
+    const el = sprite();
+    expect(el.dataset.petFrames).toBe("6");
+    expect(css(el)).toContain("bottom: 0px");
   });
 
   it("renders whatever geometry a pet declares", async () => {
