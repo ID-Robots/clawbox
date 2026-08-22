@@ -106,6 +106,12 @@ export type StagingFailure = {
 export function classifyStagingFailure(status: number | undefined, payload: unknown): StagingFailure {
   const detail = sanitizeErrorPayload(payload);
   if (status === 413) return { reason: "tooLarge", detail };
+  // The staging route's own copy of the documents gate. `partitionAttachments`
+  // normally refuses these before an upload happens, so a 415 here means the
+  // file got past the composer — a drop the partition could not classify, or a
+  // request that did not come from it. Same cause, so the same sentence: "this
+  // box can look at pictures, but not documents yet".
+  if (status === 415) return { reason: "imagesOnly", detail };
   if (status === 401 || status === 403) return { reason: "session", detail };
   if (typeof status === "number" && status >= 400 && status < 500) return { reason: "rejected", detail };
   // No status at all means the request never completed — a dropped connection

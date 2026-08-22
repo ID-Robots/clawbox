@@ -19,6 +19,23 @@ const PNG = Buffer.from(
   "base64",
 );
 
+/** A text document, as the composer's own picker would offer it. */
+const TEXT = Buffer.from("just some notes and nothing a viewer could render");
+
+/**
+ * Which harness this box runs, per test.
+ *
+ * `canAttachDocuments` is a property of the harness, and it is the whole point
+ * of the gate under test: a document staged on a Hermes box is disk the agent
+ * has no way to open, because `chat --image` is image-only and the path
+ * resolver in `image_routing.py` matches picture extensions by design.
+ */
+let harness: "openclaw" | "hermes" = "openclaw";
+vi.mock("@/lib/harness", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/harness")>()),
+  getActiveHarness: async () => harness,
+}));
+
 let tmpHome: string;
 let openclawHome: string;
 let originalHome: string | undefined;
@@ -167,6 +184,7 @@ function seedStaged(name: string, bytes: Buffer, ageMs: number): string {
 
 describe("/setup-api/chat/attachments", () => {
   beforeEach(async () => {
+    harness = "openclaw";
     originalHome = process.env.HOME;
     originalOpenclawHome = process.env.OPENCLAW_HOME;
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-attach-"));
@@ -175,6 +193,10 @@ describe("/setup-api/chat/attachments", () => {
     // The route roots on OPENCLAW_HOME, read at module load — set it first.
     process.env.HOME = tmpHome;
     process.env.OPENCLAW_HOME = openclawHome;
+    // The Hermes staging root is <DATA_DIR>/chat-media, and DATA_DIR is read at
+    // module load. Without this the Hermes cases below would stage into the
+    // real /home/clawbox/clawbox/data on a device running the suite.
+    process.env.CLAWBOX_ROOT = tmpHome;
     vi.resetModules();
     POST = (await import("@/app/setup-api/chat/attachments/route")).POST;
   });
@@ -184,6 +206,7 @@ describe("/setup-api/chat/attachments", () => {
     else process.env.HOME = originalHome;
     if (originalOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
     else process.env.OPENCLAW_HOME = originalOpenclawHome;
+    delete process.env.CLAWBOX_ROOT;
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
@@ -505,4 +528,60 @@ describe("/setup-api/chat/attachments", () => {
     expect(res.status).toBe(500);
     await expectStagingDrains();
   }, 10000);
+
+  // -- What this box can be handed ------------------------------------------
+  //
+  // The composer refuses these first (`partitionAttachments`), and that is the
+  // better place to refuse them: nothing is uploaded and the reason can be
+  // shown next to the file. This is the second gate, for a request that did not
+  // come from that composer -- reachable, and verified so: a text/plain
+  // document POSTed to a Hermes box was answered 200 and staged.
+
+  /** Everything staged under the Hermes root, or [] when it was never made. */
+  function hermesStaged(): string[] {
+    const dir = path.join(tmpHome, "data", "chat-media", "chat-attachments");
+    return fs.existsSync(dir) ? fs.readdirSync(dir) : [];
+  }
+
+  it("refuses a document on a harness that has no way to open one", async () => {
+    harness = "hermes";
+    const res = await POST(request(multipart("notes.txt", TEXT)));
+    expect(res.status).toBe(415);
+    expect((await res.json()).error).toMatch(/only attach images/i);
+    // Refused before the write stream is opened: nothing lands on the disk.
+    expect(hermesStaged()).toEqual([]);
+  });
+
+  it("takes the same document where the agent can open it", async () => {
+    // The gate is per-harness, not a new blanket rule. OpenClaw reads documents
+    // and must be unaffected.
+    harness = "openclaw";
+    const res = await POST(request(multipart("notes.txt", TEXT)));
+    expect(res.status).toBe(200);
+    expect(staged()).toHaveLength(1);
+  });
+
+  it("still takes a picture on the box that refused the document", async () => {
+    harness = "hermes";
+    const res = await POST(request(multipart("shapes.png", PNG)));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.name).toBe("shapes.png");
+    expect(fs.readFileSync(body.path)).toEqual(PNG);
+  });
+
+  it("is not fooled by a document wearing a picture's extension", async () => {
+    // The name check is what decides whether the agent's resolver would pick
+    // the file up, and a rename passes it. The client's MIME label is not
+    // consulted anywhere in this decision -- it is a header on a request that
+    // has already shown it did not come from our composer. Only the bytes say
+    // what the file is.
+    harness = "hermes";
+    const res = await POST(request(multipart("invoice.png", TEXT)));
+    expect(res.status).toBe(415);
+    // The bytes had to be written before they could be read, so the point here
+    // is that nothing is LEFT behind.
+    await expectStagingDrains();
+    expect(hermesStaged()).toEqual([]);
+  });
 });

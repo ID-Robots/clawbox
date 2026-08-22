@@ -7,6 +7,9 @@ import { pipeline } from "stream/promises";
 import Busboy from "busboy";
 import { randomUUID } from "crypto";
 import { chatAttachmentDir } from "@/lib/harness/media-root";
+import { getActiveHarness } from "@/lib/harness";
+import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+import { isImageMedia } from "@/lib/chat-media";
 
 export const dynamic = "force-dynamic";
 
@@ -161,6 +164,80 @@ async function pruneStagingDir(dirReal: string): Promise<void> {
   }
 }
 
+// -- Documents on a harness that has no way to read one ----------------------
+//
+// `partitionAttachments` already refuses these in the composer, and refusing
+// there is the better place: nothing is uploaded, nothing is written to the
+// customer's disk, and the reason can be shown next to the file. This is the
+// second gate, for a request that did not come from that composer -- verified
+// as reachable by POSTing a text/plain document to a Hermes box, which answered
+// 200 and staged it.
+//
+// The file would then be named in a turn that cannot carry it: `hermes chat
+// --image` is image-only and `image_routing.py:extract_image_refs()` matches
+// picture extensions by design, so a staged document is disk the box will never
+// hand back. Nothing is gained by keeping it.
+//
+// Deliberately NOT gated on `canAttachImages`. That capability is per-box (it
+// depends on the installed agent's flag and on a configured vision route), and
+// this route is the wrong place to spend a CLI probe per upload; the composer
+// owns that gate. `canAttachDocuments` is a fixed property of the harness, so
+// it costs one already-cached harness lookup to enforce here.
+
+/** The bytes a picture starts with, for the extensions the turn will resolve. */
+const IMAGE_SNIFF_BYTES = 16;
+
+/**
+ * Do these leading bytes look like a picture?
+ *
+ * The CLIENT'S MIME LABEL IS NOT CONSULTED anywhere in this decision. It is a
+ * request header on a request that has already shown it did not come from our
+ * composer, so `Content-Type: image/png` on a text file would defeat the gate
+ * it is supposed to pass. The name is checked (that is what decides whether the
+ * agent's own resolver would pick the file up) and then the bytes are, because
+ * only the bytes say what the file IS.
+ *
+ * The formats are exactly the ones `isImageMedia` claims, so the two gates
+ * cannot disagree about what an image is. A file too short to carry a signature
+ * is not one.
+ */
+function looksLikeImage(head: Buffer): boolean {
+  const startsWith = (...bytes: number[]) =>
+    head.length >= bytes.length && bytes.every((b, i) => head[i] === b);
+  const ascii = (offset: number, length: number) =>
+    head.length >= offset + length ? head.toString("latin1", offset, offset + length) : "";
+
+  // PNG, JPEG, GIF87a/89a, BMP.
+  if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return true;
+  if (startsWith(0xff, 0xd8, 0xff)) return true;
+  if (ascii(0, 4) === "GIF8") return true;
+  if (ascii(0, 2) === "BM") return true;
+  // WebP is a RIFF container; the form type at byte 8 is what makes it one.
+  if (ascii(0, 4) === "RIFF" && ascii(8, 4) === "WEBP") return true;
+  // AVIF is ISO-BMFF: a `ftyp` box whose major brand names the flavour. `mif1`
+  // is accepted because that is the brand a still AVIF from a phone carries.
+  if (ascii(4, 4) === "ftyp") {
+    const brand = ascii(8, 4);
+    if (brand === "avif" || brand === "avis" || brand === "mif1") return true;
+  }
+  return false;
+}
+
+/** Read the first bytes of a staged file, for the signature check above. */
+async function readHead(file: string): Promise<Buffer> {
+  const handle = await fsp.open(file, "r");
+  try {
+    const buffer = Buffer.alloc(IMAGE_SNIFF_BYTES);
+    const { bytesRead } = await handle.read(buffer, 0, IMAGE_SNIFF_BYTES, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** One message for both halves of the gate: the customer's fix is the same. */
+const IMAGE_ONLY_MESSAGE = "This device can only attach images";
+
 /**
  * A filesystem-safe leaf name for an uploaded file.
  *
@@ -215,6 +292,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Expected multipart/form-data with a boundary" }, { status: 400 });
   }
   if (!req.body) return NextResponse.json({ error: "No body" }, { status: 400 });
+
+  // What THIS box may be handed, resolved before a byte is read. The facts are
+  // the cautious ones on purpose: `canAttachDocuments` is a property of the
+  // harness and reads none of them, so resolving the real ones would spend a
+  // CLI probe per upload to compute a value that cannot change.
+  const documentsAllowed = capabilitiesFor(await getActiveHarness(), UNKNOWN_FACTS)
+    .canAttachDocuments;
 
   // Preparing the staging directory is our side of the contract, not the
   // caller's: a read-only filesystem or a bad permission here is a 500, and it
@@ -324,6 +408,14 @@ export async function POST(req: NextRequest) {
           fail(new BadUpload("Invalid filename"));
           return;
         }
+        // Refused BEFORE the write stream is opened, so a document on a harness
+        // that cannot read one never lands on the customer's disk at all. The
+        // name is the right test for this half: it is what decides whether the
+        // agent's own path-in-prompt resolver would ever pick the file up.
+        if (!documentsAllowed && !isImageMedia(leaf)) {
+          fail(new BadUpload(IMAGE_ONLY_MESSAGE, 415));
+          return;
+        }
         // Storage name is ours, display name is theirs. Deriving the path from
         // the client filename alone means two uploads called screenshot.png
         // land on the same file, and the second silently rewrites the bytes an
@@ -383,6 +475,14 @@ export async function POST(req: NextRequest) {
       source.on("error", fail);
       source.pipe(busboy);
     });
+    // The second half of the gate, and the one a rename cannot pass: a document
+    // called `invoice.png` clears the name check above. Run once the bytes are
+    // on disk rather than off the stream, so the check reads exactly what was
+    // written; a failure throws into the catch below, whose cleanup unlinks the
+    // partial file it would otherwise leave behind.
+    if (!documentsAllowed && !looksLikeImage(await readHead(result.path))) {
+      throw new BadUpload(IMAGE_ONLY_MESSAGE, 415);
+    }
     return NextResponse.json({ ok: true, name: result.name, path: result.path });
   } catch (err) {
     // A rejected upload must not leave a partial file behind: the composer
