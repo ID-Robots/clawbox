@@ -114,3 +114,56 @@ describe("the built-in toolsets a slim turn keeps", () => {
     expect(slimLocalProfileEnabled({ CLAWBOX_SMALL_MODEL_PROFILE: "on" } as unknown as NodeJS.ProcessEnv)).toBe(true);
   });
 });
+
+/**
+ * CodeQL `js/polynomial-redos` (high) on PR #442: the two regexes this parser
+ * used to be were quadratic in the length of a CLIENT-SUPPLIED string (the chat
+ * request body's `model`). Measured on the old implementation with a string of
+ * n `0`s — 11.7 ms at n=2,000, 47.3 ms at 4,000, 251.8 ms at 8,000, 861.4 ms at
+ * 16,000: 4x per doubling, the signature of an O(n²) scan.
+ *
+ * The chat route bounds its own input first (isSafeHermesModelId caps ids at
+ * 200 characters), but mcp/lib/profile.ts calls the same parser with whatever
+ * the models endpoint reports, so the parser owns this.
+ */
+describe("reading a size out of a model id is linear in its length", () => {
+  const timeMs = (input: string): number => {
+    const started = performance.now();
+    parseModelParamBillions(input);
+    return performance.now() - started;
+  };
+
+  it("does not blow up on a long run of digits", () => {
+    // The old implementation needed ~861 ms for 16k characters and would need
+    // roughly two minutes for 200k. A generous ceiling: the point is the shape
+    // of the curve, not a benchmark, so this must not go flaky on a loaded CI
+    // box while still failing outright if the quadratic ever comes back.
+    expect(timeMs("0".repeat(200_000))).toBeLessThan(2_000);
+  });
+
+  it("scales linearly rather than quadratically", () => {
+    // Warm the JIT so the first call's compile time is not read as cost.
+    timeMs("0".repeat(50_000));
+    const small = Math.max(timeMs("0".repeat(50_000)), 0.05);
+    const large = timeMs("0".repeat(400_000));
+    // 8x the input. Linear predicts ~8x the time; quadratic predicts ~64x.
+    expect(large / small).toBeLessThan(32);
+  });
+
+  it("still refuses a pathological string rather than inventing a size", () => {
+    expect(parseModelParamBillions("0".repeat(10_000))).toBeNull();
+    expect(parseModelParamBillions(`${"0".repeat(10_000)}b`)).toBeNull();
+    expect(parseModelParamBillions(`1${"0".repeat(20)}b`)).toBe(1e20);
+  });
+
+  it("reads a second decimal point as a new number — a deliberate difference", () => {
+    // The backtracking regex could start matching part-way through a digit run,
+    // so `1.2.3b` gave it 2.3. The single left-to-right scan takes the maximal
+    // leading number and then starts afresh, so it gives 3. No real model id
+    // looks like this and both readings sit on the same side of the 8B
+    // threshold; pinned so the choice stays visible rather than accidental.
+    expect(parseModelParamBillions("1.2.3b")).toBe(3);
+    expect(parseModelParamBillions("1.2.3.4b")).toBe(3.4);
+    expect(parseModelParamBillions("1.b")).toBeNull();
+  });
+});

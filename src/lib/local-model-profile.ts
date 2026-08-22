@@ -121,21 +121,112 @@ export function smallLocalModelToolsets(env: NodeJS.ProcessEnv = process.env): r
  * factor: 8x7b is a 47B model and calling it 7B would slim a model that has
  * ample room. Overestimating is the safe direction — the failure mode is a big
  * model keeping the full tool set, not a small one drowning in it.
+ *
+ * WHY THIS IS SCANNED BY HAND rather than with the two obvious regexes.
+ * `/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/` is quadratic on its input: the engine
+ * retries at every digit offset and `\d+` re-scans the rest of the run each
+ * time. CodeQL flags it as `js/polynomial-redos` (high), and the timing is
+ * real — on a string of n `0`s the pair of regexes measured 11.7 ms at
+ * n=2,000, 47.3 ms at 4,000, 251.8 ms at 8,000 and 861.4 ms at 16,000, the
+ * clean 4x-per-doubling of an O(n²) scan.
+ *
+ * The id reaching this function is client-supplied (the chat request body's
+ * `model`). The chat route happens to bound it first — isSafeHermesModelId
+ * caps it at 200 characters — but mcp/lib/profile.ts calls the same function
+ * with whatever `/setup-api/hermes/models` reports, and a parser should not
+ * depend on one of its two callers screening the input. The scan below visits
+ * each character a constant number of times, so the cost is linear and there is
+ * no backtracking to exploit.
+ *
+ * One deliberate difference from the regexes: a run with two decimal points
+ * (`1.2.3b`) is read as the maximal leading number and then a fresh one after
+ * each stray dot, so it yields 3 where the backtracking regex yielded 2.3.
+ * Neither reading is meaningful for a real id and both land on the same side of
+ * the size threshold; the case is pinned by a test so the choice stays visible.
  */
+
+const isDigit = (ch: string | undefined): boolean => ch !== undefined && ch >= "0" && ch <= "9";
+
+/** Single-character classes: no repetition, so nothing here can backtrack. */
+const SPACE = /\s/;
+const ID_CHAR = /[a-z0-9]/i;
+
+/** The first index at or after `i` that is not whitespace. */
+function skipSpace(id: string, i: number): number {
+  let k = i;
+  while (k < id.length && SPACE.test(id[k])) k++;
+  return k;
+}
+
+/**
+ * True when the `b` that turns a number into a parameter count sits at `i`
+ * (after optional whitespace) and is not itself part of a longer word — the
+ * `(?![a-z0-9])` of the original expression, which is what keeps `q4_0` and
+ * `qwen2.5` from parsing as sizes.
+ */
+function hasBillionsSuffix(id: string, i: number): boolean {
+  const k = skipSpace(id, i);
+  const ch = id[k];
+  if (ch !== "b" && ch !== "B") return false;
+  const next = id[k + 1];
+  return next === undefined || !ID_CHAR.test(next);
+}
+
+interface NumberToken {
+  value: number;
+  start: number;
+  /** Index just past the last character of the number. */
+  end: number;
+}
+
+/** Every number in `id`, left to right, in one pass. */
+function scanNumbers(id: string): NumberToken[] {
+  const found: NumberToken[] = [];
+  let i = 0;
+  while (i < id.length) {
+    if (!isDigit(id[i])) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (isDigit(id[j])) j++;
+    // At most one decimal point, and only when a digit follows it — so the `.`
+    // of `qwen2.5:3b` joins the version but a trailing dot never does.
+    if (id[j] === "." && isDigit(id[j + 1])) {
+      j++;
+      while (isDigit(id[j])) j++;
+    }
+    found.push({ value: Number(id.slice(i, j)), start: i, end: j });
+    i = j;
+  }
+  return found;
+}
+
 export function parseModelParamBillions(modelId: string): number | null {
   const id = (modelId || "").trim();
   if (!id) return null;
 
-  const moe = id.match(/(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/i);
-  if (moe) {
-    const product = Number(moe[1]) * Number(moe[2]);
+  const numbers = scanNumbers(id);
+
+  // Mixture-of-experts first, on the whole id, exactly as the two-phase regex
+  // version did: `<a> x <b> b` is the product. The two numbers are necessarily
+  // adjacent tokens, because only whitespace and the `x` may sit between them.
+  for (let n = 0; n + 1 < numbers.length; n++) {
+    const left = numbers[n];
+    const right = numbers[n + 1];
+    const afterLeft = skipSpace(id, left.end);
+    if (id[afterLeft] !== "x" && id[afterLeft] !== "X") continue;
+    if (skipSpace(id, afterLeft + 1) !== right.start) continue;
+    if (!hasBillionsSuffix(id, right.end)) continue;
+    const product = left.value * right.value;
     return Number.isFinite(product) && product > 0 ? product : null;
   }
 
-  const plain = id.match(/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/i);
-  if (!plain) return null;
-  const billions = Number(plain[1]);
-  return Number.isFinite(billions) && billions > 0 ? billions : null;
+  for (const number of numbers) {
+    if (!hasBillionsSuffix(id, number.end)) continue;
+    return Number.isFinite(number.value) && number.value > 0 ? number.value : null;
+  }
+  return null;
 }
 
 export interface LocalModelSizeInput {
