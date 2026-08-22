@@ -66,7 +66,8 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
     vi.stubGlobal("fetch", fetchSpy);
     const mod = await import("@/app/setup-api/ai-models/status/route");
     GET = mod.GET;
-    mod._resetPortalTierCache();
+    // Cache seam lives in the shared lib — see status.test.ts.
+    (await import("@/lib/clawbox-ai-portal-tier"))._resetPortalTierCache();
   });
 
   afterEach(() => {

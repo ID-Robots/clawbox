@@ -1343,6 +1343,28 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
     });
 
+    it("reaches the primary model from the portal alone when the request omits clawaiTier", async () => {
+      // CodeRabbit's catch on #430, and a fair one: every other case here
+      // sends a picker value, so none of them proves the portal result can
+      // drive the model on its own. With `clawaiTier` absent,
+      // `requestedClawboxAiTier` is null and the whole chain past
+      // `portalConfirmedTier` is the stored value then the hardcoded default
+      // — both of which are "flash". So if the reconcile ever stopped
+      // feeding this branch, this is the only test that would notice.
+      vi.stubGlobal("fetch", deviceInfo({ tier: "max" }));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_max_no_picker",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+      expect(mockSetMany).toHaveBeenCalledWith(
+        expect.objectContaining({ clawai_tier: "pro" }),
+      );
+    });
+
     it("does not consult the portal for a non-ClawBox provider", async () => {
       const fetchMock = deviceInfo({ tier: "max" });
       vi.stubGlobal("fetch", fetchMock);

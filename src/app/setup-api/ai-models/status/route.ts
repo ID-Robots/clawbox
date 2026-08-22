@@ -11,10 +11,9 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
-import {
-  fetchPortalTier,
-  _resetPortalTierCache,
-} from "@/lib/clawbox-ai-portal-tier";
+// Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
+// configure route can reach the same answer from the same cache (TASK-481).
+import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 
 export const dynamic = "force-dynamic";
 
@@ -37,12 +36,6 @@ const CLAWBOX_AI_TIER_CONFIG_KEY = "clawai_tier";
 // `applyClawaiToHermes` writes it here; the OpenClaw path reads the same token
 // from `models.providers.deepseek.apiKey` in openclaw.json instead.
 const CLAWBOX_AI_TOKEN_CONFIG_KEY = "clawai_token";
-
-// Portal tier resolution lives in @/lib/clawbox-ai-portal-tier so the
-// configure route can reach the same answer from the same cache (TASK-481).
-// Re-exported here because the route suite drives the cache through this
-// module and the seam should stay where its tests already point.
-export { _resetPortalTierCache };
 
 function normalizeProvider(provider: string | null): string | null {
   if (!provider) return null;
