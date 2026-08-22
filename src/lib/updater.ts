@@ -11,6 +11,7 @@ import {
 } from "./openclaw-config";
 import { hasHermesHarness } from "./edition-source";
 import { isPortOpen } from "./port-probe";
+import { isSafeBranch } from "./update-branch";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -195,18 +196,28 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
   });
 }
 
-/** Validate branch name — only safe git ref characters allowed (prevents shell injection). */
-// The negative lookahead rejects a leading '-' (or '/'): a branch token that
-// starts with '-' is parsed by git as an option flag (e.g. "-D", "--all")
-// rather than a ref, which smuggles switches into the checkout/fetch commands
-// and bricks the updater. Real branch names never start with '-' or '/'.
-const SAFE_BRANCH = /^(?![-/])[A-Za-z0-9._\-/]+$/;
-
 /**
  * Determine which branch to update to, in priority order:
  * 1. `.update-branch` file in project root (survives factory reset + git reset)
  * 2. Current branch if it tracks a remote
  * 3. "main" as the default fallback
+ *
+ * Rule 1 survives a factory reset because the reset route wipes `data/`,
+ * `~/.openclaw`, `~/.clawkeep` and a list of home dotfiles — never the project
+ * root itself — and survives `git reset --hard` because the file is gitignored.
+ * Both are pinned by src/tests/unit/install-update-branch-pin.test.ts.
+ *
+ * The pin is written by install.sh (persist_update_branch_pin) and by the
+ * operator through /setup-api/system/update-branch. install.sh writes it for an
+ * explicit CLAWBOX_BRANCH, and — when the device carries no pin at all — adopts
+ * the branch the checkout is already sitting on, because rule 2 is weak: a
+ * branch's upstream *link* does not survive a re-clone even though the branch
+ * does, and an unpinned device then falls silently through to `main`.
+ *
+ * Rules 2 and 3 are why a rejected pin is worse than no pin: an unreadable or
+ * malformed value does not fail the update, it quietly becomes `main`. The
+ * validator is therefore shared with the Settings route and mirrored by
+ * install.sh's `is_safe_git_ref` — see src/lib/update-branch.ts.
  */
 interface ResolvedBranch {
   /** Local branch to checkout */
@@ -221,7 +232,7 @@ async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
   // 1. Check .update-branch file
   try {
     const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
-    if (pinned && SAFE_BRANCH.test(pinned)) {
+    if (pinned && isSafeBranch(pinned)) {
       return { local: pinned, upstream: `origin/${pinned}` };
     }
   } catch { /* file doesn't exist */ }
@@ -233,14 +244,14 @@ async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
       { timeout: 10_000 },
     );
     const current = branchOut.trim();
-    if (!current || current === "main" || !SAFE_BRANCH.test(current)) return main;
+    if (!current || current === "main" || !isSafeBranch(current)) return main;
 
     const { stdout: upstreamOut } = await execShell(
       `${gitCmd} rev-parse --abbrev-ref ${current}@{u}`,
       { timeout: 10_000 },
     );
     const upstream = upstreamOut.trim();
-    if (upstream && SAFE_BRANCH.test(upstream)) {
+    if (upstream && isSafeBranch(upstream)) {
       return { local: current, upstream };
     }
   } catch {
@@ -678,7 +689,7 @@ async function getPinnedBranchTarget(gitCmd: string): Promise<{
   } catch {
     return null;
   }
-  if (!branch || !SAFE_BRANCH.test(branch)) return null;
+  if (!branch || !isSafeBranch(branch)) return null;
 
   try {
     await execShell(`${gitCmd} fetch --quiet origin ${branch}`, { timeout: 20_000 }).catch(() => {});
