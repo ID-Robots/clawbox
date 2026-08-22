@@ -1,0 +1,238 @@
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+// A voice note that arrives over a chat channel is transcribed through
+// OpenClaw's media-understanding surface, which is not a models[] row and
+// never reads one: it takes its endpoint from `tools.media.audio.baseUrl` and
+// its bearer from `models.providers.openai.apiKey`. ClawBox writes that key
+// and, before TASK-502, no audio config at all — so every Telegram voice note
+// sent the claw_ subscription token to api.openai.com and came back 401.
+// Reproduced on both loop boxes on beta 02249c1.
+//
+// Like the image migration next door, these run the block out of the shipped
+// .sh rather than a copy, so the test fails if the real script drifts.
+
+const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
+const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
+
+const PROXY = "https://clawbox.com/api/ai";
+const TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
+const OURS = [{ provider: "openai", model: TRANSCRIBE_MODEL }];
+
+function slice(from: string, to: string): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const start = src.indexOf(from);
+  const end = src.indexOf(to, start);
+  if (start < 0 || end < 0) throw new Error(`block not found: ${from}`);
+  return src.slice(start, end);
+}
+
+/** The speech-to-text migration, verbatim. */
+const POLICY = hasPython3
+  ? slice("# Migration: ClawBox AI speech to text.", "if isinstance(ds_models, list):")
+  : "";
+
+let dir: string;
+beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "clawai-audio-")); });
+afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+
+type Config = Record<string, unknown>;
+type AudioConfig = { baseUrl?: unknown; models?: unknown; [key: string]: unknown };
+
+/**
+ * Run the extracted block over a whole openclaw.json.
+ *
+ * The preamble binds only what the real script binds upstream of this point:
+ * `cfg`, `changed`, and the two names the image migration hands over once it
+ * has decided the `openai` provider slot is ours
+ * (`_clawai_openai_route_is_ours`, `_clawai_proxy_base_url`).
+ * `routeIsOurs: false` is the real script's starting value, i.e. a box whose openai slot belongs to its
+ * owner or that has no ClawBox AI token at all.
+ */
+function migrate(cfg: Config, routeIsOurs = true): { cfg: Config; changed: boolean; log: string } {
+  const file = path.join(dir, "config.json");
+  writeFileSync(file, JSON.stringify(cfg));
+  const program = [
+    "import json, sys",
+    "cfg = json.load(open(sys.argv[1]))",
+    "changed = False",
+    `_clawai_openai_route_is_ours = ${routeIsOurs ? "True" : "False"}`,
+    `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
+    POLICY,
+    "print(json.dumps({'cfg': cfg, 'changed': changed}))",
+  ].join("\n");
+  const lines = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
+  return { ...JSON.parse(lines[lines.length - 1]), log: lines.slice(0, -1).join("\n") };
+}
+
+function audio(cfg: Config): AudioConfig | undefined {
+  const tools = cfg.tools as { media?: { audio?: AudioConfig } } | undefined;
+  return tools?.media?.audio;
+}
+
+describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text migration", () => {
+  it("points channel audio at the proxy and pins the model production serves", () => {
+    const { cfg, changed } = migrate({});
+
+    expect(changed).toBe(true);
+    // Both halves are load-bearing against the live proxy: the baseUrl alone
+    // gets 400 (OpenClaw's default openai audio model is gpt-4o-transcribe,
+    // which the proxy does not serve) and the pin alone still goes to OpenAI.
+    expect(audio(cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+  });
+
+  it("keeps whatever else already sits under tools.media", () => {
+    const { cfg } = migrate({
+      tools: {
+        media: {
+          image: { enabled: true },
+          audio: { enabled: true, language: "bg", maxBytes: 1024 },
+        },
+        other: { keep: "me" },
+      },
+    });
+
+    expect(audio(cfg)).toEqual({
+      enabled: true,
+      language: "bg",
+      maxBytes: 1024,
+      baseUrl: PROXY,
+      models: OURS,
+    });
+    const tools = cfg.tools as { media: Record<string, unknown>; other: unknown };
+    expect(tools.media.image).toEqual({ enabled: true });
+    expect(tools.other).toEqual({ keep: "me" });
+  });
+
+  it("is idempotent — a second boot writes nothing", () => {
+    const once = migrate({});
+    const twice = migrate(once.cfg);
+
+    expect(twice.changed).toBe(false);
+    expect(twice.cfg).toEqual(once.cfg);
+  });
+
+  it("does nothing at all when the openai slot is not ours", () => {
+    // The image migration refused the slot, so the key on it is the owner's
+    // OpenAI credential. Pointing audio at our proxy would post THEIR key to
+    // clawbox.com — the mirror image of the leak this fixes.
+    const { cfg, changed } = migrate({}, false);
+
+    expect(changed).toBe(false);
+    expect(cfg.tools).toBeUndefined();
+  });
+
+  it("leaves a foreign transcription endpoint alone and says so", () => {
+    const owner = { baseUrl: "https://whisper.lan/v1", models: [{ provider: "openai", model: "whisper-1" }] };
+    const { cfg, changed, log } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+    expect(log).toContain("Skipped ClawBox AI speech to text");
+  });
+
+  it("leaves a different model on our own proxy alone", () => {
+    // Same host, deliberate choice of model — still the owner's configuration.
+    const owner = { baseUrl: PROXY, models: [{ provider: "openai", model: "gpt-4o-transcribe" }] };
+    const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+
+  it("leaves another route on our own host alone", () => {
+    // Same host, different path: the owner pointed transcription somewhere
+    // specific and a host-only comparison would have stamped over it.
+    const owner = { baseUrl: "https://clawbox.com/custom-transcribe", models: OURS };
+    const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+
+  it("normalizes one harmless trailing slash on our managed endpoint", () => {
+    const { cfg, changed } = migrate({
+      tools: { media: { audio: { baseUrl: `${PROXY}/`, models: OURS } } },
+    });
+
+    expect(changed).toBe(true);
+    expect(audio(cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+  });
+
+  it("leaves repeated trailing slashes alone as a distinct owner route", () => {
+    // Removing every trailing slash would turn this into PROXY and overwrite a
+    // route the owner explicitly entered. Only one optional slash is syntax.
+    const owner = { baseUrl: `${PROXY}//`, models: OURS };
+    const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+
+  it("keeps an endpoint it cannot make sense of", () => {
+    // We cannot say where it points, so we cannot say our token is safe there.
+    const owner = { baseUrl: "not a url" };
+    const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+
+  it("leaves an empty models list alone rather than claiming it", () => {
+    // `models: []` is a deliberate "no provider models here", not an absence.
+    const { cfg, changed } = migrate({ tools: { media: { audio: { models: [] } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual({ models: [] });
+  });
+
+  it("repairs a half-written config from an interrupted boot", () => {
+    // Our own baseUrl to the character, our pin missing: the transcription would resolve to
+    // gpt-4o-transcribe and 400 on every voice note.
+    const { cfg, changed } = migrate({ tools: { media: { audio: { baseUrl: PROXY } } } });
+
+    expect(changed).toBe(true);
+    expect(audio(cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+  });
+
+  it("replaces a non-dict at tools.media.audio rather than booting broken", () => {
+    const { cfg, changed } = migrate({ tools: { media: { audio: "yes" } } });
+
+    expect(changed).toBe(true);
+    expect(audio(cfg)).toEqual({ baseUrl: PROXY, models: OURS });
+  });
+
+  it("follows a staging box to its own proxy", () => {
+    // The proxy base url is taken from the deepseek entry upstream, so a box
+    // provisioned against staging keeps talking to staging for audio too.
+    const file = path.join(dir, "config.json");
+    writeFileSync(file, JSON.stringify({}));
+    const staging = "https://staging.clawbox.com/api/ai";
+    const program = [
+      "import json, sys",
+      "cfg = json.load(open(sys.argv[1]))",
+      "changed = False",
+      "_clawai_openai_route_is_ours = True",
+      `_clawai_proxy_base_url = ${JSON.stringify(staging)}`,
+      POLICY,
+      "print(json.dumps({'cfg': cfg, 'changed': changed}))",
+    ].join("\n");
+    const out = execFileSync("python3", ["-c", program, file], { encoding: "utf-8" }).trim().split("\n");
+    const { cfg } = JSON.parse(out[out.length - 1]) as { cfg: Config };
+
+    expect(audio(cfg)).toEqual({ baseUrl: staging, models: OURS });
+  });
+
+  it("pins the model the transcribe route uses, so both paths bill the same thing", () => {
+    const route = readFileSync(
+      path.resolve(process.cwd(), "src/app/setup-api/chat/transcribe/route.ts"),
+      "utf-8",
+    );
+
+    expect(route).toContain(`"${TRANSCRIBE_MODEL}"`);
+    expect(POLICY).toContain(`CLAWBOX_TRANSCRIBE_MODEL_ID = "${TRANSCRIBE_MODEL}"`);
+  });
+});

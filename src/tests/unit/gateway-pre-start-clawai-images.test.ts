@@ -41,7 +41,10 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 function extractPolicy(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const start = src.indexOf("# Migration: ClawBox AI image generation.");
-  const end = src.indexOf("if isinstance(ds_models, list):", start);
+  // Ends where the speech-to-text migration begins: the two blocks are
+  // independent and each is exercised by its own file
+  // (gateway-pre-start-clawai-audio.test.ts).
+  const end = src.indexOf("# Migration: ClawBox AI speech to text.", start);
   if (start < 0 || end < 0) throw new Error("clawai image migration block not found");
   return src.slice(start, end);
 }
