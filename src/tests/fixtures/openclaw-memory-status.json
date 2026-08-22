@@ -1,0 +1,104 @@
+[
+  {
+    "agentId": "main",
+    "status": {
+      "backend": "builtin",
+      "files": 0,
+      "chunks": 0,
+      "dirty": false,
+      "workspaceDir": "/home/clawbox/.openclaw/workspace",
+      "dbPath": "/home/clawbox/.openclaw/agents/main/agent/openclaw-agent.sqlite",
+      "provider": "ollama",
+      "model": "qwen3-embedding:0.6b",
+      "requestedProvider": "ollama",
+      "sources": [
+        "memory"
+      ],
+      "extraPaths": [],
+      "sourceCounts": [
+        {
+          "source": "memory",
+          "files": 0,
+          "chunks": 0
+        }
+      ],
+      "cache": {
+        "enabled": true,
+        "entries": 0
+      },
+      "fts": {
+        "enabled": true,
+        "available": true
+      },
+      "vector": {
+        "enabled": true,
+        "storeAvailable": true,
+        "semanticAvailable": true,
+        "available": true,
+        "extensionPath": "/home/clawbox/.npm-global/lib/node_modules/openclaw/node_modules/sqlite-vec-linux-arm64/vec0.so"
+      },
+      "batch": {
+        "enabled": false,
+        "failures": 0,
+        "limit": 2,
+        "wait": true,
+        "concurrency": 2,
+        "pollIntervalMs": 2000,
+        "timeoutMs": 3600000
+      },
+      "custom": {
+        "searchMode": "hybrid",
+        "providerState": {
+          "mode": "active",
+          "providerId": "ollama"
+        },
+        "indexIdentity": {
+          "status": "valid"
+        },
+        "readonlyRecovery": {
+          "attempts": 0,
+          "successes": 0,
+          "failures": 0
+        }
+      }
+    },
+    "embeddingProbe": {
+      "ok": true
+    },
+    "scan": {
+      "sources": [
+        {
+          "source": "memory",
+          "totalFiles": 0,
+          "issues": [
+            "memory directory missing (~/.openclaw/workspace/memory)"
+          ]
+        }
+      ],
+      "totalFiles": 0,
+      "issues": [
+        "memory directory missing (~/.openclaw/workspace/memory)"
+      ]
+    },
+    "audit": {
+      "storePath": "plugin-state:memory-core/short-term-recall/c85dd886df3f3ef21b922a8e680fab4877ebadd08b8f27eb8953a9e060107cb6",
+      "lockPath": "plugin-state:memory-core/short-term-locks/c85dd886df3f3ef21b922a8e680fab4877ebadd08b8f27eb8953a9e060107cb6",
+      "exists": false,
+      "entryCount": 0,
+      "promotedCount": 0,
+      "spacedEntryCount": 0,
+      "conceptTaggedEntryCount": 0,
+      "invalidEntryCount": 0,
+      "issues": []
+    },
+    "dreamingAudit": {
+      "sessionCorpusDir": "/home/clawbox/.openclaw/workspace/memory/.dreams/session-corpus",
+      "sessionCorpusFileCount": 0,
+      "suspiciousSessionCorpusFileCount": 0,
+      "suspiciousSessionCorpusLineCount": 0,
+      "sessionIngestionPath": "/home/clawbox/.openclaw/workspace/memory/.dreams/session-ingestion.json",
+      "sessionIngestionExists": false,
+      "issues": []
+    }
+  }
+]
