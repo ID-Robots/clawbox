@@ -17,12 +17,22 @@ import type { PetDescriptor } from '@/lib/pet-client'
 // its own (the mascot already runs one for roaming), and it keeps animating
 // across React re-renders instead of restarting.
 
-/** Rendered height, in px. Matches the crab's 150px body so the two mascots
- *  occupy the same footprint and every position/bubble offset in Mascot.tsx
- *  keeps working untouched. Hermes' own `display.pet.scale` (0.33) is not used:
- *  it is a shared scalar tuned for a terminal corner sprite, and writing to it
- *  would resize the CLI and TUI too. */
-const TARGET_H = 150
+/** Rendered cell height, in px.
+ *
+ *  Deliberately SMALLER than the crab's 150px body. Matching the crab was the
+ *  original choice, so that every offset in Mascot.tsx kept working untouched —
+ *  but the two bodies are not the same shape. The crab is one illustration that
+ *  fills its box; a Petdex cell is 192x208 with the character inset inside it,
+ *  so at 150 the pet read as oversized next to its own speech bubble and left
+ *  no room above its head. Mascot.tsx sizes the pet branch off THIS number, so
+ *  changing it moves the bubble and the effects with it.
+ *
+ *  Hermes' own `display.pet.scale` (0.33) is still not used: it is a shared
+ *  scalar tuned for a terminal corner sprite, and writing to it would resize
+ *  the CLI and TUI too. */
+export const PET_BODY_PX = 112
+
+const TARGET_H = PET_BODY_PX
 
 export interface PetSpriteProps {
   pet: PetDescriptor

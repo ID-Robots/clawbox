@@ -11,7 +11,7 @@ import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
 import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
-import PetSprite from '@/components/PetSprite'
+import PetSprite, { PET_BODY_PX } from '@/components/PetSprite'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -59,8 +59,21 @@ const CRAB_GROUND_PX = 8
 const CRAB_WALK_RANGE = { min: 5, max: 88 }
 /** Drag/physics range — wider than roaming, the crab may be thrown further. */
 const CRAB_BOUNDS = { min: 2, max: 92 }
-/** Half the mascot body, so a pet's edges stay over the bar it walks on. */
-const BODY_HALF_PX = 60
+/** The crab's own body box. A pet's is `PET_BODY_PX`, which is smaller. */
+const CRAB_BODY_PX = 150
+
+/**
+ * Clearance between the top of a pet's CELL and the bottom of its bubble.
+ *
+ * Measured off the cell, not the visible art: a Petdex sheet insets its
+ * character inside the 192x208 cell by an amount that differs per pet and per
+ * animation row, and nothing on this side can know it. Anchoring to the cell is
+ * the only offset that guarantees the bubble clears the topmost pixel of EVERY
+ * pet in EVERY state — it just reads as a slightly bigger gap for a pet that
+ * sits low in its cell. Large enough to swallow the bubble's own 6px tail and
+ * still leave an obvious gap.
+ */
+const PET_BUBBLE_GAP_PX = 26
 
 interface Range { min: number; max: number }
 
@@ -208,9 +221,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       // The shelf is full-bleed today, so this mostly reproduces the crab's
       // own range — but it is derived from the bar rather than assumed, which
       // is what keeps the pet ON it if the bar is ever inset or centred.
+      const half = PET_BODY_PX / 2
       const onBar: Range = {
-        min: ((rect.left + BODY_HALF_PX) / vw) * 100,
-        max: ((rect.right - BODY_HALF_PX) / vw) * 100,
+        min: ((rect.left + half) / vw) * 100,
+        max: ((rect.right - half) / vw) * 100,
       }
       walkRangeRef.current = intersectRange(onBar, CRAB_WALK_RANGE)
       boundsRef.current = intersectRange(onBar, CRAB_BOUNDS)
@@ -1240,9 +1254,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     const inset = rightInset ?? 0
     if (inset <= 0) return
     const vw = window.innerWidth
-    const CRAB_HALF = 75 // half the 150px crab image
-    const GAP = 24       // breathing room between crab and panel edge
-    const maxCenterPx = vw - inset - GAP - CRAB_HALF
+    // Half the body — a pet's is narrower than the crab's.
+    const HALF = (pet ? PET_BODY_PX : CRAB_BODY_PX) / 2
+    const GAP = 24       // breathing room between mascot and panel edge
+    const maxCenterPx = vw - inset - GAP - HALF
     const maxXvw = Math.max(5, (maxCenterPx / vw) * 100)
 
     const startCrab = xRef.current
@@ -1267,7 +1282,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     }
     raf = requestAnimationFrame(step)
     return () => { if (raf) cancelAnimationFrame(raf) }
-  }, [rightInset, updateCrabPos, updateBoxPos, setFacingDirect])
+  }, [rightInset, pet, updateCrabPos, updateBoxPos, setFacingDirect])
 
   // Listen for show/hide mascot events from desktop context menu
   useEffect(() => {
@@ -1284,6 +1299,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   if (petStatus === null) return null
   // Hermes edition with nothing picked yet: no crab, no placeholder.
   if (petStatus.supported && !pet) return null
+
+  /** The body box this mascot occupies. Every offset below is relative to it. */
+  const bodyPx = pet ? PET_BODY_PX : CRAB_BODY_PX
+  const bodyHalf = bodyPx / 2
 
   return (
     <>
@@ -1329,13 +1348,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 ? 'drop-shadow(0 0 15px rgba(249,115,22,0.6))'
                 : 'none',
       }}>
-        {/* Body */}
-        <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnim, width: 150, height: 150, position: 'relative', willChange: 'transform' }}>
+        {/* Body. A pet's box is smaller than the crab's, and everything
+            anchored to it — bubble, damage numbers, power effects — is
+            measured off `bodyPx` rather than the crab's 150 so the whole
+            composition scales together. */}
+        <div data-frenzy={frenzy ? '1' : undefined} style={{ animation: bodyAnim, width: bodyPx, height: bodyPx, position: 'relative', willChange: 'transform' }}>
           {pet ? (
             <PetSprite pet={pet} state={state} thinking={thinking} facing={facing} />
           ) : (
             <img src="/clawbox-crab.png" alt="" style={{
-              width: 150, height: 150, objectFit: 'contain',
+              width: CRAB_BODY_PX, height: CRAB_BODY_PX, objectFit: 'contain',
             }} />
           )}
           {/* FRENZY MODE — money rain + shockwaves */}
@@ -1373,12 +1395,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                   pointerEvents: 'none',
                 }} />
               ))}
-              {/* Floating particles */}
+              {/* Floating particles. Placed for the crab's 150px box, so they
+                  are scaled into a pet's smaller one rather than escaping it. */}
               {POWER_PARTICLES.map((particle, i) => (
                 <div key={i} style={{
                   position: 'absolute',
-                  bottom: particle.bottom,
-                  left: particle.left,
+                  bottom: Math.round(particle.bottom * bodyPx / CRAB_BODY_PX),
+                  left: Math.round(particle.left * bodyPx / CRAB_BODY_PX),
                   width: 4, height: 4, borderRadius: '50%',
                   background: i % 2 === 0 ? '#f97316' : '#fbbf24',
                   animation: `power-particles ${particle.duration}s ease-out ${particle.delay}s infinite`,
@@ -1391,7 +1414,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         {/* Floating damage numbers */}
         {damageFloaters.map(f => (
           <div key={f.id} style={{
-            position: 'absolute', bottom: 120, left: 75 + f.x,
+            position: 'absolute', bottom: bodyPx - 30, left: bodyHalf + f.x,
             transform: 'translateX(-50%)',
             pointerEvents: 'none', zIndex: 11,
             animation: 'damage-float 1.2s ease-out forwards',
@@ -1424,7 +1447,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             const bg = frenzy ? 'rgba(41,27,3,0.96)' : 'rgba(17,19,26,0.96)'
             return (
               <div style={{
-                position: 'absolute', bottom: 132, left: 75,
+                position: 'absolute', bottom: bodyPx + PET_BUBBLE_GAP_PX, left: bodyHalf,
                 transform: flip,
                 zIndex: 10,
                 // `width: max-content` is load-bearing. The shell is only as
@@ -1472,7 +1495,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
           return (
             <div style={{
-              position: 'absolute', bottom: 155, left: 75,
+              position: 'absolute', bottom: 155, left: bodyHalf,
               transform: flip,
               zIndex: 10,
             }}>

@@ -12,7 +12,7 @@ import { type ComponentProps } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, cleanup } from "@/tests/helpers/test-utils";
 import Mascot from "@/components/Mascot";
-import PetSprite from "@/components/PetSprite";
+import PetSprite, { PET_BODY_PX } from "@/components/PetSprite";
 import { invalidatePetStatus } from "@/lib/pet-client";
 import { CODEX_STATE_ROWS, LEGACY_STATE_ROWS } from "@/lib/pet-state-map";
 
@@ -218,6 +218,30 @@ describe("edition gating", () => {
     }
   });
 
+  it("gives a pet a smaller body box than the crab's, and leaves the crab's at 150", async () => {
+    // Everything anchored to the body — the speech bubble, the damage numbers,
+    // the power-stance particles — is measured off this box, so it is the one
+    // number that has to differ between the two mascots. The crab's stays 150
+    // exactly: OpenClaw's rendering must not move by a pixel.
+    expect(PET_BODY_PX).toBeLessThan(150);
+
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const withPet = render(<Mascot />);
+    await waitFor(() => expect(withPet.container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    const petBody = withPet.container.querySelector('[data-pet]')?.parentElement as HTMLElement;
+    expect(petBody.style.width).toBe(`${PET_BODY_PX}px`);
+    expect(petBody.style.height).toBe(`${PET_BODY_PX}px`);
+
+    cleanup();
+    invalidatePetStatus();
+    stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
+    const crab = render(<Mascot />);
+    await waitFor(() => expect(crab.container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    const crabBody = crab.container.querySelector('img[src="/clawbox-crab.png"]')?.parentElement as HTMLElement;
+    expect(crabBody.style.width).toBe("150px");
+    expect(crabBody.style.height).toBe("150px");
+  });
+
   it("re-reads the pet when Settings announces a pick", async () => {
     stubPetsRoute({ supported: true, edition: "hermes", enabled: false, active: null });
     const { container } = render(<Mascot />);
@@ -254,9 +278,10 @@ describe("PetSprite", () => {
 
   it("sizes the sheet from the pet's own grid and steps the frames", async () => {
     const style = css(sprite());
-    // 150px tall to match the crab's footprint; 8 cols x 9 rows of that size.
-    expect(style).toContain("height: 150px");
-    expect(style).toContain(`background-size: ${8 * (150 * 192 / 208)}px ${9 * 150}px`);
+    // Every sheet is normalised to PET_BODY_PX tall per cell, whatever its
+    // own grid; 8 cols x 9 rows of that size here.
+    expect(style).toContain(`height: ${PET_BODY_PX}px`);
+    expect(style).toContain(`background-size: ${8 * (PET_BODY_PX * 192 / 208)}px ${9 * PET_BODY_PX}px`);
     expect(style).toContain("steps(6)");
     expect(style).toContain("1100ms");
     expect(style).toContain("pixelated");
@@ -289,7 +314,7 @@ describe("PetSprite", () => {
     // No directional rows on this shape, and the generic run row faces left by
     // convention — so rightward travel IS mirrored, and the shell adds no flip.
     expect(css(el)).toContain("scaleX(-1)");
-    expect(css(el)).toContain(`background-size: ${9 * (150 * 192 / 208)}px ${8 * 150}px`);
+    expect(css(el)).toContain(`background-size: ${9 * (PET_BODY_PX * 192 / 208)}px ${8 * PET_BODY_PX}px`);
   });
 
   it("renders whatever geometry a pet declares", async () => {
@@ -299,7 +324,7 @@ describe("PetSprite", () => {
     const v2 = { ...CODEX_PET, slug: "kebo", cols: 8, rows: 11 };
     const { container } = render(<PetSprite pet={v2} state="idle" facing="right" />);
     const el = container.querySelector("[data-pet]") as HTMLElement;
-    expect(css(el)).toContain(`background-size: ${8 * (150 * 192 / 208)}px ${11 * 150}px`);
+    expect(css(el)).toContain(`background-size: ${8 * (PET_BODY_PX * 192 / 208)}px ${11 * PET_BODY_PX}px`);
     expect(Number(el.dataset.petRow)).toBeLessThan(11);
   });
 });
