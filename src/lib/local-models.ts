@@ -415,6 +415,28 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
   };
 }
 
+/**
+ * Just the speech-out rows.
+ *
+ * The Voice panel (TASK-434) needs one fact — is there a voice on this box —
+ * and it must be the SAME fact the Local Models tab shows, or the two would
+ * eventually disagree about whether Kokoro is installed. Building the whole
+ * inventory for it would cost an Ollama HTTP probe, a llama.cpp probe and two
+ * more systemctl round trips that cannot change the answer.
+ */
+export async function buildTtsInventory(): Promise<LocalModelEntry[]> {
+  const settled = await Promise.all([kokoroEntry, piperEntry].map(async build => {
+    try {
+      return await build();
+    } catch {
+      // One unreadable engine must not hide the other: a box with Piper
+      // installed can still speak while Kokoro's unit refuses to answer.
+      return null;
+    }
+  }));
+  return settled.filter((e): e is LocalModelEntry => e !== null);
+}
+
 export interface InventoryProbes {
   ollamaBaseUrl: string;
   llamacpp: LlamaCppProbe;

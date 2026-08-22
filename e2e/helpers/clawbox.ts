@@ -1143,6 +1143,40 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
+    // Settings -> Voice. Deliberately the real-box shape: the on-device voice
+    // works and the cloud one is present but unusable, because the assertion
+    // that matters is the negative one — a voice the box cannot use must read
+    // as unavailable rather than as a choice that quietly does something else.
+    if (path === "/setup-api/tts") {
+      await fulfillJson(route, {
+        choice: "auto",
+        activeProviderId: "tts-local-cli",
+        activeEngine: "local",
+        preferredEngine: "local",
+        drifted: false,
+        engines: [
+          {
+            id: "local", providerId: "tts-local-cli", label: "On this box",
+            configured: true, proven: true, usable: true,
+            detail: "Speaks on the box itself. Nothing leaves it. Installed: Piper.",
+          },
+          {
+            id: "cloud", providerId: "openai", label: "ClawBox cloud",
+            configured: false, proven: false, usable: false,
+            detail: "ClawBox AI does not serve the voice yet, so this box has no cloud voice to call.",
+          },
+        ],
+        lastCheck: {
+          at: 1787000000000, ok: true,
+          servedByProviderId: "tts-local-cli", servedEngine: "local",
+          attempts: [{ providerId: "tts-local-cli", engine: "local", ok: true, message: null, latencyMs: 14893 }],
+          message: null,
+        },
+        warning: null,
+      });
+      return;
+    }
+
     await fulfillJson(route, {});
   });
 }
