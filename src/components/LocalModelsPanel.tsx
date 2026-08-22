@@ -18,15 +18,17 @@ const KIND_ICON: Record<LocalModelEntry["kind"], string> = {
 };
 
 /**
- * Four states, four different sentences. Collapsing "not installed" into "off"
- * is the exact drift this panel exists to make visible (TASK-420: the installer
- * announced Kokoro on boxes that had never had it).
+ * One state, one sentence. Collapsing "not installed" into "off" is the exact
+ * drift this panel exists to make visible (TASK-420: the installer announced
+ * Kokoro on boxes that had never had it) — and "not on this edition" is kept
+ * apart from "not installed" for the same reason: one is fixable, one is not.
  */
 const RUN_LABEL: Record<RunState, string> = {
   running: "Running",
   idle: "Stopped",
   "on-demand": "On demand",
   "not-installed": "Not installed",
+  "not-on-this-edition": "Not on this edition",
 };
 
 const RUN_TONE: Record<RunState, string> = {
@@ -34,6 +36,9 @@ const RUN_TONE: Record<RunState, string> = {
   idle: "bg-white/[0.06] text-[var(--text-secondary)] border-white/10",
   "on-demand": "bg-white/[0.06] text-[var(--text-secondary)] border-white/10",
   "not-installed": "bg-amber-500/10 text-amber-300 border-amber-400/20",
+  // Neutral, not amber: amber says "look at this", and there is nothing here
+  // for the customer to act on.
+  "not-on-this-edition": "bg-white/[0.06] text-[var(--text-muted)] border-white/10",
 };
 
 /**

@@ -35,7 +35,17 @@ export type ControlKind = "none" | "user-unit" | "system-unit";
  * different facts and the tab must not collapse them — a crashed or absent
  * model reading as merely "off" is the failure this task exists to remove.
  */
-export type RunState = "running" | "idle" | "on-demand" | "not-installed";
+export type RunState =
+  | "running"
+  | "idle"
+  | "on-demand"
+  | "not-installed"
+  /**
+   * The feature is not part of this device's edition, so there is nothing to
+   * install and nothing the customer can do. Distinct from "not-installed" on
+   * purpose: that one invites a fix, this one says the fix does not exist here.
+   */
+  | "not-on-this-edition";
 
 export interface LocalModelEntry {
   id: string;
@@ -367,6 +377,14 @@ async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
 }
 
 interface EmbeddingProbe {
+  /**
+   * False when this edition has no memory index at all — the index and its
+   * embedding provider belong to OpenClaw, and the Hermes SKU ships no
+   * openclaw binary. `available` cannot carry that: a Hermes box and an
+   * OpenClaw box whose provider is down would both read `available: false`,
+   * and only one of them is a fault.
+   */
+  supported: boolean;
   available: boolean;
   provider: string | null;
   model: string | null;
@@ -385,6 +403,25 @@ interface EmbeddingProbe {
  * "must not read as available" case this tab exists to remove.
  */
 function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): LocalModelEntry {
+  // Edition first, before anything is read off the probe. On a box with no
+  // OpenClaw the status call cannot run, so every other field is the shape of a
+  // failure rather than a reading — and "No embedding model is answering" would
+  // send the customer looking for a model to install that this SKU never had.
+  if (!probe.supported) {
+    return {
+      id: "embeddings",
+      name: "Memory embeddings",
+      kind: "embedding",
+      runtime: "OpenClaw memory",
+      installed: false,
+      enabled: null,
+      running: "not-on-this-edition",
+      diskBytes: null,
+      memoryBytes: null,
+      control: "none",
+      detail: "Memory search is an OpenClaw feature. This edition does not include it.",
+    };
+  }
   const providerId = probe.provider ? probe.provider.toLowerCase() : null;
   const host = providerId ? engines.find(e => e.id === providerId) : undefined;
   const hostStopped = !!host && host.running !== "running" && host.running !== "on-demand";
