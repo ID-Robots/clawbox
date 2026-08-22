@@ -13,6 +13,7 @@ vi.mock("@/lib/hermes-email", async () => {
     applyHermesEmail: vi.fn(),
     clearHermesEmail: vi.fn(),
     restartHermesForEmail: vi.fn(),
+    stopHermesEmailPolling: vi.fn(),
   };
 });
 vi.mock("@/lib/smtp-client", async () => {
@@ -22,7 +23,12 @@ vi.mock("@/lib/smtp-client", async () => {
 
 import { setMany } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { applyHermesEmail, clearHermesEmail, restartHermesForEmail } from "@/lib/hermes-email";
+import {
+  applyHermesEmail,
+  clearHermesEmail,
+  restartHermesForEmail,
+  stopHermesEmailPolling,
+} from "@/lib/hermes-email";
 import { SmtpError, verifySmtp } from "@/lib/smtp-client";
 
 const mockSetMany = vi.mocked(setMany);
@@ -30,6 +36,7 @@ const mockHarness = vi.mocked(getActiveHarness);
 const mockVerify = vi.mocked(verifySmtp);
 const mockApplyHermes = vi.mocked(applyHermesEmail);
 const mockRestart = vi.mocked(restartHermesForEmail);
+const mockStopPolling = vi.mocked(stopHermesEmailPolling);
 
 let POST: typeof import("@/app/setup-api/email/configure/route").POST;
 let DELETE: typeof import("@/app/setup-api/email/configure/route").DELETE;
@@ -52,6 +59,7 @@ beforeEach(async () => {
   mockVerify.mockResolvedValue(undefined);
   mockApplyHermes.mockResolvedValue({ inbound: false });
   mockRestart.mockResolvedValue(true);
+  mockStopPolling.mockResolvedValue(false);
   const mod = await import("@/app/setup-api/email/configure/route");
   POST = mod.POST;
   DELETE = mod.DELETE;
@@ -118,6 +126,12 @@ describe("POST /setup-api/email/configure", () => {
     expect(saved.email_smtp_port).toBe(587);
   });
 
+  it("hands the request's abort signal to the SMTP verify", async () => {
+    // A user who navigates away mid-Connect should take the socket with them.
+    await POST(request({ address: "box@example.com", password: PASSWORD }));
+    expect(mockVerify.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+  });
+
   it("reports no inbound on OpenClaw even when the form asked for it", async () => {
     const res = await POST(
       request({
@@ -172,12 +186,39 @@ describe("POST /setup-api/email/configure — Hermes", () => {
     expect(data.warning).toBeTruthy();
   });
 
-  it("does not restart the gateway for an outbound-only save", async () => {
+  // Turning inbound OFF is the case that used to be silently broken: the
+  // EMAIL_* block was cleared but nothing restarted the gateway, so a running
+  // adapter kept polling the old mailbox until something else restarted it.
+  it("restarts a running gateway when inbound is turned off, so the adapter stops polling", async () => {
     mockApplyHermes.mockResolvedValue({ inbound: false });
+    mockStopPolling.mockResolvedValue(true);
     const res = await POST(request({ address: "box@example.com", password: PASSWORD }));
     const data = await res.json();
-    expect(data.inbound).toBe(false);
+    expect(data).toMatchObject({ success: true, inbound: false, restarted: true });
+    expect(mockStopPolling).toHaveBeenCalledTimes(1);
+    // ensureHermesGateway's wrapper INSTALLS a gateway; the off path must not.
     expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("does not install a gateway on a device that never had one", async () => {
+    mockApplyHermes.mockResolvedValue({ inbound: false });
+    mockStopPolling.mockResolvedValue(false);
+    const res = await POST(request({ address: "box@example.com", password: PASSWORD }));
+    const data = await res.json();
+    expect(data).toMatchObject({ success: true, inbound: false, restarted: false });
+    expect(mockRestart).not.toHaveBeenCalled();
+  });
+
+  it("still saves when the gateway restart fails on the way out", async () => {
+    mockApplyHermes.mockResolvedValue({ inbound: false });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockStopPolling.mockRejectedValue(new Error("systemctl failed"));
+    const res = await POST(request({ address: "box@example.com", password: PASSWORD }));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toMatchObject({ success: true, inbound: false, restarted: false });
+    expect(data.warning).toBeTruthy();
+    errorSpy.mockRestore();
   });
 });
 
@@ -196,5 +237,12 @@ describe("DELETE /setup-api/email/configure", () => {
     mockHarness.mockResolvedValue("hermes");
     await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
     expect(vi.mocked(clearHermesEmail)).toHaveBeenCalledTimes(1);
+  });
+
+  it("restarts a running gateway on disconnect without installing one", async () => {
+    mockHarness.mockResolvedValue("hermes");
+    await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    expect(mockStopPolling).toHaveBeenCalledTimes(1);
+    expect(mockRestart).not.toHaveBeenCalled();
   });
 });

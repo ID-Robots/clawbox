@@ -96,6 +96,44 @@ describe("POST /setup-api/email/send", () => {
     expect((await res.json()).kind).toBe("blocked");
   });
 
+  // CONTAINMENT. There is no approval prompt in front of this route: ClawBox
+  // registers its MCP server with `trust: full` because a headless one-shot
+  // agent turn has nobody to answer one. The hourly budget is what bounds a
+  // prompt-injected or looping agent, so it is a behaviour, not a nicety.
+  it("stops the agent once the hourly send budget is spent", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (let i = 0; i < 5; i++) {
+      expect((await POST(sendRequest(VALID_BODY))).status).toBe(200);
+    }
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(429);
+    const data = await res.json();
+    expect(data.kind).toBe("rate_limited");
+    // The sixth message was never handed to the SMTP client.
+    expect(mockSend).toHaveBeenCalledTimes(5);
+    errorSpy.mockRestore();
+  });
+
+  it("does not spend the budget on a device with no account connected", async () => {
+    // A 409 costs nothing, so an agent that keeps asking on an unconfigured box
+    // cannot burn the owner's budget before the owner has one.
+    storeWith({});
+    for (let i = 0; i < 8; i++) {
+      expect((await POST(sendRequest(VALID_BODY))).status).toBe(409);
+    }
+    storeWith(CONFIGURED);
+    expect((await POST(sendRequest(VALID_BODY))).status).toBe(200);
+  });
+
+  it("leaves the owner's own test email outside the agent's budget", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (let i = 0; i < 5; i++) await POST(sendRequest(VALID_BODY));
+    expect((await POST(sendRequest(VALID_BODY))).status).toBe(429);
+    // The person at the keyboard must still be able to prove the account works.
+    expect((await TEST_POST()).status).toBe(200);
+    errorSpy.mockRestore();
+  });
+
   it("never logs the password", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockSend.mockRejectedValue(new SmtpError("network", "gone"));

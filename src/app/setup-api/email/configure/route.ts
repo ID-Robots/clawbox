@@ -20,7 +20,13 @@ import {
   toSmtpConfig,
 } from "@/lib/email-config";
 import { getActiveHarness } from "@/lib/harness";
-import { applyHermesEmail, clearHermesEmail, restartHermesForEmail, wantsInbound } from "@/lib/hermes-email";
+import {
+  applyHermesEmail,
+  clearHermesEmail,
+  restartHermesForEmail,
+  stopHermesEmailPolling,
+  wantsInbound,
+} from "@/lib/hermes-email";
 import { SmtpError, verifySmtp } from "@/lib/smtp-client";
 
 export const dynamic = "force-dynamic";
@@ -40,9 +46,11 @@ export async function POST(request: Request) {
     }
     const settings = parsed.settings;
 
-    // Prove the credentials before persisting them.
+    // Prove the credentials before persisting them. The signal goes with it so
+    // a user who navigates away mid-"Connect" takes the SMTP socket down with
+    // the request instead of leaving it to the client's own timeouts.
     try {
-      await verifySmtp(toSmtpConfig(settings));
+      await verifySmtp(toSmtpConfig(settings), { signal: request.signal });
     } catch (err) {
       if (err instanceof SmtpError) {
         // Log the CLASS of failure and the server, never the address or the
@@ -91,6 +99,24 @@ export async function POST(request: Request) {
               warning: "Saved — will apply on next gateway restart",
             });
           }
+        } else {
+          // Inbound was NOT asked for. applyHermesEmail has just cleared the
+          // EMAIL_* block, but a gateway that is already running keeps polling
+          // the old mailbox until it is restarted — the "untick 'Let people
+          // write to the assistant' and re-save" path. Only restart one that is
+          // already up; never start one here.
+          try {
+            const restarted = await stopHermesEmailPolling(request.signal);
+            return NextResponse.json({ success: true, inbound: false, restarted });
+          } catch (gatewayErr) {
+            console.error("[email/configure] Hermes gateway restart failed:", gatewayErr);
+            return NextResponse.json({
+              success: true,
+              inbound: false,
+              restarted: false,
+              warning: "Saved — receiving stops on the next gateway restart",
+            });
+          }
         }
         return NextResponse.json({ success: true, inbound, restarted: inbound });
       } catch (hermesErr) {
@@ -128,7 +154,10 @@ export async function DELETE(request: Request) {
     if ((await getActiveHarness()) === "hermes") {
       try {
         await clearHermesEmail();
-        await restartHermesForEmail(request.signal).catch(() => false);
+        // Same reasoning as the inbound-off branch of POST: restart a gateway
+        // that is running so it drops the adapter, but do not install one on a
+        // device whose owner has just disconnected email.
+        await stopHermesEmailPolling(request.signal).catch(() => false);
       } catch (err) {
         console.error("[email/configure] Hermes email teardown failed:", err);
       }

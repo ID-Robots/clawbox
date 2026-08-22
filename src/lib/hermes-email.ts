@@ -29,7 +29,7 @@
 
 import type { EmailSettings } from "@/lib/email-config";
 import { clearHermesEnvValues, getHermesEnvValue, setHermesEnvValues } from "@/lib/hermes-env";
-import { ensureHermesGateway } from "@/lib/hermes-telegram";
+import { ensureHermesGateway, hermesGatewayStatus } from "@/lib/hermes-telegram";
 
 export const HERMES_EMAIL_KEYS = [
   "EMAIL_ADDRESS",
@@ -102,4 +102,22 @@ export async function hermesEmailState(): Promise<{
 export async function restartHermesForEmail(signal?: AbortSignal): Promise<boolean> {
   const status = await ensureHermesGateway(signal);
   return status.running;
+}
+
+/**
+ * Restart the gateway ONLY if one is already up, and report whether anything
+ * was restarted.
+ *
+ * This is the "email is going away" half, and it is deliberately not
+ * ensureHermesGateway(): clearing the EMAIL_* block does nothing on its own, so
+ * an adapter that is already polling keeps polling the old mailbox until
+ * something restarts the gateway — but a device that never had a gateway must
+ * not have one INSTALLED AND STARTED as a side effect of un-ticking a checkbox
+ * or pressing Disconnect. ensureHermesGateway would do exactly that.
+ */
+export async function stopHermesEmailPolling(signal?: AbortSignal): Promise<boolean> {
+  const before = await hermesGatewayStatus(signal);
+  if (!before.running) return false;
+  const after = await ensureHermesGateway(signal);
+  return after.running;
 }

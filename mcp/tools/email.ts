@@ -11,10 +11,26 @@
 // The credentials never enter this process: the route reads them, and the tool
 // only ever learns whether sending worked.
 //
-// NOT read-only, on purpose. A sent email cannot be recalled, so the tool
-// carries no readOnlyHint and therefore stays inside Hermes' `trust: untrusted`
-// approval gate. That is the intended containment for a tool whose arguments a
-// web page or an inbound message could try to dictate.
+// NOT read-only, on purpose: a sent email cannot be recalled, so the tool
+// carries no readOnlyHint. Be clear about what that does and does not buy on
+// THIS device. readOnlyHint is what exempts a tool from an MCP host's approval
+// gate — but ClawBox registers its own server into Hermes with `trust: full`
+// (scripts/register-mcp.sh), because the appliance agent runs headless and
+// one-shot and a prompt would have nobody to answer it. So on a real ClawBox
+// there is NO approval prompt: email_send executes unsupervised, and its
+// arguments can come from text the agent merely read — a web page, a file, an
+// inbound message.
+//
+// ACCEPTED RISK, recorded rather than papered over: a prompt-injected agent can
+// send mail from the owner's account with no human in the loop. The containment
+// that actually applies is server-side and lives in /setup-api/email/send —
+// header-injection rejection, a 10-recipient cap, and a per-hour send budget
+// that bounds a runaway to a handful of messages. It is a blast-radius limit,
+// not consent. Anything stronger (an owner-facing "let the assistant send mail"
+// switch, or a recipient allowlist) is a product decision, not a comment.
+//
+// The annotation still matters for correctness: a host that DOES enforce a gate
+// must see this tool as a write.
 
 import { apiPost } from "../lib/api";
 import { ApiError, ToolError } from "../lib/errors";
@@ -50,6 +66,18 @@ export function registerEmailTools(reg: Registrar): void {
             "CONFLICT",
             "This ClawBox has no email account connected, so it cannot send mail.",
             UNCONFIGURED_NEXT,
+          );
+        }
+        // The device's send budget. The generic 429 mapping is ENDPOINT_DOWN
+        // ("retry once"), which is exactly the loop this limit exists to stop —
+        // so it is mapped here instead, to the same do-not-retry code as an
+        // unconfigured device. Both mean "the device will not do this; talk to
+        // the human".
+        if (err instanceof ApiError && err.status === 429) {
+          throw new ToolError(
+            "CONFLICT",
+            "This ClawBox has sent as many emails as it will send this hour.",
+            "Do not retry. Tell the user what you were asked to send and that the device's hourly email limit was reached.",
           );
         }
         if (err instanceof ApiError && err.status === 502) {

@@ -39,6 +39,15 @@ interface SinkOptions {
   rejectRecipient?: string;
   /** Refuse the message after DATA, like a provider blocking the sender. */
   rejectData?: boolean;
+  /**
+   * Quote the credential it was just given back in its failure reply. Real
+   * servers should not, and some do quote the offending command; either way
+   * that reply becomes SmtpError.detail, which /email/configure hands straight
+   * to the browser — so the scrubbing has to hold rather than be assumed.
+   */
+  echoesCredentials?: boolean;
+  /** Refuse AUTH with this code instead of 535 (501 exercises the non-auth throw). */
+  authFailureCode?: number;
 }
 
 async function startSink(options: SinkOptions = {}): Promise<Sink> {
@@ -46,6 +55,8 @@ async function startSink(options: SinkOptions = {}): Promise<Sink> {
   const password = options.password ?? "correct-horse";
   const messages: string[] = [];
   const commands: string[] = [];
+  /** "535 5.7.8" unless the caller asked for a code the client must NOT read as an auth failure. */
+  const authFailure = () => `${options.authFailureCode ?? 535} 5.7.8`;
 
   const server = net.createServer((socket) => {
     let buffer = "";
@@ -86,7 +97,13 @@ async function startSink(options: SinkOptions = {}): Promise<Sink> {
         if (loginStage === "password") {
           loginStage = "none";
           const supplied = Buffer.from(line, "base64").toString("utf8");
-          socket.write(supplied === password ? "235 2.7.0 Authentication successful\r\n" : "535 5.7.8 Bad credentials\r\n");
+          if (supplied === password) {
+            socket.write("235 2.7.0 Authentication successful\r\n");
+          } else {
+            // `line` is the base64 the client sent — the other shape the
+            // password can take on the wire.
+            socket.write(`${authFailure()} Bad credentials${options.echoesCredentials ? ` [${line}]` : ""}\r\n`);
+          }
           continue;
         }
 
@@ -97,11 +114,12 @@ async function startSink(options: SinkOptions = {}): Promise<Sink> {
         } else if (/^AUTH PLAIN /i.test(line)) {
           const decoded = Buffer.from(line.slice("AUTH PLAIN ".length), "base64").toString("utf8");
           const [, suppliedUser, suppliedPassword] = decoded.split("\0");
-          socket.write(
-            suppliedUser === user && suppliedPassword === password
-              ? "235 2.7.0 Authentication successful\r\n"
-              : "535 5.7.8 Username and Password not accepted\r\n",
-          );
+          if (suppliedUser === user && suppliedPassword === password) {
+            socket.write("235 2.7.0 Authentication successful\r\n");
+          } else {
+            const echo = options.echoesCredentials ? ` (got "${suppliedPassword}")` : "";
+            socket.write(`${authFailure()} Username and Password not accepted${echo}\r\n`);
+          }
         } else if (/^AUTH LOGIN$/i.test(line)) {
           loginStage = "user";
           socket.write("334 VXNlcm5hbWU6\r\n");
@@ -165,6 +183,27 @@ describe("verifySmtp", () => {
     expect(s.commands.some((c) => c.startsWith("AUTH PLAIN "))).toBe(true);
   });
 
+  // Routes pass request.signal. Without it, a user who navigates away mid-
+  // "Connect" leaves the socket open until the 15 s/20 s timeouts fire.
+  it("hangs up when the caller aborts", async () => {
+    const s = await sink();
+    const controller = new AbortController();
+    const promise = verifySmtp(config(s.port), { signal: controller.signal });
+    controller.abort();
+    const err = (await promise.catch((e) => e)) as SmtpError;
+    expect(err).toBeInstanceOf(SmtpError);
+    expect(err.kind).toBe("network");
+  });
+
+  it("does not open a socket at all for an already-aborted caller", async () => {
+    const s = await sink();
+    const err = (await verifySmtp(config(s.port), { signal: AbortSignal.abort() }).catch(
+      (e) => e,
+    )) as SmtpError;
+    expect(err).toBeInstanceOf(SmtpError);
+    expect(s.commands).toEqual([]);
+  });
+
   it("falls back to AUTH LOGIN when PLAIN is not advertised", async () => {
     const s = await sink({ loginOnly: true });
     await expect(verifySmtp(config(s.port))).resolves.toBeUndefined();
@@ -177,6 +216,41 @@ describe("verifySmtp", () => {
     expect(err).toBeInstanceOf(SmtpError);
     expect((err as SmtpError).kind).toBe("auth");
     expect((err as SmtpError).message).toMatch(/App Password/i);
+  });
+
+  // SmtpError.detail is returned to the browser by /email/configure, so the
+  // module's "nothing server-supplied leaves here unscrubbed" rule has to hold
+  // on the throw paths too — not only in Session.expect().
+  it("scrubs the password out of an auth-failure detail (AUTH PLAIN)", async () => {
+    const s = await sink({ echoesCredentials: true });
+    const secret = "hunter2-app-password";
+    const err = (await verifySmtp(config(s.port, secret)).catch((e) => e)) as SmtpError;
+    expect(err.kind).toBe("auth");
+    expect(err.detail).toBeTruthy();
+    expect(err.detail).not.toContain(secret);
+    expect(err.detail).toContain("***");
+  });
+
+  it("scrubs the base64 password out of an auth-failure detail (AUTH LOGIN)", async () => {
+    const s = await sink({ echoesCredentials: true, loginOnly: true });
+    const secret = "hunter2-app-password";
+    const encoded = Buffer.from(secret, "utf8").toString("base64");
+    const err = (await verifySmtp(config(s.port, secret)).catch((e) => e)) as SmtpError;
+    expect(err.kind).toBe("auth");
+    expect(err.detail).not.toContain(secret);
+    expect(err.detail).not.toContain(encoded);
+    expect(err.detail).toContain("***");
+  });
+
+  it("scrubs the password when the refusal is not an auth code at all", async () => {
+    // 501 does not read as an auth failure, so this takes the other throw in
+    // authenticate() — the one that was also passing reply.text through raw.
+    const s = await sink({ echoesCredentials: true, authFailureCode: 501 });
+    const secret = "hunter2-app-password";
+    const err = (await verifySmtp(config(s.port, secret)).catch((e) => e)) as SmtpError;
+    expect(err.kind).toBe("protocol");
+    expect(err.detail).not.toContain(secret);
+    expect(err.detail).toContain("***");
   });
 
   it("never puts the password in the error it surfaces", async () => {

@@ -15,8 +15,10 @@
 //
 // SECURITY NOTES:
 //   - the password is never written to a log line and never appears in an
-//     Error message: every string that leaves this module goes through
-//     scrubSecrets().
+//     Error message: every server-supplied string that leaves this module goes
+//     through Session.scrub(), which is the single chokepoint for that rule.
+//     It matters because /email/configure hands SmtpError.detail back to the
+//     browser verbatim.
 //   - addresses/subjects are rejected outright if they contain CR or LF, so a
 //     value from the UI can never inject extra SMTP commands or mail headers.
 
@@ -272,10 +274,18 @@ class Session {
         () => reject(new SmtpError("tls", "The encrypted connection timed out.")),
         CONNECT_TIMEOUT_MS,
       );
-      const sock = tls.connect({ socket: plain, servername, rejectUnauthorized }, () => {
-        clearTimeout(timer);
-        resolve(sock);
-      });
+      // The annotation is load-bearing: `sock` is referenced inside its own
+      // initializer, so without it TypeScript falls back to `any` and every
+      // listener callback below becomes an implicit-any parameter — which under
+      // `strict` fails `next build`'s type-check step (and only that step, since
+      // the test files tsc also complains about are outside the build graph).
+      const sock: tls.TLSSocket = tls.connect(
+        { socket: plain, servername, rejectUnauthorized },
+        () => {
+          clearTimeout(timer);
+          resolve(sock);
+        },
+      );
       sock.once("error", (err) => {
         clearTimeout(timer);
         reject(err);
@@ -287,9 +297,18 @@ class Session {
     this.attach();
   }
 
+  /**
+   * The one way a server-supplied string is allowed out of this module. Every
+   * caller that puts `reply.text` into an SmtpError must go through here —
+   * `/email/configure` hands `detail` straight back to the browser.
+   */
+  scrub(text: string): string {
+    return scrubSecrets(text, this.secrets).slice(0, 300);
+  }
+
   expect(reply: Reply, ok: number[], kind: SmtpFailureKind, message: string): void {
     if (ok.includes(reply.code)) return;
-    throw new SmtpError(kind, message, scrubSecrets(reply.text, this.secrets).slice(0, 300));
+    throw new SmtpError(kind, message, this.scrub(reply.text));
   }
 
   close(): void {
@@ -301,7 +320,16 @@ class Session {
   }
 }
 
-function connectSocket(cfg: SmtpConfig, rejectUnauthorized: boolean): Promise<net.Socket | tls.TLSSocket> {
+/** The error every abort path raises, so callers can recognise one shape. */
+function cancelled(): SmtpError {
+  return new SmtpError("network", "The connection was cancelled.");
+}
+
+function connectSocket(
+  cfg: SmtpConfig,
+  rejectUnauthorized: boolean,
+  signal?: AbortSignal,
+): Promise<net.Socket | tls.TLSSocket> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       socket.destroy();
@@ -312,13 +340,20 @@ function connectSocket(cfg: SmtpConfig, rejectUnauthorized: boolean): Promise<ne
         ),
       );
     }, CONNECT_TIMEOUT_MS);
+    const onAbort = () => {
+      clearTimeout(timer);
+      socket.destroy();
+      reject(cancelled());
+    };
     const onReady = () => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       socket.removeListener("error", onError);
       resolve(socket);
     };
     const onError = (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       socket.destroy();
       reject(classifyConnectError(err, cfg));
     };
@@ -326,6 +361,7 @@ function connectSocket(cfg: SmtpConfig, rejectUnauthorized: boolean): Promise<ne
       ? tls.connect({ host: cfg.host, port: cfg.port, servername: cfg.host, rejectUnauthorized }, onReady)
       : net.connect({ host: cfg.host, port: cfg.port }, onReady);
     socket.once("error", onError);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -358,8 +394,12 @@ function isAuthFailure(code: number, text: string): boolean {
   return false;
 }
 
-async function openSession(cfg: SmtpConfig, rejectUnauthorized: boolean): Promise<Session> {
-  const socket = await connectSocket(cfg, rejectUnauthorized);
+async function openSession(
+  cfg: SmtpConfig,
+  rejectUnauthorized: boolean,
+  signal?: AbortSignal,
+): Promise<Session> {
+  const socket = await connectSocket(cfg, rejectUnauthorized, signal);
   const session = new Session(socket, [cfg.password]);
   const greeting = await session.greeting();
   session.expect(greeting, [220], "protocol", `${cfg.host} did not greet us as a mail server.`);
@@ -437,10 +477,10 @@ async function authenticate(session: Session, cfg: SmtpConfig): Promise<void> {
     throw new SmtpError(
       "auth",
       "The mail server rejected that address and password. For Gmail this must be a 16-character App Password (not your normal Google password), and 2-Step Verification has to be on.",
-      reply.text.slice(0, 300),
+      session.scrub(reply.text),
     );
   }
-  throw new SmtpError("protocol", `The mail server refused to sign in (${reply.code}).`, reply.text.slice(0, 300));
+  throw new SmtpError("protocol", `The mail server refused to sign in (${reply.code}).`, session.scrub(reply.text));
 }
 
 export interface SmtpOptions {
@@ -450,6 +490,35 @@ export interface SmtpOptions {
    * instead of turning this off.
    */
   rejectUnauthorized?: boolean;
+  /**
+   * Hang up as soon as the caller stops caring — routes pass `request.signal`.
+   * Without it a user who navigates away mid-"Connect" leaves a socket (and a
+   * half-finished login) open until the 15 s/20 s timeouts fire.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * Open a session, run `body`, and always close — closing EARLY if the caller
+ * aborts, which is what makes the socket go away with the request rather than
+ * on its own timeout.
+ */
+async function withSession<T>(
+  cfg: SmtpConfig,
+  opts: SmtpOptions,
+  body: (session: Session) => Promise<T>,
+): Promise<T> {
+  const { signal } = opts;
+  if (signal?.aborted) throw cancelled();
+  const session = await openSession(cfg, opts.rejectUnauthorized !== false, signal);
+  const onAbort = () => session.close();
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await body(session);
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+    session.close();
+  }
 }
 
 /**
@@ -458,13 +527,10 @@ export interface SmtpOptions {
  * server has accepted them.
  */
 export async function verifySmtp(cfg: SmtpConfig, opts: SmtpOptions = {}): Promise<void> {
-  const session = await openSession(cfg, opts.rejectUnauthorized !== false);
-  try {
+  await withSession(cfg, opts, async (session) => {
     await authenticate(session, cfg);
     await session.command("QUIT").catch(() => undefined);
-  } finally {
-    session.close();
-  }
+  });
 }
 
 /** Connect, authenticate, send one message. Returns the Message-ID we set. */
@@ -482,8 +548,7 @@ export async function sendMail(
     throw new SmtpError("recipient", "No recipient was given.");
   }
 
-  const session = await openSession(cfg, opts.rejectUnauthorized !== false);
-  try {
+  return withSession(cfg, opts, async (session) => {
     await authenticate(session, cfg);
 
     const mailFrom = await session.command(`MAIL FROM:<${msg.from}>`);
@@ -509,7 +574,5 @@ export async function sendMail(
 
     await session.command("QUIT").catch(() => undefined);
     return { messageId: id };
-  } finally {
-    session.close();
-  }
+  });
 }

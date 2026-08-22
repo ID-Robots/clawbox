@@ -120,10 +120,21 @@ in its config would fail the gateway's strict schema and silence the channels
 that do work. Hermes' native adapter can reply to mail that arrives; it cannot
 start a thread.
 
-Deliberately NOT read-only: a sent email cannot be recalled, so the tool stays
-inside Hermes' `trust: untrusted` approval gate. The credentials never enter the
-MCP process — `/setup-api/email/send` holds them — and an unconfigured device
-answers `CONFLICT` with "do not retry, tell the user to open Settings → Email".
+Deliberately NOT read-only: a sent email cannot be recalled, so the tool carries
+no `readOnlyHint`. On a real ClawBox that annotation buys no approval prompt —
+ClawBox registers this server with `trust: full` (`scripts/register-mcp.sh`),
+because a headless one-shot turn has nobody to answer a prompt. **`email_send`
+runs unsupervised**, and its arguments may come from text the agent only read.
+
+The containment is server-side, in `/setup-api/email/send`: CR/LF rejected in
+every header value, at most 10 recipients, and a per-hour send budget (5) that
+bounds a runaway — a blast-radius limit, not consent. The owner's own "Send test
+email" button is a different route with its own budget, so the agent cannot lock
+the person at the keyboard out. The credentials never enter the MCP process, an
+unconfigured device answers `CONFLICT` with "do not retry, tell the user to open
+Settings → Email". An exhausted budget answers `CONFLICT` too — the generic 429
+mapping is `ENDPOINT_DOWN` ("retry once"), which is the loop the budget exists
+to stop.
 
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`

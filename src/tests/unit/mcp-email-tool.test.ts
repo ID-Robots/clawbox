@@ -48,9 +48,12 @@ describe("email_send registration", () => {
     expect(info.opts.editions).toEqual(["openclaw", "hermes"]);
   });
 
-  it("is not marked read-only, so Hermes' untrusted-trust gate still covers it", () => {
-    // A sent email cannot be recalled. readOnlyHint is exactly what would exempt
-    // it from that approval gate, so it must stay off.
+  it("is not marked read-only, because a sent email cannot be recalled", () => {
+    // readOnlyHint is what exempts a tool from an MCP host's approval gate.
+    // ClawBox itself registers with `trust: full` — see the header of
+    // mcp/tools/email.ts — so on this device the annotation buys no prompt; it
+    // is still wrong to claim a send is read-only, and a host that does gate
+    // must see the truth.
     const { info } = collect().get("email_send")!;
     expect(info.opts.readOnly).not.toBe(true);
   });
@@ -94,6 +97,25 @@ describe("email_send behaviour", () => {
     )) as ToolError;
     expect(err.code).toBe("ENDPOINT_DOWN");
     expect(err.next).toMatch(/not retry more than once/i);
+    vi.unstubAllGlobals();
+  });
+
+  it("treats an exhausted send budget as a stop, not a retry", async () => {
+    // The budget exists to bound a looping or prompt-injected agent; an agent
+    // that retries on 429 is the exact failure it is there to stop.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(429, { error: "budget spent", kind: "rate_limited" })),
+    );
+    const { handler } = collect().get("email_send")!;
+    const err = (await Promise.resolve(handler({ to: "a@b.com", subject: "s", body: "b" })).catch(
+      (e: unknown) => e,
+    )) as ToolError;
+    expect(err).toBeInstanceOf(ToolError);
+    expect(err.code).toBe("CONFLICT");
+    expect(err.message).toMatch(/this hour/i);
+    // Not the generic 429 mapping, which says "retry once".
+    expect(err.next).toMatch(/Do not retry/i);
     vi.unstubAllGlobals();
   });
 

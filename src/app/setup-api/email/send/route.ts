@@ -9,9 +9,28 @@
 // behind the session/MCP-bearer gate in src/middleware.ts (the /setup-api/email
 // subtree is on the pre-auth sensitive list, so it is unreachable during the
 // open-AP setup window).
+//
+// CONTAINMENT — READ THIS BEFORE RELAXING THE BUDGET BELOW.
+// There is NO human in the loop on a ClawBox. ClawBox registers its MCP server
+// into Hermes with `trust: full` (scripts/register-mcp.sh), deliberately: the
+// appliance agent runs headless and one-shot, so an approval prompt would have
+// nobody to answer it and would hang the turn. So `email_send` executes
+// unsupervised, and its arguments can originate in text the agent merely READ —
+// a web page, a file, an inbound message. A sent email cannot be recalled.
+//
+// The budget below is the containment that does apply. It is a blast-radius
+// limit, not consent: it cannot stop the first injected message, it bounds a
+// runaway or a mass-mail to a few messages an hour. Enforced HERE rather than
+// in the MCP tool because this is where the credentials are — a compromised or
+// re-implemented MCP client cannot route around it.
+//
+// The owner's own "Send test email" button is /email/test, a different route
+// with its own budget, so the person at the keyboard is never locked out by the
+// agent having spent this one.
 
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { isEmailAddress, isHeaderSafe, sendMail, SmtpError } from "@/lib/smtp-client";
 
 export const dynamic = "force-dynamic";
@@ -19,6 +38,15 @@ export const dynamic = "force-dynamic";
 const MAX_RECIPIENTS = 10;
 const MAX_SUBJECT_LEN = 200;
 const MAX_BODY_LEN = 20_000;
+
+/**
+ * One shared budget for the whole device, not per client IP: the caller is
+ * always the agent on loopback, so an IP key would be a single bucket wearing a
+ * misleading name — and `x-forwarded-for` is client-controlled here anyway
+ * (see src/lib/rate-limit.ts).
+ */
+const SEND_BUDGET = { windowMs: 60 * 60 * 1000, max: 5 } as const;
+const SEND_BUDGET_KEY = "agent";
 
 export async function POST(request: Request) {
   try {
@@ -65,14 +93,29 @@ export async function POST(request: Request) {
       );
     }
 
+    if (!checkRateLimit("email-send", SEND_BUDGET_KEY, SEND_BUDGET)) {
+      console.error("[email/send] refused: agent send budget exhausted");
+      return NextResponse.json(
+        {
+          error: `This ClawBox has already sent ${SEND_BUDGET.max} emails in the last hour and will not send more for now.`,
+          kind: "rate_limited",
+        },
+        { status: 429 },
+      );
+    }
+
     try {
-      const { messageId } = await sendMail(toSmtpConfig(settings), {
-        from: settings.address,
-        fromName: settings.fromName || "ClawBox",
-        to: recipients,
-        subject,
-        text,
-      });
+      const { messageId } = await sendMail(
+        toSmtpConfig(settings),
+        {
+          from: settings.address,
+          fromName: settings.fromName || "ClawBox",
+          to: recipients,
+          subject,
+          text,
+        },
+        { signal: request.signal },
+      );
       return NextResponse.json({ success: true, messageId, recipients: recipients.length });
     } catch (err) {
       if (err instanceof SmtpError) {
