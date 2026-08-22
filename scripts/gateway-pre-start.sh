@@ -557,6 +557,14 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
         agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
         changed = True
 
+# Set by the image-generation migration below, on the one path where it decides
+# the `openai` provider slot is ours to write. The speech-to-text migration
+# after it is gated on exactly that fact: it points channel audio at our proxy,
+# and that proxy is reached with whatever key sits on that provider.
+_clawai_openai_route_is_ours = False
+_clawai_proxy_base_url = ""
+_clawai_proxy_host = None
+
 # Migration: ClawBox AI image generation.
 #
 # OpenClaw only registers its `image_generate` tool when an image-generation
@@ -685,6 +693,9 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 
     if _key_is_ours and _foreign_route is None:
         models_providers["openai"] = openai_provider
+        _clawai_openai_route_is_ours = True
+        _clawai_proxy_base_url = _image_base_url
+        _clawai_proxy_host = _proxy_host
         if openai_provider.get("apiKey") != _clawai_token:
             openai_provider["apiKey"] = _clawai_token
             changed = True
@@ -744,6 +755,82 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         if not _has_image_model:
             agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
             changed = True
+
+# Migration: ClawBox AI speech to text.
+#
+# A voice note arriving over a chat channel — Telegram is the one v4 ships — is
+# transcribed through OpenClaw's media-understanding surface, and that surface
+# is not a models[] row and never reads one. It takes its endpoint from
+# `tools.media.audio.baseUrl` and its bearer from
+# `models.providers.openai.apiKey` — the same last-resort key walk described
+# above. So on a paired ClawBox that configures no audio at all, every voice
+# note ships the claw_ subscription token to OpenAI's default host and comes
+# back
+#   HTTP 401 Incorrect API key provided: claw_…
+# Reproduced on both loop boxes on beta 02249c1; see TASK-502. That broke two
+# things, not one: no channel voice note could ever be transcribed, and the
+# token the block above takes such care never to hand to a foreign route was
+# being handed to one on every attempt.
+#
+# Both fields written below are load-bearing, measured against the live proxy
+# on 2026-08-22:
+#   - the baseUrl alone still fails, because OpenClaw's default audio model for
+#     `openai` is gpt-4o-transcribe and the proxy answers 400 "Model not
+#     supported for transcription: gpt-4o-transcribe. Use
+#     gpt-4o-mini-transcribe."
+#   - the model pin alone still resolves to api.openai.com and still 401s
+#
+# The device chat microphone does not come through here — it posts to the proxy
+# itself from src/app/setup-api/chat/transcribe/route.ts — which is exactly why
+# this stayed invisible until a channel voice note was tried on real hardware.
+#
+# The model id is duplicated from TRANSCRIBE_MODEL in that route for the same
+# reason the image id is duplicated above: a shell migration cannot import a TS
+# constant. It must name a model production allows, because the proxy matches
+# the bare id and answers 400 on a miss.
+CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
+CLAWBOX_AUDIO_MODELS = [{"provider": "openai", "model": CLAWBOX_TRANSCRIBE_MODEL_ID}]
+
+if _clawai_openai_route_is_ours:
+    # A non-dict at any of these paths is config the gateway cannot read at
+    # all, so it is replaced rather than respected — the same call the `compat`
+    # migration below makes, for the same reason.
+    _tools = cfg.get("tools")
+    if not isinstance(_tools, dict):
+        _tools = {}
+    _media = _tools.get("media")
+    if not isinstance(_media, dict):
+        _media = {}
+    _audio = _media.get("audio")
+    if not isinstance(_audio, dict):
+        _audio = {}
+
+    # Anything already here that is not what we would write is the owner's own
+    # transcription setup: a self-hosted Whisper, a Deepgram key, a different
+    # model on our own proxy. Leave all of it alone. A half-applied migration
+    # that keeps their endpoint and swaps their model is worse than none, and
+    # sending our token to their host is the failure this whole block exists to
+    # stop.
+    _audio_base_url = _audio.get("baseUrl")
+    _audio_models = _audio.get("models")
+    _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
+    _audio_host = _url_host(_audio_base_url) if _audio_has_base_url else None
+    _audio_route_taken = bool(
+        (_audio_has_base_url and (_audio_host is None or _clawai_proxy_host is None or _audio_host != _clawai_proxy_host))
+        or (_audio_models is not None and _audio_models != CLAWBOX_AUDIO_MODELS)
+    )
+    if _audio_route_taken:
+        print(
+            "  Skipped ClawBox AI speech to text: tools.media.audio already names its own transcription route"
+        )
+    elif _audio_base_url != _clawai_proxy_base_url or _audio_models != CLAWBOX_AUDIO_MODELS:
+        _audio["baseUrl"] = _clawai_proxy_base_url
+        _audio["models"] = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
+        _media["audio"] = _audio
+        _tools["media"] = _media
+        cfg["tools"] = _tools
+        changed = True
+
 
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
