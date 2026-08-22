@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -54,6 +55,12 @@ async function getJournalTail(unit: string): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  // Starts clawbox-root-update@<step>.service, which runs install.sh as root.
+  // Its only callers are VNCApp and RemoteControlPanel — desktop apps, always
+  // post-setup — so it fails closed unconditionally. TASK-443/445.
+  const unauthorized = await requireSession(req);
+  if (unauthorized) return unauthorized;
+
   let step: string;
   try {
     const body = (await req.json()) as { step?: unknown };
