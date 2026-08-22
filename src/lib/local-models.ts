@@ -370,7 +370,26 @@ interface EmbeddingProbe {
   local: boolean;
 }
 
-function embeddingEntry(probe: EmbeddingProbe): LocalModelEntry {
+/**
+ * `engines` are the rows already built, so the embedding row can be checked
+ * against the thing that actually serves it.
+ *
+ * This matters: ClawKeep's memory status answers `available: true, health:
+ * healthy` from the index and the configured provider, NOT from a live embed
+ * call — verified on a box where Ollama had been stopped and it still said
+ * healthy. Passing that straight through would put "Embedding your memory on
+ * the box" one row below "Ollama — Stopped", which is precisely the
+ * "must not read as available" case this tab exists to remove.
+ */
+function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): LocalModelEntry {
+  const providerId = probe.provider ? probe.provider.toLowerCase() : null;
+  const host = providerId ? engines.find(e => e.id === providerId) : undefined;
+  const hostStopped = !!host && host.running !== "running" && host.running !== "on-demand";
+  const running: RunState = !probe.available
+    ? "not-installed"
+    : hostStopped
+      ? "idle"
+      : probe.local ? "running" : "on-demand";
   return {
     id: "embeddings",
     name: probe.model ? `Memory embeddings (${probe.model})` : "Memory embeddings",
@@ -378,16 +397,18 @@ function embeddingEntry(probe: EmbeddingProbe): LocalModelEntry {
     runtime: probe.provider ?? "unknown",
     installed: probe.available,
     enabled: null,
-    running: probe.available ? (probe.local ? "running" : "on-demand") : "not-installed",
+    running,
     diskBytes: null,
     memoryBytes: null,
     control: "none",
     managedBy: "clawkeep",
     detail: !probe.available
       ? "No embedding model is answering, so memory search cannot run."
-      : probe.local
-        ? "Embedding your memory on the box. Manage it in ClawKeep."
-        : "Embedding your memory in the cloud. Manage it in ClawKeep.",
+      : hostStopped
+        ? `${host?.name ?? "Its engine"} is stopped, so memory cannot be embedded until you turn it back on.`
+        : probe.local
+          ? "Embedding your memory on the box. Manage it in ClawKeep."
+          : "Embedding your memory in the cloud. Manage it in ClawKeep.",
   };
 }
 
@@ -403,19 +424,21 @@ export interface InventoryProbes {
  * a subordinate panel caused in ClawKeep on TASK-398.
  */
 export async function buildLocalModelInventory(probes: InventoryProbes): Promise<LocalModelsSnapshot> {
-  const builders: [string, () => Promise<LocalModelEntry>][] = [
+  // Order matters for one reason only: the embedding row is checked against the
+  // engine that serves it, so that engine's row has to exist by then.
+  const builders: [string, (built: LocalModelEntry[]) => Promise<LocalModelEntry>][] = [
     ["llamacpp", () => llamaCppEntry(probes.llamacpp)],
     ["ollama", () => ollamaEntry(probes.ollamaBaseUrl)],
     ["kokoro", kokoroEntry],
     ["piper", piperEntry],
     ["whisper", whisperEntry],
-    ["embeddings", async () => embeddingEntry(probes.embeddings)],
+    ["embeddings", async built => embeddingEntry(probes.embeddings, built)],
   ];
   const models: LocalModelEntry[] = [];
   const unavailable: string[] = [];
   for (const [id, build] of builders) {
     try {
-      models.push(await build());
+      models.push(await build(models));
     } catch {
       unavailable.push(id);
     }

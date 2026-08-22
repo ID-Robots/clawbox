@@ -263,3 +263,41 @@ describe("unit lookup", () => {
     expect(unitForEngine("llamacpp")).toBeNull();
   });
 });
+
+describe("embeddings are checked against the engine that serves them", () => {
+  it("does not call memory embedding healthy while its engine is stopped", async () => {
+    // Found by driving a real box, not by reading the code: ClawKeep's memory
+    // status answers available/healthy from the index and the CONFIGURED
+    // provider, never from a live embed call. With Ollama stopped it still
+    // said healthy, so the tab printed "Embedding your memory on the box" one
+    // row under "Ollama — Stopped". Acceptance 4 of this task forbids exactly
+    // that: a model that is not actually able to run must not read as available.
+    responses.push({ match: /is-enabled ollama/, stdout: "disabled\n" });
+    responses.push({ match: /is-active ollama/, fail: "exit 3", stdout: "inactive\n" });
+    bareBox();
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+    });
+    const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
+    expect(emb.running).toBe("idle");
+    expect(emb.detail).toMatch(/Ollama is stopped/i);
+  });
+
+  it("still reports embedding as running when its engine is up", async () => {
+    responses.push({ match: /is-enabled ollama/, stdout: "enabled\n" });
+    responses.push({ match: /is-active ollama/, stdout: "active\n" });
+    bareBox();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, json: async () => ({ models: [] }) }));
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+    });
+    const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
+    expect(emb.running).toBe("running");
+    expect(emb.detail).toMatch(/on the box/i);
+    vi.unstubAllGlobals();
+  });
+});
