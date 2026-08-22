@@ -10,7 +10,7 @@ import { frenzyQuotesFor } from '@/lib/mascot-frenzy'
 import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
-import { PET_POWER_LINES } from '@/lib/mascot-pet-voice'
+import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
 import PetSprite from '@/components/PetSprite'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
@@ -42,6 +42,36 @@ const POWER_PARTICLES = [
   { bottom: 42, left: 76, duration: 1.5, delay: 0.55 },
   { bottom: 30, left: 108, duration: 1.35, delay: 0.95 },
 ]
+
+// ── The ground the mascot stands on ──
+//
+// The crab lives on the desktop floor with its ClawBox prop: `bottom: 8`, in
+// front of the shelf, feet hidden behind it. A pet instead walks the TOP EDGE
+// of the bottom bar, so it reads as standing ON the shelf.
+//
+// The bar is `ChromeShelf.tsx`, which carries `data-mascot-ground` — NOT
+// `Taskbar.tsx`, which is not mounted by any surface in this app. Its height
+// is `56px + env(safe-area-inset-bottom)`, so the ground line is measured off
+// the live element rather than written down here: the inset is a device
+// property and the whole bar re-lays out on resize.
+const CRAB_GROUND_PX = 8
+/** Roaming range, in vw of the body's CENTRE. */
+const CRAB_WALK_RANGE = { min: 5, max: 88 }
+/** Drag/physics range — wider than roaming, the crab may be thrown further. */
+const CRAB_BOUNDS = { min: 2, max: 92 }
+/** Half the mascot body, so a pet's edges stay over the bar it walks on. */
+const BODY_HALF_PX = 60
+
+interface Range { min: number; max: number }
+
+const clampTo = (range: Range, v: number) => Math.min(range.max, Math.max(range.min, v))
+
+/** The tighter of two ranges, collapsed to a point if they do not overlap. */
+function intersectRange(a: Range, b: Range): Range {
+  const min = Math.max(a.min, b.min)
+  const max = Math.min(a.max, b.max)
+  return min < max ? { min, max } : { min: (min + max) / 2, max: (min + max) / 2 }
+}
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
   const { locale, localeResolved } = useT()
@@ -141,6 +171,79 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   }, [])
   const pet = petStatus?.supported ? petStatus.active : null
 
+  // ── Where this body may go ──
+  //
+  // Three numbers, all of which differ between the crab and a pet: the ground
+  // line, the roaming range and the drag/physics bounds. Refs because the
+  // movement code runs inside rAF loops and stable callbacks; `groundPx` is
+  // mirrored into state because the resting `bottom` is a rendered style.
+  const groundRef = useRef(CRAB_GROUND_PX)
+  const [groundPx, setGroundPx] = useState(CRAB_GROUND_PX)
+  const walkRangeRef = useRef<Range>(CRAB_WALK_RANGE)
+  const boundsRef = useRef<Range>(CRAB_BOUNDS)
+  /** A pet has no ClawBox prop — see the render block. */
+  const hasBoxRef = useRef(true)
+  hasBoxRef.current = !pet
+
+  useEffect(() => {
+    if (!pet) {
+      groundRef.current = CRAB_GROUND_PX
+      walkRangeRef.current = CRAB_WALK_RANGE
+      boundsRef.current = CRAB_BOUNDS
+      setGroundPx(CRAB_GROUND_PX)
+      return
+    }
+    const bar = document.querySelector('[data-mascot-ground]')
+    const measure = () => {
+      const el = document.querySelector('[data-mascot-ground]') as HTMLElement | null
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const vw = window.innerWidth || 1
+      if (rect.width <= 0 || rect.height <= 0) return
+      // The pet's feet sit on the bar's top edge; `bottom` is measured from
+      // the viewport bottom, which is what the mascot's `position: fixed` uses.
+      const ground = Math.max(0, Math.round(window.innerHeight - rect.top))
+      groundRef.current = ground
+      setGroundPx(ground)
+      // The shelf is full-bleed today, so this mostly reproduces the crab's
+      // own range — but it is derived from the bar rather than assumed, which
+      // is what keeps the pet ON it if the bar is ever inset or centred.
+      const onBar: Range = {
+        min: ((rect.left + BODY_HALF_PX) / vw) * 100,
+        max: ((rect.right - BODY_HALF_PX) / vw) * 100,
+      }
+      walkRangeRef.current = intersectRange(onBar, CRAB_WALK_RANGE)
+      boundsRef.current = intersectRange(onBar, CRAB_BOUNDS)
+      const lane = boundsRef.current
+      xRef.current = clampTo(lane, xRef.current)
+      updateCrabPosRef.current?.()
+    }
+    measure()
+    window.addEventListener('resize', measure)
+    // The shelf's height carries `env(safe-area-inset-bottom)`, which can
+    // change after first paint (and on rotation), so watch the element itself
+    // rather than trusting the one measurement.
+    //
+    // Wrapped because this is decoration: a runtime without ResizeObserver —
+    // or with a partial stand-in for one — must cost the mascot a live
+    // remeasure, not its whole existence. An effect that throws unmounts the
+    // tree, and the desktop would lose its mascot over a resize listener.
+    let observer: ResizeObserver | null = null
+    try {
+      if (bar && typeof ResizeObserver === 'function') {
+        observer = new ResizeObserver(measure)
+        observer.observe(bar)
+      }
+    } catch (err) {
+      console.warn('[mascot] could not watch the shelf for resizes:', err)
+      observer = null
+    }
+    return () => {
+      window.removeEventListener('resize', measure)
+      try { observer?.disconnect() } catch { /* same reason as above */ }
+    }
+  }, [pet])
+
   // Categorized phrase set for the current locale. Starts on whatever can be
   // had synchronously — the locale's pack if it is already in memory, the
   // language-free neutral pack otherwise — so the first bubble is never in
@@ -148,6 +251,32 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // switch flips the bag immediately instead of at the next midnight expiry.
   const phrasesRef = useRef<MascotPhraseSet>(NEUTRAL_PACK)
   const sassLinesRef = useRef<string[]>(NEUTRAL_PACK.sass)
+
+  // ── Crab lines are the crab's ──
+  //
+  // A pet never speaks a crab-literal line, in any category or locale. The
+  // route already filters what it serves, but the filter is repeated here
+  // because the client has two other sources the server never sees: the
+  // synchronous first set (`initialPhraseSet`, drawn straight from the pack)
+  // and the neutral floor. It also has to survive a pet being picked AFTER
+  // the phrases were fetched — Settings fires PET_CHANGED_EVENT, and
+  // re-deriving from the raw set is cheaper and quicker than another fetch.
+  const rawPhrasesRef = useRef<MascotPhraseSet>(NEUTRAL_PACK)
+  const petVoiceRef = useRef(false)
+  /** The floor every category falls back to — crab-free while a pet is worn. */
+  const neutralRef = useRef<MascotPhraseSet>(NEUTRAL_PACK)
+  const applyVoice = useCallback((raw: MascotPhraseSet, loc: string) => {
+    rawPhrasesRef.current = raw
+    const next = petVoiceRef.current ? petSafePhrasesSync(raw, loc) : raw
+    phrasesRef.current = next
+    sassLinesRef.current = next.sass
+  }, [])
+  useEffect(() => {
+    petVoiceRef.current = !!pet
+    neutralRef.current = pet ? PET_NEUTRAL_PACK : NEUTRAL_PACK
+    applyVoice(rawPhrasesRef.current, locale)
+  }, [pet, locale, applyVoice])
+
   // Per-effect token so a slow fetch from a stale locale (e.g. en→bg→en in
   // quick succession) can't overwrite the phrase set with the wrong language.
   const phraseFetchTokenRef = useRef(0)
@@ -161,15 +290,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // arrives moments later. The refs stay on NEUTRAL_PACK until then.
     if (!localeResolved) return
     const myToken = ++phraseFetchTokenRef.current
-    const immediate = initialPhraseSet(locale)
-    phrasesRef.current = immediate
-    sassLinesRef.current = immediate.sass
+    applyVoice(initialPhraseSet(locale), locale)
     fetchPhraseSet(locale).then((phrases) => {
       if (myToken !== phraseFetchTokenRef.current) return
-      phrasesRef.current = phrases
-      sassLinesRef.current = phrases.sass
+      applyVoice(phrases, locale)
     })
-  }, [locale, localeResolved])
+  }, [locale, localeResolved, applyVoice])
 
   // User name (from `ui_user_name` preference) — used in occasional name
   // greetings. Falls back to a randomly-picked friendly placeholder so
@@ -190,7 +316,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (userNameRef.current) return userNameRef.current
     const fallbacks = phrasesRef.current.nameFallbacks.length > 0
       ? phrasesRef.current.nameFallbacks
-      : NEUTRAL_PACK.nameFallbacks
+      : neutralRef.current.nameFallbacks
     return fallbacks[Math.floor(Math.random() * fallbacks.length)]
   }, [])
 
@@ -272,11 +398,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   const updateCrabPos = useCallback(() => {
     if (!crabElRef.current) return
-    const posX = onBoxRef.current ? boxXRef.current : xRef.current
+    // A pet perches where it stands: there is no box to climb onto.
+    const posX = onBoxRef.current && hasBoxRef.current ? boxXRef.current : xRef.current
     const scaleX = facingRef.current === 'left' ? -1 : 1
     crabElRef.current.style.transform = `translateX(calc(${posX}vw - 50%)) scaleX(${scaleX})`
     saveCrabPos()
   }, [saveCrabPos])
+  // The ground/lane measurement runs before this callback exists in source
+  // order, and re-clamps the mascot into the taskbar the moment it resolves.
+  const updateCrabPosRef = useRef<(() => void) | null>(null)
+  updateCrabPosRef.current = updateCrabPos
 
   const updateBoxPos = useCallback(() => {
     if (!boxElRef.current) return
@@ -407,7 +538,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
     // ─── Collision: floor ───
     // Floor (crab feet on shelf — crab image hangs below anchor point)
-    const crabFloor = 8
+    const crabFloor = groundRef.current
     if (p.posY <= crabFloor) {
       p.posY = crabFloor
       applyImpactDamage(p.velY)
@@ -443,8 +574,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       else p.velY = 0
     }
     // ─── Collision: walls ───
-    if (xRef.current <= 2) {
-      xRef.current = 2
+    // For a pet the walls are the ends of the taskbar it lives on, so a throw
+    // bounces along the bar instead of dropping it beside one.
+    const bounds = boundsRef.current
+    if (xRef.current <= bounds.min) {
+      xRef.current = bounds.min
       applyImpactDamage(p.velX)
       if (Math.abs(p.velX) > p.minBounceVel) {
         p.velX *= -p.bounciness
@@ -452,8 +586,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         p.velX = 0
       }
     }
-    if (xRef.current >= 92) {
-      xRef.current = 92
+    if (xRef.current >= bounds.max) {
+      xRef.current = bounds.max
       applyImpactDamage(p.velX)
       if (Math.abs(p.velX) > p.minBounceVel) {
         p.velX *= -p.bounciness
@@ -528,7 +662,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       p.velY = (e.clientY - p.lastPointerY) / dt
       p.lastPointerX = e.clientX; p.lastPointerY = e.clientY; p.lastPointerTime = now
     }
-    xRef.current = Math.min(92, Math.max(2, ((e.clientX - dragOffsetRef.current.x) / vw) * 100))
+    xRef.current = clampTo(boundsRef.current, ((e.clientX - dragOffsetRef.current.x) / vw) * 100)
     onPositionChangeRef.current?.(xRef.current)
     const posY = Math.max(0, vh - e.clientY - 20)
     if (crabElRef.current) {
@@ -784,18 +918,20 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       onBoxRef.current = true
       setCrabOnBox(true)
       setBoxGlow(true)
-      const bx = boxXRef.current
-      xRef.current = bx
-      setX(bx)
+      // The crab climbs onto its box for this. A pet has no box, so it strikes
+      // the pose where it already stands rather than teleporting to a prop
+      // that is not rendered.
+      if (hasBoxRef.current) {
+        const bx = boxXRef.current
+        xRef.current = bx
+        setX(bx)
+      }
       setFacingDirect(Math.random() > 0.5 ? 'left' : 'right')
-      // A pet shouts the language-free power lines instead of the locale
-      // pack's — those are the one category with crab-literal strings in them
-      // ("KING CRAB", "SUPER CLAW"), which read as a bug out of a penguin.
-      const powerLines = petStatusRef.current?.active
-        ? PET_POWER_LINES
-        : phrasesRef.current.power.length > 0
-          ? phrasesRef.current.power
-          : NEUTRAL_PACK.power
+      // `phrasesRef` is already crab-free while a pet is worn, so this reads
+      // the same for both bodies — see `applyVoice`.
+      const powerLines = phrasesRef.current.power.length > 0
+        ? phrasesRef.current.power
+        : neutralRef.current.power
       say(powerLines[Math.floor(Math.random() * powerLines.length)], 3500)
     } else if (action.state === 'idle') {
       const line = getSpeech('idle')
@@ -805,19 +941,25 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     if (action.state === 'waddle') {
       const startX = xRef.current
       const bx = boxXRef.current
+      const walk = walkRangeRef.current
       let newTarget: number
-      
-      // Always chase the box — crab wants to be near it
-      const dist = Math.abs(startX - bx)
-      if (dist < 3) {
-        // Already close — small wander around box
-        newTarget = bx + randRange(-8, 8)
+
+      if (!hasBoxRef.current) {
+        // No box to chase: the pet strolls up and down its stretch of taskbar.
+        newTarget = startX + randRange(-18, 18)
       } else {
-        // Walk to the box (slight overshoot for natural feel)
-        const overshoot = randRange(-3, 5) * (startX < bx ? 1 : -1)
-        newTarget = bx + overshoot
+        // Always chase the box — crab wants to be near it
+        const dist = Math.abs(startX - bx)
+        if (dist < 3) {
+          // Already close — small wander around box
+          newTarget = bx + randRange(-8, 8)
+        } else {
+          // Walk to the box (slight overshoot for natural feel)
+          const overshoot = randRange(-3, 5) * (startX < bx ? 1 : -1)
+          newTarget = bx + overshoot
+        }
       }
-      newTarget = Math.min(88, Math.max(5, newTarget))
+      newTarget = clampTo(walk, newTarget)
       setFacingDirect(newTarget > startX ? 'right' : 'left')
 
       // Use requestAnimationFrame for smooth GPU-friendly movement
@@ -826,13 +968,13 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         const elapsed = now - startTime
         const t = Math.min(elapsed / duration, 1)
         const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2
-        const cx = Math.min(88, Math.max(5, startX + (newTarget - startX) * ease))
+        const cx = clampTo(walk, startX + (newTarget - startX) * ease)
         xRef.current = cx
         setX(cx)
 
         // ─── ALWAYS kick box when walking past it ───
         const bx = boxXRef.current
-        if (!kickedRef.current && Math.abs(cx - bx) < 3) {
+        if (hasBoxRef.current && !kickedRef.current && Math.abs(cx - bx) < 3) {
           kickedRef.current = true
           const dir: 'left' | 'right' = newTarget > startX ? 'right' : 'left'
           const shift = dir === 'right' ? 6 : -6
@@ -848,7 +990,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         if (t < 1) {
           walkInterval.current = requestAnimationFrame(animate) as unknown as ReturnType<typeof setInterval>
         } else {
-          xRef.current = Math.min(88, Math.max(5, newTarget))
+          xRef.current = clampTo(walk, newTarget)
           setX(xRef.current)
         }
       }
@@ -882,7 +1024,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
   useEffect(() => {
     if (!mounted || !onPositionChange) return
-    onPositionChange(onBoxRef.current ? boxXRef.current : xRef.current)
+    onPositionChange(onBoxRef.current && hasBoxRef.current ? boxXRef.current : xRef.current)
   }, [mounted, onPositionChange])
 
   useEffect(() => {
@@ -930,7 +1072,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
       // languages, so they are keyed BY LANGUAGE. Every other locale shouts
       // its own pack's power lines. (This used to filter one flat array by
       // SCRIPT, which let all 19 English lines through on de/es/fr/it/nl/sv.)
-      const quotes = frenzyQuotesFor(localeRef.current, phrasesRef.current, NEUTRAL_PACK)
+      const quotes = frenzyQuotesFor(localeRef.current, phrasesRef.current, neutralRef.current, petVoiceRef.current)
 
       // Cycle through quotes every 5 seconds — longer display for readability
       let quoteIdx = 0
@@ -1147,6 +1289,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     <>
       <style>{MASCOT_KEYFRAMES}</style>
       <div ref={crabElRef}
+        data-mascot={pet ? 'pet' : 'crab'}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
@@ -1158,7 +1301,10 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         }}
         style={{
         position: 'fixed', left: 0,
-        bottom: physicsActive ? 0 : 8,
+        // The crab's shelf is the desktop floor; a pet's is the taskbar's top
+        // edge, measured from the bar itself. During physics the element sits
+        // at 0 and the loop carries the offset in `translateY`.
+        bottom: physicsActive ? 0 : groundPx,
         // Keep the crab's real translateX (and hop height) while physics/drag is
         // active instead of dropping to `undefined`. Clearing the transform
         // reverts the crab to its base `left:0` — so a plain TAP (which flips
@@ -1168,7 +1314,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         // chat opens. The physics/drag rAF loop still overrides this per-frame.
         transform: physicsActive
           ? `translateX(calc(${xRef.current}vw - 50%)) translateY(${-physicsRef.current.posY}px)`
-          : `translateX(calc(${crabOnBox ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
+          : `translateX(calc(${crabOnBox && !pet ? boxXRef.current : xRef.current}vw - 50%)) scaleX(${facing === 'left' ? -1 : 1})`,
         zIndex: 10001, pointerEvents: 'auto',
         cursor: 'grab',
         touchAction: 'none',
@@ -1257,20 +1403,81 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             }}>-{f.dmg} HP</span>
           </div>
         ))}
-        {/* Speech bubble — OUTSIDE body div so it doesn't wobble */}
+        {/* Speech bubble — OUTSIDE body div so it doesn't wobble.
+            Two dialects. The crab's is unchanged: a wide, round, solid-colour
+            lozenge sized for a 150px illustration that fills its box and for
+            lines that never wrap. A Petdex sprite is a 192x208 pixel-art cell
+            with real headroom above the character, so the same bubble floats a
+            long way over the pet's head, and its 400px nowrap slab dwarfs a
+            ~138px body. The pet's bubble therefore sits lower, wraps inside a
+            width close to the sprite's own, and is drawn the way the art is:
+            hard 2px edge, 4px corners, a solid offset shadow instead of a
+            blur, and a square tail rotated to a point. */}
         {speech && (() => {
-          const bubbleBg = frenzy ? 'rgba(251,191,36,0.95)'
+          const accent = frenzy ? 'rgba(251,191,36,0.95)'
             : state === 'sass' ? 'rgba(220,38,38,0.9)'
             : state === 'facepalm' ? 'rgba(100,100,100,0.9)'
             : 'rgba(249,115,22,0.92)'
+          const flip = `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`
+
+          if (pet) {
+            const bg = frenzy ? 'rgba(41,27,3,0.96)' : 'rgba(17,19,26,0.96)'
+            return (
+              <div style={{
+                position: 'absolute', bottom: 132, left: 75,
+                transform: flip,
+                zIndex: 10,
+                // `width: max-content` is load-bearing. The shell is only as
+                // wide as the 150px body, so an auto-width absolute child at
+                // left:75 gets a 75px containing block and every line wraps
+                // into a column one word wide. The crab never hit this because
+                // its bubble is `nowrap` and simply overflows. Sizing to the
+                // content first, then capping, wraps at 210px instead.
+                width: 'max-content',
+                maxWidth: 210,
+              }}>
+                <div data-speech="1" style={{
+                  background: bg,
+                  color: '#fff',
+                  padding: '7px 12px',
+                  border: `2px solid ${accent}`,
+                  borderRadius: 4,
+                  boxShadow: '0 3px 0 rgba(0,0,0,0.45)',
+                  fontSize: frenzy ? '1rem' : '0.95rem',
+                  fontWeight: 600,
+                  letterSpacing: '0.2px',
+                  // Wraps instead of running off the screen — a pet stands at
+                  // the shelf's edge as often as its middle.
+                  whiteSpace: 'normal',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.35,
+                  animation: 'speech-pop 0.3s ease-out forwards',
+                  textAlign: 'center' as const,
+                }}>
+                  {speech}
+                  {/* A rotated square, so the tail carries the same 2px edge
+                      as the bubble rather than being a borderless triangle. */}
+                  <div style={{
+                    position: 'absolute', bottom: -6, left: '50%',
+                    width: 10, height: 10,
+                    transform: 'translateX(-50%) rotate(45deg)',
+                    background: bg,
+                    borderRight: `2px solid ${accent}`,
+                    borderBottom: `2px solid ${accent}`,
+                  }} />
+                </div>
+              </div>
+            )
+          }
+
           return (
             <div style={{
               position: 'absolute', bottom: 155, left: 75,
-              transform: `translateX(-50%) scaleX(${facing === 'left' ? -1 : 1})`,
+              transform: flip,
               zIndex: 10,
             }}>
               <div data-speech="1" style={{
-                background: bubbleBg,
+                background: accent,
                 color: frenzy ? '#000' : '#fff',
                 padding: frenzy ? '10px 20px' : '8px 18px',
                 borderRadius: 12, fontSize: frenzy ? '1.2rem' : '1.1rem', fontWeight: 700,
@@ -1280,7 +1487,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 textAlign: 'center' as const,
               }}>
                 {speech}
-                <div style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: `8px solid ${bubbleBg}` }} />
+                <div style={{ position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: 0, height: 0, borderLeft: '8px solid transparent', borderRight: '8px solid transparent', borderTop: `8px solid ${accent}` }} />
               </div>
             </div>
           )
@@ -1325,8 +1532,14 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
       </div>
 
-      {/* The ClawBox — crab's prop */}
-      <div ref={boxElRef}
+      {/* The ClawBox — the CRAB's prop, and only the crab's.
+          It is a little ClawBox: the crab kicks it around, climbs on it for
+          the power stance and drags it about. A Hermes pet is not ClawBox's
+          own mascot and has no business carrying our hardware around, so the
+          prop is not rendered at all when a pet is worn — the pet just walks
+          the taskbar. On OpenClaw (and on a dual box still wearing the crab)
+          nothing here changes. */}
+      {!pet && <div ref={boxElRef}
         onPointerDown={handleBoxPointerDown}
         onPointerMove={handleBoxPointerMove}
         onPointerUp={handleBoxPointerUp}
@@ -1346,7 +1559,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
         }}>
           <img src="/clawbox-box.png" alt="" style={{ width: 40, height: 40, objectFit: 'contain' }} />
         </div>
-      </div>
+      </div>}
 
       {/* Mascot right-click context menu */}
       {ctxMenu && (

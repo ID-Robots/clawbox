@@ -154,6 +154,70 @@ describe("edition gating", () => {
     await waitFor(() => expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
   });
 
+  it("keeps the ClawBox prop for the crab and takes it away from a pet", async () => {
+    // The little ClawBox is the CRAB's: it kicks it, climbs it and drags it
+    // about. A Hermes pet is not ClawBox's mascot and does not carry our
+    // hardware around, so the prop is not rendered at all for one.
+    stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
+    const crab = render(<Mascot />);
+    await waitFor(() => expect(crab.container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    expect(crab.container.querySelector('img[src="/clawbox-box.png"]')).toBeTruthy();
+
+    cleanup();
+    invalidatePetStatus();
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const withPet = render(<Mascot />);
+    await waitFor(() => expect(withPet.container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    expect(withPet.container.querySelector('img[src="/clawbox-box.png"]')).toBeNull();
+  });
+
+  // The mascot's resting `bottom` is measured off the element the bottom bar
+  // marks with `data-mascot-ground` (ChromeShelf), so a pet keeps standing on
+  // the shelf as its safe-area inset or the viewport changes. The crab keeps
+  // its 8px desktop shelf and never reads the bar at all.
+  function installShelf() {
+    const bar = document.createElement("div");
+    bar.setAttribute("data-mascot-ground", "");
+    bar.getBoundingClientRect = () => ({
+      top: 700, bottom: 800, left: 0, right: 1000, width: 1000, height: 100, x: 0, y: 700,
+      toJSON: () => ({}),
+    }) as DOMRect;
+    document.body.appendChild(bar);
+    Object.defineProperty(window, "innerHeight", { value: 800, configurable: true });
+    Object.defineProperty(window, "innerWidth", { value: 1000, configurable: true });
+    return () => bar.remove();
+  }
+
+  it("leaves the crab on the desktop floor, ignoring the bottom bar", async () => {
+    const removeShelf = installShelf();
+    try {
+      stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
+      const { container } = render(<Mascot />);
+      await waitFor(() => {
+        const shell = container.querySelector('[data-mascot="crab"]') as HTMLElement | null;
+        expect(shell?.style.bottom).toBe("8px");
+      });
+    } finally {
+      removeShelf();
+    }
+  });
+
+  it("stands a pet on the bottom bar's top edge", async () => {
+    const removeShelf = installShelf();
+    try {
+      stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+      const { container } = render(<Mascot />);
+      await waitFor(() => expect(container.querySelector('[data-pet="boba"]')).toBeTruthy());
+      // 800 (viewport) - 700 (bar top) = the bar's top edge, from the bottom.
+      await waitFor(() => {
+        const shell = container.querySelector('[data-mascot="pet"]') as HTMLElement | null;
+        expect(shell?.style.bottom).toBe("100px");
+      });
+    } finally {
+      removeShelf();
+    }
+  });
+
   it("re-reads the pet when Settings announces a pick", async () => {
     stubPetsRoute({ supported: true, edition: "hermes", enabled: false, active: null });
     const { container } = render(<Mascot />);

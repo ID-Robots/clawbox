@@ -234,7 +234,13 @@ export default function ChromeShelf({
 
   return (
     <>
+      {/* `data-mascot-ground` marks the surface a Hermes pet walks on. The
+          mascot measures THIS element — its top edge is the pet's ground line
+          and its width is how far the pet may roam — so the pet keeps standing
+          on the shelf as the safe-area inset or the viewport changes. Nothing
+          reads it on OpenClaw: the crab keeps the desktop floor. */}
       <div
+        data-mascot-ground
         className="fixed bottom-0 left-0 right-0 flex items-center justify-center px-2 z-[10000]"
         style={{
           height: "calc(56px + env(safe-area-inset-bottom))",
