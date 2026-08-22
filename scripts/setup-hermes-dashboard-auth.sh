@@ -287,8 +287,32 @@ PY
   done
 
   # Store the plaintext password for the proxy ONLY (clawbox-owned, 0600).
-  ( umask 077; printf '%s' "$pw" > "$PWFILE" )
-  chmod 600 "$PWFILE"
+  #
+  # Same temp-file-and-rename as the config write above, for the same reason:
+  # `> "$PWFILE"` truncates in place, so the proxy — which re-reads this file on
+  # every session renewal — can observe an empty or partial password and answer
+  # 401, and a crash between the truncate and the write leaves it empty for good
+  # (classify_creds then calls that PW_MISSING). The temp file lives in the same
+  # directory so the rename is atomic, and is created 0600 by umask so the
+  # plaintext is never briefly world-readable.
+  local pwtmp="$PWFILE.tmp.$$"
+  if ! ( umask 077; printf '%s' "$pw" > "$pwtmp" ); then
+    rm -f "$pwtmp" 2>/dev/null || true
+    log "ERROR: failed to write $pwtmp" >&2
+    return 1
+  fi
+  # Checked separately from the write above: folding both into one subshell
+  # would let a successful chmod mask a partial printf.
+  if ! chmod 600 "$pwtmp"; then
+    rm -f "$pwtmp" 2>/dev/null || true
+    log "ERROR: failed to set mode 600 on $pwtmp" >&2
+    return 1
+  fi
+  if ! mv -f "$pwtmp" "$PWFILE"; then
+    rm -f "$pwtmp" 2>/dev/null || true
+    log "ERROR: failed to install $PWFILE" >&2
+    return 1
+  fi
   return 0
 }
 
@@ -385,6 +409,12 @@ while :; do
     "$CREDS_NOT_CONFIGURED"|"$CREDS_PW_MISSING")
       if [ "$attempt" -lt "$max_attempts" ]; then
         log "WARNING: the dashboard auth block / password file we just wrote to $HERMES_CONFIG is already gone — a concurrent process rewrote the file. The credentials generated were correct; the write was lost. Retrying under $CONFIG_LOCK (attempt $attempt/$max_attempts)." >&2
+        # Back off before re-minting. This branch only runs when the lock did
+        # NOT hold us apart, i.e. exactly while the other writer is still inside
+        # its own read-modify-write window — retrying immediately loses the same
+        # race again, and all three attempts can finish before it lands its
+        # os.replace. Grows with the attempt so a slow writer still gets a turn.
+        sleep "$attempt"
         continue
       fi
       log "ERROR: after $attempt attempts our dashboard auth block did not survive in $HERMES_CONFIG — another process keeps rewriting the file and is not honouring $CONFIG_LOCK. This is a write/serialisation fault, NOT a credential mismatch: the password and hash were correct on every attempt." >&2
