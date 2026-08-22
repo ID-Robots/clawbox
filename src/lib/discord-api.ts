@@ -88,7 +88,15 @@ export async function fetchDiscordBotInfo(
         // first thing their rate limiter penalises.
         "User-Agent": "ClawBox (https://clawbox.com, 1.0)",
       },
-      signal: signal ?? AbortSignal.timeout(VALIDATE_TIMEOUT_MS),
+      // The caller's signal ADDS a reason to give up, it does not replace the
+      // timeout. `signal ?? timeout` looked equivalent and was not: the
+      // configure route passes `request.signal`, which silently disabled the
+      // 8 s ceiling, so a hung TLS connection to Discord fell back to undici's
+      // own (much longer) limits with the Settings spinner — which has no
+      // client-side timeout — waiting behind it.
+      signal: signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(VALIDATE_TIMEOUT_MS)])
+        : AbortSignal.timeout(VALIDATE_TIMEOUT_MS),
     });
   } catch {
     // DNS failure, TLS failure, timeout, aborted request. Never a verdict on

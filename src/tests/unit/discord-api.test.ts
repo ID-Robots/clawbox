@@ -128,4 +128,52 @@ describe("fetchDiscordBotInfo", () => {
       expect((err as Error).stack ?? "").not.toContain(TOKEN);
     }
   });
+
+  // The route hands this call `request.signal` so a browser that goes away
+  // stops the work. That must not cost us the 8 s ceiling: `signal ?? timeout`
+  // used the caller's signal INSTEAD of the timeout, so a Discord connection
+  // that opened and then hung would keep the POST (and the Settings spinner)
+  // alive on undici's defaults.
+  describe("abort handling", () => {
+    /** Run the call with fetch parked until whichever signal it got aborts. */
+    function callWithParkedFetch(callerSignal?: AbortSignal) {
+      let seen: AbortSignal | undefined;
+      fetchMock.mockImplementation((_url: string, init: { signal: AbortSignal }) => {
+        seen = init.signal;
+        return new Promise((_resolve, reject) => {
+          init.signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      });
+      const promise = fetchDiscordBotInfo(TOKEN, callerSignal);
+      return { promise, signal: () => seen as AbortSignal };
+    }
+
+    it("still times out when the caller supplies its own signal", async () => {
+      // Stand in for the 8 s timer so the test does not have to wait for it.
+      const timeout = new AbortController();
+      vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeout.signal);
+      const caller = new AbortController();
+
+      const { promise, signal } = callWithParkedFetch(caller.signal);
+      const rejects = expect(promise).rejects.toBeInstanceOf(DiscordUnavailableError);
+      expect(signal().aborted).toBe(false);
+
+      timeout.abort();
+
+      expect(signal().aborted).toBe(true);
+      expect(caller.signal.aborted).toBe(false);
+      await rejects;
+    });
+
+    it("still aborts when the caller disconnects", async () => {
+      const caller = new AbortController();
+      const { promise, signal } = callWithParkedFetch(caller.signal);
+      const rejects = expect(promise).rejects.toBeInstanceOf(DiscordUnavailableError);
+
+      caller.abort();
+
+      expect(signal().aborted).toBe(true);
+      await rejects;
+    });
+  });
 });
