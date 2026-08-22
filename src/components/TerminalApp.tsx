@@ -46,7 +46,9 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
   // Read through a ref so a changed prop cannot invalidate `connect` and tear
   // down a live socket.
   const initialCommandRef = useRef(initialCommand);
-  initialCommandRef.current = initialCommand;
+  useEffect(() => {
+    initialCommandRef.current = initialCommand;
+  }, [initialCommand]);
 
   // Connect to the terminal WebSocket through the same origin that served
   // the page — the production server proxies `/terminal-ws` upgrades to

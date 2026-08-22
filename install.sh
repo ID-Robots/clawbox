@@ -3095,7 +3095,13 @@ ensure_claude_code() {
 
   local installer rc=1
   installer="$(mktemp)"
-  if curl -fsSL https://claude.ai/install.sh -o "$installer" 2>/dev/null \
+  # --max-time bounds a STALLED vendor: this runs inside step_post_update, and
+  # every recovery step after it waits behind this download. --proto-redir keeps
+  # a redirect from stepping down to plain HTTP on the way to something we then
+  # execute as the clawbox user.
+  if curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --max-time 300 \
+       https://claude.ai/install.sh -o "$installer" 2>/dev/null \
      && [ -s "$installer" ] \
      && ! head -c 512 "$installer" | grep -qiE '<!doctype|<html|unavailable in region' \
      && chown "$CLAWBOX_USER" "$installer"; then

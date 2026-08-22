@@ -25,6 +25,7 @@ const HERMES_ONLY_APP_IDS = ["hermes-skills"];
 const APP_TITLES: Record<string, string> = {
   settings: "Settings",
   terminal: "Terminal",
+  coding: "Coding Agent",
   files: "Files",
   browser: "Browser",
   vnc: "Remote Desktop",

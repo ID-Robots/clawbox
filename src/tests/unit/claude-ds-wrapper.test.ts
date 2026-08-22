@@ -140,6 +140,21 @@ describe("routing to ClawBox AI", () => {
     expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
   });
 
+  it("refuses to put the token on the wire in the clear", () => {
+    // The wrapper exports the portal token as ANTHROPIC_AUTH_TOKEN for whatever
+    // this URL names. A plaintext proxy would leak a live credential and still
+    // look like it was working.
+    const run = runWrapper({ CLAWBOX_AI_PROXY_URL: "http://proxy.example/api/ai" });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("non-HTTPS");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("still allows a loopback proxy, which cannot leave the box", () => {
+    expect(runWrapper({ CLAWBOX_AI_PROXY_URL: "http://127.0.0.1:8787/api/ai" }).status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:8787/api/ai/anthropic");
+  });
+
   it("sends the device's own portal token", () => {
     runWrapper();
     expect(capturedEnv().ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");

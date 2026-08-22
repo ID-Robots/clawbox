@@ -45,6 +45,16 @@ PROXY_URL="${CLAWBOX_AI_PROXY_URL:-https://clawbox.com/api/ai}"
 
 die() { printf 'claude-ds: %s\n' "$*" >&2; exit 1; }
 
+# The portal token is about to be handed to whatever this URL names, so refuse
+# to speak plaintext to anything but the loopback. Without this an
+# CLAWBOX_AI_PROXY_URL of http://... would put a live credential on the wire in
+# the clear, and the wrapper would look like it was working.
+case "$PROXY_URL" in
+  https://*) ;;
+  http://127.0.0.1[:/]*|http://127.0.0.1|http://localhost[:/]*|http://localhost) ;;
+  *) die "refusing to send the ClawBox AI token to a non-HTTPS address: $PROXY_URL" ;;
+esac
+
 if ! command -v claude >/dev/null 2>&1; then
   die "Claude Code is not installed on this ClawBox.
   Install it with:  sudo bash $CLAWBOX_ROOT/install.sh --step coding_harness"
