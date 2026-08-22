@@ -563,7 +563,6 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
 # and that proxy is reached with whatever key sits on that provider.
 _clawai_openai_route_is_ours = False
 _clawai_proxy_base_url = ""
-_clawai_proxy_host = None
 
 # Migration: ClawBox AI image generation.
 #
@@ -695,7 +694,6 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         models_providers["openai"] = openai_provider
         _clawai_openai_route_is_ours = True
         _clawai_proxy_base_url = _image_base_url
-        _clawai_proxy_host = _proxy_host
         if openai_provider.get("apiKey") != _clawai_token:
             openai_provider["apiKey"] = _clawai_token
             changed = True
@@ -811,12 +809,19 @@ if _clawai_openai_route_is_ours:
     # that keeps their endpoint and swaps their model is worse than none, and
     # sending our token to their host is the failure this whole block exists to
     # stop.
+    def _same_endpoint(_a, _b):
+        # The WHOLE endpoint, not just its host. An owner who pointed
+        # transcription at https://clawbox.com/their-own-route chose that path
+        # deliberately, and a host-only match would stamp over it while
+        # reporting success. A trailing slash is the one difference that means
+        # nothing.
+        return _a.rstrip("/") == _b.rstrip("/")
+
     _audio_base_url = _audio.get("baseUrl")
     _audio_models = _audio.get("models")
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
-    _audio_host = _url_host(_audio_base_url) if _audio_has_base_url else None
     _audio_route_taken = bool(
-        (_audio_has_base_url and (_audio_host is None or _clawai_proxy_host is None or _audio_host != _clawai_proxy_host))
+        (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
         or (_audio_models is not None and _audio_models != CLAWBOX_AUDIO_MODELS)
     )
     if _audio_route_taken:

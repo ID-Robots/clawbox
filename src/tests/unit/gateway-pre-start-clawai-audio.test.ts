@@ -35,14 +35,6 @@ const POLICY = hasPython3
   ? slice("# Migration: ClawBox AI speech to text.", "if isinstance(ds_models, list):")
   : "";
 
-/**
- * `_url_host` is shipped too, and the block's don't-clobber test is only as
- * good as that helper — so it is extracted rather than reimplemented here.
- */
-const URL_HOST = hasPython3
-  ? slice("def _url_host(_url):", "# Only boxes that actually have ClawBox AI")
-  : "";
-
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(tmpdir(), "clawai-audio-")); });
 afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
@@ -54,10 +46,10 @@ type AudioConfig = { baseUrl?: unknown; models?: unknown; [key: string]: unknown
  * Run the extracted block over a whole openclaw.json.
  *
  * The preamble binds only what the real script binds upstream of this point:
- * `cfg`, `changed`, and the three names the image migration hands over when it
- * has decided the `openai` provider slot is ours (`_clawai_openai_route_is_ours`,
- * `_clawai_proxy_base_url`, `_clawai_proxy_host`). `routeIsOurs: false` is the
- * real script's starting value, i.e. a box whose openai slot belongs to its
+ * `cfg`, `changed`, and the two names the image migration hands over once it
+ * has decided the `openai` provider slot is ours
+ * (`_clawai_openai_route_is_ours`, `_clawai_proxy_base_url`).
+ * `routeIsOurs: false` is the real script's starting value, i.e. a box whose openai slot belongs to its
  * owner or that has no ClawBox AI token at all.
  */
 function migrate(cfg: Config, routeIsOurs = true): { cfg: Config; changed: boolean; log: string } {
@@ -65,13 +57,10 @@ function migrate(cfg: Config, routeIsOurs = true): { cfg: Config; changed: boole
   writeFileSync(file, JSON.stringify(cfg));
   const program = [
     "import json, sys",
-    "from urllib.parse import urlsplit",
-    URL_HOST,
     "cfg = json.load(open(sys.argv[1]))",
     "changed = False",
     `_clawai_openai_route_is_ours = ${routeIsOurs ? "True" : "False"}`,
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
-    `_clawai_proxy_host = _url_host(${JSON.stringify(PROXY)})`,
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
@@ -154,7 +143,17 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
     expect(audio(cfg)).toEqual(owner);
   });
 
-  it("treats an unparseable endpoint as foreign", () => {
+  it("leaves another route on our own host alone", () => {
+    // Same host, different path: the owner pointed transcription somewhere
+    // specific and a host-only comparison would have stamped over it.
+    const owner = { baseUrl: "https://clawbox.com/custom-transcribe", models: OURS };
+    const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+    expect(changed).toBe(false);
+    expect(audio(cfg)).toEqual(owner);
+  });
+
+  it("keeps an endpoint it cannot make sense of", () => {
     // We cannot say where it points, so we cannot say our token is safe there.
     const owner = { baseUrl: "not a url" };
     const { cfg, changed } = migrate({ tools: { media: { audio: { ...owner } } } });
@@ -172,7 +171,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
   });
 
   it("repairs a half-written config from an interrupted boot", () => {
-    // Our own baseUrl, our pin missing: the transcription would resolve to
+    // Our own baseUrl to the character, our pin missing: the transcription would resolve to
     // gpt-4o-transcribe and 400 on every voice note.
     const { cfg, changed } = migrate({ tools: { media: { audio: { baseUrl: PROXY } } } });
 
@@ -195,13 +194,10 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
     const staging = "https://staging.clawbox.com/api/ai";
     const program = [
       "import json, sys",
-      "from urllib.parse import urlsplit",
-      URL_HOST,
       "cfg = json.load(open(sys.argv[1]))",
       "changed = False",
       "_clawai_openai_route_is_ours = True",
       `_clawai_proxy_base_url = ${JSON.stringify(staging)}`,
-      `_clawai_proxy_host = _url_host(${JSON.stringify(staging)})`,
       POLICY,
       "print(json.dumps({'cfg': cfg, 'changed': changed}))",
     ].join("\n");
