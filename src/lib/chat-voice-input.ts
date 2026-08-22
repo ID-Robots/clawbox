@@ -29,6 +29,13 @@ export type VoiceError =
   | "permission"
   /** No capture device, or the browser has no MediaRecorder at all. */
   | "unsupported"
+  /**
+   * The page is not on a secure origin, so the browser removed the capture API
+   * before the user could be asked for anything. Separate from `unsupported`
+   * because the remedy is different: nothing about the browser is wrong and no
+   * permission can be granted — the ADDRESS has to change.
+   */
+  | "insecure"
   /** The recording never captured any audio. */
   | "empty"
   /** The box or the proxy failed. Retryable — the audio still exists. */
@@ -111,6 +118,49 @@ export function recordingFileName(mimeType: string): string {
   if (mimeType.includes("mp4")) return "recording.mp4";
   if (mimeType.includes("ogg")) return "recording.ogg";
   return "recording.webm";
+}
+
+/** Whether the microphone can be used here at all, and if not, why not. */
+export type CaptureAvailability = "ok" | "insecure" | "unsupported";
+
+/**
+ * Decide whether this page can capture audio, before anything is offered.
+ *
+ * Browsers gate `getUserMedia` on a secure context: on `http://<ip>/` or
+ * `http://clawbox.local/` — the ordinary way a customer reaches their box on
+ * the LAN — `navigator.mediaDevices` is not merely empty, it does not exist,
+ * and no permission grant can make it appear. Reporting that as "this browser
+ * cannot record audio" (TASK-470) sends the owner to check a browser that is
+ * working perfectly.
+ *
+ * So the missing API is read together with the origin. Missing on an insecure
+ * origin is the origin's doing and the fix is the address; missing on a secure
+ * one is genuinely the browser's, and there the old message was right.
+ */
+export function classifyCaptureAvailability(env: {
+  secureContext: boolean;
+  hasMediaDevices: boolean;
+  hasMediaRecorder: boolean;
+}): CaptureAvailability {
+  if (env.hasMediaDevices && env.hasMediaRecorder) return "ok";
+  if (!env.secureContext) return "insecure";
+  return "unsupported";
+}
+
+/**
+ * `classifyCaptureAvailability` against the live browser.
+ *
+ * `window.isSecureContext` is the browser's own answer to the same question it
+ * gates `getUserMedia` on, so localhost and the Remote Desktop tunnel are
+ * counted as secure without this having to re-implement the rule.
+ */
+export function readCaptureAvailability(): CaptureAvailability {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return "unsupported";
+  return classifyCaptureAvailability({
+    secureContext: window.isSecureContext === true,
+    hasMediaDevices: typeof navigator.mediaDevices?.getUserMedia === "function",
+    hasMediaRecorder: typeof MediaRecorder !== "undefined",
+  });
 }
 
 /**
