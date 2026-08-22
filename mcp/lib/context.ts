@@ -101,6 +101,15 @@ export async function buildContext(
     providers = (payload?.providers ?? [])
       .filter((p) => typeof p.id === "string" && p.authenticated !== false)
       .map((p) => p.id as string);
+    // The provider the device is ACTUALLY on is always a legal target, even
+    // when it is absent from the credentialed catalogue — the Hermes CLI has
+    // meta-providers ("auto") the catalogue never lists. Without this seed,
+    // ai_set_provider was a one-way door: the agent could switch away from the
+    // configured provider and then had no enum value to switch back to.
+    const current = payload?.provider;
+    if (typeof current === "string" && current && !providers.includes(current)) {
+      providers.unshift(current);
+    }
   }
 
   return {
