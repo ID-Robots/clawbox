@@ -567,6 +567,8 @@ describe("middleware", () => {
       "/setup-api/harness/status",     // desktop picker only, never the wizard
       "/setup-api/whatsapp/status",    // WhatsApp lives only in Settings
       "/setup-api/whatsapp/configure", // writes who may talk to the agent
+      "/setup-api/whatsapp/pair",      // hands back live QR pairing material
+      "/setup-api/whatsapp/unpair",    // deletes the linked-device session
     ])("gates %s during the setup window", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();

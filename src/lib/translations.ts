@@ -461,12 +461,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Turned on, phone not linked",
     "settings.whatsappNotConfiguredHint": "Link a phone to start chatting from WhatsApp.",
     "settings.whatsappGatewayStopped": "The messaging service is not running, so nothing is being picked up.",
-    "settings.whatsappBridgeMissing": "The WhatsApp bridge has not downloaded what it needs yet. The pairing command below fetches it on first run, so keep the device online.",
+    "settings.whatsappBridgeMissing": "The WhatsApp bridge has not downloaded what it needs yet. Connecting a phone below fetches it automatically, so keep the device online.",
     "settings.whatsappPairTitle": "Link your phone",
-    "settings.whatsappPairIntro": "Linking uses a QR code that has to be scanned from a terminal. It takes a minute and only has to be done once.",
+    "settings.whatsappPairIntro": "Linking takes about a minute and only has to be done once. It all happens right here — no terminal needed.",
     "settings.whatsappPairStep1": "Open the Terminal app on this ClawBox.",
     "settings.whatsappPairStep2": "Run",
     "settings.whatsappPairStep3": "On your phone open WhatsApp → Settings → Linked Devices → Link a Device, then scan the code.",
+
+    "settings.whatsappPairButton": "Connect phone",
+
+    "settings.whatsappPairRelink": "Link a different phone",
+
+    "settings.whatsappPairCancel": "Cancel",
+
+    "settings.whatsappPairPreparing": "Preparing the WhatsApp bridge",
+
+    "settings.whatsappPairPreparingHint": "Downloading what the bridge needs. This happens once and can take a few minutes.",
+
+    "settings.whatsappPairStarting": "Creating a QR code",
+
+    "settings.whatsappPairStartingHint": "This takes a couple of seconds.",
+
+    "settings.whatsappPairScanTitle": "Scan this with your phone",
+
+    "settings.whatsappPairScanHint": "On your phone open WhatsApp → Settings → Linked devices → Link a device.",
+
+    "settings.whatsappPairNoRush": "The code refreshes by itself, so take as long as you need.",
+
+    "settings.whatsappPairQrLabel": "WhatsApp pairing QR code",
+
+    "settings.whatsappPairScanned": "Code scanned — finishing the link",
+
+    "settings.whatsappPairScannedHint": "Keep WhatsApp open on your phone for a moment.",
+
+    "settings.whatsappPairedTitle": "Phone linked",
+
+    "settings.whatsappPairedAs": "Linked as {number}",
+
+    "settings.whatsappPairFailedTitle": "Pairing could not start",
+
+    "settings.whatsappPairErrBridge": "The WhatsApp bridge is missing from this ClawBox.",
+
+    "settings.whatsappPairErrInstall": "Could not download what the bridge needs. Check the network connection and try again.",
+
+    "settings.whatsappPairErrGeneric": "Something went wrong while starting the bridge.",
+
+    "settings.whatsappPairRetry": "Try again",
+
+    "settings.whatsappUnpair": "Unlink phone",
+
+    "settings.whatsappUnpairHint": "Removes the link from this ClawBox and switches the channel off. Remove the entry under Linked devices on your phone as well.",
+
+    "settings.whatsappUnpairConfirm": "Yes, unlink",
+
+    "settings.whatsappUnpairCancel": "Keep it linked",
+
+    "settings.whatsappUnpairDone": "Phone unlinked.",
+
+    "settings.whatsappUnpairFailed": "Could not unlink the phone.",
+
+    "settings.whatsappAdvancedToggle": "Rather use the terminal?",
     "settings.whatsappAllowedTitle": "Who can message the assistant",
     "settings.whatsappAllowedHint": "Only these numbers get an answer; everyone else is ignored. Enter the full number with country code, digits only.",
     "settings.whatsappAllowAllWarning": "This device is currently set to answer anyone. Add a number below to close it down.",
@@ -937,12 +991,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Включен, телефонът не е свързан",
     "settings.whatsappNotConfiguredHint": "Свържете телефон, за да пишете от WhatsApp.",
     "settings.whatsappGatewayStopped": "Услугата за съобщения не работи, затова нищо не се получава.",
-    "settings.whatsappBridgeMissing": "Мостът за WhatsApp още не е изтеглил нужното. Командата за свързване по-долу го изтегля при първото пускане, затова оставете устройството онлайн.",
+    "settings.whatsappBridgeMissing": "WhatsApp мостът още не е изтеглил нужното. Свързването на телефон по-долу го изтегля автоматично, затова дръжте устройството онлайн.",
     "settings.whatsappPairTitle": "Свържете телефона си",
-    "settings.whatsappPairIntro": "Свързването става с QR код, който се сканира от терминала. Отнема минута и се прави само веднъж.",
+    "settings.whatsappPairIntro": "Свързването отнема около минута и се прави само веднъж. Всичко става тук — без терминал.",
     "settings.whatsappPairStep1": "Отворете приложението Терминал на тази ClawBox.",
     "settings.whatsappPairStep2": "Изпълнете",
     "settings.whatsappPairStep3": "На телефона отворете WhatsApp → Настройки → Свързани устройства → Свързване на устройство и сканирайте кода.",
+
+    "settings.whatsappPairButton": "Свържи телефон",
+
+    "settings.whatsappPairRelink": "Свържи друг телефон",
+
+    "settings.whatsappPairCancel": "Отказ",
+
+    "settings.whatsappPairPreparing": "Подготовка на WhatsApp моста",
+
+    "settings.whatsappPairPreparingHint": "Изтегля се нужното за моста. Става само веднъж и може да отнеме няколко минути.",
+
+    "settings.whatsappPairStarting": "Създава се QR код",
+
+    "settings.whatsappPairStartingHint": "Отнема няколко секунди.",
+
+    "settings.whatsappPairScanTitle": "Сканирайте това с телефона си",
+
+    "settings.whatsappPairScanHint": "На телефона отворете WhatsApp → Настройки → Свързани устройства → Свързване на устройство.",
+
+    "settings.whatsappPairNoRush": "Кодът се обновява сам, така че не бързайте.",
+
+    "settings.whatsappPairQrLabel": "QR код за свързване с WhatsApp",
+
+    "settings.whatsappPairScanned": "Кодът е сканиран — свързването приключва",
+
+    "settings.whatsappPairScannedHint": "Оставете WhatsApp отворен на телефона за момент.",
+
+    "settings.whatsappPairedTitle": "Телефонът е свързан",
+
+    "settings.whatsappPairedAs": "Свързан като {number}",
+
+    "settings.whatsappPairFailedTitle": "Свързването не можа да започне",
+
+    "settings.whatsappPairErrBridge": "WhatsApp мостът липсва на тази ClawBox.",
+
+    "settings.whatsappPairErrInstall": "Нужното за моста не можа да се изтегли. Проверете мрежата и опитайте отново.",
+
+    "settings.whatsappPairErrGeneric": "Нещо се обърка при стартирането на моста.",
+
+    "settings.whatsappPairRetry": "Опитайте отново",
+
+    "settings.whatsappUnpair": "Премахни телефона",
+
+    "settings.whatsappUnpairHint": "Премахва връзката от тази ClawBox и изключва канала. Изтрийте записа и в Свързани устройства на телефона си.",
+
+    "settings.whatsappUnpairConfirm": "Да, премахни",
+
+    "settings.whatsappUnpairCancel": "Остави свързан",
+
+    "settings.whatsappUnpairDone": "Телефонът е премахнат.",
+
+    "settings.whatsappUnpairFailed": "Телефонът не можа да бъде премахнат.",
+
+    "settings.whatsappAdvancedToggle": "Предпочитате терминала?",
     "settings.whatsappAllowedTitle": "Кой може да пише на асистента",
     "settings.whatsappAllowedHint": "Само тези номера получават отговор; останалите се пренебрегват. Въведете пълния номер с код на държавата, само цифри.",
     "settings.whatsappAllowAllWarning": "В момента устройството отговаря на всички. Добавете номер по-долу, за да го ограничите.",
@@ -1413,12 +1521,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Eingeschaltet, Telefon nicht verbunden",
     "settings.whatsappNotConfiguredHint": "Verbinden Sie ein Telefon, um aus WhatsApp zu schreiben.",
     "settings.whatsappGatewayStopped": "Der Nachrichtendienst läuft nicht, deshalb wird nichts abgeholt.",
-    "settings.whatsappBridgeMissing": "Die WhatsApp-Brücke hat das Nötige noch nicht geladen. Der Kopplungsbefehl unten holt es beim ersten Start nach, halten Sie das Gerät also online.",
+    "settings.whatsappBridgeMissing": "Die WhatsApp-Bridge hat noch nicht geladen, was sie braucht. Das Verbinden eines Telefons unten holt es automatisch — halten Sie das Gerät online.",
     "settings.whatsappPairTitle": "Telefon verbinden",
-    "settings.whatsappPairIntro": "Die Kopplung läuft über einen QR-Code, der im Terminal gescannt wird. Das dauert eine Minute und ist nur einmal nötig.",
+    "settings.whatsappPairIntro": "Die Kopplung dauert etwa eine Minute und ist nur einmal nötig. Alles passiert hier — kein Terminal erforderlich.",
     "settings.whatsappPairStep1": "Öffnen Sie die Terminal-App auf dieser ClawBox.",
     "settings.whatsappPairStep2": "Führen Sie aus",
     "settings.whatsappPairStep3": "Öffnen Sie am Telefon WhatsApp → Einstellungen → Verknüpfte Geräte → Gerät verknüpfen und scannen Sie den Code.",
+
+    "settings.whatsappPairButton": "Telefon verbinden",
+
+    "settings.whatsappPairRelink": "Anderes Telefon verbinden",
+
+    "settings.whatsappPairCancel": "Abbrechen",
+
+    "settings.whatsappPairPreparing": "WhatsApp-Bridge wird vorbereitet",
+
+    "settings.whatsappPairPreparingHint": "Die Bridge lädt herunter, was sie braucht. Das passiert einmalig und kann einige Minuten dauern.",
+
+    "settings.whatsappPairStarting": "QR-Code wird erstellt",
+
+    "settings.whatsappPairStartingHint": "Das dauert ein paar Sekunden.",
+
+    "settings.whatsappPairScanTitle": "Scannen Sie dies mit Ihrem Telefon",
+
+    "settings.whatsappPairScanHint": "Öffnen Sie auf dem Telefon WhatsApp → Einstellungen → Verknüpfte Geräte → Gerät hinzufügen.",
+
+    "settings.whatsappPairNoRush": "Der Code erneuert sich von selbst — lassen Sie sich Zeit.",
+
+    "settings.whatsappPairQrLabel": "QR-Code zur WhatsApp-Kopplung",
+
+    "settings.whatsappPairScanned": "Code gescannt — Verbindung wird abgeschlossen",
+
+    "settings.whatsappPairScannedHint": "Lassen Sie WhatsApp einen Moment auf dem Telefon geöffnet.",
+
+    "settings.whatsappPairedTitle": "Telefon verbunden",
+
+    "settings.whatsappPairedAs": "Verbunden als {number}",
+
+    "settings.whatsappPairFailedTitle": "Kopplung konnte nicht starten",
+
+    "settings.whatsappPairErrBridge": "Die WhatsApp-Bridge fehlt auf dieser ClawBox.",
+
+    "settings.whatsappPairErrInstall": "Die Bridge konnte nicht laden, was sie braucht. Prüfen Sie die Netzwerkverbindung und versuchen Sie es erneut.",
+
+    "settings.whatsappPairErrGeneric": "Beim Starten der Bridge ist etwas schiefgelaufen.",
+
+    "settings.whatsappPairRetry": "Erneut versuchen",
+
+    "settings.whatsappUnpair": "Telefon trennen",
+
+    "settings.whatsappUnpairHint": "Entfernt die Verknüpfung von dieser ClawBox und schaltet den Kanal aus. Löschen Sie den Eintrag auch unter Verknüpfte Geräte auf Ihrem Telefon.",
+
+    "settings.whatsappUnpairConfirm": "Ja, trennen",
+
+    "settings.whatsappUnpairCancel": "Verbunden lassen",
+
+    "settings.whatsappUnpairDone": "Telefon getrennt.",
+
+    "settings.whatsappUnpairFailed": "Das Telefon konnte nicht getrennt werden.",
+
+    "settings.whatsappAdvancedToggle": "Lieber das Terminal?",
     "settings.whatsappAllowedTitle": "Wer dem Assistenten schreiben darf",
     "settings.whatsappAllowedHint": "Nur diese Nummern bekommen eine Antwort, alle anderen werden ignoriert. Vollständige Nummer mit Ländervorwahl eingeben, nur Ziffern.",
     "settings.whatsappAllowAllWarning": "Das Gerät antwortet derzeit jedem. Fügen Sie unten eine Nummer hinzu, um das zu ändern.",
@@ -1889,12 +2051,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Activado, teléfono sin vincular",
     "settings.whatsappNotConfiguredHint": "Vincule un teléfono para escribir desde WhatsApp.",
     "settings.whatsappGatewayStopped": "El servicio de mensajería no está en marcha, así que no se recoge nada.",
-    "settings.whatsappBridgeMissing": "El puente de WhatsApp aún no ha descargado lo que necesita. El comando de vinculación de abajo lo obtiene en el primer arranque, así que mantenga el dispositivo conectado.",
+    "settings.whatsappBridgeMissing": "El puente de WhatsApp aún no ha descargado lo que necesita. Conectar un teléfono abajo lo descarga automáticamente, así que mantenga el dispositivo en línea.",
     "settings.whatsappPairTitle": "Vincule su teléfono",
-    "settings.whatsappPairIntro": "La vinculación usa un código QR que se escanea desde el terminal. Lleva un minuto y solo hay que hacerlo una vez.",
+    "settings.whatsappPairIntro": "La vinculación lleva alrededor de un minuto y solo hay que hacerla una vez. Todo ocurre aquí, sin terminal.",
     "settings.whatsappPairStep1": "Abra la aplicación Terminal en esta ClawBox.",
     "settings.whatsappPairStep2": "Ejecute",
     "settings.whatsappPairStep3": "En el teléfono abra WhatsApp → Ajustes → Dispositivos vinculados → Vincular un dispositivo y escanee el código.",
+
+    "settings.whatsappPairButton": "Conectar teléfono",
+
+    "settings.whatsappPairRelink": "Vincular otro teléfono",
+
+    "settings.whatsappPairCancel": "Cancelar",
+
+    "settings.whatsappPairPreparing": "Preparando el puente de WhatsApp",
+
+    "settings.whatsappPairPreparingHint": "Se está descargando lo que necesita el puente. Ocurre una sola vez y puede tardar unos minutos.",
+
+    "settings.whatsappPairStarting": "Creando un código QR",
+
+    "settings.whatsappPairStartingHint": "Tarda un par de segundos.",
+
+    "settings.whatsappPairScanTitle": "Escanee esto con su teléfono",
+
+    "settings.whatsappPairScanHint": "En el teléfono abra WhatsApp → Ajustes → Dispositivos vinculados → Vincular un dispositivo.",
+
+    "settings.whatsappPairNoRush": "El código se renueva solo, así que tómese el tiempo que necesite.",
+
+    "settings.whatsappPairQrLabel": "Código QR de vinculación de WhatsApp",
+
+    "settings.whatsappPairScanned": "Código escaneado — completando la vinculación",
+
+    "settings.whatsappPairScannedHint": "Mantenga WhatsApp abierto en el teléfono un momento.",
+
+    "settings.whatsappPairedTitle": "Teléfono vinculado",
+
+    "settings.whatsappPairedAs": "Vinculado como {number}",
+
+    "settings.whatsappPairFailedTitle": "No se pudo iniciar la vinculación",
+
+    "settings.whatsappPairErrBridge": "El puente de WhatsApp no está en esta ClawBox.",
+
+    "settings.whatsappPairErrInstall": "No se pudo descargar lo que necesita el puente. Compruebe la conexión de red e inténtelo de nuevo.",
+
+    "settings.whatsappPairErrGeneric": "Algo salió mal al iniciar el puente.",
+
+    "settings.whatsappPairRetry": "Intentar de nuevo",
+
+    "settings.whatsappUnpair": "Desvincular teléfono",
+
+    "settings.whatsappUnpairHint": "Elimina el vínculo de esta ClawBox y apaga el canal. Borre también la entrada en Dispositivos vinculados de su teléfono.",
+
+    "settings.whatsappUnpairConfirm": "Sí, desvincular",
+
+    "settings.whatsappUnpairCancel": "Mantener vinculado",
+
+    "settings.whatsappUnpairDone": "Teléfono desvinculado.",
+
+    "settings.whatsappUnpairFailed": "No se pudo desvincular el teléfono.",
+
+    "settings.whatsappAdvancedToggle": "¿Prefiere usar el terminal?",
     "settings.whatsappAllowedTitle": "Quién puede escribir al asistente",
     "settings.whatsappAllowedHint": "Solo estos números reciben respuesta; el resto se ignora. Escriba el número completo con prefijo de país, solo dígitos.",
     "settings.whatsappAllowAllWarning": "Ahora mismo el dispositivo responde a cualquiera. Añada un número abajo para cerrarlo.",
@@ -2365,12 +2581,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Activé, téléphone non relié",
     "settings.whatsappNotConfiguredHint": "Reliez un téléphone pour écrire depuis WhatsApp.",
     "settings.whatsappGatewayStopped": "Le service de messagerie ne tourne pas, rien n est donc récupéré.",
-    "settings.whatsappBridgeMissing": "Le pont WhatsApp n a pas encore téléchargé ce qu il lui faut. La commande de liaison ci-dessous le récupère au premier lancement, gardez donc l appareil connecté.",
+    "settings.whatsappBridgeMissing": "La passerelle WhatsApp n a pas encore téléchargé ce dont elle a besoin. Connecter un téléphone ci-dessous le récupère automatiquement — gardez l appareil en ligne.",
     "settings.whatsappPairTitle": "Reliez votre téléphone",
-    "settings.whatsappPairIntro": "La liaison passe par un code QR à scanner depuis le terminal. Cela prend une minute et ne se fait qu une fois.",
+    "settings.whatsappPairIntro": "La liaison prend environ une minute et ne se fait qu une fois. Tout se passe ici, sans terminal.",
     "settings.whatsappPairStep1": "Ouvrez l application Terminal sur cette ClawBox.",
     "settings.whatsappPairStep2": "Lancez",
     "settings.whatsappPairStep3": "Sur le téléphone, ouvrez WhatsApp → Réglages → Appareils liés → Lier un appareil, puis scannez le code.",
+
+    "settings.whatsappPairButton": "Connecter le téléphone",
+
+    "settings.whatsappPairRelink": "Relier un autre téléphone",
+
+    "settings.whatsappPairCancel": "Annuler",
+
+    "settings.whatsappPairPreparing": "Préparation de la passerelle WhatsApp",
+
+    "settings.whatsappPairPreparingHint": "Téléchargement de ce dont la passerelle a besoin. Cela n arrive qu une fois et peut prendre quelques minutes.",
+
+    "settings.whatsappPairStarting": "Création d un code QR",
+
+    "settings.whatsappPairStartingHint": "Cela prend quelques secondes.",
+
+    "settings.whatsappPairScanTitle": "Scannez ceci avec votre téléphone",
+
+    "settings.whatsappPairScanHint": "Sur le téléphone, ouvrez WhatsApp → Réglages → Appareils connectés → Connecter un appareil.",
+
+    "settings.whatsappPairNoRush": "Le code se renouvelle tout seul, prenez le temps qu il vous faut.",
+
+    "settings.whatsappPairQrLabel": "Code QR de liaison WhatsApp",
+
+    "settings.whatsappPairScanned": "Code scanné — liaison en cours",
+
+    "settings.whatsappPairScannedHint": "Laissez WhatsApp ouvert sur le téléphone un instant.",
+
+    "settings.whatsappPairedTitle": "Téléphone relié",
+
+    "settings.whatsappPairedAs": "Relié en tant que {number}",
+
+    "settings.whatsappPairFailedTitle": "La liaison n a pas pu démarrer",
+
+    "settings.whatsappPairErrBridge": "La passerelle WhatsApp est absente de cette ClawBox.",
+
+    "settings.whatsappPairErrInstall": "Impossible de télécharger ce dont la passerelle a besoin. Vérifiez la connexion réseau et réessayez.",
+
+    "settings.whatsappPairErrGeneric": "Un problème est survenu au démarrage de la passerelle.",
+
+    "settings.whatsappPairRetry": "Réessayer",
+
+    "settings.whatsappUnpair": "Délier le téléphone",
+
+    "settings.whatsappUnpairHint": "Supprime la liaison de cette ClawBox et coupe le canal. Supprimez aussi l entrée dans Appareils connectés sur votre téléphone.",
+
+    "settings.whatsappUnpairConfirm": "Oui, délier",
+
+    "settings.whatsappUnpairCancel": "Garder la liaison",
+
+    "settings.whatsappUnpairDone": "Téléphone délié.",
+
+    "settings.whatsappUnpairFailed": "Impossible de délier le téléphone.",
+
+    "settings.whatsappAdvancedToggle": "Vous préférez le terminal ?",
     "settings.whatsappAllowedTitle": "Qui peut écrire à l assistant",
     "settings.whatsappAllowedHint": "Seuls ces numéros obtiennent une réponse, les autres sont ignorés. Saisissez le numéro complet avec l indicatif du pays, chiffres uniquement.",
     "settings.whatsappAllowAllWarning": "L appareil répond actuellement à tout le monde. Ajoutez un numéro ci-dessous pour le restreindre.",
@@ -2841,12 +3111,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Attivo, telefono non collegato",
     "settings.whatsappNotConfiguredHint": "Colleghi un telefono per scrivere da WhatsApp.",
     "settings.whatsappGatewayStopped": "Il servizio di messaggistica non è in funzione, quindi non viene raccolto nulla.",
-    "settings.whatsappBridgeMissing": "Il ponte WhatsApp non ha ancora scaricato ciò che gli serve. Il comando di collegamento qui sotto lo recupera al primo avvio, quindi tenga il dispositivo online.",
+    "settings.whatsappBridgeMissing": "Il ponte WhatsApp non ha ancora scaricato ciò che serve. Collegare un telefono qui sotto lo scarica automaticamente, quindi tenga il dispositivo online.",
     "settings.whatsappPairTitle": "Colleghi il telefono",
-    "settings.whatsappPairIntro": "Il collegamento avviene con un codice QR da scansionare dal terminale. Richiede un minuto e si fa una volta sola.",
+    "settings.whatsappPairIntro": "Il collegamento richiede circa un minuto e si fa una volta sola. Tutto avviene qui, senza terminale.",
     "settings.whatsappPairStep1": "Apra l app Terminale su questa ClawBox.",
     "settings.whatsappPairStep2": "Esegua",
     "settings.whatsappPairStep3": "Sul telefono apra WhatsApp → Impostazioni → Dispositivi collegati → Collega un dispositivo e scansioni il codice.",
+
+    "settings.whatsappPairButton": "Collega telefono",
+
+    "settings.whatsappPairRelink": "Collega un altro telefono",
+
+    "settings.whatsappPairCancel": "Annulla",
+
+    "settings.whatsappPairPreparing": "Preparazione del ponte WhatsApp",
+
+    "settings.whatsappPairPreparingHint": "Si sta scaricando ciò che serve al ponte. Succede una sola volta e può richiedere qualche minuto.",
+
+    "settings.whatsappPairStarting": "Creazione del codice QR",
+
+    "settings.whatsappPairStartingHint": "Richiede un paio di secondi.",
+
+    "settings.whatsappPairScanTitle": "Scansioni questo con il telefono",
+
+    "settings.whatsappPairScanHint": "Sul telefono apra WhatsApp → Impostazioni → Dispositivi collegati → Collega un dispositivo.",
+
+    "settings.whatsappPairNoRush": "Il codice si rinnova da solo, quindi prenda tutto il tempo che le serve.",
+
+    "settings.whatsappPairQrLabel": "Codice QR di collegamento WhatsApp",
+
+    "settings.whatsappPairScanned": "Codice scansionato — collegamento in corso",
+
+    "settings.whatsappPairScannedHint": "Tenga WhatsApp aperto sul telefono per un momento.",
+
+    "settings.whatsappPairedTitle": "Telefono collegato",
+
+    "settings.whatsappPairedAs": "Collegato come {number}",
+
+    "settings.whatsappPairFailedTitle": "Il collegamento non è potuto partire",
+
+    "settings.whatsappPairErrBridge": "Il ponte WhatsApp non è presente su questa ClawBox.",
+
+    "settings.whatsappPairErrInstall": "Non è stato possibile scaricare ciò che serve al ponte. Controlli la rete e riprovi.",
+
+    "settings.whatsappPairErrGeneric": "Qualcosa è andato storto all avvio del ponte.",
+
+    "settings.whatsappPairRetry": "Riprova",
+
+    "settings.whatsappUnpair": "Scollega telefono",
+
+    "settings.whatsappUnpairHint": "Rimuove il collegamento da questa ClawBox e spegne il canale. Elimini anche la voce in Dispositivi collegati sul telefono.",
+
+    "settings.whatsappUnpairConfirm": "Sì, scollega",
+
+    "settings.whatsappUnpairCancel": "Mantieni collegato",
+
+    "settings.whatsappUnpairDone": "Telefono scollegato.",
+
+    "settings.whatsappUnpairFailed": "Non è stato possibile scollegare il telefono.",
+
+    "settings.whatsappAdvancedToggle": "Preferisce il terminale?",
     "settings.whatsappAllowedTitle": "Chi può scrivere all assistente",
     "settings.whatsappAllowedHint": "Solo questi numeri ricevono risposta, gli altri vengono ignorati. Inserisca il numero completo con prefisso internazionale, solo cifre.",
     "settings.whatsappAllowAllWarning": "Al momento il dispositivo risponde a chiunque. Aggiunga un numero qui sotto per limitarlo.",
@@ -3317,12 +3641,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "有効ですが電話が未連携です",
     "settings.whatsappNotConfiguredHint": "電話を連携すると WhatsApp から話しかけられます。",
     "settings.whatsappGatewayStopped": "メッセージ サービスが動いていないため、何も受け取れていません。",
-    "settings.whatsappBridgeMissing": "WhatsApp の橋渡しに必要なものがまだ取得されていません。下の連携コマンドが初回起動時に取得するので、端末をオンラインのままにしてください。",
+    "settings.whatsappBridgeMissing": "WhatsApp ブリッジは必要なものをまだダウンロードしていません。下でスマートフォンを接続すると自動的に取得されるので、デバイスをオンラインのままにしてください。",
     "settings.whatsappPairTitle": "電話を連携する",
-    "settings.whatsappPairIntro": "連携は QR コードで行い、ターミナルから読み取ります。1 分ほどで、一度だけ行えば十分です。",
+    "settings.whatsappPairIntro": "連携は 1 分ほどで、一度だけ行えば十分です。すべてこの画面で完結し、ターミナルは不要です。",
     "settings.whatsappPairStep1": "この ClawBox でターミナル アプリを開きます。",
     "settings.whatsappPairStep2": "実行するコマンド",
     "settings.whatsappPairStep3": "電話で WhatsApp → 設定 → リンク済みデバイス → デバイスをリンク を開き、コードを読み取ります。",
+
+    "settings.whatsappPairButton": "スマートフォンを接続",
+
+    "settings.whatsappPairRelink": "別のスマートフォンを連携",
+
+    "settings.whatsappPairCancel": "キャンセル",
+
+    "settings.whatsappPairPreparing": "WhatsApp ブリッジを準備しています",
+
+    "settings.whatsappPairPreparingHint": "ブリッジに必要なものをダウンロードしています。初回のみで、数分かかることがあります。",
+
+    "settings.whatsappPairStarting": "QR コードを作成しています",
+
+    "settings.whatsappPairStartingHint": "数秒で完了します。",
+
+    "settings.whatsappPairScanTitle": "スマートフォンでこれを読み取ってください",
+
+    "settings.whatsappPairScanHint": "スマートフォンで WhatsApp → 設定 → リンク済みデバイス → デバイスをリンク を開きます。",
+
+    "settings.whatsappPairNoRush": "コードは自動で更新されるので、ゆっくりどうぞ。",
+
+    "settings.whatsappPairQrLabel": "WhatsApp 連携用 QR コード",
+
+    "settings.whatsappPairScanned": "コードを読み取りました — 連携を完了しています",
+
+    "settings.whatsappPairScannedHint": "しばらくスマートフォンで WhatsApp を開いたままにしてください。",
+
+    "settings.whatsappPairedTitle": "スマートフォンを連携しました",
+
+    "settings.whatsappPairedAs": "{number} として連携済み",
+
+    "settings.whatsappPairFailedTitle": "連携を開始できませんでした",
+
+    "settings.whatsappPairErrBridge": "この ClawBox に WhatsApp ブリッジがありません。",
+
+    "settings.whatsappPairErrInstall": "ブリッジに必要なものをダウンロードできませんでした。ネットワーク接続を確認して、もう一度お試しください。",
+
+    "settings.whatsappPairErrGeneric": "ブリッジの起動中に問題が発生しました。",
+
+    "settings.whatsappPairRetry": "もう一度試す",
+
+    "settings.whatsappUnpair": "連携を解除",
+
+    "settings.whatsappUnpairHint": "この ClawBox から連携を削除し、チャンネルをオフにします。スマートフォンのリンク済みデバイスからも削除してください。",
+
+    "settings.whatsappUnpairConfirm": "はい、解除します",
+
+    "settings.whatsappUnpairCancel": "連携したままにする",
+
+    "settings.whatsappUnpairDone": "連携を解除しました。",
+
+    "settings.whatsappUnpairFailed": "連携を解除できませんでした。",
+
+    "settings.whatsappAdvancedToggle": "ターミナルを使いますか？",
     "settings.whatsappAllowedTitle": "アシスタントに送信できる相手",
     "settings.whatsappAllowedHint": "ここに並ぶ番号だけに返信し、それ以外は無視します。国番号を含む全桁を数字だけで入力してください。",
     "settings.whatsappAllowAllWarning": "現在この端末は誰にでも返信する設定です。下に番号を追加して制限してください。",
@@ -3793,12 +4171,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Ingeschakeld, telefoon niet gekoppeld",
     "settings.whatsappNotConfiguredHint": "Koppel een telefoon om vanuit WhatsApp te schrijven.",
     "settings.whatsappGatewayStopped": "De berichtendienst draait niet, dus er wordt niets opgehaald.",
-    "settings.whatsappBridgeMissing": "De WhatsApp-brug heeft nog niet opgehaald wat ze nodig heeft. De koppelopdracht hieronder doet dat bij de eerste start, houd het apparaat dus online.",
+    "settings.whatsappBridgeMissing": "De WhatsApp-brug heeft nog niet gedownload wat hij nodig heeft. Hieronder een telefoon verbinden haalt het automatisch op, houd het apparaat dus online.",
     "settings.whatsappPairTitle": "Koppel je telefoon",
-    "settings.whatsappPairIntro": "Koppelen gaat via een QR-code die je vanuit de terminal scant. Het kost een minuut en hoeft maar één keer.",
+    "settings.whatsappPairIntro": "Koppelen duurt ongeveer een minuut en hoeft maar één keer. Alles gebeurt hier — geen terminal nodig.",
     "settings.whatsappPairStep1": "Open de Terminal-app op deze ClawBox.",
     "settings.whatsappPairStep2": "Voer uit",
     "settings.whatsappPairStep3": "Open op je telefoon WhatsApp → Instellingen → Gekoppelde apparaten → Apparaat koppelen en scan de code.",
+
+    "settings.whatsappPairButton": "Telefoon verbinden",
+
+    "settings.whatsappPairRelink": "Andere telefoon koppelen",
+
+    "settings.whatsappPairCancel": "Annuleren",
+
+    "settings.whatsappPairPreparing": "WhatsApp-brug wordt voorbereid",
+
+    "settings.whatsappPairPreparingHint": "De brug downloadt wat hij nodig heeft. Dit gebeurt eenmalig en kan een paar minuten duren.",
+
+    "settings.whatsappPairStarting": "QR-code wordt gemaakt",
+
+    "settings.whatsappPairStartingHint": "Dit duurt een paar seconden.",
+
+    "settings.whatsappPairScanTitle": "Scan dit met uw telefoon",
+
+    "settings.whatsappPairScanHint": "Open op de telefoon WhatsApp → Instellingen → Gekoppelde apparaten → Apparaat koppelen.",
+
+    "settings.whatsappPairNoRush": "De code ververst zichzelf, dus neem gerust de tijd.",
+
+    "settings.whatsappPairQrLabel": "QR-code voor WhatsApp-koppeling",
+
+    "settings.whatsappPairScanned": "Code gescand — koppeling wordt afgerond",
+
+    "settings.whatsappPairScannedHint": "Houd WhatsApp nog even open op uw telefoon.",
+
+    "settings.whatsappPairedTitle": "Telefoon gekoppeld",
+
+    "settings.whatsappPairedAs": "Gekoppeld als {number}",
+
+    "settings.whatsappPairFailedTitle": "Koppelen kon niet starten",
+
+    "settings.whatsappPairErrBridge": "De WhatsApp-brug ontbreekt op deze ClawBox.",
+
+    "settings.whatsappPairErrInstall": "Kon niet downloaden wat de brug nodig heeft. Controleer de netwerkverbinding en probeer het opnieuw.",
+
+    "settings.whatsappPairErrGeneric": "Er ging iets mis bij het starten van de brug.",
+
+    "settings.whatsappPairRetry": "Opnieuw proberen",
+
+    "settings.whatsappUnpair": "Telefoon ontkoppelen",
+
+    "settings.whatsappUnpairHint": "Verwijdert de koppeling van deze ClawBox en zet het kanaal uit. Verwijder het item ook onder Gekoppelde apparaten op uw telefoon.",
+
+    "settings.whatsappUnpairConfirm": "Ja, ontkoppelen",
+
+    "settings.whatsappUnpairCancel": "Gekoppeld houden",
+
+    "settings.whatsappUnpairDone": "Telefoon ontkoppeld.",
+
+    "settings.whatsappUnpairFailed": "Kon de telefoon niet ontkoppelen.",
+
+    "settings.whatsappAdvancedToggle": "Liever de terminal?",
     "settings.whatsappAllowedTitle": "Wie de assistent mag berichten",
     "settings.whatsappAllowedHint": "Alleen deze nummers krijgen antwoord, de rest wordt genegeerd. Voer het volledige nummer met landcode in, alleen cijfers.",
     "settings.whatsappAllowAllWarning": "Dit apparaat antwoordt op dit moment iedereen. Voeg hieronder een nummer toe om dat te beperken.",
@@ -4269,12 +4701,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "Påslagen, telefonen inte kopplad",
     "settings.whatsappNotConfiguredHint": "Koppla en telefon för att skriva från WhatsApp.",
     "settings.whatsappGatewayStopped": "Meddelandetjänsten körs inte, så inget hämtas.",
-    "settings.whatsappBridgeMissing": "WhatsApp-bryggan har ännu inte hämtat det den behöver. Kopplingskommandot nedan hämtar det vid första körningen, så låt enheten vara uppkopplad.",
+    "settings.whatsappBridgeMissing": "WhatsApp-bryggan har ännu inte hämtat det den behöver. Att ansluta en telefon nedan hämtar det automatiskt, så håll enheten uppkopplad.",
     "settings.whatsappPairTitle": "Koppla din telefon",
-    "settings.whatsappPairIntro": "Kopplingen sker med en QR-kod som skannas från terminalen. Det tar en minut och görs bara en gång.",
+    "settings.whatsappPairIntro": "Länkningen tar ungefär en minut och behöver bara göras en gång. Allt sker här — ingen terminal behövs.",
     "settings.whatsappPairStep1": "Öppna Terminal-appen på den här ClawBoxen.",
     "settings.whatsappPairStep2": "Kör",
     "settings.whatsappPairStep3": "Öppna WhatsApp på telefonen → Inställningar → Kopplade enheter → Koppla en enhet och skanna koden.",
+
+    "settings.whatsappPairButton": "Anslut telefon",
+
+    "settings.whatsappPairRelink": "Länka en annan telefon",
+
+    "settings.whatsappPairCancel": "Avbryt",
+
+    "settings.whatsappPairPreparing": "Förbereder WhatsApp-bryggan",
+
+    "settings.whatsappPairPreparingHint": "Bryggan hämtar det den behöver. Det sker en gång och kan ta några minuter.",
+
+    "settings.whatsappPairStarting": "Skapar en QR-kod",
+
+    "settings.whatsappPairStartingHint": "Det tar ett par sekunder.",
+
+    "settings.whatsappPairScanTitle": "Skanna det här med telefonen",
+
+    "settings.whatsappPairScanHint": "Öppna WhatsApp på telefonen → Inställningar → Länkade enheter → Länka en enhet.",
+
+    "settings.whatsappPairNoRush": "Koden uppdateras av sig själv, så ta den tid du behöver.",
+
+    "settings.whatsappPairQrLabel": "QR-kod för WhatsApp-länkning",
+
+    "settings.whatsappPairScanned": "Koden skannad — länkningen slutförs",
+
+    "settings.whatsappPairScannedHint": "Håll WhatsApp öppet på telefonen en stund.",
+
+    "settings.whatsappPairedTitle": "Telefonen länkad",
+
+    "settings.whatsappPairedAs": "Länkad som {number}",
+
+    "settings.whatsappPairFailedTitle": "Länkningen kunde inte starta",
+
+    "settings.whatsappPairErrBridge": "WhatsApp-bryggan saknas på den här ClawBoxen.",
+
+    "settings.whatsappPairErrInstall": "Kunde inte hämta det bryggan behöver. Kontrollera nätverket och försök igen.",
+
+    "settings.whatsappPairErrGeneric": "Något gick fel när bryggan skulle startas.",
+
+    "settings.whatsappPairRetry": "Försök igen",
+
+    "settings.whatsappUnpair": "Koppla från telefonen",
+
+    "settings.whatsappUnpairHint": "Tar bort länken från den här ClawBoxen och stänger av kanalen. Ta även bort posten under Länkade enheter på telefonen.",
+
+    "settings.whatsappUnpairConfirm": "Ja, koppla från",
+
+    "settings.whatsappUnpairCancel": "Behåll länken",
+
+    "settings.whatsappUnpairDone": "Telefonen frånkopplad.",
+
+    "settings.whatsappUnpairFailed": "Det gick inte att koppla från telefonen.",
+
+    "settings.whatsappAdvancedToggle": "Vill du hellre använda terminalen?",
     "settings.whatsappAllowedTitle": "Vilka som får skriva till assistenten",
     "settings.whatsappAllowedHint": "Bara de här numren får svar, övriga ignoreras. Ange hela numret med landsnummer, endast siffror.",
     "settings.whatsappAllowAllWarning": "Enheten svarar just nu vem som helst. Lägg till ett nummer nedan för att begränsa den.",
@@ -4745,12 +5231,66 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappEnabledNotPaired": "已开启，手机未绑定",
     "settings.whatsappNotConfiguredHint": "绑定手机后即可从 WhatsApp 发消息。",
     "settings.whatsappGatewayStopped": "消息服务未运行，因此收不到任何内容。",
-    "settings.whatsappBridgeMissing": "WhatsApp 桥接尚未下载所需组件。下面的绑定命令会在首次运行时下载，请保持设备联网。",
+    "settings.whatsappBridgeMissing": "WhatsApp 桥接尚未下载所需内容。在下方连接手机会自动获取，请保持设备联网。",
     "settings.whatsappPairTitle": "绑定你的手机",
-    "settings.whatsappPairIntro": "绑定通过二维码完成，需要在终端里扫描。大约一分钟，只需做一次。",
+    "settings.whatsappPairIntro": "关联大约需要一分钟，且只需做一次。全部在此完成，无需终端。",
     "settings.whatsappPairStep1": "在这台 ClawBox 上打开终端应用。",
     "settings.whatsappPairStep2": "运行",
     "settings.whatsappPairStep3": "在手机上打开 WhatsApp → 设置 → 已关联的设备 → 关联设备，然后扫描该二维码。",
+
+    "settings.whatsappPairButton": "连接手机",
+
+    "settings.whatsappPairRelink": "连接另一部手机",
+
+    "settings.whatsappPairCancel": "取消",
+
+    "settings.whatsappPairPreparing": "正在准备 WhatsApp 桥接",
+
+    "settings.whatsappPairPreparingHint": "正在下载桥接所需的内容。只需一次，可能需要几分钟。",
+
+    "settings.whatsappPairStarting": "正在生成二维码",
+
+    "settings.whatsappPairStartingHint": "只需几秒钟。",
+
+    "settings.whatsappPairScanTitle": "用手机扫描此二维码",
+
+    "settings.whatsappPairScanHint": "在手机上打开 WhatsApp → 设置 → 已关联设备 → 关联设备。",
+
+    "settings.whatsappPairNoRush": "二维码会自动刷新，您可以慢慢来。",
+
+    "settings.whatsappPairQrLabel": "WhatsApp 配对二维码",
+
+    "settings.whatsappPairScanned": "已扫描 — 正在完成关联",
+
+    "settings.whatsappPairScannedHint": "请在手机上让 WhatsApp 保持打开片刻。",
+
+    "settings.whatsappPairedTitle": "手机已关联",
+
+    "settings.whatsappPairedAs": "已关联为 {number}",
+
+    "settings.whatsappPairFailedTitle": "无法开始配对",
+
+    "settings.whatsappPairErrBridge": "这台 ClawBox 上缺少 WhatsApp 桥接。",
+
+    "settings.whatsappPairErrInstall": "无法下载桥接所需的内容。请检查网络连接后重试。",
+
+    "settings.whatsappPairErrGeneric": "启动桥接时出现问题。",
+
+    "settings.whatsappPairRetry": "重试",
+
+    "settings.whatsappUnpair": "解除手机关联",
+
+    "settings.whatsappUnpairHint": "从这台 ClawBox 移除关联并关闭该渠道。也请在手机的“已关联设备”中删除对应条目。",
+
+    "settings.whatsappUnpairConfirm": "是的，解除关联",
+
+    "settings.whatsappUnpairCancel": "保持关联",
+
+    "settings.whatsappUnpairDone": "手机已解除关联。",
+
+    "settings.whatsappUnpairFailed": "无法解除手机关联。",
+
+    "settings.whatsappAdvancedToggle": "更想用终端？",
     "settings.whatsappAllowedTitle": "谁可以给助手发消息",
     "settings.whatsappAllowedHint": "只有这些号码会收到回复，其余一律忽略。请填写含国家代码的完整号码，只填数字。",
     "settings.whatsappAllowAllWarning": "此设备目前会回复任何人。请在下方添加号码以收紧权限。",

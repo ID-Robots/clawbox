@@ -118,6 +118,21 @@ interface WhatsappStatus {
   receiving?: boolean;
 }
 
+/** Phases of GET /setup-api/whatsapp/pair. Mirrors WhatsappPairPhase server-side. */
+type WhatsappPairPhase = "idle" | "preparing" | "starting" | "waiting" | "scanned" | "paired" | "error";
+
+/** Shape of GET/POST /setup-api/whatsapp/pair, normalised client-side. */
+interface WhatsappPairSnapshot {
+  phase: WhatsappPairPhase;
+  /** Raw Baileys payload. Rendered as a QR; never shown as text. */
+  qr: string | null;
+  /** Distinct QR payloads this session — proof the rotation is live. */
+  qrCount: number;
+  restarts: number;
+  error: string | null;
+  user: { id: string | null; name: string | null } | null;
+}
+
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string }[] = [
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
@@ -1469,10 +1484,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   /* ── WhatsApp ──
    *
-   * Read-mostly on purpose. Pairing is a QR scan driven by `hermes whatsapp`,
-   * a TTY wizard with no flags, so this panel reports the real state and owns
-   * only the two things a route can safely set: who is allowed to talk to the
-   * agent, and whether the channel is on. */
+   * The panel owns the whole channel now, pairing included: /whatsapp/pair
+   * drives the same Baileys bridge `hermes whatsapp` drives and hands back the
+   * raw QR payload, so the QR below is rendered from real pairing material
+   * rather than instructions to go and find a terminal. */
   const [waStatus, setWaStatus] = useState<WhatsappStatus | null>(null);
   const [waNumber, setWaNumber] = useState("");
   const [waSaving, setWaSaving] = useState(false);
@@ -1566,6 +1581,166 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     },
     [waStatus, saveWhatsapp],
   );
+
+  /* ── WhatsApp pairing ──
+   *
+   * The poll below is not a progress bar, it is the session's heartbeat: the
+   * server keeps the bridge alive only while these GETs keep arriving, and
+   * reaps it a minute after they stop. So the effect must run for every phase
+   * that is not terminal — including "starting", which is where a session sits
+   * during the seconds between a bridge restart and the next QR. */
+  const [waPair, setWaPair] = useState<WhatsappPairSnapshot | null>(null);
+  const [waPairBusy, setWaPairBusy] = useState(false);
+  const [waAdvanced, setWaAdvanced] = useState(false);
+  const [waUnpairConfirm, setWaUnpairConfirm] = useState(false);
+
+  const readPairSnapshot = useCallback((d: unknown): WhatsappPairSnapshot => {
+    const raw = (d ?? {}) as Record<string, unknown>;
+    const phase = typeof raw.phase === "string" ? raw.phase : "idle";
+    return {
+      phase: (["idle", "preparing", "starting", "waiting", "scanned", "paired", "error"] as const).includes(
+        phase as WhatsappPairPhase,
+      )
+        ? (phase as WhatsappPairPhase)
+        : "idle",
+      qr: typeof raw.qr === "string" && raw.qr.length > 0 ? raw.qr : null,
+      qrCount: typeof raw.qrCount === "number" ? raw.qrCount : 0,
+      restarts: typeof raw.restarts === "number" ? raw.restarts : 0,
+      error: typeof raw.error === "string" ? raw.error : null,
+      user:
+        raw.user && typeof raw.user === "object"
+          ? {
+              id: typeof (raw.user as { id?: unknown }).id === "string" ? ((raw.user as { id: string }).id) : null,
+              name:
+                typeof (raw.user as { name?: unknown }).name === "string"
+                  ? ((raw.user as { name: string }).name)
+                  : null,
+            }
+          : null,
+    };
+  }, []);
+
+  const startWhatsappPairing = useCallback(
+    async (force = false) => {
+      setWaPairBusy(true);
+      setWaMsg(null);
+      // Show "preparing" the instant the click lands: on a box with no
+      // node_modules the POST below does not return until npm has finished,
+      // and a dead button for two minutes reads as a broken one.
+      setWaPair({ phase: "preparing", qr: null, qrCount: 0, restarts: 0, error: null, user: null });
+      try {
+        const res = await fetch("/setup-api/whatsapp/pair", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setWaPair({
+            phase: "error",
+            qr: null,
+            qrCount: 0,
+            restarts: 0,
+            error: typeof data?.error === "string" ? data.error : "start_failed",
+            user: null,
+          });
+          return;
+        }
+        setWaPair(readPairSnapshot(data));
+      } catch {
+        setWaPair({ phase: "error", qr: null, qrCount: 0, restarts: 0, error: "start_failed", user: null });
+      } finally {
+        setWaPairBusy(false);
+      }
+    },
+    [readPairSnapshot],
+  );
+
+  const cancelWhatsappPairing = useCallback(async () => {
+    setWaPairBusy(true);
+    try {
+      await fetch("/setup-api/whatsapp/pair", { method: "DELETE" });
+    } catch {
+      // The reaper collects the session anyway once the polls stop.
+    } finally {
+      setWaPair(null);
+      setWaPairBusy(false);
+    }
+  }, []);
+
+  const unpairWhatsappPhone = useCallback(async () => {
+    setWaPairBusy(true);
+    setWaMsg(null);
+    try {
+      const res = await fetch("/setup-api/whatsapp/unpair", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setWaMsg({ type: "error", message: t("settings.whatsappUnpairFailed") });
+        return;
+      }
+      setWaPair(null);
+      setWaUnpairConfirm(false);
+      setWaMsg({ type: "success", message: t("settings.whatsappUnpairDone") });
+      await refreshWhatsapp();
+    } catch {
+      setWaMsg({ type: "error", message: t("settings.whatsappUnpairFailed") });
+    } finally {
+      setWaPairBusy(false);
+    }
+  }, [refreshWhatsapp, t]);
+
+  /* Baileys reports the linked account as "<number>:<device>@s.whatsapp.net".
+     Only the number half is meaningful to an owner, and it is the same digits
+     the allowlist uses, so show that and drop the device suffix. */
+  const waPairedNumber = (() => {
+    const id = waPair?.user?.id;
+    if (id) {
+      const digits = id.split(/[:@]/)[0].replace(/\D/g, "");
+      if (digits) return `+${digits}`;
+    }
+    return null;
+  })();
+
+  const waPairPhase = waPair?.phase ?? null;
+  const waPairActive =
+    waPairPhase === "preparing" || waPairPhase === "starting" || waPairPhase === "waiting" || waPairPhase === "scanned";
+
+  useEffect(() => {
+    if (!waPairActive) return;
+    if (section !== "whatsapp" && !isMobile) return;
+
+    let cancelled = false;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch("/setup-api/whatsapp/pair", { cache: "no-store" });
+        if (!res.ok || cancelled) return;
+        const snap = readPairSnapshot(await res.json());
+        if (cancelled) return;
+        setWaPair(snap);
+        // The channel status behind the panel (enabled / paired / receiving)
+        // only changes once, at the moment of success. Refresh it there rather
+        // than polling two routes for five minutes.
+        if (snap.phase === "paired") await refreshWhatsapp();
+      } catch {
+        // A dropped poll is not a failed pairing; the next tick re-reads.
+      }
+    }, 2_000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [waPairActive, section, isMobile, readPairSnapshot, refreshWhatsapp]);
+
+  /* Leaving the WhatsApp panel stops the heartbeat, and the server reaps the
+     bridge a minute later. Tell it now instead, so a browsed-away session does
+     not hold a Baileys socket open for that minute. */
+  useEffect(() => {
+    if (section === "whatsapp" || isMobile) return;
+    if (!waPairActive) return;
+    void fetch("/setup-api/whatsapp/pair", { method: "DELETE" }).catch(() => {});
+    setWaPair(null);
+  }, [section, isMobile, waPairActive]);
 
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -3061,19 +3236,196 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   )}
                 </div>
 
-                {/* Pairing — the one thing this panel cannot do for you */}
-                {waStatus && !waStatus.paired && (
-                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                {/* Pairing — done here, in the panel, with a real QR */}
+                {waStatus && (
+                  <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="whatsapp-pairing">
                     <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairTitle")}</div>
-                    <p className="text-xs text-[var(--text-secondary)] mt-1.5 leading-relaxed">{t("settings.whatsappPairIntro")}</p>
-                    <ol className="mt-3 space-y-2 text-xs text-[var(--text-secondary)] list-decimal list-inside">
-                      <li>{t("settings.whatsappPairStep1")}</li>
-                      <li>
-                        {t("settings.whatsappPairStep2")}{" "}
-                        <code className="px-1.5 py-0.5 rounded bg-white/[0.08] text-[var(--text-primary)] font-mono">hermes whatsapp</code>
-                      </li>
-                      <li>{t("settings.whatsappPairStep3")}</li>
-                    </ol>
+
+                    {waStatus.paired || waPair?.phase === "paired" ? (
+                      <>
+                        <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 border bg-green-500/[0.06] border-green-500/15">
+                          <span className="material-symbols-rounded text-green-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
+                            check_circle
+                          </span>
+                          <div className="min-w-0">
+                            <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairedTitle")}</div>
+                            {waPairedNumber && (
+                              <div className="text-xs text-[var(--text-muted)] mt-0.5 font-mono truncate">
+                                {t("settings.whatsappPairedAs", { number: waPairedNumber })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <p className="text-xs text-[var(--text-secondary)] mt-3 leading-relaxed">{t("settings.whatsappUnpairHint")}</p>
+
+                        {waUnpairConfirm ? (
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            <button
+                              type="button"
+                              onClick={unpairWhatsappPhone}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-red-500/15 border border-red-500/40 text-sm font-semibold text-red-300 cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappUnpairConfirm")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setWaUnpairConfirm(false)}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappUnpairCancel")}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex flex-wrap gap-2 mt-3">
+                            <button
+                              type="button"
+                              onClick={() => setWaUnpairConfirm(true)}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappUnpair")}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => startWhatsappPairing(true)}
+                              disabled={waPairBusy}
+                              className="px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappPairRelink")}
+                            </button>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-xs text-[var(--text-secondary)] mt-1.5 leading-relaxed">{t("settings.whatsappPairIntro")}</p>
+
+                        {/* Not started yet, cancelled, or failed to start */}
+                        {(waPair === null || waPair.phase === "idle" || waPair.phase === "error") && (
+                          <>
+                            {waPair?.phase === "error" && (
+                              <div role="alert" className="mt-3 rounded-xl border border-red-500/25 bg-red-500/[0.06] px-4 py-3">
+                                <div className="text-sm text-red-200 font-medium">{t("settings.whatsappPairFailedTitle")}</div>
+                                <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
+                                  {waPair.error === "bridge_missing"
+                                    ? t("settings.whatsappPairErrBridge")
+                                    : waPair.error === "install_failed"
+                                      ? t("settings.whatsappPairErrInstall")
+                                      : t("settings.whatsappPairErrGeneric")}
+                                </p>
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => startWhatsappPairing(false)}
+                              disabled={waPairBusy}
+                              data-testid="whatsapp-pair-start"
+                              className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
+                            >
+                              {waPair?.phase === "error" ? t("settings.whatsappPairRetry") : t("settings.whatsappPairButton")}
+                            </button>
+                          </>
+                        )}
+
+                        {/* Bridge dependencies downloading, or socket coming up.
+                            Both are "wait a moment", and neither is a failure. */}
+                        {(waPair?.phase === "preparing" || waPair?.phase === "starting") && (
+                          <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 bg-white/[0.03] border border-white/[0.06]" aria-live="polite">
+                            <span className="material-symbols-rounded animate-spin shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
+                              progress_activity
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-sm text-[var(--text-primary)] font-medium">
+                                {waPair.phase === "preparing" ? t("settings.whatsappPairPreparing") : t("settings.whatsappPairStarting")}
+                              </div>
+                              <div className="text-xs text-[var(--text-muted)] mt-0.5 leading-relaxed">
+                                {waPair.phase === "preparing"
+                                  ? t("settings.whatsappPairPreparingHint")
+                                  : t("settings.whatsappPairStartingHint")}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* The QR itself. White plate + marginSize=4 gives the
+                            quiet zone the spec asks for; without it a phone
+                            camera has to fight the dark panel for the finder
+                            patterns. Level L keeps the module count down —
+                            these payloads run past 200 characters, and at 256px
+                            a denser correction level shrinks each module below
+                            what a phone reads at arm's length. */}
+                        {waPair?.phase === "waiting" && waPair.qr && (
+                          <div className="mt-3" aria-live="polite">
+                            <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairScanTitle")}</div>
+                            <div className="flex justify-center my-4">
+                              <div className="bg-white rounded-xl p-3" data-testid="whatsapp-qr">
+                                <QRCodeSVG
+                                  value={waPair.qr}
+                                  size={256}
+                                  level="L"
+                                  marginSize={4}
+                                  bgColor="#ffffff"
+                                  fgColor="#000000"
+                                  title={t("settings.whatsappPairQrLabel")}
+                                />
+                              </div>
+                            </div>
+                            <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.whatsappPairScanHint")}</p>
+                            <p className="text-xs text-[var(--text-muted)] mt-1.5 leading-relaxed">{t("settings.whatsappPairNoRush")}</p>
+                            <button
+                              type="button"
+                              onClick={cancelWhatsappPairing}
+                              disabled={waPairBusy}
+                              className="mt-3 px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-[var(--text-secondary)] cursor-pointer disabled:opacity-50"
+                            >
+                              {t("settings.whatsappPairCancel")}
+                            </button>
+                          </div>
+                        )}
+
+                        {waPair?.phase === "scanned" && (
+                          <div className="flex items-center gap-3 mt-3 rounded-xl px-4 py-3 bg-green-500/[0.06] border border-green-500/15" aria-live="polite">
+                            <span className="material-symbols-rounded animate-spin shrink-0 text-green-400" style={{ fontSize: 20 }} aria-hidden="true">
+                              progress_activity
+                            </span>
+                            <div className="min-w-0">
+                              <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairScanned")}</div>
+                              <div className="text-xs text-[var(--text-muted)] mt-0.5 leading-relaxed">{t("settings.whatsappPairScannedHint")}</div>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+
+                    {/* The old terminal route, kept because it still works and
+                        is the only path left if the bridge cannot start — but
+                        collapsed, because it is no longer how this is done. */}
+                    <div className="mt-4 pt-3 border-t border-white/[0.06]">
+                      <button
+                        type="button"
+                        onClick={() => setWaAdvanced((v) => !v)}
+                        aria-expanded={waAdvanced}
+                        className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none p-0 cursor-pointer"
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
+                          {waAdvanced ? "expand_less" : "expand_more"}
+                        </span>
+                        {t("settings.whatsappAdvancedToggle")}
+                      </button>
+                      {waAdvanced && (
+                        <ol className="mt-2.5 space-y-2 text-xs text-[var(--text-secondary)] list-decimal list-inside">
+                          <li>{t("settings.whatsappPairStep1")}</li>
+                          <li>
+                            {t("settings.whatsappPairStep2")}{" "}
+                            <code className="px-1.5 py-0.5 rounded bg-white/[0.08] text-[var(--text-primary)] font-mono">hermes whatsapp</code>
+                          </li>
+                          <li>{t("settings.whatsappPairStep3")}</li>
+                        </ol>
+                      )}
+                    </div>
                   </div>
                 )}
 
