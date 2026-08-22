@@ -102,6 +102,22 @@ describe("Local Models panel", () => {
     await expectSecondPollIgnored({});
   });
 
+  it("refuses an entry that is missing fields the render reads", async () => {
+    // A well-formed envelope is not a well-formed entry. This one has a valid
+    // `unavailable` array and an entry with an id, so a guard that stops at the
+    // envelope accepts it — and then `KIND_ICON[undefined]` and
+    // `RUN_TONE[undefined]` render an unlabelled, untoned row that looks like
+    // a real reading of the box.
+    await expectSecondPollIgnored({ models: [{ id: "ollama", running: "running" }], unavailable: [] });
+  });
+
+  it("refuses an entry whose state is not one the copy knows", async () => {
+    await expectSecondPollIgnored({
+      models: [{ ...model(), running: "warming-up" }],
+      unavailable: [],
+    });
+  });
+
   it("refuses a payload that has models but no unavailable list", async () => {
     // Narrower than the case above and worth its own test: `{ models: [] }`
     // satisfies a guard that only checks `models`, is then stored, and the very

@@ -54,23 +54,44 @@ export function formatBytes(bytes: number | null): string | null {
   return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+const RUN_STATES = Object.keys(RUN_LABEL) as RunState[];
+const KINDS = Object.keys(KIND_LABEL) as LocalModelEntry["kind"][];
+const CONTROLS = ["none", "user-unit", "system-unit"];
+
 /**
  * A payload is only adopted when it is really an inventory — EVERY field the
  * render reads, not just the one it reads first. `{ "models": [] }` used to
  * pass here and then threw on `snapshot.unavailable.length` a few lines later,
- * which is the same "guard the shape, then read an ungarded sibling" mistake
+ * which is the same "guard the shape, then read an unguarded sibling" mistake
  * that took the whole ClawKeep window down on TASK-398.
+ *
+ * The enums are checked against the lookup tables themselves rather than a
+ * hand-written list, so a state added to the model but not to the copy is
+ * rejected here instead of rendering as a blank pill.
  */
+function isEntry(value: unknown): value is LocalModelEntry {
+  if (!value || typeof value !== "object") return false;
+  const m = value as Record<string, unknown>;
+  for (const key of ["id", "name", "runtime", "detail"]) {
+    if (typeof m[key] !== "string") return false;
+  }
+  if (typeof m.installed !== "boolean") return false;
+  if (m.enabled !== null && typeof m.enabled !== "boolean") return false;
+  for (const key of ["diskBytes", "memoryBytes"]) {
+    if (m[key] !== null && typeof m[key] !== "number") return false;
+  }
+  return KINDS.includes(m.kind as LocalModelEntry["kind"])
+    && RUN_STATES.includes(m.running as RunState)
+    && CONTROLS.includes(m.control as string);
+}
+
 function isSnapshot(value: unknown): value is LocalModelsSnapshot {
   if (!value || typeof value !== "object") return false;
   const models = (value as { models?: unknown }).models;
   const unavailable = (value as { unavailable?: unknown }).unavailable;
   if (!Array.isArray(models) || !Array.isArray(unavailable)) return false;
   if (!unavailable.every(u => typeof u === "string")) return false;
-  return models.every(m =>
-    !!m && typeof m === "object"
-    && typeof (m as LocalModelEntry).id === "string"
-    && typeof (m as LocalModelEntry).running === "string");
+  return models.every(isEntry);
 }
 
 export default function LocalModelsPanel({ active }: { active: boolean }) {

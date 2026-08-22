@@ -73,7 +73,9 @@ test("settings covers appearance, network, local AI, local models, telegram, sys
   const ollamaRow = settingsWindow.getByTestId("local-model-ollama");
   await expect(ollamaRow.getByText("Running", { exact: true })).toBeVisible();
   await expect(ollamaRow.getByText(/Disk 609 MB/)).toBeVisible();
-  await expect(ollamaRow.getByRole("switch", { name: /Ollama enabled/i })).toBeVisible();
+  // aria-checked, not just visible: the fixture has Ollama enabled, so a switch
+  // that rendered stuck-off would still pass a visibility-only assertion.
+  await expect(ollamaRow.getByRole("switch", { name: /Ollama enabled/i })).toHaveAttribute("aria-checked", "true");
   const kokoroRow = settingsWindow.getByTestId("local-model-kokoro");
   await expect(kokoroRow.getByText("Not installed", { exact: true })).toBeVisible();
   await expect(kokoroRow.getByRole("switch")).toHaveCount(0);
