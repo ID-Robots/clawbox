@@ -23,7 +23,12 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
 
-import { CLAWAI_PROVIDER, ClawaiApplyError, applyClawaiToHermes } from "@/lib/hermes-clawai";
+import {
+  CLAWAI_PROVIDER,
+  ClawaiApplyError,
+  applyClawaiToHermes,
+  clawaiModelForTier,
+} from "@/lib/hermes-clawai";
 import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 
 /** Every `config set`, as "key=value", in the order they were issued. */
@@ -75,6 +80,33 @@ describe("pointing Hermes at ClawBox AI", () => {
     // so both need the fallback.
     await applyClawaiToHermes("claw_token_abc", "pro");
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
+  });
+
+  it("names the session titler too, so `auto` never goes looking elsewhere", async () => {
+    // Left at its shipped `provider: auto`, the titler SEARCHES — a live box's
+    // own log recorded it trying openrouter, then nous, then local/custom, then
+    // api-key, four services it had no account with, on a device that had a
+    // working endpoint configured the whole time. Naming clawai is the same
+    // move as naming it for vision: stop auto from wandering.
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain(`auxiliary.title_generation.provider=${CLAWAI_PROVIDER}`);
+    expect(sets()).toContain(`auxiliary.title_generation.model=${clawaiModelForTier("flash")}`);
+  });
+
+  it("titles with a model the proxy actually serves, on either tier", async () => {
+    // Same trap as the vision id: the proxy answers a slug outside its
+    // allowlist with HTTP 400, which would turn every title into a failed
+    // request. The chat model is by construction one it serves.
+    await applyClawaiToHermes("claw_token_abc", "pro");
+    expect(sets()).toContain(`auxiliary.title_generation.model=${clawaiModelForTier("pro")}`);
+    const titleModel = sets().find((s) => s.startsWith("auxiliary.title_generation.model="));
+    expect(titleModel).not.toContain("/");
+  });
+
+  it("leaves the titler's endpoint and key to be inherited as well", async () => {
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(keys()).not.toContain("auxiliary.title_generation.base_url");
+    expect(keys()).not.toContain("auxiliary.title_generation.api_key");
   });
 
   it("still fails loudly when the vision step itself cannot be written", async () => {
