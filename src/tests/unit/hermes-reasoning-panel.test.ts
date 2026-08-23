@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { stripReasoningPanels } from "@/lib/hermes-reasoning-panel";
+import { extractReasoningPanels, stripReasoningPanels } from "@/lib/hermes-reasoning-panel";
 
 /**
  * The CLI's reasoning recap box, out of the chat bubble and out of the record.
@@ -143,5 +143,94 @@ describe("stripReasoningPanels", () => {
 
   it("answers an empty capture with an empty string rather than throwing", () => {
     expect(stripReasoningPanels("")).toBe("");
+  });
+});
+
+/**
+ * The same parser, asked for what it removed instead of only what it kept.
+ *
+ * This is the half that turns a strip into a feature: the monologue is handed
+ * back so the bubble can offer it as a collapsed disclosure. The rules that
+ * matter here are the ones that stop it being shown TWICE — once deduped out of
+ * two emitters, and once by refusing to claim reasoning it has already returned
+ * as the answer.
+ */
+describe("extractReasoningPanels", () => {
+  it("hands back the answer and the thinking as separate values", () => {
+    const captured = [panel("I should look at the attachment first."), "A black cat."].join(CRLF);
+    expect(extractReasoningPanels(captured)).toEqual({
+      text: "A black cat.",
+      reasoning: "I should look at the attachment first.",
+    });
+  });
+
+  it("returns ONE copy when both of the CLI's emitters printed the same thought", () => {
+    // The streamed box and the post-response recap in one capture. Faithful to
+    // the console, unreadable in a disclosure — so it is deduped.
+    const thought = "The user said hey. Keep it short.";
+    const captured = [panel(thought), panel(thought), "Hey!"].join(CRLF);
+    const out = extractReasoningPanels(captured);
+    expect(out.text).toBe("Hey!");
+    expect(out.reasoning).toBe(thought);
+  });
+
+  it("keeps two DIFFERENT thoughts, in the order they were printed", () => {
+    const captured = [panel("First I check."), panel("Now I answer."), "42."].join(CRLF);
+    expect(extractReasoningPanels(captured).reasoning).toBe("First I check.
+
+Now I answer.");
+  });
+
+  it("claims no reasoning when there is no panel at all", () => {
+    expect(extractReasoningPanels("Just an answer.")).toEqual({ text: "Just an answer." });
+  });
+
+  it("claims no reasoning when the panel WAS the whole reply", () => {
+    // Rule 4. The capture is handed back as the answer because there is nothing
+    // else to show — and reporting the same words as reasoning as well would
+    // print them twice, which is the bug this change exists to end.
+    const captured = panel("Only thinking, no answer.");
+    const out = extractReasoningPanels(captured);
+    expect(out.text).toBe(captured.replace(/
+/g, "
+"));
+    expect(out).not.toHaveProperty("reasoning");
+  });
+
+  it("leaves the reply untouched when the frame was never closed", () => {
+    // THE LIVE SHAPE on this hardware: the CLI opens the box and quiet mode
+    // never closes it, so the answer sits under an open frame with no marker
+    // separating the two. Nothing here can tell them apart, so nothing is
+    // taken — the reply survives whole, and the panel is simply not offered.
+    // (The agent's own record is what separates this turn; see
+    // hermes-turn-record.test.ts.)
+    const captured = [TOP, "Thinking out loud.", "The actual answer."].join(CRLF);
+    const out = extractReasoningPanels(captured);
+    expect(out.text).toContain("The actual answer.");
+    expect(out).not.toHaveProperty("reasoning");
+  });
+
+  it("still refuses to read a panel inside a code fence", () => {
+    // Fence safety is unchanged by the refactor: a reply that DOCUMENTS this
+    // format keeps every line of it, and none of it is reported as thinking.
+    const captured = ["Here is what it prints:", "```", TOP, "some thinking", BOTTOM, "```"].join(CRLF);
+    const out = extractReasoningPanels(captured);
+    expect(out.text).toBe(captured.replace(/
+/g, "
+"));
+    expect(out).not.toHaveProperty("reasoning");
+  });
+
+  it("agrees with stripReasoningPanels on the answer, always", () => {
+    const captures = [
+      [panel("thinking"), "answer"].join(CRLF),
+      "no panel here",
+      panel("only thinking"),
+      [TOP, "unclosed", "answer"].join(CRLF),
+      "",
+    ];
+    for (const captured of captures) {
+      expect(extractReasoningPanels(captured).text).toBe(stripReasoningPanels(captured));
+    }
   });
 });

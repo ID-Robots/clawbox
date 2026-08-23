@@ -209,6 +209,89 @@ describe("transcript store", () => {
     expect(store.transcriptKeyIsSafe("")).toBe(false);
   });
 
+  // ── Thinking and tool steps, beside the answer ─────────────────────────
+
+  it("keeps the monologue and the steps in their own fields, out of the text", async () => {
+    await store.appendTranscript({
+      role: "assistant",
+      text: "Hey! What can I help you with today?",
+      timestamp: 5,
+      reasoning: 'The user just said "Hey". Keep it short.',
+      toolCalls: [{ name: "terminal", detail: "uname -sr", status: "ok" }],
+    });
+    const [record] = await store.readTranscript();
+    expect(record.text).toBe("Hey! What can I help you with today?");
+    expect(record.reasoning).toBe('The user just said "Hey". Keep it short.');
+    expect(record.toolCalls).toEqual([{ name: "terminal", detail: "uname -sr", status: "ok" }]);
+    // The whole point: replay must not put the monologue back in the bubble.
+    expect(record.text).not.toContain("Keep it short");
+  });
+
+  it("reads a line written BEFORE these fields existed", async () => {
+    // Backward compatibility is not a nicety here — every box that has chatted
+    // already has a transcript full of these lines, and they must keep
+    // replaying rather than being skipped as malformed.
+    const dir = path.join(root, "data", "chat-transcripts");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "desktop.jsonl"),
+      `${JSON.stringify({ role: "assistant", text: "old reply", timestamp: 1 })}
+`,
+    );
+    const [record] = await store.readTranscript();
+    expect(record).toEqual({ role: "assistant", text: "old reply", timestamp: 1 });
+  });
+
+  it("drops a tool entry with no name rather than replaying a nameless chip", async () => {
+    const dir = path.join(root, "data", "chat-transcripts");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "desktop.jsonl"),
+      `${JSON.stringify({
+        role: "assistant",
+        text: "hi",
+        timestamp: 1,
+        toolCalls: [{ detail: "orphan" }, { name: "terminal" }, "not an object"],
+      })}
+`,
+    );
+    const [record] = await store.readTranscript();
+    expect(record.toolCalls).toEqual([{ name: "terminal" }]);
+  });
+
+  it("ignores a status it does not recognise", async () => {
+    await store.appendTranscript({
+      role: "assistant",
+      text: "hi",
+      timestamp: 1,
+      toolCalls: [{ name: "terminal", status: "weird" as unknown as "ok" }],
+    });
+    const [record] = await store.readTranscript();
+    expect(record.toolCalls).toEqual([{ name: "terminal" }]);
+  });
+
+  it("clamps the monologue on its own budget, not the answer's", async () => {
+    const huge = "x".repeat(store.TRANSCRIPT_LIMITS.MAX_TEXT_BYTES + 500);
+    await store.appendTranscript({
+      role: "assistant",
+      text: "short answer",
+      timestamp: 1,
+      reasoning: huge,
+    });
+    const [record] = await store.readTranscript();
+    expect(record.text).toBe("short answer");
+    expect(record.reasoning?.length).toBe(store.TRANSCRIPT_LIMITS.MAX_TEXT_BYTES);
+  });
+
+  it("bounds how many steps one turn can record", async () => {
+    const many = Array.from({ length: store.TRANSCRIPT_LIMITS.MAX_TOOL_CALLS + 10 }, (_, i) => ({
+      name: `tool_${i}`,
+    }));
+    await store.appendTranscript({ role: "assistant", text: "hi", timestamp: 1, toolCalls: many });
+    const [record] = await store.readTranscript();
+    expect(record.toolCalls).toHaveLength(store.TRANSCRIPT_LIMITS.MAX_TOOL_CALLS);
+  });
+
   it("lives under the data directory a factory reset wipes by default", async () => {
     // Location as a security property: the reset route erases everything under
     // DATA_DIR that is not in its keep-list, so putting transcripts here means

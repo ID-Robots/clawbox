@@ -83,8 +83,29 @@ const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_TEXT_BYTES = 64 * 1024;
 /** Media refs are paths, and a reply carries a handful at most. */
 const MAX_MEDIA_REFS = 8;
+/** A turn's tool chips. Matches the cap the turn reader applies at the source. */
+const MAX_TOOL_CALLS = 24;
+/** One chip's argument summary. Long enough to recognise the step by. */
+const MAX_DETAIL_CHARS = 160;
 
 export type TranscriptRole = "user" | "assistant" | "system";
+
+/**
+ * One step the agent took during a turn.
+ *
+ * Deliberately harness-NEUTRAL and structural rather than an import from the
+ * Hermes reader: OpenClaw turns have tool activity too, and the transcript is
+ * the one store both editions write to. It records what a chip renders, not
+ * what any one agent's wire format happens to call it.
+ */
+export interface TranscriptToolCall {
+  /** The tool's own name, e.g. "terminal". */
+  name: string;
+  /** A short summary of what it was called with. */
+  detail?: string;
+  /** Whether it came back clean. Absent when no result was recorded. */
+  status?: "ok" | "error";
+}
 
 export interface TranscriptRecord {
   role: TranscriptRole;
@@ -95,6 +116,16 @@ export interface TranscriptRecord {
   media?: string[];
   /** Same, for spoken replies. Kept apart for the same reason `ChatMessage` does. */
   audio?: string[];
+  /**
+   * The model's internal monologue for this turn, kept OUT of `text`.
+   *
+   * Its own field precisely so replay can render it the way the live turn did —
+   * collapsed, under the answer — instead of pasting it back into the bubble,
+   * which is what the transcript used to preserve forever.
+   */
+  reasoning?: string;
+  /** The tools the agent used, in call order. */
+  toolCalls?: TranscriptToolCall[];
   /** The run this record belongs to, so a reconcile can match it to a bubble. */
   turnId?: string;
   /** Only ever "error", and only on a record that reports a failed turn. */
@@ -131,9 +162,25 @@ function transcriptPath(key: string): string {
   return path.join(TRANSCRIPT_DIR, `${key}.jsonl`);
 }
 
+/** Clamp one tool chip to what a line is allowed to carry. */
+function boundToolCall(call: TranscriptToolCall): TranscriptToolCall {
+  const detail = typeof call.detail === "string" ? call.detail : "";
+  return {
+    name: String(call.name).slice(0, MAX_DETAIL_CHARS),
+    ...(detail ? { detail: detail.slice(0, MAX_DETAIL_CHARS) } : {}),
+    ...(call.status === "ok" || call.status === "error" ? { status: call.status } : {}),
+  };
+}
+
 /** Clamp one record to what a line is allowed to carry. */
 function boundRecord(record: TranscriptRecord): TranscriptRecord {
   const text = typeof record.text === "string" ? record.text : "";
+  // The monologue gets the same budget as the answer and is clamped
+  // separately, so a long think cannot eat the reply's share of the line.
+  const reasoning = typeof record.reasoning === "string" ? record.reasoning : "";
+  const toolCalls = Array.isArray(record.toolCalls)
+    ? record.toolCalls.filter((call) => call && typeof call.name === "string" && call.name)
+    : [];
   return {
     role: record.role,
     // Byte-safe truncation is not needed: this bounds a JSON line's size, and
@@ -142,6 +189,16 @@ function boundRecord(record: TranscriptRecord): TranscriptRecord {
     timestamp: Number.isFinite(record.timestamp) ? record.timestamp : Date.now(),
     ...(record.media?.length ? { media: record.media.slice(0, MAX_MEDIA_REFS) } : {}),
     ...(record.audio?.length ? { audio: record.audio.slice(0, MAX_MEDIA_REFS) } : {}),
+    ...(reasoning
+      ? {
+        reasoning: reasoning.length > MAX_TEXT_BYTES
+          ? reasoning.slice(0, MAX_TEXT_BYTES)
+          : reasoning,
+      }
+      : {}),
+    ...(toolCalls.length
+      ? { toolCalls: toolCalls.slice(0, MAX_TOOL_CALLS).map(boundToolCall) }
+      : {}),
     ...(record.turnId ? { turnId: record.turnId } : {}),
     ...(record.variant ? { variant: record.variant } : {}),
   };
@@ -306,12 +363,34 @@ function parseRecord(line: string): TranscriptRecord | null {
   };
   const media = strings(row.media);
   const audio = strings(row.audio);
+  // Both are OPTIONAL on the way in, which is what makes this backward
+  // compatible: every line written before these fields existed parses exactly
+  // as it did, and simply replays without a disclosure or chips.
+  const reasoning = typeof row.reasoning === "string" && row.reasoning ? row.reasoning : undefined;
+  const toolCalls = Array.isArray(row.toolCalls)
+    ? row.toolCalls
+      .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+      .map((entry) => {
+        const name = typeof entry.name === "string" ? entry.name : "";
+        const detail = typeof entry.detail === "string" ? entry.detail : "";
+        const status = entry.status === "ok" || entry.status === "error" ? entry.status : undefined;
+        return {
+          name,
+          ...(detail ? { detail } : {}),
+          ...(status ? { status } : {}),
+        } satisfies TranscriptToolCall;
+      })
+      .filter((call) => call.name)
+      .slice(0, MAX_TOOL_CALLS)
+    : [];
   return {
     role,
     text: row.text,
     timestamp,
     ...(media ? { media } : {}),
     ...(audio ? { audio } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
     ...(typeof row.turnId === "string" && row.turnId ? { turnId: row.turnId } : {}),
     ...(row.variant === "error" ? { variant: "error" as const } : {}),
   };
@@ -366,6 +445,8 @@ export const TRANSCRIPT_LIMITS = {
   MAX_AGE_MS,
   MAX_TEXT_BYTES,
   MAX_MEDIA_REFS,
+  MAX_TOOL_CALLS,
+  MAX_DETAIL_CHARS,
   DIR_MODE,
   FILE_MODE,
 } as const;

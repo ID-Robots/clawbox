@@ -29,7 +29,8 @@ import {
 import { appendTranscript } from "@/lib/harness/transcript-store";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
-import { stripReasoningPanels } from "@/lib/hermes-reasoning-panel";
+import { extractReasoningPanels } from "@/lib/hermes-reasoning-panel";
+import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 
 /**
@@ -541,12 +542,28 @@ export async function POST(request: Request) {
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
-    // `chat -q` prints the model's internal monologue above the answer, in a
-    // box-drawing panel, because `display.show_reasoning` defaults to true and
-    // there is no flag that turns the panel off for one turn. Stripped ONCE,
-    // here, so the bubble and the stored record are the same text — doing it in
-    // the browser would have left the monologue in the transcript forever.
-    const answer = stripReasoningPanels(text);
+    // ── Answer, thinking and tool steps, pulled apart ─────────────────────
+    //
+    // TWO SOURCES, IN THIS ORDER, and the order is the whole point.
+    //
+    // What `chat -q … -Q` prints is a console rendering, and on this hardware
+    // it is a lossy one. Captured from the live box with deepseek-v4-flash, a
+    // bare "Hey" arrives as an OPENED reasoning frame that is never closed, the
+    // monologue printed TWICE by two different producers, then the answer — and
+    // no tool activity at all, because quiet mode prints none. Nothing in that
+    // stream marks where thinking stops and the reply starts, so the parser
+    // below can only ever handle the closed, framed case.
+    //
+    // The agent already has it right. `~/.hermes/state.db` stores the same turn
+    // as `content`, `reasoning_content` and `tool_calls` in separate columns,
+    // deduplicated, which is exactly the split the UI wants. So we ask the
+    // agent's own record first, keyed by the session id it just reported, and
+    // keep the console parse as the floor under it.
+    const consoleReply = extractReasoningPanels(text);
+    const record = await readHermesTurn(threaded);
+    const answer = record?.text ?? consoleReply.text;
+    const reasoning = record?.reasoning ?? consoleReply.reasoning;
+    const toolCalls = record?.toolCalls;
     // The ANSWER, and only on success. Media is split here rather than stored
     // raw so that the record holds exactly what the bubble renders, and a
     // refreshed transcript is byte-identical to the live one instead of showing
@@ -558,10 +575,16 @@ export async function POST(request: Request) {
       timestamp: Date.now(),
       ...(reply.images.length ? { media: reply.images } : {}),
       ...(reply.audio.length ? { audio: reply.audio } : {}),
+      // Persisted beside the answer, never inside it: replay has to be able to
+      // collapse the monologue the same way the live turn did.
+      ...(reasoning ? { reasoning } : {}),
+      ...(toolCalls?.length ? { toolCalls } : {}),
     });
     return NextResponse.json({
       text: answer,
       harness: "hermes",
+      ...(reasoning ? { reasoning } : {}),
+      ...(toolCalls?.length ? { toolCalls } : {}),
       ...(threaded ? { sessionId: threaded } : {}),
     });
   } catch (err) {

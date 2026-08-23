@@ -58,6 +58,11 @@ function toMessage(record: TranscriptRecord) {
     timestamp: record.timestamp,
     ...(record.media?.length ? { images: record.media } : {}),
     ...(record.audio?.length ? { audio: record.audio } : {}),
+    // Carried under their own names so a REPLAYED turn collapses its thinking
+    // and shows its steps exactly as the live one did. Without this a refresh
+    // would quietly downgrade every past answer to a bare bubble.
+    ...(record.reasoning ? { reasoning: record.reasoning } : {}),
+    ...(record.toolCalls?.length ? { toolCalls: record.toolCalls } : {}),
     ...(record.turnId ? { idempotencyKey: record.turnId } : {}),
     ...(record.variant ? { variant: record.variant } : {}),
   };
