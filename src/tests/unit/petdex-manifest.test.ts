@@ -130,3 +130,144 @@ describe("the curated list itself", () => {
     }
   });
 });
+
+// ── What actually lands on disk ──
+//
+// The cache file is written from a body this box did not author, so nothing
+// from that body is carried through verbatim: the manifest is parsed, reduced
+// to the two fields the picker consumes for the thirteen slugs it can offer,
+// and re-serialised from the curated table’s own strings.
+
+describe("the manifest never reaches the disk cache verbatim", () => {
+  function cachePath() {
+    return path.join(tmpHome, "cache", "clawbox-pets", "sheet-urls.json");
+  }
+
+  it("drops every field and slug the picker does not consume", async () => {
+    const body = JSON.stringify({
+      generatedAt: "now",
+      total: 3,
+      // A whole extra top-level branch, which must not survive.
+      operatorNote: "x".repeat(5000),
+      pets: [
+        {
+          slug: "boba",
+          spritesheetUrl: "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+          // Everything below is real manifest cargo we have no use for.
+          petJsonUrl: "https://assets.petdex.dev/curated/boba/petjson.json",
+          zipUrl: "https://assets.petdex.dev/curated/boba/boba.zip",
+          displayName: "Boba",
+          submittedBy: "railly",
+          spriteVersionNumber: 2,
+          notes: "y".repeat(5000),
+        },
+        // Not curated: 4.5k of these exist upstream and none may be cached.
+        { slug: "homelander", spritesheetUrl: "https://assets.petdex.dev/pets/homelander/spritesheet.webp" },
+        { slug: "scoop", spritesheetUrl: "https://assets.petdex.dev/curated/scoop/spritesheet.webp" },
+      ],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(body, { status: 200 })));
+    const { petdexSheetUrl } = await loadModule();
+    expect(await petdexSheetUrl("boba")).toBe("https://assets.petdex.dev/curated/boba/sprite-v2.webp");
+
+    const raw = fs.readFileSync(cachePath(), "utf-8");
+    expect(raw).not.toContain("zipUrl");
+    expect(raw).not.toContain("petjson");
+    expect(raw).not.toContain("operatorNote");
+    expect(raw).not.toContain("homelander");
+    const written = JSON.parse(raw);
+    expect(Object.keys(written).sort()).toEqual(["fetchedAt", "urls"]);
+    expect(typeof written.fetchedAt).toBe("number");
+    expect(written.urls).toEqual({
+      boba: "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+      scoop: "https://assets.petdex.dev/curated/scoop/spritesheet.webp",
+    });
+  });
+
+  it("rebuilds the URL instead of copying it, so nothing rides along in a query", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(manifestBody([
+      {
+        slug: "boba",
+        spritesheetUrl:
+          "https://assets.petdex.dev/curated/boba/sprite-v2.webp?trackme=1&next=//evil.example.com#frag",
+      },
+    ]), { status: 200 })));
+    const { petdexSheetUrl } = await loadModule();
+    expect(await petdexSheetUrl("boba")).toBe("https://assets.petdex.dev/curated/boba/sprite-v2.webp");
+    const raw = fs.readFileSync(cachePath(), "utf-8");
+    expect(raw).not.toContain("trackme");
+    expect(raw).not.toContain("evil.example.com");
+  });
+
+  it("refuses a sheet URL that is not shaped like a curated sheet", async () => {
+    const cases = [
+      // Another pet's directory — the bug that made three slugs unofferable.
+      "https://assets.petdex.dev/curated/cash-cuy/spritesheet.webp",
+      // Outside the curated namespace entirely.
+      "https://assets.petdex.dev/pets/boba/spritesheet.webp",
+      // Traversal, which `pathname` keeps encoded so the file gate catches it.
+      "https://assets.petdex.dev/curated/boba/..%2f..%2fetc%2fpasswd",
+      // Not an image at all.
+      "https://assets.petdex.dev/curated/boba/install.sh",
+      // Credentials smuggled into the authority.
+      "https://user:pw@assets.petdex.dev/curated/boba/sprite-v2.webp",
+      // A file name past the length cap.
+      `https://assets.petdex.dev/curated/boba/${"n".repeat(300)}.webp`,
+      "http://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    ];
+    for (const spritesheetUrl of cases) {
+      fs.rmSync(path.join(tmpHome, "cache"), { recursive: true, force: true });
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(
+        manifestBody([{ slug: "boba", spritesheetUrl }]), { status: 200 },
+      )));
+      const { petdexSheetUrl } = await loadModule();
+      // The offline fallback, not the manifest's answer.
+      expect(await petdexSheetUrl("boba"), spritesheetUrl)
+        .toBe("https://assets.petdex.dev/curated/boba/sprite-v2.webp");
+      expect(fs.existsSync(cachePath()), spritesheetUrl).toBe(false);
+    }
+  });
+
+  it("rejects a manifest that declares more bytes than the cap", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      manifestBody([{ slug: "scoop", spritesheetUrl: "https://assets.petdex.dev/curated/scoop/spritesheet.webp" }]),
+      { status: 200, headers: { "content-length": String(64 * 1024 * 1024) } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
+    const { petdexSheetUrl } = await loadModule();
+    expect(await petdexSheetUrl("scoop")).toBe("https://assets.petdex.dev/curated/scoop/spritesheet.webp");
+    expect(fetchMock).toHaveBeenCalled();
+    // Fallback answer, and nothing cached from a body we refused to read.
+    expect(fs.existsSync(cachePath())).toBe(false);
+  });
+
+  it("rejects an oversized body even when the declared length lies", async () => {
+    const padded = JSON.stringify({
+      pets: [{ slug: "scoop", spritesheetUrl: "https://assets.petdex.dev/curated/scoop/spritesheet.webp" }],
+      filler: "z".repeat(17 * 1024 * 1024),
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(padded, {
+      status: 200, headers: { "content-length": "42" },
+    })));
+    const { petdexSheetUrl } = await loadModule();
+    expect(await petdexSheetUrl("scoop")).toBe("https://assets.petdex.dev/curated/scoop/spritesheet.webp");
+    expect(fs.existsSync(cachePath())).toBe(false);
+  });
+
+  it("re-validates the disk cache on read, so a hand-edited file cannot redirect a thumbnail", async () => {
+    const cacheFile = cachePath();
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      fetchedAt: Date.now(),
+      urls: {
+        boba: "https://evil.example.com/curated/boba/sprite-v2.webp",
+        scoop: "https://assets.petdex.dev/curated/scoop/spritesheet.webp",
+      },
+    }));
+    const fetchMock = vi.fn(async () => { throw new Error("offline"); });
+    vi.stubGlobal("fetch", fetchMock);
+    const { petdexSheetUrl } = await loadModule();
+    expect(await petdexSheetUrl("boba")).toBe("https://assets.petdex.dev/curated/boba/sprite-v2.webp");
+    expect(await petdexSheetUrl("scoop")).toBe("https://assets.petdex.dev/curated/scoop/spritesheet.webp");
+  });
+});

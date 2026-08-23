@@ -21,6 +21,14 @@
 //      internet still renders thumbnails once it gets some.
 //
 // Nothing here downloads or stores sprite bytes — only addresses.
+//
+// And not even the addresses are stored as the network sent them. Every URL
+// that reaches the disk cache is REBUILT from things this repository already
+// knows — the pinned host, the curated slug being looked up — with the file
+// name as the single piece taken from the response, matched against a strict
+// pattern and length-capped first. The body is parsed, reduced to
+// `slug -> sheet URL` for the thirteen slugs the picker can ask for, and
+// re-serialised; no raw response text is ever written out.
 
 import fsp from "fs/promises";
 import path from "path";
@@ -42,7 +50,18 @@ const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 /** Mirrors `store.py`'s host pin — a redirect may not walk us off Petdex. */
 export const PETDEX_ASSET_HOSTS = new Set(["assets.petdex.dev", "petdex.dev"]);
 
+/** Maps a slug off the wire onto OUR copy of that string, so everything
+ *  downstream — cache keys, rebuilt URLs — is a constant from this repo. */
+const CURATED_SLUG_CONSTANTS = new Map(CURATED_PETS.map((p) => [p.slug, p.slug] as const));
 const CURATED_SLUGS = new Set(CURATED_PETS.map((p) => p.slug));
+const PETDEX_ASSET_HOST_LIST = [...PETDEX_ASSET_HOSTS];
+
+/** No real sheet URL is anywhere near this long; anything that is, is not one. */
+const MAX_URL_CHARS = 512;
+/** ~4.6k pets today. Well past that is a body we should stop walking. */
+const MAX_MANIFEST_ENTRIES = 50_000;
+/** Every curated sheet upstream is `<slug>/sprite-v2.webp` or `<slug>/spritesheet.webp`. */
+const SHEET_FILE_RE = /^[a-z0-9][a-z0-9._-]{0,63}\.(?:webp|png)$/i;
 
 interface SheetUrlCache {
   fetchedAt: number;
@@ -63,6 +82,41 @@ function isPetdexUrl(raw: string): boolean {
   }
 }
 
+/**
+ * Rebuild a curated pet's sheet URL out of parts we trust, or reject it.
+ *
+ * The host comes from the pinned allow-list, the slug from the curated table
+ * and `/curated/` is a literal — so the only text that survives from the
+ * manifest is the file name, and only if it is a plain `.webp`/`.png` name of
+ * sane length. Query strings, fragments, credentials, ports and any path that
+ * is not exactly `/curated/<slug>/<file>` do not come through, which is what
+ * keeps unvetted response text out of the disk cache.
+ *
+ * A URL that fails here is simply not recorded: `petdexSheetUrl` then answers
+ * with the offline fallback, so the picker degrades to the hardcoded curated
+ * address rather than to blank tiles.
+ */
+function canonicalSheetUrl(raw: unknown, slug: string): string | null {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_URL_CHARS) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:") return null;
+  if (parsed.username || parsed.password || parsed.port) return null;
+  const host = PETDEX_ASSET_HOST_LIST.find((known) => known === parsed.hostname);
+  if (!host) return null;
+  // `pathname` stays percent-encoded, so a smuggled `%2e%2e` or slash fails
+  // the file-name pattern below instead of being decoded into a traversal.
+  const segments = parsed.pathname.split("/").filter(Boolean);
+  if (segments.length !== 3) return null;
+  if (segments[0] !== "curated" || segments[1] !== slug) return null;
+  if (!SHEET_FILE_RE.test(segments[2])) return null;
+  return `https://${host}/curated/${slug}/${segments[2]}`;
+}
+
 function isFresh(cache: SheetUrlCache | null): cache is SheetUrlCache {
   return cache !== null && Date.now() - cache.fetchedAt < MANIFEST_TTL_MS;
 }
@@ -70,23 +124,46 @@ function isFresh(cache: SheetUrlCache | null): cache is SheetUrlCache {
 async function readDiskCache(): Promise<SheetUrlCache | null> {
   try {
     const parsed = JSON.parse(await fsp.readFile(CACHE_FILE, "utf-8")) as SheetUrlCache;
-    if (!parsed || typeof parsed.fetchedAt !== "number" || !parsed.urls) return null;
-    // Re-pin on read: the file is ours, but it is the one input here that a
-    // later code change (or a hand edit) could point somewhere else.
-    const urls: Record<string, string> = {};
-    for (const [slug, url] of Object.entries(parsed.urls)) {
-      if (typeof url === "string" && isPetdexUrl(url)) urls[slug] = url;
-    }
-    return { fetchedAt: parsed.fetchedAt, urls };
+    if (!parsed || !Number.isFinite(parsed.fetchedAt) || !parsed.urls) return null;
+    // Re-validated on read through the same gate as the wire: the file is
+    // ours, but it is the one input here that a later code change (or a hand
+    // edit) could point somewhere else.
+    return { fetchedAt: Number(parsed.fetchedAt), urls: reduceToCuratedUrls(parsed.urls) };
   } catch {
     return null;
   }
 }
 
+/**
+ * `slug -> sheet URL` for the curated slugs present in `source`, and nothing
+ * else. Keys are this repo's own strings and values are rebuilt by
+ * `canonicalSheetUrl`, so the result shares no text with its input beyond a
+ * vetted file name. Anything else in `source` — other slugs, other fields,
+ * junk — is dropped rather than carried to disk.
+ */
+function reduceToCuratedUrls(source: unknown): Record<string, string> {
+  const urls: Record<string, string> = {};
+  if (!source || typeof source !== "object") return urls;
+  const raw = source as Record<string, unknown>;
+  for (const [, slug] of CURATED_SLUG_CONSTANTS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, slug)) continue;
+    const url = canonicalSheetUrl(raw[slug], slug);
+    if (url) urls[slug] = url;
+  }
+  return urls;
+}
+
 async function writeDiskCache(cache: SheetUrlCache): Promise<void> {
   try {
     await fsp.mkdir(path.dirname(CACHE_FILE), { recursive: true });
-    await fsp.writeFile(CACHE_FILE, JSON.stringify(cache), "utf-8");
+    // Built here, not passed through: a fresh object whose keys are the
+    // curated slugs and whose values have been through `canonicalSheetUrl`.
+    // Never a stringify of anything the manifest handed us.
+    const body = JSON.stringify({
+      fetchedAt: Math.trunc(cache.fetchedAt),
+      urls: reduceToCuratedUrls(cache.urls),
+    });
+    await fsp.writeFile(CACHE_FILE, body, "utf-8");
   } catch {
     // A cache we cannot write costs one fetch per TTL, not a failure.
   }
@@ -97,19 +174,24 @@ interface ManifestEntry {
   spritesheetUrl?: unknown;
 }
 
-/** Pull the curated slugs' sheet URLs out of a manifest body. */
+/**
+ * Pull the curated slugs' sheet URLs out of a manifest body — two fields of
+ * the eight each entry carries, for the thirteen slugs of ~4600 ClawBox can
+ * offer, rebuilt rather than copied.
+ */
 function extractUrls(body: unknown): Record<string, string> {
   const pets = (body as { pets?: unknown })?.pets;
   if (!Array.isArray(pets)) return {};
   const urls: Record<string, string> = {};
-  for (const entry of pets as ManifestEntry[]) {
-    const slug = entry?.slug;
-    const url = entry?.spritesheetUrl;
-    if (typeof slug !== "string" || !CURATED_SLUGS.has(slug)) continue;
-    if (typeof url !== "string" || !isPetdexUrl(url)) continue;
+  const scanned = pets.slice(0, MAX_MANIFEST_ENTRIES) as ManifestEntry[];
+  for (const entry of scanned) {
+    const slug = typeof entry?.slug === "string" ? CURATED_SLUG_CONSTANTS.get(entry.slug) : undefined;
+    if (!slug) continue;
     // First occurrence wins — the manifest is append-ordered and a duplicate
     // slug later in the file is a re-upload we have no way to rank.
-    if (!(slug in urls)) urls[slug] = url;
+    if (slug in urls) continue;
+    const url = canonicalSheetUrl(entry?.spritesheetUrl, slug);
+    if (url) urls[slug] = url;
   }
   return urls;
 }
