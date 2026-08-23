@@ -23,6 +23,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "shelf.chat": "Chat",
     "shelf.openClawKeep": "Open ClawKeep",
     "shelf.clawkeepStale": "ClawKeep backup overdue — open to back up now",
+    "shelf.clawkeepNotSetUp": "ClawKeep is not set up yet — open to protect this box",
     "shelf.clawkeepBusy": "ClawKeep backup running — open to see progress",
     "shelf.clawkeepRestoring": "ClawKeep restore running — open to see progress",
     "shelf.clawkeepNeedsPaid": "ClawKeep needs a Pro or Max plan",
