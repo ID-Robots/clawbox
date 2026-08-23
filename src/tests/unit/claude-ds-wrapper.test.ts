@@ -60,9 +60,11 @@ function installFakeClaude(): void {
 function runWrapper(
   extraEnv: Record<string, string | undefined> = {},
   args: string[] = [],
+  cwd: string = REPO,
 ): { status: number | null; stdout: string; stderr: string } {
   const result = spawnSync("bash", [WRAPPER, ...args], {
     encoding: "utf-8",
+    cwd,
     env: {
       // A MINIMAL path on purpose. Inheriting the host's PATH made the
       // "Claude Code is not installed" case find the developer's own `claude`
@@ -272,5 +274,98 @@ describe("failing in a way the owner can act on", () => {
     const run = runWrapper();
     expect(run.stdout).not.toContain("claw_test_token");
     expect(run.stderr).not.toContain("claw_test_token");
+  });
+});
+
+/**
+ * The trust dialog, and why it is pre-answered for exactly one directory.
+ *
+ * Found on a real box: the Coding Agent asked "is this a project you created
+ * or one you trust?" on EVERY launch, because Claude Code never persists
+ * hasTrustDialogAccepted for $HOME — the flag stayed false on both test boxes
+ * across clean exits that did record lastCost and lastSessionId. A security
+ * prompt whose only other option is "exit", shown every single time, trains
+ * the owner to click through prompts instead of reading them.
+ *
+ * The line these tests hold is the SCOPE. Pre-answering the box's own home is
+ * defensible; pre-answering whatever directory the owner happens to be in is
+ * not, because a cloned repository is the case the dialog exists for.
+ */
+describe("the trust dialog", () => {
+  const claudeConfig = () => path.join(home, ".claude-ds", ".claude.json");
+  const readConfig = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(claudeConfig(), "utf-8")) as Record<string, unknown>;
+  /** undefined both when the file is absent and when the key is — "not seeded" either way. */
+  const trustFor = (dir: string): unknown => {
+    if (!existsSync(claudeConfig())) return undefined;
+    return ((readConfig().projects as Record<string, Record<string, unknown>>)?.[dir])?.hasTrustDialogAccepted;
+  };
+
+  it("is pre-answered for the home directory the Coding Agent opens in", () => {
+    expect(runWrapper({}, [], home).status).toBe(0);
+    expect(trustFor(home)).toBe(true);
+  });
+
+  it("is NOT pre-answered for a folder the owner happened to be standing in", () => {
+    // A cloned repository is exactly what the dialog is for. Seeding the cwd
+    // would silently disarm it.
+    const repoDir = path.join(home, "someones-repo");
+    mkdirSync(repoDir, { recursive: true });
+    expect(runWrapper({}, [], repoDir).status).toBe(0);
+    expect(trustFor(repoDir)).toBeUndefined();
+    expect(trustFor(home)).toBeUndefined();
+  });
+
+  it("keeps everything else in the config it did not come to change", () => {
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({
+      theme: "dark",
+      projects: {
+        [home]: { allowedTools: ["Bash"], projectOnboardingSeenCount: 3 },
+        "/somewhere/else": { hasTrustDialogAccepted: false },
+      },
+    }), "utf-8");
+
+    expect(runWrapper({}, [], home).status).toBe(0);
+
+    const cfg = readConfig();
+    expect(cfg.theme).toBe("dark");
+    const projects = cfg.projects as Record<string, Record<string, unknown>>;
+    expect(projects[home].allowedTools).toEqual(["Bash"]);
+    expect(projects[home].projectOnboardingSeenCount).toBe(3);
+    expect(projects[home].hasTrustDialogAccepted).toBe(true);
+    // Another folder's answer is not ours to change in either direction.
+    expect(projects["/somewhere/else"].hasTrustDialogAccepted).toBe(false);
+  });
+
+  it("leaves a config it cannot parse alone rather than overwriting it", () => {
+    // Losing an owner's MCP servers to save them one keypress would be a bad
+    // trade; a broken config is Claude Code's to repair.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), "{ not json at all", "utf-8");
+
+    expect(runWrapper({}, [], home).status).toBe(0);
+    expect(readFileSync(claudeConfig(), "utf-8")).toBe("{ not json at all");
+  });
+
+  it("still starts Claude Code when the seed cannot be written", () => {
+    // The harness must never fail to launch over a convenience. A read-only
+    // config directory is the cheapest way to force the write to fail.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({ projects: {} }), "utf-8");
+    execFileSync("chmod", ["500", path.join(home, ".claude-ds")]);
+    try {
+      expect(runWrapper({}, [], home).status).toBe(0);
+      expect(existsSync(envDump)).toBe(true);
+    } finally {
+      execFileSync("chmod", ["700", path.join(home, ".claude-ds")]);
+    }
+  });
+
+  it("does not rewrite the config when the answer is already there", () => {
+    expect(runWrapper({}, [], home).status).toBe(0);
+    const first = statSync(claudeConfig()).mtimeMs;
+    expect(runWrapper({}, [], home).status).toBe(0);
+    expect(statSync(claudeConfig()).mtimeMs).toBe(first);
   });
 });

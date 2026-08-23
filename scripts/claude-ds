@@ -141,6 +141,76 @@ export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_DS_EFFORT:-max}"
 mkdir -p "$CLAUDE_CONFIG_DIR"
 chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 
+# PRE-ANSWER THE TRUST QUESTION, FOR THE BOX'S OWN HOME AND NOTHING ELSE.
+#
+# Claude Code asks "is this a project you created or one you trust?" before it
+# will read a folder, and never remembers the answer for $HOME: the flag it
+# writes, projects[<dir>].hasTrustDialogAccepted, stays false there across
+# clean exits that do record lastCost and lastSessionId. So the Coding Agent
+# app — which always opens in the owner's home — asked it on EVERY launch.
+#
+# On this appliance that question has no second answer. The folder is the
+# box's own home, behind the device login, and the dialog's other option is
+# "exit". A security prompt whose only real answer is "yes", shown every single
+# time, does not protect anybody; it teaches the owner to click through
+# prompts without reading them, which is worse than not asking.
+#
+# It is pre-answered ONLY when the harness is starting in that home directory.
+# Somebody who clones a repo and runs `claude-ds` inside it is asked, exactly
+# as before — that is the case the dialog is actually for.
+#
+# Claude Code documents this key as the supported alternative to answering
+# interactively ("accept the trust dialog here once interactively, or set
+# projects[...].hasTrustDialogAccepted in <config>").
+seed_home_trust() {
+  python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$HOME" <<'PYEOF' || true
+import json, os, sys, tempfile
+
+cfg_path, home = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg_path) as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError("not an object")
+except FileNotFoundError:
+    cfg = {}
+except Exception:
+    # A config we cannot parse is Claude Code's to repair, not ours to
+    # overwrite — losing an owner's MCP servers to save them one keypress
+    # would be a bad trade.
+    raise SystemExit(0)
+
+projects = cfg.setdefault("projects", {})
+if not isinstance(projects, dict):
+    raise SystemExit(0)
+entry = projects.setdefault(home, {})
+if not isinstance(entry, dict):
+    raise SystemExit(0)
+if entry.get("hasTrustDialogAccepted") is True:
+    raise SystemExit(0)          # already set; leave the file alone
+entry["hasTrustDialogAccepted"] = True
+
+# Written through a temp file in the same directory and renamed, so a crash
+# mid-write cannot leave Claude Code with half a config.
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(cfg_path) or ".")
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(cfg, fh)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, cfg_path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise SystemExit(0)
+PYEOF
+}
+
+if [ "$PWD" = "$HOME" ]; then
+  seed_home_trust
+fi
+
 # Say which model is actually about to answer. "Chosen vs actually used" is the
 # question this banner exists to close: the plan, not the wrapper, picks it.
 printf 'claude-ds: ClawBox AI (%s) — state in %s\n' "$MODEL" "$CLAUDE_CONFIG_DIR" >&2
