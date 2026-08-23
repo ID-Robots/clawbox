@@ -72,6 +72,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  runOpenclawConfigSetBatch: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
@@ -107,15 +108,18 @@ import {
   readConfig,
   restartGateway,
   runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
+import { configSetCalls as recordedConfigSetCalls, failConfigSetsMatching } from "./config-set-calls";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
 const mockSetMany = vi.mocked(setMany);
 const mockReadConfig = vi.mocked(readConfig);
 const mockRunOpenclawConfigSet = vi.mocked(runOpenclawConfigSet);
+const mockRunOpenclawConfigSetBatch = vi.mocked(runOpenclawConfigSetBatch);
 const mockFs = vi.mocked(fsp);
 
 function createSuccessfulChildProcess(): ChildProcess {
@@ -142,9 +146,13 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     });
   }
 
-  /** Every `openclaw config set` the route ran, as [path, ...rest] tuples. */
+  /**
+   * Every `openclaw config set` assignment the route made, as [path, ...rest]
+   * tuples — whether it went out on its own or inside a batch.
+   */
   function configSetCalls(): string[][] {
-    return mockRunOpenclawConfigSet.mock.calls.map((call) => call[0] as string[]);
+    return recordedConfigSetCalls(mockRunOpenclawConfigSet, mockRunOpenclawConfigSetBatch)
+      .map((call) => call.args);
   }
 
   function callFor(path: string): string[] | undefined {
@@ -169,6 +177,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     vi.mocked(restartGateway).mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     mockRunOpenclawConfigSet.mockResolvedValue(undefined);
+    mockRunOpenclawConfigSetBatch.mockResolvedValue(undefined);
     vi.mocked(unpairLocal).mockResolvedValue(undefined);
     vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
     vi.mocked(parseFullyQualifiedModel).mockImplementation(parseFullyQualifiedModelImpl);
@@ -536,18 +545,22 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
   describe("what the failure path is allowed to write to the journal", () => {
     /** The single journal record the image-provider catch produced. */
     async function failImageWritesWith(message: string): Promise<string> {
-      mockRunOpenclawConfigSet.mockImplementation(async (args: string[]) => {
-        if (args[0]?.startsWith("models.providers.openai")) throw new Error(message);
-      });
+      failConfigSetsMatching(
+        mockRunOpenclawConfigSet,
+        mockRunOpenclawConfigSetBatch,
+        (path) => path.startsWith("models.providers.openai"),
+        () => new Error(message),
+      );
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         await connectClawai();
         const records = warn.mock.calls
           .map((call) => call.map(String).join(" "))
           .filter((record) => record.includes("ClawBox AI image provider"));
-        // configureClawboxAi runs twice on this path — once for the primary and
-        // once from ensureFallbackModel — so the catch fires twice with the
-        // same message. One distinct record is what matters here.
+        // One distinct record is what matters here — the route may report the
+        // same failure more than once (the combined batch fails first, then the
+        // image group fails again on its own boundary), but it must never
+        // produce two DIFFERENT records from one subprocess message.
         expect(records.length).toBeGreaterThan(0);
         expect(new Set(records).size).toBe(1);
         return records[0];
@@ -581,9 +594,12 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
   describe("failure containment", () => {
     it("still connects ClawBox AI when the image writes fail", async () => {
       // A chat provider that works is worth more than an image tool.
-      mockRunOpenclawConfigSet.mockImplementation(async (args: string[]) => {
-        if (args[0]?.startsWith("models.providers.openai")) throw new Error("config write conflict");
-      });
+      failConfigSetsMatching(
+        mockRunOpenclawConfigSet,
+        mockRunOpenclawConfigSetBatch,
+        (path) => path.startsWith("models.providers.openai"),
+        () => new Error("config write conflict"),
+      );
 
       const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
       const body = await res.json();
