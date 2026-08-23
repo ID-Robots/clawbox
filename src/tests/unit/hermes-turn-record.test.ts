@@ -19,7 +19,15 @@ import { buildTurnFromRows, readHermesTurn } from "@/lib/harness/hermes-turn-rec
  * from the schema would not have shown that.
  */
 
-/** The "Hey" turn, verbatim from `messages` (ids 199-200). */
+/**
+ * The "Hey" turn from `messages` (ids 199-200).
+ *
+ * One clause is REDACTED: the captured monologue quoted a private value out of
+ * the bench box owner's agent profile, and this repository is public. Nothing
+ * else is altered, and the redaction changes nothing the tests turn on — they
+ * assert on structure and on how many times a passage appears, not on its
+ * words.
+ */
 const HEY_REASONING =
   'The user just said "Hey" - a simple greeting. I should respond warmly and briefly,'
   + " maybe mention I'm ready to help. No need for tools here. The user profile mentions"
