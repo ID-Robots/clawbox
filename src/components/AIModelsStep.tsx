@@ -767,7 +767,10 @@ export default function AIModelsStep({
           // or guessing at someone's subscription.
         });
     };
-    refresh();
+    // The mount read gets the same visibility gate as the ticks: a panel
+    // mounting in a background tab waits for `visibilitychange` like any
+    // other hidden refresh would.
+    if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
     const interval = setInterval(() => {
       if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
     }, ALLOWANCE_REFRESH_MS);
