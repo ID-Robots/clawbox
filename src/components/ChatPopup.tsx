@@ -2369,13 +2369,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void dispatchSend(text, sendAttachments, idempotencyKey)
   }, [status, dispatchSend, dispatchHermes])
 
-  // The skill-change handler lives in a mount-once effect and cannot close over
-  // `startRun`, which is rebuilt whenever the connection state changes. Same
-  // ref trick `resetSessionRef` uses a few hundred lines up.
-  const startRunRef = useRef(startRun)
-  useEffect(() => { startRunRef.current = startRun }, [startRun])
-
-  const sendVoiceTranscript = useCallback((text: string) => {
+  // Send a line the UI composed itself — a voice transcript, or the question
+  // that follows a skill change. Both can arrive while the agent is already
+  // answering, and starting a second turn on top of a live one makes the chat
+  // report the first as finished while it is still running, so they take the
+  // same queue a typed message would.
+  const enqueueRun = useCallback((text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (sending) {
@@ -2387,9 +2386,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     startRun(trimmed, [])
   }, [sending, startRun])
+
+  const sendVoiceTranscript = enqueueRun
   useEffect(() => {
     sendVoiceTranscriptRef.current = sendVoiceTranscript
   }, [sendVoiceTranscript])
+
+  // The skill-change handler lives in a mount-once effect and cannot close over
+  // `enqueueRun`, which is rebuilt whenever a turn starts or ends. Same ref
+  // trick `resetSessionRef` uses a few hundred lines up — and it has to be a
+  // ref rather than a dependency, because the value it needs to see is the
+  // CURRENT `sending`.
+  const enqueueRunRef = useRef(enqueueRun)
+  useEffect(() => { enqueueRunRef.current = enqueueRun }, [enqueueRun])
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
@@ -2820,10 +2829,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // truthful one — it comes from the session that now has the skill.
     const skillHandler = (e: Event) => {
       const detail = ((e as CustomEvent).detail || {}) as { action?: string; name?: string; id?: string }
-      // `startRun` owns queueing-while-disconnected, the Hermes branch and the
-      // run bookkeeping, so a skill change goes out the same door a typed
-      // message does rather than growing a second, thinner send path.
-      startRunRef.current(buildSkillChangeMessage(detail), [])
+      // Goes out the same door a typed message does — queued behind a turn
+      // that is still answering, sent through startRun otherwise, which owns
+      // the disconnected queue, the Hermes branch and the run bookkeeping.
+      // Growing a second, thinner send path here is what would drift next.
+      enqueueRunRef.current(buildSkillChangeMessage(detail))
     }
     // Treat a primary-AI-provider change the same as a skill install:
     // the gateway is restarting, the chat WS is about to drop, and

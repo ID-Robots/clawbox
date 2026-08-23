@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 
@@ -166,6 +166,48 @@ describe("a skill change does not freeze the chat", () => {
     // connection and re-run the whole handshake for nothing.
     expect(ws?.closed).toBe(false);
     expect(sockets).toHaveLength(1);
+  });
+
+  it("waits its turn instead of talking over an answer in flight", async () => {
+    // CodeRabbit caught this on the first cut: firing the confirmation while
+    // the agent is mid-answer opens a second run on top of a live one, and the
+    // chat then reports the first turn finished while it is still working.
+    // It takes the same queue a typed message takes.
+    await mountReady();
+    const input = screen.getByRole("textbox");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "how tall is the Eiffel tower?" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const duringTurn = sendFrames().length;
+    expect(duringTurn).toBeGreaterThan(0);
+
+    await fireSkillEvent({ action: "install", name: "Weather Forecast" });
+    // Nothing extra went out while the first turn is still running.
+    expect(sendFrames()).toHaveLength(duringTurn);
+    // ...and the owner can see it is waiting rather than lost.
+    await screen.findByText(/I just installed the "Weather Forecast" skill/);
+
+    // Finish the turn the way the gateway does; the queued confirmation then
+    // goes out on its own.
+    await act(async () => {
+      socket()?.emit({
+        type: "event",
+        event: "chat",
+        payload: {
+          runId: "r1",
+          sessionKey: "agent:main:main",
+          state: "final",
+          stopReason: "stop",
+          message: { role: "assistant", content: [{ type: "text", text: "330 metres." }], timestamp: 1787260000000 },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitFor(() => expect(sendFrames().length).toBe(duringTurn + 1));
+    expect(String((sendFrames()[duringTurn].params as Record<string, unknown>).message))
+      .toContain('"Weather Forecast"');
   });
 
   it("handles an uninstall the same way", async () => {
