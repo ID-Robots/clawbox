@@ -49,10 +49,12 @@ vi.mock("fs", () => ({
 }));
 
 let processMemoryBytes: typeof import("@/lib/local-models")["processMemoryBytes"];
+/** The real pattern the llama.cpp row passes, not a copy of it. */
+let OLLAMA_OWNED_PROCESS: RegExp;
 
 beforeEach(async () => {
   vi.resetModules();
-  ({ processMemoryBytes } = await import("@/lib/local-models"));
+  ({ processMemoryBytes, OLLAMA_OWNED_PROCESS } = await import("@/lib/local-models"));
 });
 
 const MB = 1024;
@@ -72,7 +74,7 @@ describe("processMemoryBytes", () => {
     // reported on its own row.
     pgrepStdout = "29942\n30519\n30821\n";
 
-    expect(await processMemoryBytes("llama-server", /[/\\]ollama[/\\]/)).toBe(
+    expect(await processMemoryBytes("llama-server", OLLAMA_OWNED_PROCESS)).toBe(
       (2682652 + 2600) * MB,
     );
   });
@@ -88,12 +90,12 @@ describe("processMemoryBytes", () => {
     // memory" are different claims, and the row renders the second one.
     pgrepStdout = "30519\n";
 
-    expect(await processMemoryBytes("llama-server", /[/\\]ollama[/\\]/)).toBeNull();
+    expect(await processMemoryBytes("llama-server", OLLAMA_OWNED_PROCESS)).toBeNull();
   });
 
   it("skips a process whose files vanished mid-read rather than failing the row", async () => {
     pgrepStdout = "29942\n99999\n";
 
-    expect(await processMemoryBytes("llama-server", /[/\\]ollama[/\\]/)).toBe(2682652 * MB);
+    expect(await processMemoryBytes("llama-server", OLLAMA_OWNED_PROCESS)).toBe(2682652 * MB);
   });
 });

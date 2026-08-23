@@ -230,7 +230,7 @@ export async function processMemoryBytes(
  * Ollama's bundled inference server, which shares a file name with llama.cpp's.
  * Anything running out of an `ollama` directory belongs on the Ollama row.
  */
-const OLLAMA_OWNED_PROCESS = /[/\\]ollama[/\\]/;
+export const OLLAMA_OWNED_PROCESS = /[/\\]ollama[/\\]/;
 
 async function ollamaModels(baseUrl: string): Promise<{ name: string; size: number }[] | null> {
   try {
