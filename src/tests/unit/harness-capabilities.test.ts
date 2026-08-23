@@ -21,17 +21,20 @@ const linked: HarnessFacts = {
   hasClawaiToken: true,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
+  hermesStreamsTurns: false,
 };
 const bare: HarnessFacts = {
   hasClawaiToken: false,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
+  hermesStreamsTurns: false,
 };
 /** The box the attach button is honest on: the flag AND somewhere to look. */
 const seeing: HarnessFacts = {
   hasClawaiToken: true,
   hermesSupportsImages: true,
   hermesHasVisionRoute: true,
+  hermesStreamsTurns: false,
 };
 
 describe("capabilitiesFor", () => {
@@ -71,8 +74,34 @@ describe("capabilitiesFor", () => {
       // `--image` is image-only and the agent's path resolver matches picture
       // extensions by design; a document has no way in.
       expect(caps.canAttachDocuments).toBe(false);
-      expect(caps.streamsTurns).toBe(false);
     }
+  });
+
+  it("claims streaming only where the box was found able to do it", () => {
+    // Both fact sets above have `hermesStreamsTurns: false` — a box with no
+    // reachable dashboard, which is every box that has to spawn `chat -q` for
+    // each turn and therefore cannot produce a token until the child exits.
+    expect(capabilitiesFor("hermes", bare).streamsTurns).toBe(false);
+    expect(capabilitiesFor("hermes", seeing).streamsTurns).toBe(false);
+    // And the box that can: the claim follows the probe, nothing else. Not the
+    // credential, not the image flags — a linked box with no dashboard running
+    // still cannot stream, and an unlinked one with a dashboard still can.
+    expect(capabilitiesFor("hermes", { ...bare, hermesStreamsTurns: true }).streamsTurns).toBe(true);
+    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true }).streamsTurns).toBe(true);
+  });
+
+  it("keeps the connection banner honest even when turns stream", () => {
+    // `hasLiveConnection` is not "something arrives progressively" — it is
+    // "there is a socket that can be DOWN, so a banner about it is honest".
+    // Hermes' stream is opened per turn by the route and gone by the time the
+    // answer lands; there is no connection for the surface to report on, and
+    // three things read this flag: the queue-while-disconnected branch, the
+    // replay-on-mount effect, and the transcript route's own ownership gate.
+    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true }).hasLiveConnection).toBe(
+      false,
+    );
+    // The transcript stays ours to serve, which is what that gate turns on.
+    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true }).canListHistory).toBe(true);
   });
 
   it("never hides the attach button on the strength of a guess", () => {
@@ -92,6 +121,7 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: false,
         hermesSupportsImages: true,
         hermesHasVisionRoute: false,
+        hermesStreamsTurns: false,
       }).canAttachImages,
     ).toBe(false);
     // And the mirror: a vision route on an agent whose turn cannot carry the
@@ -101,6 +131,7 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: true,
         hermesSupportsImages: false,
         hermesHasVisionRoute: true,
+        hermesStreamsTurns: false,
       }).canAttachImages,
     ).toBe(false);
   });
@@ -117,6 +148,7 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: true,
         hermesSupportsImages: true,
         hermesHasVisionRoute: false,
+        hermesStreamsTurns: false,
       }).canAttachImages,
     ).toBe(false);
     expect(
@@ -124,6 +156,7 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: false,
         hermesSupportsImages: true,
         hermesHasVisionRoute: true,
+        hermesStreamsTurns: false,
       }).canAttachImages,
     ).toBe(true);
   });
@@ -148,6 +181,10 @@ describe("capabilitiesFor", () => {
     expect(UNKNOWN_FACTS.hasClawaiToken).toBe(false);
     expect(UNKNOWN_FACTS.hermesSupportsImages).toBe(false);
     expect(UNKNOWN_FACTS.hermesHasVisionRoute).toBe(false);
+    // A composer that has not heard back yet must not show a caret it may never
+    // be able to move.
+    expect(UNKNOWN_FACTS.hermesStreamsTurns).toBe(false);
+    expect(capabilitiesFor("hermes", UNKNOWN_FACTS).streamsTurns).toBe(false);
   });
 });
 

@@ -61,6 +61,7 @@ async function fetchFacts(signal?: AbortSignal): Promise<HarnessFacts | null> {
       hasClawaiToken: data.facts?.hasClawaiToken === true,
       hermesSupportsImages: data.facts?.hermesSupportsImages === true,
       hermesHasVisionRoute: data.facts?.hermesHasVisionRoute === true,
+      hermesStreamsTurns: data.facts?.hermesStreamsTurns === true,
     };
   } catch {
     // A box that cannot answer keeps the cautious defaults: a hidden control

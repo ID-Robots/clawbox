@@ -32,6 +32,7 @@ import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+import { openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -292,6 +293,169 @@ function parseSessionId(stderr: string): string {
   return match ? match[1] : "";
 }
 
+/** The reply this route hands back, whichever transport produced it. */
+interface TurnPayload {
+  text: string;
+  harness: "hermes";
+  reasoning?: string;
+  toolCalls?: readonly unknown[];
+  sessionId?: string;
+}
+
+/** Did the caller ask to be streamed to, rather than handed a finished turn? */
+function wantsStream(request: Request): boolean {
+  return (request.headers.get("accept") || "").includes("text/event-stream");
+}
+
+/**
+ * Turn a finished run into the answer, and record it.
+ *
+ * ── Answer, thinking and tool steps, pulled apart ─────────────────────────
+ *
+ * TWO SOURCES, IN THIS ORDER, and the order is the whole point.
+ *
+ * What `chat -q … -Q` prints is a console rendering, and on this hardware it is
+ * a lossy one. Captured from the live box with deepseek-v4-flash, a bare "Hey"
+ * arrives as an OPENED reasoning frame that is never closed, the monologue
+ * printed TWICE by two different producers, then the answer — and no tool
+ * activity at all, because quiet mode prints none. Nothing in that stream marks
+ * where thinking stops and the reply starts, so the parser below can only ever
+ * handle the closed, framed case.
+ *
+ * The agent already has it right. `~/.hermes/state.db` stores the same turn as
+ * `content`, `reasoning_content` and `tool_calls` in separate columns,
+ * deduplicated, which is exactly the split the UI wants. So we ask the agent's
+ * own record first, keyed by the session id the run reported, and keep the
+ * console parse as the floor under it.
+ *
+ * The streaming transport lands here too, and needs the same treatment for a
+ * different reason: its text is already clean (the answer and the monologue
+ * arrive on separate channels), but only the database has the TOOL STEPS, which
+ * no amount of reading the reply can recover.
+ */
+async function settleTurn(
+  threaded: string,
+  consoleText: string,
+  streamedReasoning: string,
+): Promise<TurnPayload> {
+  const consoleReply = extractReasoningPanels(consoleText);
+  const record = await readHermesTurn(threaded);
+  const answer = record?.text ?? consoleReply.text;
+  // The database first, the console parse next, and what the stream itself
+  // carried as the floor — the last only matters when the turn ran but its row
+  // could not be read back, which is the one case the other two are both empty.
+  const settledReasoning = record?.reasoning || consoleReply.reasoning || streamedReasoning;
+  const toolCalls = record?.toolCalls;
+  // The ANSWER, and only on success. Media is split here rather than stored raw
+  // so that the record holds exactly what the bubble renders, and a refreshed
+  // transcript is byte-identical to the live one instead of showing a MEDIA:
+  // directive as text.
+  const reply = splitAssistantMedia(answer);
+  await appendTranscript({
+    role: "assistant",
+    text: reply.text,
+    timestamp: Date.now(),
+    ...(reply.images.length ? { media: reply.images } : {}),
+    ...(reply.audio.length ? { audio: reply.audio } : {}),
+    // Persisted beside the answer, never inside it: replay has to be able to
+    // collapse the monologue the same way the live turn did.
+    ...(settledReasoning ? { reasoning: settledReasoning } : {}),
+    ...(toolCalls?.length ? { toolCalls } : {}),
+  });
+  return {
+    text: answer,
+    harness: "hermes",
+    ...(settledReasoning ? { reasoning: settledReasoning } : {}),
+    ...(toolCalls?.length ? { toolCalls } : {}),
+    ...(threaded ? { sessionId: threaded } : {}),
+  };
+}
+
+/**
+ * Stream a dashboard turn to the caller as it is written.
+ *
+ * Server-sent events, one named event per kind, because the two are genuinely
+ * different things and the client must not have to guess which it is holding:
+ *
+ *   `delta` — a FRAGMENT of the answer, to append. Only ever the answer: the
+ *             model's monologue arrives on its own channel upstream and this
+ *             route does not forward it, so the raw thinking cannot flash into
+ *             the bubble mid-stream. That is a property of the transport, not a
+ *             filter that has to stay correct.
+ *   `done`  — the settled turn, byte-identical in shape to what the non-
+ *             streaming path returns, including the tool steps and the
+ *             deduplicated reasoning that only the agent's database has.
+ *   `error` — the turn failed; the message is already customer-readable.
+ *
+ * Once the first byte is out the status code is spent, so a failure after that
+ * point is reported inside the stream rather than as an HTTP error. Everything
+ * that could have produced a clean 4xx/5xx has already run before this is called.
+ */
+function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+      try {
+        const final = await turn.run((chunk) => send("delta", { text: chunk }));
+        const threaded = turn.sessionId || fallbackSessionId;
+        if (final.status === "error") {
+          const detail = final.error || final.text || "Hermes chat failed";
+          await appendTranscript({
+            role: "system",
+            text: `Error: ${detail}`,
+            timestamp: Date.now(),
+            variant: "error",
+          });
+          send("error", { error: detail });
+        } else {
+          send("done", await settleTurn(threaded, final.text, final.reasoning));
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : "Hermes chat failed";
+        // A failure is recorded too — see the non-streaming path's note. The one
+        // exception is a caller who hung up: the socket dies as a consequence of
+        // their own Stop, and their unanswered question is already recorded.
+        if (!isAbort(err)) {
+          await appendTranscript({
+            role: "system",
+            text: `Error: ${detail}`,
+            timestamp: Date.now(),
+            variant: "error",
+          });
+          send("error", { error: detail });
+        }
+      } finally {
+        turn.close();
+        try {
+          controller.close();
+        } catch {
+          /* the caller already went away */
+        }
+      }
+    },
+    cancel() {
+      turn.close();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      // Nginx and friends buffer a proxied response by default, which would
+      // hold every fragment until the turn ended and undo the whole point.
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
+function isAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 export async function POST(request: Request) {
   let body: {
     message?: string;
@@ -537,56 +701,36 @@ export async function POST(request: Request) {
   // runs) into each other.
   if (rawSessionId) args.push("--resume", rawSessionId);
 
+  // ── The fast path ───────────────────────────────────────────────────────
+  //
+  // Try the already-running dashboard first, and only when the caller asked to
+  // be streamed to. Opening the socket and settling the session costs about a
+  // tenth of a second and answers "can this box stream?" honestly, so a box
+  // where it cannot falls through to the spawn below having lost nothing.
+  //
+  // Attachments stay on the CLI path deliberately: `--image` is a flag on that
+  // command, and `prompt.submit` takes its attachments through a separate
+  // `image.attach` handshake this route has not been taught. A turn carrying a
+  // picture is rare and already slow; correctness first.
+  if (wantsStream(request) && imagePaths.length === 0) {
+    const turn = await openDashboardTurn({
+      text: promptWithImages,
+      ...(rawModel ? { model: rawModel } : {}),
+      ...(wantsProvider ? { provider: rawProvider } : {}),
+      ...(rawReasoning ? { reasoning: rawReasoning } : {}),
+      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+      signal: request.signal,
+    });
+    if (turn) return streamTurn(turn, rawSessionId);
+  }
+
   try {
     const { out: text, err } = await runHermes(args, request.signal);
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
-    // ── Answer, thinking and tool steps, pulled apart ─────────────────────
-    //
-    // TWO SOURCES, IN THIS ORDER, and the order is the whole point.
-    //
-    // What `chat -q … -Q` prints is a console rendering, and on this hardware
-    // it is a lossy one. Captured from the live box with deepseek-v4-flash, a
-    // bare "Hey" arrives as an OPENED reasoning frame that is never closed, the
-    // monologue printed TWICE by two different producers, then the answer — and
-    // no tool activity at all, because quiet mode prints none. Nothing in that
-    // stream marks where thinking stops and the reply starts, so the parser
-    // below can only ever handle the closed, framed case.
-    //
-    // The agent already has it right. `~/.hermes/state.db` stores the same turn
-    // as `content`, `reasoning_content` and `tool_calls` in separate columns,
-    // deduplicated, which is exactly the split the UI wants. So we ask the
-    // agent's own record first, keyed by the session id it just reported, and
-    // keep the console parse as the floor under it.
-    const consoleReply = extractReasoningPanels(text);
-    const record = await readHermesTurn(threaded);
-    const answer = record?.text ?? consoleReply.text;
-    const reasoning = record?.reasoning ?? consoleReply.reasoning;
-    const toolCalls = record?.toolCalls;
-    // The ANSWER, and only on success. Media is split here rather than stored
-    // raw so that the record holds exactly what the bubble renders, and a
-    // refreshed transcript is byte-identical to the live one instead of showing
-    // a MEDIA: directive as text.
-    const reply = splitAssistantMedia(answer);
-    await appendTranscript({
-      role: "assistant",
-      text: reply.text,
-      timestamp: Date.now(),
-      ...(reply.images.length ? { media: reply.images } : {}),
-      ...(reply.audio.length ? { audio: reply.audio } : {}),
-      // Persisted beside the answer, never inside it: replay has to be able to
-      // collapse the monologue the same way the live turn did.
-      ...(reasoning ? { reasoning } : {}),
-      ...(toolCalls?.length ? { toolCalls } : {}),
-    });
-    return NextResponse.json({
-      text: answer,
-      harness: "hermes",
-      ...(reasoning ? { reasoning } : {}),
-      ...(toolCalls?.length ? { toolCalls } : {}),
-      ...(threaded ? { sessionId: threaded } : {}),
-    });
+    const answered = await settleTurn(threaded, text, "");
+    return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
       // Client hit Stop / disconnected; the child was already killed. Nothing

@@ -40,6 +40,18 @@ export interface HarnessFacts {
    * arrives nowhere.
    */
   hermesHasVisionRoute: boolean;
+  /**
+   * Turns can be run through the already-running `hermes dashboard` process and
+   * streamed back token by token, instead of spawning a `chat -q` per message.
+   *
+   * PROBED, like the two above, and for a sharper reason than either: the
+   * dashboard is a separate service that can be stopped, and the answer is
+   * therefore about the box's state this minute rather than about which version
+   * is installed. A wrong `true` would promise the composer a stream it then
+   * never gets; the route's own fallback covers that, but the caret would sit
+   * empty until the whole turn landed, which is worse than never claiming it.
+   */
+  hermesStreamsTurns: boolean;
 }
 
 /**
@@ -67,9 +79,14 @@ const MAX_ATTACHMENTS = { openclaw: 12, hermes: 8 } as const;
 export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapabilities {
   if (id === "hermes") {
     return {
-      // The Hermes chat route runs `hermes chat -q … -Q` and reads the whole
-      // answer off the child's stdout. Streaming is a future upgrade.
-      streamsTurns: false,
+      // True only where the box can actually do it. A turn routed through the
+      // running dashboard streams token by token; one that has to spawn
+      // `hermes chat -q … -Q` cannot, because the whole answer is read off the
+      // child's stdout after roughly six seconds of the process starting up.
+      // The route tries the first and falls back to the second, so this says
+      // which of the two the composer should expect — and on a box with no
+      // dashboard it still honestly says no.
+      streamsTurns: facts.hermesStreamsTurns,
       canListHistory: HERMES_DURABLE_TRANSCRIPT,
       // Forgetting the resumed session id IS the reset: the next turn goes out
       // with no `--resume`, so the box opens a fresh session. Every bit as real
@@ -150,6 +167,10 @@ export const UNKNOWN_FACTS: HarnessFacts = {
   hasClawaiToken: false,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
+  // Cautious in the same direction as the rest: a composer that has not heard
+  // back yet waits for the whole turn rather than showing a caret that may
+  // never move.
+  hermesStreamsTurns: false,
 };
 
 /**

@@ -3,6 +3,7 @@ import { getActiveHarness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import type { HarnessFacts } from "@/lib/harness/capabilities";
 import { hermesHasVisionRoute, hermesSupportsImages } from "@/lib/harness/hermes-features";
+import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +42,14 @@ export async function GET() {
     // Not asked on an OpenClaw box, for the same reason as above: `hermes` may
     // not be installed there, and no OpenClaw capability reads this.
     hermesHasVisionRoute: harness === "hermes" ? await hermesHasVisionRoute() : false,
+    // Whether a turn can go through the running dashboard and stream back,
+    // rather than spawning a CLI whose answer only exists once it exits. Probed
+    // by minting a WebSocket ticket — cheap, local, and the same door the turn
+    // itself will use, so a yes here is a yes for the real thing.
+    //
+    // Not asked on an OpenClaw box: it has its own socket and its own streaming,
+    // and `hermes` may not be installed there at all.
+    hermesStreamsTurns: harness === "hermes" ? await hermesCanStreamTurns() : false,
   };
   return NextResponse.json({ harness, facts });
 }

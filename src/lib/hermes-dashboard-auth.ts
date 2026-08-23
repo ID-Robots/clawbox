@@ -75,6 +75,30 @@ async function loginWithBackoff(): Promise<string | null> {
   return cookie;
 }
 
+/**
+ * A single-use ticket for a dashboard WebSocket upgrade, or null.
+ *
+ * A browser cannot put an Authorization header on a WebSocket handshake, so the
+ * dashboard mints a 30-second single-use ticket for the authenticated session
+ * and takes it as `?ticket=` on the upgrade. Server-side callers are in the same
+ * position for a different reason — the socket is opened by a library that
+ * speaks the handshake itself — so they use the same door the SPA does.
+ *
+ * Minted per connection, never cached: the store consumes it on first use, so a
+ * kept copy is worth nothing to a second connection and everything to a leak.
+ */
+export async function dashboardWsTicket(signal?: AbortSignal): Promise<string | null> {
+  const res = await dashboardFetch("/api/auth/ws-ticket", { method: "POST", ...(signal ? { signal } : {}) }).catch(
+    () => null,
+  );
+  if (!res || !res.ok) return null;
+  const body = (await res.json().catch(() => null)) as { ticket?: unknown } | null;
+  return typeof body?.ticket === "string" && body.ticket ? body.ticket : null;
+}
+
+/** Where the dashboard's WebSocket endpoints live, for a caller that opens one. */
+export const DASHBOARD_WS_ORIGIN = `ws://${DASH_HOST}:${DASH_PORT}`;
+
 // Fetch a dashboard API path with a valid session, re-logging in once on 401.
 export async function dashboardFetch(apiPath: string, init?: RequestInit): Promise<Response> {
   if (!cachedCookie) cachedCookie = await loginWithBackoff();
