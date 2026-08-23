@@ -235,8 +235,7 @@ describe("transcript store", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "desktop.jsonl"),
-      `${JSON.stringify({ role: "assistant", text: "old reply", timestamp: 1 })}
-`,
+      `${JSON.stringify({ role: "assistant", text: "old reply", timestamp: 1 })}\n`,
     );
     const [record] = await store.readTranscript();
     expect(record).toEqual({ role: "assistant", text: "old reply", timestamp: 1 });
@@ -252,8 +251,7 @@ describe("transcript store", () => {
         text: "hi",
         timestamp: 1,
         toolCalls: [{ detail: "orphan" }, { name: "terminal" }, "not an object"],
-      })}
-`,
+      })}\n`,
     );
     const [record] = await store.readTranscript();
     expect(record.toolCalls).toEqual([{ name: "terminal" }]);

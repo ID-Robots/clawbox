@@ -176,9 +176,7 @@ describe("extractReasoningPanels", () => {
 
   it("keeps two DIFFERENT thoughts, in the order they were printed", () => {
     const captured = [panel("First I check."), panel("Now I answer."), "42."].join(CRLF);
-    expect(extractReasoningPanels(captured).reasoning).toBe("First I check.
-
-Now I answer.");
+    expect(extractReasoningPanels(captured).reasoning).toBe("First I check.\n\nNow I answer.");
   });
 
   it("claims no reasoning when there is no panel at all", () => {
@@ -191,9 +189,7 @@ Now I answer.");
     // print them twice, which is the bug this change exists to end.
     const captured = panel("Only thinking, no answer.");
     const out = extractReasoningPanels(captured);
-    expect(out.text).toBe(captured.replace(/
-/g, "
-"));
+    expect(out.text).toBe(captured.replace(/\r\n/g, "\n"));
     expect(out).not.toHaveProperty("reasoning");
   });
 
@@ -215,9 +211,7 @@ Now I answer.");
     // format keeps every line of it, and none of it is reported as thinking.
     const captured = ["Here is what it prints:", "```", TOP, "some thinking", BOTTOM, "```"].join(CRLF);
     const out = extractReasoningPanels(captured);
-    expect(out.text).toBe(captured.replace(/
-/g, "
-"));
+    expect(out.text).toBe(captured.replace(/\r\n/g, "\n"));
     expect(out).not.toHaveProperty("reasoning");
   });
 
