@@ -21,15 +21,19 @@
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 
 /**
- * The failure OpenClaw reports when a second client takes the agent session
- * over mid-prompt: another tab, the Telegram channel, or a New chat reset
- * landing on a turn that is already running.
+ * The failure OpenClaw reports when the session file changes under a running
+ * prompt: another tab, the Telegram channel, a New chat reset landing on a
+ * turn that is already running — or, as TASK-512 proved on .177, no second
+ * client at all: a session can wedge so that EVERY turn dies this way, for
+ * hours, with exactly one tab and one gateway in existence.
  *
  * Matched on the gateway's own wording rather than an invented marker, in the
- * same spirit as `isInternalRoutingMessage`. Retrying always worked in every
- * reproduction, which is why this one gets a sentence naming the cause instead
- * of the generic line — a customer who knows the other window did it will not
- * file it as the box being broken.
+ * same spirit as `isInternalRoutingMessage`. The wedged case is why the
+ * sentence below must not assert a second window as fact, and why it has to
+ * name New chat: retrying cures the one-off collision, but New chat is the
+ * only recovery that also cures the wedge — and it cured it instantly in
+ * every observation. A customer told only to "send it again" keeps hitting
+ * the same wall with no way out on screen.
  */
 function isSessionTakeover(raw: string): boolean {
   return /session file changed while embedded prompt lock was released/i.test(raw)
@@ -39,8 +43,8 @@ function isSessionTakeover(raw: string): boolean {
 /** Something went wrong and we will not say what, because we cannot say it safely. */
 const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
 
-/** A second client had the conversation; the turn is simply retryable. */
-const TAKEOVER = "That message did not go through — this chat was open somewhere else at the same time. Send it again.";
+/** The conversation changed under the turn; retry may work, New chat always does. */
+const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
 
 /**
  * Customer-facing text for a chat turn that ended in `state: "error"`.
