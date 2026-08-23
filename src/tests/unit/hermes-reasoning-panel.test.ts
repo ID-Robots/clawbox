@@ -189,7 +189,10 @@ describe("extractReasoningPanels", () => {
     // print them twice, which is the bug this change exists to end.
     const captured = panel("Only thinking, no answer.");
     const out = extractReasoningPanels(captured);
-    expect(out.text).toBe(captured.replace(/\r\n/g, "\n"));
+    // Handed back as it ARRIVED, CRLF and all: this path never rebuilt the
+    // text, it declined to replace it. Only a reply that really was scanned
+    // and rejoined comes back with LF.
+    expect(out.text).toBe(captured);
     expect(out).not.toHaveProperty("reasoning");
   });
 
