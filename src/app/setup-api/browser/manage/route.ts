@@ -365,12 +365,22 @@ export async function POST(req: Request) {
         if (existing.agentBrowsing) {
           const cleared = await terminateForeignCdpBrowser({ profileDir: PROFILE_DIR, cdpPort: CDP_PORT });
           if (cleared > 0) console.log(`[browser] closed ${cleared} headless agent browser process(es) holding CDP :${CDP_PORT}`);
-          // Wait for the port to actually free before launching against it.
+          // Wait for the port to actually free before launching against it. If
+          // it never frees, fail honestly — starting the service anyway would
+          // let the readiness probe mistake the foreign browser's answer for a
+          // successful desktop launch, which is the exact lie this task removes.
+          let portFree = false;
           for (let i = 0; i < 5; i++) {
             try {
               await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
               await new Promise(r => setTimeout(r, 1000));
-            } catch { break; }
+            } catch { portFree = true; break; }
+          }
+          if (!portFree) {
+            return NextResponse.json(
+              { error: `The assistant's background browser is still holding CDP port ${CDP_PORT}. Try again in a moment.` },
+              { status: 409 },
+            );
           }
         }
 
