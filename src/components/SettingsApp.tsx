@@ -3556,9 +3556,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // ─── Desktop layout: sidebar + content ───
   return (
-    <div className="flex h-full bg-[var(--bg-deep)]">
-      {/* Sidebar */}
-      <nav className="w-60 shrink-0 bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
+    <div className="flex h-full min-h-0 overflow-hidden bg-[var(--bg-deep)]">
+      {/* Sidebar. The nav scrolls on its own so a long section list can never
+          grow the row past the window body and paint outside the frame. */}
+      <nav className="w-60 shrink-0 min-h-0 overflow-y-auto bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
         {visibleNavItems.map(item => {
           const active = activeSection === item.id;
           const status = sectionStatus(item.id);
@@ -3566,7 +3567,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <button
               key={item.id}
               onClick={() => setSectionGated(item.id)}
-              className={`flex items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
+              className={`flex shrink-0 items-center gap-3 px-2.5 py-2 rounded-xl text-[15px] border-none cursor-pointer transition-colors text-left ${
                 active
                   ? "bg-[var(--coral-bright)]/15 text-[var(--text-primary)]"
                   : "text-[var(--text-secondary)] hover:bg-white/[0.05] hover:text-[var(--text-primary)]"
@@ -3584,7 +3585,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       </nav>
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center">
+      <div className="flex-1 min-w-0 min-h-0 overflow-y-auto p-6 flex flex-col items-center">
         <div className="w-full max-w-3xl flex flex-col items-stretch [&>div]:mx-auto [&>div]:w-full">
           {renderContent()}
         </div>
