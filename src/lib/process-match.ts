@@ -131,6 +131,32 @@ export function isForeignCdpBrowserArgv(
 }
 
 /**
+ * Parse a /proc/<pid>/cmdline into argv.
+ *
+ * Normally the file is NUL-separated with a trailing NUL. But a LIVE Chromium
+ * is not normal: it rewrites its argv in place as one flat space-joined
+ * string (its process title), so the whole command line arrives as a single
+ * NUL-free element — verified byte-for-byte on a real device (TASK-515),
+ * where it made every scan miss the running desktop browser. Fall back to
+ * space-splitting for exactly that single-element shape.
+ *
+ * The fallback does not weaken the argv[0] anchor this module exists for: a
+ * chat message always sits inside ONE element of a multi-element,
+ * NUL-separated argv (the harness's), which takes the NUL path and is
+ * rejected on argv[0]. Only a process that rewrote its own title — or was
+ * exec'd with a single spaced argv[0], which a chat message cannot cause —
+ * reaches the space path. Paths we match (executable, profile dir) contain
+ * no spaces on this device.
+ */
+export function parseProcCmdline(raw: string): string[] {
+  const parts = raw.split("\0").filter((part) => part.length > 0);
+  if (parts.length === 1 && parts[0].includes(" ")) {
+    return parts[0].split(" ").filter((part) => part.length > 0);
+  }
+  return parts;
+}
+
+/**
  * Read one process's argv from /proc, or null when it is gone / unreadable.
  *
  * Rejects on the executable BEFORE splitting the rest. This runs for every pid
@@ -153,12 +179,13 @@ async function readMatchingProcArgv(
     return null;
   }
   if (!raw) return null;
-  // /proc cmdline is NUL-separated with a trailing NUL.
-  const firstNul = raw.indexOf("\0");
-  const argv0 = firstNul < 0 ? raw : raw.slice(0, firstNul);
+  // Fast pre-check on the executable alone: argv[0] ends at the first NUL or,
+  // for a title-rewriting process like Chromium, the first space.
+  const end = raw.search(/[\0 ]/);
+  const argv0 = end < 0 ? raw : raw.slice(0, end);
   if (!argv0 || !acceptsExecutable(argv0)) return null;
 
-  const argv = raw.split("\0").filter((part) => part.length > 0);
+  const argv = parseProcCmdline(raw);
   return argv.length > 0 && accepts(argv) ? argv : null;
 }
 

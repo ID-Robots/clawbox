@@ -22,6 +22,7 @@ import {
   isClawboxBrowserArgv,
   isForeignCdpBrowserArgv,
   findClawboxBrowserPids,
+  parseProcCmdline,
 } from "@/lib/process-match";
 
 const PROFILE_DIR = "/home/clawbox/.config/clawbox-browser";
@@ -189,6 +190,47 @@ describe("isForeignCdpBrowserArgv", () => {
         `please run chromium --remote-debugging-port=${CDP_PORT}`],
       MATCH,
     )).toBe(false);
+  });
+});
+
+describe("parseProcCmdline", () => {
+  it("splits an ordinary NUL-separated cmdline", () => {
+    expect(parseProcCmdline("/usr/bin/node\0server.js\0--port\u00008080\0")).toEqual([
+      "/usr/bin/node", "server.js", "--port", "8080",
+    ]);
+  });
+
+  /**
+   * TASK-515: a LIVE Chromium rewrites its argv in place as one flat
+   * space-joined string (its process title), so /proc cmdline arrives as a
+   * single NUL-free element. This is the exact shape read from a running
+   * desktop browser on a real device — the old NUL-only parse turned it into
+   * a one-element argv whose "executable" was the whole command line, so the
+   * scan never matched a live browser at all.
+   */
+  it("space-splits Chromium's rewritten single-string cmdline", () => {
+    const raw = "/home/clawbox/.cache/ms-playwright/chromium-1208/chrome-linux/chrome "
+      + "--remote-debugging-port=18800 --remote-allow-origins=http://127.0.0.1:18800 "
+      + "--user-data-dir=/home/clawbox/.config/clawbox-browser --no-first-run\0";
+    const argv = parseProcCmdline(raw);
+    expect(argv[0]).toBe("/home/clawbox/.cache/ms-playwright/chromium-1208/chrome-linux/chrome");
+    expect(argv).toContain("--user-data-dir=/home/clawbox/.config/clawbox-browser");
+    expect(isClawboxBrowserArgv(argv, MATCH)).toBe(true);
+  });
+
+  it("keeps a chat message inside one element on the NUL path", () => {
+    // The message contains spaces and browser-ish text, but the harness argv
+    // is multi-element NUL-separated — the space fallback must not fire, so
+    // the message stays one element and argv[0] stays the harness binary.
+    const raw = `/usr/bin/python\0hermes\0chat\0-q\0${HOSTILE_MESSAGE}\0`;
+    const argv = parseProcCmdline(raw);
+    expect(argv[0]).toBe("/usr/bin/python");
+    expect(argv).toContain(HOSTILE_MESSAGE);
+    expect(isClawboxBrowserArgv(argv, MATCH)).toBe(false);
+  });
+
+  it("leaves a single-element cmdline without spaces alone", () => {
+    expect(parseProcCmdline("/usr/sbin/sshd\0")).toEqual(["/usr/sbin/sshd"]);
   });
 });
 
