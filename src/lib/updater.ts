@@ -9,8 +9,10 @@ import {
   openclawIsAbsent,
   gatewayIsAbsent,
 } from "./openclaw-config";
-import { hasHermesHarness } from "./edition-source";
+import { hasHermesHarness, readEdition, type EditionName } from "./edition-source";
+import { runHermesCli } from "./hermes-cli";
 import { isPortOpen } from "./port-probe";
+import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
@@ -618,6 +620,22 @@ interface ComponentVersionInfo {
 interface VersionInfo {
   clawbox: ComponentVersionInfo & { current: string };
   openclaw: ComponentVersionInfo;
+  /**
+   * The Hermes agent, reported ONLY on the SKUs that ship it (`hermes` and
+   * `dual`). Absent — not null — on `openclaw`, so the field's presence is
+   * itself the "this device has a Hermes to talk about" signal and the UI
+   * never has to guess.
+   */
+  hermes?: ComponentVersionInfo;
+  /**
+   * Which harnesses this device actually has. The About screen needs it to
+   * decide which version rows are meaningful: a Hermes box has no OpenClaw
+   * at all, so an "OpenClaw: not installed" row there is noise, not news.
+   *
+   * Additive: an older client that ignores this field renders exactly as
+   * before.
+   */
+  edition: EditionName;
 }
 
 let cachedVersionInfo: VersionInfo | null = null;
@@ -678,6 +696,30 @@ async function readClawboxVersion(): Promise<string> {
   return process.env.NEXT_PUBLIC_APP_VERSION || "unknown";
 }
 
+/**
+ * The installed Hermes agent version, or null if it cannot be determined.
+ *
+ * The caller MUST gate this on the edition: `openclaw` boxes have no Hermes
+ * binary, and spawning one there would be a guaranteed ENOENT on every
+ * version read. It is only ever reached from getVersionInfo(), whose whole
+ * result is cached for TARGET_VERSION_CACHE_TTL, so the About screen polling
+ * for versions cannot turn into a subprocess storm.
+ *
+ * Never throws: a device mid-upgrade (the Hermes installer briefly replaces
+ * the venv the shim execs) should report an unknown version for a few
+ * seconds, not fail the whole version endpoint that ClawBox's own update
+ * tile also depends on.
+ */
+async function readHermesVersion(): Promise<string | null> {
+  try {
+    const { code, stdout } = await runHermesCli(["--version"], { timeoutMs: 10_000 });
+    if (code !== 0) return null;
+    return parseHermesVersion(stdout);
+  } catch {
+    return null;
+  }
+}
+
 async function getPinnedBranchTarget(gitCmd: string): Promise<{
   branch: string;
   currentSha: string;
@@ -712,7 +754,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
   }
 
   const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
-  const [targetVersion, openclawCurrent, openclawTarget, rawVersion] = await Promise.all([
+  const edition = readEdition();
+  const hasHermes = hasHermesHarness();
+  const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent] = await Promise.all([
     getTargetVersion(),
     // The Hermes edition ships no openclaw binary, so skip the spawn and read
     // the version from the installed package.json (absent there too → null,
@@ -737,6 +781,9 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       }
     })(),
     readClawboxVersion(),
+    // Gated on the edition, not on a try/catch: the `openclaw` SKU has no
+    // hermes binary, so this must never spawn there.
+    hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
   const pinnedBranchTarget = await getPinnedBranchTarget(gitCmd);
 
@@ -764,6 +811,13 @@ export async function getVersionInfo(): Promise<VersionInfo> {
       target: openclawTarget && openclawCurrent && openclawCurrent.includes(openclawTarget) ? null : openclawTarget,
       updateAvailable: !!(openclawTarget && openclawCurrent && !openclawCurrent.includes(openclawTarget)),
     },
+    // Hermes ships from its own upstream installer, not from a ClawBox pin, so
+    // there is no target to converge on and nothing to offer an update for —
+    // only the installed version is reportable.
+    ...(hasHermes
+      ? { hermes: { current: hermesCurrent, target: null, updateAvailable: false } }
+      : {}),
+    edition,
   };
   versionInfoCacheTime = Date.now();
   return cachedVersionInfo;

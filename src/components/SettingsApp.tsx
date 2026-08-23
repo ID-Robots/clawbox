@@ -32,6 +32,30 @@ import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-
 import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 import { DISCORD_INVITE_URL } from "@/lib/community";
+import { isGenerationLocale } from "@/lib/mascot-phrases";
+
+/**
+ * `meta.reason` from `POST /setup-api/mascot-lines/regenerate` -> the
+ * translation key to show for it.
+ *
+ * The route's own `reason` field is a human-readable ENGLISH string, so it
+ * cannot be shown to a user running the UI in Bulgarian. The machine-readable
+ * `meta.reason` is the one to branch on — and these must stay distinct, which
+ * is the whole point of the route reporting them separately: "your chat has
+ * the model" and "the box is already refreshing" call for different reactions
+ * from the user, and only one of them mentions their chat.
+ */
+const MASCOT_REGEN_MESSAGE_KEYS: Record<string, string> = {
+  "chat-busy": "settings.mascotRefreshChatBusy",
+  "refresh-in-progress": "settings.mascotRefreshInProgress",
+  "generation-disabled-for-locale": "settings.mascotRefreshEnglishOnly",
+  "low-memory": "settings.mascotRefreshLowMemory",
+  unavailable: "settings.mascotRefreshUnavailable",
+  timeout: "settings.mascotRefreshFailed",
+  transport: "settings.mascotRefreshFailed",
+  malformed: "settings.mascotRefreshFailed",
+  "no-new-phrases": "settings.mascotRefreshNothingNew",
+};
 
 /* ── Types ── */
 
@@ -318,6 +342,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [versionInfo, setVersionInfo] = useState<{
     clawbox: { current: string; target: string | null; updateAvailable?: boolean };
     openclaw: { current: string | null; target: string | null; updateAvailable?: boolean };
+    // Both optional: a device that has not been updated yet still answers
+    // /update/versions with the old two-key shape.
+    hermes?: { current: string | null; target: string | null; updateAvailable?: boolean };
+    edition?: "openclaw" | "hermes" | "dual";
   } | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
   const [updateBranch, setUpdateBranch] = useState<string | null>(null);
@@ -662,6 +690,56 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         .catch(() => { /* keep local edit; next save attempt will retry */ });
     }, 600);
   }, []);
+
+  /* ── Mascot phrase refresh ── */
+  // `POST /setup-api/mascot-lines/regenerate` shipped with no caller at all —
+  // the on-device generator could only ever be triggered by the cache going
+  // stale on its own schedule, so nobody could ask the crab for new lines.
+  const [mascotRegenBusy, setMascotRegenBusy] = useState(false);
+  const [mascotRegenStatus, setMascotRegenStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const mascotRegenAbortRef = useRef<AbortController | null>(null);
+  const mascotGenerationAllowed = isGenerationLocale(locale);
+  // A local run is up to 180 s of Jetson, so the request must survive the user
+  // switching sections — but not the whole panel unmounting.
+  useEffect(() => () => mascotRegenAbortRef.current?.abort(), []);
+
+  const regenerateMascotPhrases = useCallback(async () => {
+    mascotRegenAbortRef.current?.abort();
+    const controller = new AbortController();
+    mascotRegenAbortRef.current = controller;
+    setMascotRegenBusy(true);
+    setMascotRegenStatus(null);
+    try {
+      const res = await fetch(
+        `/setup-api/mascot-lines/regenerate?locale=${encodeURIComponent(locale)}`,
+        { method: "POST", signal: controller.signal },
+      );
+      const data = await res.json().catch(() => null);
+      const reason = typeof data?.meta?.reason === "string" ? data.meta.reason : null;
+      if (data?.ok === true) {
+        setMascotRegenStatus({ type: "success", message: t("settings.mascotRefreshed") });
+        // The crab caches its phrases per day+locale in the browser; tell it
+        // to drop that and refetch, or the new lines only appear tomorrow.
+        window.dispatchEvent(new Event("clawbox-mascot-phrases-changed"));
+        return;
+      }
+      // Map the machine-readable outcome to a translated string. The route's
+      // own `reason` text is English-only, so it is a last resort rather than
+      // the thing we show.
+      setMascotRegenStatus({
+        type: "error",
+        message: MASCOT_REGEN_MESSAGE_KEYS[reason ?? ""]
+          ? t(MASCOT_REGEN_MESSAGE_KEYS[reason ?? ""])
+          : t("settings.mascotRefreshFailed"),
+      });
+    } catch (err) {
+      // An abort is the component going away, not a failure to report.
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setMascotRegenStatus({ type: "error", message: t("settings.mascotRefreshFailed") });
+    } finally {
+      if (!controller.signal.aborted) setMascotRegenBusy(false);
+    }
+  }, [locale, t]);
 
   /* ── Local URL (mDNS hostname) ── */
   const [hostname, setHostname] = useState<string>("");
@@ -1713,6 +1791,37 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 ui.onMascotToggle(hidden);
                 window.dispatchEvent(new Event(hidden ? "clawbox-hide-mascot" : "clawbox-show-mascot"));
               }} label={t("settings.showMascot")} />
+
+              {/* Ask the on-device model for a fresh batch of mascot lines.
+                  Disabled outside the generation allowlist, with the reason
+                  spelled out rather than a dead button. */}
+              <div className="mt-4 pt-4 border-t border-[var(--border-subtle)]">
+                <p className="text-xs text-[var(--text-muted)] mb-3">{t("settings.mascotRefreshHelper")}</p>
+                <button
+                  type="button"
+                  onClick={() => { void regenerateMascotPhrases(); }}
+                  disabled={mascotRegenBusy || !mascotGenerationAllowed}
+                  aria-busy={mascotRegenBusy}
+                  className="flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm bg-white/[0.04] border border-[var(--border-subtle)] text-[var(--text-primary)] hover:border-white/20 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <span
+                    className={`material-symbols-rounded${mascotRegenBusy ? " animate-spin" : ""}`}
+                    style={{ fontSize: 18 }}
+                    aria-hidden="true"
+                  >
+                    {mascotRegenBusy ? "progress_activity" : "refresh"}
+                  </span>
+                  <span>{mascotRegenBusy ? t("settings.mascotRefreshing") : t("settings.mascotRefresh")}</span>
+                </button>
+                {!mascotGenerationAllowed && (
+                  <p className="mt-2 text-xs text-[var(--text-muted)]">{t("settings.mascotRefreshEnglishOnly")}</p>
+                )}
+                {mascotRegenStatus && (
+                  <div className="mt-2">
+                    <StatusMessage type={mascotRegenStatus.type} message={mascotRegenStatus.message} />
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Mascot pet — Hermes editions only; renders nothing on OpenClaw. */}
@@ -3044,10 +3153,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className="text-[var(--text-muted)]">{t("settings.version")}</span>
                   <span className="text-[var(--text-primary)]">{versionInfo?.clawbox.current ?? process.env.NEXT_PUBLIC_APP_VERSION ?? "unknown"}</span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-[var(--text-muted)]">OpenClaw</span>
-                  <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
-                </div>
+                {/* Harness version, per edition. The Hermes SKU ships no
+                    OpenClaw at all, so its row could only ever read "not
+                    installed" — a meaningless line about software the device
+                    was never supposed to have. Show the harness this box
+                    actually runs instead; `dual` has both, so it shows both.
+                    A server that predates the `edition` field falls through to
+                    the OpenClaw row exactly as before. */}
+                {versionInfo?.edition !== "hermes" && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-[var(--text-muted)]">OpenClaw</span>
+                    <span className="text-[var(--text-primary)]">{cleanVersion(versionInfo?.openclaw.current) ?? t("settings.notInstalled")}</span>
+                  </div>
+                )}
+                {versionInfo?.hermes && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-[var(--text-muted)]">Hermes</span>
+                    <span className="text-[var(--text-primary)]">{versionInfo.hermes.current ?? t("settings.notInstalled")}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
                   <span className="text-[var(--text-primary)]">Next.js + Bun</span>

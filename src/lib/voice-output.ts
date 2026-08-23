@@ -18,12 +18,19 @@
  *     disagree with the one that runs.
  *
  *  2. A CONFIGURED CLOUD VOICE IS NOT A WORKING ONE. The `openai` provider on a
- *     ClawBox carries the ClawBox AI portal token (`claw_…`) and no
- *     provider-level baseUrl, so a speech call goes to api.openai.com and comes
- *     back 401 (`openclaw capability tts convert --model openai/gpt-4o-mini-tts`
- *     on .177, 2026-08-22). The ClawBox AI proxy has no speech endpoint at all.
- *     An option that is present in a registry is therefore not evidence that the
- *     box can speak with it.
+ *     ClawBox carries the ClawBox AI portal token (`claw_…`), and a speech call
+ *     with no endpoint behind it goes to api.openai.com and comes back 401
+ *     (`openclaw capability tts convert --model openai/gpt-4o-mini-tts` on
+ *     .177, 2026-08-22). An option that is present in a registry is therefore
+ *     not evidence that the box can speak with it.
+ *
+ *     UPDATED 2026-08-22 (TASK-490): ClawBox AI now DOES serve speech —
+ *     `/api/ai/audio/speech`, Max only (clawbox-website PR #523). An entitled
+ *     box gets `messages.tts.providers.openai` written by
+ *     gateway-pre-start.sh, which is what turns the claw_ token from a
+ *     credential with nowhere to go into a working one. The rule below did not
+ *     change, only the reason a box can fail it: an unentitled box, or one
+ *     whose `openai` slot belongs to its owner, still has no endpoint.
  *
  * So availability here is a MEASUREMENT, in the same spirit as the Local Models
  * tab (TASK-435): an engine is usable when the box has what it needs AND the
@@ -221,10 +228,17 @@ function cloudEndpointConfigured(config: VoiceConfigView, providerId: string): b
 
 /**
  * A ClawBox AI portal token is not an OpenAI key. Sent to api.openai.com it
- * comes back 401 — proven on .177 — and ClawBox AI itself serves chat,
- * transcription and images but no speech, so there is nothing to point it at.
- * Saying so before the customer spends a check on it is the difference between
- * a selector that reports the box and one that repeats a registry.
+ * comes back 401 — proven on .177 — so a claw_ credential is only usable when
+ * something has pointed it at a route that accepts it.
+ *
+ * Until 2026-08-22 nothing could: ClawBox AI served chat, transcription and
+ * images but no speech. It serves speech now, on Max, and gateway-pre-start.sh
+ * writes the endpoint for an entitled box (TASK-490). So this returning true no
+ * longer means "the product has no cloud voice" — it means THIS box has not
+ * been pointed at one, because its plan does not include it or because its
+ * `openai` slot is the owner's own. Saying so before the customer spends a
+ * check on it is the difference between a selector that reports the box and one
+ * that repeats a registry.
  */
 export function cloudCredentialIsUnusable(config: VoiceConfigView, providerId: string): boolean {
   const key = credentialFor(config, providerId);
@@ -299,7 +313,18 @@ function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEng
   if (!providerId || !hasKey) {
     detail = "No cloud voice is set up on this box.";
   } else if (unusableKey) {
-    detail = "ClawBox AI does not serve the voice yet, so this box has no cloud voice to call.";
+    // Was "ClawBox AI does not serve the voice yet", which stopped being true on
+    // 2026-08-22 and was the most confident wrong sentence in the panel. What is
+    // true for every box that still lands here: it holds a ClawBox AI key, and
+    // that key does not open a cloud voice for it. The upgrade prompt at the
+    // point of USE is TASK-486's, deliberately not duplicated here.
+    //
+    // It stops there rather than adding "so it speaks with its own voice".
+    // This branch knows nothing about the local engine, and a box with no
+    // installed voice would have been promised one it does not have — the same
+    // class of confident wrong sentence this line replaced. The local row sits
+    // directly above it in the panel and answers that question itself.
+    detail = "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one.";
   } else if (failure) {
     detail = `The last voice check failed: ${failure}`;
   } else if (proven) {

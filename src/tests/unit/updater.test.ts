@@ -21,6 +21,11 @@ vi.mock("@/lib/port-probe", () => ({
   isPortOpen: vi.fn(),
 }));
 
+// The Hermes version probe goes through the shared CLI wrapper, so the wrapper
+// is the seam: nothing in these tests may spawn a real `hermes`.
+const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
+vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
+
 import { get, set, setMany } from "@/lib/config-store";
 import { isPortOpen } from "@/lib/port-probe";
 
@@ -808,5 +813,104 @@ describe("updater", () => {
         expect.objectContaining({ update_completed: true }),
       );
     });
+  });
+});
+
+/**
+ * The About screen used to report an OpenClaw version on every SKU. On the
+ * Hermes edition there IS no OpenClaw — the harness is not installed — so the
+ * row could only read "not installed": a line about software the device was
+ * never meant to have, and nothing at all about the agent it actually runs.
+ *
+ * getVersionInfo() therefore reports the harness the device really has, and
+ * must do it without ever spawning a hermes binary on an openclaw box.
+ */
+describe("getVersionInfo harness reporting", () => {
+  const HERMES_BANNER =
+    "Hermes Agent v0.20.5 (2026.8.19) — upstream 261a4efb — local 10914727\n" +
+    "Install directory: /home/clawbox/.hermes/hermes-agent";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockReadFile.mockRejectedValue(new Error("ENOENT"));
+    mockGet.mockResolvedValue(undefined);
+    setupExecMock({ "ls-remote": { stdout: "abc123\trefs/tags/v1.0.0\n", stderr: "" } });
+    setupExecFileMock({ openclaw: { stdout: "1.0.0", stderr: "" } });
+    mockRunHermesCli.mockResolvedValue({ code: 0, stdout: HERMES_BANNER, stderr: "" });
+  });
+
+  afterEach(() => {
+    delete process.env.CLAWBOX_EDITION;
+  });
+
+  async function versionsFor(edition: string) {
+    vi.resetModules();
+    process.env.CLAWBOX_EDITION = edition;
+    const fresh = await import("@/lib/updater");
+    return fresh.getVersionInfo();
+  }
+
+  it("reports the Hermes agent version on the hermes edition", async () => {
+    const info = await versionsFor("hermes");
+
+    expect(info.edition).toBe("hermes");
+    expect(info.hermes?.current).toBe("v0.20.5");
+    expect(mockRunHermesCli).toHaveBeenCalledWith(["--version"], expect.anything());
+  });
+
+  it("never spawns hermes on the openclaw edition, and reports no hermes field", async () => {
+    const info = await versionsFor("openclaw");
+
+    expect(info.edition).toBe("openclaw");
+    expect(info.hermes).toBeUndefined();
+    expect(mockRunHermesCli).not.toHaveBeenCalled();
+    // OpenClaw itself is unchanged — this SKU's About row still has a version.
+    expect(info.openclaw.current).toBe("1.0.0");
+  });
+
+  it("reports both harnesses on dual", async () => {
+    const info = await versionsFor("dual");
+
+    expect(info.edition).toBe("dual");
+    expect(info.openclaw.current).toBe("1.0.0");
+    expect(info.hermes?.current).toBe("v0.20.5");
+  });
+
+  it("reports a null hermes version rather than failing when the CLI is missing", async () => {
+    mockRunHermesCli.mockRejectedValue(new Error("Hermes is not installed on this device"));
+
+    const info = await versionsFor("hermes");
+
+    // The field is still present (the SKU has a Hermes) but has no version,
+    // and the ClawBox half of the payload is unaffected.
+    expect(info.hermes).toEqual({ current: null, target: null, updateAvailable: false });
+    expect(info.clawbox.current).toBeTruthy();
+  });
+
+  it("reports a null hermes version when the CLI exits non-zero", async () => {
+    mockRunHermesCli.mockResolvedValue({ code: 1, stdout: "", stderr: "boom" });
+
+    const info = await versionsFor("hermes");
+
+    expect(info.hermes?.current).toBeNull();
+  });
+
+  it("offers no Hermes update — ClawBox does not pin the agent", async () => {
+    const info = await versionsFor("hermes");
+
+    expect(info.hermes?.target).toBeNull();
+    expect(info.hermes?.updateAvailable).toBe(false);
+  });
+
+  it("probes hermes once per cache window, not once per caller", async () => {
+    vi.resetModules();
+    process.env.CLAWBOX_EDITION = "hermes";
+    const fresh = await import("@/lib/updater");
+
+    await fresh.getVersionInfo();
+    await fresh.getVersionInfo();
+    await fresh.getVersionInfo();
+
+    expect(mockRunHermesCli).toHaveBeenCalledTimes(1);
   });
 });

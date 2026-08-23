@@ -7,7 +7,7 @@ import { type MascotPhraseSet } from '@/lib/mascot-phrases'
 import { isPhraseCompatible } from '@/lib/mascot-language'
 import { NEUTRAL_PACK } from '@/lib/mascot-packs'
 import { frenzyQuotesFor } from '@/lib/mascot-frenzy'
-import { fetchUserName, fetchPhraseSet, initialPhraseSet, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
+import { fetchUserName, fetchPhraseSet, initialPhraseSet, clearPhraseCache, pickNameGreeting, type MascotLine } from '@/lib/mascot-client'
 import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
 import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
@@ -437,12 +437,23 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     // never show — and leaves the model busy when the real locale's request
     // arrives moments later. The refs stay on NEUTRAL_PACK until then.
     if (!localeResolved) return
-    const myToken = ++phraseFetchTokenRef.current
-    applyVoice(initialPhraseSet(locale), locale)
-    fetchPhraseSet(locale).then((phrases) => {
-      if (myToken !== phraseFetchTokenRef.current) return
-      applyVoice(phrases, locale)
-    })
+    const load = () => {
+      const myToken = ++phraseFetchTokenRef.current
+      applyVoice(initialPhraseSet(locale), locale)
+      fetchPhraseSet(locale).then((phrases) => {
+        if (myToken !== phraseFetchTokenRef.current) return
+        applyVoice(phrases, locale)
+      })
+    }
+    load()
+    // Settings just had the device generate a new batch. The client cache is
+    // keyed by day, so without dropping it the new lines would not show up
+    // until tomorrow — which reads as the button having done nothing. The
+    // reloaded set goes through `applyVoice` like every other one, so a worn
+    // pet does not start speaking crab lines just because they are new.
+    const onRegenerated = () => { clearPhraseCache(); load() }
+    window.addEventListener('clawbox-mascot-phrases-changed', onRegenerated)
+    return () => window.removeEventListener('clawbox-mascot-phrases-changed', onRegenerated)
   }, [locale, localeResolved, applyVoice])
 
   // User name (from `ui_user_name` preference) — used in occasional name

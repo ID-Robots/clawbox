@@ -178,6 +178,15 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
 // gateway token into HTML, so it stays gated.
 const PRE_AUTH_SENSITIVE_EXACT = new Set([
   "/setup-api/gateway",
+  // The leaf only, NOT the `/setup-api/mascot-lines` subtree: the GET is what
+  // the crab reads its phrases from and it runs on the wizard, so gating the
+  // subtree would leave the mascot mute during setup. The POST is the
+  // expensive half — each call cold-loads a ~3.8 GB model on a Jetson for up
+  // to three minutes — and it has no onboarding role at all: its only caller
+  // is the Settings button, which is desktop-only and therefore post-setup.
+  // Left ungated it was a free way for anyone in radio range of the open
+  // `ClawBox-Setup` AP to pin the box's memory and CPU.
+  "/setup-api/mascot-lines/regenerate",
 ]);
 
 function isSensitiveSetupApi(pathname: string): boolean {

@@ -49,10 +49,38 @@ export type PhraseCategory = (typeof PHRASE_CATEGORIES)[number];
 /** A speech bubble is small. Anything longer is clipped on a phone. */
 export const MAX_PHRASE_LENGTH = 60;
 
-/** A generated category is only kept if this many entries survive validation. */
-export const MIN_SURVIVORS_PER_CATEGORY = 4;
+/**
+ * A category is only kept if this many entries survive validation.
+ *
+ * One. This was four, from the era when a generated set REPLACED the pack: a
+ * category with two lines made the crab repeat itself, so topping it up from
+ * the pack was strictly better. Neither half of that is true any more —
+ * `mergeWithPackSync` UNIONS the generated lines with the pack, so every
+ * category the crab renders is pack-sized whatever generation contributed,
+ * and `stripEchoes` now removes the pack copies before this count is taken,
+ * so the number being compared is "NEW lines", not "lines".
+ *
+ * Four NEW lines per category is a bar the on-device model does not clear: a
+ * measured English run on the reference box came back ~76% echo, leaving 1-16
+ * new lines spread across nine categories, and demanding four of them in each
+ * of three categories turned every real run into an error message. One new
+ * line in a category is a real addition to the repertoire — it is exactly
+ * what the owner sees when the crab says something it has never said before.
+ * Zero is still zero, and still fails: that is `MIN_SURVIVING_CATEGORIES`
+ * below doing its job.
+ */
+export const MIN_SURVIVORS_PER_CATEGORY = 1;
 
-/** A generated batch is only kept if this many categories survive. */
+/**
+ * A batch is only kept if this many categories survive.
+ *
+ * With the per-category bar at one, this is what stops a worthless run
+ * passing: a batch that echoed the pack everywhere contributes zero
+ * categories and is rejected. It is also a structural sanity check — the JSON
+ * grammar makes a healthy run emit all nine categories, so a batch that lands
+ * new lines in fewer than three of them is a truncated or malformed answer
+ * rather than a thin one.
+ */
 export const MIN_SURVIVING_CATEGORIES = 3;
 
 /**
@@ -61,6 +89,44 @@ export const MIN_SURVIVING_CATEGORIES = 3;
  * English" and thrown away.
  */
 export const MAX_ENGLISH_STOPWORD_RATIO = 0.35;
+
+/**
+ * The locales the on-device model is allowed to generate phrases for.
+ *
+ * English only, and that is a deliberate product decision rather than a
+ * temporary gap. Gemma 4 E2B is the only model that fits on the box, and in
+ * every other shipped language it either answered in English outright (which
+ * is what the stopword probe below exists to catch) or produced phrasing a
+ * native speaker would not: a 60-character sarcastic one-liner is close to the
+ * hardest thing to write in a language a 2B model barely speaks, and getting
+ * it wrong is far more visible than having no generated lines at all.
+ *
+ * The hand-written packs are already complete, idiomatic and reviewed in all
+ * ten languages, so a non-English box loses nothing by skipping generation —
+ * it just skips the part that was making things worse. Every guard downstream
+ * (the validator, the stopword probe, the language gate) still runs; this is
+ * the cheapest one, applied first, and it means a Bulgarian box never spends
+ * 180 seconds of Jetson on a batch that was going to be thrown away.
+ *
+ * Widening this list is a real change: it needs a model that can carry the
+ * tone in the new language, not just a config edit.
+ *
+ * It lives in this module — not the server one — because the Settings UI has
+ * to know whether to offer the refresh button, and this file is the only one
+ * of the pair a client component can import.
+ */
+export const GENERATION_LOCALES: readonly string[] = ["en"];
+
+/** True when the local model may generate phrases for `locale`. */
+export function isGenerationLocale(locale: string): boolean {
+  return GENERATION_LOCALES.includes(locale);
+}
+
+/**
+ * `meta.reason` served for a locale generation is switched off for. Shared so
+ * the route, the server and the Settings UI all name it the same way.
+ */
+export const GENERATION_DISABLED_REASON = "generation-disabled-for-locale";
 
 export const LANG_NAMES: Record<string, string> = {
   en: "English",
@@ -116,6 +182,85 @@ export function sanitizeCategory(
   return out;
 }
 
+/**
+ * Fold a phrase to the form two entries are compared by when deciding whether
+ * one is an echo of the other. Deliberately looser than the exact-string
+ * dedupe `mergeWithPackSync` does, because "Bug? Feature." and "bug? feature."
+ * are the same line as far as the crab's repertoire is concerned.
+ *
+ * Emoji and trailing punctuation come off too, because the decorated echo is
+ * what the model actually produces: a measured run returned "I do all the work
+ * here. 🙄", "Ship faster, humans. 💨" and "I need a raise. 💸" against pack
+ * lines identical but for the emoji. Counting those as new lines is the same
+ * untruth this module exists to stop telling, one notch finer — and keeping
+ * both variants in the bag is exactly how the crab ends up saying the same
+ * thing twice in a row.
+ *
+ * A line that is NOTHING but emoji (the idle pack is full of them) folds to
+ * the empty string, which would make every such line an echo of every other.
+ * Those fall back to the plain fold, so "🤔" and "😴" stay different lines.
+ */
+function echoKey(phrase: string): string {
+  const folded = phrase.trim().toLowerCase().replace(/\s+/g, " ");
+  const bare = folded
+    // Variation selector-16 and ZWJ are written as escapes on purpose: both
+    // are invisible in a source file, so a literal one is impossible to spot.
+    .replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D]/gu, "")
+    .replace(/[.!?,;\u2026"'*]+/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return bare === "" ? folded : bare;
+}
+
+/**
+ * Drop every generated entry the crab can already say.
+ *
+ * The prompt shows the model the locale's pack as a TONE REFERENCE, and the
+ * model copies it: a measured English run came back 76% echo. Those echoes
+ * used to count towards MIN_SURVIVORS_PER_CATEGORY, so a batch that added
+ * almost nothing passed the gate, was cached, and was then deduped away again
+ * by `mergeWithPackSync` on the way to the bubble — a whole 180-second model
+ * run spent to store lines the pack already had.
+ *
+ * Stripping them here, BEFORE the survivor count, makes that count mean what
+ * it says: how many NEW lines this run produced. A run that is nothing but
+ * echo fails validation instead of masquerading as a success, which is the
+ * honest outcome.
+ *
+ * `known` is variadic because "already said" has two sources, and using only
+ * the first was a half-truth: the pack, and — in top-up mode — the lines a
+ * previous run already put in the cache envelope. A line the model produced
+ * again yesterday is not new either, and counting it as new would put the
+ * survivor gate back to measuring something other than what it claims.
+ *
+ * Nothing is lost by dropping them — the pack and the envelope both supply
+ * their own lines on every read anyway.
+ */
+export function stripEchoes(
+  set: Partial<MascotPhraseSet> | null | undefined,
+  ...known: Array<Partial<MascotPhraseSet> | null | undefined>
+): Partial<MascotPhraseSet> {
+  const out: Partial<MascotPhraseSet> = {};
+  for (const category of PHRASE_CATEGORIES) {
+    const incoming = set?.[category];
+    if (!Array.isArray(incoming)) continue;
+    const packKeys = new Set(
+      known
+        .flatMap((source) => {
+          const entries = source?.[category];
+          return Array.isArray(entries) ? entries : [];
+        })
+        .filter((entry): entry is string => typeof entry === "string")
+        .map(echoKey),
+    );
+    // Non-strings are passed through untouched so `validateBatch` stays the
+    // single place that decides what a usable phrase is — and keeps counting
+    // them as dropped.
+    out[category] = incoming.filter((entry) => typeof entry !== "string" || !packKeys.has(echoKey(entry)));
+  }
+  return out;
+}
+
 export interface BatchValidation {
   /** Only the categories that passed — the rest are the pack's job. */
   categories: Partial<MascotPhraseSet>;
@@ -130,10 +275,11 @@ export interface BatchValidation {
 /**
  * Gate a freshly generated batch before it is written to the cache.
  *
- * A category needs MIN_SURVIVORS_PER_CATEGORY survivors to be kept at all —
- * a category with two usable lines makes the crab repeat itself, and topping
- * it up from the pack is strictly better. A batch needs
- * MIN_SURVIVING_CATEGORIES kept categories to be persisted at all.
+ * A category needs MIN_SURVIVORS_PER_CATEGORY survivors to be kept, and a
+ * batch needs MIN_SURVIVING_CATEGORIES kept categories to be persisted at
+ * all. Callers that have already run the entries through `stripEchoes` are
+ * therefore counting NEW lines, which is the only count worth gating on: see
+ * both constants for why the per-category bar is one rather than four.
  *
  * `stopwordProbe` catches the failure the script check structurally cannot:
  * a model asked for German that answered in English.

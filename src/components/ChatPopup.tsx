@@ -11,7 +11,9 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { describeChatFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
+import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
@@ -23,7 +25,9 @@ import {
   describeTranscribeFailure,
   formatRecordingClock,
   pickRecordingMimeType,
+  readCaptureAvailability,
   recordingFileName,
+  type CaptureAvailability,
   type VoiceStatus,
 } from '@/lib/chat-voice-input'
 import {
@@ -202,6 +206,7 @@ import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
+import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import { fetchHarness } from '@/lib/client-harness'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
@@ -1100,52 +1105,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // A gateway without the RPC just means we fall back to the
               // backstop reconcile below; the chat still works.
             })
-          // If a skill was just installed/uninstalled, start fresh session.
-          // Provider changes re-use the same flag for retry-budget + overlay
-          // purposes, but we skip the auto-send prompt for them (no skill
-          // changed, there's nothing to confirm) — just reset and hand
-          // control back to the user.
+          // Only a provider change or a plain gateway restart gets here: those
+          // are the two things that still bounce the gateway and drop this
+          // socket. A skill change no longer does either, so it never raises
+          // the overlay and is handled entirely in its own event handler
+          // (search for skillHandler) — it must not be re-handled here.
+          //
+          // Both survivors keep the visible history: a provider change only
+          // swapped the backend session override, and a restart changed
+          // nothing about the conversation at all.
           if (skillInstalledRef.current) {
             const wasProviderChange = reloadReasonRef.current === 'provider'
-            // A plain gateway restart (e.g. a channel-config toggle) keeps
-            // the conversation intact too — nothing about the session
-            // semantics changed, the gateway just bounced.
-            const keepHistoryReload = wasProviderChange || reloadReasonRef.current === 'restart'
             skillInstalledRef.current = false
             reloadReasonRef.current = 'skill' // reset for next reload
-            // Only reset the transcript for skill install/uninstall/etc.
-            // Provider changes and plain restarts keep the visible history so
-            // the user's earlier context isn't wiped — only the backend
-            // session override changed (provider) or nothing did (restart).
-            if (!keepHistoryReload) {
-              setMessages([])
-              greetedRef.current = true // prevent auto-greet
-              // Clearing the transcript starts a NEW conversation, so drop the
-              // threaded Hermes session too — otherwise the agent would still
-              // carry the old context the user just cleared away.
-              hermesSessionRef.current = ''
-            }
-            const evt = skillEventRef.current
             skillEventRef.current = null
-            // Build context message about the skill change
-            let contextMsg = 'My skills were just updated. What skills do you have available now?'
-            if (evt?.action === 'install' && evt.name) {
-              contextMsg = `[System: A new skill "${evt.name}" was just installed and your session was refreshed.] Hi! I just installed the "${evt.name}" skill. Can you confirm you have it and briefly tell me what it does?`
-            } else if (evt?.action === 'uninstall' && evt.id) {
-              contextMsg = `[System: The skill "${evt.id}" was just uninstalled and your session was refreshed.] I just removed the "${evt.id}" skill. Can you confirm it's gone?`
-            } else if (evt?.action === 'enable' && evt.id) {
-              contextMsg = `[System: The skill "${evt.id}" was just re-enabled and your session was refreshed.] I just enabled the "${evt.id}" skill. Can you confirm you have it?`
-            } else if (evt?.action === 'disable' && evt.id) {
-              contextMsg = `[System: The skill "${evt.id}" was just disabled and your session was refreshed.] I just disabled the "${evt.id}" skill. Can you confirm it's no longer active?`
-            }
             // Complete the progress bar
             if (reloadTimerRef.current) clearInterval(reloadTimerRef.current)
             setReloadProgress(100)
-            // Small delay to show 100%, then either auto-send the skill
-            // context message (skill install/uninstall) or, for a
-            // provider change, just drop the overlay and surface a
-            // green "Switched chat to X" banner so the user has an
-            // explicit confirmation the new provider is active.
+            // Small delay to show 100%, then drop the overlay. A provider
+            // change additionally surfaces a green "Switched chat to X" banner
+            // so the user has an explicit confirmation the new provider is
+            // active.
             setTimeout(async () => {
               setReloadingSkill(false)
               // A provider change surfaces a "Switched chat to X" banner so the
@@ -1184,17 +1164,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   // Ignore — banner is best-effort confirmation only.
                 }
               }
-              // Provider changes and plain restarts keep the visible history and
-              // have nothing to auto-send — drop the overlay and hand back to the
-              // user. Only a skill install/uninstall sends a context message.
-              if (keepHistoryReload) return
-              setSending(true)
-              setMessages([{ role: 'user', text: contextMsg.replace(/\[System:.*?\]\s*/g, ''), timestamp: Date.now() }])
-              wsRequest('chat.send', {
-                sessionKey: mainSessionKey,
-                message: contextMsg,
-                idempotencyKey: uuid(),
-              }).catch((err) => { console.warn('[chat] skill reload send failed:', err); setSending(false) })
             }, 500)
           } else {
             loadHistory()
@@ -1457,8 +1426,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             runIdRef.current = null
             setSending(false)
             if (state === 'error') {
-              const errMsg = (payload.errorMessage as string) || 'Chat error'
-              setMessages(prev => [...prev, { role: 'system', text: `Error: ${errMsg}`, timestamp: Date.now() }])
+              // Never render the gateway's own error text. It is written for
+              // an operator reading a log and has carried an absolute device
+              // path, a session UUID and a `openclaw logs --follow` line into
+              // the customer's transcript (TASK-440).
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
             }
           }
         }
@@ -1958,7 +1930,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Telegram-like record -> stop -> send flow Yanko requested; Cancel remains
   // available for anything the user does not want uploaded.
   const [voice, setVoice] = useState<VoiceStatus>(IDLE_STATUS)
+  // Whether this ORIGIN can capture audio at all (TASK-470). Resolved after
+  // mount because the server has no `window` to ask, and it starts at "ok" so
+  // the first paint on a perfectly capable box never flashes a refusal.
+  const [captureAvailability, setCaptureAvailability] = useState<CaptureAvailability>('ok')
+  // The popup that answers "then where DOES the mic work?" on an insecure
+  // origin: it offers a live route to this box's Remote Access tunnel
+  // (TASK-470). Opened only from a mic click that classified as `insecure`.
+  const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
   const [recordingMs, setRecordingMs] = useState(0)
+  useEffect(() => {
+    setCaptureAvailability(readCaptureAvailability())
+  }, [])
   const recorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const chunksRef = useRef<Blob[]>([])
@@ -2085,8 +2068,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const startRecording = useCallback(async () => {
     if (voice.state === 'recording' || voice.state === 'requesting') return
-    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
-      setVoice({ state: 'error', error: 'unsupported', message: null, canRetry: false })
+    // Read live rather than from `captureAvailability`: the state exists to
+    // label the button before anyone clicks, and a stale render must never be
+    // what decides whether the microphone is opened.
+    const availability = readCaptureAvailability()
+    if (availability !== 'ok') {
+      setVoice({ state: 'error', error: availability, message: null, canRetry: false })
+      // On an insecure origin the status line can only say where the mic does
+      // not work. The popup carries the other half: a live, one-click route to
+      // this box's Remote Access tunnel, where it does.
+      if (availability === 'insecure') setTunnelDialogOpen(true)
       return
     }
     setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
@@ -2256,7 +2247,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } catch (err) {
       setSending(false)
       runIdRef.current = null
-      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+      setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
     }
   }, [wsRequest])
 
@@ -2343,7 +2334,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
       if ((err as Error)?.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+        setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
       }
     } finally {
       hermesAbortRef.current = null
@@ -2387,7 +2378,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     void dispatchSend(text, sendAttachments, idempotencyKey)
   }, [status, dispatchSend, dispatchHermes])
 
-  const sendVoiceTranscript = useCallback((text: string) => {
+  // Send a line the UI composed itself — a voice transcript, or the question
+  // that follows a skill change. Both can arrive while the agent is already
+  // answering, and starting a second turn on top of a live one makes the chat
+  // report the first as finished while it is still running, so they take the
+  // same queue a typed message would.
+  const enqueueRun = useCallback((text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     if (sending) {
@@ -2399,9 +2395,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     startRun(trimmed, [])
   }, [sending, startRun])
+
+  const sendVoiceTranscript = enqueueRun
   useEffect(() => {
     sendVoiceTranscriptRef.current = sendVoiceTranscript
   }, [sendVoiceTranscript])
+
+  // The skill-change handler lives in a mount-once effect and cannot close over
+  // `enqueueRun`, which is rebuilt whenever a turn starts or ends. Same ref
+  // trick `resetSessionRef` uses a few hundred lines up — and it has to be a
+  // ref rather than a dependency, because the value it needs to see is the
+  // CURRENT `sending`.
+  const enqueueRunRef = useRef(enqueueRun)
+  useEffect(() => { enqueueRunRef.current = enqueueRun }, [enqueueRun])
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
@@ -2814,15 +2820,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       retryCountRef.current = 0
       startReloadProgressTimer()
     }
-    // A skill install signals the gateway to restart (SIGUSR1), which drops the
-    // WS shortly after this event fires. We deliberately do NOT force a
-    // reconnect here (unlike the provider path below): the install route does
-    // not await the restart, so the WS is still up when this runs and the
-    // natural onClose → reconnect → resolve path delivers the post-restart
-    // `hello` that clears the overlay and auto-sends the skill-confirm message.
-    // Forcing a reconnect here instead races the restart and the auto-send
-    // lands on a dead socket.
-    const skillHandler = makeHandler('skill')
+    // A SKILL CHANGE RESTARTS NOTHING — and this handler used to assume it did.
+    //
+    // `openclaw-config.ts` deliberately stopped bouncing the gateway on install:
+    // SIGUSR1 means "restart" to OpenClaw, not "reload", and OpenClaw watches its
+    // own skill roots anyway, so the running session picks a new skill up on its
+    // next turn. Proven on hardware: right after an install the live session
+    // answered "yes" and named the skill's SKILL.md, with the gateway's PID and
+    // restart count unchanged.
+    //
+    // The reconnect overlay was left behind pointing at that removed restart. Its
+    // ONLY exit was a post-restart `hello`, so it never cleared and the chat sat
+    // frozen on "Reloading skills..." until the owner thought to reload the page
+    // (TASK-508). There is nothing to wait for, so we do not wait: keep the
+    // socket, keep the transcript, and ask the agent to confirm the change. Its
+    // answer is the confirmation the overlay was standing in for, and it is a
+    // truthful one — it comes from the session that now has the skill.
+    const skillHandler = (e: Event) => {
+      const detail = ((e as CustomEvent).detail || {}) as { action?: string; name?: string; id?: string }
+      // Goes out the same door a typed message does — queued behind a turn
+      // that is still answering, sent through startRun otherwise, which owns
+      // the disconnected queue, the Hermes branch and the run bookkeeping.
+      // Growing a second, thinner send path here is what would drift next.
+      enqueueRunRef.current(buildSkillChangeMessage(detail))
+    }
     // Treat a primary-AI-provider change the same as a skill install:
     // the gateway is restarting, the chat WS is about to drop, and
     // without the progress overlay the user sees the chat freeze until
@@ -3343,7 +3364,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, width: '85%' }}>
                 <div style={SPINNER_STYLE} />
                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, width: '100%' }}>
-                  <span>{reloadReason === 'provider' ? 'Switching AI provider...' : reloadReason === 'restart' ? 'Restarting chat...' : 'Reloading skills...'}</span>
+                  {/* Two states only: a skill change no longer restarts the
+                      gateway, so it never raises this overlay (TASK-508). */}
+                  <span>{reloadReason === 'provider' ? 'Switching AI provider...' : 'Restarting chat...'}</span>
                   <div role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={reloadProgress >= 100 ? 100 : undefined} aria-busy={reloadProgress < 100} aria-label="Reload progress" style={{ width: '100%', height: 4, borderRadius: 2, background: 'rgba(255,255,255,0.08)', overflow: 'hidden' }}>
                     {/* Compositor-only fill: a transform:scaleX keyframe eases
                         0→90% and holds; when the gateway answers (reloadProgress
@@ -3697,7 +3720,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               style={{ width: 8, height: 8, borderRadius: '50%', background: '#ef4444', flexShrink: 0, animation: 'claw-pulse 1s ease-in-out infinite' }}
             />
           )}
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {/* One line while a capture is live — the row sits over the composer
+              and a wrapping status would push the input around every second.
+              An ERROR is the opposite case: it is the only place the reason and
+              the remedy are written, and a sentence cut off at "Open this
+              ClawBox…" tells the owner a problem exists and hides the fix. */}
+          <span style={voice.state === 'error'
+            ? { flex: 1, whiteSpace: 'normal' }
+            : { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {voice.state === 'requesting' && t("chat.voice.requesting")}
             {voice.state === 'recording' && <>{t("chat.voice.recording")}{' '}
               {/* The clock is kept out of the accessibility tree, not out of
@@ -3716,6 +3746,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             {voice.state === 'error' && (
               voice.message
               || (voice.error === 'permission' ? t("chat.voice.permissionDenied")
+                : voice.error === 'insecure' ? t("chat.voice.insecureContext")
                 : voice.error === 'unsupported' ? t("chat.voice.unsupported")
                 : voice.error === 'empty' ? t("chat.voice.nothingHeard")
                 : t("chat.voice.failed"))
@@ -3808,8 +3839,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             <button
               onClick={startRecording}
               disabled={status !== 'connected' || voice.state === 'requesting' || voice.state === 'transcribing'}
-              title={t("chat.voice.record")}
-              aria-label={t("chat.voice.record")}
+              // On an origin the browser will not open a microphone on, the
+              // button says WHY on hover and to a screen reader, instead of
+              // naming an action it cannot perform. It stays clickable so the
+              // same reason lands in the status row for anyone who tries.
+              title={captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")}
+              aria-label={captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")}
               data-testid="voice-record"
               style={{
                 width: 36, height: 36, borderRadius: 10, border: 'none',
@@ -3913,6 +3948,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <div className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize" onMouseDown={(e) => handleResizeStart("bl", e)} onTouchStart={(e) => handleResizeStart("bl", e)} />
         <div className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize" onMouseDown={(e) => handleResizeStart("br", e)} onTouchStart={(e) => handleResizeStart("br", e)} />
       </>}
+
+      {/* Where the microphone DOES work, when this origin cannot record.
+          The component portals itself to <body> for the same containing-block
+          reason as the image preview below. */}
+      <VoiceTunnelDialog open={tunnelDialogOpen} onClose={() => setTunnelDialogOpen(false)} />
 
       {/* Full-size image preview.
           Portalled to <body> rather than nested here: the popup root carries a

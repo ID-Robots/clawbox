@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import HermesProviderConfig from "@/components/HermesProviderConfig";
 
 // The inline provider sign-in that replaced the jump to the Hermes dashboard's
@@ -42,7 +42,7 @@ vi.mock("@/hooks/useHermesModelOptions", () => ({
 /** The panel's backing routes, including the new inline-OAuth relay. Tracks a
  *  successful submit the way the dashboard would, so the status re-read after
  *  connecting reports logged_in instead of clobbering the panel's flip. */
-function stubFetch({ submitOk = true }: { submitOk?: boolean } = {}) {
+function stubFetch({ submitOk = true, poll }: { submitOk?: boolean; poll?: () => Response } = {}) {
   let anthropicLoggedIn = false;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -108,7 +108,7 @@ function stubFetch({ submitOk = true }: { submitOk?: boolean } = {}) {
           } as Response);
     }
     if (url.startsWith("/setup-api/hermes/oauth/poll")) {
-      return { ok: true, json: async () => ({ status: "pending" }) } as Response;
+      return poll ? poll() : ({ ok: true, json: async () => ({ status: "pending" }) } as Response);
     }
     if (url === "/setup-api/hermes/oauth/cancel") {
       return { ok: true, json: async () => ({ ok: true }) } as Response;
@@ -132,6 +132,23 @@ describe("HermesProviderConfig inline OAuth", () => {
     openMock = vi.fn();
     vi.stubGlobal("open", openMock);
   });
+
+  afterEach(() => {
+    // Only the poll-loop tests fake timers; restoring unconditionally keeps
+    // them from leaking into whichever test runs next.
+    vi.useRealTimers();
+  });
+
+  /** The device_code sign-in, driven to its first poll. Returns a counter for
+   *  the polls issued so far, so a test can assert the loop stopped. */
+  async function startDeviceFlow(fetchMock: ReturnType<typeof stubFetch>) {
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+    fireEvent.click(await screen.findByRole("radio", { name: /OpenAI/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /^Sign in$/ }));
+    await screen.findByTestId("hermes-oauth-user-code");
+    return () =>
+      fetchMock.mock.calls.filter(([u]) => String(u).startsWith("/setup-api/hermes/oauth/poll")).length;
+  }
 
   it("runs the pkce flow inline: opens the provider page, takes a pasted code, shows Connected", async () => {
     const fetchMock = stubFetch();
@@ -324,5 +341,63 @@ describe("HermesProviderConfig inline OAuth", () => {
     await screen.findByText("hermes auth login copilot");
     expect(screen.getByText("This provider signs in through the Hermes CLI.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Sign in$/ })).not.toBeInTheDocument();
+  });
+
+  // The relay answers a dead device-code session with an HTTP error and an
+  // `error` string — no `status` key at all. Reading `status` alone made those
+  // bodies look like "keep polling", so the panel sat on "Waiting for
+  // approval..." for a session that could never be approved.
+  for (const [httpStatus, error] of [
+    [400, "Provider mismatch for session"],
+    [404, "Session not found or expired"],
+  ] as const) {
+    it(`stops polling and shows the relay's message on HTTP ${httpStatus}`, async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const fetchMock = stubFetch({
+        poll: () => ({ ok: false, status: httpStatus, json: async () => ({ error }) }) as Response,
+      });
+
+      const polls = await startDeviceFlow(fetchMock);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent(error);
+      });
+      // The wait state is gone and the row offers a fresh session.
+      expect(screen.queryByText("Waiting for approval...")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Try again/ })).toBeInTheDocument();
+
+      // Terminal means terminal: nothing re-arms the loop.
+      const issued = polls();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(polls()).toBe(issued);
+    });
+  }
+
+  it("keeps polling through a 5xx, which only means the dashboard is restarting", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const fetchMock = stubFetch({
+      poll: () =>
+        ({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: "Hermes dashboard is unreachable" }),
+        }) as Response,
+    });
+
+    const polls = await startDeviceFlow(fetchMock);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000);
+    });
+
+    expect(polls()).toBeGreaterThan(1);
+    expect(screen.getByText("Waiting for approval...")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 });
