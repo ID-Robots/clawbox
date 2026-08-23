@@ -348,24 +348,41 @@ describe("the trust dialog", () => {
     expect(readFileSync(claudeConfig(), "utf-8")).toBe("{ not json at all");
   });
 
-  it("still starts Claude Code when the seed cannot be written", () => {
-    // The harness must never fail to launch over a convenience. A read-only
-    // config directory is the cheapest way to force the write to fail.
-    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
-    writeFileSync(claudeConfig(), JSON.stringify({ projects: {} }), "utf-8");
-    execFileSync("chmod", ["500", path.join(home, ".claude-ds")]);
-    try {
-      expect(runWrapper({}, [], home).status).toBe(0);
-      expect(existsSync(envDump)).toBe(true);
-    } finally {
-      execFileSync("chmod", ["700", path.join(home, ".claude-ds")]);
-    }
-  });
+  // Skipped as root, where a read-only directory does not stop a write and the
+  // test would pass without ever reaching the failure path it names. CI and a
+  // developer machine both run this unprivileged.
+  it.skipIf(typeof process.getuid === "function" && process.getuid() === 0)(
+    "still starts Claude Code when the seed cannot be written",
+    () => {
+      // The harness must never fail to launch over a convenience.
+      mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+      writeFileSync(claudeConfig(), JSON.stringify({ projects: {} }), "utf-8");
+      execFileSync("chmod", ["500", path.join(home, ".claude-ds")]);
+      try {
+        expect(runWrapper({}, [], home).status).toBe(0);
+        expect(existsSync(envDump)).toBe(true);
+      } finally {
+        execFileSync("chmod", ["700", path.join(home, ".claude-ds")]);
+      }
+    },
+  );
 
   it("does not rewrite the config when the answer is already there", () => {
+    // Compared as BYTES, not by mtime: a filesystem with coarse timestamps can
+    // report the same mtime across a real replacement, and this test would
+    // then pass while the wrapper rewrote the file on every launch. The
+    // indentation is deliberate — a rewrite through json.dump would flatten
+    // it, so the formatting itself is the tell.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    const pretty = JSON.stringify(
+      { theme: "dark", projects: { [home]: { hasTrustDialogAccepted: true } } },
+      null,
+      4,
+    );
+    writeFileSync(claudeConfig(), pretty, "utf-8");
+
     expect(runWrapper({}, [], home).status).toBe(0);
-    const first = statSync(claudeConfig()).mtimeMs;
-    expect(runWrapper({}, [], home).status).toBe(0);
-    expect(statSync(claudeConfig()).mtimeMs).toBe(first);
+
+    expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);
   });
 });
