@@ -1,4 +1,5 @@
 import { splitAssistantMedia } from "@/lib/chat-media";
+import type { ChatToolSummary } from "@/lib/chat-history-cache";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
 import {
   asHarnessError,
@@ -50,6 +51,28 @@ const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
  * bubble, and a `role` the UI has no branch for renders as nothing at all —
  * a silently missing message rather than a visible fault.
  */
+/**
+ * Tool steps off the wire, re-validated rather than trusted.
+ *
+ * The route builds these from the agent's own database, but they arrive here as
+ * JSON like anything else and are about to be rendered — so the shape is
+ * checked here too. A malformed entry is dropped, never rendered as `undefined`.
+ */
+function toToolSummaries(value: unknown): ChatToolSummary[] {
+  if (!Array.isArray(value)) return [];
+  const calls: ChatToolSummary[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const name = typeof row.name === "string" ? row.name : "";
+    if (!name) continue;
+    const detail = typeof row.detail === "string" ? row.detail : "";
+    const status = row.status === "ok" || row.status === "error" ? row.status : undefined;
+    calls.push({ name, ...(detail ? { detail } : {}), ...(status ? { status } : {}) });
+  }
+  return calls;
+}
+
 function isHistoryMessage(row: unknown): row is HistoryMessage {
   if (!row || typeof row !== "object") return false;
   const value = row as Record<string, unknown>;
@@ -208,7 +231,19 @@ export class HermesAdapter implements HarnessAdapter {
       // Same MEDIA: split as the gateway path, so a picture renders the same
       // way whichever edition answered.
       const reply = splitAssistantMedia(typeof data.text === "string" ? data.text : "");
-      return { text: reply.text, media: reply.images, audio: reply.audio };
+      // Thinking and tool steps ride BESIDE the answer. The route separated
+      // them from the CLI's console output (or, where it could, read them
+      // straight out of the agent's own record); folding them back into `text`
+      // here would put the monologue right back in the bubble.
+      const reasoning = typeof data.reasoning === "string" && data.reasoning ? data.reasoning : "";
+      const toolCalls = toToolSummaries(data.toolCalls);
+      return {
+        text: reply.text,
+        media: reply.images,
+        audio: reply.audio,
+        ...(reasoning ? { reasoning } : {}),
+        ...(toolCalls.length ? { toolCalls } : {}),
+      };
     } catch (err) {
       throw asHarnessError(err, "upstream");
     } finally {

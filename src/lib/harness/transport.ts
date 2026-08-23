@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/lib/chat-history-cache";
+import type { ChatMessage, ChatToolSummary } from "@/lib/chat-history-cache";
 
 /**
  * The one contract the chat surface talks to.
@@ -166,6 +166,16 @@ export interface TurnResult {
   readonly media?: readonly string[];
   /** Spoken-reply refs, kept apart from pictures — different affordances. */
   readonly audio?: readonly string[];
+  /**
+   * The model's internal monologue for this turn, SEPARATE from `text`.
+   *
+   * A harness that reports it lets the surface show it as a collapsed
+   * disclosure; one that does not simply omits it. It must never be folded into
+   * `text` — that is the bug this field exists to end.
+   */
+  readonly reasoning?: string;
+  /** The steps the agent took to answer, in call order. */
+  readonly toolCalls?: readonly ChatToolSummary[];
   /**
    * True when the harness merely ACKNOWLEDGED the turn and the answer will
    * arrive by another route (the gateway's own event stream). The caller must

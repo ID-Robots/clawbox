@@ -10,7 +10,8 @@ import {
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
-import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -2262,6 +2263,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       timestamp: Date.now(),
       images: [...(result.media ?? [])],
       audio: boundedAudio([...(result.audio ?? [])]),
+      // Beside the answer, never folded into it — the live bubble and the one
+      // replayed from the transcript have to be the same bubble.
+      ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+      ...(result.toolCalls?.length ? { toolCalls: [...result.toolCalls] } : {}),
     }])
     setSending(false)
     setStreaming('')
@@ -3427,6 +3432,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       </audio>
                     ))}
                   </div>
+                )}
+                {/* What the agent DID and what it was thinking, under the
+                    answer and never inside it. Both come off the stored
+                    message, so a replayed turn shows exactly what the live one
+                    did — the chips sit where the live pills sat, and the
+                    monologue stays collapsed until it is asked for. */}
+                {msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0 && (
+                  <ToolCallSummaryChips toolCalls={msg.toolCalls} label={t("chat.toolsUsed")} />
+                )}
+                {msg.role === 'assistant' && msg.reasoning && (
+                  <ReasoningDisclosure reasoning={msg.reasoning} label={t("chat.reasoning")} />
                 )}
               </div>
             </div>
