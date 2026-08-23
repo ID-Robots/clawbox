@@ -97,6 +97,42 @@ describe("VoiceTunnelDialog", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it("closes on Escape without letting the key reach the page behind", async () => {
+    stubPortalStatus({ tunnel: { installed: true, service: "active", url: "https://x.trycloudflare.com" } });
+    const { onClose } = renderDialog();
+    await screen.findByTestId("voice-tunnel-dialog");
+
+    // ChatPopup closes the whole chat on Escape from a window-level handler;
+    // an un-trapped dialog would hand this keystroke straight to it and the
+    // customer would lose the chat under the popup.
+    const behind = vi.fn();
+    window.addEventListener("keydown", behind);
+    try {
+      fireEvent.keyDown(document.activeElement ?? document.body, { key: "Escape" });
+    } finally {
+      window.removeEventListener("keydown", behind);
+    }
+    expect(onClose).toHaveBeenCalled();
+    expect(behind).not.toHaveBeenCalled();
+  });
+
+  it("traps Tab inside the dialog", async () => {
+    stubPortalStatus({ tunnel: { installed: true, service: "active", url: "https://x.trycloudflare.com" } });
+    renderDialog();
+    const go = await screen.findByTestId("voice-tunnel-go");
+    const close = screen.getByTestId("voice-tunnel-close");
+
+    // Focus moved into the dialog on open…
+    expect(document.activeElement).toBe(close);
+    // …and Tab wraps from the last control back to the first instead of
+    // walking out into the page behind the scrim.
+    go.focus();
+    fireEvent.keyDown(go, { key: "Tab" });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(go);
+  });
+
   it("renders nothing while closed", () => {
     stubPortalStatus({ tunnel: { installed: true, service: "active", url: "https://x.trycloudflare.com" } });
     render(

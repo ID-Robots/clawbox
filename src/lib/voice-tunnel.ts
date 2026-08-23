@@ -60,7 +60,14 @@ export async function fetchTunnelDestination(
   fetchImpl: typeof fetch = fetch,
 ): Promise<TunnelDestination> {
   try {
-    const res = await fetchImpl("/setup-api/portal/status", { cache: "no-store" });
+    const res = await fetchImpl("/setup-api/portal/status", {
+      cache: "no-store",
+      // fetch itself never times out, and this answer decides what a popup
+      // that is already on screen says. Eight seconds is enough for a Jetson
+      // under load to run three systemd/journal probes; past that, "could not
+      // check" is more honest than a spinner that never resolves.
+      signal: AbortSignal.timeout(8_000),
+    });
     if (!res.ok) return { kind: "failed" };
     return classifyTunnelDestination(await res.json());
   } catch {

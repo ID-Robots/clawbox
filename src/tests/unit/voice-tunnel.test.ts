@@ -68,7 +68,10 @@ describe("fetchTunnelDestination", () => {
     const result = await fetchTunnelDestination(fetchImpl);
 
     expect(result).toEqual({ kind: "ready", url: "https://x.trycloudflare.com/" });
-    expect(fetchImpl).toHaveBeenCalledWith("/setup-api/portal/status", { cache: "no-store" });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/setup-api/portal/status",
+      expect.objectContaining({ cache: "no-store", signal: expect.any(AbortSignal) }),
+    );
   });
 
   it("maps a network failure to failed, not to a claim the tunnel is off", async () => {

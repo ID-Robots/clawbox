@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { fetchTunnelDestination, type TunnelDestination } from "@/lib/voice-tunnel";
 
 /**
@@ -30,6 +31,10 @@ export default function VoiceTunnelDialog({
 }) {
   const { t } = useT();
   const [destination, setDestination] = useState<TunnelDestination | null>(null);
+  // The shared modal trap: focus moves in, Tab cycles inside, Escape closes
+  // THIS dialog and stops there — without it the Escape reaches ChatPopup's
+  // window handler and closes the whole chat out from under the popup.
+  const panelRef = useModalDialog<HTMLDivElement>({ open, onClose });
 
   useEffect(() => {
     if (!open) { setDestination(null); return; }
@@ -59,6 +64,7 @@ export default function VoiceTunnelDialog({
       }}
     >
       <div
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={t("chat.voice.tunnel.title")}
