@@ -80,6 +80,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  runOpenclawConfigSetBatch: vi.fn(),
   // Added by PR #83 — the configure route sweeps agent sessions so the
   // new primary provider takes effect on the open chat without a reset.
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
@@ -126,7 +127,8 @@ vi.mock("@/lib/local-ai-token", () => ({
 
 import { getAll, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { getLocalAiToken } from "@/lib/local-ai-token";
@@ -208,6 +210,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockRestartGateway.mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
     mockUnpairLocal.mockResolvedValue(undefined);
 
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
@@ -307,7 +310,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5");
   });
 
@@ -340,8 +343,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       }),
     );
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
     expect(providerDef.apiKey).toBe("portal-token-123");
     expect(providerDef.baseUrl).toBe("https://clawbox.com/api/ai");
     expect(providerDef.models[0].compat.supportedReasoningEfforts).toEqual(["off", "high", "xhigh"]);
@@ -437,7 +440,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     // the flat 24000 default — a 24000 floor leaves too little usable input for
     // the agent's system prompt + tools, so every turn overflows before the
     // model runs.
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 8192");
   });
 
@@ -450,7 +453,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 24000");
     expect(commands).toContain("config set gateway.auth.mode token");
@@ -479,9 +482,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const res = await configurePost(jsonRequest({ provider: "llamacpp" }));
     expect(res.status).toBe(200);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map(
-      (call) => ["config", "set", ...(call[0] ?? [])].join(" "),
-    );
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set gateway.auth.mode token");
     expect(commands.some((command) =>
       command.startsWith("config set gateway.auth.token "),
@@ -505,7 +506,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }),
     );
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands).toContain("config set models.mode merge");
@@ -526,7 +527,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).not.toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands).toContain("config set models.mode merge");
@@ -549,7 +550,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
   });
 
@@ -569,7 +570,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(res.status).toBe(200);
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.6-sol");
   });
 
@@ -588,7 +589,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(res.status).toBe(200);
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.5");
   });
 
@@ -609,7 +610,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
 
     expect(res.status).toBe(200);
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary codex/gpt-5.4-mini");
     const probedCodex = fetchMock.mock.calls.some(([url]) => String(url).includes("backend-api/codex/responses"));
     expect(probedCodex).toBe(false);
@@ -642,7 +643,10 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   it("returns 500 when spawn command fails", async () => {
+    // Both forms: the route sends most of its writes as one batch, so stubbing
+    // only the single-set form would leave the failure it is testing unreached.
     vi.mocked(runOpenclawConfigSet).mockRejectedValue(new Error("Command failed"));
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValue(new Error("Command failed"));
 
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
@@ -722,7 +726,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-test",
     }));
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-v4-flash"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
 
@@ -747,7 +751,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-openai-key",
     }));
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(false);
   });
@@ -763,7 +767,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-openai-key",
     }));
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
   });
 
@@ -781,7 +785,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-openai-key",
     }));
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
   });
 
@@ -798,8 +802,8 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.deepseek");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
 
     expect(providerDef.baseUrl).toBe("https://clawbox.com/api/ai");
     expect(providerDef.apiKey).toBe("stored-portal-token");
@@ -820,12 +824,12 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "gemma-q4",
     }));
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((command) => command.includes("config set models.providers.llamacpp"))).toBe(true);
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma-q4");
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.llamacpp");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.llamacpp");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
     const modelDef = providerDef?.models?.[0] ?? {};
 
     expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/llamacpp/v1");
@@ -839,8 +843,8 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "llama3.2:3b",
     }));
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.ollama");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.ollama");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
 
     expect(providerDef.baseUrl).toBe("http://127.0.0.1/setup-api/local-ai/ollama");
   });
@@ -859,12 +863,12 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((command) => command.includes("config set models.providers.openrouter"))).toBe(true);
     expect(commands).toContain("config set agents.defaults.model.primary openrouter/anthropic/claude-haiku-4.5");
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.openrouter");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.openrouter");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
 
     expect(providerDef.baseUrl).toBe("https://openrouter.ai/api/v1");
     expect(providerDef.api).toBe("openai-completions");
@@ -900,7 +904,7 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary openrouter/mistralai/mistral-large");
   });
 
@@ -926,12 +930,12 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     expect(res.status).toBe(200);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((command) => command.includes("config set models.providers.google"))).toBe(true);
     expect(commands).toContain("config set agents.defaults.model.primary google/gemini-2.5-flash");
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.google");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.google");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
     expect(providerDef.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta/openai");
     expect(providerDef.api).toBe("openai-completions");
     // Real key inlined (the fix) — not delegated to the native plugin.
@@ -958,12 +962,12 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     expect(res.status).toBe(200);
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(true);
     expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-4-6");
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
     expect(providerDef.baseUrl).toBe("https://api.anthropic.com/v1");
     expect(providerDef.api).toBe("openai-completions");
     expect(providerDef.apiKey).toBe("sk-ant-test123");
@@ -986,12 +990,12 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     expect(res.status).toBe(200);
 
-    const providerCall = vi.mocked(runOpenclawConfigSet).mock.calls.find((call) => call[0][0] === "models.providers.anthropic");
-    const providerDef = providerCall ? JSON.parse(providerCall[0][1] ?? "{}") : {};
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.anthropic");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("claude-opus-4-8");
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-opus-4-8");
   });
 
@@ -1060,7 +1064,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(written.profiles["codex:default"]).toBeDefined();
     expect(written.profiles["google:default"]).toBeUndefined();
 
-    const commands = vi.mocked(runOpenclawConfigSet).mock.calls.map((call) => ["config", "set", ...(call[0] ?? [])].join(" "));
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands.some((c) => c.startsWith("config set agents.defaults.model.primary codex/"))).toBe(true);
   });
 
@@ -1242,9 +1246,11 @@ describe("POST /setup-api/ai-models/configure", () => {
       );
 
     const primaryModelWritten = () =>
-      vi.mocked(runOpenclawConfigSet).mock.calls
-        .map((call) => call[0] ?? [])
-        .find((args) => args[0] === "agents.defaults.model.primary")?.[1];
+      findConfigSet(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        "agents.defaults.model.primary",
+      )?.value;
 
     it("configures the Max model when the portal says Max, even though the picker said Pro", async () => {
       vi.stubGlobal("fetch", deviceInfo({ tier: "max" }));
@@ -1377,6 +1383,157 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(res.status).toBe(200);
       expect(fetchMock.mock.calls.some(([url]) =>
         String(url).includes("/api/clawbox-ai/device-info"))).toBe(false);
+    });
+  });
+  // TASK-483: the last wizard step sat on "Almost ready" for about three
+  // minutes on a real box. It was not a spinner problem — the route issued
+  // roughly EIGHTEEN separate `openclaw config set` processes, and on a Jetson
+  // Orin Nano the CLI costs ~8 s of Node start-up per invocation before it does
+  // any work at all. Two things made it eighteen: every key was its own
+  // process, and the ClawBox AI path provisioned ClawBox AI TWICE, because
+  // ensureFallbackModel called configureClawboxAi again purely to write
+  // `agents.defaults.model.fallbacks`.
+  //
+  // These tests pin both halves. They are deliberately about the number of
+  // PROCESSES and the number of times a path is written, not about wall clock,
+  // because those are the two things that regressed and the only two a unit
+  // test can hold.
+  describe("how many openclaw processes first-run setup costs", () => {
+    function invocationCount(): number {
+      return (
+        vi.mocked(runOpenclawConfigSet).mock.calls.length +
+        vi.mocked(runOpenclawConfigSetBatch).mock.calls.length
+      );
+    }
+
+    it("connects ClawBox AI in at most two CLI invocations", async () => {
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(200);
+      expect(invocationCount()).toBeLessThanOrEqual(2);
+    });
+
+    it("still writes every key the old sequence wrote", async () => {
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc" }));
+
+      const paths = configSetCalls(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+      ).map((call) => call.path);
+
+      for (const expected of [
+        "auth.profiles.deepseek:default",
+        "agents.defaults.model.primary",
+        "agents.defaults.compaction.reserveTokensFloor",
+        "gateway.auth.mode",
+        "gateway.auth.token",
+        "gateway.controlUi.allowInsecureAuth",
+        "gateway.controlUi.dangerouslyDisableDeviceAuth",
+        "models.providers.deepseek",
+        "models.mode",
+        "agents.defaults.imageModel",
+        "models.providers.openai.apiKey",
+        "models.providers.openai.models",
+        "agents.defaults.imageGenerationModel",
+        "agents.defaults.model.fallbacks",
+      ]) {
+        expect(paths).toContain(expected);
+      }
+    });
+
+    it("provisions ClawBox AI once, not twice", async () => {
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_token_abc" }));
+
+      const paths = configSetCalls(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+      ).map((call) => call.path);
+
+      // The expensive ones. Each of these used to be written twice.
+      expect(paths.filter((p) => p === "models.providers.deepseek")).toHaveLength(1);
+      expect(paths.filter((p) => p === "models.providers.openai.apiKey")).toHaveLength(1);
+      expect(paths.filter((p) => p === "agents.defaults.imageGenerationModel")).toHaveLength(1);
+      // Two, not one: the generic auth-profile step and the ClawBox AI step
+      // both name this path, with the same value. That overlap predates this
+      // change (it used to make three) and removing it is a different edit.
+      expect(paths.filter((p) => p === "auth.profiles.deepseek:default")).toHaveLength(2);
+    });
+
+    it("takes the local model as the fallback without a second ClawBox AI pass", async () => {
+      // The other branch of the same decision: when the box already has a local
+      // model, the fallback slot names it instead of ClawBox AI — and that has
+      // to be decided BEFORE the batch, or we are back to two passes.
+      mockGetAll.mockResolvedValue({
+        local_ai_configured: true,
+        local_ai_model: "ollama/llama3.2:3b",
+      });
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(200);
+      const calls = configSetCalls(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+      );
+      expect(calls.find((c) => c.path === "agents.defaults.model.fallbacks")?.value)
+        .toBe(JSON.stringify(["ollama/llama3.2:3b"]));
+      expect(calls.filter((c) => c.path === "models.providers.deepseek")).toHaveLength(1);
+      expect(invocationCount()).toBeLessThanOrEqual(2);
+    });
+
+    it("does not fail the connect when only the fallback write fails", async () => {
+      // The fallback used to be written inside ensureFallbackModel's try/catch,
+      // so it could never fail the request. Batching it alongside the required
+      // writes must not quietly promote it to fatal.
+      failConfigSetsMatching(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        (path) => path === "agents.defaults.model.fallbacks",
+        () => new Error("fallback write exploded"),
+      );
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(200);
+      const paths = configSetCalls(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+      ).map((call) => call.path);
+      expect(paths).toContain("models.providers.deepseek");
+    });
+
+    it("still fails the connect when the LOCAL fallback write fails", async () => {
+      // The mirror of the test above, and the reason the two are written
+      // separately. A local fallback was written before ensureFallbackModel's
+      // try block and so was fatal; the ClawBox AI one was written inside it
+      // and only warned. Batching them into one call must not quietly level
+      // that difference in either direction.
+      mockGetAll.mockResolvedValue({
+        local_ai_configured: true,
+        local_ai_model: "ollama/llama3.2:3b",
+      });
+      failConfigSetsMatching(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        (path) => path === "agents.defaults.model.fallbacks",
+        () => new Error("fallback write exploded"),
+      );
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(500);
     });
   });
 });

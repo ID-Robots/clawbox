@@ -101,6 +101,16 @@ function getConnectButtonLabel(providerName?: string | null) {
   return providerName ? `Connect to ${providerName}` : "Connect";
 }
 
+/**
+ * When each row of the generic "configuring" overlay lights up, in ms.
+ *
+ * The LAST entry is deliberately not used by the timer — see the effect that
+ * schedules these. Driving the final row off a stopwatch is what made this
+ * screen lie: it reached "Almost ready" at 22 s and then sat there, unchanged,
+ * for the remaining two minutes the config writes actually took, which reads as
+ * a hang on a screen that is also asking the customer not to close the page
+ * (TASK-483).
+ */
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
 type ConfiguringKind = "generic" | "ollama" | "llamacpp";
@@ -197,6 +207,12 @@ function ConfiguringOverlay({
           return (
             <li
               key={i}
+              // Which row a customer is actually looking at, stated rather than
+              // inferred from a Tailwind class. Every label is in the DOM at all
+              // times — an unreached row is rendered at opacity 0 — so "is the
+              // last row showing yet" is a question only this attribute can
+              // answer (TASK-483).
+              data-step-state={stepDone ? "done" : stepNow ? "active" : "pending"}
               className={`flex items-center gap-2 text-[length:var(--t-2)] ${
                 reached ? "opacity-100" : "opacity-0 translate-y-1"
               }`}
@@ -935,8 +951,12 @@ export default function AIModelsStep({
   useEffect(() => {
     if (configuringKind !== "generic" || configuringCompleted) return;
 
+    // Every row except the last one is timed. The last row belongs to
+    // `completeConfiguring`, so "Almost ready" appears when the request has
+    // actually come back and never before it.
+    const lastTimedIndex = CONFIGURING_STEP_DELAYS.length - 2;
     const timers = CONFIGURING_STEP_DELAYS.map((delay, index) =>
-      index === 0
+      index === 0 || index > lastTimedIndex
         ? null
         : setTimeout(() => {
             setConfiguringState((current) => {

@@ -10,6 +10,8 @@ import {
   restartGateway,
   findOpenclawBin,
   runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
+  type OpenclawConfigSetArgs,
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
@@ -143,6 +145,7 @@ const PROVIDERS: Record<string, ProviderConfig> = {
 
 const PROFILE_KEY_RE = /^[a-zA-Z0-9._-]+(?::[a-zA-Z0-9._-]+)*$/;
 const COMMAND_TIMEOUT_MS = 30_000;
+const BATCH_COMMAND_TIMEOUT_MS = 60_000;
 
 interface AuthProfilesFile {
   version: number;
@@ -206,6 +209,76 @@ function runCommand(cmd: string, args: string[], timeoutMs = COMMAND_TIMEOUT_MS)
     });
     child.stdin.end();
   });
+}
+
+/**
+ * Apply `config set` assignments in as few `openclaw` invocations as possible
+ * WITHOUT merging their error boundaries.
+ *
+ * Every invocation of the CLI costs ~8 s of Node startup on a Jetson (see
+ * `runOpenclawConfigSetBatch`), which is where first-run setup's silent
+ * two-and-a-half minutes came from (TASK-483). Batching is the fix, but this
+ * route deliberately treats some writes as fatal and others as not — a chat
+ * provider that works is worth more than an image tool, so a failure to
+ * provision images must not fail "Connect ClawBox AI" — and one batch is
+ * atomic, so a single combined call would make every failure fatal to
+ * everything.
+ *
+ * So: try the combined call first, and only if it fails re-issue each group on
+ * its own, which is exactly the old one-boundary-per-group behaviour. A batch
+ * that fails wrote nothing, so re-applying the same values group by group is
+ * safe. The slow path costs one extra invocation per group and is only reached
+ * when something is already wrong.
+ */
+interface ConfigSetGroup {
+  /** `config set` argvs, minus the leading `config set`. */
+  ops: OpenclawConfigSetArgs[];
+  /** Called instead of throwing when this group alone fails. Absent = fatal. */
+  onError?: (err: unknown) => void;
+  /** Called once this group's ops are known to have been applied. */
+  onApplied?: () => void;
+}
+
+function runConfigSetBatch(ops: OpenclawConfigSetArgs[]): Promise<void> {
+  return runOpenclawConfigSetBatch(ops, {
+    // A batch is one CLI start-up regardless of size, so the per-attempt budget
+    // stays in the same order as a single set; the extra headroom is because a
+    // batch that times out costs every write in it, not one.
+    timeoutMs: BATCH_COMMAND_TIMEOUT_MS,
+    uid: CLAWBOX_UID,
+    gid: CLAWBOX_GID,
+  });
+}
+
+async function applyConfigSetGroups(groups: (ConfigSetGroup | null)[]): Promise<void> {
+  const present = groups.filter((group): group is ConfigSetGroup => !!group && group.ops.length > 0);
+  if (present.length === 0) return;
+
+  if (present.length > 1) {
+    try {
+      await runConfigSetBatch(present.flatMap((group) => group.ops));
+      for (const group of present) group.onApplied?.();
+      return;
+    } catch (err) {
+      // Fall through: re-issue per group so each keeps its own fatal/non-fatal
+      // boundary. Logged because the combined failure names the real cause,
+      // while the per-group retry may only reproduce part of it.
+      console.warn(
+        "[AI Config] Combined config write failed; retrying one group at a time:",
+        err instanceof Error ? logSafe(err.message) : err,
+      );
+    }
+  }
+
+  for (const group of present) {
+    try {
+      await runConfigSetBatch(group.ops);
+      group.onApplied?.();
+    } catch (err) {
+      if (!group.onError) throw err;
+      group.onError(err);
+    }
+  }
 }
 
 async function readAuthProfiles(): Promise<AuthProfilesFile> {
@@ -601,18 +674,13 @@ function hasToolModelConfig(existing: unknown): boolean {
  * the image *understanding* (vision) model and is what `openclaw models
  * set-image` writes, which is why that CLI command is not used here.
  */
-async function configureClawboxAiImages(clawboxAiToken: string): Promise<boolean> {
-  let existingOpenAiProvider: OpenAiProviderConfig | undefined;
-  let existingImageModel: unknown;
-  try {
-    const config = await readOpenClawConfig();
-    existingOpenAiProvider = config.models?.providers?.[CLAWBOX_AI_IMAGE_PROVIDER];
-    existingImageModel = config.agents?.defaults?.imageGenerationModel;
-  } catch {
-    // No readable config yet (fresh box) — nothing to preserve.
-    existingOpenAiProvider = undefined;
-    existingImageModel = undefined;
-  }
+function buildClawboxAiImageOps(
+  clawboxAiToken: string,
+  snapshot: OpenClawConfig | null,
+): OpenclawConfigSetArgs[] {
+  let existingOpenAiProvider: OpenAiProviderConfig | undefined =
+    snapshot?.models?.providers?.[CLAWBOX_AI_IMAGE_PROVIDER];
+  const existingImageModel: unknown = snapshot?.agents?.defaults?.imageGenerationModel;
   if (typeof existingOpenAiProvider !== "object" || existingOpenAiProvider === null) {
     existingOpenAiProvider = undefined;
   }
@@ -621,7 +689,7 @@ async function configureClawboxAiImages(clawboxAiToken: string): Promise<boolean
     console.warn(
       "[AI Config] Skipped ClawBox AI image provider: models.providers.openai.apiKey holds a non-ClawBox key we will not overwrite",
     );
-    return false;
+    return [];
   }
 
   const foreignRoute = foreignOpenAiRoute(existingOpenAiProvider);
@@ -629,41 +697,59 @@ async function configureClawboxAiImages(clawboxAiToken: string): Promise<boolean
     console.warn(
       `[AI Config] Skipped ClawBox AI image provider: models.providers.openai already routes to ${logSafe(foreignRoute)}, and the apiKey we would write there is the credential for that route too`,
     );
-    return false;
+    return [];
   }
 
   // Leaf-path writes, not a whole-provider `config set models.providers.openai`:
   // replacing the object would drop any other openai settings the box carries.
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
-    `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey`,
-    clawboxAiToken,
-  ]);
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
-    `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.models`,
-    buildClawboxAiImageProviderModels(existingOpenAiProvider?.models),
-    "--json",
-  ]);
+  const ops: OpenclawConfigSetArgs[] = [
+    [`models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.apiKey`, clawboxAiToken],
+    [
+      `models.providers.${CLAWBOX_AI_IMAGE_PROVIDER}.models`,
+      buildClawboxAiImageProviderModels(existingOpenAiProvider?.models),
+      "--json",
+    ],
+  ];
   if (hasToolModelConfig(existingImageModel)) {
     console.log(
       "[AI Config] Left agents.defaults.imageGenerationModel alone: it already names an image model",
     );
-    return true;
+    return ops;
   }
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
+  ops.push([
     "agents.defaults.imageGenerationModel",
     JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }),
     "--json",
   ]);
-  return true;
+  return ops;
 }
 
-async function configureClawboxAi(setFallback: boolean, preferredToken?: string) {
+/**
+ * Provision ClawBox AI: the auth profile, the provider definition, image
+ * understanding, image generation, and optionally the fallback slot.
+ *
+ * All of it lands in ONE `openclaw config set --batch-json` on the happy path.
+ * It used to be six to seven separate invocations at ~8 s of CLI startup each,
+ * and on the ClawBox AI wizard path this function ran TWICE — see the caller
+ * (TASK-483).
+ *
+ * The three groups below exist because their failures mean different things,
+ * and `applyConfigSetGroups` is what keeps them apart while still writing them
+ * together. Every conditional here reads `snapshot`, one config read taken
+ * before any of this request's writes, because each of those decisions is about
+ * what the owner had BEFORE we started — nothing we write in this pass changes
+ * the answer.
+ */
+async function configureClawboxAi(
+  setFallback: boolean,
+  preferredToken?: string,
+  extra?: {
+    /** Ops to write in the same must-succeed group. */
+    requiredOps?: OpenclawConfigSetArgs[];
+    /** Extra groups to write in the same batch, with their own boundaries. */
+    groups?: ConfigSetGroup[];
+  },
+) {
   const clawboxAiToken = await getConfiguredClawboxAiToken(preferredToken);
   if (!clawboxAiToken) {
     return false;
@@ -677,20 +763,27 @@ async function configureClawboxAi(setFallback: boolean, preferredToken?: string)
   };
   await writeAuthProfiles(authProfiles);
 
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
-    `auth.profiles.${CLAWBOX_AI_PROFILE_KEY}`,
-    JSON.stringify({ provider: CLAWBOX_AI_PROVIDER, mode: "api_key" }),
-    "--json",
-  ]);
-  await runCommand(OPENCLAW_BIN, [
-    "config",
-    "set",
-    `models.providers.${CLAWBOX_AI_PROVIDER}`,
-    buildClawboxAiProviderDefinition(clawboxAiToken),
-    "--json",
-  ]);
+  let snapshot: OpenClawConfig | null = null;
+  try {
+    snapshot = await readOpenClawConfig();
+  } catch {
+    // No readable config yet (fresh box) — nothing to preserve.
+    snapshot = null;
+  }
+
+  const requiredOps: OpenclawConfigSetArgs[] = [
+    [
+      `auth.profiles.${CLAWBOX_AI_PROFILE_KEY}`,
+      JSON.stringify({ provider: CLAWBOX_AI_PROVIDER, mode: "api_key" }),
+      "--json",
+    ],
+    [
+      `models.providers.${CLAWBOX_AI_PROVIDER}`,
+      buildClawboxAiProviderDefinition(clawboxAiToken),
+      "--json",
+    ],
+    ...(extra?.requiredOps ?? []),
+  ];
 
   // Point image *understanding* at the vision entry the provider definition
   // above just wrote. Without this the device accepts an attached picture and
@@ -706,35 +799,17 @@ async function configureClawboxAi(setFallback: boolean, preferredToken?: string)
   // function also runs when ClawBox AI is merely being added as a *fallback*
   // for some other provider, and a slot the owner filled is their choice.
   // Non-fatal for the same reason too.
-  try {
-    let existingVisionModel: unknown;
-    try {
-      existingVisionModel = (await readOpenClawConfig()).agents?.defaults?.imageModel;
-    } catch {
-      // No readable config yet (fresh box) — nothing to preserve.
-      existingVisionModel = undefined;
-    }
-    if (hasToolModelConfig(existingVisionModel)) {
-      console.log(
-        "[AI Config] Left agents.defaults.imageModel alone: it already names a vision model",
-      );
-    } else {
-      await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "agents.defaults.imageModel",
-        JSON.stringify({ primary: CLAWBOX_AI_VISION_MODEL }),
-        "--json",
-      ]);
-      console.log(
-        `[AI Config] Set ClawBox AI vision model ${CLAWBOX_AI_VISION_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
-      );
-    }
-  } catch (err) {
-    console.warn(
-      "[AI Config] Failed to configure ClawBox AI vision model:",
-      err instanceof Error ? logSafe(err.message) : err,
+  const visionOps: OpenclawConfigSetArgs[] = [];
+  if (hasToolModelConfig(snapshot?.agents?.defaults?.imageModel)) {
+    console.log(
+      "[AI Config] Left agents.defaults.imageModel alone: it already names a vision model",
     );
+  } else {
+    visionOps.push([
+      "agents.defaults.imageModel",
+      JSON.stringify({ primary: CLAWBOX_AI_VISION_MODEL }),
+      "--json",
+    ]);
   }
 
   // Images ride on the same token and the same proxy, so they are provisioned
@@ -742,35 +817,61 @@ async function configureClawboxAi(setFallback: boolean, preferredToken?: string)
   // an image allowance whether or not ClawBox AI is also the chat provider.
   // Non-fatal: a chat provider that works is worth more than an image tool, so
   // a failure here must not fail the whole "Connect ClawBox AI" flow.
+  let imageOps: OpenclawConfigSetArgs[] = [];
   try {
-    if (await configureClawboxAiImages(clawboxAiToken)) {
-      console.log(
-        `[AI Config] Set ClawBox AI image provider ${CLAWBOX_AI_IMAGE_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
-      );
-    }
+    imageOps = buildClawboxAiImageOps(clawboxAiToken, snapshot);
   } catch (err) {
-    // `logSafe`, not the raw message: this one is built from a subprocess
-    // failure, so it carries whatever `openclaw` wrote to stderr — a value that
-    // reached the CLI from this route's request body, control characters and
-    // all. Unbounded and un-escaped, it would be the caller deciding how many
-    // journal records one API call produces. The command line itself is already
-    // safe: `spawnOpenclawConfigSet` names the config path and elides the value,
-    // which for this call is the portal token (see `configSetLabelArgs`).
     console.warn(
       "[AI Config] Failed to configure ClawBox AI image provider:",
       err instanceof Error ? logSafe(err.message) : err,
     );
   }
 
-  if (setFallback) {
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      "agents.defaults.model.fallbacks",
-      JSON.stringify([CLAWBOX_AI_MODEL]),
-      "--json",
-    ]);
-  }
+  await applyConfigSetGroups([
+    { ops: requiredOps },
+    {
+      ops: visionOps,
+      onApplied: () =>
+        console.log(
+          `[AI Config] Set ClawBox AI vision model ${CLAWBOX_AI_VISION_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+        ),
+      onError: (err) =>
+        console.warn(
+          "[AI Config] Failed to configure ClawBox AI vision model:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+    },
+    {
+      ops: imageOps,
+      onApplied: () =>
+        console.log(
+          `[AI Config] Set ClawBox AI image provider ${CLAWBOX_AI_IMAGE_MODEL} via proxy ${CLAWBOX_AI_PROXY_URL}`,
+        ),
+      // `logSafe`, not the raw message: this one is built from a subprocess
+      // failure, so it carries whatever `openclaw` wrote to stderr — a value
+      // that reached the CLI from this route's request body, control characters
+      // and all. Unbounded and un-escaped, it would be the caller deciding how
+      // many journal records one API call produces. The command line itself is
+      // already safe: the batch label names the config paths and elides every
+      // value, which here includes the portal token (see
+      // `configSetBatchLabelArgs`).
+      onError: (err) =>
+        console.warn(
+          "[AI Config] Failed to configure ClawBox AI image provider:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+    },
+    ...(extra?.groups ?? []),
+    setFallback
+      ? {
+          ops: [[
+            "agents.defaults.model.fallbacks",
+            JSON.stringify([CLAWBOX_AI_MODEL]),
+            "--json",
+          ]],
+        }
+      : null,
+  ]);
 
   return true;
 }
@@ -807,17 +908,33 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
   }
 }
 
+/**
+ * The local model that should back up `primaryModel`, or null when there is
+ * none to use.
+ *
+ * Split out of `ensureFallbackModel` so a caller that is about to write a pile
+ * of config can learn the answer BEFORE it writes, and fold the fallback into
+ * the same batch instead of paying another CLI start-up for it (TASK-483).
+ */
+async function pickLocalFallbackModel(
+  primaryModel?: string | null,
+  preferredLocalModel?: string,
+): Promise<string | null> {
+  const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
+    .filter((model): model is string => !!model && model !== primaryModel);
+  return fallbackCandidates[0] ?? null;
+}
+
 async function ensureFallbackModel(
   primaryModel?: string | null,
   preferredLocalModel?: string,
   preferredClawboxAiToken?: string,
 ) {
-  const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
-    .filter((model): model is string => !!model && model !== primaryModel);
+  const localFallback = await pickLocalFallbackModel(primaryModel, preferredLocalModel);
 
-  if (fallbackCandidates.length > 0) {
-    await setFallbackModels([fallbackCandidates[0]]);
-    console.log(`[AI Config] Configured local fallback model: ${logSafe(fallbackCandidates[0])}`);
+  if (localFallback) {
+    await setFallbackModels([localFallback]);
+    console.log(`[AI Config] Configured local fallback model: ${logSafe(localFallback)}`);
     return;
   }
 
@@ -868,14 +985,14 @@ async function writeOpenAICompatProvider(opts: {
     apiKey: opts.apiKey,
     models: Array.from(modelIds).map((id) => ({ id, name: id })),
   });
-  await runCommand(OPENCLAW_BIN, [
-    "config", "set", `models.providers.${opts.provider}`, providerDef, "--json",
+  await applyConfigSetGroups([
+    { ops: [[`models.providers.${opts.provider}`, providerDef, "--json"]] },
+    {
+      ops: [["models.mode", "merge"]],
+      // Non-fatal: merge is the default behavior anyway
+      onError: () => {},
+    },
   ]);
-  try {
-    await runCommand(OPENCLAW_BIN, ["config", "set", "models.mode", "merge"]);
-  } catch {
-    // Non-fatal: merge is the default behavior anyway
-  }
   await ensureFallbackModel(opts.defaultModel);
 }
 
@@ -1389,27 +1506,27 @@ export async function POST(request: Request) {
       );
     }
 
-    // 3. Set auth profile and primary model sequentially (parallel writes cause
-    //    ConfigMutationConflictError because openclaw config set reads/writes the
-    //    same file).
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
-      `auth.profiles.${config.profileKey}`,
-      // Subscription → "oauth"; every key-based provider → "api_key". The old
-      // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
-      JSON.stringify(authMode === "subscription"
-        ? { provider: ocProvider, mode: "oauth" }
-        : { provider: ocProvider, mode: "api_key" }),
-      "--json",
-    ]);
+    // 3. Auth profile, primary model, compaction reserve and the local-access
+    //    gateway settings. These are seven independent leaf writes with no
+    //    reads between them, so they go out as ONE `config set --batch-json`.
+    //    Issued one at a time they cost seven CLI cold starts — about a minute
+    //    on a Jetson, for seven keys (TASK-483). They still must not be
+    //    *parallel* writes: concurrent `openclaw config set` processes race on
+    //    the same file and lose to ConfigMutationConflictError. One batched
+    //    process is not concurrency, it is one validated read-modify-write.
+    const baseOps: OpenclawConfigSetArgs[] = [
+      [
+        `auth.profiles.${config.profileKey}`,
+        // Subscription → "oauth"; every key-based provider → "api_key". The old
+        // "token" mode 401s on 2026.6.8+ (see the auth-profile write above).
+        JSON.stringify(authMode === "subscription"
+          ? { provider: ocProvider, mode: "oauth" }
+          : { provider: ocProvider, mode: "api_key" }),
+        "--json",
+      ],
+    ];
     if (!isLocalScope || shouldPromoteLocalToPrimary) {
-      await runCommand(OPENCLAW_BIN, [
-        "config",
-        "set",
-        "agents.defaults.model.primary",
-        config.defaultModel,
-      ]);
+      baseOps.push(["agents.defaults.model.primary", config.defaultModel]);
       if (shouldPromoteLocalToPrimary) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
@@ -1424,9 +1541,7 @@ export async function POST(request: Request) {
         ? llamaCppContextWindow
         : Number.POSITIVE_INFINITY;
     const compactionReserveFloor = compactionReserveFloorForContext(activeContextWindow);
-    await runCommand(OPENCLAW_BIN, [
-      "config",
-      "set",
+    baseOps.push([
       "agents.defaults.compaction.reserveTokensFloor",
       `${compactionReserveFloor}`,
     ]);
@@ -1443,22 +1558,15 @@ export async function POST(request: Request) {
     // WS connections, and rotates legacy "clawbox" tokens automatically.
     console.log(`[AI Config] Configuring gateway for local access (provider: ${provider})`);
     const gatewayToken = await getOrGenerateGatewayToken();
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.auth.mode", "token",
-    ]);
+    baseOps.push(["gateway.auth.mode", "token"]);
     // A null result means the token is externally managed. Preserve the
     // SecretRef/interpolation instead of replacing it with plaintext.
     if (gatewayToken !== null) {
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "gateway.auth.token", gatewayToken,
-      ]);
+      baseOps.push(["gateway.auth.token", gatewayToken]);
     }
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.controlUi.allowInsecureAuth", "true", "--json",
-    ]);
-    await runCommand(OPENCLAW_BIN, [
-      "config", "set", "gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json",
-    ]);
+    baseOps.push(["gateway.controlUi.allowInsecureAuth", "true", "--json"]);
+    baseOps.push(["gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json"]);
+    await runConfigSetBatch(baseOps);
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(
@@ -1518,11 +1626,58 @@ export async function POST(request: Request) {
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
     // and set models.mode=replace so the gateway uses our definition.
     if (isClawAI) {
-      await configureClawboxAi(false, clawboxAiToken);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", "merge",
-      ]);
-      await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
+      // ONE provisioning pass, not two. This used to call configureClawboxAi()
+      // and then ensureFallbackModel(), which — with no local model to fall
+      // back to, which is the normal case — called configureClawboxAi() a
+      // SECOND time for the sole purpose of writing
+      // `agents.defaults.model.fallbacks`. Every write in it therefore paid the
+      // CLI's ~8 s cold start twice. Decide the fallback first and hand both
+      // that decision and `models.mode` to the single pass, so the whole
+      // ClawBox AI provisioning is one `config set --batch-json` (TASK-483).
+      const localFallback = await pickLocalFallbackModel(config.defaultModel, undefined);
+      // The two fallback outcomes keep the fatality they had when they lived in
+      // ensureFallbackModel: a local fallback was written before its try block
+      // and so was fatal, while the ClawBox AI one was written inside it and so
+      // only warned. Inherited, not chosen — batching them must not quietly
+      // change either.
+      const fallbackGroup: ConfigSetGroup = localFallback
+        ? {
+            ops: [[
+              "agents.defaults.model.fallbacks",
+              JSON.stringify([localFallback]),
+              "--json",
+            ]],
+            onApplied: () =>
+              console.log(`[AI Config] Configured local fallback model: ${logSafe(localFallback)}`),
+          }
+        : {
+            ops: [[
+              "agents.defaults.model.fallbacks",
+              JSON.stringify([CLAWBOX_AI_MODEL]),
+              "--json",
+            ]],
+            onApplied: () => console.log("[AI Config] Configured ClawBox AI as fallback model"),
+            onError: (err) =>
+              console.warn(
+                "[AI Config] Failed to configure fallback model:",
+                err instanceof Error ? logSafe(err.message) : err,
+              ),
+          };
+      const clawboxAiConfigured = await configureClawboxAi(
+        false,
+        clawboxAiToken,
+        {
+          requiredOps: [["models.mode", "merge"]],
+          groups: [fallbackGroup],
+        },
+      );
+      if (!clawboxAiConfigured) {
+        // Unreachable in practice — the handler already 400s when ClawBox AI
+        // has no token — but keep the old shape rather than silently leave a
+        // stale fallback naming a provider this box no longer has.
+        await runConfigSetBatch([["models.mode", "merge"]]);
+        await ensureFallbackModel(config.defaultModel, undefined, clawboxAiToken);
+      }
       console.log(`[AI Config] Set ClawBox AI provider in openclaw.json via proxy ${CLAWBOX_AI_PROXY_URL}`);
 
       // Account-switch safety: ClawKeep pairs separately and is bound to its
@@ -1559,11 +1714,9 @@ export async function POST(request: Request) {
           maxTokens: OLLAMA_MAX_TOKENS,
         }],
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.ollama", providerDef, "--json",
-      ]);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
+      await runConfigSetBatch([
+        ["models.providers.ollama", providerDef, "--json"],
+        ["models.mode", isLocalScope ? "merge" : "replace"],
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
@@ -1590,11 +1743,9 @@ export async function POST(request: Request) {
           maxTokens: llamaCppMaxTokens,
         }],
       });
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.providers.llamacpp", providerDef, "--json",
-      ]);
-      await runCommand(OPENCLAW_BIN, [
-        "config", "set", "models.mode", isLocalScope ? "merge" : "replace",
+      await runConfigSetBatch([
+        ["models.providers.llamacpp", providerDef, "--json"],
+        ["models.mode", isLocalScope ? "merge" : "replace"],
       ]);
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
