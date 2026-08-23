@@ -248,7 +248,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "store.installFailed": "Install failed. Please try again.",
     "store.confirmTitle": "Install {name}?",
     "store.confirmMessage": "This skill becomes available straight away. Your conversation keeps going — nothing restarts and nothing is lost.",
-    "store.installAnyway": "Install",
+    "store.installAnyway": "Install skill",
     "store.appStore": "App Store",
     "store.unknownDeveloper": "Unknown developer",
     "store.installs": "{count} installs",
