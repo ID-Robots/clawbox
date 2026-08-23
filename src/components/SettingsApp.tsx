@@ -81,6 +81,8 @@ interface SettingsAppProps {
 
 /** Exactly what /setup-api/email/status returns. The address is already
  *  masked server-side and the password is only ever a boolean. */
+type EmailMode = "send" | "read" | "answer";
+
 interface EmailStatus {
   configured: boolean;
   address: string | null;
@@ -90,6 +92,23 @@ interface EmailStatus {
   allowedSenders: string[];
   inbound: boolean;
   inboundSupported: boolean;
+  /** What the assistant may do with the mailbox. */
+  mode: EmailMode;
+  /** The explicit incoming-server override; null when it is being derived. */
+  imapHostExplicit: string | null;
+  /** When true, email_send queues a draft instead of sending. */
+  askBeforeSend: boolean;
+  /** How many drafts are waiting for approval. */
+  pendingCount: number;
+}
+
+/** One outgoing message the assistant queued, waiting for the owner. */
+interface PendingEmail {
+  id: string;
+  to: string[];
+  subject: string;
+  preview: string;
+  createdAt: number;
 }
 
 interface SwapStats { used: number; total: number; percent: number }
@@ -110,6 +129,13 @@ interface SystemStats {
 
 
 const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "email", "remote", "system", "about"] as const;
+
+/** The three mailbox modes, in increasing order of what the assistant may do. */
+const EMAIL_MODE_OPTIONS: { id: EmailMode; labelKey: string; hintKey: string }[] = [
+  { id: "send", labelKey: "settings.emailModeSend", hintKey: "settings.emailModeSendHint" },
+  { id: "read", labelKey: "settings.emailModeRead", hintKey: "settings.emailModeReadHint" },
+  { id: "answer", labelKey: "settings.emailModeAnswer", hintKey: "settings.emailModeAnswerHint" },
+];
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -1470,6 +1496,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // Gmail's submission endpoint, used only to prefill the form. The device
   // itself has no Gmail-specific path: any SMTP server works.
   const GMAIL_SMTP_HOST = "smtp.gmail.com";
+  // Only ever a placeholder now: leaving the incoming-server field blank lets
+  // the device derive it from the outgoing one.
   const GMAIL_IMAP_HOST = "imap.gmail.com";
   const [emailStatus, setEmailStatus] = useState<EmailStatus | null>(null);
   const [emailAddress, setEmailAddress] = useState("");
@@ -1477,9 +1505,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailShowPassword, setEmailShowPassword] = useState(false);
   const [emailHost, setEmailHost] = useState(GMAIL_SMTP_HOST);
   const [emailPort, setEmailPort] = useState("587");
-  const [emailInboundWanted, setEmailInboundWanted] = useState(false);
-  const [emailImapHost, setEmailImapHost] = useState(GMAIL_IMAP_HOST);
+  const [emailMode, setEmailMode] = useState<EmailMode>("send");
+  // Empty means "derive it from the outgoing server" — the panel only sends a
+  // value when the user typed one, so smtp.gmail.com keeps implying
+  // imap.gmail.com without pinning it into the saved config.
+  const [emailImapHost, setEmailImapHost] = useState("");
   const [emailAllowedSenders, setEmailAllowedSenders] = useState("");
+  const [emailAskBeforeSend, setEmailAskBeforeSend] = useState(true);
+  const [emailPending, setEmailPending] = useState<PendingEmail[]>([]);
+  const [emailPendingBusy, setEmailPendingBusy] = useState<string | null>(null);
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailTesting, setEmailTesting] = useState(false);
   const [emailReconfigure, setEmailReconfigure] = useState(false);
@@ -1504,16 +1538,95 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           : [],
         inbound: d?.inbound === true,
         inboundSupported: d?.inboundSupported === true,
+        mode: d?.mode === "read" || d?.mode === "answer" ? d.mode : "send",
+        imapHostExplicit: typeof d?.imapHostExplicit === "string" ? d.imapHostExplicit : null,
+        // Absent means an older device that has no gate — reporting `false`
+        // matches what such a device actually does.
+        askBeforeSend: d?.askBeforeSend === true,
+        pendingCount: typeof d?.pendingCount === "number" ? d.pendingCount : 0,
       });
     } catch {
       // keep the last known state rather than flashing "not configured"
     }
   }, []);
 
+  /**
+   * The approval queue. Session-gated server-side (the MCP bearer is refused
+   * there on purpose), so this only ever succeeds for a logged-in browser.
+   */
+  const refreshEmailPending = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/email/pending", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      setEmailPending(
+        Array.isArray(d?.pending)
+          ? d.pending
+              .filter((p: unknown): p is PendingEmail => typeof p === "object" && p !== null)
+              .map((p: Record<string, unknown>) => ({
+                id: String(p.id ?? ""),
+                to: Array.isArray(p.to) ? p.to.filter((x): x is string => typeof x === "string") : [],
+                subject: typeof p.subject === "string" ? p.subject : "",
+                preview: typeof p.preview === "string" ? p.preview : "",
+                createdAt: typeof p.createdAt === "number" ? p.createdAt : 0,
+              }))
+          : [],
+      );
+    } catch {
+      // keep the last known queue rather than blanking the strip
+    }
+  }, []);
+
   useEffect(() => {
     if (section !== "email" && !isMobile) return;
     refreshEmailStatus();
-  }, [section, isMobile, refreshEmailStatus]);
+    refreshEmailPending();
+  }, [section, isMobile, refreshEmailStatus, refreshEmailPending]);
+
+  /**
+   * Open the setup form on what is actually saved, rather than on the defaults.
+   *
+   * Done here, in the click, and not in an effect keyed on the status: an effect
+   * would also fire on every background refresh and overwrite whatever the user
+   * was halfway through typing.
+   */
+  const openEmailReconfigure = () => {
+    setEmailMsg(null);
+    if (emailStatus?.configured) {
+      setEmailMode(emailStatus.mode);
+      setEmailAskBeforeSend(emailStatus.askBeforeSend);
+      setEmailImapHost(emailStatus.imapHostExplicit ?? "");
+      setEmailAllowedSenders(emailStatus.allowedSenders.join(", "));
+    }
+    setEmailReconfigure(true);
+  };
+
+  const decidePending = async (id: string, action: "approve" | "reject") => {
+    setEmailPendingBusy(id);
+    setEmailMsg(null);
+    try {
+      const res = await fetch("/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, id }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        setEmailMsg({ type: "error", message: data?.error || t("settings.emailApproveFailed") });
+      } else {
+        setEmailMsg({
+          type: "success",
+          message: action === "approve" ? t("settings.emailApproved") : t("settings.emailRejected"),
+        });
+      }
+    } catch (err) {
+      setEmailMsg({ type: "error", message: err instanceof Error ? err.message : t("settings.emailApproveFailed") });
+    } finally {
+      setEmailPendingBusy(null);
+      refreshEmailPending();
+      refreshEmailStatus();
+    }
+  };
 
   const saveEmail = async () => {
     if (!emailAddress.trim()) {
@@ -1538,8 +1651,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           password: emailPassword,
           smtpHost: emailHost.trim(),
           smtpPort: Number(emailPort) || 587,
-          imapHost: emailInboundWanted ? emailImapHost.trim() : "",
-          allowedSenders: emailInboundWanted ? emailAllowedSenders : "",
+          mode: emailMode,
+          askBeforeSend: emailAskBeforeSend,
+          // Only ever the EXPLICIT override. Left blank, the device derives it
+          // from the outgoing server (smtp.gmail.com -> imap.gmail.com).
+          imapHost: emailMode === "send" ? "" : emailImapHost.trim(),
+          allowedSenders: emailMode === "answer" ? emailAllowedSenders : "",
         }),
         signal: controller.signal,
       });
@@ -1552,6 +1669,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // drop it the moment the device has accepted it.
       setEmailPassword("");
       setEmailReconfigure(false);
+      refreshEmailPending();
       setEmailMsg({
         type: data.warning ? "error" : "success",
         message: data.warning || t("settings.emailConfigured"),
@@ -1597,7 +1715,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         return;
       }
       setEmailReconfigure(false);
-      setEmailInboundWanted(false);
+      setEmailMode("send");
+      setEmailPending([]);
       setEmailMsg({ type: "success", message: t("settings.emailDisconnected") });
       refreshEmailStatus();
     } catch (err) {
@@ -3080,7 +3199,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setEmailReconfigure(true); setEmailMsg(null); }}
+                      onClick={openEmailReconfigure}
                       className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
                     >
                       {t("settings.emailReconfigure")}
@@ -3106,6 +3225,53 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
               {emailMsg && <div className="mt-4"><StatusMessage type={emailMsg.type} message={emailMsg.message} /></div>}
             </div>
+
+            {/* Approvals. Only shown when something is actually waiting — an
+                empty queue is not news, and this panel is mostly looked at for
+                other reasons. Every string here is agent-composed text, so it
+                is rendered as text and never as markup. */}
+            {emailPending.length > 0 && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-approvals">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">outgoing_mail</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailPending")}</label>
+                  <span className="ml-auto text-xs font-mono text-[var(--coral-bright)]/70 bg-orange-500/10 px-2 py-0.5 rounded-md">
+                    {t("settings.emailPendingCount", { count: String(emailPending.length) })}
+                  </span>
+                </div>
+
+                <div className="space-y-3">
+                  {emailPending.map((draft) => (
+                    <div key={draft.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                      <div className="text-xs text-[var(--text-muted)] truncate">
+                        {t("settings.emailPendingTo")}: {draft.to.join(", ")}
+                      </div>
+                      <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{draft.subject}</div>
+                      <div className="text-xs text-[var(--text-secondary)] mt-1 whitespace-pre-wrap break-words">{draft.preview}</div>
+                      <div className="flex flex-wrap items-center gap-3 mt-3">
+                        <button
+                          type="button"
+                          onClick={() => decidePending(draft.id, "approve")}
+                          disabled={emailPendingBusy !== null}
+                          className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                        >
+                          {emailPendingBusy === draft.id && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                          {t("settings.emailApprove")}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => decidePending(draft.id, "reject")}
+                          disabled={emailPendingBusy !== null}
+                          className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50"
+                        >
+                          {t("settings.emailReject")}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Setup */}
             {(emailStatus === null || !emailStatus.configured || emailReconfigure) && (
@@ -3203,36 +3369,62 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                   </div>
 
-                  {/* Inbound is Hermes-only, and never offered without an allowlist. */}
-                  {emailStatus?.inboundSupported && (
-                    <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
-                      <label className="flex items-start gap-3 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={emailInboundWanted}
-                          onChange={(e) => { setEmailInboundWanted(e.target.checked); setEmailMsg(null); }}
-                          className="mt-0.5 accent-[var(--coral-bright)]"
-                        />
-                        <span className="min-w-0">
-                          <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailInboundTitle")}</span>
-                          <span className="block text-xs text-[var(--text-secondary)] mt-0.5">{t("settings.emailInboundHint")}</span>
-                        </span>
-                      </label>
-
-                      {emailInboundWanted && (
-                        <div className="mt-4 space-y-3">
-                          <div>
-                            <label htmlFor="settings-email-imap" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailImapHost")}</label>
+                  {/* The three modes, as ONE choice: "answers senders but may
+                      not read them" is not a thing, so two booleans would spell
+                      states that cannot exist. */}
+                  <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                    <div className="text-[11px] font-medium text-white/35 uppercase tracking-wider mb-3">{t("settings.emailMode")}</div>
+                    <div className="space-y-3" role="radiogroup" aria-label={t("settings.emailMode")}>
+                      {EMAIL_MODE_OPTIONS.map((opt) => {
+                        // "Answer senders" is Hermes' native adapter and has no
+                        // OpenClaw equivalent. Shown disabled with the reason
+                        // rather than silently missing, so the panel does not
+                        // look different on the two editions for no visible cause.
+                        const unavailable = opt.id === "answer" && !emailStatus?.inboundSupported;
+                        return (
+                          <label
+                            key={opt.id}
+                            className={`flex items-start gap-3 ${unavailable ? "opacity-50 cursor-not-allowed" : "cursor-pointer"}`}
+                          >
                             <input
-                              id="settings-email-imap"
-                              type="text"
-                              value={emailImapHost}
-                              onChange={(e) => { setEmailImapHost(e.target.value); setEmailMsg(null); }}
-                              spellCheck={false}
-                              autoComplete="off"
-                              className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all"
+                              type="radio"
+                              name="settings-email-mode"
+                              data-testid={`settings-email-mode-${opt.id}`}
+                              value={opt.id}
+                              checked={emailMode === opt.id}
+                              disabled={unavailable}
+                              onChange={() => { setEmailMode(opt.id); setEmailMsg(null); }}
+                              className="mt-0.5 accent-[var(--coral-bright)]"
                             />
-                          </div>
+                            <span className="min-w-0">
+                              <span className="block text-sm text-[var(--text-primary)] font-medium">{t(opt.labelKey)}</span>
+                              <span className="block text-xs text-[var(--text-secondary)] mt-0.5">
+                                {unavailable ? t("settings.emailModeAnswerUnavailable") : t(opt.hintKey)}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    {emailMode !== "send" && (
+                      <div className="mt-4 space-y-3">
+                        <div>
+                          <label htmlFor="settings-email-imap" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailImapHost")}</label>
+                          <input
+                            id="settings-email-imap"
+                            type="text"
+                            value={emailImapHost}
+                            onChange={(e) => { setEmailImapHost(e.target.value); setEmailMsg(null); }}
+                            placeholder={GMAIL_IMAP_HOST}
+                            spellCheck={false}
+                            autoComplete="off"
+                            className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 transition-all placeholder-white/15"
+                          />
+                          <p className="text-xs text-[var(--text-muted)] mt-1.5">{t("settings.emailImapHostHint")}</p>
+                        </div>
+
+                        {emailMode === "answer" && (
                           <div>
                             <label htmlFor="settings-email-allowed" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.emailAllowedSenders")}</label>
                             <input
@@ -3247,10 +3439,28 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             />
                             <p className="text-xs text-[var(--text-muted)] mt-1.5">{t("settings.emailAllowedSendersHint")}</p>
                           </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Independent of the mode above: that one is about the INBOX,
+                      this one is about what leaves the device. */}
+                  <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                    <label className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        data-testid="settings-email-ask-before-send"
+                        checked={emailAskBeforeSend}
+                        onChange={(e) => { setEmailAskBeforeSend(e.target.checked); setEmailMsg(null); }}
+                        className="mt-0.5 accent-[var(--coral-bright)]"
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailAskBeforeSend")}</span>
+                        <span className="block text-xs text-[var(--text-secondary)] mt-0.5">{t("settings.emailAskBeforeSendHint")}</span>
+                      </span>
+                    </label>
+                  </div>
 
                   <p className="text-xs text-[var(--text-muted)]">{t("settings.emailSecurityNote")}</p>
                 </div>

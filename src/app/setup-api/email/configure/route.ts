@@ -15,10 +15,14 @@
 import { NextResponse } from "next/server";
 import {
   clearEmailSettings,
+  modeAllowsReading,
   parseEmailConfigure,
   saveEmailSettings,
+  toImapConfig,
   toSmtpConfig,
 } from "@/lib/email-config";
+import { clearPending } from "@/lib/email-pending";
+import { ImapError, verifyImap } from "@/lib/imap-client";
 import { getActiveHarness } from "@/lib/harness";
 import {
   applyHermesEmail,
@@ -64,6 +68,28 @@ export async function POST(request: Request) {
         { error: "Could not connect to the mail server.", kind: "network" },
         { status: 400 },
       );
+    }
+
+    // Same rule for the incoming server, for the same reason: a mode that says
+    // "the assistant may read my mail" and cannot actually open the mailbox
+    // would only be discovered the first time the owner asked it to look. The
+    // derived host (imap.gmail.com from smtp.gmail.com) is exactly the kind of
+    // guess that has to be proven rather than assumed — and for Gmail this is
+    // also what catches "IMAP is switched off in Gmail's own settings".
+    if (modeAllowsReading(settings.mode)) {
+      try {
+        await verifyImap(toImapConfig(settings), { signal: request.signal });
+      } catch (err) {
+        if (err instanceof ImapError) {
+          console.error(`[email/configure] IMAP verification failed: kind=${err.kind}`);
+          return NextResponse.json({ error: err.message, kind: err.kind, detail: err.detail }, { status: 400 });
+        }
+        console.error("[email/configure] IMAP verification failed: kind=unknown");
+        return NextResponse.json(
+          { error: "Could not connect to the incoming-mail server.", kind: "network" },
+          { status: 400 },
+        );
+      }
     }
 
     await saveEmailSettings(settings);
@@ -136,8 +162,11 @@ export async function POST(request: Request) {
       success: true,
       inbound: false,
       restarted: false,
+      // "read" needs nothing from Hermes — it runs on ClawBox's own IMAP client
+      // and is offered on both editions, like sending. Only "answer" depends on
+      // Hermes' native adapter.
       ...(wantsInbound(settings)
-        ? { warning: "Sending works. Receiving replies is only available on the Hermes edition." }
+        ? { warning: "Sending works. Answering senders is only available on the Hermes edition." }
         : {}),
     });
   } catch (err) {
@@ -151,6 +180,9 @@ export async function POST(request: Request) {
 export async function DELETE(request: Request) {
   try {
     await clearEmailSettings();
+    // Drafts waiting on an account that no longer exists can never be approved,
+    // and they hold agent-composed text. Disconnecting drops them.
+    clearPending();
     if ((await getActiveHarness()) === "hermes") {
       try {
         await clearHermesEmail();

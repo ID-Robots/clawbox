@@ -1,16 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn(), setMany: vi.fn() }));
+vi.mock("@/lib/email-pending", () => ({ queuePending: vi.fn() }));
+vi.mock("@/lib/email-notify", () => ({ notifyOwner: vi.fn() }));
 vi.mock("@/lib/smtp-client", async () => {
   const actual = await vi.importActual<typeof import("@/lib/smtp-client")>("@/lib/smtp-client");
   return { ...actual, sendMail: vi.fn() };
 });
 
 import { get } from "@/lib/config-store";
+import { notifyOwner } from "@/lib/email-notify";
+import { queuePending } from "@/lib/email-pending";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
 const mockGet = vi.mocked(get);
 const mockSend = vi.mocked(sendMail);
+const mockQueue = vi.mocked(queuePending);
+const mockNotify = vi.mocked(notifyOwner);
 
 let POST: typeof import("@/app/setup-api/email/send/route").POST;
 let TEST_POST: typeof import("@/app/setup-api/email/test/route").POST;
@@ -42,6 +48,11 @@ beforeEach(async () => {
   vi.clearAllMocks();
   vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
   mockSend.mockResolvedValue({ messageId: "abc@example.com" });
+  mockNotify.mockResolvedValue(undefined);
+  mockQueue.mockReturnValue({
+    ok: true,
+    draft: { id: "draft-1", to: ["owner@example.com"], subject: "Hello", body: "Text", createdAt: 0 },
+  });
   storeWith(CONFIGURED);
   POST = (await import("@/app/setup-api/email/send/route")).POST;
   TEST_POST = (await import("@/app/setup-api/email/test/route")).POST;
@@ -168,5 +179,88 @@ describe("POST /setup-api/email/test", () => {
     const data = await res.json();
     expect(data.kind).toBe("auth");
     expect(data.error).toMatch(/rejected/i);
+  });
+});
+
+// ── The approval gate ────────────────────────────────────────────────────────
+//
+// The difference between the send budget and this: the budget bounds a runaway,
+// it cannot stop the first message. With the gate on, nothing reaches the SMTP
+// client at all.
+
+describe("ask me before sending", () => {
+  const GATED = { ...CONFIGURED, email_ask_before_send: true };
+
+  it("does not send — it queues", async () => {
+    storeWith(GATED);
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(202);
+    const data = await res.json();
+    expect(data).toMatchObject({ success: true, queued: true, pendingId: "draft-1" });
+    // The whole point.
+    expect(mockSend).not.toHaveBeenCalled();
+    expect(mockQueue).toHaveBeenCalledWith({
+      to: ["owner@example.com"],
+      subject: "Hello",
+      body: "Text",
+    });
+  });
+
+  it("tells the owner something is waiting", async () => {
+    storeWith(GATED);
+    await POST(sendRequest(VALID_BODY));
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  it("still queues when the desktop notification fails", async () => {
+    // A notice that does not appear must not turn a queued draft into a failed
+    // send.
+    storeWith(GATED);
+    mockNotify.mockRejectedValueOnce(new Error("no desktop"));
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(202);
+  });
+
+  it("never puts the message on the wire when the queue is full", async () => {
+    storeWith(GATED);
+    mockQueue.mockReturnValue({ ok: false, reason: "full", error: "20 messages are already waiting" });
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(429);
+    expect((await res.json()).kind).toBe("queue_full");
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
+  it("validates the message before queueing it", async () => {
+    storeWith(GATED);
+    const res = await POST(sendRequest({ ...VALID_BODY, to: "not-an-address" }));
+    expect(res.status).toBe(400);
+    expect(mockQueue).not.toHaveBeenCalled();
+  });
+
+  it("refuses before queueing when nothing is configured", async () => {
+    storeWith({});
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(409);
+    expect(mockQueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("with the gate off", () => {
+  it("sends straight away, as an account configured before the gate does", async () => {
+    // MIGRATION: no email_ask_before_send key at all is an existing account,
+    // and it must keep behaving exactly as it did.
+    storeWith(CONFIGURED);
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(200);
+    expect((await res.json())).toMatchObject({ queued: false, messageId: "abc@example.com" });
+    expect(mockSend).toHaveBeenCalledTimes(1);
+    expect(mockQueue).not.toHaveBeenCalled();
+  });
+
+  it("sends when the gate is explicitly off", async () => {
+    storeWith({ ...CONFIGURED, email_ask_before_send: false });
+    const res = await POST(sendRequest(VALID_BODY));
+    expect(res.status).toBe(200);
+    expect(mockSend).toHaveBeenCalledTimes(1);
   });
 });

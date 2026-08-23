@@ -18,11 +18,21 @@
 // unsupervised, and its arguments can originate in text the agent merely READ —
 // a web page, a file, an inbound message. A sent email cannot be recalled.
 //
-// The budget below is the containment that does apply. It is a blast-radius
-// limit, not consent: it cannot stop the first injected message, it bounds a
-// runaway or a mass-mail to a few messages an hour. Enforced HERE rather than
-// in the MCP tool because this is where the credentials are — a compromised or
-// re-implemented MCP client cannot route around it.
+// TWO DIFFERENT THINGS GUARD THIS ROUTE, and they are not interchangeable:
+//
+//   The BUDGET below is a blast-radius limit. It cannot stop the first injected
+//   message; it bounds a runaway or a mass-mail to a few messages an hour.
+//
+//   The APPROVAL GATE (settings.askBeforeSend, default ON for new accounts) is
+//   actual consent: with it on, this route never reaches the SMTP client at all
+//   — the message becomes a draft the owner approves by hand in Settings. It is
+//   the answer to "not send emails without my permission"; the budget never was.
+//
+// Both are enforced HERE rather than in the MCP tool because this is where the
+// credentials are — a compromised or re-implemented MCP client cannot route
+// around either one. The budget still applies with the gate on: queueing is
+// cheap but not free, and 5 drafts an hour is already more than a person wants
+// to triage.
 //
 // The owner's own "Send test email" button is /email/test, a different route
 // with its own budget, so the person at the keyboard is never locked out by the
@@ -30,6 +40,8 @@
 
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
+import { notifyOwner } from "@/lib/email-notify";
+import { queuePending } from "@/lib/email-pending";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isEmailAddress, isHeaderSafe, sendMail, SmtpError } from "@/lib/smtp-client";
 
@@ -104,6 +116,31 @@ export async function POST(request: Request) {
       );
     }
 
+    // THE APPROVAL GATE. Nothing above this point has touched the network, and
+    // nothing below it runs when the owner has asked to be asked: the message
+    // becomes a draft on disk and the agent is told so. See email-pending.ts
+    // for why consent here is asynchronous rather than a prompt.
+    if (settings.askBeforeSend) {
+      const queued = queuePending({ to: recipients, subject, body: text });
+      if (!queued.ok) {
+        console.error(`[email/send] not queued: reason=${queued.reason}`);
+        return NextResponse.json(
+          { error: queued.error, kind: queued.reason === "full" ? "queue_full" : "invalid" },
+          { status: queued.reason === "full" ? 429 : 400 },
+        );
+      }
+      // Best effort: a notification that does not appear must not turn a
+      // successfully-queued draft into a failed send.
+      await notifyOwner(
+        `The assistant wants to send an email. Open Settings → Email to approve or delete it.`,
+      ).catch(() => undefined);
+      console.error("[email/send] queued for owner approval");
+      return NextResponse.json(
+        { success: true, queued: true, pendingId: queued.draft.id, recipients: recipients.length },
+        { status: 202 },
+      );
+    }
+
     try {
       const { messageId } = await sendMail(
         toSmtpConfig(settings),
@@ -116,7 +153,7 @@ export async function POST(request: Request) {
         },
         { signal: request.signal },
       );
-      return NextResponse.json({ success: true, messageId, recipients: recipients.length });
+      return NextResponse.json({ success: true, queued: false, messageId, recipients: recipients.length });
     } catch (err) {
       if (err instanceof SmtpError) {
         console.error(`[email/send] send failed: kind=${err.kind} host=${settings.smtpHost}`);

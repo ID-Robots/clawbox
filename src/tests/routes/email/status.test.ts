@@ -1,6 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/config-store", () => ({ get: vi.fn(), setMany: vi.fn() }));
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  // Spread the real module so DATA_DIR (used by the pending store, which the
+  // email routes now reach) keeps its value.
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  get: vi.fn(),
+  setMany: vi.fn(),
+}));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/hermes-email", () => ({ hermesEmailState: vi.fn() }));
 

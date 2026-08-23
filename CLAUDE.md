@@ -47,7 +47,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Browser**: `browser/` — Chromium automation via CDP (launch, navigate, click, type, screenshot)
 - **Gateway**: `gateway/`, `gateway/health`, `gateway/ws-config` — gateway proxying with HTML injection
 - **Telegram**: `telegram/configure`, `telegram/status` — Telegram bot config
-- **Email**: `email/configure`, `email/status`, `email/test`, `email/send` — SMTP account for outgoing mail (any provider; Gmail app-password guide in the UI). On Hermes, `configure` also wires the native IMAP/SMTP gateway adapter when inbound is opted into.
+- **Email**: `email/configure`, `email/status`, `email/test`, `email/send`, `email/messages`, `email/pending` — a mail account (any provider; Gmail app-password guide in the UI) with ONE of three modes: send only, read on demand (`email/messages` backs the `email_list`/`email_read` MCP tools over ClawBox's own IMAP client — no polling, EXAMINE + BODY.PEEK so reading never marks mail seen), or answer senders (Hermes' native adapter, allowlist-only). A separate "ask me before sending" gate turns `email/send` into a queued draft; `email/pending` approves or deletes it and is the one route that refuses the MCP bearer, because the agent is the party it gates.
 - **Setup**: `setup/status`, `setup/complete`, `setup/reset` — setup flow state, factory reset
 - **Update**: `update/run`, `update/status` — git-based system updates
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
@@ -74,7 +74,10 @@ Handles two concerns:
 - **`oauth-config.ts`** / **`oauth-utils.ts`** / **`google-project.ts`** — OAuth provider configuration and flows.
 - **`openclaw-config.ts`** — read/write OpenClaw gateway config (`~/.openclaw/openclaw.json`).
 - **`smtp-client.ts`** — dependency-free SMTP submission client (STARTTLS/implicit TLS, AUTH PLAIN/LOGIN) used for the email feature. Never authenticates over an unencrypted connection.
-- **`email-config.ts`** — the mail account in `data/config.json`: validation, masking, and the only reader of the stored app password.
+- **`email-config.ts`** — the mail account in `data/config.json`: the three mailbox modes and their migration, IMAP-host derivation (`smtp.gmail.com` → `imap.gmail.com`), validation, masking, and the only reader of the stored app password.
+- **`imap-client.ts`** — dependency-free, READ-ONLY IMAP client (implicit TLS 993, STARTTLS, LOGIN). EXAMINE and BODY.PEEK only; it contains no verb that can modify a mailbox. Never authenticates over an unencrypted connection.
+- **`email-pending.ts`** — outgoing drafts waiting for the owner's approval (`data/email-pending.json`, 0600, capped; a full queue refuses rather than evicting).
+- **`owner-session.ts`** — "is the PERSON asking, or the agent?". Accepts a session cookie only, and is what stops the MCP bearer from opening the approval gate.
 - **`hermes-env.ts`** — writes `~/.hermes/.env` with Hermes' own `save_env_value` semantics. Needed because `hermes config set` routes no `EMAIL_*` key to `.env` and would put a mailbox password in `config.yaml` instead.
 - **`hermes-email.ts`** — Hermes' native inbound email adapter (opt-in, allowlist-only).
 - **`gateway-proxy.ts`** — fetch gateway HTML, inject ClawBox nav bar + auth token.

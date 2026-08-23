@@ -12,6 +12,7 @@
 
 import { NextResponse } from "next/server";
 import { DEFAULT_IMAP_HOST, DEFAULT_SMTP_HOST, DEFAULT_SMTP_PORT, publicEmailStatus } from "@/lib/email-config";
+import { countPending } from "@/lib/email-pending";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesEmailState } from "@/lib/hermes-email";
 
@@ -30,6 +31,9 @@ export async function GET() {
       ...status,
       harness,
       inboundSupported,
+      // The approvals strip needs a count even when the panel has not opened
+      // the pending route yet, so the badge can appear on the nav item.
+      pendingCount: status.configured ? countPending() : 0,
       defaults: {
         smtpHost: DEFAULT_SMTP_HOST,
         smtpPort: DEFAULT_SMTP_PORT,

@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/config-store", () => ({
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  // Spread the real module so DATA_DIR (used by the pending store, which the
+  // email routes now reach) keeps its value.
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: vi.fn(),
   set: vi.fn(),
   setMany: vi.fn(),
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+vi.mock("@/lib/imap-client", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/imap-client")>("@/lib/imap-client");
+  return { ...actual, verifyImap: vi.fn() };
+});
 vi.mock("@/lib/hermes-email", async () => {
   const actual = await vi.importActual<typeof import("@/lib/hermes-email")>("@/lib/hermes-email");
   return {
@@ -29,11 +36,13 @@ import {
   restartHermesForEmail,
   stopHermesEmailPolling,
 } from "@/lib/hermes-email";
+import { ImapError, verifyImap } from "@/lib/imap-client";
 import { SmtpError, verifySmtp } from "@/lib/smtp-client";
 
 const mockSetMany = vi.mocked(setMany);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockVerify = vi.mocked(verifySmtp);
+const mockVerifyImap = vi.mocked(verifyImap);
 const mockApplyHermes = vi.mocked(applyHermesEmail);
 const mockRestart = vi.mocked(restartHermesForEmail);
 const mockStopPolling = vi.mocked(stopHermesEmailPolling);
@@ -57,6 +66,7 @@ beforeEach(async () => {
   vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
   mockHarness.mockResolvedValue("openclaw");
   mockVerify.mockResolvedValue(undefined);
+  mockVerifyImap.mockResolvedValue(undefined);
   mockApplyHermes.mockResolvedValue({ inbound: false });
   mockRestart.mockResolvedValue(true);
   mockStopPolling.mockResolvedValue(false);
@@ -244,5 +254,50 @@ describe("DELETE /setup-api/email/configure", () => {
     await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
     expect(mockStopPolling).toHaveBeenCalledTimes(1);
     expect(mockRestart).not.toHaveBeenCalled();
+  });
+});
+
+// ── Proving the INCOMING server before saving it ────────────────────────────
+//
+// The same rule the outgoing side already keeps: a mode that says "the
+// assistant may read my mail" and cannot open the mailbox would only be
+// discovered the first time the owner asked it to look.
+
+describe("POST /setup-api/email/configure — read modes", () => {
+  const READ_BODY = {
+    address: "box@example.com",
+    password: "abcd efgh ijkl mnop",
+    mode: "read",
+  };
+
+  it("checks the incoming server before writing anything", async () => {
+    mockVerifyImap.mockRejectedValue(new ImapError("auth", "IMAP is switched off in Gmail."));
+    const res = await POST(request(READ_BODY));
+    expect(res.status).toBe(400);
+    expect((await res.json()).kind).toBe("auth");
+    expect(setMany).not.toHaveBeenCalled();
+  });
+
+  it("dials the host derived from the outgoing one", async () => {
+    await POST(request(READ_BODY));
+    expect(mockVerifyImap).toHaveBeenCalledTimes(1);
+    expect(mockVerifyImap.mock.calls[0][0]).toMatchObject({ host: "imap.gmail.com", port: 993, secure: true });
+  });
+
+  it("uses an explicit incoming server when one is given", async () => {
+    await POST(request({ ...READ_BODY, smtpHost: "smtp-mail.outlook.com", imapHost: "outlook.office365.com" }));
+    expect(mockVerifyImap.mock.calls[0][0]).toMatchObject({ host: "outlook.office365.com" });
+  });
+
+  it("does not touch IMAP at all in send-only mode", async () => {
+    // Nothing may open a mailbox, so there is nothing to prove.
+    await POST(request({ ...READ_BODY, mode: "send" }));
+    expect(mockVerifyImap).not.toHaveBeenCalled();
+  });
+
+  it("saves once both servers accept", async () => {
+    const res = await POST(request(READ_BODY));
+    expect(res.status).toBe(200);
+    expect(setMany).toHaveBeenCalledWith(expect.objectContaining({ email_mode: "read" }));
   });
 });
