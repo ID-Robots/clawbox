@@ -11,6 +11,7 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { describeChatFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -1459,8 +1460,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             runIdRef.current = null
             setSending(false)
             if (state === 'error') {
-              const errMsg = (payload.errorMessage as string) || 'Chat error'
-              setMessages(prev => [...prev, { role: 'system', text: `Error: ${errMsg}`, timestamp: Date.now() }])
+              // Never render the gateway's own error text. It is written for
+              // an operator reading a log and has carried an absolute device
+              // path, a session UUID and a `openclaw logs --follow` line into
+              // the customer's transcript (TASK-440).
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
             }
           }
         }
@@ -2269,7 +2273,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } catch (err) {
       setSending(false)
       runIdRef.current = null
-      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+      setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
     }
   }, [wsRequest])
 
@@ -2356,7 +2360,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     } catch (err) {
       // A user-initiated Stop shows nothing, not an error line.
       if ((err as Error)?.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+        setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
       }
     } finally {
       hermesAbortRef.current = null
