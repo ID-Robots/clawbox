@@ -42,11 +42,16 @@ describe("describeChatFailure", () => {
     expect(shown).toMatch(/new chat/i);
   });
 
-  it("does not assert a second window as established fact", () => {
+  it("does not assert an unchecked cause as established fact", () => {
     // The box has not checked for another tab and, in the wedged case, there
-    // is none. Presenting a guess as the diagnosis sent the owner hunting a
-    // phantom window while the real recovery sat one click away.
-    expect(describeChatFailure(TAKEOVER_RAW)).not.toMatch(/was open somewhere else/i);
+    // is none — the cause is internal. Presenting a guess as the diagnosis
+    // sent the owner hunting a phantom window while the real recovery sat one
+    // click away. Causes may be OFFERED ("that can happen when…"), never
+    // STATED ("this chat was…" / "the conversation changed outside…").
+    const shown = describeChatFailure(TAKEOVER_RAW);
+    expect(shown).not.toMatch(/was open somewhere else/i);
+    expect(shown).not.toMatch(/changed outside/i);
+    expect(shown).toMatch(/can happen/i);
   });
 
   it("says the same thing for the followup wording", () => {

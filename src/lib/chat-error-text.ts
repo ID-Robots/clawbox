@@ -44,7 +44,7 @@ function isSessionTakeover(raw: string): boolean {
 const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
 
 /** The conversation changed under the turn; retry may work, New chat always does. */
-const TAKEOVER = "That message did not go through — the conversation changed outside this window (another tab, Telegram, or a stuck session). Send it again, and if it keeps failing, start a New chat — that clears it.";
+const TAKEOVER = "That message did not go through. That can happen when this chat is open in another tab or on Telegram — or when the session gets stuck. Send it again, and if it keeps failing, start a New chat — that clears it.";
 
 /**
  * Customer-facing text for a chat turn that ended in `state: "error"`.
