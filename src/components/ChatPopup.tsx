@@ -206,6 +206,7 @@ import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
+import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import { fetchHarness } from '@/lib/client-harness'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
 
@@ -1933,6 +1934,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // mount because the server has no `window` to ask, and it starts at "ok" so
   // the first paint on a perfectly capable box never flashes a refusal.
   const [captureAvailability, setCaptureAvailability] = useState<CaptureAvailability>('ok')
+  // The popup that answers "then where DOES the mic work?" on an insecure
+  // origin: it offers a live route to this box's Remote Access tunnel
+  // (TASK-470). Opened only from a mic click that classified as `insecure`.
+  const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
   const [recordingMs, setRecordingMs] = useState(0)
   useEffect(() => {
     setCaptureAvailability(readCaptureAvailability())
@@ -2069,6 +2074,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const availability = readCaptureAvailability()
     if (availability !== 'ok') {
       setVoice({ state: 'error', error: availability, message: null, canRetry: false })
+      // On an insecure origin the status line can only say where the mic does
+      // not work. The popup carries the other half: a live, one-click route to
+      // this box's Remote Access tunnel, where it does.
+      if (availability === 'insecure') setTunnelDialogOpen(true)
       return
     }
     setVoice({ state: 'requesting', error: null, message: null, canRetry: false })
@@ -3939,6 +3948,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <div className="absolute bottom-0 left-0 w-3 h-3 cursor-sw-resize" onMouseDown={(e) => handleResizeStart("bl", e)} onTouchStart={(e) => handleResizeStart("bl", e)} />
         <div className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize" onMouseDown={(e) => handleResizeStart("br", e)} onTouchStart={(e) => handleResizeStart("br", e)} />
       </>}
+
+      {/* Where the microphone DOES work, when this origin cannot record.
+          The component portals itself to <body> for the same containing-block
+          reason as the image preview below. */}
+      <VoiceTunnelDialog open={tunnelDialogOpen} onClose={() => setTunnelDialogOpen(false)} />
 
       {/* Full-size image preview.
           Portalled to <body> rather than nested here: the popup root carries a

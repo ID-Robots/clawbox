@@ -196,8 +196,14 @@ describe("chat voice status row", () => {
     );
     expect(panel.textContent).not.toContain(translations.en["chat.voice.unsupported"]);
     // The remedy has to be in the sentence — an accurate diagnosis the owner
-    // cannot act on is no better than the wrong one.
-    expect(translations.en["chat.voice.insecureContext"]).toContain("Remote Desktop");
+    // cannot act on is no better than the wrong one. And it must be a remedy
+    // that WORKS: Remote Desktop is served from this same insecure origin and
+    // carries no audio, so naming it sent the owner somewhere the mic still
+    // cannot open (TASK-511). The paths voice actually ships on are the
+    // box's Remote Access tunnel and Telegram voice messages.
+    expect(translations.en["chat.voice.insecureContext"]).toContain("Remote Access");
+    expect(translations.en["chat.voice.insecureContext"]).toContain("Telegram");
+    expect(translations.en["chat.voice.insecureContext"]).not.toContain("Remote Desktop");
 
     // …and it has to be READABLE. The row is one ellipsised line while a
     // capture is live, which on a real box cut this sentence off at "Open
@@ -232,5 +238,27 @@ describe("chat voice status row", () => {
     expect(panel.textContent).not.toContain(translations.en["chat.voice.insecureContext"]);
     const record = screen.getByTestId("voice-record");
     expect(record.getAttribute("aria-label")).toBe(translations.en["chat.voice.record"]);
+  });
+
+  /**
+   * Yanko's TASK-470 decision (2026-08-22 19:34): the insecure origin gets a
+   * "notification and popup that redirects to the cloudflare tunnel". The
+   * status-row line above is the notification; this is the popup.
+   */
+  it("opens the tunnel popup from a mic click on a LAN origin", async () => {
+    setSecureContext(false);
+    await openVoiceStatus();
+
+    const dialog = await screen.findByTestId("voice-tunnel-dialog");
+    expect(dialog.getAttribute("aria-label")).toBe(translations.en["chat.voice.tunnel.title"]);
+  });
+
+  it("does not open the tunnel popup on a secure origin", async () => {
+    // A secure origin with no capture API is the browser's problem; the
+    // tunnel would change nothing, so offering it would be a false remedy.
+    setSecureContext(true);
+    await openVoiceStatus();
+
+    expect(screen.queryByTestId("voice-tunnel-dialog")).toBeNull();
   });
 });
