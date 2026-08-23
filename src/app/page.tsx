@@ -533,8 +533,10 @@ function ChromeDesktopInner() {
         };
         if (aborted) return;
         // A box that was never paired has no backup that could be "overdue";
-        // it gets the calm not-set-up-yet shield, not the red alert.
-        const unconfigured = !data.paired;
+        // it gets the calm not-set-up-yet shield, not the red alert. Only an
+        // explicit `paired: false` counts — a response missing the field keeps
+        // the old alert fallback rather than silencing a real overdue backup.
+        const unconfigured = data.paired === false;
         const stale =
           !unconfigured
           && (!data.lastBackupAtMs
