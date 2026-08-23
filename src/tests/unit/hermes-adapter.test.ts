@@ -22,6 +22,7 @@ const caps = capabilitiesFor("hermes", {
   hasClawaiToken: true,
   hermesSupportsImages: true,
   hermesHasVisionRoute: true,
+  hermesStreamsTurns: false,
 });
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },

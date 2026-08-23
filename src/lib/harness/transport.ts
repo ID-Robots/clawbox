@@ -156,6 +156,23 @@ export interface TurnRequest {
  * kind it is holding — it renders deltas if they come and the final either way.
  */
 export type TurnEvent =
+  /**
+   * The answer SO FAR — cumulative, not the fragment that just arrived.
+   *
+   * Stated here because it is the one thing about this event a reader cannot
+   * infer and a renderer cannot survive getting wrong: append when it meant
+   * replace and the reply doubles; replace when it meant append and only the
+   * last few characters are ever visible.
+   *
+   * Cumulative is the right way round because the surface's job is to paint the
+   * current state of one bubble, which is what `setStreaming(text)` already
+   * does for the gateway. An adapter whose transport speaks in fragments — the
+   * Hermes dashboard socket does — accumulates them itself and reports the
+   * whole, so the renderer stays the same one for every harness.
+   *
+   * It is never the model's monologue. Thinking is reported separately on the
+   * finished turn, and no transport may leak it into this field.
+   */
   | { kind: "delta"; text: string }
   | { kind: "final"; text: string; media?: readonly string[] }
   | { kind: "thinking"; on: boolean };

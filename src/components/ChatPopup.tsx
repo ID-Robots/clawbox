@@ -2236,6 +2236,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // none at all, so a failed seeding fetch cannot silently override the
         // device's own reasoning effort with "medium".
         reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
+      }, (event) => {
+        // The answer so far, for the streaming bubble — the same state the
+        // gateway's own delta handler sets, so both harnesses paint through
+        // one renderer. Passed unconditionally: an adapter that cannot stream
+        // simply never calls this, which is a quieter contract than asking the
+        // capability here and getting the answer wrong on one of them.
+        //
+        // A run that has already ended (Stop, or a late frame after the final)
+        // must not reopen the caret, so a delta is only painted while this run
+        // is still the live one.
+        if (event.kind === 'delta' && runIdRef.current !== null) setStreaming(event.text)
       })
     } catch (err) {
       // Nothing is coming on either path, so the run ends here.

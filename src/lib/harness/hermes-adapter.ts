@@ -83,6 +83,91 @@ function isHistoryMessage(row: unknown): row is HistoryMessage {
   );
 }
 
+/** Is this the streamed answer, or the ordinary one-shot JSON body? */
+function isEventStream(res: { headers?: { get(name: string): string | null } }): boolean {
+  return (res.headers?.get("content-type") || "").includes("text/event-stream");
+}
+
+/**
+ * Read a streamed turn, painting it as it arrives and returning what the JSON
+ * path would have returned.
+ *
+ * The frames are server-sent events with three names, and the split matters:
+ * `delta` carries a FRAGMENT of the answer and nothing else — the route never
+ * forwards the model's monologue on this channel — while `done` carries the
+ * settled turn, which is the only thing that has the tool steps and the
+ * deduplicated thinking. So the caller sees text appear immediately and still
+ * ends up with exactly the record the non-streaming path would have produced.
+ *
+ * Fragments are accumulated here rather than passed on raw, because `TurnEvent`
+ * says a delta is the answer SO FAR. One renderer, both harnesses.
+ *
+ * A stream that ends without a `done` is a failure, not an empty answer: the
+ * connection dropped mid-turn, and silently resolving with the partial text
+ * would record a truncated reply as if the agent had finished.
+ */
+async function readStreamedTurn(
+  res: Response,
+  onEvent: (event: TurnEvent) => void,
+): Promise<Record<string, unknown>> {
+  const body = res.body;
+  if (!body) throw new HarnessError("upstream", "Hermes streamed an empty response");
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let answer = "";
+  let settled: Record<string, unknown> | null = null;
+  let failure = "";
+
+  const consume = (frame: string) => {
+    let name = "message";
+    const data: string[] = [];
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("event:")) name = line.slice(6).trim();
+      // The space after the colon is part of the framing, not the payload.
+      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+    }
+    if (!data.length) return;
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(data.join("\n")) as Record<string, unknown>;
+    } catch {
+      // A frame we cannot read is dropped rather than failing the turn: the
+      // authoritative record still arrives on `done`.
+      return;
+    }
+    if (name === "delta") {
+      const chunk = typeof payload.text === "string" ? payload.text : "";
+      if (!chunk) return;
+      answer += chunk;
+      onEvent({ kind: "delta", text: answer });
+    } else if (name === "done") {
+      settled = payload;
+    } else if (name === "error") {
+      failure = typeof payload.error === "string" && payload.error ? payload.error : "Hermes chat failed";
+    }
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (value) buffer += decoder.decode(value, { stream: true });
+    // Frames are separated by a blank line. Split on what is complete and keep
+    // the remainder — a chunk boundary lands mid-frame constantly.
+    let split = buffer.indexOf("\n\n");
+    while (split !== -1) {
+      consume(buffer.slice(0, split));
+      buffer = buffer.slice(split + 2);
+      split = buffer.indexOf("\n\n");
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) consume(buffer);
+
+  if (failure) throw new HarnessError("upstream", failure);
+  if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
+  return settled;
+}
+
 export class HermesAdapter implements HarnessAdapter {
   readonly id = "hermes" as const;
 
@@ -143,11 +228,12 @@ export class HermesAdapter implements HarnessAdapter {
     for (const cb of this.statusListeners) cb(status, detail);
   }
 
-  async sendTurn(req: TurnRequest, _onEvent?: (event: TurnEvent) => void): Promise<TurnResult> {
-    // Nothing to stream: the route runs `hermes chat -q … -Q` and hands back
-    // the whole reply. `capabilities.streamsTurns` says so, so a caller that
-    // wants deltas has already been told it will not get any.
-    void _onEvent;
+  async sendTurn(req: TurnRequest, onEvent?: (event: TurnEvent) => void): Promise<TurnResult> {
+    // Ask to be streamed to only when both halves are true: this box can do it
+    // (`capabilities.streamsTurns`, probed) AND the caller is listening. The
+    // route honours the header when it can and answers with ordinary JSON when
+    // it cannot, so asking is never a commitment — see `readStreamedTurn`.
+    const streaming = this.capabilities.streamsTurns && typeof onEvent === "function";
     const controller = new AbortController();
     this.inFlight = controller;
     const abortFromCaller = () => controller.abort();
@@ -190,7 +276,12 @@ export class HermesAdapter implements HarnessAdapter {
         : req.text;
       const res = await this.fetchImpl(CHAT_ROUTE, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // A request, not a demand. The route streams when the box can and
+          // answers JSON when it cannot, and both are handled below.
+          ...(streaming ? { Accept: "text/event-stream" } : {}),
+        },
         body: JSON.stringify({
           message: outbound,
           // Only when the two differ, so the ordinary turn carries no extra
@@ -213,7 +304,13 @@ export class HermesAdapter implements HarnessAdapter {
         }),
         signal: controller.signal,
       });
-      const data = await res.json();
+      // A streamed answer is read frame by frame; anything else is one JSON
+      // body, exactly as before. The CONTENT TYPE decides, not what we asked
+      // for — the route falls back to spawning the CLI whenever the box cannot
+      // stream this minute, and that answer must still be understood.
+      const data = isEventStream(res)
+        ? await readStreamedTurn(res, onEvent!)
+        : ((await res.json()) as Record<string, unknown>);
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",
