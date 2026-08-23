@@ -6,7 +6,17 @@ import {
   type DiscordBotInfo,
   fetchDiscordBotInfo,
 } from "@/lib/discord-api";
-import { hermesDiscordRegistered, hermesGatewayStatus } from "@/lib/hermes-discord";
+import {
+  DISCORD_AUTH_ERROR_CODE,
+  type DiscordConnectionState,
+  type HermesDiscordAccess,
+  type HermesGatewaySnapshot,
+  hermesDiscordRegistered,
+  hermesGatewayStatus,
+  mapDiscordConnectionState,
+  readHermesDiscordAccess,
+  readHermesGatewaySnapshot,
+} from "@/lib/hermes-discord";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +82,8 @@ async function fetchBotProbe(token: string): Promise<BotProbe> {
 interface HermesDiscordProbe {
   registered: boolean | null;
   gateway: { installed: boolean; running: boolean };
+  snapshot: HermesGatewaySnapshot;
+  access: HermesDiscordAccess;
 }
 
 const HERMES_PROBE_TTL = 15_000;
@@ -89,11 +101,16 @@ async function probeHermes(token: string): Promise<HermesDiscordProbe> {
   const existing = inFlightHermesProbe.get(token);
   if (existing) return existing;
   const pending = (async () => {
-    const [registered, gateway] = await Promise.all([
+    // The snapshot and the env are plain file reads and cost nothing; only
+    // `hermes gateway status` and `send --list` shell out, and they are what
+    // this cache is for.
+    const [registered, gateway, snapshot, access] = await Promise.all([
       hermesDiscordRegistered(),
       hermesGatewayStatus(),
+      readHermesGatewaySnapshot(),
+      readHermesDiscordAccess(),
     ]);
-    const probe: HermesDiscordProbe = { registered, gateway };
+    const probe: HermesDiscordProbe = { registered, gateway, snapshot, access };
     cachedHermesProbe = { token, probe, at: Date.now() };
     return probe;
   })().finally(() => {
@@ -113,20 +130,48 @@ export async function GET() {
     const bot = await fetchBotProbe(token);
 
     if ((await getActiveHarness()) === "hermes") {
-      const { registered, gateway } = await probeHermes(token);
+      const { registered, gateway, snapshot, access } = await probeHermes(token);
       // `null` = Hermes couldn't be asked; fall back to the stored token rather
       // than reporting a working bot as gone.
       const configured = registered ?? true;
+
+      // The honest question is not "is a token stored and is a process up" —
+      // both were true on the bench box while Discord refused to connect and
+      // then, once connected, dropped every message. It is "what does the
+      // gateway say about the Discord platform, and will the adapter admit
+      // anyone". mapDiscordConnectionState answers exactly that.
+      const observed = mapDiscordConnectionState({
+        gatewayRunning: gateway.running,
+        snapshot,
+        authorized: access.authorized,
+      });
+      // Hermes saying it has no Discord platform at all outranks anything a
+      // leftover snapshot claims about one.
+      const state: DiscordConnectionState = configured ? observed : "offline";
+
       return NextResponse.json({
         configured,
         // Whether the answer came from Hermes or from the stored token alone.
         verified: registered !== null,
-        // Discord is only LIVE when something is listening for events.
-        receiving: configured && gateway.running,
+        state,
+        // "receiving" may be true ONLY when Discord is genuinely connected AND
+        // somebody is allowed to talk to it. It used to be
+        // `configured && gateway.running`, which is why a bot that could not
+        // connect at all was reported as live.
+        receiving: state === "connected",
         // Discord itself said the stored token is dead — the one state the UI
         // must surface even while everything else looks configured.
-        tokenRejected: bot.rejected,
+        tokenRejected: bot.rejected || snapshot.platform?.errorCode === DISCORD_AUTH_ERROR_CODE,
         gateway,
+        // The gateway's own word for the platform, so a state nobody
+        // anticipated is still visible rather than flattened into "offline".
+        platformState: snapshot.platform?.state ?? null,
+        platformErrorCode: snapshot.platform?.errorCode ?? null,
+        allowedUserIds: access.allowedUsers,
+        allowlistExtras: access.allowlistExtras,
+        allowAllUsers: access.allowAllUsers,
+        authorized: access.authorized,
+        allowlistSupported: true,
         username: bot.info?.displayName,
         botId: bot.info?.id,
       });
@@ -134,6 +179,11 @@ export async function GET() {
 
     return NextResponse.json({
       configured: true,
+      // OpenClaw gates Discord through its own owner-approved DM pairing and
+      // exposes no per-platform state file, so there is nothing here that could
+      // honestly be mapped to the four states.
+      state: null,
+      allowlistSupported: false,
       tokenRejected: bot.rejected,
       username: bot.info?.displayName,
       botId: bot.info?.id,

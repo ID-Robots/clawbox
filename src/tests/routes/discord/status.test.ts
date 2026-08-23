@@ -2,10 +2,24 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
-vi.mock("@/lib/hermes-discord", () => ({
-  hermesDiscordRegistered: vi.fn(),
-  hermesGatewayStatus: vi.fn(),
-}));
+vi.mock("@/lib/hermes-discord", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
+  return {
+    mapDiscordConnectionState: actual.mapDiscordConnectionState,
+    DISCORD_AUTH_ERROR_CODE: actual.DISCORD_AUTH_ERROR_CODE,
+    hermesDiscordRegistered: vi.fn(),
+    hermesGatewayStatus: vi.fn(),
+    readHermesGatewaySnapshot: vi.fn(async () => ({ gatewayState: null, platform: null })),
+    readHermesDiscordAccess: vi.fn(async () => ({
+      allowedUsers: [],
+      allowlistExtras: [],
+      allowedRoles: [],
+      allowedChannels: [],
+      allowAllUsers: false,
+      authorized: false,
+    })),
+  };
+});
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";

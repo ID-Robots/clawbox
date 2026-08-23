@@ -8,19 +8,35 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
-vi.mock("@/lib/hermes-discord", () => ({
-  hermesDiscordRegistered: vi.fn(),
-  hermesGatewayStatus: vi.fn(),
-}));
+vi.mock("@/lib/hermes-discord", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
+  return {
+    // The state mapping is a pure function and is the thing under test here —
+    // stubbing it would leave the route's honesty unverified.
+    mapDiscordConnectionState: actual.mapDiscordConnectionState,
+    DISCORD_AUTH_ERROR_CODE: actual.DISCORD_AUTH_ERROR_CODE,
+    hermesDiscordRegistered: vi.fn(),
+    hermesGatewayStatus: vi.fn(),
+    readHermesGatewaySnapshot: vi.fn(),
+    readHermesDiscordAccess: vi.fn(),
+  };
+});
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
-import { hermesDiscordRegistered, hermesGatewayStatus } from "@/lib/hermes-discord";
+import {
+  hermesDiscordRegistered,
+  hermesGatewayStatus,
+  readHermesDiscordAccess,
+  readHermesGatewaySnapshot,
+} from "@/lib/hermes-discord";
 
 const mockGet = vi.mocked(get);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockRegistered = vi.mocked(hermesDiscordRegistered);
 const mockGatewayStatus = vi.mocked(hermesGatewayStatus);
+const mockSnapshot = vi.mocked(readHermesGatewaySnapshot);
+const mockAccess = vi.mocked(readHermesDiscordAccess);
 
 const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
@@ -46,6 +62,19 @@ describe("GET /setup-api/discord/status — Hermes", () => {
     mockHarness.mockResolvedValue("hermes");
     mockRegistered.mockResolvedValue(true);
     mockGatewayStatus.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    // The healthy baseline: gateway up, Discord connected, one person allowed.
+    mockSnapshot.mockResolvedValue({
+      gatewayState: "running",
+      platform: { state: "connected", errorCode: null, updatedAt: null },
+    });
+    mockAccess.mockResolvedValue({
+      allowedUsers: ["100000000000000001"],
+      allowlistExtras: [],
+      allowedRoles: [],
+      allowedChannels: [],
+      allowAllUsers: false,
+      authorized: true,
+    });
 
     GET = (await import("@/app/setup-api/discord/status/route")).GET;
   });
