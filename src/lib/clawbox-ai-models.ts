@@ -130,19 +130,26 @@ export const CLAWBOX_AI_IMAGE_MODEL_LABEL = "ClawBox AI Images";
 export type ClawboxAiPlan = "free" | "pro" | "max";
 
 /**
- * Images per calendar month included in each plan.
+ * Images per UTC DAY included in each plan.
  *
- * Approved by Yanko on 2026-08-19 and enforced by the cloud proxy, which is
- * the only counter — the device deliberately does not keep one of its own.
- * Mirrors `monthlyImageLimits` from
- * `GET https://clawbox.com/api/ai/images/generations`, re-checked against
- * production on 2026-08-20. These numbers are shown to the user, so if the
- * cloud ever changes them this table has to move in the same release.
+ * Daily, and these numbers, since TASK-485 (Yanko, 2026-08-22 19:34). They were
+ * 5/50/200 per calendar MONTH, and a monthly cap failed in the worst way it
+ * could: a customer who explored on the 2nd was locked out for twenty-eight
+ * days with no recovery except waiting.
+ *
+ * The cloud proxy is the only counter — the device deliberately does not keep
+ * one of its own. This table mirrors `dailyImageLimits` from
+ * `GET https://clawbox.com/api/ai/images/generations`, and it is a FALLBACK
+ * only: when the portal answers, `readImageAllowance` below prefers the live
+ * `meters.images.limit` it sends, because a table compiled into a device is a
+ * snapshot of what the cloud believed on release day. This one was already a
+ * release behind reality for as long as it took to write TASK-485, and nothing
+ * caught it because nothing rendered it.
  */
-export const CLAWBOX_AI_MONTHLY_IMAGE_LIMITS: Record<ClawboxAiPlan, number> = {
-  free: 5,
-  pro: 50,
-  max: 200,
+export const CLAWBOX_AI_DAILY_IMAGE_LIMITS: Record<ClawboxAiPlan, number> = {
+  free: 1,
+  pro: 5,
+  max: 20,
 };
 
 /** Human-facing plan name used in the images allowance copy. */
@@ -162,14 +169,81 @@ export function normalizeClawboxAiPlan(value: unknown): ClawboxAiPlan | null {
 }
 
 /**
- * Monthly image allowance for a plan, or `null` when the plan is unknown.
+ * Daily image allowance for a plan, or `null` when the plan is unknown.
  *
  * `null` is load-bearing: when the portal is unreachable we genuinely do not
  * know which allowance applies, and showing a guessed number would be worse
- * than showing none. Callers must render nothing rather than a default.
+ * than showing none. Callers must render nothing rather than a default. There
+ * is no "probably Free" — any default here is a guess at somebody's paid
+ * subscription.
  */
-export function monthlyImageLimitForPlan(plan: ClawboxAiPlan | null): number | null {
-  return plan ? CLAWBOX_AI_MONTHLY_IMAGE_LIMITS[plan] : null;
+export function dailyImageLimitForPlan(plan: ClawboxAiPlan | null): number | null {
+  return plan ? CLAWBOX_AI_DAILY_IMAGE_LIMITS[plan] : null;
+}
+
+/**
+ * What the AI Provider panel is allowed to say about image generation.
+ *
+ * `limit` is the day's allowance. `used` is present ONLY when the portal
+ * actually reported it this cycle; the device has no counter of its own and
+ * must never invent one, because a cached count rendered as live disagrees
+ * with the cloud the moment the same account generates a picture from anywhere
+ * else. So a panel with `used === null` says "20 images a day on Max" and one
+ * with a number says "3 of 20 images today" — never "0 of 20" on a silence.
+ */
+export interface ClawboxAiImageAllowance {
+  plan: ClawboxAiPlan;
+  planLabel: string;
+  /** Pictures per UTC day on this plan. Always a positive integer. */
+  limit: number;
+  /** Pictures spent today, or null when the portal did not report usage. */
+  used: number | null;
+  /** 0-100, or null whenever `used` is null. */
+  percentUsed: number | null;
+}
+
+/**
+ * Parse the `clawaiImages` block of `/setup-api/ai-models/status` into
+ * something renderable, or null.
+ *
+ * REJECTS RATHER THAN DEFAULTS, deliberately and at every step. A missing
+ * block, an unknown plan, a limit the portal could not resolve, a non-integer
+ * or negative count — every one of those returns null and the caller renders
+ * nothing. The alternative is a confidently wrong cap in front of an owner,
+ * which is strictly worse than the silence this task started from: silence is
+ * a gap, a wrong number is a support ticket and a refund conversation.
+ *
+ * `used` is dropped rather than the whole allowance when only the usage half
+ * is unusable — knowing the ceiling is still worth showing.
+ */
+export function readImageAllowance(value: unknown): ClawboxAiImageAllowance | null {
+  if (!value || typeof value !== "object") return null;
+  const block = value as Record<string, unknown>;
+  if (block.supported !== true) return null;
+
+  const plan = normalizeClawboxAiPlan(block.plan);
+  if (!plan) return null;
+
+  const limit = block.dailyLimit;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) return null;
+
+  const rawUsed = block.used;
+  const used =
+    typeof rawUsed === "number" && Number.isInteger(rawUsed) && rawUsed >= 0
+      ? rawUsed
+      : null;
+
+  return {
+    plan,
+    planLabel: CLAWBOX_AI_PLAN_LABEL[plan],
+    limit,
+    used,
+    // Computed here rather than trusted from the wire: the panel decides
+    // whether to warn off this number, and two sources for one percentage is
+    // how a warning fires at a different point from the one it describes.
+    // Capped at 100 so an over-limit day reads as full, not as 140%.
+    percentUsed: used === null ? null : Math.min(100, Math.round((used / limit) * 100)),
+  };
 }
 
 /* ---------------------------------------------------------------------------

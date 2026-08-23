@@ -4,10 +4,11 @@ import {
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_IMAGE_MODEL_LABEL,
-  CLAWBOX_AI_MONTHLY_IMAGE_LIMITS,
+  CLAWBOX_AI_DAILY_IMAGE_LIMITS,
   CLAWBOX_AI_PLAN_LABEL,
   normalizeClawboxAiPlan,
-  monthlyImageLimitForPlan,
+  dailyImageLimitForPlan,
+  readImageAllowance,
   type ClawboxAiPlan,
 } from "@/lib/clawbox-ai-models";
 
@@ -131,14 +132,17 @@ describe("normalizeClawboxAiPlan", () => {
   });
 });
 
-describe("monthlyImageLimitForPlan", () => {
+describe("dailyImageLimitForPlan", () => {
+  // Yanko's final table, TASK-485. Daily, not monthly: the previous 5/50/200
+  // were per calendar MONTH, and a monthly cap locked a customer who explored
+  // on the 2nd out for twenty-eight days.
   it.each<[ClawboxAiPlan, number]>([
-    ["free", 5],
-    ["pro", 50],
-    ["max", 200],
-  ])("reports %s = %i images/month", (plan, expected) => {
-    expect(monthlyImageLimitForPlan(plan)).toBe(expected);
-    expect(CLAWBOX_AI_MONTHLY_IMAGE_LIMITS[plan]).toBe(expected);
+    ["free", 1],
+    ["pro", 5],
+    ["max", 20],
+  ])("reports %s = %i images/day", (plan, expected) => {
+    expect(dailyImageLimitForPlan(plan)).toBe(expected);
+    expect(CLAWBOX_AI_DAILY_IMAGE_LIMITS[plan]).toBe(expected);
   });
 
   it("returns null — not 0 — for an unknown plan", () => {
@@ -146,30 +150,119 @@ describe("monthlyImageLimitForPlan", () => {
     // allowance applies. Callers render nothing on null; a 0 would read as
     // "you have no images left" and a default would be a guess at someone's
     // subscription. `?? 0` anywhere downstream is a bug.
-    const limit = monthlyImageLimitForPlan(null);
+    const limit = dailyImageLimitForPlan(null);
     expect(limit).toBeNull();
     expect(limit).not.toBe(0);
   });
 
   it("round-trips a portal string end to end", () => {
-    expect(monthlyImageLimitForPlan(normalizeClawboxAiPlan("MAX "))).toBe(200);
-    expect(monthlyImageLimitForPlan(normalizeClawboxAiPlan("enterprise"))).toBeNull();
+    expect(dailyImageLimitForPlan(normalizeClawboxAiPlan("MAX "))).toBe(20);
+    expect(dailyImageLimitForPlan(normalizeClawboxAiPlan("enterprise"))).toBeNull();
   });
 
   it("gives every plan a positive allowance and a label", () => {
     for (const plan of ["free", "pro", "max"] as const) {
-      expect(CLAWBOX_AI_MONTHLY_IMAGE_LIMITS[plan]).toBeGreaterThan(0);
+      expect(CLAWBOX_AI_DAILY_IMAGE_LIMITS[plan]).toBeGreaterThan(0);
       expect(CLAWBOX_AI_PLAN_LABEL[plan].trim()).not.toBe("");
     }
     // Free is a real allowance, not an absence of one — which is exactly why
     // the status route keeps `plan` alongside `tier` instead of collapsing
     // Free into the same null as "portal said something we don't recognise".
-    expect(CLAWBOX_AI_MONTHLY_IMAGE_LIMITS.free).toBe(5);
+    expect(CLAWBOX_AI_DAILY_IMAGE_LIMITS.free).toBe(1);
   });
 
   it("orders the allowances free < pro < max", () => {
-    const { free, pro, max } = CLAWBOX_AI_MONTHLY_IMAGE_LIMITS;
+    const { free, pro, max } = CLAWBOX_AI_DAILY_IMAGE_LIMITS;
     expect(free).toBeLessThan(pro);
     expect(pro).toBeLessThan(max);
+  });
+});
+
+describe("readImageAllowance", () => {
+  // The parser between the status route and the only surface that renders a
+  // cap to an owner. Its entire job is to answer "nothing" confidently: a
+  // wrong allowance on screen is worse than the silence this task started
+  // from, because silence is a gap and a wrong cap is a refund conversation.
+  const good = {
+    supported: true,
+    model: "gpt-image-1-mini",
+    plan: "max",
+    planLabel: "Max",
+    dailyLimit: 20,
+    used: 3,
+  };
+
+  it("reads a complete block", () => {
+    expect(readImageAllowance(good)).toEqual({
+      plan: "max",
+      planLabel: "Max",
+      limit: 20,
+      used: 3,
+      percentUsed: 15,
+    });
+  });
+
+  it("keeps the ceiling when only the usage half is unusable", () => {
+    // Knowing the ceiling is still worth showing — a device talking to a
+    // portal that predates the meters block should say "20 images a day on
+    // Max", not go silent.
+    const parsed = readImageAllowance({ ...good, used: undefined });
+    expect(parsed).toMatchObject({ limit: 20, used: null, percentUsed: null });
+  });
+
+  it.each([
+    ["a missing block", null],
+    ["a non-object", "20"],
+    ["an unpaired box", { ...good, supported: false }],
+    ["an unknown plan", { ...good, plan: "enterprise" }],
+    ["a plan the portal did not resolve", { ...good, plan: null }],
+    ["a limit the portal did not resolve", { ...good, dailyLimit: null }],
+    ["a zero limit", { ...good, dailyLimit: 0 }],
+    ["a negative limit", { ...good, dailyLimit: -5 }],
+    ["a fractional limit", { ...good, dailyLimit: 2.5 }],
+    ["a stringly-typed limit", { ...good, dailyLimit: "20" }],
+  ])("renders nothing for %s", (_label, block) => {
+    expect(readImageAllowance(block)).toBeNull();
+  });
+
+  it.each([
+    ["a negative count", -1],
+    ["a fractional count", 1.5],
+    ["a stringly-typed count", "3"],
+    ["a null count", null],
+  ])("drops %s but keeps the allowance", (_label, used) => {
+    const parsed = readImageAllowance({ ...good, used });
+    expect(parsed?.limit).toBe(20);
+    expect(parsed?.used).toBeNull();
+  });
+
+  it("never reports more than a full day, even over the cap", () => {
+    // A reservation can land the counter on the limit exactly; a refund race
+    // or a multi-image request settling could in principle overshoot. "140%"
+    // reads as a bug to the person looking at it.
+    expect(readImageAllowance({ ...good, used: 28 })?.percentUsed).toBe(100);
+    expect(readImageAllowance({ ...good, used: 20 })?.percentUsed).toBe(100);
+  });
+
+  it("crosses the warning line exactly where the panel warns", () => {
+    // 80% is the decided warning point (TASK-469). Asserted here so the
+    // number the component compares against and the number this produces
+    // cannot be rounded apart.
+    expect(readImageAllowance({ ...good, dailyLimit: 5, used: 4 })?.percentUsed).toBe(80);
+    expect(readImageAllowance({ ...good, dailyLimit: 5, used: 3 })?.percentUsed).toBe(60);
+    expect(readImageAllowance({ ...good, dailyLimit: 1, used: 0 })?.percentUsed).toBe(0);
+  });
+
+  it("reads a Free box's single picture as a real allowance", () => {
+    // Free is 1 a day, and 1 is a number worth rendering. Collapsing "Free"
+    // into the same null as "we could not tell" is the bug the status route
+    // keeps `plan` alongside `tier` to avoid.
+    expect(readImageAllowance({ ...good, plan: "free", dailyLimit: 1, used: 0 })).toEqual({
+      plan: "free",
+      planLabel: "Free",
+      limit: 1,
+      used: 0,
+      percentUsed: 0,
+    });
   });
 });
