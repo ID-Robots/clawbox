@@ -97,8 +97,11 @@ export function readPortalImageMeter(body: DeviceInfoResponse): PortalImageMeter
   const images = (meters as Record<string, unknown>).images;
   if (!images || typeof images !== "object") return null;
   const { used, limit } = images as Record<string, unknown>;
-  if (typeof used !== "number" || !Number.isInteger(used) || used < 0) return null;
-  if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) return null;
+  // Safe integers at this boundary too, not just at the render one: a count
+  // that cannot be represented exactly is not a count, and letting it past here
+  // means the cache holds it for two minutes before anything notices.
+  if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 0) return null;
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) return null;
   return { used, limit };
 }
 

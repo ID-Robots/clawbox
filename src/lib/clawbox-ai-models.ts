@@ -224,12 +224,15 @@ export function readImageAllowance(value: unknown): ClawboxAiImageAllowance | nu
   const plan = normalizeClawboxAiPlan(block.plan);
   if (!plan) return null;
 
+  // isSafeInteger, not isInteger: 2**53 passes isInteger and cannot represent an
+  // exact count, so arithmetic on it silently loses. Nothing sane sends that,
+  // but this function's whole contract is that it does not have to be sane.
   const limit = block.dailyLimit;
-  if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) return null;
+  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) return null;
 
   const rawUsed = block.used;
   const used =
-    typeof rawUsed === "number" && Number.isInteger(rawUsed) && rawUsed >= 0
+    typeof rawUsed === "number" && Number.isSafeInteger(rawUsed) && rawUsed >= 0
       ? rawUsed
       : null;
 

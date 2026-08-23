@@ -221,6 +221,12 @@ describe("readImageAllowance", () => {
     ["a negative limit", { ...good, dailyLimit: -5 }],
     ["a fractional limit", { ...good, dailyLimit: 2.5 }],
     ["a stringly-typed limit", { ...good, dailyLimit: "20" }],
+    // Above MAX_SAFE_INTEGER: isInteger says yes and the arithmetic silently
+    // loses, so a percentage computed from it is not wrong by a rounding, it
+    // is meaningless.
+    ["a limit past what a count can represent", { ...good, dailyLimit: 2 ** 53 }],
+    ["Infinity as a limit", { ...good, dailyLimit: Number.POSITIVE_INFINITY }],
+    ["NaN as a limit", { ...good, dailyLimit: Number.NaN }],
   ])("renders nothing for %s", (_label, block) => {
     expect(readImageAllowance(block)).toBeNull();
   });
@@ -230,6 +236,8 @@ describe("readImageAllowance", () => {
     ["a fractional count", 1.5],
     ["a stringly-typed count", "3"],
     ["a null count", null],
+    ["a count past what a count can represent", 2 ** 53],
+    ["Infinity as a count", Number.POSITIVE_INFINITY],
   ])("drops %s but keeps the allowance", (_label, used) => {
     const parsed = readImageAllowance({ ...good, used });
     expect(parsed?.limit).toBe(20);
