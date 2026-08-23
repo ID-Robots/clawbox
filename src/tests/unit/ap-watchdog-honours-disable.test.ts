@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -30,6 +30,18 @@ import path from "node:path";
 const REPO = process.cwd();
 const WATCHDOG = path.join(REPO, "scripts", "ap-watchdog.sh");
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
+
+// Unconditional, not skipIf. This file is the ONLY thing standing between a
+// customer and an open network they switched off, and a suite that quietly
+// skips itself on a runner without bash would report green while proving
+// nothing — which is the same shape of silence the fix itself is about.
+beforeAll(() => {
+  if (!hasBash) {
+    throw new Error(
+      "bash is required: these tests execute scripts/ap-watchdog.sh rather than reading it"
+    );
+  }
+});
 
 let root: string;
 let bin: string;
@@ -88,7 +100,7 @@ afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
-describe.skipIf(!hasBash)("the AP watchdog tells a drop from a decision", () => {
+describe("the AP watchdog tells a drop from a decision", () => {
   it("does NOT resurrect a hotspot the owner switched off", () => {
     // The exact state a box is in between the Security step and the end of the
     // wizard: disabled on purpose, setup not finished, radio idle.
