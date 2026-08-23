@@ -60,6 +60,16 @@ export interface McpContext {
    * a runtime check rather than disappearing.
    */
   providers: string[];
+  /**
+   * Whether the device has a mail account AND the owner picked a mode that
+   * lets the agent open the mailbox. Decides whether email_list/email_read are
+   * registered at all — a tool that could only ever 409 is a tool that trips
+   * Hermes' circuit breaker and takes the whole server down with it.
+   *
+   * Both editions, like sending: reading runs on ClawBox's own IMAP client and
+   * needs nothing from Hermes.
+   */
+  emailCanRead: boolean;
 }
 
 const SCREEN_GRABBERS = ["scrot", "gnome-screenshot", "spectacle", "import"];
@@ -75,6 +85,23 @@ interface ModelsPayload {
   current?: string;
   provider?: string;
   providers?: { id?: string; authenticated?: boolean }[];
+}
+
+interface EmailStatusPayload {
+  configured?: boolean;
+  mode?: string;
+}
+
+/**
+ * Ask the device whether reading is switched on. A device whose status route
+ * cannot be reached (an older build, a service still starting) answers null,
+ * and the read tools stay UNREGISTERED — the safe direction, because the
+ * failure mode of guessing "yes" is a permanently-failing tool.
+ */
+async function probeEmailRead(): Promise<boolean> {
+  const status = await apiTry<EmailStatusPayload>("/setup-api/email/status", { timeoutMs: 3_000 });
+  if (!status?.configured) return false;
+  return status.mode === "read" || status.mode === "answer";
 }
 
 export async function buildContext(
@@ -95,6 +122,8 @@ export async function buildContext(
     hasBinary("du"),
   ]);
 
+  const emailCanRead = await probeEmailRead();
+
   let providers: string[] = [];
   if (edition === "hermes") {
     const payload = await apiTry<ModelsPayload>("/setup-api/hermes/models", { timeoutMs: 3_000 });
@@ -109,5 +138,6 @@ export async function buildContext(
     profile,
     capabilities: { screenGrabber, imageConvert, journal, du },
     providers,
+    emailCanRead,
   };
 }

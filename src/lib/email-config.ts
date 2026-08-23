@@ -13,6 +13,7 @@
 // question and "what is the password" is not.
 
 import { get, setMany } from "@/lib/config-store";
+import type { ImapConfig } from "@/lib/imap-client";
 import { isEmailAddress, isHostname, isPort, type SmtpConfig } from "@/lib/smtp-client";
 
 export const EMAIL_KEYS = {
@@ -24,12 +25,72 @@ export const EMAIL_KEYS = {
   fromName: "email_from_name",
   imapHost: "email_imap_host",
   allowedSenders: "email_allowed_senders",
+  mode: "email_mode",
+  askBeforeSend: "email_ask_before_send",
 } as const;
 
 /** Gmail's submission endpoint — what the form is prefilled with. */
 export const DEFAULT_SMTP_HOST = "smtp.gmail.com";
 export const DEFAULT_SMTP_PORT = 587;
 export const DEFAULT_IMAP_HOST = "imap.gmail.com";
+/** IMAP over implicit TLS. Not exposed in the panel — see imap-client.ts. */
+export const DEFAULT_IMAP_PORT = 993;
+
+/**
+ * What the agent is allowed to do with the mailbox. One choice, three values,
+ * because the owner's question was "may it read?" and "may it answer?" — two
+ * independent booleans would also spell "answers senders but may not read",
+ * which is not a thing.
+ *
+ *   send   — outbound only. The mailbox is never opened. (Was: inbound unticked.)
+ *   read   — outbound, plus email_list/email_read WHEN THE AGENT IS ASKED.
+ *            Nothing polls; the mailbox is touched only inside a tool call.
+ *   answer — Hermes' native inbound adapter: it polls, and it replies to the
+ *            allowlist on its own. (Was: inbound ticked.)
+ */
+export type EmailMode = "send" | "read" | "answer";
+
+export const EMAIL_MODES: readonly EmailMode[] = ["send", "read", "answer"] as const;
+
+export function isEmailMode(value: unknown): value is EmailMode {
+  return typeof value === "string" && (EMAIL_MODES as readonly string[]).includes(value);
+}
+
+/** Modes in which the read-on-demand tools have a mailbox to open. */
+export function modeAllowsReading(mode: EmailMode): boolean {
+  return mode === "read" || mode === "answer";
+}
+
+/**
+ * The IMAP host implied by an SMTP host, so the common case needs no second
+ * field. "smtp.gmail.com" -> "imap.gmail.com", and the same for every provider
+ * that names its two servers that way (fastmail, zoho, yandex, most cPanel
+ * hosts).
+ *
+ * Anything else is returned UNCHANGED rather than guessed at. That is right for
+ * the "mail.example.com does both" shape and merely useless for
+ * "smtp-mail.outlook.com", whose IMAP host is outlook.office365.com and is not
+ * derivable from the string at all — which is exactly why the panel keeps an
+ * explicit incoming-server field. A wrong guess here would be a confusing
+ * connection error against a hostname the user never typed.
+ */
+export function deriveImapHost(smtpHost: string): string {
+  const host = smtpHost.trim();
+  if (!host) return "";
+  if (/^smtps?\./i.test(host)) return host.replace(/^smtps?\./i, "imap.");
+  return host;
+}
+
+/** The host the IMAP client should dial: the explicit one, else the derived one. */
+export function resolveImapHost(settings: Pick<EmailSettings, "smtpHost" | "imapHost">): string {
+  return settings.imapHost?.trim() || deriveImapHost(settings.smtpHost);
+}
+
+/**
+ * New setups get the approval gate ON. An account that was already configured
+ * before this setting existed gets it OFF — see getEmailCredentials.
+ */
+export const DEFAULT_ASK_BEFORE_SEND = true;
 
 export interface EmailSettings {
   address: string;
@@ -39,10 +100,17 @@ export interface EmailSettings {
   /** true = implicit TLS (465). false = plain connect + STARTTLS (587). */
   smtpSecure: boolean;
   fromName?: string;
-  /** Hermes inbound only. Empty string when the user did not ask for replies. */
+  /**
+   * EXPLICIT incoming-server override. Undefined means "derive it from the SMTP
+   * host" — read it through resolveImapHost(), never directly.
+   */
   imapHost?: string;
-  /** Hermes inbound only. Who the agent is allowed to answer. */
+  /** "answer" mode only. Who the agent is allowed to reply to. */
   allowedSenders?: string[];
+  /** What the agent may do with the mailbox. */
+  mode: EmailMode;
+  /** When true, email_send queues a draft for the owner instead of sending. */
+  askBeforeSend: boolean;
 }
 
 export interface PublicEmailStatus {
@@ -56,6 +124,10 @@ export interface PublicEmailStatus {
   inbound: boolean;
   imapHost: string | null;
   allowedSenders: string[];
+  mode: EmailMode;
+  /** The explicit override only — null when the host is being derived. */
+  imapHostExplicit: string | null;
+  askBeforeSend: boolean;
 }
 
 function asString(value: unknown): string {
@@ -86,6 +158,10 @@ export async function getEmailCredentials(): Promise<EmailSettings | null> {
   const rawPort = await get(EMAIL_KEYS.smtpPort);
   const smtpPort = typeof rawPort === "number" && isPort(rawPort) ? rawPort : DEFAULT_SMTP_PORT;
   const rawSenders = await get(EMAIL_KEYS.allowedSenders);
+  const imapHost = asString(await get(EMAIL_KEYS.imapHost)) || undefined;
+  const allowedSenders = Array.isArray(rawSenders)
+    ? rawSenders.filter((s): s is string => typeof s === "string")
+    : undefined;
 
   return {
     address,
@@ -94,9 +170,34 @@ export async function getEmailCredentials(): Promise<EmailSettings | null> {
     smtpPort,
     smtpSecure: (await get(EMAIL_KEYS.smtpSecure)) === true,
     fromName: asString(await get(EMAIL_KEYS.fromName)) || undefined,
-    imapHost: asString(await get(EMAIL_KEYS.imapHost)) || undefined,
-    allowedSenders: Array.isArray(rawSenders) ? rawSenders.filter((s): s is string => typeof s === "string") : undefined,
+    imapHost,
+    allowedSenders,
+    mode: resolveStoredMode(await get(EMAIL_KEYS.mode), imapHost, allowedSenders),
+    askBeforeSend: resolveStoredAskBeforeSend(await get(EMAIL_KEYS.askBeforeSend)),
   };
+}
+
+/**
+ * MIGRATION, read side. An account configured before the three-mode choice
+ * existed has no email_mode key, and the honest reading of it is what it is
+ * doing right now: an IMAP host plus an allowlist is Hermes' inbound adapter
+ * running, i.e. "answer"; anything else only ever sent, i.e. "send". Nobody's
+ * device changes behaviour on upgrade.
+ */
+function resolveStoredMode(raw: unknown, imapHost?: string, allowedSenders?: string[]): EmailMode {
+  if (isEmailMode(raw)) return raw;
+  return imapHost && allowedSenders && allowedSenders.length > 0 ? "answer" : "send";
+}
+
+/**
+ * MIGRATION, read side. Reached only from getEmailCredentials, i.e. only for an
+ * account that IS configured — so a missing key means an account that predates
+ * the approval gate, and turning the gate on under it would silently stop mail
+ * the owner already relies on. It defaults OFF here and ON in the form
+ * (DEFAULT_ASK_BEFORE_SEND), which is the asymmetry the two cases actually want.
+ */
+function resolveStoredAskBeforeSend(raw: unknown): boolean {
+  return typeof raw === "boolean" ? raw : false;
 }
 
 /** The shape /setup-api/email/status returns. Never carries the password. */
@@ -114,6 +215,10 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
       inbound: false,
       imapHost: null,
       allowedSenders: [],
+      mode: "send",
+      imapHostExplicit: null,
+      // No account yet, so this is the value the form should start on.
+      askBeforeSend: DEFAULT_ASK_BEFORE_SEND,
     };
   }
   return {
@@ -124,9 +229,13 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
     smtpSecure: settings.smtpSecure,
     fromName: settings.fromName ?? null,
     hasPassword: true,
-    inbound: Boolean(settings.imapHost && settings.allowedSenders?.length),
-    imapHost: settings.imapHost ?? null,
+    inbound: settings.mode === "answer",
+    // The EFFECTIVE host, so the panel can show what would actually be dialled.
+    imapHost: modeAllowsReading(settings.mode) ? resolveImapHost(settings) : null,
     allowedSenders: settings.allowedSenders ?? [],
+    mode: settings.mode,
+    imapHostExplicit: settings.imapHost ?? null,
+    askBeforeSend: settings.askBeforeSend,
   };
 }
 
@@ -135,6 +244,22 @@ export function toSmtpConfig(settings: EmailSettings): SmtpConfig {
     host: settings.smtpHost,
     port: settings.smtpPort,
     secure: settings.smtpSecure,
+    user: settings.address,
+    password: settings.password,
+  };
+}
+
+/**
+ * Credentials for the IMAP client. Implicit TLS on 993 always: the panel offers
+ * no incoming port, because every provider worth supporting serves 993 and the
+ * alternative (143 + STARTTLS) is a downgrade surface with no user demand. The
+ * client can still speak it — see imap-client.ts — which is what the tests use.
+ */
+export function toImapConfig(settings: EmailSettings): ImapConfig {
+  return {
+    host: resolveImapHost(settings),
+    port: DEFAULT_IMAP_PORT,
+    secure: true,
     user: settings.address,
     password: settings.password,
   };
@@ -151,6 +276,10 @@ export async function saveEmailSettings(settings: EmailSettings): Promise<void> 
     [EMAIL_KEYS.imapHost]: settings.imapHost || undefined,
     [EMAIL_KEYS.allowedSenders]:
       settings.allowedSenders && settings.allowedSenders.length > 0 ? settings.allowedSenders : undefined,
+    // Always written explicitly, so neither migration above can fire a second
+    // time and re-derive a value the owner has since chosen for themselves.
+    [EMAIL_KEYS.mode]: settings.mode,
+    [EMAIL_KEYS.askBeforeSend]: settings.askBeforeSend,
   });
 }
 
@@ -169,6 +298,8 @@ export interface EmailConfigureInput {
   fromName?: unknown;
   imapHost?: unknown;
   allowedSenders?: unknown;
+  mode?: unknown;
+  askBeforeSend?: unknown;
 }
 
 export type ParseResult =
@@ -211,7 +342,7 @@ export function parseEmailConfigure(body: EmailConfigureInput): ParseResult {
   if (fromName.length > MAX_NAME_LEN) return { ok: false, error: "Display name is too long" };
   if (/[\r\n]/.test(fromName)) return { ok: false, error: "Display name cannot contain line breaks" };
 
-  const imapHost = typeof body.imapHost === "string" ? body.imapHost.trim() : "";
+  let imapHost = typeof body.imapHost === "string" ? body.imapHost.trim() : "";
   if (imapHost && (!isHostname(imapHost) || imapHost.startsWith("-"))) {
     return { ok: false, error: "That does not look like a server address" };
   }
@@ -230,17 +361,39 @@ export function parseEmailConfigure(body: EmailConfigureInput): ParseResult {
     if (!isEmailAddress(sender)) return { ok: false, error: `"${sender}" is not a valid email address` };
   }
 
-  // Inbound is opt-in AND allowlist-only. Hermes' email adapter has no pairing
+  // The mode. A body that carries no `mode` is the pre-three-mode form shape,
+  // and it said what it wanted the old way: an IMAP host meant "let people write
+  // to the assistant". Deriving it from the IMAP host ALONE — not from the host
+  // plus a non-empty allowlist — is what keeps such a body meaning exactly what
+  // it used to, including the refusal below when the allowlist is empty. Reading
+  // it as "send" instead would silently accept a request the device has always
+  // rejected, and drop the explanation with it.
+  let mode: EmailMode;
+  if (body.mode === undefined || body.mode === null || body.mode === "") {
+    mode = imapHost ? "answer" : "send";
+  } else if (isEmailMode(body.mode)) {
+    mode = body.mode;
+  } else {
+    return { ok: false, error: "Unknown email mode" };
+  }
+
+  // "answer" is opt-in AND allowlist-only. Hermes' email adapter has no pairing
   // flow — the allowlist is the ONLY access control — so an inbox with no
   // allowlist would be an unauthenticated path to an agent that holds the
   // device's tools. Refuse rather than guess what an empty allowlist means.
-  if (imapHost && allowedSenders.length === 0) {
+  //
+  // "read" needs no allowlist: nobody is being answered, and the only thing that
+  // ever opens the mailbox is a tool call the owner asked for.
+  if (mode === "answer" && allowedSenders.length === 0) {
     return {
       ok: false,
       error: "To let people email the agent, list at least one address that is allowed to write to it",
     };
   }
-  if (!imapHost) allowedSenders = [];
+  if (mode !== "answer") allowedSenders = [];
+  // Send-only keeps no incoming server: there is nothing that may open a
+  // mailbox, so storing where one lives would only be misleading.
+  if (mode === "send") imapHost = "";
 
   return {
     ok: true,
@@ -253,6 +406,10 @@ export function parseEmailConfigure(body: EmailConfigureInput): ParseResult {
       fromName: fromName || undefined,
       imapHost: imapHost || undefined,
       allowedSenders: allowedSenders.length > 0 ? allowedSenders : undefined,
+      mode,
+      // Absent means a caller that predates the gate — default it ON. The safe
+      // direction for a missing field is "ask", never "send silently".
+      askBeforeSend: body.askBeforeSend === undefined ? DEFAULT_ASK_BEFORE_SEND : body.askBeforeSend === true,
     },
   };
 }

@@ -27,7 +27,7 @@
 // are the ones we want, and the last of the three is the setting that would
 // undo the paragraph above.
 
-import type { EmailSettings } from "@/lib/email-config";
+import { resolveImapHost, type EmailSettings } from "@/lib/email-config";
 import { clearHermesEnvValues, getHermesEnvValue, setHermesEnvValues } from "@/lib/hermes-env";
 import { ensureHermesGateway, hermesGatewayStatus } from "@/lib/hermes-telegram";
 
@@ -40,9 +40,19 @@ export const HERMES_EMAIL_KEYS = [
   "EMAIL_ALLOWED_USERS",
 ] as const;
 
-/** True when the settings ask for inbound: an IMAP host AND an allowlist. */
+/**
+ * True only in "answer" mode.
+ *
+ * NOT the same question as "may the agent read?". "read" mode also opens the
+ * mailbox, but on demand and from ClawBox's own IMAP client — Hermes' adapter
+ * is never wired up for it, because the adapter POLLS and REPLIES and that is
+ * exactly what the middle mode promises not to do. Wiring EMAIL_* into
+ * ~/.hermes/.env for a read-mode device would silently turn it into an
+ * answering one.
+ */
 export function wantsInbound(settings: EmailSettings): boolean {
-  return Boolean(settings.imapHost && settings.allowedSenders && settings.allowedSenders.length > 0);
+  return settings.mode === "answer"
+    && Boolean(settings.allowedSenders && settings.allowedSenders.length > 0);
 }
 
 /**
@@ -60,7 +70,7 @@ export async function applyHermesEmail(settings: EmailSettings): Promise<{ inbou
     EMAIL_PASSWORD: settings.password,
     EMAIL_SMTP_HOST: settings.smtpHost,
     EMAIL_SMTP_PORT: String(settings.smtpPort),
-    EMAIL_IMAP_HOST: settings.imapHost as string,
+    EMAIL_IMAP_HOST: resolveImapHost(settings),
     EMAIL_ALLOWED_USERS: (settings.allowedSenders as string[]).join(","),
   });
   return { inbound: true };

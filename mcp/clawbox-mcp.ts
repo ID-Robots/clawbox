@@ -92,7 +92,7 @@ export async function buildServer(edition: Ed, profile: Profile = resolveProfile
   registerSystemTools(reg, ctx);
   registerDesktopTools(reg, ctx);
   registerBrowserTools(reg);
-  registerEmailTools(reg);
+  registerEmailTools(reg, ctx);
   registerCodingTools(reg);
 
   // LAST. It takes over tools/call so that argument-validation failures come
