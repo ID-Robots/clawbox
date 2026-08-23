@@ -235,13 +235,15 @@ export class HermesAdapter implements HarnessAdapter {
       // them from the CLI's console output (or, where it could, read them
       // straight out of the agent's own record); folding them back into `text`
       // here would put the monologue right back in the bubble.
-      const reasoning = typeof data.reasoning === "string" && data.reasoning ? data.reasoning : "";
+      // Named for what it IS — the monologue that came BACK — because
+      // `reasoning` in this scope is already the effort level we sent.
+      const thinking = typeof data.reasoning === "string" && data.reasoning ? data.reasoning : "";
       const toolCalls = toToolSummaries(data.toolCalls);
       return {
         text: reply.text,
         media: reply.images,
         audio: reply.audio,
-        ...(reasoning ? { reasoning } : {}),
+        ...(thinking ? { reasoning: thinking } : {}),
         ...(toolCalls.length ? { toolCalls } : {}),
       };
     } catch (err) {

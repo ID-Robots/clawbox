@@ -216,7 +216,10 @@ describe("readHermesTurn against a real state.db", () => {
     home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-statedb-"));
     process.env.HERMES_HOME = home;
     try {
-      const { DatabaseSync } = await import("node:sqlite");
+      // Variable specifier: `@types/node` here has no declaration for the
+      // module, and this test is about the runtime, not the types.
+      const specifier = "node:sqlite";
+      const { DatabaseSync } = await import(specifier);
       const db = new DatabaseSync(path.join(home, "state.db"));
       db.exec(`CREATE TABLE messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

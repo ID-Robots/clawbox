@@ -278,7 +278,13 @@ export async function readHermesTurn(sessionId: string): Promise<HermesTurnRecor
     // `node:sqlite` is a Node 22.5+ builtin and still flagged experimental, so
     // it is imported at CALL time inside the guard: an older runtime must lose
     // the panel, not fail this module's import and take the chat route with it.
-    const sqlite = await import("node:sqlite");
+    //
+    // The specifier is a VARIABLE on purpose. `@types/node` at the version this
+    // project pins has no declaration for the module, so a literal import is a
+    // compile error for something that is legitimately resolved at runtime —
+    // and the guard above is what makes its absence safe either way.
+    const specifier = "node:sqlite";
+    const sqlite = await import(/* webpackIgnore: true */ specifier);
     const DatabaseSync = (sqlite as unknown as {
       DatabaseSync?: new (file: string, options?: { readOnly?: boolean }) => ReadOnlyDb;
     }).DatabaseSync;
