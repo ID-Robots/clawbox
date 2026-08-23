@@ -1510,5 +1510,30 @@ describe("POST /setup-api/ai-models/configure", () => {
       ).map((call) => call.path);
       expect(paths).toContain("models.providers.deepseek");
     });
+
+    it("still fails the connect when the LOCAL fallback write fails", async () => {
+      // The mirror of the test above, and the reason the two are written
+      // separately. A local fallback was written before ensureFallbackModel's
+      // try block and so was fatal; the ClawBox AI one was written inside it
+      // and only warned. Batching them into one call must not quietly level
+      // that difference in either direction.
+      mockGetAll.mockResolvedValue({
+        local_ai_configured: true,
+        local_ai_model: "ollama/llama3.2:3b",
+      });
+      failConfigSetsMatching(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        (path) => path === "agents.defaults.model.fallbacks",
+        () => new Error("fallback write exploded"),
+      );
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(500);
+    });
   });
 });
