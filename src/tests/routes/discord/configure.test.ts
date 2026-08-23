@@ -121,10 +121,15 @@ describe("POST /setup-api/discord/configure", () => {
     it("asks Discord before storing anything", async () => {
       await POST(req({ botToken: TOKEN }));
 
-      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // The identity check is FIRST — the intents preflight and the member
+      // lookup that follow it only run once Discord has accepted the token.
       const [url, init] = fetchMock.mock.calls[0];
       expect(String(url)).toContain("/users/@me");
       expect((init.headers as Record<string, string>).Authorization).toBe(`Bot ${TOKEN}`);
+      // And nothing had been written by the time it was asked.
+      expect(mockSet.mock.invocationCallOrder[0]).toBeGreaterThan(
+        fetchMock.mock.invocationCallOrder[0],
+      );
     });
 
     it("refuses a token Discord rejects, and stores nothing", async () => {
@@ -194,8 +199,10 @@ describe("POST /setup-api/discord/configure", () => {
       const body = await res.json();
 
       expect(res.status).toBe(200);
-      expect(body).toMatchObject({ success: true, restarted: false });
-      expect(body.warning).toMatch(/next gateway restart/i);
+      // A machine token, not a sentence: the panel maps it to a translated
+      // string. The English phrase this used to return was the one piece of
+      // Discord copy that never went through i18n.
+      expect(body).toMatchObject({ success: true, restarted: false, warning: "restart_pending" });
     });
   });
 

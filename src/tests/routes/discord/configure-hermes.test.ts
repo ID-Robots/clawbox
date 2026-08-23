@@ -108,8 +108,8 @@ describe("POST /setup-api/discord/configure — Hermes", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body).toMatchObject({ success: true, restarted: false });
-    expect(body.warning).toMatch(/next gateway restart/i);
+    // A machine token the panel translates, not an English sentence.
+    expect(body).toMatchObject({ success: true, restarted: false, warning: "restart_pending" });
   });
 
   it("keeps the save when the gateway call throws", async () => {
