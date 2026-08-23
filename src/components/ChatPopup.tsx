@@ -508,6 +508,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [sending, setSending] = useState(false)
   // Queued while a run is in flight; drained one at a time on `final`.
   const [queuedSends, setQueuedSends] = useState<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
+  // Synchronous mirrors of `sending` and the queue. A send handler can run in
+  // the window between the commit that rendered `sending === false` and the
+  // commit after the drain effect started the next queued run; deciding from
+  // the render-time closures in that window started a SECOND run while one was
+  // already in flight — which is how three accepted messages went unanswered
+  // (TASK-517). The refs are written at the moment the fact changes, so a
+  // stale closure cannot start a run it has no right to start.
+  const sendingRef = useRef(false)
+  const queuedSendsRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
+  useEffect(() => { queuedSendsRef.current = queuedSends }, [queuedSends])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
@@ -1398,7 +1408,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             setStreaming('')
             clearToolCalls()
             runIdRef.current = null
-            setSending(false)
+            sendingRef.current = false; setSending(false)
             // OpenClaw can ack a turn with "Sent." (delivery-mirror persona
             // pipeline / internal-source-reply) while the real reply is
             // generated server-side a moment later — persisted but never
@@ -1424,7 +1434,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             })
             clearToolCalls()
             runIdRef.current = null
-            setSending(false)
+            sendingRef.current = false; setSending(false)
             if (state === 'error') {
               // Never render the gateway's own error text. It is written for
               // an operator reading a log and has carried an absolute device
@@ -1674,6 +1684,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (chatMsgs.length === 0 && !greetedRef.current) {
         greetedRef.current = true
         setIsBootstrappingHistory(false)
+        sendingRef.current = true
         setSending(true)
         const idempotencyKey = uuid()
         runIdRef.current = idempotencyKey
@@ -1685,7 +1696,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             idempotencyKey,
           })
         } catch {
-          setSending(false)
+          sendingRef.current = false; setSending(false)
           runIdRef.current = null
         }
       } else if (mightAutoGreet) {
@@ -2245,7 +2256,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         idempotencyKey,
       })
     } catch (err) {
-      setSending(false)
+      sendingRef.current = false; setSending(false)
       runIdRef.current = null
       setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
     }
@@ -2338,7 +2349,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }
     } finally {
       hermesAbortRef.current = null
-      setSending(false)
+      sendingRef.current = false; setSending(false)
       setStreaming('')
       runIdRef.current = null
     }
@@ -2364,6 +2375,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // do that job here — `displayText` carries the 📎 filenames while the
     // gateway stores and returns the prompt alone.
     setMessages(prev => [...prev, { role: 'user', text: displayText, timestamp: Date.now(), idempotencyKey, images }])
+    sendingRef.current = true
     setSending(true)
     setStreaming('')
     runIdRef.current = idempotencyKey
@@ -2386,7 +2398,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const enqueueRun = useCallback((text: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
-    if (sending) {
+    // Decide from the refs, not the render-time `sending`: this can run in the
+    // window between "previous turn finished" committing and the drain's next
+    // run committing, where the closure still says idle while a run is already
+    // in flight — starting here would double-start (TASK-517). A non-empty
+    // queue also forces enqueueing, or this send would jump the line.
+    if (sending || sendingRef.current || queuedSendsRef.current.length > 0) {
       setQueuedSends(prev => {
         const next = [...prev, { id: uuid(), text: trimmed, attachments: [] }]
         return next.length > MAX_QUEUED_SENDS ? next.slice(next.length - MAX_QUEUED_SENDS) : next
@@ -2420,7 +2437,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // composer strip, which this send has just emptied. The queued/pending
     // copies of these objects are read for `name` and `path` alone.
     revokePreviews(currentAttachments)
-    if (sending) {
+    // Same ref-based decision as enqueueRun, for the same reason: an Enter can
+    // land while the drain is mid-handoff and the closure still says idle.
+    if (sending || sendingRef.current || queuedSendsRef.current.length > 0) {
       // Cap to bound memory; dropping the oldest matches "newest is freshest".
       setQueuedSends(prev => {
         const next = [...prev, { id: uuid(), text, attachments: currentAttachments }]
@@ -2432,7 +2451,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [input, sending, attachments, startRun])
 
   useEffect(() => {
-    if (sending || queuedSends.length === 0) return
+    // sendingRef guards the commit-lag case: a send that started between this
+    // commit and now (stale-window Enter) is invisible to the `sending` state
+    // this effect closed over, and draining on top of it would double-start.
+    if (sending || sendingRef.current || queuedSends.length === 0) return
     const [next, ...rest] = queuedSends
     setQueuedSends(rest)
     startRun(next.text, next.attachments)
