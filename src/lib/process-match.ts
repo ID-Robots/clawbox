@@ -76,17 +76,27 @@ export function isClawboxBrowserArgv(
   // set of real browser processes down to the one instance we manage.
   if (!isBrowserExecutable(argv[0])) return false;
 
-  // EITHER attribute is sufficient, deliberately — not both.
+  // The PROFILE DIRECTORY is the identity, alone.
   //
-  // Both are already ClawBox-specific (our profile path, our CDP port), so
-  // neither can plausibly belong to someone else's browser; Chromium
-  // singleton-locks a profile directory, so a second instance cannot share
-  // ours. Requiring both would instead LOSE the process tree: Chromium passes
-  // `--user-data-dir` down to its renderer/GPU/zygote children but keeps
-  // `--remote-debugging-port` in the browser process alone, so an AND would
-  // match only the parent and leave orphaned children behind — the exact
-  // cleanup the old pkill did perform, and what this fallback exists for.
-  const profileDir = trimSlashes(options.profileDir);
+  // It covers the whole tree: launch-browser.sh passes `--user-data-dir` to
+  // the parent, and Chromium hands it down to its renderer/GPU/zygote
+  // children. And it is genuinely ours — Chromium singleton-locks a profile
+  // directory, so a second instance cannot share it.
+  //
+  // The CDP port is NOT an identity, and matching it here was TASK-515: the
+  // OpenClaw gateway launches its own HEADLESS browser on the same port
+  // (`--remote-debugging-port=18800`, profile ~/.openclaw/browser/…), so a
+  // port clause classified the agent's invisible browser as the desktop one.
+  // The status panel then claimed a desktop browser was running with the
+  // headless PID, and close-browser would have SIGTERMed the agent's browser
+  // mid-turn. A browser answering our port that is not on our profile is a
+  // DIFFERENT browser — see isForeignCdpBrowserArgv below.
+  return argvMatchesProfileDir(argv, options.profileDir);
+}
+
+/** True when some argument names `profileDir` as the browser's profile. */
+function argvMatchesProfileDir(argv: readonly string[], dir: string): boolean {
+  const profileDir = trimSlashes(dir);
   return argv.some((arg, i) => {
     if (i === 0) return false;
     // Match the switch NAME exactly. `startsWith("--user-data-dir")` would also
@@ -97,8 +107,27 @@ export function isClawboxBrowserArgv(
     }
     // The separated `--user-data-dir /path` form puts the path in the next slot.
     if (arg === "--user-data-dir") return trimSlashes(argv[i + 1] ?? "") === profileDir;
-    return arg === `--remote-debugging-port=${options.cdpPort}`;
+    return false;
   });
+}
+
+/**
+ * True for a browser that OWNS our CDP port but is NOT the desktop browser —
+ * in practice the OpenClaw gateway's own headless Chromium, which binds
+ * `--remote-debugging-port=18800` with its own profile whenever the agent
+ * browses before the owner ever opened the desktop browser (TASK-515).
+ *
+ * Matched on the parent only (children never carry the port argument), which
+ * is enough: SIGTERM to a Chromium browser process shuts down its tree.
+ */
+export function isForeignCdpBrowserArgv(
+  argv: readonly string[],
+  options: { profileDir: string; cdpPort: number },
+): boolean {
+  if (argv.length === 0) return false;
+  if (!isBrowserExecutable(argv[0])) return false;
+  if (argvMatchesProfileDir(argv, options.profileDir)) return false;
+  return argv.some((arg, i) => i > 0 && arg === `--remote-debugging-port=${options.cdpPort}`);
 }
 
 /**
@@ -208,4 +237,26 @@ export function terminateClawboxBrowser(options: {
   cdpPort: number;
 }): Promise<number> {
   return terminateByArgv((argv) => isClawboxBrowserArgv(argv, options), isBrowserExecutable);
+}
+
+/** PIDs of a foreign browser holding our CDP port — see isForeignCdpBrowserArgv. */
+export function findForeignCdpBrowserPids(options: {
+  profileDir: string;
+  cdpPort: number;
+}): Promise<number[]> {
+  return findPidsByArgv((argv) => isForeignCdpBrowserArgv(argv, options), isBrowserExecutable);
+}
+
+/**
+ * SIGTERM a foreign browser holding our CDP port. Used by open-browser: the
+ * desktop browser cannot bind 18800 while the agent's headless browser owns
+ * it, and the owner has explicitly asked for a window. The agent relaunches
+ * its browser on demand — and after the desktop browser is up, it attaches to
+ * that window instead, which is the shared-browser state the panel documents.
+ */
+export function terminateForeignCdpBrowser(options: {
+  profileDir: string;
+  cdpPort: number;
+}): Promise<number> {
+  return terminateByArgv((argv) => isForeignCdpBrowserArgv(argv, options), isBrowserExecutable);
 }

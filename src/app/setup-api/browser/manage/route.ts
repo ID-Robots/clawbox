@@ -9,7 +9,7 @@ import path from "path";
 import type { OpenClawConfig } from "@/lib/openclaw-config";
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { findClawboxBrowserPids, terminateClawboxBrowser } from "@/lib/process-match";
+import { findClawboxBrowserPids, terminateClawboxBrowser, terminateForeignCdpBrowser } from "@/lib/process-match";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -144,26 +144,28 @@ async function cleanBrowserLocks() {
 }
 
 /** Check if browser is running and CDP is accessible */
-async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean }> {
-  // Identify the browser by its executable + our profile dir / CDP port, never
-  // by a regex over whole command lines — see src/lib/process-match.ts. The
+async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean; agentBrowsing?: boolean }> {
+  // Identify the browser by its executable + our profile dir, never by a
+  // regex over whole command lines — see src/lib/process-match.ts. The
   // harness runs each chat turn as `hermes chat -q <user's message>`, so a
   // command-line pattern is matchable from a chat message.
   const browserMatch = { profileDir: PROFILE_DIR, cdpPort: CDP_PORT };
 
-  // CDP answering is the authoritative "it is up and usable" signal; the pid
-  // is only a label for the UI. One scan serves both answers — this route is
-  // polled every 5s while the Browser panel is open, and the scan reads /proc.
   let cdpReady = false;
   try {
     const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
     cdpReady = res.ok;
   } catch {}
 
+  // "Running" means OUR desktop browser process exists — the one on the
+  // clawbox-browser profile. The CDP port answering is NOT that proof: the
+  // agent's own headless browser binds the same port whenever it browses
+  // before the owner opens the desktop browser, and reporting that as a
+  // running desktop browser (green tick, PID, Close button) was TASK-515.
   // findClawboxBrowserPids handles its own I/O failures and returns [].
   const pids = await findClawboxBrowserPids(browserMatch);
-  if (cdpReady) return { running: true, pid: pids[0], cdpReady: true };
-  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady: false };
+  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady };
+  if (cdpReady) return { running: false, cdpReady: true, agentBrowsing: true };
   return { running: false, cdpReady: false };
 }
 
@@ -340,15 +342,36 @@ export async function POST(req: Request) {
       }
 
       case "open-browser": {
-        // Check if already running via CDP
+        // Already running means OUR desktop browser answers — not merely that
+        // something answers the CDP port (TASK-515: the agent's headless
+        // browser satisfies a port probe, which made this button a no-op that
+        // then reported success).
         const existing = await getBrowserStatus();
-        if (existing.cdpReady) {
+        if (existing.running && existing.cdpReady) {
           return NextResponse.json({ ok: true, alreadyRunning: true, pid: existing.pid, cdpPort: CDP_PORT });
         }
 
         const chromium = await checkChromium();
         if (!chromium.installed || !chromium.path) {
           return NextResponse.json({ error: "Chromium not installed" }, { status: 400 });
+        }
+
+        // If the agent's headless browser holds the CDP port, the desktop
+        // browser could start but never bind it — the two browsers would then
+        // permanently diverge (separate profiles, separate logins). The owner
+        // explicitly asked for a window, so close the headless one first; the
+        // agent relaunches on demand and will attach to the desktop window,
+        // which is the shared-browser state the panel describes.
+        if (existing.agentBrowsing) {
+          const cleared = await terminateForeignCdpBrowser({ profileDir: PROFILE_DIR, cdpPort: CDP_PORT });
+          if (cleared > 0) console.log(`[browser] closed ${cleared} headless agent browser process(es) holding CDP :${CDP_PORT}`);
+          // Wait for the port to actually free before launching against it.
+          for (let i = 0; i < 5; i++) {
+            try {
+              await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+              await new Promise(r => setTimeout(r, 1000));
+            } catch { break; }
+          }
         }
 
         await fs.mkdir(PROFILE_DIR, { recursive: true });
