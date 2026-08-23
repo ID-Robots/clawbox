@@ -115,6 +115,12 @@ interface WhatsappStatus {
   allowAllUsers?: boolean;
   /** null = the bridge directory was not found, which is not "bridge broken". */
   bridgeReady?: boolean | null;
+  /**
+   * Does the gateway's sender allowlist cover the paired account? Pairing and
+   * authorization are separate gates upstream, and a box that clears the first
+   * but not the second looks healthy while dropping every message.
+   */
+  authorized?: boolean;
   receiving?: boolean;
 }
 
@@ -1509,6 +1515,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         allowedUsers: Array.isArray(d?.allowedUsers) ? d.allowedUsers : [],
         allowAllUsers: d?.allowAllUsers === true,
         bridgeReady: d?.bridgeReady ?? null,
+        authorized: d?.authorized === true,
         receiving: d?.receiving === true,
       });
     } catch {

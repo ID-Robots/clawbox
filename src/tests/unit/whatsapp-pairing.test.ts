@@ -55,8 +55,15 @@ interface Harness {
     creds: boolean;
     cleared: number;
     installs: number;
-    enabled: number;
+    /** markPaired() calls -- the env write that enables AND authorizes. */
+    pairedWrites: number;
+    /** The connected-event id handed to markPaired, in order. */
+    pairedUserIds: (string | null)[];
+    /** restartGateway() calls. */
+    gatewayRestarts: number;
     installFails: boolean;
+    restartSucceeds: boolean;
+    restartThrows: boolean;
   };
 }
 
@@ -72,8 +79,12 @@ function makeHarness(overrides: Partial<Harness["state"]> = {}): Harness {
     creds: false,
     cleared: 0,
     installs: 0,
-    enabled: 0,
+    pairedWrites: 0,
+    pairedUserIds: [] as (string | null)[],
+    gatewayRestarts: 0,
     installFails: false,
+    restartSucceeds: true,
+    restartThrows: false,
     ...overrides,
   };
 
@@ -94,8 +105,14 @@ function makeHarness(overrides: Partial<Harness["state"]> = {}): Harness {
     async clearSession() {
       state.cleared += 1;
     },
-    async markEnabled() {
-      state.enabled += 1;
+    async markPaired(connectedUserId) {
+      state.pairedWrites += 1;
+      state.pairedUserIds.push(connectedUserId);
+    },
+    async restartGateway() {
+      state.gatewayRestarts += 1;
+      if (state.restartThrows) throw new Error("hermes CLI timed out");
+      return state.restartSucceeds;
     },
     spawnBridge() {
       const b = new FakeBridge();
@@ -290,15 +307,85 @@ describe("WhatsappPairingManager — scan and success", () => {
     expect(snap.user).toEqual({ id: "359881234567:12@s.whatsapp.net", name: "Bench Box" });
   });
 
-  it("writes WHATSAPP_ENABLED only after a real connected event", async () => {
+  it("writes the env only after a real connected event", async () => {
     const h = makeHarness();
     await h.manager.start();
     h.latest().emit({ event: "qr", qr: "2@AAA" });
-    expect(h.state.enabled).toBe(0);
+    expect(h.state.pairedWrites).toBe(0);
 
     h.latest().emit({ event: "connected", user: { id: "1@s.whatsapp.net", name: null } });
     await vi.advanceTimersByTimeAsync(0);
-    expect(h.state.enabled).toBe(1);
+    expect(h.state.pairedWrites).toBe(1);
+  });
+
+  it("hands the connected account on, so the owner is authorized as well as linked", async () => {
+    // Enabling the channel without also writing WHATSAPP_ALLOWED_USERS is the
+    // bug: the gateway then drops the owner's own messages as unauthorized.
+    const h = makeHarness();
+    await h.manager.start();
+    h.latest().emit({
+      event: "connected",
+      user: { id: "15550001111:7@s.whatsapp.net", name: "Bench Box" },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.state.pairedUserIds).toEqual(["15550001111:7@s.whatsapp.net"]);
+  });
+
+  it("restarts the gateway, because env only reaches it at start", async () => {
+    const h = makeHarness();
+    await h.manager.start();
+    h.latest().emit({ event: "connected", user: { id: "1@s.whatsapp.net", name: null } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.state.gatewayRestarts).toBe(1);
+    expect(h.manager.peek().gatewayRestartPending).toBe(false);
+  });
+
+  it("releases the bridge before the gateway comes back", async () => {
+    // Both drive the same Baileys session directory; a gateway bridge starting
+    // while this one still holds the socket would fight it for the session.
+    const h = makeHarness();
+    await h.manager.start();
+    const bridge = h.latest();
+    let killedFirst = false;
+    const deps = h.deps as { restartGateway: () => Promise<boolean> };
+    const realRestart = deps.restartGateway;
+    deps.restartGateway = async () => {
+      killedFirst = bridge.killed;
+      return realRestart();
+    };
+
+    bridge.emit({ event: "connected", user: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(killedFirst).toBe(true);
+  });
+
+  it("says so when the new config has not reached the gateway yet", async () => {
+    for (const mode of ["fails", "throws"] as const) {
+      const h = makeHarness(
+        mode === "fails" ? { restartSucceeds: false } : { restartThrows: true },
+      );
+      await h.manager.start();
+      h.latest().emit({ event: "connected", user: { id: "1@s.whatsapp.net", name: null } });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Still paired -- the link is real and on disk. Just not live yet.
+      expect(h.manager.peek().phase).toBe("paired");
+      expect(h.manager.peek().gatewayRestartPending).toBe(true);
+    }
+  });
+
+  it("treats a failed env write as a degraded success, not a failed pairing", async () => {
+    const h = makeHarness();
+    (h.deps as { markPaired: PairingDeps["markPaired"] }).markPaired = async () => {
+      throw new Error("read-only filesystem");
+    };
+    await h.manager.start();
+    h.latest().emit({ event: "connected", user: null });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(h.manager.peek().phase).toBe("paired");
   });
 
   it("stops the bridge once paired", async () => {
@@ -586,7 +673,7 @@ describe("WhatsappPairingManager — process lifecycle", () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(h.manager.peek().phase).not.toBe("paired");
-    expect(h.state.enabled).toBe(0);
+    expect(h.state.pairedWrites).toBe(0);
   });
 
   it("survives interleaved start/cancel calls without accumulating bridges", async () => {

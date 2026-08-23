@@ -60,8 +60,14 @@ import { existsSync } from "fs";
 import fs from "fs/promises";
 import path from "path";
 import { hermesHome } from "@/lib/hermes-env";
-import { resolveWhatsappBridgeDir, whatsappBridgeDir, WHATSAPP_ENV_ENABLED } from "@/lib/hermes-whatsapp";
+import {
+  markWhatsappPaired,
+  resolveWhatsappBridgeDir,
+  whatsappBridgeDir,
+  WHATSAPP_ENV_ENABLED,
+} from "@/lib/hermes-whatsapp";
 import { setHermesEnvValues } from "@/lib/hermes-env";
+import { ensureHermesGateway } from "@/lib/hermes-telegram";
 
 /** Stop the bridge this long after the last status poll. */
 export const REAP_AFTER_MS = 60_000;
@@ -109,6 +115,14 @@ export interface WhatsappPairSnapshot {
   /** Bridge respawns this session. Proves auto-restart without exposing a timeout. */
   restarts: number;
   user: { id: string | null; name: string | null } | null;
+  /**
+   * True once a link exists whose configuration has NOT reached the running
+   * gateway yet. Env only enters the gateway through its process environment,
+   * which is read at start, so until it restarts the channel is linked and
+   * still answering nobody. The panel is told rather than left to imply the
+   * pairing finished the job.
+   */
+  gatewayRestartPending: boolean;
   /** Machine-readable reason, never a raw stack. */
   error: string | null;
   startedAt: number | null;
@@ -136,8 +150,17 @@ export interface PairingDeps {
   credsExist(): Promise<boolean>;
   /** Delete the session directory's contents. */
   clearSession(): Promise<void>;
-  /** Persist what step 7 of `cmd_whatsapp` persists on success. */
-  markEnabled(): Promise<void>;
+  /**
+   * Persist what step 7 of `cmd_whatsapp` persists on success -- and the
+   * authorization step upstream leaves undone. Takes the id from the
+   * `connected` event, which is the phone jid.
+   */
+  markPaired(connectedUserId: string | null): Promise<void>;
+  /**
+   * Restart the gateway so the freshly written env is actually in effect.
+   * Resolves to whether it is running afterwards.
+   */
+  restartGateway(): Promise<boolean>;
   spawnBridge(): BridgeProcessHandle;
   now(): number;
 }
@@ -149,6 +172,7 @@ const IDLE: WhatsappPairSnapshot = {
   qrCount: 0,
   restarts: 0,
   user: null,
+  gatewayRestartPending: false,
   error: null,
   startedAt: null,
 };
@@ -430,14 +454,27 @@ export class WhatsappPairingManager {
    */
   private async onPaired(): Promise<void> {
     try {
-      await this.deps.markEnabled();
+      await this.deps.markPaired(this.snap.user?.id ?? null);
     } catch {
-      // The link itself is real and on disk; failing to flip the env var is a
+      // The link itself is real and on disk; failing to flip the env vars is a
       // degraded success, not a pairing failure. The panel's own enable toggle
       // remains available.
     }
+    // Release this bridge BEFORE the gateway comes back. Both drive the same
+    // Baileys session directory, and a gateway bridge starting while this one
+    // still holds the socket would fight it for the session.
     this.teardownProcess();
     this.clearTimers();
+
+    let restarted = false;
+    try {
+      restarted = await this.deps.restartGateway();
+    } catch {
+      // Same contract as /whatsapp/configure: the write already happened, so a
+      // restart that fails is a pending restart, never a failed pairing.
+      restarted = false;
+    }
+    this.snap = { ...this.snap, gatewayRestartPending: !restarted };
   }
 
   private onExit(proc: BridgeProcessHandle): void {
@@ -627,8 +664,16 @@ export function createRealDeps(): PairingDeps {
       await fs.mkdir(sessionDir(), { recursive: true, mode: 0o700 });
     },
 
-    async markEnabled() {
-      await setHermesEnvValues({ [WHATSAPP_ENV_ENABLED]: "true" });
+    async markPaired(connectedUserId) {
+      await markWhatsappPaired(connectedUserId);
+    },
+
+    async restartGateway() {
+      // The hook /whatsapp/configure already uses, unchanged and reused rather
+      // than reinvented: no new sudo rights are involved, and a box whose
+      // gateway cannot be restarted from here reports the fact instead.
+      const status = await ensureHermesGateway();
+      return status.running;
     },
 
     spawnBridge() {

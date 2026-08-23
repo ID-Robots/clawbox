@@ -5,11 +5,18 @@ import path from "path";
 
 import { readHermesEnv, setHermesEnvValues } from "@/lib/hermes-env";
 import {
+  allowlistAuthorizes,
   formatAllowedUsers,
   isWhatsappMode,
+  markWhatsappPaired,
+  mergeAllowlistEntries,
+  normalizeWhatsappIdentifier,
   normalizeWhatsappNumber,
+  pairedIdentityAllowlistEntries,
   parseAllowedUsers,
   readHermesWhatsappStatus,
+  readPairedWhatsappIdentity,
+  whatsappAllowlistForms,
   resetWhatsappBridgeDirForTests,
   resolveWhatsappBridgeDir,
   setHermesWhatsappConfig,
@@ -195,8 +202,8 @@ describe("setHermesWhatsappConfig", () => {
   });
 
   it("always allows disabling, even when unpaired", async () => {
-    const keys = await setHermesWhatsappConfig({ enabled: false });
-    expect(keys).toEqual(["WHATSAPP_ENABLED"]);
+    const { changedKeys } = await setHermesWhatsappConfig({ enabled: false });
+    expect(changedKeys).toEqual(["WHATSAPP_ENABLED"]);
     expect((await readHermesEnv()).WHATSAPP_ENABLED).toBe("false");
   });
 
@@ -236,12 +243,12 @@ describe("setHermesWhatsappConfig", () => {
   });
 
   it("reports the keys it wrote and nothing else", async () => {
-    const keys = await setHermesWhatsappConfig({ mode: "bot" });
-    expect(keys).toEqual(["WHATSAPP_MODE"]);
+    const { changedKeys } = await setHermesWhatsappConfig({ mode: "bot" });
+    expect(changedKeys).toEqual(["WHATSAPP_MODE"]);
   });
 
   it("is a no-op for an empty update", async () => {
-    expect(await setHermesWhatsappConfig({})).toEqual([]);
+    expect((await setHermesWhatsappConfig({})).changedKeys).toEqual([]);
     expect(await readHermesEnv()).toEqual({});
   });
 });
@@ -316,5 +323,357 @@ describe("resolveWhatsappBridgeDir", () => {
 
     expect(await resolveWhatsappBridgeDir()).toBe(mirrorDir());
     expect(await fs.readFile(path.join(mirrorDir(), "bridge.js"), "utf8")).toBe("// already mirrored");
+  });
+});
+
+
+/*
+ * The gateway's OWN authorization gate.
+ *
+ * Everything below concerns WHATSAPP_ALLOWED_USERS, which is a second gate the
+ * pairing flow never used to fill in: a box could link perfectly and then have
+ * the gateway drop every message with "Unauthorized user: <id> on whatsapp".
+ *
+ * No real account identifiers appear here. This repo is public, and a LID or a
+ * phone number in a fixture is exactly as personal as it looks. The shapes are
+ * copied from a live device; the digits are invented.
+ */
+
+/** A stand-in for the linked account: a LID and a phone JID, both with a device suffix. */
+const OWNER = {
+  id: "15550001111:7@s.whatsapp.net",
+  lid: "100000000000001:7@lid",
+  name: "Bench Box",
+};
+
+describe("normalizeWhatsappIdentifier", () => {
+  it("reduces every JID shape to the bare id the gateway compares", () => {
+    // Hermes' normalize_whatsapp_identifier: trim, drop the first "+", cut at
+    // ":", cut at "@". Verified against gateway/whatsapp_identity.py on a device.
+    expect(normalizeWhatsappIdentifier("100000000000001@lid")).toBe("100000000000001");
+    expect(normalizeWhatsappIdentifier("100000000000001:7@lid")).toBe("100000000000001");
+    expect(normalizeWhatsappIdentifier("15550001111:7@s.whatsapp.net")).toBe("15550001111");
+    expect(normalizeWhatsappIdentifier("+15550001111")).toBe("15550001111");
+    expect(normalizeWhatsappIdentifier("  15550001111  ")).toBe("15550001111");
+  });
+
+  it("is empty for values that carry no id", () => {
+    expect(normalizeWhatsappIdentifier("")).toBe("");
+    expect(normalizeWhatsappIdentifier(null)).toBe("");
+    expect(normalizeWhatsappIdentifier(undefined)).toBe("");
+    expect(normalizeWhatsappIdentifier("@lid")).toBe("");
+  });
+});
+
+describe("whatsappAllowlistForms", () => {
+  it("writes the qualified and the bare spelling of a JID", () => {
+    expect(whatsappAllowlistForms("100000000000001:7@lid")).toEqual([
+      "100000000000001@lid",
+      "100000000000001",
+    ]);
+    expect(whatsappAllowlistForms("15550001111:7@s.whatsapp.net")).toEqual([
+      "15550001111@s.whatsapp.net",
+      "15550001111",
+    ]);
+  });
+
+  it("never lets a device suffix reach .env", () => {
+    // ":7" is a device, not a principal. Upstream cuts it before comparing, so
+    // storing it would only make the file harder to read.
+    for (const form of whatsappAllowlistForms("100000000000001:7@lid")) {
+      expect(form).not.toContain(":");
+    }
+  });
+
+  it("yields a single entry for a bare number and nothing for a non-id", () => {
+    expect(whatsappAllowlistForms("15550001111")).toEqual(["15550001111"]);
+    expect(whatsappAllowlistForms("")).toEqual([]);
+    expect(whatsappAllowlistForms(null)).toEqual([]);
+    expect(whatsappAllowlistForms("@lid")).toEqual([]);
+  });
+});
+
+describe("mergeAllowlistEntries", () => {
+  it("keeps entries it did not write", () => {
+    // A box may carry a hand-edited allowlist. Auto-authorizing the owner adds
+    // to it; it never takes somebody else's access away.
+    expect(mergeAllowlistEntries("15559998888", ["15550001111"])).toEqual([
+      "15559998888",
+      "15550001111",
+    ]);
+  });
+
+  it("is idempotent", () => {
+    const once = mergeAllowlistEntries(null, whatsappAllowlistForms(OWNER.lid));
+    const twice = mergeAllowlistEntries(formatAllowedUsers(once), whatsappAllowlistForms(OWNER.lid));
+    expect(twice).toEqual(once);
+  });
+
+  it("treats a device-suffixed repeat as the duplicate it is", () => {
+    expect(mergeAllowlistEntries("100000000000001@lid", ["100000000000001:7@lid"])).toEqual([
+      "100000000000001@lid",
+    ]);
+  });
+
+  it("keeps the two spellings of one id as the deliberate pair they are", () => {
+    expect(mergeAllowlistEntries(null, ["100000000000001@lid", "100000000000001"])).toEqual([
+      "100000000000001@lid",
+      "100000000000001",
+    ]);
+  });
+
+  it("drops blanks and tolerates a missing base", () => {
+    expect(mergeAllowlistEntries(" , ,15550001111, ", [])).toEqual(["15550001111"]);
+    expect(mergeAllowlistEntries(null, [])).toEqual([]);
+    expect(mergeAllowlistEntries(undefined, [])).toEqual([]);
+  });
+});
+
+describe("allowlistAuthorizes", () => {
+  it("matches on the normalised id, whichever spelling is stored", () => {
+    expect(allowlistAuthorizes("100000000000001", OWNER)).toBe(true);
+    expect(allowlistAuthorizes("100000000000001@lid", OWNER)).toBe(true);
+    // The phone half of the same account authorizes it too.
+    expect(allowlistAuthorizes("15550001111", OWNER)).toBe(true);
+  });
+
+  it("honours upstream's allow-everyone marker", () => {
+    expect(allowlistAuthorizes("*", OWNER)).toBe(true);
+  });
+
+  it("is false when nothing covers the owner", () => {
+    expect(allowlistAuthorizes("15559998888", OWNER)).toBe(false);
+    expect(allowlistAuthorizes("", OWNER)).toBe(false);
+    expect(allowlistAuthorizes(null, OWNER)).toBe(false);
+  });
+
+  it("is false when nothing is paired, rather than vacuously true", () => {
+    expect(allowlistAuthorizes("15550001111", null)).toBe(false);
+  });
+});
+
+describe("pairedIdentityAllowlistEntries", () => {
+  it("covers BOTH the phone id and the LID", () => {
+    // The bridge's `connected` event reports the phone jid, but a self-chat
+    // message can arrive under the LID. Authorizing only one of them is how a
+    // freshly paired box ends up answering nobody.
+    expect(pairedIdentityAllowlistEntries(OWNER)).toEqual([
+      "15550001111@s.whatsapp.net",
+      "15550001111",
+      "100000000000001@lid",
+      "100000000000001",
+    ]);
+  });
+
+  it("folds in an extra id without repeating what it already has", () => {
+    expect(pairedIdentityAllowlistEntries(OWNER, [OWNER.id])).toEqual(
+      pairedIdentityAllowlistEntries(OWNER),
+    );
+  });
+
+  it("is empty when nothing is paired", () => {
+    expect(pairedIdentityAllowlistEntries(null)).toEqual([]);
+  });
+});
+
+describe("the paired identity on disk", () => {
+  let dir: string;
+  const originalHome = process.env.HERMES_HOME;
+
+  const writeCreds = async (contents: unknown, legacy = false) => {
+    const sessionDir = legacy
+      ? path.join(dir, "whatsapp", "session")
+      : path.join(dir, "platforms", "whatsapp", "session");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(path.join(sessionDir, "creds.json"), JSON.stringify(contents));
+  };
+
+  beforeEach(async () => {
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-whatsapp-id-"));
+    process.env.HERMES_HOME = dir;
+  });
+
+  afterEach(async () => {
+    if (originalHome === undefined) delete process.env.HERMES_HOME;
+    else process.env.HERMES_HOME = originalHome;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  it("reads the linked account out of creds.json", async () => {
+    await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+    expect(await readPairedWhatsappIdentity()).toEqual(OWNER);
+  });
+
+  it("finds a session in the legacy location too", async () => {
+    // The adapter and the CLI genuinely disagree about where this lives.
+    await writeCreds({ me: { id: OWNER.id, lid: null, name: null } }, true);
+    expect(await readPairedWhatsappIdentity()).toEqual({ id: OWNER.id, lid: null, name: null });
+  });
+
+  it("survives a bridge old enough to have no LID", async () => {
+    await writeCreds({ me: { id: OWNER.id } });
+    expect(await readPairedWhatsappIdentity()).toEqual({ id: OWNER.id, lid: null, name: null });
+  });
+
+  it("returns null rather than throwing on missing or unusable creds", async () => {
+    expect(await readPairedWhatsappIdentity()).toBeNull();
+    await writeCreds({});
+    expect(await readPairedWhatsappIdentity()).toBeNull();
+    // A half-written file during pairing must not take the status route down.
+    const sessionDir = path.join(dir, "platforms", "whatsapp", "session");
+    await fs.writeFile(path.join(sessionDir, "creds.json"), '{"me":{"id":');
+    expect(await readPairedWhatsappIdentity()).toBeNull();
+  });
+
+  describe("markWhatsappPaired", () => {
+    it("authorizes the owner as well as enabling the channel", async () => {
+      // The bug: upstream's step 7 writes WHATSAPP_ENABLED and stops, so the
+      // gateway's sender check has nothing to match and denies everyone.
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+      const keys = await markWhatsappPaired(OWNER.id);
+
+      expect(keys).toEqual(["WHATSAPP_ENABLED", "WHATSAPP_ALLOWED_USERS"]);
+      const env = await readHermesEnv();
+      expect(env.WHATSAPP_ENABLED).toBe("true");
+      expect(env.WHATSAPP_ALLOWED_USERS).toBe(
+        "15550001111@s.whatsapp.net,15550001111,100000000000001@lid,100000000000001",
+      );
+      expect(
+        allowlistAuthorizes(env.WHATSAPP_ALLOWED_USERS, await readPairedWhatsappIdentity()),
+      ).toBe(true);
+    });
+
+    it("unions into a hand-fixed allowlist instead of clobbering it", async () => {
+      // The bench box was repaired by hand before this code existed. Re-pairing
+      // it must not drop the entries somebody already put there.
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+      await setHermesEnvValues({
+        WHATSAPP_ALLOWED_USERS: "100000000000001@lid,100000000000001,15559998888",
+      });
+
+      await markWhatsappPaired(OWNER.id);
+      const env = await readHermesEnv();
+      expect(env.WHATSAPP_ALLOWED_USERS).toBe(
+        "100000000000001@lid,100000000000001,15559998888,15550001111@s.whatsapp.net,15550001111",
+      );
+    });
+
+    it("writes nothing new when the allowlist is already right", async () => {
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+      await markWhatsappPaired(OWNER.id);
+      const first = (await readHermesEnv()).WHATSAPP_ALLOWED_USERS;
+
+      const keys = await markWhatsappPaired(OWNER.id);
+      expect(keys).toEqual(["WHATSAPP_ENABLED"]);
+      expect((await readHermesEnv()).WHATSAPP_ALLOWED_USERS).toBe(first);
+    });
+
+    it("leaves an explicit allow-everyone flag to do its job", async () => {
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+      await setHermesEnvValues({ WHATSAPP_ALLOW_ALL_USERS: "true" });
+
+      expect(await markWhatsappPaired(OWNER.id)).toEqual(["WHATSAPP_ENABLED"]);
+      expect((await readHermesEnv()).WHATSAPP_ALLOWED_USERS).toBeUndefined();
+    });
+
+    it("still enables when there is no identity to read", async () => {
+      await writeCreds({});
+      expect(await markWhatsappPaired(null)).toEqual(["WHATSAPP_ENABLED"]);
+      expect((await readHermesEnv()).WHATSAPP_ENABLED).toBe("true");
+    });
+  });
+
+  describe("setHermesWhatsappConfig keeps the owner authorized", () => {
+    beforeEach(async () => {
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+    });
+
+    it("makes the owner the allowlist in self-chat mode", async () => {
+      const result = await setHermesWhatsappConfig({ mode: "self-chat", enabled: true });
+      expect(result.authorized).toBe(true);
+      expect((await readHermesEnv()).WHATSAPP_ALLOWED_USERS).toBe(
+        "15550001111@s.whatsapp.net,15550001111,100000000000001@lid,100000000000001",
+      );
+    });
+
+    it("keeps the owner alongside the panel's numbers in bot mode", async () => {
+      const result = await setHermesWhatsappConfig({
+        mode: "bot",
+        allowedUsers: ["+1 555 999 8888"],
+      });
+      expect(result.authorized).toBe(true);
+      const env = await readHermesEnv();
+      expect(env.WHATSAPP_MODE).toBe("bot");
+      expect(env.WHATSAPP_ALLOWED_USERS).toBe(
+        "15559998888,15550001111@s.whatsapp.net,15550001111,100000000000001@lid,100000000000001",
+      );
+    });
+
+    it("honours a removal from the panel without locking the owner out", async () => {
+      await setHermesWhatsappConfig({ allowedUsers: ["15559998888", "15557776666"] });
+      await setHermesWhatsappConfig({ allowedUsers: ["15559998888"] });
+
+      const env = await readHermesEnv();
+      // The removed guest is gone...
+      expect(env.WHATSAPP_ALLOWED_USERS).not.toContain("15557776666");
+      // ...and the owner is not collateral damage.
+      expect(allowlistAuthorizes(env.WHATSAPP_ALLOWED_USERS, OWNER)).toBe(true);
+    });
+
+    it("refuses to leave a paired box authorizing nobody", async () => {
+      // THE INVARIANT. Emptying the list on a paired box used to delete the key
+      // outright, which is the state the gateway reads as "deny everyone".
+      const result = await setHermesWhatsappConfig({ allowedUsers: [] });
+      expect(result.paired).toBe(true);
+      expect(result.authorized).toBe(true);
+      expect((await readHermesEnv()).WHATSAPP_ALLOWED_USERS).toBeTruthy();
+    });
+
+    it("clears a stale allow-everyone flag and still authorizes the owner", async () => {
+      await setHermesEnvValues({ WHATSAPP_ALLOW_ALL_USERS: "true" });
+      const result = await setHermesWhatsappConfig({ allowedUsers: ["15559998888"] });
+
+      const env = await readHermesEnv();
+      expect(env.WHATSAPP_ALLOW_ALL_USERS).toBe("false");
+      expect(result.authorized).toBe(true);
+      expect(allowlistAuthorizes(env.WHATSAPP_ALLOWED_USERS, OWNER)).toBe(true);
+    });
+
+    it("does not rewrite an allowlist that is already correct", async () => {
+      await setHermesWhatsappConfig({ mode: "self-chat" });
+      const result = await setHermesWhatsappConfig({ mode: "self-chat" });
+      // Mode is re-written; the allowlist is not, so the panel can still tell
+      // "nothing changed" from "saved".
+      expect(result.changedKeys).toEqual(["WHATSAPP_MODE"]);
+    });
+
+    it("reports authorized:false on an unpaired box rather than guessing", async () => {
+      await fs.rm(path.join(dir, "platforms"), { recursive: true, force: true });
+      const result = await setHermesWhatsappConfig({ mode: "bot" });
+      expect(result.paired).toBe(false);
+      expect(result.authorized).toBe(false);
+    });
+  });
+
+  describe("readHermesWhatsappStatus", () => {
+    it("says whether the gateway allowlist covers the paired account", async () => {
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+      await setHermesEnvValues({ WHATSAPP_ENABLED: "true", WHATSAPP_ALLOWED_USERS: "15559998888" });
+      expect((await readHermesWhatsappStatus()).authorized).toBe(false);
+
+      await setHermesEnvValues({ WHATSAPP_ALLOWED_USERS: "15559998888,100000000000001@lid" });
+      expect((await readHermesWhatsappStatus()).authorized).toBe(true);
+    });
+
+    it("is not authorized when nothing is paired", async () => {
+      await setHermesEnvValues({ WHATSAPP_ALLOWED_USERS: "15550001111" });
+      expect((await readHermesWhatsappStatus()).authorized).toBe(false);
+    });
+
+    it("counts an explicit allow-everyone flag as authorization", async () => {
+      await writeCreds({ me: { id: OWNER.id, lid: OWNER.lid, name: OWNER.name } });
+      await setHermesEnvValues({ WHATSAPP_ENABLED: "true", WHATSAPP_ALLOW_ALL_USERS: "true" });
+      expect((await readHermesWhatsappStatus()).authorized).toBe(true);
+    });
   });
 });

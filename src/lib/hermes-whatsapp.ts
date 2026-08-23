@@ -40,7 +40,7 @@
 
 import fs from "fs/promises";
 import path from "path";
-import { getHermesEnvValue, hermesHome, readHermesEnv, setHermesEnvValues } from "@/lib/hermes-env";
+import { hermesHome, readHermesEnv, setHermesEnvValues } from "@/lib/hermes-env";
 
 export const WHATSAPP_ENV_ENABLED = "WHATSAPP_ENABLED";
 export const WHATSAPP_ENV_MODE = "WHATSAPP_MODE";
@@ -223,6 +223,217 @@ export function formatAllowedUsers(numbers: string[]): string {
   return numbers.join(",");
 }
 
+// -- Sender identity: JIDs, LIDs and the gateway allowlist ------------------
+//
+// THE SECOND AUTHORIZATION LAYER
+//
+// Pairing a box is not the same as authorizing anyone on it. The bridge's
+// self-chat filter decides which *chats* are forwarded; the gateway then runs a
+// separate check on the *sender* before the agent ever sees the message --
+// gateway/authz_mixin.py `_is_user_authorized`, which reads
+// WHATSAPP_ALLOWED_USERS (and WHATSAPP_ALLOW_ALL_USERS) out of the environment.
+// With neither set, and no pairing-store grant, that function falls through to
+// `GATEWAY_ALLOW_ALL_USERS` -- unset on a ClawBox -- and returns False. The
+// gateway logs "Unauthorized user: <id> on whatsapp" and drops the message.
+//
+// So a box can pair perfectly and then answer nobody, including its owner.
+// Making that state unreachable is what this section is for.
+//
+// HOW THE GATEWAY ACTUALLY COMPARES IDS (read on a live device, in
+// gateway/whatsapp_identity.py and authz_mixin.py `_is_user_authorized`)
+//
+//   * `normalize_whatsapp_identifier` reduces an id to its bare numeric core:
+//     trim, drop the FIRST "+", cut at the first ":" (device suffix), then cut
+//     at the first "@" (domain). So "100000000000001:7@lid" and
+//     "100000000000001" are the same principal.
+//   * for WhatsApp every allowlist entry is run through
+//     `expand_whatsapp_aliases` and the result REPLACES the allowlist, so the
+//     comparison happens on bare numeric ids -- never on the "@lid" spelling.
+//   * that expansion also walks the bridge's `lid-mapping-*.json` files, which
+//     is how a phone id and a LID resolve to each other. Those files are
+//     written by the bridge as it learns mappings; on a freshly paired box the
+//     owner's own pair need not be there yet.
+//
+// That last point is the one that matters here. The bridge's pair-json
+// `connected` event reports `sock.user.id`, which is the PHONE jid
+// ("359...:7@s.whatsapp.net"), while a self-chat message from the same human
+// can arrive under the LID ("200...@lid") -- the exact mismatch behind the live
+// failure. Writing only the connected id would authorize the owner only where a
+// lid-mapping file happened to exist already. So the allowlist is built from
+// BOTH `me.id` and `me.lid` in creds.json, and never from the event alone.
+//
+// Each id is written in two spellings (qualified and bare). On this gateway the
+// bare form is the one that matches; the qualified form is kept because it is
+// what an operator reading .env recognises, and because a gateway without
+// whatsapp_identity.py compares the raw strings instead.
+
+/**
+ * Hermes' `normalize_whatsapp_identifier`, character for character.
+ *
+ * Note what it does NOT do: internal whitespace survives. An allowlist entry
+ * like "+359 879 691 194" normalises to "359 879 691 194", which then fails
+ * upstream's `_SAFE_IDENTIFIER_RE` and expands to nothing -- a silently denied
+ * user. Everything written from here is therefore whitespace-free by
+ * construction (normalizeWhatsappNumber covers the panel's input path).
+ */
+export function normalizeWhatsappIdentifier(value: string | null | undefined): string {
+  return String(value ?? "")
+    .trim()
+    .replace("+", "")
+    .split(":", 1)[0]
+    .split("@", 1)[0];
+}
+
+/**
+ * The allowlist spellings to write for one raw sender id.
+ *
+ * "100000000000001:7@lid" produces ["100000000000001@lid", "100000000000001"],
+ * which is exactly the value proven to work on the bench box. A bare number
+ * yields just itself; anything that normalises to nothing yields nothing.
+ */
+export function whatsappAllowlistForms(raw: string | null | undefined): string[] {
+  const value = String(raw ?? "").trim();
+  if (!value) return [];
+  const bare = normalizeWhatsappIdentifier(value);
+  if (!bare) return [];
+  const forms: string[] = [];
+  const at = value.indexOf("@");
+  if (at >= 0) {
+    // Re-attach the domain to the NORMALISED id, so a device suffix never
+    // reaches .env: "200...:7@lid" is stored as "200...@lid".
+    const domain = value.slice(at + 1).trim();
+    if (domain && !/[\s,]/.test(domain)) forms.push(`${bare}@${domain}`);
+  }
+  forms.push(bare);
+  return [...new Set(forms)];
+}
+
+/** The linked account, as the bridge wrote it into creds.json. */
+export interface PairedWhatsappIdentity {
+  /** Phone-format JID, e.g. "359...:7@s.whatsapp.net". */
+  id: string | null;
+  /** LID, e.g. "200...:7@lid". Absent on older bridge versions. */
+  lid: string | null;
+  name: string | null;
+}
+
+/**
+ * Read the paired account out of the bridge session.
+ *
+ * creds.json is the only durable record of who this box is linked as: the
+ * pairing manager's snapshot lives in one Next process and is gone after a
+ * restart, and it carries `id` but never `lid`.
+ */
+export async function readPairedWhatsappIdentity(): Promise<PairedWhatsappIdentity | null> {
+  for (const dir of whatsappSessionDirs()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await fs.readFile(path.join(dir, "creds.json"), "utf-8"));
+    } catch {
+      // Absent, unreadable or half-written -- try the other location.
+      continue;
+    }
+    const me = (parsed as { me?: unknown } | null)?.me;
+    if (!me || typeof me !== "object") continue;
+    const record = me as Record<string, unknown>;
+    const str = (value: unknown): string | null =>
+      typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+    const identity: PairedWhatsappIdentity = {
+      id: str(record.id),
+      lid: str(record.lid),
+      name: str(record.name),
+    };
+    if (identity.id || identity.lid) return identity;
+  }
+  return null;
+}
+
+/**
+ * Every allowlist entry that authorizes the paired owner.
+ *
+ * `extraIds` carries ids known outside creds.json -- in practice the id from
+ * the bridge's `connected` event, which is available a moment before the file
+ * on disk is guaranteed to be complete.
+ */
+export function pairedIdentityAllowlistEntries(
+  identity: PairedWhatsappIdentity | null,
+  extraIds: (string | null | undefined)[] = [],
+): string[] {
+  const out: string[] = [];
+  for (const raw of [identity?.id, identity?.lid, ...extraIds]) {
+    out.push(...whatsappAllowlistForms(raw));
+  }
+  return [...new Set(out)];
+}
+
+/**
+ * Union `additions` into an existing WHATSAPP_ALLOWED_USERS value.
+ *
+ * A box may already carry entries this panel never wrote -- a hand-edited .env,
+ * or an earlier release. Auto-authorizing the owner must add to that list, not
+ * replace it, and must be idempotent: running it twice changes nothing.
+ *
+ * De-duplication is on (normalised id, domain), which is what lets the two
+ * spellings of one id survive as the deliberate pair they are while a genuine
+ * repeat -- including one differing only by device suffix -- is dropped.
+ */
+export function mergeAllowlistEntries(
+  existingRaw: string | null | undefined,
+  additions: string[],
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const push = (entry: string): void => {
+    const trimmed = entry.trim();
+    if (!trimmed) return;
+    const at = trimmed.indexOf("@");
+    const key =
+      trimmed === "*"
+        ? "*"
+        : `${normalizeWhatsappIdentifier(trimmed)}@${at >= 0 ? trimmed.slice(at + 1) : ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(trimmed);
+  };
+
+  for (const part of String(existingRaw ?? "").split(",")) push(part);
+  for (const entry of additions) push(entry);
+  return out;
+}
+
+/**
+ * Does this allowlist authorize the paired owner?
+ *
+ * Deliberately CONSERVATIVE: it compares normalised ids only and does not walk
+ * the bridge's lid-mapping files the way `expand_whatsapp_aliases` does. It can
+ * therefore say "not authorized" where the gateway would in fact allow the
+ * sender through a learned alias. That is the safe direction for a warning --
+ * the opposite error would reassure an owner whose box answers nobody.
+ */
+export function allowlistAuthorizes(
+  rawAllowlist: string | null | undefined,
+  identity: PairedWhatsappIdentity | null,
+): boolean {
+  if (!identity) return false;
+  const allowed = new Set<string>();
+  for (const part of String(rawAllowlist ?? "").split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    // Upstream's allow-everyone marker, checked before normalisation because
+    // "*" is not an identifier.
+    if (trimmed === "*") return true;
+    const normalized = normalizeWhatsappIdentifier(trimmed);
+    if (normalized) allowed.add(normalized);
+  }
+  if (allowed.size === 0) return false;
+  for (const raw of [identity.id, identity.lid]) {
+    const normalized = normalizeWhatsappIdentifier(raw);
+    if (normalized && allowed.has(normalized)) return true;
+  }
+  return false;
+}
+
 // ── Status ──────────────────────────────────────────────────────────────────
 
 /**
@@ -242,6 +453,16 @@ export interface HermesWhatsappStatus {
   allowAllUsers: boolean;
   /** null = bridge directory not found, not "bridge broken". */
   bridgeReady: boolean | null;
+  /**
+   * Does the gateway's sender allowlist cover the account this box is paired
+   * as? Pairing and authorization are two different gates (see the identity
+   * section above), and a box that passes the first and fails the second looks
+   * perfectly healthy while answering nobody. Surfacing it is what lets the
+   * panel warn instead of leaving the owner to discover the silence.
+   *
+   * False whenever nothing is paired -- there is no owner to authorize yet.
+   */
+  authorized: boolean;
 }
 
 function envIsTrue(value: string | null | undefined): boolean {
@@ -264,6 +485,9 @@ export async function readHermesWhatsappStatus(): Promise<HermesWhatsappStatus> 
 
   const state: WhatsappState = !enabled ? "not_configured" : paired ? "paired" : "enabled_not_paired";
 
+  // Only worth a file read when there is a link to check.
+  const identity = paired ? await readPairedWhatsappIdentity() : null;
+
   return {
     state,
     enabled,
@@ -272,6 +496,7 @@ export async function readHermesWhatsappStatus(): Promise<HermesWhatsappStatus> 
     allowedUsers,
     allowAllUsers,
     bridgeReady,
+    authorized: allowAllUsers || allowlistAuthorizes(env[WHATSAPP_ENV_ALLOWED_USERS], identity),
   };
 }
 
@@ -291,28 +516,56 @@ export class WhatsappNotPairedError extends Error {
   }
 }
 
+export interface WhatsappConfigResult {
+  /** Env keys written, for the caller's audit line. Never the values. */
+  changedKeys: string[];
+  /** Is there a linked session on disk? */
+  paired: boolean;
+  /** Does the configuration now on disk let the paired owner through? */
+  authorized: boolean;
+}
+
 /**
  * Apply an access-control / enablement change to ~/.hermes/.env.
  *
  * ENABLING IS GATED ON PAIRING, on purpose. Upstream's wizard deliberately
  * writes WHATSAPP_ENABLED=true only after a successful scan (hermes_cli
- * main.py: "an aborted setup leaves WHATSAPP_ENABLED unset → gateway skips
+ * main.py: "an aborted setup leaves WHATSAPP_ENABLED unset -> gateway skips
  * it"), because an enabled-but-unpaired adapter starts the bridge, fails to
  * find creds.json, and logs an error on every gateway boot. ClawBox must not
  * be the thing that puts a box into that state, so `enabled: true` without a
  * session is refused rather than written.
  *
- * Disabling is always allowed — turning a channel off must never depend on the
+ * Disabling is always allowed -- turning a channel off must never depend on the
  * channel being healthy.
  *
- * Returns the key names written, for the caller's audit line. Never returns or
- * logs values.
+ * THE INVARIANT: no change made here may leave a paired box that authorizes
+ * nobody. WHATSAPP_MODE decides which chats reach the gateway, but the gateway
+ * still checks the sender, so the two have to be configured together:
+ *
+ *   * self-chat -- the only sender that can ever be right is the owner, so the
+ *     owner's own ids ARE the allowlist.
+ *   * bot -- the panel's numbers are the allowlist, plus the owner, who must
+ *     not lose access to his own box by adding somebody else to it.
+ *
+ * Both cases reduce to the same rule, applied on every write: union the paired
+ * owner's identifiers into whatever the allowlist is about to become. The one
+ * exception is WHATSAPP_ALLOW_ALL_USERS, which authorizes everyone already.
+ *
+ * There is deliberately no "allow all" mode here. It is upstream's dev-only
+ * escape hatch, this panel has never offered it, and adding a control that
+ * opens a box to every sender on WhatsApp is not a fix for an allowlist bug.
+ * A value set by hand is still honoured -- and still reported as a warning.
  */
-export async function setHermesWhatsappConfig(update: WhatsappConfigUpdate): Promise<string[]> {
+export async function setHermesWhatsappConfig(
+  update: WhatsappConfigUpdate,
+): Promise<WhatsappConfigResult> {
   const entries: Record<string, string | null> = {};
+  const [env, paired] = await Promise.all([readHermesEnv(), whatsappPaired()]);
+  const identity = paired ? await readPairedWhatsappIdentity() : null;
 
   if (update.enabled === true) {
-    if (!(await whatsappPaired())) throw new WhatsappNotPairedError();
+    if (!paired) throw new WhatsappNotPairedError();
     entries[WHATSAPP_ENV_ENABLED] = "true";
   } else if (update.enabled === false) {
     entries[WHATSAPP_ENV_ENABLED] = "false";
@@ -322,22 +575,83 @@ export async function setHermesWhatsappConfig(update: WhatsappConfigUpdate): Pro
     entries[WHATSAPP_ENV_MODE] = update.mode;
   }
 
+  const currentRaw = env[WHATSAPP_ENV_ALLOWED_USERS] ?? null;
+  let allowAll = envIsTrue(env[WHATSAPP_ENV_ALLOW_ALL_USERS]);
+
+  // A list from the panel replaces the numbers the panel manages -- removing a
+  // number there has to actually remove it. The owner's own ids are re-added
+  // below, so "replace" never means "lock yourself out".
+  let base = currentRaw;
   if (update.allowedUsers !== undefined) {
     const numbers = update.allowedUsers
       .map((n) => normalizeWhatsappNumber(n))
       .filter((n): n is string => n !== null);
-    const unique = [...new Set(numbers)];
-    entries[WHATSAPP_ENV_ALLOWED_USERS] = unique.length > 0 ? formatAllowedUsers(unique) : null;
+    base = formatAllowedUsers([...new Set(numbers)]);
     // Writing an explicit allowlist and leaving a stale ALLOW_ALL_USERS=true in
     // place would keep the channel wide open while the UI showed a short list.
     // Clear it whenever we take ownership of access control.
-    if (envIsTrue(await getHermesEnvValue(WHATSAPP_ENV_ALLOW_ALL_USERS))) {
+    if (allowAll) {
       entries[WHATSAPP_ENV_ALLOW_ALL_USERS] = "false";
+      allowAll = false;
     }
   }
 
-  const keys = Object.keys(entries);
-  if (keys.length === 0) return [];
+  const merged = mergeAllowlistEntries(
+    base,
+    allowAll ? [] : pairedIdentityAllowlistEntries(identity),
+  );
+  const nextFormatted = formatAllowedUsers(merged);
+  // Compare against the CURRENT value put through the same normalisation, so a
+  // save that changes nothing but the spacing is not reported as a change.
+  if (nextFormatted !== formatAllowedUsers(mergeAllowlistEntries(currentRaw, []))) {
+    entries[WHATSAPP_ENV_ALLOWED_USERS] = nextFormatted === "" ? null : nextFormatted;
+  }
+
+  const changedKeys = Object.keys(entries);
+  if (changedKeys.length > 0) await setHermesEnvValues(entries);
+
+  return {
+    changedKeys,
+    paired,
+    authorized: allowAll || allowlistAuthorizes(nextFormatted, identity),
+  };
+}
+
+/**
+ * The success path of a QR pairing: record the link AND authorize the human who
+ * just scanned it, in one .env write.
+ *
+ * Upstream's `cmd_whatsapp` step 7 writes WHATSAPP_ENABLED=true here and stops,
+ * which is how a freshly paired box ends up enabled, linked, and refusing its
+ * own owner -- the gateway's sender check is a separate gate that nothing had
+ * ever filled in. `connectedUserId` is the id from the bridge's `connected`
+ * event; it is the PHONE jid, so it is a supplement to creds.json (which also
+ * carries the LID), never a replacement for it.
+ *
+ * Idempotent by construction: the allowlist is a union, so re-pairing, or
+ * pairing onto a box whose .env was fixed by hand, adds nothing and removes
+ * nothing.
+ *
+ * Returns the key names written, for the caller's audit line.
+ */
+export async function markWhatsappPaired(connectedUserId?: string | null): Promise<string[]> {
+  const env = await readHermesEnv();
+  const identity = await readPairedWhatsappIdentity();
+  const entries: Record<string, string | null> = { [WHATSAPP_ENV_ENABLED]: "true" };
+
+  // Allow-all already authorizes this sender; adding ids under it is noise.
+  if (!envIsTrue(env[WHATSAPP_ENV_ALLOW_ALL_USERS])) {
+    const currentRaw = env[WHATSAPP_ENV_ALLOWED_USERS] ?? null;
+    const merged = mergeAllowlistEntries(
+      currentRaw,
+      pairedIdentityAllowlistEntries(identity, [connectedUserId]),
+    );
+    const nextFormatted = formatAllowedUsers(merged);
+    if (nextFormatted !== formatAllowedUsers(mergeAllowlistEntries(currentRaw, []))) {
+      entries[WHATSAPP_ENV_ALLOWED_USERS] = nextFormatted === "" ? null : nextFormatted;
+    }
+  }
+
   await setHermesEnvValues(entries);
-  return keys;
+  return Object.keys(entries);
 }

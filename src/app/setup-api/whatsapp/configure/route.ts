@@ -6,6 +6,7 @@ import {
   normalizeWhatsappNumber,
   setHermesWhatsappConfig,
   WhatsappNotPairedError,
+  type WhatsappConfigResult,
   type WhatsappConfigUpdate,
 } from "@/lib/hermes-whatsapp";
 
@@ -87,15 +88,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
     }
 
-    let changedKeys: string[];
+    let result: WhatsappConfigResult;
     try {
-      changedKeys = await setHermesWhatsappConfig(update);
+      result = await setHermesWhatsappConfig(update);
     } catch (err) {
       if (err instanceof WhatsappNotPairedError) {
         return NextResponse.json({ error: "not_paired" }, { status: 409 });
       }
       throw err;
     }
+    const { changedKeys, paired, authorized } = result;
 
     // Hermes' own convention for this exact operation: log which keys moved,
     // never what they were set to. The repo is public and these lines end up in
@@ -104,14 +106,13 @@ export async function POST(request: Request) {
       console.info("[whatsapp/configure] updated env keys:", changedKeys.join(","));
     }
 
-    // Enabling with no allowlist is not an error — the gateway fails closed and
-    // simply denies every inbound message — but it is almost never what the
-    // owner meant, so say so instead of leaving them to wonder why nothing
-    // arrives.
-    const warning =
-      update.enabled === true && update.allowedUsers !== undefined && update.allowedUsers.length === 0
-        ? "no_allowed_users"
-        : undefined;
+    // The failure this route exists to prevent: a box that is linked and
+    // enabled, and whose gateway will still refuse the owner because nothing
+    // authorizes him. setHermesWhatsappConfig keeps that from happening on any
+    // write it makes, so reaching here means an allowlist we could not repair
+    // -- no pairing on disk to take an identity from. Report it rather than
+    // returning a bare success and letting the owner find the silence himself.
+    const warning = paired && !authorized ? "no_allowed_users" : undefined;
 
     if (changedKeys.length === 0) {
       return NextResponse.json({ success: true, restarted: false, unchanged: true, warning });

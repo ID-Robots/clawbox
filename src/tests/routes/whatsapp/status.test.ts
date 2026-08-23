@@ -22,6 +22,7 @@ const pairedStatus = {
   allowedUsers: ["15551234567"],
   allowAllUsers: false,
   bridgeReady: true,
+  authorized: true,
 };
 
 beforeEach(async () => {
@@ -53,6 +54,26 @@ describe("GET /setup-api/whatsapp/status", () => {
     expect(body.state).toBe("paired");
     expect(body.allowedUsers).toEqual(["15551234567"]);
     expect(body.gateway).toEqual({ installed: true, running: true });
+  });
+
+  it("passes the gateway's authorization verdict through to the panel", async () => {
+    // Pairing and authorization are separate gates upstream. The panel can only
+    // warn about the second one if this route reports it.
+    mockStatus.mockResolvedValue({ ...pairedStatus, authorized: false });
+    expect((await (await GET()).json()).authorized).toBe(false);
+  });
+
+  it("refuses to call a box 'receiving' while the gateway denies its owner", async () => {
+    // The live failure this field exists for: linked, enabled, gateway up, and
+    // every message dropped with "Unauthorized user".
+    vi.resetModules();
+    mockStatus.mockResolvedValue({ ...pairedStatus, authorized: false });
+    GET = (await import("@/app/setup-api/whatsapp/status/route")).GET;
+
+    const body = await (await GET()).json();
+    expect(body.state).toBe("paired");
+    expect(body.gateway.running).toBe(true);
+    expect(body.receiving).toBe(false);
   });
 
   it("is only 'receiving' when paired AND the gateway runs", async () => {

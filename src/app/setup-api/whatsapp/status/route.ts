@@ -61,11 +61,14 @@ export async function GET() {
       harness,
       ...status,
       gateway,
-      // WhatsApp is only LIVE when it is enabled, paired, AND something is
-      // running to receive messages. Any one of the three missing means the
-      // owner's phone gets silence, so all three have to hold before the UI is
-      // allowed to say "active".
-      receiving: status.state === "paired" && gateway.running,
+      // WhatsApp is only LIVE when it is enabled, paired, something is running
+      // to receive messages, AND the gateway's own sender allowlist lets the
+      // owner through. Any one of the four missing means the owner's phone gets
+      // silence, so all four have to hold before the UI is allowed to say
+      // "active". Authorization is the one that used to be missing here: a box
+      // could report itself active while the gateway dropped every message it
+      // received with "Unauthorized user".
+      receiving: status.state === "paired" && gateway.running && status.authorized,
     });
   } catch (err) {
     return NextResponse.json(

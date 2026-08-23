@@ -35,7 +35,11 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   mockHarness.mockResolvedValue("hermes");
-  mockSet.mockResolvedValue(["WHATSAPP_ALLOWED_USERS"]);
+  mockSet.mockResolvedValue({
+    changedKeys: ["WHATSAPP_ALLOWED_USERS"],
+    paired: true,
+    authorized: true,
+  });
   mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system" });
   POST = (await import("@/app/setup-api/whatsapp/configure/route")).POST;
 });
@@ -128,16 +132,45 @@ describe("POST /setup-api/whatsapp/configure", () => {
   });
 
   it("skips the restart entirely when nothing actually changed", async () => {
-    mockSet.mockResolvedValue([]);
+    mockSet.mockResolvedValue({ changedKeys: [], paired: true, authorized: true });
     const body = await (await post({ mode: "bot" })).json();
     expect(body).toMatchObject({ success: true, unchanged: true, restarted: false });
     expect(mockEnsure).not.toHaveBeenCalled();
   });
 
-  it("warns when the channel is switched on with an empty allowlist", async () => {
-    mockSet.mockResolvedValue(["WHATSAPP_ENABLED", "WHATSAPP_ALLOWED_USERS"]);
+  it("warns when a paired box would end up authorizing nobody", async () => {
+    // The gateway checks the sender separately from the pairing, so this is the
+    // difference between "saved" and "saved, and your box will ignore you".
+    mockSet.mockResolvedValue({
+      changedKeys: ["WHATSAPP_ENABLED", "WHATSAPP_ALLOWED_USERS"],
+      paired: true,
+      authorized: false,
+    });
     const body = await (await post({ enabled: true, allowedUsers: [] })).json();
     expect(body).toMatchObject({ success: true, warning: "no_allowed_users" });
+  });
+
+  it("does not cry 'no users' about a box that was never paired", async () => {
+    mockSet.mockResolvedValue({
+      changedKeys: ["WHATSAPP_MODE"],
+      paired: false,
+      authorized: false,
+    });
+    const body = await (await post({ mode: "bot" })).json();
+    expect(body.warning).toBeUndefined();
+  });
+
+  it("keeps the authorization warning when the restart also fails", async () => {
+    // Two things are wrong; the more actionable one is not allowed to hide the
+    // other, and "restart_pending" is the recoverable half.
+    mockSet.mockResolvedValue({
+      changedKeys: ["WHATSAPP_ENABLED"],
+      paired: true,
+      authorized: false,
+    });
+    mockEnsure.mockResolvedValue({ installed: false, running: false, scope: null });
+    const body = await (await post({ enabled: true })).json();
+    expect(body).toMatchObject({ success: true, restarted: false, warning: "no_allowed_users" });
   });
 
   it("returns 500 with a plain message on an unexpected failure", async () => {
