@@ -171,6 +171,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "browser.desktopBrowser": "Desktop Browser",
     "browser.launchMessage": "Launch a real Chromium window on the desktop that {harness} can control.",
     "browser.runningMessage": "Chromium is running on the desktop. {harness} can interact with it in real time.",
+    "browser.agentHeadlessMessage": "{harness} is browsing in its own background browser — there is no window on the desktop. Open Browser starts a desktop window and moves browsing there.",
     "browser.ready": "ready",
     "browser.starting": "starting...",
     "browser.openInVNC": "Open in VNC",
