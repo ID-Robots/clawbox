@@ -229,6 +229,15 @@ describe("parseProcCmdline", () => {
     expect(isClawboxBrowserArgv(argv, MATCH)).toBe(false);
   });
 
+  it("preserves a NUL-separated executable path that contains spaces", () => {
+    const argv = parseProcCmdline("/opt/ClawBox Browser/chrome\0--user-data-dir=/home/clawbox/.config/clawbox-browser\0");
+    expect(argv).toEqual([
+      "/opt/ClawBox Browser/chrome",
+      "--user-data-dir=/home/clawbox/.config/clawbox-browser",
+    ]);
+    expect(isClawboxBrowserArgv(argv, MATCH)).toBe(true);
+  });
+
   it("leaves a single-element cmdline without spaces alone", () => {
     expect(parseProcCmdline("/usr/sbin/sshd\0")).toEqual(["/usr/sbin/sshd"]);
   });

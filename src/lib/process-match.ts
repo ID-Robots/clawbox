@@ -179,10 +179,14 @@ async function readMatchingProcArgv(
     return null;
   }
   if (!raw) return null;
-  // Fast pre-check on the executable alone: argv[0] ends at the first NUL or,
-  // for a title-rewriting process like Chromium, the first space.
-  const end = raw.search(/[\0 ]/);
-  const argv0 = end < 0 ? raw : raw.slice(0, end);
+  // Fast pre-check on the executable alone. In a normal multi-element cmdline
+  // (a NUL before the end) argv[0] ends at the first NUL — spaces and all, so
+  // an executable living in a spaced path is preserved. Only the
+  // single-element title-rewritten form (Chromium) ends argv[0] at a space.
+  const firstNul = raw.indexOf("\0");
+  const multiElement = firstNul >= 0 && firstNul < raw.length - 1;
+  const single = firstNul < 0 ? raw : raw.slice(0, firstNul);
+  const argv0 = multiElement ? single : single.split(" ", 1)[0];
   if (!argv0 || !acceptsExecutable(argv0)) return null;
 
   const argv = parseProcCmdline(raw);
