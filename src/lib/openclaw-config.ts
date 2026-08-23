@@ -86,6 +86,26 @@ export async function runOpenclawConfigSet(
   args: string[],
   options: OpenclawConfigSetOptions = {},
 ): Promise<void> {
+  await withConfigMutationRetry(
+    (timeoutMs) => spawnOpenclawConfigSet(args, { ...options, timeoutMs }),
+    options,
+    "runOpenclawConfigSet",
+  );
+}
+
+/**
+ * Retry `attempt` while it fails with `ConfigMutationConflictError`.
+ *
+ * Shared by {@link runOpenclawConfigSet} and {@link runOpenclawConfigSetBatch}
+ * so both forms of the write survive the same race. Any other failure is
+ * rethrown on the first try — a schema rejection does not become valid by
+ * being repeated.
+ */
+async function withConfigMutationRetry(
+  attemptFn: (timeoutMs: number) => Promise<void>,
+  options: OpenclawConfigSetOptions,
+  label: string,
+): Promise<void> {
   const {
     timeoutMs = 30_000,
     maxAttempts = 4,
@@ -95,7 +115,7 @@ export async function runOpenclawConfigSet(
   let lastError: Error | null = null;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      await spawnOpenclawConfigSet(args, { ...options, timeoutMs });
+      await attemptFn(timeoutMs);
       return;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
@@ -110,7 +130,7 @@ export async function runOpenclawConfigSet(
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
-  throw lastError ?? new Error("runOpenclawConfigSet exhausted retries");
+  throw lastError ?? new Error(`${label} exhausted retries`);
 }
 
 interface SpawnOpenclawOptions {
@@ -235,6 +255,111 @@ function spawnOpenclawConfigSet(
     cwd: options.cwd,
     env: options.env,
   }).then(() => undefined);
+}
+
+/**
+ * One `openclaw config set` assignment, in the same argv form
+ * {@link runOpenclawConfigSet} takes: `[path, value]`, optionally followed by
+ * `--json` when `value` is already JSON text.
+ */
+export type OpenclawConfigSetArgs = string[];
+
+/**
+ * Turn one `config set` argv into the `{ path, value }` entry the CLI's batch
+ * mode wants.
+ *
+ * The CLI's own two value modes are reproduced exactly, because a batch has to
+ * write the same config a sequence of single calls would:
+ *  - with `--json` (aka `--strict-json`) the value text is parsed as JSON and a
+ *    parse failure is an error;
+ *  - without it the CLI tries to parse the text and silently falls back to the
+ *    raw string, which is how `"24000"` becomes the number 24000 and
+ *    `"deepseek/deepseek-v4-pro"` stays a string.
+ *
+ * (The CLI reaches for JSON5 rather than JSON on the lenient path. Every value
+ * this repo writes without `--json` is a plain model id, a mode word, a token
+ * or a decimal integer, for which the two parsers agree; JSON5 is not a
+ * dependency here and pulling one in to cover values we never send would be
+ * cost without benefit.)
+ */
+export function parseConfigSetArgs(args: OpenclawConfigSetArgs): { path: string; value: unknown } {
+  const flags = args.filter((arg) => arg.startsWith("--"));
+  const positional = args.filter((arg) => !arg.startsWith("--"));
+  const [path, raw] = positional;
+  if (!path) throw new Error("config set batch entry is missing a path");
+  if (raw === undefined) throw new Error(`config set batch entry for ${path} is missing a value`);
+  const strictJson = flags.includes("--json") || flags.includes("--strict-json");
+  if (strictJson) return { path, value: JSON.parse(raw) };
+  try {
+    return { path, value: JSON.parse(raw) };
+  } catch {
+    return { path, value: raw };
+  }
+}
+
+/**
+ * Argv for a batched `config set`, with every *value* elided, for use in a log
+ * line — the batch counterpart of {@link configSetLabelArgs}.
+ *
+ * Batch mode puts the whole payload in a single argv element, so the values
+ * that {@link configSetLabelArgs} carefully keeps out of the journal (the
+ * ClawBox AI portal token, provider API keys, the gateway token) would all ride
+ * into an error message inside one JSON blob. Name the paths, which is what
+ * makes such a line diagnosable, and nothing else.
+ */
+export function configSetBatchLabelArgs(batch: readonly OpenclawConfigSetArgs[]): string[] {
+  return [
+    "config",
+    "set",
+    "--batch-json",
+    `[${batch.map((args) => `${args.filter((arg) => !arg.startsWith("--"))[0] ?? "<no path>"}=<redacted>`).join(",")}]`,
+  ];
+}
+
+/**
+ * Apply several `config set` assignments in ONE `openclaw` invocation.
+ *
+ * Why this exists: the CLI is a full Node program that loads the gateway SDK,
+ * parses plugins and validates the config schema on every run, so on a Jetson
+ * Orin Nano a single `config set` costs ~8 s of startup and does milliseconds
+ * of work. First-run setup wrote ~18 keys one at a time and spent about two and
+ * a half minutes doing it, with the wizard sitting on "Almost ready" for the
+ * last two of them (TASK-483). `--batch-json` applies N assignments in one
+ * validated read-modify-write, so N keys cost one startup instead of N.
+ *
+ * Semantics match a sequence of `config set --json` calls: the CLI applies the
+ * entries in order against one snapshot, runs the same non-destructive
+ * replacement guard per entry, and writes once. The difference that matters is
+ * atomicity — a batch either lands whole or not at all — so a caller that needs
+ * two failures kept apart must issue two batches, not one.
+ *
+ * A single-entry batch is sent through {@link runOpenclawConfigSet} unchanged:
+ * there is nothing to save, and the plain form is the one every other caller
+ * has been using.
+ */
+export async function runOpenclawConfigSetBatch(
+  batch: readonly OpenclawConfigSetArgs[],
+  options: OpenclawConfigSetOptions = {},
+): Promise<void> {
+  if (batch.length === 0) return;
+  if (batch.length === 1) {
+    await runOpenclawConfigSet(batch[0], options);
+    return;
+  }
+  const payload = JSON.stringify(batch.map(parseConfigSetArgs));
+  await withConfigMutationRetry(
+    (timeoutMs) =>
+      spawnOpenclaw(["config", "set", "--batch-json", payload], {
+        labelArgs: configSetBatchLabelArgs(batch),
+        timeoutMs,
+        uid: options.uid,
+        gid: options.gid,
+        cwd: options.cwd,
+        env: options.env,
+      }).then(() => undefined),
+    options,
+    "runOpenclawConfigSetBatch",
+  );
 }
 export const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");

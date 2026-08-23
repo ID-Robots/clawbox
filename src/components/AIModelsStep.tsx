@@ -37,6 +37,11 @@ import {
   resolveUiTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
+import {
+  readImageAllowance,
+  type ClawboxAiImageAllowance,
+} from "@/lib/clawbox-ai-models";
+import ClawboxAiImageAllowanceLine from "./ClawboxAiImageAllowanceLine";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -101,6 +106,16 @@ function getConnectButtonLabel(providerName?: string | null) {
   return providerName ? `Connect to ${providerName}` : "Connect";
 }
 
+/**
+ * When each row of the generic "configuring" overlay lights up, in ms.
+ *
+ * The LAST entry is deliberately not used by the timer — see the effect that
+ * schedules these. Driving the final row off a stopwatch is what made this
+ * screen lie: it reached "Almost ready" at 22 s and then sat there, unchanged,
+ * for the remaining two minutes the config writes actually took, which reads as
+ * a hang on a screen that is also asking the customer not to close the page
+ * (TASK-483).
+ */
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
 type ConfiguringKind = "generic" | "ollama" | "llamacpp";
@@ -197,6 +212,12 @@ function ConfiguringOverlay({
           return (
             <li
               key={i}
+              // Which row a customer is actually looking at, stated rather than
+              // inferred from a Tailwind class. Every label is in the DOM at all
+              // times — an unreached row is rendered at opacity 0 — so "is the
+              // last row showing yet" is a question only this attribute can
+              // answer (TASK-483).
+              data-step-state={stepDone ? "done" : stepNow ? "active" : "pending"}
               className={`flex items-center gap-2 text-[length:var(--t-2)] ${
                 reached ? "opacity-100" : "opacity-0 translate-y-1"
               }`}
@@ -598,6 +619,13 @@ export default function AIModelsStep({
   // portal-confirmed account as soon as an answer arrives. Local storage alone
   // is NOT the answer for a paired box — see TASK-468.
   const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => readStoredUiTier());
+  // The day's image allowance, as the portal reported it. Null until an answer
+  // arrives, and null again if the answer was not usable — never a placeholder.
+  // Whatever this is, it is what the panel renders; there is no fallback and
+  // there must not be one, because a default here is a guess at somebody's
+  // paid subscription. (TASK-469.)
+  const [imageAllowance, setImageAllowance] =
+    useState<ClawboxAiImageAllowance | null>(null);
   // Set the moment the user touches the plan picker. The reconcile below must
   // never yank the card out from under a pick that already happened — on the
   // wizard this picker is someone CHOOSING a plan they do not have yet.
@@ -700,6 +728,13 @@ export default function AIModelsStep({
         // stored device tier cannot tell Free from "we never asked" — guessing
         // from it is how a Free user got shown a paid plan in the first place.
         if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
+        // The allowance rides on the same live-portal gate as the tier badge,
+        // and for the same reason: `tierSource: "picker"` means nobody asked
+        // the portal this cycle, so any number attached to it is a leftover.
+        // Set unconditionally, including to null — an allowance that stays on
+        // screen after the portal stopped confirming it is a stale cap, and a
+        // stale cap is indistinguishable from a wrong one.
+        setImageAllowance(readImageAllowance(data.clawaiImages));
         if (userPickedTierRef.current) return;
         setClawaiTier(resolveUiTier(true, data.clawaiAccountTier ?? null));
       })
@@ -935,8 +970,12 @@ export default function AIModelsStep({
   useEffect(() => {
     if (configuringKind !== "generic" || configuringCompleted) return;
 
+    // Every row except the last one is timed. The last row belongs to
+    // `completeConfiguring`, so "Almost ready" appears when the request has
+    // actually come back and never before it.
+    const lastTimedIndex = CONFIGURING_STEP_DELAYS.length - 2;
     const timers = CONFIGURING_STEP_DELAYS.map((delay, index) =>
-      index === 0
+      index === 0 || index > lastTimedIndex
         ? null
         : setTimeout(() => {
             setConfiguringState((current) => {
@@ -1979,6 +2018,13 @@ export default function AIModelsStep({
         {selected?.id === "clawai" && (
           <div className="mt-3 rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
             <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
+            {/* Directly under the plan, because that is where somebody already
+                goes to find out what their plan is (TASK-469's decided
+                placement). Not on the chat surface: a counter beside every
+                message makes an assistant feel metered in a way that devalues
+                it — the number should be met when you go looking, or when it
+                starts to matter. */}
+            <ClawboxAiImageAllowanceLine allowance={imageAllowance} />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow

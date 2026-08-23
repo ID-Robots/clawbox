@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
 import * as kv from '@/lib/client-kv'
+import { describeChatFailure } from '@/lib/chat-error-text'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -300,8 +301,11 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
             runIdRef.current = null
             setSending(false)
             if (state === 'error') {
-              const errMsg = (payload.errorMessage as string) || 'Chat error'
-              setMessages(prev => [...prev, { role: 'system', text: `Error: ${errMsg}`, timestamp: Date.now() }])
+              // Never render the gateway's own error text. It is written for
+              // an operator reading a log and has carried an absolute device
+              // path, a session UUID and a `openclaw logs --follow` line into
+              // the customer's transcript (TASK-440).
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage), timestamp: Date.now() }])
             }
           }
         }
@@ -417,7 +421,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
     } catch (err) {
       setSending(false)
       runIdRef.current = null
-      setMessages(prev => [...prev, { role: 'system', text: `Error: ${(err as Error).message}`, timestamp: Date.now() }])
+      setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
     }
   }, [wsRequest])
 

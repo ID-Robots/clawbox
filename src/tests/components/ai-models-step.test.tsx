@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
 import AIModelsStep from "@/components/AIModelsStep";
 
 vi.mock("@/lib/i18n", () => ({
@@ -441,5 +441,74 @@ describe("AIModelsStep variants", () => {
     }, { timeout: 4000 });
 
     vi.unstubAllGlobals();
+  });
+  // TASK-483: the overlay's rows used to be driven entirely off wall-clock
+  // timers, so it reached the final row, "Almost ready", 22 seconds in and then
+  // sat there unchanged for the two further minutes the config writes actually
+  // took. On a screen that also says "Please don't close this page" that reads
+  // as a hang. The last row now belongs to the request, not the stopwatch.
+  it("does not claim 'Almost ready' until the configure request comes back", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let resolveConfigure: ((value: unknown) => void) | null = null;
+      const fetchMock = vi.mocked(fetch);
+      fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+        if (url.includes("/setup-api/ai-models/oauth/providers")) {
+          return { ok: true, json: async () => ({ providers: [] }) } as unknown as Response;
+        }
+        if (url.includes("/setup-api/ai-models/configure")) {
+          await new Promise((resolve) => { resolveConfigure = resolve; });
+          return { ok: true, json: async () => ({ success: true }) } as unknown as Response;
+        }
+        return { ok: true, json: async () => ({}) } as unknown as Response;
+      });
+
+      const { getByRole, getByText, container } = render(
+        <AIModelsStep
+          providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+          defaultProviderId="clawai"
+          title="Connect AI Provider"
+          description="Primary provider"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+      });
+
+      fireEvent.click(getByRole("button", { name: /Show more providers/i }));
+      fireEvent.click(getByRole("radio", { name: /Anthropic Claude/i }));
+      const keyInput = container.querySelector("input[type=password], input[type=text]");
+      expect(keyInput).not.toBeNull();
+      fireEvent.change(keyInput as HTMLInputElement, { target: { value: "sk-ant-test" } });
+      fireEvent.click(getByRole("button", { name: "Connect to Anthropic Claude" }));
+
+      await waitFor(() => {
+        expect(getByText("Credentials verified")).toBeInTheDocument();
+      });
+
+      // Well past the last timer in CONFIGURING_STEP_DELAYS.
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      // Every row's label is in the DOM the whole time — unreached rows are
+      // just rendered transparent — so ask each row what state it is in.
+      const stepState = (label: string) =>
+        getByText(label).closest("li")?.getAttribute("data-step-state");
+      expect(stepState("Warming up models")).toBe("active");
+      expect(stepState("Almost ready")).toBe("pending");
+
+      await act(async () => {
+        resolveConfigure?.(undefined);
+      });
+
+      await waitFor(() => {
+        expect(stepState("Almost ready")).toBe("done");
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

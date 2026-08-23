@@ -27,7 +27,7 @@ test("store supports searching, viewing details, and installing an app", async (
 
   await expect(storeWindow.getByText("Forecast cards and travel alerts tuned for the desktop shell.")).toBeVisible();
   await storeWindow.getByRole("button", { name: "Install" }).click();
-  await page.getByRole("button", { name: "Install Anyway" }).click();
+  await page.getByRole("button", { name: "Install skill" }).click();
 
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
   await storeWindow.getByRole("button", { name: "arrow_back" }).click();

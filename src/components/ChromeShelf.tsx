@@ -21,7 +21,7 @@ interface ChromeShelfProps {
   onLauncherClick: () => void;
   onTrayClick: () => void;
   onClawKeepShieldClick?: () => void;
-  clawkeepStatus?: { stale: boolean; busy: boolean; restoring: boolean };
+  clawkeepStatus?: { stale: boolean; unconfigured?: boolean; busy: boolean; restoring: boolean };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
   onCloseApp?: (id: string) => void;
@@ -40,7 +40,7 @@ export default function ChromeShelf({
   onLauncherClick,
   onTrayClick,
   onClawKeepShieldClick,
-  clawkeepStatus = { stale: false, busy: false, restoring: false },
+  clawkeepStatus = { stale: false, unconfigured: false, busy: false, restoring: false },
   onPinApp,
   onUnpinApp,
   onCloseApp,
@@ -116,15 +116,22 @@ export default function ChromeShelf({
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
   const stale = clawAiAuthenticated && clawkeepStatus.stale;
+  // Never-paired is not "overdue": nothing is late on a box that has never
+  // been set up. It gets its own invitation and a calm colour instead of the
+  // red alert a genuinely missed backup earns.
+  const needsSetup = clawAiAuthenticated && !clawkeepStatus.stale && !!clawkeepStatus.unconfigured;
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
     : stale
     ? t("shelf.clawkeepStale")
+    : needsSetup
+    ? t("shelf.clawkeepNotSetUp")
     : t("shelf.openClawKeep");
-  const mode: "restoring" | "busy" | "alert" | "ok" =
+  const mode: "restoring" | "busy" | "alert" | "setup" | "ok" =
     clawkeepStatus.restoring ? "restoring"
     : clawkeepStatus.busy ? "busy"
     : !clawAiAuthenticated || clawkeepStatus.stale ? "alert"
+    : needsSetup ? "setup"
     : "ok";
   // Tailwind JIT can only see *literal* class strings, so each variant
   // ships its full pulse/icon class names rather than composing them.
@@ -145,6 +152,12 @@ export default function ChromeShelf({
       icon: "text-red-500 clawkeep-shelf-glow-red",
       pulse: "bg-red-500/25",
       pulseDelayed: "bg-red-500/20",
+      tooltip: baseTitle,
+    },
+    setup: {
+      icon: "text-sky-300",
+      pulse: "",
+      pulseDelayed: "",
       tooltip: baseTitle,
     },
     ok: {
