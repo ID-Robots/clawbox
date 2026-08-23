@@ -119,6 +119,43 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string 
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
 
+/* ── Discord ── */
+// The four states GET /setup-api/discord/status can report, each with exactly
+// one remedy in the UI. "connected" is the only one that may render as live.
+const DISCORD_STATES = ["connected", "intents-missing", "denied-no-allowlist", "offline"] as const;
+type DiscordConnectionState = (typeof DISCORD_STATES)[number];
+
+function isDiscordState(value: unknown): value is DiscordConnectionState {
+  return typeof value === "string" && (DISCORD_STATES as readonly string[]).includes(value);
+}
+
+/** One row of the "who may talk to the assistant" picker. */
+interface DiscordMemberOption {
+  id: string;
+  displayName: string;
+  username: string;
+  isOwner: boolean;
+  guildName: string;
+}
+
+function toDiscordMembers(value: unknown): DiscordMemberOption[] {
+  if (!Array.isArray(value)) return [];
+  const out: DiscordMemberOption[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const m = entry as Record<string, unknown>;
+    if (typeof m.id !== "string") continue;
+    out.push({
+      id: m.id,
+      displayName: typeof m.displayName === "string" ? m.displayName : "",
+      username: typeof m.username === "string" ? m.username : "",
+      isOwner: m.isOwner === true,
+      guildName: typeof m.guildName === "string" ? m.guildName : "",
+    });
+  }
+  return out;
+}
+
 /* ── Helpers ── */
 // Hermes registers the on-device model under this single provider id whichever
 // local runtime backs it (see HERMES_LOCAL_PROVIDER in lib/hermes-local-ai.ts).
@@ -1454,9 +1491,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   };
 
   /* ── Discord ── */
-  // Deliberately smaller than the Telegram block: Discord access control is
-  // OpenClaw's own DM pairing (or DISCORD_ALLOWED_USERS on Hermes), neither of
-  // which ClawBox writes, so there is no allowlist UI to keep in sync here.
+  // Three things can leave a Discord bot configured and silent, and only the
+  // first was ever visible here:
+  //   * the token is dead                  -> dcTokenRejected
+  //   * MESSAGE CONTENT was never enabled  -> dcIntentsMissing / state
+  //     "intents-missing"
+  //   * nothing is on the allowlist        -> state "denied-no-allowlist",
+  //     fixed by the member picker below
+  // The status card renders exactly one of the four states the route reports,
+  // each next to the one thing that fixes it.
   const [dcToken, setDcToken] = useState("");
   const [dcShowToken, setDcShowToken] = useState(false);
   const [dcSaving, setDcSaving] = useState(false);
@@ -1471,6 +1514,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // Application ID is only ever used in the browser to build the invite URL —
   // it is public (it is in the invite link itself) and is never sent to the box.
   const [dcAppId, setDcAppId] = useState("");
+  // What the gateway actually reports, not what a stored token implies.
+  const [dcState, setDcState] = useState<DiscordConnectionState | null>(null);
+  // The picker. `dcMembers` is what the bot can see; `dcSelected` is what the
+  // owner has ticked. Both come back from configure and from status.
+  const [dcMembers, setDcMembers] = useState<DiscordMemberOption[]>([]);
+  const [dcSelected, setDcSelected] = useState<string[]>([]);
+  const [dcAllowlistSupported, setDcAllowlistSupported] = useState(true);
+  const [dcAllowAllUsers, setDcAllowAllUsers] = useState(false);
+  const [dcMembersSaving, setDcMembersSaving] = useState(false);
+  // Set when the preflight refused the save. Kept until the next save attempt
+  // so the fix instructions stay on screen while the owner follows them.
+  const [dcIntentsMissing, setDcIntentsMissing] = useState<string[] | null>(null);
+  const [dcMembersUnavailable, setDcMembersUnavailable] = useState(false);
   const dcSaveControllerRef = useRef<AbortController | null>(null);
 
   const refreshDiscordStatus = useCallback(async () => {
@@ -1486,8 +1542,38 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setDcConfigured(d.configured ?? false);
       setDcBotName(typeof d.username === "string" ? d.username : null);
       setDcTokenRejected(d.tokenRejected === true);
+      setDcState(isDiscordState(d.state) ? d.state : null);
+      setDcAllowlistSupported(d.allowlistSupported !== false);
+      setDcAllowAllUsers(d.allowAllUsers === true);
+      // The server owns the allowlist; the picker only ever proposes a change.
+      if (Array.isArray(d.allowedUserIds)) {
+        setDcSelected(d.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
     } catch (err) {
       console.warn("[discord] refresh failed:", err);
+    }
+  }, []);
+
+  // The member list costs Discord API calls, so it is fetched only while the
+  // Discord section is actually open — never from the status poll that backs
+  // the sidebar subtitle.
+  const refreshDiscordMembers = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/discord/members", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.supported === false) {
+        setDcAllowlistSupported(false);
+        return;
+      }
+      if (d.configured === false) return;
+      setDcMembers(toDiscordMembers(d.members));
+      setDcMembersUnavailable(d.available === false);
+      if (Array.isArray(d.allowedUserIds)) {
+        setDcSelected(d.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+    } catch (err) {
+      console.warn("[discord] member refresh failed:", err);
     }
   }, []);
 
@@ -1495,6 +1581,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (section !== "discord" && !isMobile) return;
     refreshDiscordStatus();
   }, [section, isMobile, refreshDiscordStatus]);
+
+  useEffect(() => {
+    if (section !== "discord") return;
+    if (!dcConfigured) return;
+    refreshDiscordMembers();
+  }, [section, dcConfigured, refreshDiscordMembers]);
 
   useEffect(() => () => dcSaveControllerRef.current?.abort(), []);
 
@@ -1513,6 +1605,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     ? `https://discord.com/oauth2/authorize?client_id=${dcAppIdTrimmed}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`
     : null;
 
+  /** Warning tokens the configure route returns, mapped to translated copy. */
+  const discordWarningText = (warning: unknown): string | null => {
+    if (warning === "restart_pending") return t("settings.discordSavedRestartPending");
+    if (warning === "no_allowed_users") return t("settings.discordSavedNoUsers");
+    if (warning === "members_unavailable") return t("settings.discordMembersUnavailable");
+    if (warning === "server_members_intent") return t("settings.discordMembersUnavailable");
+    return null;
+  };
+
   const saveDiscord = async () => {
     if (!dcToken.trim()) {
       setDcStatus({ type: "error", message: t("settings.enterToken") });
@@ -1523,6 +1624,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     dcSaveControllerRef.current = controller;
     setDcSaving(true);
     setDcStatus(null);
+    setDcIntentsMissing(null);
     try {
       const res = await fetch("/setup-api/discord/configure", {
         method: "POST",
@@ -1533,18 +1635,35 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (controller.signal.aborted) return;
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
-        // The route already phrases its errors for a person (bad token vs
+        // The preflight refusal is not a sentence, it is a checklist — render
+        // the four steps rather than a one-line error nobody can act on.
+        if (data.code === "intents_missing") {
+          setDcIntentsMissing(
+            Array.isArray(data.missingIntents)
+              ? data.missingIntents.filter((i: unknown) => typeof i === "string")
+              : [],
+          );
+          setDcStatus({ type: "error", message: t("settings.discordStateIntentsMissingHint") });
+          return;
+        }
+        // The route already phrases its other errors for a person (bad token vs
         // "couldn't reach Discord"), so show them rather than a generic line.
         setDcStatus({ type: "error", message: data.error || t("settings.failedSave") });
         return;
       }
       setDcStatus({
         type: data.warning ? "error" : "success",
-        message: data.warning || t("settings.discordConfigured"),
+        message: discordWarningText(data.warning) ?? t("settings.discordConfigured"),
       });
       setDcConfigured(true);
       setDcTokenRejected(false);
       setDcBotName(typeof data.username === "string" ? data.username : null);
+      setDcMembers(toDiscordMembers(data.members));
+      setDcMembersUnavailable(data.warning === "members_unavailable");
+      setDcAllowlistSupported(data.allowlistSupported !== false);
+      if (Array.isArray(data.allowedUserIds)) {
+        setDcSelected(data.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
       setDcReconfigure(false);
       setDcToken("");
       refreshDiscordStatus();
@@ -1555,6 +1674,93 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       if (!controller.signal.aborted) setDcSaving(false);
     }
   };
+
+  const toggleDiscordMember = (id: string) => {
+    setDcStatus(null);
+    setDcSelected((current) =>
+      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
+    );
+  };
+
+  /**
+   * Save the picker on its own — the token is already stored, so this is the
+   * one write that turns a connected-but-denying bot into a working one.
+   */
+  const saveDiscordMembers = async () => {
+    setDcMembersSaving(true);
+    setDcStatus(null);
+    try {
+      const res = await fetch("/setup-api/discord/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowedUserIds: dcSelected }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setDcStatus({
+          type: "error",
+          message:
+            data.code === "empty_allowlist"
+              ? t("settings.discordMembersEmptyWarning")
+              : data.error || t("settings.failedSave"),
+        });
+        return;
+      }
+      setDcStatus({
+        type: data.warning ? "error" : "success",
+        message: discordWarningText(data.warning) ?? t("settings.discordConfigured"),
+      });
+      refreshDiscordStatus();
+    } catch {
+      setDcStatus({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      setDcMembersSaving(false);
+    }
+  };
+
+  // One descriptor per state, so the icon, the colour and the sentence cannot
+  // drift apart — and so "live" is reachable from exactly one of them.
+  const dcStateView = (() => {
+    switch (dcState) {
+      case "connected":
+        return {
+          tone: "live" as const,
+          icon: "check_circle",
+          title: dcBotName || t("settings.discordStateConnected"),
+          hint: t("settings.discordStateConnectedHint"),
+        };
+      case "intents-missing":
+        return {
+          tone: "warn" as const,
+          icon: "report",
+          title: t("settings.discordStateIntentsMissing"),
+          hint: t("settings.discordStateIntentsMissingHint"),
+        };
+      case "denied-no-allowlist":
+        return {
+          tone: "warn" as const,
+          icon: "block",
+          title: t("settings.discordStateDenied"),
+          hint: t("settings.discordStateDeniedHint"),
+        };
+      case "offline":
+        return {
+          tone: "idle" as const,
+          icon: "link_off",
+          title: t("settings.discordStateOffline"),
+          hint: t("settings.discordStateOfflineHint"),
+        };
+      default:
+        // No state reported (OpenClaw, or a status call that has not landed
+        // yet). Say the bot is set up and stop short of claiming it is live.
+        return {
+          tone: "idle" as const,
+          icon: "forum",
+          title: dcBotName || t("settings.botConnected"),
+          hint: "",
+        };
+    }
+  })();
 
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -2996,25 +3202,60 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </div>
                 </div>
               ) : dcConfigured && !dcReconfigure ? (
-                <div>
-                  <div className="flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5 mb-4">
-                    <div className="w-10 h-10 rounded-full bg-green-500/15 flex items-center justify-center shrink-0">
-                      <span className="material-symbols-rounded text-green-400" style={{ fontSize: 22 }}>check_circle</span>
+                <div data-testid="discord-status-card" data-state={dcState ?? "unknown"}>
+                  <div
+                    className={`flex items-center gap-4 rounded-xl px-4 py-3.5 mb-4 border ${
+                      dcStateView.tone === "live"
+                        ? "bg-green-500/[0.06] border-green-500/15"
+                        : dcStateView.tone === "warn"
+                          ? "bg-amber-500/[0.06] border-amber-500/15"
+                          : "bg-white/[0.03] border-white/[0.06]"
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                      <span
+                        className={`material-symbols-rounded ${
+                          dcStateView.tone === "live"
+                            ? "text-green-400"
+                            : dcStateView.tone === "warn"
+                              ? "text-amber-400"
+                              : "text-[var(--text-muted)] opacity-60"
+                        }`}
+                        style={{ fontSize: 22 }}
+                        aria-hidden="true"
+                      >
+                        {dcStateView.icon}
+                      </span>
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm text-[var(--text-primary)] font-medium">
-                        {dcBotName || t("settings.botConnected")}
+                        {dcStateView.title}
                       </div>
-                      <div className="flex items-center gap-1.5 mt-0.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                        <span className="text-xs text-green-400/80">{t("settings.discordActive")}</span>
-                      </div>
+                      {/* The live dot is bound to the one state that earns it.
+                          It used to show whenever a token was stored, which is
+                          how a bot that could not connect at all read as
+                          "Discord channel active". */}
+                      {dcState === "connected" ? (
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                          <span className="text-xs text-green-400/80">{t("settings.discordActive")}</span>
+                        </div>
+                      ) : dcStateView.hint ? (
+                        <div className="text-xs text-[var(--text-secondary)] mt-0.5 leading-relaxed">
+                          {dcStateView.hint}
+                        </div>
+                      ) : null}
                     </div>
                   </div>
                   {dcTokenRejected && (
                     <div className="mb-4">
                       <StatusMessage type="error" message={t("settings.discordTokenRejected")} />
                     </div>
+                  )}
+                  {dcAllowAllUsers && (
+                    <p className="text-xs text-amber-300/90 mb-4 leading-relaxed">
+                      {t("settings.discordAllowAllWarning")}
+                    </p>
                   )}
                   <button
                     onClick={() => { setDcReconfigure(true); setDcStatus(null); }}
@@ -3035,6 +3276,124 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
             </div>
+
+            {/* Privileged intents — the checklist that fixes a silent bot.
+                Shown either because the save was refused by the preflight, or
+                because the gateway is already reporting that failure. Both are
+                the same problem, so both get the same four steps. */}
+            {(dcIntentsMissing !== null || dcState === "intents-missing") && (
+              <div
+                className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] p-5"
+                data-testid="discord-intents-fix"
+              >
+                <div className="flex gap-3 mb-3">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">warning</span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-amber-200">{t("settings.discordIntentsFixTitle")}</div>
+                    <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
+                      {t("settings.discordStateIntentsMissingHint")}
+                    </p>
+                  </div>
+                </div>
+                <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                  <li>
+                    {t("settings.discordIntentsFixStep1")}{" "}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--coral-bright)] hover:text-orange-300 underline underline-offset-2"
+                    >
+                      discord.com/developers
+                    </a>
+                  </li>
+                  <li>{t("settings.discordIntentsFixStep2")}</li>
+                  <li>{t("settings.discordIntentsFixStep3")}</li>
+                  <li>{t("settings.discordIntentsFixStep4")}</li>
+                </ol>
+                {dcIntentsMissing !== null && dcIntentsMissing.length > 0 && (
+                  <ul className="mt-3 space-y-1 list-none p-0">
+                    {dcIntentsMissing.map((intent) => (
+                      <li key={intent} className="text-xs font-mono text-amber-200/90">{intent}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* Who may talk to the assistant.
+                A connected Discord bot denies every message until one of the
+                DISCORD_ALLOWED_* variables exists, and says so only in the
+                gateway log. This is the panel's answer to that: the members the
+                bot can actually see, with the server owner ticked by default. */}
+            {dcConfigured && !dcReconfigure && dcAllowlistSupported && (
+              <div
+                className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5"
+                data-testid="discord-members"
+              >
+                <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                  {t("settings.discordMembersTitle")}
+                </label>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                  {t("settings.discordMembersHint")}
+                </p>
+
+                {dcMembersUnavailable && (
+                  <p className="text-xs text-amber-300/90 mt-2 leading-relaxed">
+                    {t("settings.discordMembersUnavailable")}
+                  </p>
+                )}
+
+                <ul className="mt-3 space-y-1.5 list-none p-0">
+                  {dcMembers.map((member) => {
+                    const checked = dcSelected.includes(member.id);
+                    const label = member.displayName || member.username || member.id;
+                    return (
+                      <li key={member.id}>
+                        <label className="flex items-center gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleDiscordMember(member.id)}
+                            disabled={dcMembersSaving}
+                            className="shrink-0 accent-[var(--coral-bright)]"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm text-[var(--text-primary)] truncate">{label}</span>
+                            <span className="block text-xs text-[var(--text-muted)] truncate">
+                              {member.isOwner ? t("settings.discordMembersOwner") : member.guildName}
+                            </span>
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                  {dcMembers.length === 0 && (
+                    <li className="text-xs text-[var(--text-muted)]">{t("settings.discordMembersNone")}</li>
+                  )}
+                </ul>
+
+                {/* The never-empty invariant, made visible. The save is refused
+                    server-side too — this is so nobody has to click to find
+                    out. */}
+                {dcMembers.length > 0 && dcSelected.length === 0 && (
+                  <p className="text-xs text-amber-300/90 mt-3 leading-relaxed" data-testid="discord-members-empty">
+                    {t("settings.discordMembersEmptyWarning")}
+                  </p>
+                )}
+
+                {dcMembers.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={saveDiscordMembers}
+                    disabled={dcMembersSaving || dcSelected.length === 0}
+                    className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
+                  >
+                    {t("settings.discordMembersSave")}
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Setup card — shown when not configured or reconfiguring */}
             {(dcConfigured === false || dcReconfigure) && (
@@ -3630,6 +3989,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       case "discord": {
         if (dcConfigured === null) return { subtitle: null };
         if (!dcConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // A problem the owner has to act on outranks the bot's name here: the
+        // sidebar is the only place a closed section can say anything at all.
+        if (dcState === "intents-missing") return { subtitle: t("settings.discordStateIntentsMissing") };
+        if (dcState === "denied-no-allowlist") return { subtitle: t("settings.discordStateDenied") };
+        if (dcState === "offline") return { subtitle: t("settings.discordStateOffline") };
         return { subtitle: dcBotName || (t("settings.botConnected") || "Connected") };
       }
       case "remote":

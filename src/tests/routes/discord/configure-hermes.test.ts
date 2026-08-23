@@ -15,15 +15,27 @@ vi.mock("@/lib/openclaw-config", () => ({
   setDiscordToken: vi.fn(),
   restartGateway: vi.fn(),
 }));
-vi.mock("@/lib/hermes-discord", () => ({
-  setHermesDiscordToken: vi.fn(),
-  ensureHermesGateway: vi.fn(),
-}));
+vi.mock("@/lib/hermes-discord", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
+  return {
+    // The error class has to be the REAL one: the route branches on
+    // `instanceof`, and a stub would make every allowlist refusal fall through
+    // to the generic 500 instead of the warning it is supposed to become.
+    DiscordEmptyAllowlistError: actual.DiscordEmptyAllowlistError,
+    setHermesDiscordToken: vi.fn(),
+    setHermesDiscordAllowlist: vi.fn(),
+    ensureHermesGateway: vi.fn(),
+  };
+});
 
 import { set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
-import { setHermesDiscordToken, ensureHermesGateway } from "@/lib/hermes-discord";
+import {
+  setHermesDiscordToken,
+  setHermesDiscordAllowlist,
+  ensureHermesGateway,
+} from "@/lib/hermes-discord";
 
 const mockSet = vi.mocked(set);
 const mockHarness = vi.mocked(getActiveHarness);
@@ -31,6 +43,7 @@ const mockSetDiscordToken = vi.mocked(setDiscordToken);
 const mockRestartGateway = vi.mocked(restartGateway);
 const mockSetHermesToken = vi.mocked(setHermesDiscordToken);
 const mockEnsureGateway = vi.mocked(ensureHermesGateway);
+const mockSetAllowlist = vi.mocked(setHermesDiscordAllowlist);
 
 const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
@@ -63,6 +76,7 @@ describe("POST /setup-api/discord/configure — Hermes", () => {
     mockSet.mockResolvedValue();
     mockHarness.mockResolvedValue("hermes");
     mockSetHermesToken.mockResolvedValue();
+    mockSetAllowlist.mockResolvedValue({ changedKeys: [], allowedUsers: [], authorized: true });
     mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system" });
 
     POST = (await import("@/app/setup-api/discord/configure/route")).POST;

@@ -16,10 +16,18 @@ vi.mock("@/lib/openclaw-config", () => ({
   setDiscordToken: vi.fn(),
   restartGateway: vi.fn(),
 }));
-vi.mock("@/lib/hermes-discord", () => ({
-  setHermesDiscordToken: vi.fn(),
-  ensureHermesGateway: vi.fn(),
-}));
+vi.mock("@/lib/hermes-discord", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
+  return {
+    // The error class has to be the REAL one: the route branches on
+    // `instanceof`, and a stub would make every allowlist refusal fall through
+    // to the generic 500 instead of the warning it is supposed to become.
+    DiscordEmptyAllowlistError: actual.DiscordEmptyAllowlistError,
+    setHermesDiscordToken: vi.fn(),
+    setHermesDiscordAllowlist: vi.fn(),
+    ensureHermesGateway: vi.fn(),
+  };
+});
 
 import { set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";

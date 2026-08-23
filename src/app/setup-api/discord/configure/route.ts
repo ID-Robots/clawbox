@@ -1,17 +1,33 @@
 import { NextResponse } from "next/server";
-import { set } from "@/lib/config-store";
+import { get, set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import {
   DiscordAuthError,
   type DiscordBotInfo,
+  type DiscordGuildMembers,
+  type DiscordIntents,
   DiscordUnavailableError,
   fetchDiscordBotInfo,
+  fetchDiscordGuildMembers,
+  fetchDiscordIntents,
   isSafeDiscordToken,
 } from "@/lib/discord-api";
 import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
-import { ensureHermesGateway, setHermesDiscordToken } from "@/lib/hermes-discord";
+import {
+  DiscordEmptyAllowlistError,
+  ensureHermesGateway,
+  setHermesDiscordAllowlist,
+  setHermesDiscordToken,
+} from "@/lib/hermes-discord";
 
 export const dynamic = "force-dynamic";
+
+/** Where the two steps that fix a silent bot actually live. */
+const DEVELOPER_PORTAL_URL = "https://discord.com/developers/applications";
+
+// Guard rail, not policy: a caller can select at most this many people, so a
+// pasted member dump cannot turn into a multi-kilobyte .env line.
+const MAX_ALLOWED_USERS = 64;
 
 /**
  * Text of an error, with the bot token scrubbed out of it.
@@ -27,42 +43,186 @@ function scrub(err: unknown, secret: string): string {
   return secret ? text.split(secret).join("<redacted>") : text;
 }
 
-// Deliberately different from the Telegram route in one place: the token is
-// verified against Discord BEFORE anything is written.
+// Deliberately different from the Telegram route in two places, both of them
+// paid for in support time:
 //
-// Telegram can validate offline (its token embeds the bot id, so a typo is a
-// shape error) and leaves liveness to the status route. A Discord token is
-// opaque — a regex cannot tell a real one from a plausible-looking string — so
-// a save that skipped the live check would report success for a token that can
-// never log in, and the only symptom would be a bot that is "configured" and
-// permanently silent. That is exactly the failure this integration exists to
-// avoid, so an unverifiable token is not saved at all.
+// 1. The token is verified against Discord BEFORE anything is written. Telegram
+//    can validate offline (its token embeds the bot id, so a typo is a shape
+//    error). A Discord token is opaque, so a save that skipped the live check
+//    would report success for a token that can never log in.
+//
+// 2. The two things that make a *valid* token useless are checked here too,
+//    because neither is visible from the token and both were hit live:
+//
+//    * MESSAGE CONTENT was never enabled in the Developer Portal, so the
+//      gateway raises PrivilegedIntentsRequired and the bot is online and
+//      deaf. Read from `GET /applications/@me` before saving.
+//    * No allowlist exists, so the adapter denies every message it receives.
+//      Fixed by writing DISCORD_ALLOWED_USERS as part of the same save, with
+//      the guild owner selected by default.
+//
+// Both used to be discoverable only by reading the gateway log.
+
+interface ConfigureBody {
+  botToken?: unknown;
+  /** Numeric member ids from the picker. Absent on a first save. */
+  allowedUserIds?: unknown;
+}
+
+function readUserIds(value: unknown): { ids: string[] } | { error: string } {
+  if (!Array.isArray(value)) return { error: "allowedUserIds must be an array" };
+  if (value.length > MAX_ALLOWED_USERS) {
+    return { error: `At most ${MAX_ALLOWED_USERS} people can be selected` };
+  }
+  const ids: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") return { error: "allowedUserIds must be strings" };
+    ids.push(entry);
+  }
+  return { ids };
+}
+
+/** Members the picker offers, plus the ids selected by default. */
+function defaultSelection(directory: DiscordGuildMembers): string[] {
+  // The guild owner is who set the bot up, and was the id that fixed this by
+  // hand. `owner_id` comes from GET /guilds/{id}, which needs no privileged
+  // intent, so this default survives a bot whose Server Members intent is off.
+  return directory.members.filter((m) => m.isOwner).map((m) => m.id);
+}
+
+async function applyAllowlist(
+  harness: string,
+  userIds: string[],
+): Promise<{ allowedUsers: string[]; changedKeys: string[]; warning?: string }> {
+  // The env allowlist is a Hermes mechanism. OpenClaw gates Discord through its
+  // own owner-approved DM pairing, which ClawBox does not write, so there is
+  // nothing honest to set there.
+  if (harness !== "hermes") return { allowedUsers: [], changedKeys: [] };
+  try {
+    const result = await setHermesDiscordAllowlist(userIds);
+    return { allowedUsers: result.allowedUsers, changedKeys: result.changedKeys };
+  } catch (err) {
+    if (err instanceof DiscordEmptyAllowlistError) {
+      // Reached on a first save when the bot has not been invited to a server
+      // yet, so there is no owner to select. Never silent: the caller turns
+      // this into the panel's blocking warning state.
+      return { allowedUsers: [], changedKeys: [], warning: "no_allowed_users" };
+    }
+    throw err;
+  }
+}
+
+/** Restart the harness' gateway; report rather than throw when it will not. */
+async function applyRestart(harness: string, signal: AbortSignal, secret: string): Promise<boolean> {
+  try {
+    if (harness === "hermes") {
+      const status = await ensureHermesGateway(signal);
+      return status.running;
+    }
+    await restartGateway();
+    return true;
+  } catch (err) {
+    // The credential and the allowlist are already persisted, so a service
+    // failure is a warning, not a failed save — the same contract
+    // /telegram/configure has always had.
+    console.error("[discord/configure] gateway restart failed:", scrub(err, secret));
+    return false;
+  }
+}
 
 export async function POST(request: Request) {
   // Kept out of the try so the outer catch can scrub it from anything it logs.
   let tokenForScrub = "";
   try {
-    let body: { botToken?: string };
+    let body: ConfigureBody;
     try {
       body = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
 
-    const botToken = typeof body.botToken === "string" ? body.botToken.trim() : "";
-    if (!botToken) {
-      return NextResponse.json({ error: "Bot token is required" }, { status: 400 });
+    const harness = await getActiveHarness();
+
+    let requestedIds: string[] | undefined;
+    if (body.allowedUserIds !== undefined) {
+      const parsed = readUserIds(body.allowedUserIds);
+      if ("error" in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
+      requestedIds = parsed.ids;
     }
+
+    const rawToken = typeof body.botToken === "string" ? body.botToken.trim() : "";
+
+    // ── Allowlist-only save: the picker changed, the token did not ──────────
+    if (!rawToken) {
+      if (requestedIds === undefined) {
+        return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+      }
+      if (harness !== "hermes") {
+        return NextResponse.json(
+          { error: "Discord access is managed by OpenClaw's own pairing", supported: false },
+          { status: 501 },
+        );
+      }
+      const stored = await get("discord_bot_token");
+      if (!stored || typeof stored !== "string") {
+        return NextResponse.json({ error: "Bot token is required" }, { status: 400 });
+      }
+
+      let result;
+      try {
+        result = await setHermesDiscordAllowlist(requestedIds);
+      } catch (err) {
+        if (err instanceof DiscordEmptyAllowlistError) {
+          // The one refusal in this route. Everything else degrades to a
+          // warning; this does not, because saving it would hand back a bot
+          // that looks configured and answers nobody — the state this change
+          // exists to remove.
+          return NextResponse.json(
+            { error: "empty_allowlist", code: "empty_allowlist" },
+            { status: 400 },
+          );
+        }
+        if (err instanceof Error && err.message === "Invalid Discord user id") {
+          return NextResponse.json({ error: "Invalid Discord user id" }, { status: 400 });
+        }
+        throw err;
+      }
+
+      // Hermes' own convention for this operation: log which keys moved, never
+      // what they were set to. The repo is public and these lines end up in
+      // support bundles.
+      if (result.changedKeys.length > 0) {
+        console.info("[discord/configure] updated env keys:", result.changedKeys.join(","));
+      }
+      if (result.changedKeys.length === 0) {
+        return NextResponse.json({
+          success: true,
+          restarted: false,
+          unchanged: true,
+          allowedUserIds: result.allowedUsers,
+        });
+      }
+
+      const restarted = await applyRestart(harness, request.signal, "");
+      return NextResponse.json({
+        success: true,
+        restarted,
+        allowedUserIds: result.allowedUsers,
+        warning: restarted ? undefined : "restart_pending",
+      });
+    }
+
+    // ── Full save: token, intents preflight, members, allowlist ─────────────
+    tokenForScrub = rawToken;
     // Cheap safety guard only (charset/length) — see isSafeDiscordToken. The
     // real verdict comes from Discord below.
-    tokenForScrub = botToken;
-    if (!isSafeDiscordToken(botToken)) {
+    if (!isSafeDiscordToken(rawToken)) {
       return NextResponse.json({ error: "Invalid bot token format" }, { status: 400 });
     }
 
     let bot: DiscordBotInfo;
     try {
-      bot = await fetchDiscordBotInfo(botToken, request.signal);
+      bot = await fetchDiscordBotInfo(rawToken, request.signal);
     } catch (err) {
       if (err instanceof DiscordAuthError) {
         return NextResponse.json(
@@ -85,66 +245,88 @@ export async function POST(request: Request) {
       throw err;
     }
 
+    // Intents preflight. `null` means we could not read them — treated as
+    // "unknown" and never as "they are off", because blocking a save on a
+    // network blip is the same dishonesty pointing the other way.
+    let intents: DiscordIntents | null = null;
+    try {
+      intents = await fetchDiscordIntents(rawToken, request.signal);
+    } catch (err) {
+      if (err instanceof DiscordAuthError) throw err;
+    }
+
+    if (intents && !intents.messageContent) {
+      // Nothing is written. Saving here would produce the exact state this
+      // preflight exists to prevent: a stored token, a panel that says
+      // "receiving", and a gateway that cannot connect at all.
+      return NextResponse.json(
+        {
+          error: "intents_missing",
+          code: "intents_missing",
+          missingIntents: [
+            "MESSAGE CONTENT INTENT",
+            ...(intents.serverMembers ? [] : ["SERVER MEMBERS INTENT"]),
+          ],
+          portalUrl: DEVELOPER_PORTAL_URL,
+        },
+        { status: 400 },
+      );
+    }
+
+    // Who is in the servers this bot was invited to. A failure here is soft:
+    // the token is good, and refusing to save it because a member list could
+    // not be read would be worse than saving it without a picker.
+    let directory: DiscordGuildMembers | null = null;
+    try {
+      directory = await fetchDiscordGuildMembers(rawToken, request.signal);
+    } catch (err) {
+      if (err instanceof DiscordAuthError) throw err;
+    }
+
     // ClawBox's own store is written first, so a harness failure below can
     // never lose the credential the user just pasted.
-    await set("discord_bot_token", botToken);
-
-    const harness = await getActiveHarness();
+    await set("discord_bot_token", rawToken);
 
     if (harness === "hermes") {
-      await setHermesDiscordToken(botToken, request.signal);
-
-      // Hermes' messaging gateway is the process that RECEIVES messages, so it
-      // has to be installed and up. The token is already persisted here — a
-      // service failure is a warning, not a failed save.
-      try {
-        const status = await ensureHermesGateway(request.signal);
-        if (!status.running) {
-          return NextResponse.json({
-            success: true,
-            restarted: false,
-            username: bot.displayName,
-            warning: "Saved — will apply on next gateway restart",
-          });
-        }
-      } catch (gatewayErr) {
-        console.error("[discord/configure] Hermes gateway start failed:", scrub(gatewayErr, botToken));
-        return NextResponse.json({
-          success: true,
-          restarted: false,
-          username: bot.displayName,
-          warning: "Saved — will apply on next gateway restart",
-        });
-      }
-
-      return NextResponse.json({ success: true, restarted: true, username: bot.displayName });
+      await setHermesDiscordToken(rawToken, request.signal);
+    } else {
+      // OpenClaw: channel config + the EnvironmentFile the gateway resolves
+      // `channels.discord.token` from.
+      await setDiscordToken(rawToken);
     }
 
-    // OpenClaw: channel config + the EnvironmentFile the gateway resolves
-    // `channels.discord.token` from.
-    await setDiscordToken(botToken);
-
-    try {
-      await restartGateway();
-    } catch (restartErr) {
-      // Same soft-warning contract as /telegram/configure: the token is already
-      // persisted, so a restart failure must not fail the save, and the raw
-      // exec error is logged rather than returned.
-      console.error("[discord/configure] Gateway restart failed:", scrub(restartErr, botToken));
-      return NextResponse.json({
-        success: true,
-        restarted: false,
-        username: bot.displayName,
-        warning: "Saved — will apply on next gateway restart",
-      });
+    const selection = requestedIds ?? (directory ? defaultSelection(directory) : []);
+    const allowlist = await applyAllowlist(harness, selection);
+    if (allowlist.changedKeys.length > 0) {
+      console.info("[discord/configure] updated env keys:", allowlist.changedKeys.join(","));
     }
 
-    return NextResponse.json({ success: true, restarted: true, username: bot.displayName });
+    const restarted = await applyRestart(harness, request.signal, rawToken);
+
+    // Warning precedence: a bot nobody may talk to is a bigger problem than a
+    // pending restart, and a missing member list is the least of the three.
+    const warning =
+      allowlist.warning ??
+      (!restarted ? "restart_pending" : undefined) ??
+      (directory === null ? "members_unavailable" : undefined) ??
+      (intents && !intents.serverMembers ? "server_members_intent" : undefined);
+
+    return NextResponse.json({
+      success: true,
+      restarted,
+      username: bot.displayName,
+      botId: bot.id,
+      intents,
+      guilds: directory?.guilds ?? [],
+      members: directory?.members ?? [],
+      allowedUserIds: allowlist.allowedUsers,
+      allowlistSupported: harness === "hermes",
+      portalUrl: DEVELOPER_PORTAL_URL,
+      warning,
+    });
   } catch (err) {
     // Never echo a harness/CLI error verbatim — those can quote the argv they
-    // were handed, which is where the token is. `botToken` is out of scope in
-    // this outer catch (the body may not even have parsed), so re-read it
-    // defensively before scrubbing.
+    // were handed, which is where the token is.
     console.error("[discord/configure] failed:", scrub(err, tokenForScrub));
     return NextResponse.json({ error: "Failed to save" }, { status: 500 });
   }
