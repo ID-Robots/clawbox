@@ -31,12 +31,22 @@ describe("describeChatFailure", () => {
     }
   });
 
-  it("tells the customer what to do about it, because retrying works", () => {
-    // Every reproduction of this recovered on a retry. A line that only says
-    // "something went wrong" would send a working box to support.
+  it("offers both recoveries: retry for the collision, New chat for the wedge", () => {
+    // TASK-512: a session on .177 wedged so that EVERY turn died with this
+    // error for ten hours — one tab, one gateway, nothing "open somewhere
+    // else" — and the only cure was New chat, which nothing on screen named.
+    // So the line must offer the retry (cures a real one-off collision) AND
+    // the New chat escape hatch (cures the wedge).
     const shown = describeChatFailure(TAKEOVER_RAW);
     expect(shown).toMatch(/send it again/i);
-    expect(shown).toMatch(/open somewhere else/i);
+    expect(shown).toMatch(/new chat/i);
+  });
+
+  it("does not assert a second window as established fact", () => {
+    // The box has not checked for another tab and, in the wedged case, there
+    // is none. Presenting a guess as the diagnosis sent the owner hunting a
+    // phantom window while the real recovery sat one click away.
+    expect(describeChatFailure(TAKEOVER_RAW)).not.toMatch(/was open somewhere else/i);
   });
 
   it("says the same thing for the followup wording", () => {
