@@ -18,7 +18,16 @@ import { HarnessError } from "@/lib/harness/transport";
  * state. Here it is a method, and these are its unit tests.
  */
 
-const caps = capabilitiesFor("hermes", { hasClawaiToken: true, hermesSupportsImages: false });
+const caps = capabilitiesFor("hermes", {
+  hasClawaiToken: true,
+  hermesSupportsImages: true,
+  hermesHasVisionRoute: true,
+  hermesStreamsTurns: false,
+});
+const CONTEXT: HermesTurnContext = {
+  devicePairing: { provider: "clawai", model: "deepseek" },
+  modelsReady: true,
+};
 
 function makeAdapter(
   respond: (body: Record<string, unknown>) => { ok: boolean; status: number; payload: unknown },
@@ -226,12 +235,135 @@ describe("HermesAdapter", () => {
     expect((err as HarnessError).message).toBe("The model provider refused the request.");
   });
 
+  // ── The durable transcript ────────────────────────────────────────────────
+  //
+  // The refresh bug this fixes: the screen emptied while the agent still
+  // remembered the conversation, because the transcript only ever lived in
+  // React state.
+
+  it("replays the conversation the box recorded", async () => {
+    const rows = [
+      { role: "user", text: "what is on my calendar", timestamp: 10 },
+      { role: "assistant", text: "Nothing today.", timestamp: 20 },
+    ];
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ messages: rows }),
+    } as unknown as Response));
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    const page = await adapter.loadHistory({ limit: 50 });
+    expect(page.messages).toEqual(rows);
+    // No image-generation verdict to give: that notice is a gateway artefact
+    // with no equivalent here, so claiming one either way would be inventing it.
+    expect(page.imageGenerationFailed).toBe(false);
+  });
+
+  it("asks for the transcript uncached, so a reset cannot be repainted from a stale 200", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true, status: 200, json: async () => ({ messages: [] }),
+    } as unknown as Response));
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    await adapter.loadHistory({ limit: 25 });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("/setup-api/chat/history");
+    expect(url).toContain("limit=25");
+    expect(init.cache).toBe("no-store");
+  });
+
+  it("drops a row the surface has no way to render rather than rendering nothing", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        messages: [
+          { role: "assistant", text: "kept", timestamp: 1 },
+          { role: "wizard", text: "not a role this chat has", timestamp: 2 },
+          { role: "user", timestamp: 3 },
+          "not an object",
+        ],
+      }),
+    } as unknown as Response));
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    const page = await adapter.loadHistory();
+    expect(page.messages).toEqual([{ role: "assistant", text: "kept", timestamp: 1 }]);
+  });
+
+  it("reports a transcript it could not read, rather than an empty conversation", async () => {
+    // An empty page and an unreadable one look identical on screen, and only
+    // one of them means "you have said nothing yet".
+    const fetchImpl = vi.fn(async () => ({
+      ok: false, status: 500, json: async () => ({ error: "disk" }),
+    } as unknown as Response));
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    await expect(adapter.loadHistory()).rejects.toBeInstanceOf(HarnessError);
+  });
+
+  it("clears the stored transcript as part of starting a new chat", async () => {
+    const seen: Array<{ url: string; method?: string }> = [];
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      seen.push({ url: String(url), method: init?.method });
+      return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+    });
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    await adapter.resetSession();
+    expect(seen).toEqual([{ url: "/setup-api/chat/history", method: "DELETE" }]);
+  });
+
+  it("still forgets the session when the transcript cannot be cleared", async () => {
+    // The agent has already forgotten by the time the DELETE goes out — the id
+    // is dropped first. Rejecting here would report a failed reset that in fact
+    // succeeded, and leave the (+) button looking broken.
+    const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "DELETE") throw new Error("offline");
+      return { ok: true, status: 200, json: async () => ({ text: "hi", sessionId: "s2" }) } as unknown as Response;
+    });
+    const adapter = new HermesAdapter(caps, () => CONTEXT, fetchImpl as unknown as typeof fetch);
+    await adapter.sendTurn({ text: "one", attachments: [], idempotencyKey: "k" });
+    expect(adapter.threadedSessionId).toBe("s2");
+    await expect(adapter.resetSession()).resolves.toBeUndefined();
+    expect(adapter.threadedSessionId).toBe("");
+  });
+
+  // ── Attachments ───────────────────────────────────────────────────────────
+
+  it("hands the staged image paths to the route, which is what re-checks them", async () => {
+    const { adapter, calls } = makeAdapter(ok({ text: "a cat", sessionId: "s1" }));
+    await adapter.sendTurn({
+      text: "what is this",
+      attachments: [
+        { name: "a.png", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/a.png", type: "image/png" },
+        { name: "b.png", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/b.png", type: "image/png" },
+      ],
+      idempotencyKey: "k",
+    });
+    expect(calls[0].body.imagePaths).toEqual([
+      "/home/clawbox/clawbox/data/chat-media/chat-attachments/a.png",
+      "/home/clawbox/clawbox/data/chat-media/chat-attachments/b.png",
+    ]);
+  });
+
+  it("sends no imagePaths field at all on an ordinary turn", async () => {
+    const { adapter, calls } = makeAdapter(ok({ text: "hi", sessionId: "s1" }));
+    await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "k" });
+    expect(calls[0].body).not.toHaveProperty("imagePaths");
+    expect(calls[0].body).not.toHaveProperty("displayText");
+  });
+
+  it("records the user's own words, not the switch note written for the agent", async () => {
+    const { adapter, calls } = makeAdapter(ok({ text: "ok", sessionId: "s1" }));
+    await adapter.sendTurn({ text: "one", attachments: [], idempotencyKey: "a", provider: "clawai", model: "m1" });
+    await adapter.sendTurn({ text: "two", attachments: [], idempotencyKey: "b", provider: "clawai", model: "m2" });
+    // The agent has to read the note; the transcript must not replay it as
+    // something the customer typed.
+    expect(String(calls[1].body.message)).toContain("[System note:");
+    expect(calls[1].body.displayText).toBe("two");
+  });
+
   it("refuses the calls its capabilities say it cannot make", async () => {
     const { adapter } = makeAdapter(ok({ text: "ok" }));
     // A capability that reports false and a method that silently no-ops is how
     // a customer ends up wondering why a button did nothing.
-    expect(adapter.capabilities.canListHistory).toBe(false);
-    await expect(adapter.loadHistory()).rejects.toMatchObject({ code: "unsupported" });
     expect(adapter.capabilities.canPatchSessionDefaults).toBe(false);
     await expect(adapter.patchSessionDefaults({})).rejects.toMatchObject({ code: "unsupported" });
   });

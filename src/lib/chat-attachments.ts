@@ -89,7 +89,7 @@ export function revokePreviews(items: readonly { previewUrl?: string }[] | undef
 /** Why an attachment could not be staged, in terms the composer can render. */
 export type StagingFailure = {
   /** Translation key for the generic line. */
-  reason: "tooLarge" | "rejected" | "session" | "box";
+  reason: "tooLarge" | "rejected" | "session" | "box" | "imagesOnly";
   /** A vetted message from the box, when it gave one that is safe to show. */
   detail: string | null;
 };
@@ -106,9 +106,66 @@ export type StagingFailure = {
 export function classifyStagingFailure(status: number | undefined, payload: unknown): StagingFailure {
   const detail = sanitizeErrorPayload(payload);
   if (status === 413) return { reason: "tooLarge", detail };
+  // The staging route's own copy of the documents gate. `partitionAttachments`
+  // normally refuses these before an upload happens, so a 415 here means the
+  // file got past the composer — a drop the partition could not classify, or a
+  // request that did not come from it. Same cause, so the same sentence: "this
+  // box can look at pictures, but not documents yet".
+  if (status === 415) return { reason: "imagesOnly", detail };
   if (status === 401 || status === 403) return { reason: "session", detail };
   if (typeof status === "number" && status >= 400 && status < 500) return { reason: "rejected", detail };
   // No status at all means the request never completed — a dropped connection
   // or a gateway restart mid-upload. That is the box's problem, not the file's.
   return { reason: "box", detail };
+}
+
+/**
+ * Split a drop/paste/pick into what this box can actually use and what it
+ * cannot.
+ *
+ * Two capabilities, not one, because the honest answer on a Hermes box is
+ * "pictures yes, documents no": `hermes chat --image` is image-only, and the
+ * agent's own path-in-prompt resolver matches picture extensions BY DESIGN
+ * (`image_routing.py` excludes documents so a PDF is never attached as a vision
+ * part). A single canAttach flag would force a choice between hiding a working
+ * feature and accepting a file that silently never reaches the model.
+ *
+ * Refusing here rather than at the staging route is deliberate: a document that
+ * reached the box would be written to disk, counted against retention and named
+ * in a turn the model cannot read it from. The customer is told before any of
+ * that happens, and told the real reason.
+ */
+export function partitionAttachments(
+  files: File[],
+  caps: { canAttachImages: boolean; canAttachDocuments: boolean },
+): { accepted: File[]; refused: File[] } {
+  const accepted: File[] = [];
+  const refused: File[] = [];
+  for (const file of files) {
+    // The browser's own MIME label is the only thing available before an
+    // upload, and it is enough for this decision: the box re-decides from the
+    // staged path afterwards, and the two disagreeing only ever costs an extra
+    // refusal, never a wrongly accepted file.
+    const isImage = typeof file.type === "string" && file.type.startsWith("image/");
+    const allowed = isImage ? caps.canAttachImages : caps.canAttachDocuments;
+    (allowed ? accepted : refused).push(file);
+  }
+  return { accepted, refused };
+}
+
+/**
+ * The `accept` attribute for the file picker, per capability.
+ *
+ * The picker's filter is not a security control — a determined user can pick
+ * anything — but it is the difference between a customer being told no after
+ * choosing a file and never being offered it. `partitionAttachments` is what
+ * actually holds.
+ */
+export function attachmentAcceptAttribute(
+  caps: { canAttachImages: boolean; canAttachDocuments: boolean },
+): string {
+  const parts: string[] = [];
+  if (caps.canAttachImages) parts.push("image/*");
+  if (caps.canAttachDocuments) parts.push(".pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css");
+  return parts.join(",");
 }

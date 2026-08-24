@@ -93,7 +93,10 @@ describe("staging failure classification", () => {
   it("splits by what the customer can do about it", () => {
     expect(classifyStagingFailure(413, null).reason).toBe("tooLarge");
     expect(classifyStagingFailure(400, null).reason).toBe("rejected");
-    expect(classifyStagingFailure(415, null).reason).toBe("rejected");
+    // 415 is the staging route's own copy of the documents gate. Same cause as
+    // the composer's own refusal, so the customer gets the same sentence
+    // ("pictures yes, documents not yet") rather than a bare "rejected".
+    expect(classifyStagingFailure(415, null).reason).toBe("imagesOnly");
     expect(classifyStagingFailure(401, null).reason).toBe("session");
     expect(classifyStagingFailure(403, null).reason).toBe("session");
     expect(classifyStagingFailure(500, null).reason).toBe("box");

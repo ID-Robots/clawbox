@@ -3,7 +3,7 @@ import fs from "fs";
 import fsp from "fs/promises";
 import path from "path";
 import { Readable } from "stream";
-import { OPENCLAW_HOME } from "@/lib/openclaw-config";
+import { chatMediaRoot } from "@/lib/harness/media-root";
 
 export const dynamic = "force-dynamic";
 
@@ -24,11 +24,17 @@ export const dynamic = "force-dynamic";
 // Session-gated by middleware, which also lists /setup-api/chat among the
 // surfaces that stay closed during the pre-setup AP window.
 //
-// Rooted on OPENCLAW_HOME rather than a second `$HOME + "/.openclaw"` of our
-// own: that env var is a live contract the config and ws-config routes already
-// honour, and an install that relocates the tree would otherwise leave this
-// route resolving a directory holding nothing, 404-ing every picture.
-const MEDIA_ROOT = path.join(OPENCLAW_HOME, "media");
+// Rooted on the edition's resolved media root rather than a second
+// `$HOME + "/.openclaw"` of our own: OPENCLAW_HOME is a live contract the config
+// and ws-config routes already honour, and an install that relocates the tree
+// would otherwise leave this route resolving a directory holding nothing,
+// 404-ing every picture.
+//
+// Resolved per request, and per EDITION. A Hermes SKU has no `~/.openclaw/media`
+// at all, so this reader was pointed at a directory nothing wrote into while the
+// staging route next door wrote somewhere it could not read. Both ends now ask
+// the same question. On an OpenClaw box the answer is byte-identical to the
+// constant this replaced, so nothing about that path changes.
 
 // Extension → Content-Type. Doubles as the allowlist: anything not named here
 // is refused rather than served under a guessed type. `.svg` is absent on
@@ -118,9 +124,9 @@ export function parseRange(header: string | null, size: number): { start: number
  * tree does not exist yet — no image has been generated on this box — which
  * simply means nothing can match.
  */
-async function resolvedRoot(): Promise<string | null> {
+async function resolvedRoot(logical: string): Promise<string | null> {
   try {
-    return await fsp.realpath(MEDIA_ROOT);
+    return await fsp.realpath(logical);
   } catch {
     return null;
   }
@@ -147,7 +153,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unsupported media type" }, { status: 415 });
   }
 
-  const root = await resolvedRoot();
+  const logicalRoot = await chatMediaRoot();
+  const root = await resolvedRoot(logicalRoot);
   if (!root) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -176,7 +183,7 @@ export async function GET(req: NextRequest) {
   // constant, never from the request. Relative-then-join is what makes the
   // guard legible to the scanner where a startsWith comparison was not.
   const resolvedRequested = path.resolve(requested);
-  const logicalRel = path.relative(MEDIA_ROOT, resolvedRequested);
+  const logicalRel = path.relative(logicalRoot, resolvedRequested);
   const resolvedRel = path.relative(root, resolvedRequested);
   const rel = !logicalRel.startsWith("..") && !path.isAbsolute(logicalRel)
     ? logicalRel

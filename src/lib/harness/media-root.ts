@@ -1,0 +1,108 @@
+import path from "path";
+import fsp from "fs/promises";
+import { getActiveHarness } from "@/lib/harness";
+import { OPENCLAW_HOME } from "@/lib/openclaw-config";
+import { DATA_DIR } from "@/lib/config-store";
+
+/**
+ * Where chat's files live on THIS box — attachments on the way in, generated
+ * pictures on the way out. SERVER ONLY.
+ *
+ * Both `chat/attachments` and `chat/media` used to hardcode
+ * `OPENCLAW_HOME/media`, and on a Hermes SKU that is a directory the box does
+ * not have: `~/.openclaw` there holds `openclaw.json` and nothing else
+ * (verified on the live box, 2026-08-22). So staging wrote into a tree the
+ * reader then could not find, and the reader was rooted on a tree nothing wrote
+ * into. One resolved root fixes both ends.
+ *
+ * On OpenClaw the answer is byte-identical to the constant it replaces, which
+ * is the point: this must be a no-op there. The OpenClaw path is not just a
+ * convention either — the harness maintains a fixed allowlist of media roots
+ * (`buildMediaLocalRoots`) and `<stateDir>/media` is on it, so a staged file
+ * anywhere else gets "Local media path is not under an allowed directory" from
+ * the agent's own image tool. Hermes has no such allowlist (it opens any
+ * readable absolute path), which is exactly why its files may live beside the
+ * rest of the app's data instead.
+ */
+
+/** The `media` subtree, per edition. Callers name their own subdirectory in it. */
+export async function chatMediaRoot(): Promise<string> {
+  const harness = await getActiveHarness();
+  return harness === "hermes"
+    ? path.join(DATA_DIR, "chat-media")
+    : path.join(OPENCLAW_HOME, "media");
+}
+
+/** Where an uploaded attachment is staged. */
+export async function chatAttachmentDir(): Promise<string> {
+  return path.join(await chatMediaRoot(), "chat-attachments");
+}
+
+/** Where a picture this box generated is written. */
+export async function chatGeneratedImageDir(): Promise<string> {
+  return path.join(await chatMediaRoot(), "chat-generated");
+}
+
+/**
+ * Resolve one caller-supplied path against the media root, or null.
+ *
+ * Used where a path is about to become an ARGV ELEMENT for the Hermes CLI. No
+ * shell is involved, so this is not about injection; it is about the two things
+ * that are still true of argv:
+ *
+ *   1. a value starting with "-" is read by the CLI as a FLAG, so a file named
+ *      `--yolo` would be one;
+ *   2. the agent opens any readable absolute path it is handed, so a path that
+ *      escapes the staging tree hands it `~/.hermes/.env` — the file with every
+ *      provider key in it — as a "picture" to look at and describe.
+ *
+ * The symlink resolution is what makes (2) hold: a lexical check alone passes a
+ * link planted INSIDE the staging tree that points at the config (CWE-59).
+ * Both the logical root and its realpath are accepted as the base, for the same
+ * reason `chat/media` accepts both — a relocated tree gives one legitimate file
+ * two spellings, and rejecting the logical one 404s every real read.
+ */
+export async function resolveInMediaRoot(candidate: string): Promise<string | null> {
+  if (typeof candidate !== "string" || !candidate.trim()) return null;
+  if (!path.isAbsolute(candidate)) return null;
+  const root = await chatMediaRoot();
+  let realRoot: string;
+  try {
+    realRoot = await fsp.realpath(root);
+  } catch {
+    // No staging tree on this box yet, so nothing can be inside it.
+    return null;
+  }
+  const resolved = path.resolve(candidate);
+  const logicalRel = path.relative(root, resolved);
+  const realRel = path.relative(realRoot, resolved);
+  const rel = contained(logicalRel) ? logicalRel : contained(realRel) ? realRel : null;
+  if (rel === null) return null;
+  let real: string;
+  try {
+    real = await fsp.realpath(path.join(realRoot, rel));
+  } catch {
+    // A path that does not exist is a miss, not an error — and for the argv
+    // case it MUST be: `hermes --image` on a missing file fails the whole turn,
+    // and the path-in-prompt convention silently drops it.
+    return null;
+  }
+  if (real !== realRoot && !real.startsWith(realRoot + path.sep)) return null;
+  // Rebuilt from the resolved root plus the segment just cleared, so what is
+  // handed onward is constructed from trusted parts rather than carried down
+  // from the request. A leading "-" cannot survive this: every result begins
+  // with the absolute root.
+  const cleared = path.relative(realRoot, real);
+  if (!contained(cleared)) return null;
+  const safe = path.join(realRoot, cleared);
+  try {
+    if (!(await fsp.stat(safe)).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return safe;
+}
+
+function contained(rel: string): boolean {
+  return rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel);
+}

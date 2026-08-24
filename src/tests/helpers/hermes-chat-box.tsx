@@ -26,7 +26,23 @@ export interface HermesBox {
   /** A box with no gateway must never open a socket. */
   socketsOpened: number;
   /** What this particular device can do. Change before mounting. */
-  facts: { hasClawaiToken: boolean; hermesSupportsImages: boolean };
+  facts: {
+    hasClawaiToken: boolean;
+    hermesSupportsImages: boolean;
+    hermesHasVisionRoute: boolean;
+    hermesStreamsTurns: boolean;
+  };
+  /**
+   * What the durable transcript holds.
+   *
+   * NON-empty by default, because an empty transcript is the "first
+   * conversation" signal that fires the auto-greet — real behaviour, worth a
+   * test of its own, and noise in every other case. Empty it to get that
+   * signal back.
+   */
+  storedTranscript: Record<string, unknown>[];
+  /** DELETEs of the stored transcript, so "new chat" can be shown to reach it. */
+  transcriptDeletes: number;
 }
 
 /**
@@ -42,7 +58,14 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
     socketsOpened: 0,
     // The default device is a customer on their own provider key: no ClawBox
     // AI credential, so nothing on it can turn a recording into text.
-    facts: { hasClawaiToken: false, hermesSupportsImages: false },
+    facts: {
+      hasClawaiToken: false,
+      hermesSupportsImages: false,
+      hermesHasVisionRoute: false,
+      hermesStreamsTurns: false,
+    },
+    storedTranscript: [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }],
+    transcriptDeletes: 0,
   };
 
   class ForbiddenWs {
@@ -91,6 +114,14 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       }
       if (url.includes("/setup-api/chat/spoken-history")) {
         return { ok: true, json: async () => ({ items: [] }) };
+      }
+      if (url.includes("/setup-api/chat/history")) {
+        if (init?.method === "DELETE") {
+          box.transcriptDeletes += 1;
+          box.storedTranscript = [];
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, json: async () => ({ messages: box.storedTranscript }) };
       }
       if (url.includes("/setup-api/hermes/chat")) {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;

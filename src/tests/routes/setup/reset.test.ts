@@ -584,6 +584,29 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(targets).not.toContain("/test/data/network.env");
   });
 
+  it("wipes the chat transcripts, which hold the customer's own words", async () => {
+    // The most sensitive thing the durable transcript introduced: whatever the
+    // owner typed at the agent, and whatever was in the pictures they attached.
+    // It survives a reset only if somebody ADDS it to the keep-list, which is
+    // the right default — but a resold box handing its next owner the previous
+    // one's conversations is the failure that matters most here, so it is
+    // pinned rather than left to that default holding.
+    mockFs.readdir.mockImplementation(((p: string) => {
+      if (p === "/test/data") {
+        return Promise.resolve(["config.json", "chat-transcripts", "chat-media", "network.env"]);
+      }
+      return Promise.resolve([]);
+    }) as unknown as typeof fs.readdir);
+
+    await resetPost();
+    const targets = rmTargets();
+
+    expect(targets).toContain("/test/data/chat-transcripts");
+    // Staged attachments and generated pictures go with them, for the same
+    // reason and by the same default.
+    expect(targets).toContain("/test/data/chat-media");
+  });
+
   it("keeps only the weights inside data/llamacpp — runtime scratch still goes", async () => {
     // The keep is for the 3.2 GB download a reset device cannot re-fetch, not
     // for the directory it happens to live in. llamacpp/ is also llama-server's

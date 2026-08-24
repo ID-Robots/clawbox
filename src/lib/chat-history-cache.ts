@@ -1,9 +1,29 @@
 // Chat-message types + uuid helper. Gateway is canonical for history.
 
+/**
+ * One tool the agent used during a turn, as the finished record keeps it.
+ *
+ * Distinct from `ChatToolCall` in `chat-tool-events` on purpose: that one is a
+ * LIVE pill with a phase and a clock, driven by the gateway's event stream and
+ * thrown away when the turn ends. This one is what survives into the transcript
+ * — a step that already happened, replayed identically after a refresh.
+ */
+export interface ChatToolSummary {
+  name: string;
+  detail?: string;
+  status?: "ok" | "error";
+}
+
 export interface ChatMessage {
   role: "user" | "assistant" | "system";
   text: string;
   timestamp: number;
+  // The model's internal monologue, kept OUT of `text` and rendered as a
+  // collapsed disclosure under the answer. Absent on a turn that had none, and
+  // on every message stored before the field existed.
+  reasoning?: string;
+  // The steps the agent took to answer, in call order.
+  toolCalls?: ChatToolSummary[];
   // Inline display only: data URLs for images the user attached, or
   // /setup-api/chat/media URLs for ones the agent generated.
   images?: string[];

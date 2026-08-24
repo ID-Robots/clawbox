@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import type { ChatToolSummary } from "@/lib/chat-history-cache";
 
 // The OpenClaw gateway broadcasts tool-call lifecycle as `event: 'agent'`
 // with `stream: 'tool'`; payload `data.phase` is `start | update | result`.
@@ -90,6 +91,55 @@ const RUNNING_FG = "#fdba74";
 const DONE_BG = "rgba(34,197,94,0.12)";
 const DONE_BORDER = "1px solid rgba(34,197,94,0.25)";
 const DONE_FG = "#86efac";
+// A step that came back with a failure. Same pill, the palette the chat already
+// uses for an error banner — so "it ran" and "it went wrong" are one glance
+// apart instead of looking identical.
+const FAILED_BG = "rgba(239,68,68,0.12)";
+const FAILED_BORDER = "1px solid rgba(239,68,68,0.25)";
+const FAILED_FG = "#fca5a5";
+
+type ChipTone = "running" | "done" | "failed";
+
+const CHIP_TONE: Record<ChipTone, { background: string; border: string; color: string }> = {
+  running: { background: RUNNING_BG, border: RUNNING_BORDER, color: RUNNING_FG },
+  done: { background: DONE_BG, border: DONE_BORDER, color: DONE_FG },
+  failed: { background: FAILED_BG, border: FAILED_BORDER, color: FAILED_FG },
+};
+
+const CHIP_GLYPH: Record<ChipTone, string> = { running: "🔧", done: "✓", failed: "!" };
+
+/**
+ * One pill.
+ *
+ * Extracted so the LIVE pill and the REPLAYED chip are the same element rather
+ * than two that merely look alike today: a turn must not change appearance the
+ * moment the page is refreshed, and the only way to guarantee that is to render
+ * both from here.
+ */
+function ToolChip(
+  { tone, label, suffix, title }: { tone: ChipTone; label: string; suffix?: string; title?: string },
+) {
+  return (
+    <div
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "4px 10px",
+        borderRadius: 999,
+        ...CHIP_TONE[tone],
+        fontSize: 12,
+        fontWeight: 500,
+        maxWidth: "100%",
+      }}
+    >
+      <span aria-hidden="true">{CHIP_GLYPH[tone]}</span>
+      <span>{label}</span>
+      {suffix ? <span style={{ opacity: 0.7 }}>· {suffix}</span> : null}
+    </div>
+  );
+}
 
 export function ToolCallPills({ toolCalls, runningLabel }: { toolCalls: ChatToolCall[]; runningLabel: string }) {
   if (toolCalls.length === 0) return null;
@@ -98,27 +148,54 @@ export function ToolCallPills({ toolCalls, runningLabel }: { toolCalls: ChatTool
       {toolCalls.map((tc) => {
         const done = tc.phase === "done";
         return (
-          <div
+          <ToolChip
             key={tc.id}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 6,
-              padding: "4px 10px",
-              borderRadius: 999,
-              background: done ? DONE_BG : RUNNING_BG,
-              color: done ? DONE_FG : RUNNING_FG,
-              border: done ? DONE_BORDER : RUNNING_BORDER,
-              fontSize: 12,
-              fontWeight: 500,
-            }}
-          >
-            <span aria-hidden="true">{done ? "✓" : "🔧"}</span>
-            <span>{tc.prettyName}</span>
-            {!done && <span style={{ opacity: 0.7 }}>· {runningLabel}</span>}
-          </div>
+            tone={done ? "done" : "running"}
+            label={tc.prettyName}
+            {...(done ? {} : { suffix: runningLabel })}
+          />
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * The steps a FINISHED turn took, as stored on the message.
+ *
+ * The live pills are cleared the moment a turn ends, so before this the only
+ * record that the agent had run a browser or a shell was a sentence in the
+ * reply. These persist — they come back with the transcript on a refresh, which
+ * is the whole difference between an indicator and a record.
+ *
+ * The argument summary rides on `title` rather than in the pill: it is
+ * model-authored text of unpredictable length, and a chip row that reflows to
+ * three lines because one command was long stops reading as a row of steps.
+ */
+export function ToolCallSummaryChips(
+  { toolCalls, label }: { toolCalls: ChatToolSummary[]; label: string },
+) {
+  if (!toolCalls || toolCalls.length === 0) return null;
+  return (
+    <div
+      data-testid="chat-tool-summary"
+      aria-label={label}
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        gap: 4,
+        alignItems: "flex-start",
+        marginTop: 8,
+      }}
+    >
+      {toolCalls.map((call, index) => (
+        <ToolChip
+          key={`${call.name}-${index}`}
+          tone={call.status === "error" ? "failed" : "done"}
+          label={prettifyToolName(call.name)}
+          {...(call.detail ? { title: `${call.name}: ${call.detail}` } : { title: call.name })}
+        />
+      ))}
     </div>
   );
 }

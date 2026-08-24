@@ -1,4 +1,4 @@
-import type { ChatMessage } from "@/lib/chat-history-cache";
+import type { ChatMessage, ChatToolSummary } from "@/lib/chat-history-cache";
 
 /**
  * The one contract the chat surface talks to.
@@ -156,6 +156,23 @@ export interface TurnRequest {
  * kind it is holding — it renders deltas if they come and the final either way.
  */
 export type TurnEvent =
+  /**
+   * The answer SO FAR — cumulative, not the fragment that just arrived.
+   *
+   * Stated here because it is the one thing about this event a reader cannot
+   * infer and a renderer cannot survive getting wrong: append when it meant
+   * replace and the reply doubles; replace when it meant append and only the
+   * last few characters are ever visible.
+   *
+   * Cumulative is the right way round because the surface's job is to paint the
+   * current state of one bubble, which is what `setStreaming(text)` already
+   * does for the gateway. An adapter whose transport speaks in fragments — the
+   * Hermes dashboard socket does — accumulates them itself and reports the
+   * whole, so the renderer stays the same one for every harness.
+   *
+   * It is never the model's monologue. Thinking is reported separately on the
+   * finished turn, and no transport may leak it into this field.
+   */
   | { kind: "delta"; text: string }
   | { kind: "final"; text: string; media?: readonly string[] }
   | { kind: "thinking"; on: boolean };
@@ -166,6 +183,16 @@ export interface TurnResult {
   readonly media?: readonly string[];
   /** Spoken-reply refs, kept apart from pictures — different affordances. */
   readonly audio?: readonly string[];
+  /**
+   * The model's internal monologue for this turn, SEPARATE from `text`.
+   *
+   * A harness that reports it lets the surface show it as a collapsed
+   * disclosure; one that does not simply omits it. It must never be folded into
+   * `text` — that is the bug this field exists to end.
+   */
+  readonly reasoning?: string;
+  /** The steps the agent took to answer, in call order. */
+  readonly toolCalls?: readonly ChatToolSummary[];
   /**
    * True when the harness merely ACKNOWLEDGED the turn and the answer will
    * arrive by another route (the gateway's own event stream). The caller must

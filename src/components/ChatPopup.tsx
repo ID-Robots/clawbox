@@ -10,7 +10,8 @@ import {
   uuid,
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
-import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { describeChatFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
@@ -173,10 +174,12 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 import { renderText, plainTextForLabel } from '@/lib/chat-markdown'
 import { extractImageFilesFromClipboard } from '@/lib/clipboard'
 import {
+  attachmentAcceptAttribute,
   type ChatAttachment,
   classifyStagingFailure,
   createPreviewUrl,
   isPreviewableImage,
+  partitionAttachments,
   revokePreviews,
   type StagingFailure,
 } from '@/lib/chat-attachments'
@@ -839,6 +842,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
   const runIdRef = useRef<string | null>(null)
+  /**
+   * `dispatchTurn`, reachable from `loadHistory` above it.
+   *
+   * The auto-greet used to call `adapter.sendTurn` directly, which is only
+   * correct for a harness that answers on an event stream: the gateway ACKs,
+   * its socket handler paints the reply and clears `sending`. A harness that
+   * RESOLVES with the reply has no such handler, so the greeting arrived, was
+   * dropped on the floor, and the composer stayed disabled forever with a Stop
+   * button and nothing running. Going through `dispatchTurn` means both
+   * editions end the run the same way — it already reads `acknowledgedOnly` to
+   * tell the two apart.
+   */
+  const dispatchTurnRef = useRef<(text: string, attachments: ChatAttachment[], key: string) => Promise<void>>(
+    async () => {},
+  )
   // Timer for the ack-only `chat.history` refetch — single-flight so a
   // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
   // cancellable on unmount.
@@ -1644,12 +1662,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         setSending(true)
         const idempotencyKey = uuid()
         runIdRef.current = idempotencyKey
-        try {
-          await adapter.sendTurn({ text: 'hi', attachments: [], idempotencyKey })
-        } catch {
-          sendingRef.current = false; setSending(false)
-          runIdRef.current = null
-        }
+        await dispatchTurnRef.current('hi', [], idempotencyKey)
       } else if (mightAutoGreet) {
         setIsBootstrappingHistory(false)
       }
@@ -1771,13 +1784,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // A new attempt clears the previous complaint. Leaving a stale error above
     // a strip that now holds a good attachment reads as "this one failed too".
     setAttachmentError(null)
+    // What this box can actually pass to the model. Refused BEFORE the upload,
+    // not after: a document staged on a harness that has no way to show it to
+    // the model would sit on the customer's disk and be named in a turn nobody
+    // could read it from. The refusal names the real limit — pictures, not
+    // documents — rather than failing silently.
+    const { accepted, refused } = partitionAttachments(files, caps)
+    if (refused.length > 0) {
+      setAttachmentError({ reason: 'imagesOnly', detail: null, file: refused[0].name || '' })
+    }
+    if (accepted.length === 0) return
     // Which composer these uploads belong to. Closing the chat bumps it, so a
     // request that resolves afterwards releases its thumbnail and drops
     // instead of pushing an attachment nobody can see back into a strip the
     // user has already dismissed.
     const generation = uploadGenerationRef.current
     const isCurrent = () => uploadGenerationRef.current === generation
-    const tasks = files.map(async (rawFile, idx) => {
+    const tasks = accepted.map(async (rawFile, idx) => {
       // Clipboard images come in as the generic "image.png"; stamp them so
       // a burst of pastes in the same millisecond doesn't collide on disk.
       // FormData's third arg sets the filename without copying the Blob.
@@ -1838,7 +1861,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }
     })
     void Promise.all(tasks)
-  }, [])
+  }, [caps])
 
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
@@ -2249,6 +2272,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // none at all, so a failed seeding fetch cannot silently override the
         // device's own reasoning effort with "medium".
         reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
+      }, (event) => {
+        // The answer so far, for the streaming bubble — the same state the
+        // gateway's own delta handler sets, so both harnesses paint through
+        // one renderer. Passed unconditionally: an adapter that cannot stream
+        // simply never calls this, which is a quieter contract than asking the
+        // capability here and getting the answer wrong on one of them.
+        //
+        // A run that has already ended (Stop, or a late frame after the final)
+        // must not reopen the caret, so a delta is only painted while this run
+        // is still the live one.
+        if (event.kind === 'delta' && runIdRef.current !== null) setStreaming(event.text)
       })
     } catch (err) {
       // Nothing is coming on either path, so the run ends here.
@@ -2281,6 +2315,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       timestamp: Date.now(),
       images: [...(result.media ?? [])],
       audio: boundedAudio([...(result.audio ?? [])]),
+      // Beside the answer, never folded into it — the live bubble and the one
+      // replayed from the transcript have to be the same bubble.
+      ...(result.reasoning ? { reasoning: result.reasoning } : {}),
+      ...(result.toolCalls?.length ? { toolCalls: [...result.toolCalls] } : {}),
     }])
     // Pair the synchronous guard with the state on EVERY completion path, not
     // just the failing one: the drain effect and both send handlers decide from
@@ -2291,6 +2329,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setStreaming('')
     runIdRef.current = null
   }, [adapter])
+  useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
     // Pictures render in the bubble; everything else keeps its 📎 line, because
@@ -2670,6 +2709,35 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!harnessLoaded) return
     void adapter.connect()
   }, [adapter, harnessLoaded])
+
+  // Replay the stored conversation on a harness that has no handshake to hang
+  // it on.
+  //
+  // The gateway path bootstraps its history from the moment auth resolves —
+  // there IS a moment there, and the socket handler owns it. A harness with no
+  // live connection has no such event: `connect()` resolves immediately, so the
+  // only thing left that means "the user is looking at this now" is the surface
+  // being mounted with a harness resolved. Without this the store is written on
+  // every turn and read by nobody, and the refresh bug it exists to fix stays
+  // exactly as it was.
+  //
+  // Once per resolved harness, not once per open: `greetedRef` makes the
+  // auto-greet fire at most once anyway, and re-reading on every open would
+  // fight the optimistic bubbles `loadHistory` reconciles against.
+  const replayedRef = useRef(false)
+  useEffect(() => {
+    if (!harnessLoaded) return
+    // Not while the popup is closed. This surface stays MOUNTED behind the
+    // desktop, so "the harness resolved" is not the same as "the user is
+    // looking at this" — and on an empty transcript the replay ends in the
+    // auto-greet, which persisted a turn the owner never asked for, before
+    // they had opened chat at all.
+    if (!isOpen) return
+    if (caps.hasLiveConnection || !caps.canListHistory) return
+    if (replayedRef.current) return
+    replayedRef.current = true
+    void loadHistory()
+  }, [harnessLoaded, isOpen, caps, loadHistory])
 
   useEffect(() => {
     if (isOpen) {
@@ -3481,6 +3549,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     ))}
                   </div>
                 )}
+                {/* What the agent DID and what it was thinking, under the
+                    answer and never inside it. Both come off the stored
+                    message, so a replayed turn shows exactly what the live one
+                    did — the chips sit where the live pills sat, and the
+                    monologue stays collapsed until it is asked for. */}
+                {msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0 && (
+                  <ToolCallSummaryChips toolCalls={msg.toolCalls} label={t("chat.toolsUsed")} />
+                )}
+                {msg.role === 'assistant' && msg.reasoning && (
+                  <ReasoningDisclosure reasoning={msg.reasoning} label={t("chat.reasoning")} />
+                )}
               </div>
             </div>
           );
@@ -3647,7 +3726,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       )}
 
       {/* Hidden file input */}
-      <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.txt,.csv,.json,.md,.py,.js,.ts,.html,.css" style={{ display: 'none' }} onChange={handleFileSelect} />
+      <input ref={fileInputRef} type="file" multiple accept={attachmentAcceptAttribute(caps)} style={{ display: 'none' }} onChange={handleFileSelect} />
 
       {/* Voice status. Always rendered while anything is happening: a capture
           that is running, uploading or failed must be visible, because the

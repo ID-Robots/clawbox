@@ -12,13 +12,25 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * the clamp alone would have shown it, because the clamp was doing exactly what
  * it was told.
  */
-vi.mock("child_process", () => ({ spawn: vi.fn() }));
+// `execFile` as well as `spawn`. The route reaches `openclaw-config` through
+// the media root it now resolves, and that module does `promisify(execFile)` at
+// import time — so a mock without it makes the route unloadable rather than
+// making a case fail.
+vi.mock("child_process", () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ HERMES_BIN: "/home/clawbox/.local/bin/hermes" }));
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hermes-model-options")>();
   return { ...actual, getModelOptions: vi.fn() };
 });
-vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
+// `DATA_DIR` as well as `get`: the chat route now stages media and appends the
+// durable transcript, and both of those modules resolve their directory from
+// this one at import time. A mock that omits it makes the route unloadable
+// rather than making it fail a case — the same shape the other config-store
+// mocks in this suite already use.
+vi.mock("@/lib/config-store", () => ({
+  DATA_DIR: "/tmp/clawbox-chat-reasoning-test",
+  get: vi.fn(),
+}));
 
 import { spawn } from "child_process";
 import { get } from "@/lib/config-store";

@@ -61,6 +61,8 @@ async function fetchFacts(signal?: AbortSignal): Promise<HarnessFacts | null> {
     return {
       hasClawaiToken: data.facts?.hasClawaiToken === true,
       hermesSupportsImages: data.facts?.hermesSupportsImages === true,
+      hermesHasVisionRoute: data.facts?.hermesHasVisionRoute === true,
+      hermesStreamsTurns: data.facts?.hermesStreamsTurns === true,
     };
   } catch {
     // A box that cannot answer keeps the cautious defaults: a hidden control
@@ -120,8 +122,17 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
   return { adapter, capabilities, harnessId, resolved };
 }
 
+/**
+ * Every fact, compared. A missing one here is not a slower update, it is a
+ * PERMANENTLY stale capability: `reprobe` keeps the previous object whenever
+ * this answers true, so a fact left out can never be applied. `streamsTurns`
+ * was the one that mattered — the dashboard service starting or stopping is
+ * exactly what the probe is there to notice, and the new answer was dropped.
+ *
+ * Keyed off the object rather than written out field by field, so a fact added
+ * later is compared without anyone having to remember this function exists.
+ */
 function sameFacts(a: HarnessFacts, b: HarnessFacts): boolean {
-  return (
-    a.hasClawaiToken === b.hasClawaiToken && a.hermesSupportsImages === b.hermesSupportsImages
-  );
+  const keys = Object.keys({ ...a, ...b }) as (keyof HarnessFacts)[];
+  return keys.every((key) => a[key] === b[key]);
 }

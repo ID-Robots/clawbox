@@ -28,17 +28,43 @@ export interface HarnessFacts {
    * files into a turn that would silently ignore them.
    */
   hermesSupportsImages: boolean;
+  /**
+   * There is somewhere for an attached picture to be LOOKED AT
+   * (`auxiliary.vision.model` in `~/.hermes/config.yaml`).
+   *
+   * The other half of the same capability, and a separate fact because it has a
+   * separate cause: the flag above says the turn will carry the file, this says
+   * something will read it. An unlinked box passes the first and fails the
+   * second — `image_routing.py` falls back to `vision_analyze` for a chat model
+   * that is not vision-capable, and with nothing named there the picture
+   * arrives nowhere.
+   */
+  hermesHasVisionRoute: boolean;
+  /**
+   * Turns can be run through the already-running `hermes dashboard` process and
+   * streamed back token by token, instead of spawning a `chat -q` per message.
+   *
+   * PROBED, like the two above, and for a sharper reason than either: the
+   * dashboard is a separate service that can be stopped, and the answer is
+   * therefore about the box's state this minute rather than about which version
+   * is installed. A wrong `true` would promise the composer a stream it then
+   * never gets; the route's own fallback covers that, but the caret would sit
+   * empty until the whole turn landed, which is worse than never claiming it.
+   */
+  hermesStreamsTurns: boolean;
 }
 
 /**
- * Hermes has no durable transcript yet, so a refresh empties the screen while
- * the agent still remembers the conversation.
+ * Hermes keeps a durable transcript: `transcript-store.ts`, written by the chat
+ * route as each turn goes out and comes back, read by `/setup-api/chat/history`.
  *
- * Named rather than inlined as `false`: the store that fixes it is a separate
- * piece of work, and when it lands this is the single line that flips —
- * nothing else in the surface has to be found and changed.
+ * It used to be false, and this was the single line to flip when the store
+ * landed. It stays a named constant rather than being inlined as `true` for the
+ * same reason it was named while false: what it records is that Hermes' history
+ * is OURS to keep, not the transport's — the one thing about this capability
+ * that a reader would otherwise have to go and discover.
  */
-export const HERMES_DURABLE_TRANSCRIPT = false;
+export const HERMES_DURABLE_TRANSCRIPT = true;
 
 /**
  * How many files one turn may carry.
@@ -53,9 +79,14 @@ const MAX_ATTACHMENTS = { openclaw: 12, hermes: 8 } as const;
 export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapabilities {
   if (id === "hermes") {
     return {
-      // The Hermes chat route runs `hermes chat -q … -Q` and reads the whole
-      // answer off the child's stdout. Streaming is a future upgrade.
-      streamsTurns: false,
+      // True only where the box can actually do it. A turn routed through the
+      // running dashboard streams token by token; one that has to spawn
+      // `hermes chat -q … -Q` cannot, because the whole answer is read off the
+      // child's stdout after roughly six seconds of the process starting up.
+      // The route tries the first and falls back to the second, so this says
+      // which of the two the composer should expect — and on a box with no
+      // dashboard it still honestly says no.
+      streamsTurns: facts.hermesStreamsTurns,
       canListHistory: HERMES_DURABLE_TRANSCRIPT,
       // Forgetting the resumed session id IS the reset: the next turn goes out
       // with no `--resume`, so the box opens a fresh session. Every bit as real
@@ -65,7 +96,15 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // patch — see `reasoningScope` for what Hermes has instead.
       canPatchSessionDefaults: false,
       reasoningScope: "per-turn",
-      canAttachImages: facts.hermesSupportsImages,
+      // BOTH halves, because a picture needs both to be answered about: a turn
+      // that CARRIES it (`chat --image`) and something that LOOKS at it
+      // (`auxiliary.vision`). Gating on the flag alone shipped the attach
+      // button on an unlinked box, where the file reached the agent and no
+      // vision route existed — the model reached for a `vision_analyze` tool
+      // that was not installed and finally hand-wrote pixel-scanning code to
+      // answer at all. The composer promising something the box half-does is
+      // the failure this table exists to stop.
+      canAttachImages: facts.hermesSupportsImages && facts.hermesHasVisionRoute,
       // `--image` is image-only, and the agent's own path-in-prompt resolver
       // matches picture extensions by design. A document has no way in.
       canAttachDocuments: false,
@@ -74,7 +113,24 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // AI proxy, which both editions can reach. What a Hermes box may lack is
       // the credential, so that is exactly what this asks about.
       canTranscribe: facts.hasClawaiToken,
-      canGenerateImages: facts.hasClawaiToken,
+      // FALSE, and not because of the credential.
+      //
+      // On OpenClaw a picture is made by the AGENT reaching for its own image
+      // tool — the user just asks. That tool is a bundled OpenClaw plugin
+      // configured through `agents.defaults.imageGenerationModel`, and Hermes
+      // has no such plugin and no image-generation provider slot to put one in.
+      // So there is nothing on this edition that a request for a picture could
+      // reach, and a `true` here computed from the token would be describing a
+      // credential rather than an ability.
+      //
+      // The credential is genuinely not the blocker: the ClawBox AI proxy
+      // serves `POST /images/generations` (`gpt-image-1-mini`, on every plan)
+      // with the same device token `canTranscribe` above reads. What is missing
+      // is a TRIGGER — the Hermes agent needs a tool it can call, the way the
+      // OpenClaw agent has one — and the enablement plan is in the PR. Until
+      // that lands this stays false, because a composer that offered to draw
+      // and then could not would be the same lie the microphone used to tell.
+      canGenerateImages: false,
       // Speaking replies is a gateway capability with no Hermes equivalent.
       // Genuinely absent, and note this is voice OUTPUT: voice INPUT is
       // `canTranscribe` above and is a different feature with a different
@@ -116,6 +172,11 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
 export const UNKNOWN_FACTS: HarnessFacts = {
   hasClawaiToken: false,
   hermesSupportsImages: false,
+  hermesHasVisionRoute: false,
+  // Cautious in the same direction as the rest: a composer that has not heard
+  // back yet waits for the whole turn rather than showing a caret that may
+  // never move.
+  hermesStreamsTurns: false,
 };
 
 /**

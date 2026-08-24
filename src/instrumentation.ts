@@ -36,6 +36,24 @@ export async function register() {
     console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
   }
   try {
+    // Old chat transcripts. Age is the only thing left to bound here -- the
+    // per-conversation caps already decide how big any ONE of them gets, so
+    // what accumulates is stale ones. Boot is the right moment because these
+    // are the customer's own words: the sweep should run even on a box nobody
+    // has opened the chat on since the last update.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { sweepTranscripts } = require('./lib/harness/transcript-store')
+    void sweepTranscripts()
+      .then((removed: number) => {
+        if (removed > 0) console.log(`[instrumentation] Swept ${removed} stale chat transcript(s)`)
+      })
+      .catch((err: unknown) => {
+        console.error('[instrumentation] Chat transcript sweep failed:', err instanceof Error ? err.message : err)
+      })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the chat transcript sweep:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Memory indexing is armed the same way, from its own persisted schedule.
     // Rebuilding the timer at every boot is what makes the schedule survive a
     // reboot and an update without a crontab entry to duplicate or orphan.
