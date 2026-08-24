@@ -548,9 +548,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     )
     return activeOption?.provider ?? null
   }, [chatModelState])
+  // Fully-qualified model behind the active option. The reasoning default is
+  // tier-aware for ClawBox AI (the Max tier reasons by default, Flash does
+  // not), and the tier is a property of the MODEL, not the provider.
+  const headerModel = useMemo<string | null>(() => {
+    if (!chatModelState) return null
+    const activeOption = chatModelState.options.find(
+      (option) => option.id === chatModelState.activeOptionId,
+    )
+    return activeOption?.model ?? chatModelState.activeModel ?? null
+  }, [chatModelState])
   const reasoningConfig = useMemo<ProviderReasoningConfig>(
-    () => getProviderReasoningConfig(headerProvider),
-    [headerProvider],
+    () => getProviderReasoningConfig(headerProvider, headerModel),
+    [headerProvider, headerModel],
   )
   const visibleThinkingLevels = reasoningConfig.levels
   // Snap the displayed value to a level the active provider actually
@@ -981,7 +991,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // reasoning-capable model is folded to the local model's `off`) and returns
     // null while the provider is still unknown (catalog loading) so we hold the
     // push rather than sending a speculative value the gateway would reject.
-    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel)
+    const wireLevel = resolveWireThinkingLevel(headerProvider, thinkingLevel, headerModel)
     if (wireLevel === null) return
     const wireValue: string = wireLevel
     if (wireValue === lastSentThinkingRef.current) return
@@ -1017,7 +1027,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         variant: 'error',
       }])
     })
-  }, [status, headerProvider, thinkingLevel, adapter, caps])
+  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -1026,15 +1036,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // would silently fall back to the provider default while the actual
   // state still said xhigh — confusing and racey when the user then
   // tries to change levels.
+  //
+  // Keyed on the model as well: within ClawBox AI the default moves with the
+  // tier (Max reasons by default, Flash does not), so a Flash↔Max switch has
+  // to re-snap too. A persisted user choice is per provider and still wins.
   useEffect(() => {
     if (!headerProvider) return
-    const cfg = getProviderReasoningConfig(headerProvider)
+    const cfg = getProviderReasoningConfig(headerProvider, headerModel)
     const persisted = readPersistedThinkingLevel(headerProvider, cfg)
     setThinkingLevel(prev => (prev === persisted ? prev : persisted))
-  }, [headerProvider])
+  }, [headerProvider, headerModel])
 
   const handleThinkingLevelChange = useCallback((next: string) => {
-    const cfg = getProviderReasoningConfig(headerProvider)
+    const cfg = getProviderReasoningConfig(headerProvider, headerModel)
     const normalized: ThinkingLevel = cfg.levels.includes(next as ThinkingLevel)
       ? (next as ThinkingLevel)
       : cfg.default
@@ -1052,7 +1066,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (headerProvider) {
       try { window.localStorage?.setItem(`${PERSIST_KEY_PREFIX}:${headerProvider}`, normalized) } catch { /* localStorage unavailable */ }
     }
-  }, [headerProvider])
+  }, [headerProvider, headerModel])
 
   // Connect to gateway
   const gatewayTokenRef = useRef('')
