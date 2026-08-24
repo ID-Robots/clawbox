@@ -468,7 +468,9 @@ export default function HermesProviderConfig({
     const el = modelSelectRef.current;
     if (!el) return;
     el.focus();
-    el.scrollIntoView({ block: "nearest" });
+    // Optional-called: focusing is the part that must happen, scrolling is the
+    // courtesy, and not every environment this renders in implements it.
+    el.scrollIntoView?.({ block: "nearest" });
   }, [focusModelRequest, selectedProvider, loading]);
 
   // A chip in the connection strip was clicked. Treated exactly like a click on
