@@ -334,3 +334,65 @@ describe("SettingsApp mascot phrase refresh", () => {
     await waitFor(() => expect(button).not.toBeDisabled());
   });
 });
+
+describe("SettingsApp desktop nav overflow contract", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      return jsonResponse({});
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // The sidebar grew past the window once (Email/Discord/WhatsApp were added)
+  // and painted its last sections outside the Settings frame. The contract is
+  // structural, not a height keyed to today's list: the nav owns a scrollport,
+  // the row clips, and no item may be squashed to make the list fit.
+  function renderDesktop() {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const row = nav.parentElement;
+    if (!row) throw new Error("sidebar has no layout row");
+    const content = nav.nextElementSibling;
+    if (!content) throw new Error("content pane did not render");
+    return { row, nav, content };
+  }
+
+  it("gives the sidebar its own scrollport so a long section list scrolls", () => {
+    const { nav } = renderDesktop();
+
+    expect(nav.className).toContain("overflow-y-auto");
+    // Without min-h-0 a flex child refuses to shrink below its content height.
+    expect(nav.className).toContain("min-h-0");
+  });
+
+  it("clips the layout row so the nav can never paint outside the window", () => {
+    const { row } = renderDesktop();
+
+    expect(row.className).toContain("overflow-hidden");
+    expect(row.className).toContain("h-full");
+  });
+
+  it("keeps every section button at full height whatever the item count", () => {
+    const { nav } = renderDesktop();
+    const items = [...nav.querySelectorAll(":scope > button")];
+
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(item.className).toContain("shrink-0");
+    }
+  });
+
+  it("lets the content pane fill its column and scroll independently", () => {
+    const { content } = renderDesktop();
+
+    expect(content.className).toContain("flex-1");
+    expect(content.className).toContain("overflow-y-auto");
+    expect(content.className).toContain("min-w-0");
+  });
+});
