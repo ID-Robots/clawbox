@@ -369,7 +369,7 @@ export function registerCodingTools(reg: Registrar): void {
         await recordRead(abs);
         return {
           content: [
-            { type: "text", text: `Image ${basename(abs)} (${buf.length} bytes)` },
+            { type: "text", text: `Image ${abs} (${buf.length} bytes)` },
             { type: "image", data: buf.toString("base64"), mimeType: mime },
           ],
         };
@@ -386,7 +386,7 @@ export function registerCodingTools(reg: Registrar): void {
         }
         const lines = r.stdout.split("\n").slice(offset, offset + limit);
         await recordRead(abs);
-        return text(`[PDF ${basename(abs)}]\n${lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n")}`);
+        return text(`[PDF ${abs}]\n${lines.map((l, i) => `${offset + i + 1}\t${l}`).join("\n")}`);
       }
 
       if (isNotebook(abs)) {
@@ -406,11 +406,11 @@ export function registerCodingTools(reg: Registrar): void {
           }
         });
         await recordRead(abs);
-        return text(`[Notebook ${basename(abs)}, ${nb.cells?.length ?? 0} cells]\n${out.join("\n")}`);
+        return text(`[Notebook ${abs}, ${nb.cells?.length ?? 0} cells]\n${out.join("\n")}`);
       }
 
       if (isBinary(abs)) {
-        return text(`${basename(abs)} is a binary file of ${st.size} bytes. Its contents cannot be shown as text.`);
+        return text(`${abs} is a binary file of ${st.size} bytes. Its contents cannot be shown as text.`);
       }
 
       const buf = await fsReadFile(abs);
@@ -419,8 +419,8 @@ export function registerCodingTools(reg: Registrar): void {
       const selected = all.slice(offset, offset + limit);
       const numbered = selected.map((l, i) => `${offset + i + 1}\t${l}`).join("\n");
       const header = offset + limit < all.length
-        ? `[${basename(abs)}: lines ${offset + 1}-${offset + selected.length} of ${all.length}]`
-        : `[${basename(abs)}: ${all.length} lines]`;
+        ? `[${abs}: lines ${offset + 1}-${offset + selected.length} of ${all.length}]`
+        : `[${abs}: ${all.length} lines]`;
       await recordRead(abs);
       return text(`${header}\n${numbered}`);
     },
@@ -455,7 +455,12 @@ export function registerCodingTools(reg: Registrar): void {
       await fsWriteFile(abs, body, "utf-8");
       await recordRead(abs);
 
-      const parts = [`${existed ? "Rewrote" : "Created"} ${basename(abs)} (${body.split("\n").length} lines).`];
+      // The RESOLVED path, never the basename. A relative `file_path` resolves
+      // against CLAWBOX_ROOT, which is not the cwd the harness spawned this
+      // server from — so "Created notes.txt" left the agent with no way to tell
+      // which of two plausible trees it had just written into, and its next
+      // read_file of the same relative path could land somewhere else again.
+      const parts = [`${existed ? "Rewrote" : "Created"} ${abs} (${body.split("\n").length} lines).`];
       if (original !== null) {
         const diff = simpleDiff(original, body, basename(abs));
         if (diff) parts.push(diff);
@@ -527,7 +532,7 @@ export function registerCodingTools(reg: Registrar): void {
       await fsWriteFile(abs, content, encoding);
       await recordRead(abs);
       const diff = simpleDiff(original, content, basename(abs));
-      return text(`Changed ${basename(abs)} (${replacements} replacement${replacements === 1 ? "" : "s"}).${diff ? `\n${diff}` : ""}`);
+      return text(`Changed ${abs} (${replacements} replacement${replacements === 1 ? "" : "s"}).${diff ? `\n${diff}` : ""}`);
     },
   );
 
@@ -766,7 +771,7 @@ export function registerCodingTools(reg: Registrar): void {
         }
       }
       await fsWriteFile(abs, JSON.stringify(nb, null, 1), "utf-8");
-      return text(`${edit_mode === "delete" ? "Deleted" : edit_mode === "insert" ? "Inserted a cell after" : "Replaced"} cell ${cell_index} in ${basename(abs)} (${nb.cells.length} cells now).`);
+      return text(`${edit_mode === "delete" ? "Deleted" : edit_mode === "insert" ? "Inserted a cell after" : "Replaced"} cell ${cell_index} in ${abs} (${nb.cells.length} cells now).`);
     },
   );
 
