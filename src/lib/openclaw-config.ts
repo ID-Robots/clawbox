@@ -6,6 +6,7 @@ import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { readEdition } from "@/lib/edition-source";
 import { getProviderReasoningConfig, isThinkingLevel } from "@/lib/chat-reasoning";
+import { isSafeDiscordToken } from "@/lib/discord-api";
 
 const exec = promisify(execFile);
 
@@ -873,18 +874,28 @@ export const DISCORD_ENV_PATH = path.join(DATA_DIR, "discord.env");
  * only honoured when it CREATES the file, so a rewrite over an existing 0644
  * would silently keep the loose mode (same reasoning as config-store.ts).
  *
- * The value is interpolated unquoted, which is safe only because the caller has
- * already restricted the token to `[A-Za-z0-9._-]` (isSafeDiscordToken) — no
- * newline can split the line, no quote can escape it.
+ * The value is interpolated unquoted, which is safe because this function
+ * itself restricts the token to `[A-Za-z0-9._-]` (isSafeDiscordToken) before
+ * writing — no newline can split the line, no quote can escape it.
  *
- * That same guard is the answer to "a request body ends up in a file here". The
+ * That guard is also the answer to "a request body ends up in a file here". The
  * destination is DISCORD_ENV_PATH, a module constant, so nothing request-derived
  * chooses where this lands; the only request-derived part is the token, which
  * has to BE the credential for the write to be worth doing at all. The configure
- * route rejects anything outside that charset before reaching this, and Discord
- * itself has to accept the token before the write happens.
+ * route rejects anything outside that charset far earlier with an actionable
+ * message, and Discord itself has to accept the token before the write happens
+ * — but the charset invariant no longer depends on either of them holding.
  */
 export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
+  // Enforced HERE, not just trusted from the caller. The unquoted interpolation
+  // below is only safe while the token cannot contain a newline or a quote, and
+  // an exported writer whose safety lives entirely in whoever calls it is one
+  // future caller away from an env-file injection. The configure route still
+  // rejects a bad token far earlier, with a message the owner can act on; this
+  // is the guarantee that the file format cannot be broken even if it doesn't.
+  if (!isSafeDiscordToken(botToken)) {
+    throw new Error("Refusing to write an unsafe Discord token to the gateway env file");
+  }
   await fs.mkdir(DATA_DIR, { recursive: true });
   const tmpPath = `${DISCORD_ENV_PATH}.tmp`;
   const body =

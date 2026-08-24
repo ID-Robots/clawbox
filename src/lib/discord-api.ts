@@ -15,7 +15,13 @@
 // message, not in a thrown stack. The repo is public and these errors are
 // surfaced to the UI verbatim.
 
-const DISCORD_API_BASE = process.env.DISCORD_API_BASE || "https://discord.com/api/v10";
+// Hardcoded, with no environment override, and that is the security property
+// rather than an oversight. This is the one destination a stored bot token is
+// ever sent to, so anything that could retarget it — an env var read at import
+// time included — would turn a config-write primitive into token exfiltration.
+// The tests never needed the seam either: they stub global fetch and assert
+// against this literal URL.
+const DISCORD_API_BASE = "https://discord.com/api/v10";
 const VALIDATE_TIMEOUT_MS = 8_000;
 
 export interface DiscordBotInfo {
@@ -27,7 +33,13 @@ export interface DiscordBotInfo {
   displayName: string;
 }
 
-/** Discord answered, and the answer was "this token is not valid". */
+/**
+ * This token is not valid. Either Discord answered 401, or the value could not
+ * be a bot token at all and was never sent. Both mean the same thing to the
+ * owner — the stored credential is dead until a new one is pasted — so they
+ * deliberately share one error rather than splitting a distinction the panel
+ * has no way to act on differently.
+ */
 export class DiscordAuthError extends Error {
   constructor(message = "Discord rejected this bot token") {
     super(message);
@@ -73,12 +85,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *
  * Sending a stored credential outward is the whole point of this function, so
  * the status route's "a value read from disk reaches an outbound request" shape
- * is the feature rather than a leak. What keeps it that way: the destination is
- * DISCORD_API_BASE, a module constant that no caller and no request can steer;
- * the token travels only in the Authorization header; and the one caller that
- * takes an operator-supplied token has already run it through
- * isSafeDiscordToken. Same class as the other credential-check calls in the
- * tree.
+ * is the feature rather than a leak. Three things keep it that way: the
+ * destination is DISCORD_API_BASE, a hardcoded literal with no environment
+ * override, so neither a caller, a request, nor the process environment can
+ * retarget it; the token travels only in the Authorization header, never in a
+ * URL or a log line; and every token is run through isSafeDiscordToken here,
+ * whether it came from an operator or off the disk. Same class as the other
+ * credential-check calls in the tree.
  *
  * @throws {DiscordAuthError} the token is not valid (HTTP 401).
  * @throws {DiscordUnavailableError} Discord could not be reached or did not
@@ -88,6 +101,15 @@ export async function fetchDiscordBotInfo(
   token: string,
   signal?: AbortSignal,
 ): Promise<DiscordBotInfo> {
+  // The same charset guard the configure route applies on the way IN, applied
+  // again here on the way OUT. `data/discord.env` is ours and 0600, but "the
+  // file can only ever hold what we wrote" is an assumption rather than a
+  // check, and this function is where a stored value leaves the box: the
+  // status and members routes both read the token straight off disk and hand
+  // it to this call. A truncated or hand-edited file must produce an honest
+  // "that token is dead" instead of an outbound request built out of it.
+  if (!isSafeDiscordToken(token)) throw new DiscordAuthError();
+
   let res: Response;
   try {
     res = await fetch(`${DISCORD_API_BASE}/users/@me`, {
@@ -194,13 +216,18 @@ export function intentsFromApplicationFlags(flags: number): DiscordIntents {
 /**
  * One authenticated GET against the Discord API.
  *
- * Same destination rule as fetchDiscordBotInfo: DISCORD_API_BASE is a module
- * constant no caller and no request can steer, and the token travels only in
- * the Authorization header. `pathname` is built from ids this module has
- * already read out of a Discord response, and encodeURIComponent'd at every
- * call site, so it cannot carry a caller-supplied path.
+ * Same destination rule as fetchDiscordBotInfo: DISCORD_API_BASE is a hardcoded
+ * literal no caller, request or environment variable can steer; the token is
+ * validated here and travels only in the Authorization header. `pathname` is
+ * built from ids this module has already read out of a Discord response, and
+ * encodeURIComponent'd at every call site, so it cannot carry a caller-supplied
+ * path.
  */
 async function discordGet(token: string, pathname: string, signal?: AbortSignal): Promise<unknown> {
+  // Same read-boundary guard as fetchDiscordBotInfo, for the same reason: the
+  // members picker reaches here with a token read straight off disk.
+  if (!isSafeDiscordToken(token)) throw new DiscordAuthError();
+
   let res: Response;
   try {
     res = await fetch(`${DISCORD_API_BASE}${pathname}`, {

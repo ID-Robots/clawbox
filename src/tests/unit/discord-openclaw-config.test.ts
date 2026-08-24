@@ -158,3 +158,52 @@ describe("setDiscordToken (OpenClaw config generation)", () => {
     expect(assignments).toEqual([`DISCORD_BOT_TOKEN=${TOKEN}`]);
   });
 });
+
+// `writeDiscordGatewayEnv` is exported, and the line it writes is interpolated
+// unquoted. That is only safe while the token cannot carry a newline or a
+// quote, so the writer enforces the charset itself instead of trusting the
+// configure route to have done it — a guarantee that survives a future caller
+// which forgets.
+describe("writeDiscordGatewayEnv (env-file injection guard)", () => {
+  let openclawConfig: typeof import("@/lib/openclaw-config");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockFs.readFile.mockResolvedValue("{}");
+    mockFs.writeFile.mockResolvedValue(undefined);
+    mockFs.rename.mockResolvedValue(undefined);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.chmod.mockResolvedValue(undefined);
+    openclawConfig = await import("@/lib/openclaw-config");
+  });
+
+  const UNSAFE = [
+    // The payload that matters: a second assignment that would open the bot to
+    // everyone who can find the server.
+    ["a newline that would append a second assignment", "
+DISCORD_ALLOW_ALL_USERS=true"],
+    ["a carriage return", "DISCORD_ALLOW_ALL_USERS=true"],
+    ["a quote that would escape the value", '"'],
+    ["a shell substitution", "$(id)"],
+  ] as const;
+
+  it.each(UNSAFE)("refuses a token containing %s and writes nothing", async (_why, suffix) => {
+    await expect(openclawConfig.writeDiscordGatewayEnv(`${TOKEN}${suffix}`)).rejects.toThrow();
+    expect(mockFs.writeFile).not.toHaveBeenCalled();
+    expect(mockFs.rename).not.toHaveBeenCalled();
+  });
+
+  it("does not leak the rejected token into the error message", async () => {
+    const err = (await openclawConfig
+      .writeDiscordGatewayEnv(`${TOKEN}
+DISCORD_ALLOW_ALL_USERS=true`)
+      .catch((e: Error) => e)) as Error;
+    expect(err.message).not.toContain(TOKEN);
+  });
+
+  it("still writes a well-formed token", async () => {
+    await openclawConfig.writeDiscordGatewayEnv(TOKEN);
+    expect(writtenEnvFile().body).toContain(`DISCORD_BOT_TOKEN=${TOKEN}`);
+  });
+});
