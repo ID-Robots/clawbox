@@ -5,6 +5,7 @@ import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
+import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
 import { readEdition } from "@/lib/edition-source";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
@@ -348,12 +349,11 @@ async function wipeHomeUserState(): Promise<string[]> {
  * directory the wizard then writes its own state into.
  */
 async function resetSystemPasswordToDefault(): Promise<void> {
-  const DEFAULT_PASSWORD = "clawbox";
   try {
     await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
     await fs.writeFile(
       CHPASSWD_INPUT_PATH,
-      chpasswdRecord(getSystemUsername(), DEFAULT_PASSWORD),
+      chpasswdRecord(getSystemUsername(), FACTORY_DEFAULT_PASSWORD),
       { mode: 0o600 },
     );
     await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
