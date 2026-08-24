@@ -24,12 +24,21 @@ interface ConfigureBody {
 
 export async function POST(request: Request) {
   try {
-    let body: ConfigureBody;
+    let parsed: unknown;
     try {
-      body = await request.json();
+      parsed = await request.json();
     } catch {
       return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
     }
+    // `request.json()` happily returns null, a number or an array — all valid
+    // JSON, none of them a body. The ConfigureBody annotation is erased at
+    // runtime, so without this check `body.allowedUsers` on a `null` body
+    // throws a TypeError and the catch-all below turns a bad request into a
+    // 500. An array is rejected too: it has no named fields to read.
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+    const body = parsed as ConfigureBody;
 
     // Pairing is a QR scan performed by `hermes whatsapp`, a zero-flag TTY
     // wizard (see src/lib/hermes-whatsapp.ts). This route owns access control
@@ -134,9 +143,11 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true, restarted: true, warning });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Failed to save" },
-      { status: 500 },
-    );
+    // Same contract as /whatsapp/pair and /whatsapp/unpair: a fixed string to
+    // the client, the real cause to the server log. Filesystem failures under
+    // ~/.hermes carry absolute paths and syscall names, and echoing them back
+    // handed server-side detail to whoever holds the session cookie.
+    console.error("[whatsapp/configure] save failed:", err);
+    return NextResponse.json({ error: "Failed to save" }, { status: 500 });
   }
 }

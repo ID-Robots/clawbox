@@ -638,7 +638,14 @@ export function createRealDeps(): PairingDeps {
         const child = spawn("npm", ["install", "--no-fund", "--no-audit", "--progress=false"], {
           cwd: bridgeDir(),
           env: bridgeEnv(),
-          stdio: ["ignore", "ignore", "pipe"],
+          // stderr is "ignore", not "pipe". npm writes its warnings there —
+          // deprecations, engine mismatches, the peer-dependency notes a cold
+          // Baileys install produces plenty of — and an inherited pipe nobody
+          // reads fills its buffer and blocks the child forever. That turned a
+          // working install into a ten-minute wait ending in `install_failed`.
+          // spawnBridge() below has the same hazard and drains instead,
+          // because it needs the pipe; this one has no reader at all.
+          stdio: ["ignore", "ignore", "ignore"],
         });
         const timer = setTimeout(() => {
           child.kill("SIGKILL");

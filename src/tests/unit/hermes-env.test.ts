@@ -92,6 +92,26 @@ describe("applyEnvValues", () => {
     expect(applyEnvValues("A=1\n", { Z: null })).toBe("A=1\n");
   });
 
+  it("rewrites EVERY definition of a duplicated key, not just the first", () => {
+    // parseHermesEnv (like Hermes' load_env) lets the LAST definition win, so
+    // touching only the first produced a write that read back unchanged.
+    const before = "A=old\nB=keep\nA=newer\n";
+    const after = applyEnvValues(before, { A: "written" });
+    expect(after).toBe("A=written\nB=keep\n");
+    expect(parseHermesEnv(after).A).toBe("written");
+  });
+
+  it("deletes every definition, so a duplicate cannot resurrect the old value", () => {
+    const after = applyEnvValues("A=old\nB=keep\nA=newer\n", { A: null });
+    expect(after).toBe("B=keep\n");
+    expect(parseHermesEnv(after).A).toBeUndefined();
+  });
+
+  it("matches a duplicate written in the export form too", () => {
+    const after = applyEnvValues("A=old\nexport A=newer\n", { A: "written" });
+    expect(after).toBe("A=written\n");
+  });
+
   it("does not grow blank lines when applied repeatedly", () => {
     let text = "";
     for (let i = 0; i < 3; i++) text = applyEnvValues(text, { A: String(i) });
@@ -150,10 +170,14 @@ describe("setHermesEnvValues on disk", () => {
   });
 
   it("preserves the existing file mode instead of widening it", async () => {
-    await fs.writeFile(hermesEnvPath(), "A=1\n", { mode: 0o600 });
-    await fs.chmod(hermesEnvPath(), 0o600);
+    // 0640, not 0600: setHermesEnvValues CREATES a missing file at 0600, so a
+    // 0600 fixture passes this assertion even with the mode-preserving code
+    // deleted. The mode has to differ from the default for the test to mean
+    // anything. umask cannot interfere — chmod sets the mode outright.
+    await fs.writeFile(hermesEnvPath(), "A=1\n", { mode: 0o640 });
+    await fs.chmod(hermesEnvPath(), 0o640);
     await setHermesEnvValues({ B: "2" });
-    expect((await fs.stat(hermesEnvPath())).mode & 0o777).toBe(0o600);
+    expect((await fs.stat(hermesEnvPath())).mode & 0o777).toBe(0o640);
   });
 
   it("leaves no temp file behind", async () => {
@@ -180,5 +204,28 @@ describe("setHermesEnvValues on disk", () => {
   it("treats a missing .env as empty rather than throwing", async () => {
     expect(await readHermesEnv()).toEqual({});
     expect(await getHermesEnvValue("A")).toBeNull();
+  });
+
+  it("treats a missing ~/.hermes as empty too", async () => {
+    // ENOTDIR rather than ENOENT: a path component exists but is not a
+    // directory. Still "nothing configured", not a fault.
+    process.env.HERMES_HOME = path.join(dir, "not-a-dir", "hermes");
+    await fs.writeFile(path.join(dir, "not-a-dir"), "");
+    expect(await readHermesEnv()).toEqual({});
+  });
+
+  it("propagates a real read failure instead of reporting an empty env", async () => {
+    // The bug this guards: `catch { return {} }` flattened EVERY failure into
+    // "nothing configured yet", so an unreadable .env made
+    // readHermesWhatsappStatus answer `not_configured` with an empty allowlist
+    // — the panel told the owner his channel was simply not set up while the
+    // real cause was an unreadable file. A fault has to reach the caller.
+    //
+    // A directory at the .env path yields EISDIR on every platform and for
+    // every user, which chmod 0o000 does not: CI containers often run as root,
+    // where the permission bits are ignored and the read would succeed.
+    await fs.mkdir(hermesEnvPath(), { recursive: true });
+    await expect(readHermesEnv()).rejects.toMatchObject({ code: "EISDIR" });
+    await expect(getHermesEnvValue("A")).rejects.toMatchObject({ code: "EISDIR" });
   });
 });

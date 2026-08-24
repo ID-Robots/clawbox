@@ -51,6 +51,19 @@ describe("POST /setup-api/whatsapp/configure", () => {
     expect((await res.json()).error).toBe("Invalid JSON");
   });
 
+  it("rejects well-formed JSON that is not an object", async () => {
+    // `null`, `true`, numbers and arrays all parse. The ConfigureBody
+    // annotation is erased at runtime, so a `null` body used to reach
+    // `body.allowedUsers`, throw a TypeError, and come back as a 500 carrying
+    // the raw JavaScript message. These are bad requests, not server faults.
+    for (const raw of ["null", "true", "42", '"a string"', "[]"]) {
+      const res = await post(raw);
+      expect(res.status, `body ${raw}`).toBe(400);
+      expect((await res.json()).error).toBe("Invalid JSON");
+    }
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
   it("refuses on a non-Hermes harness and writes nothing", async () => {
     mockHarness.mockResolvedValue("openclaw");
     const res = await post({ enabled: false });
@@ -93,8 +106,14 @@ describe("POST /setup-api/whatsapp/configure", () => {
   });
 
   it("only accepts the two documented modes", async () => {
+    // BOTH documented modes, not just one: asserting "bot" alone would still
+    // pass if the allowlist were narrowed to "bot" and self-chat quietly
+    // stopped being settable from the panel.
     expect((await post({ mode: "bot" })).status).toBe(200);
+    expect((await post({ mode: "self-chat" })).status).toBe(200);
+    expect(mockSet).toHaveBeenLastCalledWith({ mode: "self-chat" });
     expect((await post({ mode: "selfchat" })).status).toBe(400);
+    expect((await post({ mode: "self_chat" })).status).toBe(400);
   });
 
   it("requires a boolean for enabled", async () => {
@@ -173,10 +192,17 @@ describe("POST /setup-api/whatsapp/configure", () => {
     expect(body).toMatchObject({ success: true, restarted: false, warning: "no_allowed_users" });
   });
 
-  it("returns 500 with a plain message on an unexpected failure", async () => {
-    mockSet.mockRejectedValue(new Error("disk full"));
+  it("returns 500 without echoing the exception message", async () => {
+    // Filesystem failures under ~/.hermes carry absolute paths and syscall
+    // names. The panel translates a fixed string; the real cause is logged.
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockSet.mockRejectedValue(new Error("ENOSPC: no space left on device, open '/home/clawbox/.hermes/.env'"));
     const res = await post({ mode: "bot" });
+    const body = await res.json();
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toBe("disk full");
+    expect(body.error).toBe("Failed to save");
+    expect(JSON.stringify(body)).not.toContain("/home/clawbox");
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
   });
 });

@@ -108,7 +108,22 @@ export function applyEnvValues(existing: string, values: Record<string, string |
 
   for (const [key, rawValue] of Object.entries(values)) {
     if (!ENV_VAR_NAME_RE.test(key)) throw new Error(`Invalid environment variable name: ${key}`);
-    const index = lines.findIndex((line) => envLineDefinesKey(line, key));
+
+    // EVERY definition, not just the first. A .env can define the same key
+    // twice — hand-edited, or appended to by two tools — and parseHermesEnv
+    // (like Hermes' own load_env) lets the LAST one win on read. Touching only
+    // the first therefore produced writes that read back unchanged, and
+    // deletes that resurrected the older value from the line below: the exact
+    // failure the export-line handling above already exists to prevent, just
+    // reached by a different route. Rewrite at the first position so key order
+    // in the file is stable, and drop the shadowing duplicates.
+    const indexes: number[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      if (envLineDefinesKey(lines[i], key)) indexes.push(i);
+    }
+    // Remove back to front so the earlier indexes stay valid.
+    for (let i = indexes.length - 1; i >= 1; i -= 1) lines.splice(indexes[i], 1);
+    const index = indexes.length > 0 ? indexes[0] : -1;
 
     if (rawValue === null) {
       if (index >= 0) lines.splice(index, 1);
@@ -129,14 +144,24 @@ export function applyEnvValues(existing: string, values: Record<string, string |
  * comments and blanks skipped, `export ` stripped, split on the FIRST `=` so a
  * value containing `=` survives.
  *
- * A missing file is not an error — it means "nothing configured yet".
+ * A missing file is not an error — it means "nothing configured yet". Anything
+ * else IS an error and is rethrown: an unreadable .env (EACCES after a
+ * root-owned write, EIO on a failing eMMC) used to be flattened into the same
+ * empty object, so readHermesWhatsappStatus reported `not_configured` with an
+ * empty allowlist and the panel told the owner his channel was simply not set
+ * up. A real fault has to reach the caller, which answers 500 and logs it.
  */
 export async function readHermesEnv(): Promise<Record<string, string>> {
   let raw: string;
   try {
     raw = await fs.readFile(hermesEnvPath(), "utf-8");
-  } catch {
-    return {};
+  } catch (err) {
+    // ENOENT: no .env, or no ~/.hermes to hold one. ENOTDIR: a component of
+    // the path is a file, so there is no ~/.hermes directory either. Both mean
+    // "nothing configured yet" — the ordinary state of a non-Hermes box.
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return {};
+    throw err;
   }
   return parseHermesEnv(raw);
 }

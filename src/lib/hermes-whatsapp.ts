@@ -82,6 +82,41 @@ export function whatsappBridgeMirrorDir(): string {
 let resolvedBridgeDir: string | null = null;
 
 /**
+ * Give the owner write access to every entry under `root`, `root` included.
+ *
+ * `fs.cp` copies modes verbatim, so a mirror taken from a read-only install
+ * tree is read-only all the way down. `npm install` writes into nested
+ * directories (node_modules/, and package-lock.json beside it), so adding u+w
+ * to the top directory alone is not enough to make the copy usable.
+ *
+ * Best-effort per entry: a mirror we cannot fully relax is still worth
+ * returning, and the install that follows reports its own failure.
+ */
+async function makeTreeWritable(root: string): Promise<void> {
+  // `string[]`, spelled out. Deriving it from `typeof fs.readdir` resolves to
+  // the wrong one of that function's overloads — the `Dirent[]` one — so the
+  // assignment below and the `path.join` at the end both failed to compile.
+  let entries: string[] = [];
+  try {
+    const stat = await fs.lstat(root);
+    // Symlinks carry no meaningful mode of their own and chmod follows them,
+    // which would reach back out of the mirror into the source tree.
+    if (stat.isSymbolicLink()) return;
+    // Mask to the permission bits — stat.mode also carries the file type, and
+    // 0o700 on a directory is what makes the readdir below possible at all.
+    const perms = stat.mode & 0o777;
+    await fs.chmod(root, perms | (stat.isDirectory() ? 0o700 : 0o200));
+    if (!stat.isDirectory()) return;
+    entries = await fs.readdir(root);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    await makeTreeWritable(path.join(root, entry));
+  }
+}
+
+/**
  * The bridge directory to actually work in.
  *
  * A straight `$HERMES_AGENT_DIR/scripts/whatsapp-bridge` is only right where
@@ -123,11 +158,13 @@ export async function resolveWhatsappBridgeDir(): Promise<string> {
   try {
     await fs.mkdir(path.dirname(mirror), { recursive: true });
     await fs.cp(install, mirror, { recursive: true, errorOnExist: true, force: false });
-    // The copy inherits the source's mode, and a bridge mirrored out of a tree
-    // that was read-only by permission would arrive read-only too — which
-    // defeats the whole point, since the next thing to run in here is
-    // `npm install`.
-    await fs.chmod(mirror, 0o755);
+    // The copy inherits the source's mode for EVERY entry, not just the top
+    // one, and a bridge mirrored out of a tree that was read-only by permission
+    // would arrive read-only too — which defeats the whole point, since the
+    // next thing to run in here is `npm install`. chmod'ing only `mirror` left
+    // every nested directory unwritable, so the install still failed the moment
+    // npm tried to write inside one.
+    await makeTreeWritable(mirror);
     resolvedBridgeDir = mirror;
     return mirror;
   } catch {

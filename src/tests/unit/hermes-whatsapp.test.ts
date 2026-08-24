@@ -287,7 +287,11 @@ describe("resolveWhatsappBridgeDir", () => {
     else process.env.HERMES_HOME = originalHome;
     if (originalAgent === undefined) delete process.env.HERMES_AGENT_DIR;
     else process.env.HERMES_AGENT_DIR = originalAgent;
+    // Top-down: a 0555 parent forbids chmod'ing what is inside it, and rm
+    // cannot unlink an entry out of a directory it may not write.
     await fs.chmod(installDir(), 0o755).catch(() => {});
+    await fs.chmod(path.join(installDir(), "node_modules"), 0o755).catch(() => {});
+    await fs.chmod(path.join(installDir(), "node_modules", "dep"), 0o755).catch(() => {});
     await fs.chmod(mirrorDir(), 0o755).catch(() => {});
     await fs.rm(dir, { recursive: true, force: true });
   });
@@ -303,6 +307,16 @@ describe("resolveWhatsappBridgeDir", () => {
   });
 
   it("mirrors the bridge into HERMES_HOME when the install tree is read-only", async () => {
+    // Nested read-only content, not just a read-only top directory. `fs.cp`
+    // copies the mode of EVERY entry, so a single chmod of the mirror root
+    // left each subdirectory unwritable and `npm install` still failed the
+    // moment npm wrote inside one — node_modules/ is exactly such a
+    // subdirectory. Making only installDir() 0555 never caught that.
+    const nested = path.join(installDir(), "node_modules", "dep");
+    await fs.mkdir(nested, { recursive: true });
+    await fs.writeFile(path.join(nested, "index.js"), "// dep");
+    await fs.chmod(nested, 0o555);
+    await fs.chmod(path.join(installDir(), "node_modules"), 0o555);
     await fs.chmod(installDir(), 0o555);
 
     const resolved = await resolveWhatsappBridgeDir();
@@ -314,6 +328,11 @@ describe("resolveWhatsappBridgeDir", () => {
     expect(whatsappBridgeDir()).toBe(mirrorDir());
     // Writable, or the copy solved nothing: `npm install` runs in here next.
     await fs.writeFile(path.join(mirrorDir(), "probe"), "");
+    // ...and writable all the way down, which is where the install actually
+    // writes. The copy of the read-only subtree has to accept a new file.
+    const mirroredNested = path.join(mirrorDir(), "node_modules", "dep");
+    expect(await fs.readFile(path.join(mirroredNested, "index.js"), "utf8")).toBe("// dep");
+    await fs.writeFile(path.join(mirroredNested, "probe"), "");
   });
 
   it("reuses an existing mirror instead of copying over it", async () => {

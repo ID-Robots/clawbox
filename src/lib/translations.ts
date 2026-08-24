@@ -2571,20 +2571,20 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.failedSave": "Échec de l'enregistrement",
     "settings.telegramConfigured": "Bot Telegram configuré avec succès !",
     "settings.whatsappRiskTitle": "Connexion non officielle — risque pour le compte",
-    "settings.whatsappRiskBody": "WhatsApp ne prend pas officiellement en charge les bots tiers en dehors de son API Business. Relier un numéro par ce pont comporte un léger risque de restriction du compte. Utilisez un numéro dédié, gardez un ton de conversation normal et n envoyez jamais de messages en masse.",
+    "settings.whatsappRiskBody": "WhatsApp ne prend pas officiellement en charge les bots tiers en dehors de son API Business. Relier un numéro par ce pont comporte un léger risque de restriction du compte. Utilisez un numéro dédié, gardez un ton de conversation normal et n'envoyez jamais de messages en masse.",
     "settings.whatsappUnsupportedTitle": "Indisponible sur cet appareil",
-    "settings.whatsappUnsupportedBody": "WhatsApp est fourni par l agent Hermes. Cette ClawBox utilise un autre agent, il n y a donc encore rien à configurer ici.",
+    "settings.whatsappUnsupportedBody": "WhatsApp est fourni par l'agent Hermes. Cette ClawBox utilise un autre agent, il n'y a donc encore rien à configurer ici.",
     "settings.whatsappUnavailable": "Indisponible",
     "settings.whatsappActive": "Canal WhatsApp actif",
-    "settings.whatsappActiveHint": "Le téléphone relié peut écrire à l assistant.",
+    "settings.whatsappActiveHint": "Le téléphone relié peut écrire à l'assistant.",
     "settings.whatsappPairedIdle": "Relié, mais ne reçoit rien",
     "settings.whatsappEnabledNotPaired": "Activé, téléphone non relié",
     "settings.whatsappNotConfiguredHint": "Reliez un téléphone pour écrire depuis WhatsApp.",
-    "settings.whatsappGatewayStopped": "Le service de messagerie ne tourne pas, rien n est donc récupéré.",
-    "settings.whatsappBridgeMissing": "La passerelle WhatsApp n a pas encore téléchargé ce dont elle a besoin. Connecter un téléphone ci-dessous le récupère automatiquement — gardez l appareil en ligne.",
+    "settings.whatsappGatewayStopped": "Le service de messagerie ne tourne pas, rien n'est donc récupéré.",
+    "settings.whatsappBridgeMissing": "La passerelle WhatsApp n'a pas encore téléchargé ce dont elle a besoin. Connecter un téléphone ci-dessous le récupère automatiquement — gardez l'appareil en ligne.",
     "settings.whatsappPairTitle": "Reliez votre téléphone",
-    "settings.whatsappPairIntro": "La liaison prend environ une minute et ne se fait qu une fois. Tout se passe ici, sans terminal.",
-    "settings.whatsappPairStep1": "Ouvrez l application Terminal sur cette ClawBox.",
+    "settings.whatsappPairIntro": "La liaison prend environ une minute et ne se fait qu'une fois. Tout se passe ici, sans terminal.",
+    "settings.whatsappPairStep1": "Ouvrez l'application Terminal sur cette ClawBox.",
     "settings.whatsappPairStep2": "Lancez",
     "settings.whatsappPairStep3": "Sur le téléphone, ouvrez WhatsApp → Réglages → Appareils liés → Lier un appareil, puis scannez le code.",
 
@@ -2596,9 +2596,9 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     "settings.whatsappPairPreparing": "Préparation de la passerelle WhatsApp",
 
-    "settings.whatsappPairPreparingHint": "Téléchargement de ce dont la passerelle a besoin. Cela n arrive qu une fois et peut prendre quelques minutes.",
+    "settings.whatsappPairPreparingHint": "Téléchargement de ce dont la passerelle a besoin. Cela n'arrive qu'une fois et peut prendre quelques minutes.",
 
-    "settings.whatsappPairStarting": "Création d un code QR",
+    "settings.whatsappPairStarting": "Création d'un code QR",
 
     "settings.whatsappPairStartingHint": "Cela prend quelques secondes.",
 
@@ -2606,7 +2606,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     "settings.whatsappPairScanHint": "Sur le téléphone, ouvrez WhatsApp → Réglages → Appareils connectés → Connecter un appareil.",
 
-    "settings.whatsappPairNoRush": "Le code se renouvelle tout seul, prenez le temps qu il vous faut.",
+    "settings.whatsappPairNoRush": "Le code se renouvelle tout seul, prenez le temps qu'il vous faut.",
 
     "settings.whatsappPairQrLabel": "Code QR de liaison WhatsApp",
 
@@ -2618,7 +2618,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     "settings.whatsappPairedAs": "Relié en tant que {number}",
 
-    "settings.whatsappPairFailedTitle": "La liaison n a pas pu démarrer",
+    "settings.whatsappPairFailedTitle": "La liaison n'a pas pu démarrer",
 
     "settings.whatsappPairErrBridge": "La passerelle WhatsApp est absente de cette ClawBox.",
 
@@ -2630,7 +2630,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     "settings.whatsappUnpair": "Délier le téléphone",
 
-    "settings.whatsappUnpairHint": "Supprime la liaison de cette ClawBox et coupe le canal. Supprimez aussi l entrée dans Appareils connectés sur votre téléphone.",
+    "settings.whatsappUnpairHint": "Supprime la liaison de cette ClawBox et coupe le canal. Supprimez aussi l'entrée dans Appareils connectés sur votre téléphone.",
 
     "settings.whatsappUnpairConfirm": "Oui, délier",
 
@@ -2641,25 +2641,25 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappUnpairFailed": "Impossible de délier le téléphone.",
 
     "settings.whatsappAdvancedToggle": "Vous préférez le terminal ?",
-    "settings.whatsappAllowedTitle": "Qui peut écrire à l assistant",
-    "settings.whatsappAllowedHint": "Seuls ces numéros obtiennent une réponse, les autres sont ignorés. Saisissez le numéro complet avec l indicatif du pays, chiffres uniquement.",
-    "settings.whatsappAllowAllWarning": "L appareil répond actuellement à tout le monde. Ajoutez un numéro ci-dessous pour le restreindre.",
-    "settings.whatsappNoNumbers": "Aucun numéro pour l instant, personne ne peut donc joindre l assistant.",
+    "settings.whatsappAllowedTitle": "Qui peut écrire à l'assistant",
+    "settings.whatsappAllowedHint": "Seuls ces numéros obtiennent une réponse, les autres sont ignorés. Saisissez le numéro complet avec l'indicatif du pays, chiffres uniquement.",
+    "settings.whatsappAllowAllWarning": "L'appareil répond actuellement à tout le monde. Ajoutez un numéro ci-dessous pour le restreindre.",
+    "settings.whatsappNoNumbers": "Aucun numéro pour l'instant, personne ne peut donc joindre l'assistant.",
     "settings.whatsappNumberPlaceholder": "ex. 33612345678",
     "settings.whatsappAddNumber": "Ajouter",
     "settings.whatsappRemoveNumber": "Retirer",
     "settings.whatsappModeTitle": "Mode de conversation",
     "settings.whatsappModeBot": "Numéro dédié",
-    "settings.whatsappModeBotHint": "L assistant utilise son propre numéro WhatsApp et répond aux personnes que vous autorisez.",
-    "settings.whatsappModeSelf": "S écrire à soi-même",
-    "settings.whatsappModeSelfHint": "Utilisez votre propre WhatsApp et parlez à l assistant dans votre discussion. Pratique pour un essai rapide.",
+    "settings.whatsappModeBotHint": "L'assistant utilise son propre numéro WhatsApp et répond aux personnes que vous autorisez.",
+    "settings.whatsappModeSelf": "S'écrire à soi-même",
+    "settings.whatsappModeSelfHint": "Utilisez votre propre WhatsApp et parlez à l'assistant dans votre discussion. Pratique pour un essai rapide.",
     "settings.whatsappEnable": "Canal WhatsApp",
     "settings.whatsappEnableHint": "Coupez ou relancez le canal sans délier votre téléphone.",
-    "settings.whatsappEnableBlocked": "Reliez d abord un téléphone : le canal ne peut pas être activé avant.",
+    "settings.whatsappEnableBlocked": "Reliez d'abord un téléphone : le canal ne peut pas être activé avant.",
     "settings.whatsappSaved": "Enregistré.",
     "settings.whatsappSavedRestartPending": "Enregistré — effectif au prochain redémarrage du service de messagerie.",
-    "settings.whatsappSavedNoUsers": "Enregistré, mais aucun numéro n est encore autorisé, rien ne passera donc.",
-    "settings.whatsappNotPairedError": "Reliez d abord un téléphone.",
+    "settings.whatsappSavedNoUsers": "Enregistré, mais aucun numéro n'est encore autorisé, rien ne passera donc.",
+    "settings.whatsappNotPairedError": "Reliez d'abord un téléphone.",
     "settings.pairingTitle": "Accès des utilisateurs",
     "settings.pairingHint": "Approuvez qui peut discuter avec votre bot. Les nouvelles personnes reçoivent un code à 8 caractères du bot — collez-le ici ou vérifiez les demandes en attente.",
     "settings.pairingCodePlaceholder": "Coller le code",
@@ -3100,13 +3100,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.connectionFailed": "Connessione fallita",
     "settings.failedSave": "Salvataggio fallito",
     "settings.telegramConfigured": "Bot Telegram configurato con successo!",
-    "settings.whatsappRiskTitle": "Connessione non ufficiale — rischio per l account",
-    "settings.whatsappRiskBody": "WhatsApp non supporta ufficialmente i bot di terze parti al di fuori della sua API per le aziende. Collegare un numero tramite questo ponte comporta un piccolo rischio di limitazioni sull account. Usi un numero dedicato, mantenga un tono di conversazione normale e non invii messaggi in massa.",
+    "settings.whatsappRiskTitle": "Connessione non ufficiale — rischio per l'account",
+    "settings.whatsappRiskBody": "WhatsApp non supporta ufficialmente i bot di terze parti al di fuori della sua API per le aziende. Collegare un numero tramite questo ponte comporta un piccolo rischio di limitazioni sull'account. Usi un numero dedicato, mantenga un tono di conversazione normale e non invii messaggi in massa.",
     "settings.whatsappUnsupportedTitle": "Non disponibile su questo dispositivo",
-    "settings.whatsappUnsupportedBody": "WhatsApp arriva dall agente Hermes. Questa ClawBox usa un altro agente, quindi qui non c è ancora nulla da configurare.",
+    "settings.whatsappUnsupportedBody": "WhatsApp arriva dall'agente Hermes. Questa ClawBox usa un altro agente, quindi qui non c'è ancora nulla da configurare.",
     "settings.whatsappUnavailable": "Non disponibile",
     "settings.whatsappActive": "Canale WhatsApp attivo",
-    "settings.whatsappActiveHint": "Il telefono collegato può scrivere all assistente.",
+    "settings.whatsappActiveHint": "Il telefono collegato può scrivere all'assistente.",
     "settings.whatsappPairedIdle": "Collegato, ma non riceve",
     "settings.whatsappEnabledNotPaired": "Attivo, telefono non collegato",
     "settings.whatsappNotConfiguredHint": "Colleghi un telefono per scrivere da WhatsApp.",
@@ -3114,7 +3114,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappBridgeMissing": "Il ponte WhatsApp non ha ancora scaricato ciò che serve. Collegare un telefono qui sotto lo scarica automaticamente, quindi tenga il dispositivo online.",
     "settings.whatsappPairTitle": "Colleghi il telefono",
     "settings.whatsappPairIntro": "Il collegamento richiede circa un minuto e si fa una volta sola. Tutto avviene qui, senza terminale.",
-    "settings.whatsappPairStep1": "Apra l app Terminale su questa ClawBox.",
+    "settings.whatsappPairStep1": "Apra l'app Terminale su questa ClawBox.",
     "settings.whatsappPairStep2": "Esegua",
     "settings.whatsappPairStep3": "Sul telefono apra WhatsApp → Impostazioni → Dispositivi collegati → Collega un dispositivo e scansioni il codice.",
 
@@ -3154,7 +3154,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
 
     "settings.whatsappPairErrInstall": "Non è stato possibile scaricare ciò che serve al ponte. Controlli la rete e riprovi.",
 
-    "settings.whatsappPairErrGeneric": "Qualcosa è andato storto all avvio del ponte.",
+    "settings.whatsappPairErrGeneric": "Qualcosa è andato storto all'avvio del ponte.",
 
     "settings.whatsappPairRetry": "Riprova",
 
@@ -3171,18 +3171,18 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "settings.whatsappUnpairFailed": "Non è stato possibile scollegare il telefono.",
 
     "settings.whatsappAdvancedToggle": "Preferisce il terminale?",
-    "settings.whatsappAllowedTitle": "Chi può scrivere all assistente",
+    "settings.whatsappAllowedTitle": "Chi può scrivere all'assistente",
     "settings.whatsappAllowedHint": "Solo questi numeri ricevono risposta, gli altri vengono ignorati. Inserisca il numero completo con prefisso internazionale, solo cifre.",
     "settings.whatsappAllowAllWarning": "Al momento il dispositivo risponde a chiunque. Aggiunga un numero qui sotto per limitarlo.",
-    "settings.whatsappNoNumbers": "Ancora nessun numero, quindi nessuno può raggiungere l assistente.",
+    "settings.whatsappNoNumbers": "Ancora nessun numero, quindi nessuno può raggiungere l'assistente.",
     "settings.whatsappNumberPlaceholder": "es. 393331234567",
     "settings.whatsappAddNumber": "Aggiungi",
     "settings.whatsappRemoveNumber": "Rimuovi",
     "settings.whatsappModeTitle": "Modalità di conversazione",
     "settings.whatsappModeBot": "Numero dedicato",
-    "settings.whatsappModeBotHint": "L assistente usa un proprio numero WhatsApp e risponde alle persone che lei autorizza.",
+    "settings.whatsappModeBotHint": "L'assistente usa un proprio numero WhatsApp e risponde alle persone che lei autorizza.",
     "settings.whatsappModeSelf": "Scrivere a se stessi",
-    "settings.whatsappModeSelfHint": "Usi il suo WhatsApp e parli con l assistente nella sua chat. Comodo per una prova veloce.",
+    "settings.whatsappModeSelfHint": "Usi il suo WhatsApp e parli con l'assistente nella sua chat. Comodo per una prova veloce.",
     "settings.whatsappEnable": "Canale WhatsApp",
     "settings.whatsappEnableHint": "Spenga o riaccenda il canale senza scollegare il telefono.",
     "settings.whatsappEnableBlocked": "Colleghi prima un telefono: finché non lo fa il canale non si può attivare.",

@@ -19,16 +19,21 @@ async function probeGateway(): Promise<{ installed: boolean; running: boolean }>
   }
   if (inFlightGateway) return inFlightGateway;
   const pending = (async () => {
+    let value: { installed: boolean; running: boolean };
     try {
       const status = await hermesGatewayStatus();
-      const value = { installed: status.installed, running: status.running };
-      cachedGateway = { value, at: Date.now() };
-      return value;
+      value = { installed: status.installed, running: status.running };
     } catch {
       // A wedged or missing CLI must not turn into a 500 for the whole panel;
       // report "not running" and let the state below stay honest about it.
-      return { installed: false, running: false };
+      value = { installed: false, running: false };
     }
+    // Cache the failure exactly like the success. Caching only the happy path
+    // meant that the slower the CLI got, the more often the panel paid for it:
+    // a wedged `hermes gateway status` costs ~2 s and the panel polls this
+    // route, so every poll re-ran the shell-out it had just given up on.
+    cachedGateway = { value, at: Date.now() };
+    return value;
   })().finally(() => {
     inFlightGateway = null;
   });
@@ -71,9 +76,10 @@ export async function GET() {
       receiving: status.state === "paired" && gateway.running && status.authorized,
     });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Status check failed" },
-      { status: 500 },
-    );
+    // Fixed string out, real cause to the log — the same contract the other
+    // three WhatsApp routes follow. An unreadable ~/.hermes/.env surfaces here
+    // as an EACCES whose message carries the absolute path.
+    console.error("[whatsapp/status] status check failed:", err);
+    return NextResponse.json({ error: "Status check failed" }, { status: 500 });
   }
 }

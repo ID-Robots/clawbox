@@ -1713,9 +1713,21 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const waPairActive =
     waPairPhase === "preparing" || waPairPhase === "starting" || waPairPhase === "waiting" || waPairPhase === "scanned";
 
+  /* Which section is actually on screen.
+     `section` is the desktop sidebar selection; on mobile the rendered panel is
+     `mobileSection`, and null there means the nav list, with no panel at all.
+     The one-shot status fetches elsewhere in this file get away with
+     `&& !isMobile` because an extra GET costs nothing. This is different: the
+     pairing poll is a 2 s heartbeat that a live `node bridge.js` on the Jetson
+     stays alive for, so "is the panel visible" has to be the real answer. With
+     `!isMobile` the guard inverted on a phone — the interval never stopped and
+     the DELETE never fired, so browsing away from WhatsApp left the server
+     renewing lastPollAt forever and the reaper could never collect the bridge. */
+  const whatsappVisible = isMobile ? mobileSection === "whatsapp" : section === "whatsapp";
+
   useEffect(() => {
     if (!waPairActive) return;
-    if (section !== "whatsapp" && !isMobile) return;
+    if (!whatsappVisible) return;
 
     let cancelled = false;
     const id = setInterval(async () => {
@@ -1738,17 +1750,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       cancelled = true;
       clearInterval(id);
     };
-  }, [waPairActive, section, isMobile, readPairSnapshot, refreshWhatsapp]);
+  }, [waPairActive, whatsappVisible, readPairSnapshot, refreshWhatsapp]);
 
   /* Leaving the WhatsApp panel stops the heartbeat, and the server reaps the
      bridge a minute later. Tell it now instead, so a browsed-away session does
      not hold a Baileys socket open for that minute. */
   useEffect(() => {
-    if (section === "whatsapp" || isMobile) return;
+    if (whatsappVisible) return;
     if (!waPairActive) return;
     void fetch("/setup-api/whatsapp/pair", { method: "DELETE" }).catch(() => {});
     setWaPair(null);
-  }, [section, isMobile, waPairActive]);
+  }, [whatsappVisible, waPairActive]);
 
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -3201,7 +3213,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <>
                 {/* Status */}
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                  <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-4">{t("settings.status")}</label>
+                  <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-4">{t("settings.status")}</h3>
                   {waStatus === null ? (
                     <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
                       <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
@@ -3443,7 +3455,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
                 {/* Allowlist — the security-critical field */}
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                  <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">{t("settings.whatsappAllowedTitle")}</label>
+                  <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">{t("settings.whatsappAllowedTitle")}</h3>
                   <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.whatsappAllowedHint")}</p>
                   {waStatus?.allowAllUsers && (
                     <p className="text-xs text-amber-300/90 mt-2 leading-relaxed">{t("settings.whatsappAllowAllWarning")}</p>
@@ -3490,7 +3502,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
                 {/* Mode */}
                 <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                  <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-3">{t("settings.whatsappModeTitle")}</label>
+                  <h3 className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-3">{t("settings.whatsappModeTitle")}</h3>
                   <div className="space-y-2">
                     {(["bot", "self-chat"] as const).map((mode) => (
                       <button

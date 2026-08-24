@@ -17,16 +17,23 @@ vi.mock("@/lib/hermes-whatsapp", () => ({
 }));
 
 import { getActiveHarness } from "@/lib/harness";
+import type { WhatsappPairSnapshot } from "@/lib/whatsapp-pairing";
 
 const mockHarness = vi.mocked(getActiveHarness);
 
-const idle = {
+/* Annotated, not a bare literal: untyped, the fixture silently drifted from the
+   server contract — it was already missing `gatewayRestartPending`, the field
+   the panel reads to warn that a fresh link is not live yet. The annotation
+   makes a renamed or added snapshot field a compile error here. `import type`
+   is erased at runtime, so it does not defeat the vi.mock above. */
+const idle: WhatsappPairSnapshot = {
   phase: "idle",
   qr: null,
   qrIssuedAt: null,
   qrCount: 0,
   restarts: 0,
   user: null,
+  gatewayRestartPending: false,
   error: null,
   startedAt: null,
 };

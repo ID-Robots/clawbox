@@ -108,13 +108,37 @@ describe("GET /setup-api/whatsapp/status", () => {
     expect(mockGateway).toHaveBeenCalledTimes(1);
   });
 
-  it("returns 500 with a plain message when the env read fails", async () => {
+  it("caches a FAILING gateway probe, not just a successful one", async () => {
+    // The panel polls this route, and `hermes gateway status` costs ~2 s on a
+    // Jetson. Caching only the success path meant a wedged CLI was re-run on
+    // every single poll — the cost repeated exactly when it was highest.
     vi.resetModules();
-    mockStatus.mockRejectedValue(new Error("boom"));
+    mockGateway.mockRejectedValue(new Error("hermes CLI timed out"));
+    GET = (await import("@/app/setup-api/whatsapp/status/route")).GET;
+
+    const first = await (await GET()).json();
+    const second = await (await GET()).json();
+
+    expect(mockGateway).toHaveBeenCalledTimes(1);
+    expect(first.gateway).toEqual({ installed: false, running: false });
+    expect(second.gateway).toEqual({ installed: false, running: false });
+  });
+
+  it("returns 500 without echoing the exception message", async () => {
+    // An unreadable ~/.hermes/.env arrives here as an EACCES whose message
+    // carries the absolute path. The client gets a fixed string; the real
+    // error goes to the server log.
+    vi.resetModules();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockStatus.mockRejectedValue(new Error("EACCES: permission denied, open '/home/clawbox/.hermes/.env'"));
     GET = (await import("@/app/setup-api/whatsapp/status/route")).GET;
 
     const res = await GET();
+    const body = await res.json();
     expect(res.status).toBe(500);
-    expect((await res.json()).error).toBe("boom");
+    expect(body.error).toBe("Status check failed");
+    expect(JSON.stringify(body)).not.toContain("/home/clawbox");
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
   });
 });
