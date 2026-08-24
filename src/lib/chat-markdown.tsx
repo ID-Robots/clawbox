@@ -188,7 +188,12 @@ function parseBlocks(text: string): MdBlock[] {
   return blocks;
 }
 
-export function renderText(text: string) {
+/**
+ * `tableLabel` names the scroll container a wide table sits in. It arrives from
+ * the caller because this module is a pure renderer with no access to `t` —
+ * the same way `audioLabel` is handed `t("chat.audioReply")`.
+ */
+export function renderText(text: string, tableLabel = "Table") {
   return parseBlocks(text).map((block, i) => {
     // The first block sits flush against the top of the bubble; every later
     // one keeps the spacing its kind had before.
@@ -209,7 +214,16 @@ export function renderText(text: string) {
           // The bubble is narrow and capped at 85% of the thread, so a wide
           // table has to scroll INSIDE itself; letting it set the bubble's
           // width would push the whole popup out of shape.
-          <div key={i} className={`${spaced ? "mt-2" : ""} max-w-full overflow-x-auto`}>
+          // A region that scrolls needs its own tab stop, or a keyboard-only
+          // reader cannot reach the columns past the right edge (WCAG 2.1.1).
+          // Focusable means it also needs a name, hence the label.
+          <div
+            key={i}
+            role="region"
+            aria-label={tableLabel}
+            tabIndex={0}
+            className={`${spaced ? "mt-2" : ""} max-w-full overflow-x-auto`}
+          >
             <table className="w-full text-xs border-collapse">
               {block.header && (
                 <thead>
@@ -296,7 +310,13 @@ export function plainTextForLabel(text: string, max = 100): string {
     // walls of a real row become spaces, or the label is read as "pipe CPU
     // pipe 6x Cortex-A78AE pipe".
     .replace(/^\s*\|[\s:|-]*-[\s:|-]*\|\s*$/gm, " ")
-    .replace(/^\s*\|(.*)\|\s*$/gm, (_, cells: string) => cells.split("|").join(" "))
+    // Reusing splitTableRow is what keeps the walls in step with the table on
+    // screen: it knows `\|` is an escaped pipe and belongs in the cell, where
+    // splitting on a bare `|` left the backslash behind to be read out loud.
+    // Inline code is already unwrapped by the time we reach here, so a pipe
+    // that was inside `` ` `` does separate cells in the label — which is the
+    // quieter reading anyway, and the pipe itself is never spoken either way.
+    .replace(/^\s*\|.*\|\s*$/gm, (row) => ` ${splitTableRow(row).join(" ")} `)
     .replace(/\s+/g, " ")
     .trim();
   if (flat.length <= max) return flat;

@@ -74,6 +74,15 @@ describe("plainTextForLabel", () => {
     expect(spoken).not.toContain("---");
   });
 
+  it("speaks an escaped pipe as the pipe the table shows, not as a backslash", () => {
+    // renderText puts a literal | in the cell for an escaped pipe. Splitting the label on
+    // every bare | left the backslash in, so the reader heard "x backslash y"
+    // while the table said "x | y". Both sides now use splitTableRow.
+    const spoken = plainTextForLabel("| esc | x \\| y |");
+    expect(spoken).toBe("esc x | y");
+    expect(spoken).not.toContain("\\");
+  });
+
   it("leaves a short plain message exactly as it is", () => {
     expect(plainTextForLabel("The lantern is green.")).toBe("The lantern is green.");
   });

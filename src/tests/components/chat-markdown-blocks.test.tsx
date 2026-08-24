@@ -155,11 +155,62 @@ describe("renderText block parsing", () => {
       expect(wrapper?.className).toContain("max-w-full");
     });
 
+    it("lets a keyboard reach the scrolled-off columns", () => {
+      // A region that scrolls but takes no focus is unreachable without a
+      // mouse: the columns past the right edge cannot be read at all.
+      const { container } = draw("| a | b |");
+      const wrapper = container.querySelector("table")?.parentElement;
+      expect(wrapper?.getAttribute("tabindex")).toBe("0");
+    });
+
+    it("names that focus stop so a screen reader announces it", () => {
+      const { container } = draw("| a | b |");
+      const wrapper = container.querySelector("table")?.parentElement;
+      expect(wrapper?.getAttribute("role")).toBe("region");
+      expect(wrapper?.getAttribute("aria-label")).toBe("Table");
+    });
+
+    it("uses the caller's translated name for the region", () => {
+      // This module cannot reach `t`, so the label is handed in — the same way
+      // `audioLabel` is handed `t("chat.audioReply")`.
+      const { container } = render(<div>{renderText("| a | b |", "Tabelle")}</div>);
+      const wrapper = container.querySelector("table")?.parentElement;
+      expect(wrapper?.getAttribute("aria-label")).toBe("Tabelle");
+    });
+
     it("keeps a lone divider-looking line as text rather than an empty table", () => {
       const { container } = draw("|---|---|");
       expect(container.querySelector("table")).toBeNull();
       expect(container.textContent).toContain("|---|---|");
     });
+
+    it("treats an alignment divider as layout, not as a row", () => {
+      const { container } = draw("| Part | Value |\n|:---|---:|\n| CPU | 6 |");
+      expect([...container.querySelectorAll("th")].map((el) => el.textContent)).toEqual([
+        "Part",
+        "Value",
+      ]);
+      expect(container.querySelectorAll("tbody tr")).toHaveLength(1);
+      expect(container.textContent).not.toContain(":---");
+    });
+
+    it("keeps a dashless row of colons as data, since it is not a divider", () => {
+      // TABLE_DIVIDER_RE demands at least one dash precisely so this real row
+      // of short cells survives instead of being eaten as layout.
+      const { container } = draw("| Part | Value |\n| : | : |");
+      const rows = [...container.querySelectorAll("tbody tr")].map((tr) =>
+        [...tr.querySelectorAll("td")].map((td) => td.textContent),
+      );
+      // No divider was found, so neither line is promoted to a header and the
+      // colon row survives as data. Were it eaten as layout, this would be a
+      // one-row table with a "Part | Value" header instead.
+      expect(container.querySelectorAll("th")).toHaveLength(0);
+      expect(rows).toEqual([
+        ["Part", "Value"],
+        [":", ":"],
+      ]);
+    });
+
 
     it("returns to prose after the table ends", () => {
       const { container } = draw("| CPU | 6 |\nThat is the whole board.");
@@ -249,9 +300,17 @@ describe("renderText block parsing", () => {
     });
 
     it("separates paragraphs split by a blank line", () => {
-      const { container } = draw("first para\n\nsecond para");
-      expect(container.textContent).toContain("first para");
-      expect(container.textContent).toContain("second para");
+      const { getByTestId } = draw("first para\n\nsecond para");
+      const bubble = getByTestId("bubble");
+      // Two blocks, not one holding both lines. Asserting only the text passed
+      // either way, so assert the boundary the test name claims.
+      const blocks = [...bubble.children];
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0].textContent).toBe("first para");
+      expect(blocks[1].textContent).toBe("second para");
+      // A blank line is a block break, not a line break inside one block.
+      expect(bubble.querySelectorAll("br")).toHaveLength(0);
+      expect(blocks[1].className).toContain("mt-2");
     });
 
     it("renders empty input as nothing", () => {
