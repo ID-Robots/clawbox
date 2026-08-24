@@ -374,21 +374,24 @@ describe("HermesAdapter", () => {
     // that — so without a check afterwards the turn would resolve as a
     // SUCCESSFUL reply with no text, and the transcript would show the agent
     // answering nothing instead of the run ending where the user stopped it.
-    let adapter!: HermesAdapter;
+    // A holder, because the response body has to reach back into the adapter
+    // that is asking for it — the Stop happens DURING the read.
+    const held: { adapter?: HermesAdapter } = {};
     const fetchImpl = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => {
         // Stop pressed after the headers, before the body parses.
-        void adapter.abortTurn();
+        void held.adapter?.abortTurn();
         throw new Error("The user aborted a request.");
       },
     }) as unknown as Response);
-    adapter = new HermesAdapter(
+    const adapter = new HermesAdapter(
       caps,
       () => ({ devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true }),
       fetchImpl as unknown as typeof fetch,
     );
+    held.adapter = adapter;
 
     await expect(
       adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" }),
