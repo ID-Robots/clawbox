@@ -79,7 +79,7 @@ function bareBox() {
 const PROBES = {
   ollamaBaseUrl: "http://127.0.0.1:11434",
   llamacpp: { installed: false, running: false, model: null },
-  embeddings: { available: false, provider: null, model: null, local: false },
+  embeddings: { supported: true, available: false, provider: null, model: null, local: false },
 };
 
 function entry(models: { id: string }[], id: string) {
@@ -184,6 +184,7 @@ describe("local model inventory", () => {
     const broken = {
       ...PROBES,
       embeddings: {
+        supported: true,
         get available(): boolean { throw new Error("probe exploded"); },
         provider: null, model: null, local: false,
       },
@@ -281,7 +282,7 @@ describe("embeddings are checked against the engine that serves them", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("idle");
@@ -296,10 +297,34 @@ describe("embeddings are checked against the engine that serves them", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("running");
     expect(emb.detail).toMatch(/on the box/i);
+  });
+});
+
+describe("the embeddings row on an edition that has no memory index", () => {
+  it("says so, rather than reporting a model that is failing to answer", async () => {
+    bareBox();
+    const { buildLocalModelInventory } = await lib();
+    const { models } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { supported: false, available: false, provider: null, model: null, local: false },
+    });
+    const emb = entry(models, "embeddings") as unknown as {
+      running: string;
+      detail: string;
+      managedBy?: string;
+    };
+    // "Not installed" invites the customer to install something. There is
+    // nothing to install on this SKU, and the amber tone that state carries
+    // asks them to look at a row they cannot act on.
+    expect(emb.running).toBe("not-on-this-edition");
+    expect(emb.detail).toMatch(/does not include it/i);
+    // ClawKeep is absent on the same edition, so pointing at it would be a
+    // second dead end inside the first.
+    expect(emb.managedBy).toBeUndefined();
   });
 });

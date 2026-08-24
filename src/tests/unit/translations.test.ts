@@ -126,6 +126,7 @@ describe("translations", () => {
         "hermesProvider",
         "skills",
         "localModels",
+        "systemProfile",
       ]);
 
       for (const key of Object.keys(translations.en)) {

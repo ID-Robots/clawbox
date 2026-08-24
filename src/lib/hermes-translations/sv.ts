@@ -331,6 +331,7 @@ export const sv: Record<string, string> = {
   "localModels.run.idle": "Stoppad",
   "localModels.run.onDemand": "Vid behov",
   "localModels.run.notInstalled": "Inte installerad",
+  "localModels.run.notOnThisEdition": "Inte tillgänglig i den här utgåvan",
 
   // === Panel ===
   "localModels.intro": "Allt som kan köras på själva boxen, och vad det gör just nu. Det som står som inte installerat saknas verkligen — det är ingen inställning du kan slå på här.",
@@ -345,4 +346,20 @@ export const sv: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Det gick inte att ändra den modellen.",
   "localModels.error.unreachable": "Det gick inte att nå boxen för att ändra den modellen.",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "Skrivbord och ström",
+  "systemProfile.desktopLabel": "Skrivbordsmiljö",
+  "systemProfile.desktopHelp": "Kör hela GNOME-skrivbordet på boxens HDMI-utgång och i Fjärrskrivbord. Stäng av det för att köra utan skärm och få tillbaka ungefär 700 MB minne — inget avinstalleras, så du kan slå på det igen när du vill.",
+  "systemProfile.performanceLabel": "Prestandaläge",
+  "systemProfile.performanceHelp": "Låser processorn och GPU:n på högsta klockfrekvens i stället för att låta dem variera. Första token kommer snabbare, men kortet ligger då på ungefär 7,2 W i vila och ihållande lokal inferens uppmättes till 74,8 °C, precis över gränsen på 74 °C för passiv kylning. Låt det vara av om du inte kör långa jobb och har luftflöde.",
+  "systemProfile.rebootRequired": "Starta om boxen för att tillämpa ändringen.",
+  "systemProfile.unsupported": "Inte tillgängligt på den här enheten.",
+  "systemProfile.powerState": "Strömprofil: {profile} · klockor: {clocks}",
+  "systemProfile.clocksPinned": "låsta",
+  "systemProfile.clocksDynamic": "dynamiska",
+  "systemProfile.memoryGuards": "Gällande minnesgränser: lokal AI {ollama}, webbläsare {browser}, skrivbord {desktop}. Den lokala AI:n betjänar {parallel} förfrågningar åt gången.",
+  "systemProfile.loadFailed": "Kunde inte läsa skrivbords- och ströminställningarna.",
+  "systemProfile.desktopFailed": "Kunde inte ändra skrivbordsinställningen.",
+  "systemProfile.powerFailed": "Kunde inte ändra strömprofilen.",
 };

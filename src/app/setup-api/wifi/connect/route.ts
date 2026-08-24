@@ -6,10 +6,19 @@ import {
   type ConnectFailReason,
 } from "@/lib/network";
 import { set, setMany } from "@/lib/config-store";
+import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  // WifiStep is step 1, before any password can exist, so this takes the
+  // bootstrap carve-out. Post-password it needs a session: joining the box to
+  // an attacker-chosen SSID takes it off the owner's LAN, and a WPA password
+  // typed into `nmcli` is a credential the caller shouldn't be able to plant
+  // anonymously. TASK-443.
+  const unauthorized = await requireSession(request, { allowBootstrap: true });
+  if (unauthorized) return unauthorized;
+
   let body: { ssid?: unknown; password?: unknown; skip?: unknown };
   try {
     body = await request.json();

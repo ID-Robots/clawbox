@@ -4,43 +4,89 @@ import fs from "fs";
 import path from "path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
 import { readEdition } from "@/lib/edition-source";
+import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 
 // ─── Setup completion ────────────────────────────────────────────────────────
 //
-// While the wizard is still running there is no session cookie yet, so every
-// /setup-api/* call would be 307'd to /login. We mirror config-store's
-// CONFIG_ROOT resolution and treat "config.json missing" or "setup_complete
-// not yet true" as the bootstrap window where /setup-api/* must pass through.
-// Cached by mtime so the per-request hit is one stat() in the steady state.
+// Before the owner has set a password there is no session cookie to have, so a
+// narrow allow-list of wizard routes must pass through unauthenticated. We
+// mirror config-store's CONFIG_ROOT resolution to read that state. Cached by
+// mtime so the per-request hit is one stat() in the steady state.
 
 const CONFIG_ROOT = process.env.CLAWBOX_ROOT
   || (process.env.NODE_ENV === "development" ? process.cwd() : "/home/clawbox/clawbox");
 const CONFIG_PATH = path.join(CONFIG_ROOT, "data", "config.json");
 
-let configCache: { mtimeMs: number; setupComplete: boolean; sessionGen: number } | null = null;
+interface ConfigSnapshot {
+  mtimeMs: number;
+  setupComplete: boolean;
+  passwordConfigured: boolean;
+  sessionGen: number;
+}
 
-function readConfigCached(): { setupComplete: boolean; sessionGen: number } {
+let configCache: ConfigSnapshot | null = null;
+
+function readConfigCached(): ConfigSnapshot {
   try {
     const stat = fs.statSync(CONFIG_PATH);
     if (configCache && configCache.mtimeMs === stat.mtimeMs) return configCache;
     const raw = fs.readFileSync(CONFIG_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as { setup_complete?: unknown; session_generation?: unknown };
-    const setupComplete = parsed.setup_complete === true;
+    const parsed = JSON.parse(raw) as {
+      setup_complete?: unknown;
+      password_configured?: unknown;
+      session_generation?: unknown;
+    };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;
-    configCache = { mtimeMs: stat.mtimeMs, setupComplete, sessionGen };
+    configCache = {
+      mtimeMs: stat.mtimeMs,
+      setupComplete: parsed.setup_complete === true,
+      passwordConfigured: parsed.password_configured === true,
+      sessionGen,
+    };
     return configCache;
-  } catch {
-    // Missing/unreadable config = pre-setup. Cache the negative answer so we
-    // don't statSync on every request before config.json is first written.
-    configCache = { mtimeMs: -1, setupComplete: false, sessionGen: 0 };
+  } catch (err) {
+    // A config.json that is genuinely ABSENT is a first-boot device: the
+    // bootstrap window has to open or the wizard can never run.
+    //
+    // A config.json that EXISTS but won't parse is a different animal — a
+    // provisioned box with a corrupt or truncated file, or one an attacker
+    // just clobbered. Treating that as "pre-setup" is fail-OPEN and hands
+    // back the whole unauthenticated window on a device that has an owner
+    // (TASK-446, crit11 note). Fail closed instead: assume set up and
+    // password-configured, so everything needs a session.
+    const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
+    configCache = {
+      mtimeMs: -1,
+      setupComplete: !missing,
+      passwordConfigured: !missing,
+      sessionGen: 0,
+    };
     return configCache;
   }
 }
 
-function isSetupComplete(): boolean {
-  return readConfigCached().setupComplete;
+/**
+ * The first-boot bootstrap window: no owner credential exists yet, so a subset
+ * of /setup-api/* (see src/lib/setup-api-gate.ts) is reachable without a
+ * session because there is no session to have.
+ *
+ * Gated on `password_configured`, NOT on `setup_complete`. The old gate used
+ * setup_complete alone, which meant a box that had set a password but not
+ * finished (or resumed) the wizard — and, after the factory-reset incident, a
+ * box whose config.json had simply lost the key — served setup/reset,
+ * update/run, system/power and install/run-step to anyone on the open AP.
+ * Once a password exists there is someone to log in as, so the window shuts.
+ *
+ * `password_configured` here is the config-store flag only; middleware is a
+ * synchronous hot path and cannot shell out to `passwd -S` per request. The
+ * handlers that care about config-vs-shadow drift (system/credentials) resolve
+ * the authoritative answer themselves via src/lib/system-password.ts.
+ */
+function isBootstrapWindowOpen(): boolean {
+  const cfg = readConfigCached();
+  return !cfg.setupComplete && !cfg.passwordConfigured;
 }
 
 // Current session generation — bumped on password change to revoke every cookie
@@ -86,12 +132,26 @@ const APPLE_PATHS = new Set([
 
 const PUBLIC_PREFIXES = [
   "/login",
-  "/setup",
   "/login-api",
   "/_next/",
   "/fonts/",
   "/images/",
 ];
+
+// The wizard PAGE. Public only while the device has no owner credential — the
+// same window its API surface is open in.
+//
+// Once a password exists, a half-finished or resumed wizard has to log in
+// first. That isn't just tidiness: it is what makes the API allow-list
+// survivable. CredentialsStep's password POST hands back a session cookie, so
+// steps 4-5 (AI models, Telegram, setup/complete) run authenticated and need no
+// pre-auth carve-out at all. A user who comes back in a fresh browser gets
+// /login?redirect=/setup and lands right back on the step they left.
+const WIZARD_PAGE_PREFIX = "/setup";
+
+function isWizardPagePath(pathname: string): boolean {
+  return pathname === WIZARD_PAGE_PREFIX || pathname.startsWith(WIZARD_PAGE_PREFIX + "/");
+}
 
 // Endpoints the unauthenticated /login + /setup pages must reach before a
 // session exists. Everything else under /setup-api/ requires a session
@@ -120,85 +180,12 @@ const LOOPBACK_PROXY_PREFIXES = [
   "/setup-api/local-ai/ollama",
 ];
 
-// Sensitive /setup-api/* surfaces that must NEVER be reachable without a session
-// (or the MCP bearer) — not even during the pre-setup wizard window. These are
-// desktop-app / agent backends (file access, browser automation, the code
-// workspace, the remote-desktop bridge, and the gateway-token endpoints) with
-// no role in first-boot onboarding. The blanket pre-setup pass below used to
-// expose them unauthenticated while the open `ClawBox-Setup` AP was up, turning
-// otherwise-local issues into network-adjacent, pre-auth ones.
-const PRE_AUTH_SENSITIVE_PREFIXES = [
-  "/setup-api/files",
-  "/setup-api/browser",
-  "/setup-api/code",        // code workspace file ops / build (also /code/*)
-  "/setup-api/code-server",
-  "/setup-api/webapps",
-  "/setup-api/vnc",
-  "/setup-api/terminal",
-  "/setup-api/clawkeep",    // backup restore/encryption/pairing — data-injection surface
-  "/setup-api/tunnel",      // enabling remote tunnel access
-  "/setup-api/portal",      // same privileged tunnel start/stop/enable as /tunnel
-  "/setup-api/apps/install",
-  "/setup-api/apps/uninstall",
-  "/setup-api/apps/settings",  // privileged `openclaw config set skills.*` + credential writes
-  "/setup-api/gateway/ws-config", // hands back the live gateway auth token
-  "/setup-api/chat",        // reads generated media out of the harness media tree
-  "/setup-api/local-models", // POST enables/disables real systemd units through sudo
-  "/setup-api/tts",         // POST rewrites messages.tts.provider and spawns the openclaw CLI
-  "/setup-api/pets",        // POST downloads ~2.2 MB from a third party and rewrites display.pet.*
-  // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
-  // AP, so anything left pre-auth is reachable by anyone in radio range.
-  //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.
-  //   - /hermes/skills/* installs & uninstalls agent skills (code execution).
-  //   - /harness/select rewrites which agent the device runs.
-  // None of the three has any onboarding role: chat is only called from
-  // ChatPopup, the skills store only from HermesSkillsStore (both desktop-only,
-  // mounted from page.tsx), and the harness picker only from SettingsApp.
-  //
-  // Deliberately NOT listed — the wizard calls these BEFORE setup completes, so
-  // gating them would make the Hermes SKU unprovisionable:
-  //   /setup-api/harness/active         (AIModelsStep.tsx — the ONLY harness
-  //                                      route the wizard touches; /status is
-  //                                      HarnessPicker-only, so it is gated)
-  //   /setup-api/hermes/models          (HermesProviderConfig + useHermesModelOptions)
-  //   /setup-api/hermes/clawai          (ClawBox AI sign-in during onboarding)
-  //   /setup-api/hermes/oauth           (provider OAuth status during onboarding)
-  //   /setup-api/hermes/provider-key    (writes the provider key the wizard collects)
-  // That is exactly the same pre-auth exposure the OpenClaw SKU already accepts
-  // for /setup-api/ai-models/* on the same AP, and the read paths return status
-  // booleans (hasToken/loggedIn), never the stored secrets.
-  "/setup-api/hermes/chat",
-  "/setup-api/hermes/skills",
-  "/setup-api/harness/select",
-  "/setup-api/harness/status",  // probes both harnesses; only the desktop picker calls it
-];
-// Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
-// `/setup-api/gateway/health`, which the wizard's readiness check legitimately
-// polls before setup completes. The SPA proxy at the bare path injects the
-// gateway token into HTML, so it stays gated.
-const PRE_AUTH_SENSITIVE_EXACT = new Set([
-  "/setup-api/gateway",
-  // The leaf only, NOT the `/setup-api/mascot-lines` subtree: the GET is what
-  // the crab reads its phrases from and it runs on the wizard, so gating the
-  // subtree would leave the mascot mute during setup. The POST is the
-  // expensive half — each call cold-loads a ~3.8 GB model on a Jetson for up
-  // to three minutes — and it has no onboarding role at all: its only caller
-  // is the Settings button, which is desktop-only and therefore post-setup.
-  // Left ungated it was a free way for anyone in radio range of the open
-  // `ClawBox-Setup` AP to pin the box's memory and CPU.
-  "/setup-api/mascot-lines/regenerate",
-]);
-
-function isSensitiveSetupApi(pathname: string): boolean {
-  // Normalize a trailing slash so `/setup-api/gateway/` can't dodge the exact
-  // match (Next.js may not always redirect it before middleware runs).
-  const p0 = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
-  if (PRE_AUTH_SENSITIVE_EXACT.has(p0)) return true;
-  for (const p of PRE_AUTH_SENSITIVE_PREFIXES) {
-    if (p0 === p || p0.startsWith(p + "/")) return true;
-  }
-  return false;
-}
+// Which /setup-api/* routes are reachable during the first-boot bootstrap
+// window lives in src/lib/setup-api-gate.ts as an ALLOW-list. See that file for
+// why the previous deny-list (`PRE_AUTH_SENSITIVE_PREFIXES`) was inverted:
+// every route nobody remembered to name was served unauthenticated on the open
+// `ClawBox-Setup` AP, which is how setup/reset, update/run, system/power and
+// install/run-step ended up pre-auth (TASK-443/446).
 
 // Paths that exist ONLY because next.config.ts rewrites them to the OpenClaw
 // gateway (see the edition check in the middleware body).
@@ -224,6 +211,9 @@ const PUBLIC_EXACT = new Set([
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_EXACT.has(pathname)) return true;
   if (PRE_AUTH_API_PATHS.has(pathname)) return true;
+  // `/setup-api/...` also starts with `/setup`, so this must not be a bare
+  // prefix test — isWizardPagePath matches on a segment boundary.
+  if (isWizardPagePath(pathname) && isBootstrapWindowOpen()) return true;
   // Match each prefix on a path-segment boundary. Bare `startsWith("/setup")`
   // would also match `/setup-api/...` and silently expose every protected
   // setup-api route — that was the original auth-bypass.
@@ -333,28 +323,35 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  // 3a. Setup wizard bootstrap — production-server.js always provisions
+  // 3a. First-boot bootstrap — production-server.js always provisions
   // SESSION_SECRET so the env-var short-circuit above never fires in real
-  // deployments. While setup_complete is not yet true the wizard runs without
-  // a session cookie; let it reach its API surface so it can configure WiFi,
-  // run the updater, set the password, etc. Once setup completes the gate
-  // closes and every /setup-api/* request requires a valid session.
-  if (pathname.startsWith("/setup-api/") && !isSetupComplete()) {
-    // ...except the sensitive surfaces above, which stay gated even pre-setup
-    // (they play no part in onboarding). They fall through to the session /
-    // MCP-bearer checks below, so an authenticated caller still reaches them.
-    if (!isSensitiveSetupApi(pathname)) {
+  // deployments. While the device has no owner credential the wizard runs
+  // without a session cookie, so the handful of routes steps 1-3 need are let
+  // through; everything else falls to the session / MCP-bearer checks below.
+  //
+  // Two changes from the old gate, both load-bearing (TASK-443):
+  //   - ALLOW-list, not deny-list. The default is now 401.
+  //   - keyed on `password_configured`, not `setup_complete`. A box that has a
+  //     password but an unfinished wizard is a box with an owner.
+  if (pathname.startsWith("/setup-api/") && isBootstrapWindowOpen()) {
+    if (isBootstrapAllowedPath(pathname)) {
       return NextResponse.next();
     }
   }
 
   // 3b. Trusted-test-environment escape hatch for the e2e-install harness.
-  // Scoped to /setup-api/* only — page requests still go through the
-  // normal /login redirect so the login-round-trip spec can verify it.
+  // Scoped to /setup-api/* and the wizard page — every other page request
+  // still goes through the normal /login redirect so the login-round-trip
+  // spec can verify it. The harness drives the wizard past the password step
+  // over plain HTTP with no cookie jar, which the session gate on /setup
+  // would otherwise stop.
   // Mirrors the convention src/lib/network.ts uses to skip hardware-only
   // nmcli paths; both are gated on the flag install.sh writes when it
   // boots under CLAWBOX_TEST_MODE.
-  if (process.env.CLAWBOX_TEST_MODE === "1" && pathname.startsWith("/setup-api/")) {
+  if (
+    process.env.CLAWBOX_TEST_MODE === "1"
+    && (pathname.startsWith("/setup-api/") || isWizardPagePath(pathname))
+  ) {
     return NextResponse.next();
   }
 

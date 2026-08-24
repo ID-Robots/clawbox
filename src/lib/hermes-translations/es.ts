@@ -330,6 +330,7 @@ export const es: Record<string, string> = {
   "localModels.run.idle": "Detenido",
   "localModels.run.onDemand": "Bajo demanda",
   "localModels.run.notInstalled": "No instalado",
+  "localModels.run.notOnThisEdition": "No disponible en esta edición",
 
   // === Panel ===
   "localModels.intro": "Todo lo que puede ejecutarse en la propia caja y lo que está haciendo ahora mismo. Lo que aparece como no instalado es que de verdad no está — no es un ajuste que puedas activar aquí.",
@@ -344,4 +345,20 @@ export const es: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "No se pudo cambiar ese modelo.",
   "localModels.error.unreachable": "No se pudo contactar con la caja para cambiar ese modelo.",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "Escritorio y energía",
+  "systemProfile.desktopLabel": "Entorno de escritorio",
+  "systemProfile.desktopHelp": "Ejecuta el escritorio GNOME completo en la salida HDMI de la caja y en Escritorio remoto. Desactívalo para funcionar sin pantalla y recuperar unos 700 MB de memoria: no se desinstala nada, así que puedes volver a activarlo cuando quieras.",
+  "systemProfile.performanceLabel": "Modo de rendimiento",
+  "systemProfile.performanceHelp": "Fija la CPU y la GPU a su frecuencia máxima en lugar de dejar que se ajusten. Llega antes al primer token, pero la placa se queda en reposo a unos 7,2 W y la inferencia local sostenida se midió a 74,8 °C, justo por encima del límite de 74 °C de la refrigeración pasiva. Déjalo desactivado salvo que ejecutes tareas largas y tengas ventilación.",
+  "systemProfile.rebootRequired": "Reinicia la caja para aplicar este cambio.",
+  "systemProfile.unsupported": "No disponible en este dispositivo.",
+  "systemProfile.powerState": "Perfil de energía: {profile} · frecuencias: {clocks}",
+  "systemProfile.clocksPinned": "fijas",
+  "systemProfile.clocksDynamic": "dinámicas",
+  "systemProfile.memoryGuards": "Límites de memoria en vigor: IA local {ollama}, navegador {browser}, escritorio {desktop}. La IA local atiende {parallel} peticiones a la vez.",
+  "systemProfile.loadFailed": "No se pudieron leer los ajustes de escritorio y energía.",
+  "systemProfile.desktopFailed": "No se pudo cambiar el ajuste de escritorio.",
+  "systemProfile.powerFailed": "No se pudo cambiar el perfil de energía.",
 };

@@ -737,6 +737,11 @@ function UpdateProgressCard({
   onDismiss: () => void;
 }) {
   const failedSteps = state?.steps.filter((s) => s.status === "failed") ?? [];
+  // Non-fatal problems the update found and worked around — build drift, a
+  // missing update pin it wrote for the owner. Krasi's ruling is that these
+  // warn rather than block, which only means anything if they are visible;
+  // the text comes from the server alongside the step labels.
+  const warnings = state?.warnings ?? [];
   return (
     <div className={CARD}>
       <div className="flex items-center justify-between gap-3">
@@ -773,6 +778,20 @@ function UpdateProgressCard({
               }>
                 {step.label}
               </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {warnings.length > 0 && (
+        <ul className="mt-4 space-y-2">
+          {warnings.map((w) => (
+            <li
+              key={w.code}
+              className="flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
+            >
+              <span className="material-symbols-rounded text-amber-300 shrink-0" style={{ fontSize: 16 }}>warning</span>
+              <span>{w.message}</span>
             </li>
           ))}
         </ul>

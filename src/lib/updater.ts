@@ -1,6 +1,7 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { readFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
+import { existsSync } from "fs";
 import path from "path";
 import { get, set, setMany } from "./config-store";
 import {
@@ -14,6 +15,7 @@ import { runHermesCli } from "./hermes-cli";
 import { isPortOpen } from "./port-probe";
 import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
+import { collectBuildIdentity } from "./build-identity";
 
 const PROJECT_DIR = "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
@@ -90,11 +92,31 @@ export type UpdatePhase =
   | "completed"
   | "failed";
 
+/**
+ * A non-fatal problem the update noticed and worked around.
+ *
+ * Krasi's ruling on build drift is WARN + AUTO-REPIN, not block: a box whose
+ * deployed build or checkout has wandered still updates, but it has to SAY so
+ * — silently converging is how the drift went unnoticed for a fortnight. The
+ * `code` is machine-readable so a caller can act on it; `message` is the line
+ * shown in the update log, written server-side alongside the step labels.
+ */
+export interface UpdateWarning {
+  code: string;
+  message: string;
+}
+
 export interface UpdateState {
   phase: UpdatePhase;
   steps: StepState[];
   currentStepIndex: number;
   error?: string;
+  /**
+   * Warnings raised during this run, oldest first. Optional rather than
+   * required so every existing construction of an UpdateState — and every
+   * client reading one — keeps compiling and behaving exactly as before.
+   */
+  warnings?: UpdateWarning[];
 }
 
 export { RESTART_STEP_ID } from "./update-constants";
@@ -264,6 +286,176 @@ async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
   return main;
 }
 
+/**
+ * Record a warning on the running update: journal + update log.
+ *
+ * De-duplicated by code, because the same condition can be observed twice in
+ * one run (before the rebuild and again by the post-update verification) and a
+ * doubled line reads like two separate problems.
+ */
+function warnUpdate(code: string, message: string): void {
+  console.warn(`[Updater] WARNING: ${message}`);
+  if (!state.warnings) state.warnings = [];
+  if (state.warnings.some((w) => w.code === code)) return;
+  state.warnings.push({ code, message });
+}
+
+/**
+ * Persist this run's warnings across the reboot the rebuild step performs.
+ *
+ * Drift is detected BEFORE the rebuild and the device restarts moments later,
+ * so without this the one line the owner most needs to see is the one line the
+ * reboot eats.
+ */
+async function persistWarnings(): Promise<void> {
+  await set("update_warnings", state.warnings?.length ? JSON.stringify(state.warnings) : undefined);
+}
+
+async function restoreWarnings(): Promise<UpdateWarning[]> {
+  try {
+    const raw = await get("update_warnings");
+    if (typeof raw !== "string") return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (w): w is UpdateWarning =>
+        !!w && typeof (w as UpdateWarning).code === "string" && typeof (w as UpdateWarning).message === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * AUTO-REPIN. A device with no usable `.update-branch` is not blocked and is
+ * not left as it was: it is pinned to the branch this very update resolved,
+ * so the next one converges on the tested commit by record rather than by
+ * whatever `git symbolic-ref` happens to answer after a re-clone.
+ *
+ * This writes the same file install.sh's persist_update_branch_pin writes and
+ * that resolveUpdateBranch reads — one pin mechanism, not a second one. An
+ * existing, VALID pin is never overwritten: that value is the operator's
+ * choice (Settings → update branch) and repinning it would silently move a QA
+ * box off the branch it was put on.
+ *
+ * Returns the warnings to raise rather than raising them, so the decision can
+ * be tested against a throwaway directory without a running update.
+ *
+ * `projectDir` is a parameter for that reason alone; every caller passes
+ * PROJECT_DIR.
+ */
+export async function repinUpdateBranch(
+  resolved: string,
+  projectDir: string = PROJECT_DIR,
+): Promise<UpdateWarning[]> {
+  const pinFile = path.join(projectDir, ".update-branch");
+  let existing: string | null = null;
+  try {
+    existing = (await readFile(pinFile, "utf-8")).trim();
+  } catch {
+    // No pin file at all — the common unpinned case.
+  }
+
+  if (existing && isSafeBranch(existing)) return [];
+
+  if (!isSafeBranch(resolved)) {
+    return [{
+      code: "repin-refused",
+      message: `Cannot pin this device: "${resolved}" is not a usable branch name.`,
+    }];
+  }
+
+  try {
+    await writeFile(pinFile, `${resolved}\n`, { mode: 0o644 });
+    return [{
+      code: "repinned",
+      message: existing
+        ? `This box carried an unusable update pin ("${existing}") — re-pinned to the tested branch "${resolved}".`
+        : `This box carried no update pin — pinned to the tested branch "${resolved}" so future updates are repeatable.`,
+    }];
+  } catch (err) {
+    return [{
+      code: "repin-failed",
+      message: `Could not write the update pin: ${err instanceof Error ? err.message : "unknown error"}`,
+    }];
+  }
+}
+
+/**
+ * Report — never block — a box whose deployed build or checkout has drifted.
+ *
+ * The condition this exists for: a device serving assets built from one commit
+ * while its source tree sits on another. Two features 404'd on such a box for
+ * a fortnight and nothing anywhere said why. Returns one warning per problem,
+ * and an empty list for a healthy box.
+ */
+export async function collectDriftWarnings(
+  projectDir: string = PROJECT_DIR,
+): Promise<UpdateWarning[]> {
+  try {
+    const { drift } = await collectBuildIdentity(projectDir);
+    return drift.codes
+      .map((code, i) => ({ code: code as string, message: drift.reasons[i] as string | undefined }))
+      .filter((w): w is UpdateWarning => !!w.message);
+  } catch (err) {
+    // Never fail an update because the diagnosis failed.
+    console.warn("[Updater] Could not read build identity before sync:", err);
+    return [];
+  }
+}
+
+/**
+ * Run scripts/verify-build-identity.sh against `projectDir`.
+ *
+ * Delegating to the script rather than reimplementing the comparison here is
+ * the point: CI gates pull requests with the same code path, so the device and
+ * the pipeline cannot come to different conclusions about the same build.
+ *
+ * "skipped" is not "passed" — it means the script was not there to run, which
+ * is reported as a warning rather than a failure.
+ */
+export async function runBuildIdentityCheck(
+  projectDir: string = PROJECT_DIR,
+): Promise<{ status: "ok" | "skipped"; detail: string } | { status: "failed"; detail: string }> {
+  const script = path.join(projectDir, "scripts", "verify-build-identity.sh");
+  if (!existsSync(script)) {
+    return { status: "skipped", detail: "scripts/verify-build-identity.sh is missing" };
+  }
+  try {
+    const { stdout } = await execFile("/bin/bash", [script, "--project-dir", projectDir], {
+      timeout: 60_000,
+    });
+    return { status: "ok", detail: stdout.trim() };
+  } catch (err) {
+    const e = err as { stderr?: string; stdout?: string; message?: string };
+    const detail = (e.stderr || e.stdout || e.message || "").trim().split("\n").filter(Boolean).pop()
+      || "build identity could not be verified";
+    return { status: "failed", detail };
+  }
+}
+
+/**
+ * The loud half of the ruling: after the rebuild, the build MUST be the code
+ * on disk. Everything before this warns and carries on; this one fails.
+ */
+async function verifyBuildIdentityAfterUpdate(): Promise<void> {
+  const result = await runBuildIdentityCheck();
+  if (result.status === "ok") {
+    console.log(`[Updater] ${result.detail}`);
+    return;
+  }
+  if (result.status === "skipped") {
+    warnUpdate(
+      "verify-script-missing",
+      `Could not verify the new build's identity: ${result.detail}.`,
+    );
+    return;
+  }
+  throw new Error(
+    `The device rebooted onto a build that does not match its own source — ${result.detail}`,
+  );
+}
+
 async function updateClawBoxAndReboot(): Promise<void> {
   // Fix .git ownership — previous root operations (install.sh) may have
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
@@ -273,6 +465,13 @@ async function updateClawBoxAndReboot(): Promise<void> {
   const { local, upstream } = await resolveUpdateBranch(gitCmd);
 
   console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
+
+  // WARN + AUTO-REPIN, in that order and before the sync destroys the
+  // evidence: say what was wrong with this box, then pin it so the next
+  // update is repeatable. Neither step can stop the update.
+  for (const w of await collectDriftWarnings()) warnUpdate(w.code, w.message);
+  for (const w of await repinUpdateBranch(local)) warnUpdate(w.code, w.message);
+  await persistWarnings();
 
   // Hard-sync to upstream. The device is an appliance — the working tree
   // must always match what we ship, period. Local edits made via SSH /
@@ -552,6 +751,19 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     // directly contradicted the step before it: post_update's smoke test
     // fails the install if anything IS listening on 18789.
     applies: () => !gatewayIsAbsent(),
+  },
+  {
+    // The only hard gate this feature adds. Everything before it warns and
+    // carries on; a device that has finished rebuilding and STILL does not
+    // serve its own source has a problem no warning covers — that is the
+    // state in which fixes look shipped and are not.
+    //
+    // Last, and after the reboot: it can only be answered once the new build
+    // is the one on disk.
+    id: "verify_build_identity",
+    label: "Verifying the new build matches the code",
+    timeoutMs: 60_000,
+    customRun: verifyBuildIdentityAfterUpdate,
   },
 ];
 
@@ -871,6 +1083,7 @@ function createInitialState(steps: UpdateStepDef[]): UpdateState {
     phase: "idle",
     steps: createStepStates(steps),
     currentStepIndex: -1,
+    warnings: [],
   };
 }
 
@@ -878,7 +1091,11 @@ let state: UpdateState = createInitialState(applicableSteps());
 let running = false;
 
 export function getUpdateState(): UpdateState {
-  return { ...state, steps: state.steps.map((s) => ({ ...s })) };
+  return {
+    ...state,
+    steps: state.steps.map((s) => ({ ...s })),
+    warnings: (state.warnings ?? []).map((w) => ({ ...w })),
+  };
 }
 
 export function resetUpdateState(): void {
@@ -946,6 +1163,7 @@ export async function checkContinuation(): Promise<boolean> {
       ? (await readRootStepFailure(REBUILD_ROOT_STEP)) ?? "Rebuild failed before the restart"
       : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
     state = createInitialState(steps);
+    state.warnings = await restoreWarnings();
     state.phase = "failed";
     for (let i = 0; i < restartIndex; i++) {
       state.steps[i].status = "completed";
@@ -958,6 +1176,10 @@ export async function checkContinuation(): Promise<boolean> {
 
   running = true;
   state = createInitialState(steps);
+  // The drift warnings were raised before the rebuild, one reboot ago. Carry
+  // them into the second half of the run so the owner still sees why their
+  // box was repinned.
+  state.warnings = await restoreWarnings();
   state.phase = "running";
   for (let i = 0; i <= restartIndex; i++) {
     state.steps[i].status = "completed";
@@ -1124,6 +1346,11 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       update_completed_at: new Date().toISOString(),
     });
   }
+  // The warnings have been carried across the reboot and are now in the live
+  // state; drop the persisted copy so the NEXT update starts from a clean
+  // sheet rather than re-showing a condition it already fixed.
+  await set("update_warnings", undefined);
+
   // Force the next /update/versions poll to refetch — both the device's
   // installed versions and the desktop notification depend on it.
   invalidateVersionCache();
