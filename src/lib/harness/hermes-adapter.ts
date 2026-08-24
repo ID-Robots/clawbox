@@ -481,10 +481,11 @@ export class HermesAdapter implements HarnessAdapter {
    * Draw one picture through the box's own images route.
    *
    * This is the half of image generation that OpenClaw gets from its agent and
-   * Hermes had nowhere to get at all: the agent has no image tool and no
-   * provider slot to grow one, so before this a request for a picture reached
-   * nothing and the turn ran until it timed out. The trigger moves to the
-   * composer and the box makes the call — see `imageGenerationTrigger`.
+   * Hermes could not: its image-generation provider slot ships EMPTY, so before
+   * this a request for a picture reached no provider and the turn ran until it
+   * timed out. The trigger moves to the composer and the box makes the call —
+   * see `imageGenerationTrigger`, which is also where a box whose slot HAS been
+   * filled goes back to being asked in plain words instead.
    *
    * NOT threaded through `sessionId`, and that is a deliberate limit rather
    * than an oversight: the picture is fetched from the proxy without the agent

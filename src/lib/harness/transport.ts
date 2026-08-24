@@ -72,11 +72,11 @@ export interface HarnessCapabilities {
    *                wired up through `agents.defaults.imageGenerationModel`.
    *                Nothing in the composer to render: the ordinary send path
    *                already carries the request.
-   *   `'composer'` the BOX asks, because the agent has nothing to reach for.
-   *                Hermes, which has no image plugin and no provider slot to
-   *                grow one, so the picture is fetched from the ClawBox AI
-   *                images endpoint by `generateImage` below. This is the value
-   *                that puts a button in the composer.
+   *   `'composer'` the BOX asks, because the agent has nothing REGISTERED to
+   *                reach for. Hermes, whose image-generation provider slot
+   *                exists and ships empty, so the picture is fetched from the
+   *                ClawBox AI images endpoint by `generateImage` below. This is
+   *                the value that puts a button in the composer.
    *   `null`       no picture can be made here at all. Always the value when
    *                `canGenerateImages` is false, and never a value when it is
    *                true — the two are computed together for exactly that
@@ -86,9 +86,13 @@ export interface HarnessCapabilities {
    * reason `reasoningScope` is a scope rather than `canSetReasoning`: the
    * ability is present on both editions and only its ROUTE differs, and
    * flattening that difference into a boolean about a control is how a UI ends
-   * up asking "is this Hermes?" again. A Hermes that grows a real image tool
-   * upstream becomes `'agent'` here and the button correctly disappears,
-   * without a line of the composer changing.
+   * up asking "is this Hermes?" again.
+   *
+   * It is also the seam where the OTHER half of this work merges. A Hermes box
+   * whose `image_gen` provider slot has been FILLED can be asked in plain words
+   * on every channel it answers on, not only in this chat — so such a box
+   * should report `'agent'`, the button should disappear, and the composer
+   * needs no edit at all for that to happen. One expression decides it.
    */
   readonly imageGenerationTrigger: "agent" | "composer" | null;
   /** Replies can be spoken back (TTS). */

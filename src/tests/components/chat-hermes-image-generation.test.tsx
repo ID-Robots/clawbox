@@ -12,11 +12,12 @@ import { resetHarnessCache } from "@/lib/client-harness";
  * Asking a Hermes box for a picture, from the composer.
  *
  * This is the feature the capability table said was absent until now, and the
- * reason it was absent is worth keeping in view: the Hermes agent has no image
- * tool and no provider slot to grow one, so asking for a picture in words
- * reached nothing at all and the turn ran until it timed out. The proxy was
- * never the blocker — it serves image generation to the same device token voice
- * input already spends — so the fix is a caller, and the caller is the box.
+ * reason it was absent is worth keeping in view: the Hermes agent's
+ * image-generation provider slot EXISTS and ships empty, so asking for a
+ * picture in words reached no provider at all and the turn ran until it timed
+ * out. The proxy was never the blocker — it serves image generation to the same
+ * device token voice input already spends — so the fix is a caller, and on a
+ * box with an empty slot the caller is the box itself.
  *
  * Which means the TRIGGER moves to the composer, and these tests are mostly
  * about that button being honest: present exactly when the box can draw, absent

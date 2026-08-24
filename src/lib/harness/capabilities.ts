@@ -135,14 +135,15 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // (`hasClawaiImageRoute`, probed against the proxy's own discovery
       // endpoint). Either one alone is a button that ends in an error bubble.
       //
-      // This was FALSE outright until the trigger landed, and the note it
-      // replaces is worth keeping in mind because it explains the shape of the
-      // fix. On OpenClaw a picture is made by the AGENT reaching for its own
-      // image tool — the user just asks — and that tool is a bundled plugin
-      // configured through `agents.defaults.imageGenerationModel`. Hermes has
-      // no such plugin and no image-generation provider slot to put one in, so
-      // a request for a picture reached nothing at all and the turn ran until
-      // it timed out. The credential was never the blocker: the proxy serves
+      // This was FALSE outright until the trigger landed. On OpenClaw a picture
+      // is made by the AGENT reaching for its own image tool — the user just
+      // asks — and that tool is a bundled plugin configured through
+      // `agents.defaults.imageGenerationModel`. On Hermes the equivalent slot
+      // EXISTS (`image_gen.provider`, served by plugins discovered from
+      // `~/.hermes/plugins/image_gen/`) and ships EMPTY, so a request for a
+      // picture reached no provider and the turn ran until it timed out. A box
+      // whose slot has since been filled wants `'agent'` below rather than this
+      // composer path. The credential was never the blocker: the proxy serves
       // `POST /images/generations` to the same device token `canTranscribe`
       // reads. What was missing was a CALLER, and the box is now it — see
       // `imageGenerationTrigger` just below, and `clawai-images.ts`.

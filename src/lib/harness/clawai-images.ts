@@ -12,12 +12,24 @@ import type { FetchLike } from "./transport";
  *
  * WHY THE BOX CALLS THIS AND NOT THE AGENT. On OpenClaw a picture is drawn by
  * the AGENT reaching for its own image tool — a bundled plugin wired up through
- * `agents.defaults.imageGenerationModel`. Hermes has no such plugin and no
- * image-generation provider slot to put one in, so a request for a picture on
- * that edition reached nothing at all: the agent looked for a tool it does not
- * have and the turn ran until it timed out. The proxy was never the blocker —
- * it serves image generation to the same device token voice input already
- * spends — so what this module adds is the one missing half, a CALLER.
+ * `agents.defaults.imageGenerationModel`. On Hermes the equivalent slot is
+ * EMPTY, and the distinction matters: upstream Hermes DOES have an
+ * image-generation provider mechanism — `agent/image_gen_registry.py` dispatches
+ * every `image_generate` call to whatever `image_gen.provider` names, and
+ * `hermes_cli/plugins.py` discovers user backends from
+ * `~/.hermes/plugins/image_gen/<name>/` — it just ships with nothing in it. So a
+ * request for a picture reached no provider at all: the agent looked for a tool
+ * that was not registered, and the turn ran until it timed out.
+ *
+ * The proxy was never the blocker either — it serves image generation to the
+ * same device token voice input already spends. What was missing was a CALLER,
+ * and this module is one: the box asks directly, so the composer works on a box
+ * whose slot is empty, which is every stock Hermes box.
+ *
+ * THE OTHER HALF IS A SEPARATE FIX. Filling that plugin slot makes the AGENT
+ * able to draw, in every channel it answers on rather than only in this chat.
+ * The two compose rather than compete — `imageGenerationTrigger` is the one
+ * expression deciding which of them a given box should offer.
  *
  * The credential is resolved through `resolveClawaiToken`, which knows both
  * editions' stores, so nothing here is Hermes-specific. What IS edition-
@@ -267,6 +279,23 @@ export async function generateClawaiImage(
 
   let res: Response;
   try {
+    // CodeQL `js/file-access-to-http` ("file data in outbound network request")
+    // flags this, and it is a false positive here — the same one it raises on
+    // every credentialed call in this codebase, including the transcription
+    // route next door, which is dismissed on beta for this reason.
+    //
+    // What the rule models is exfiltration: file CONTENT leaving the box, or
+    // file content choosing WHERE a request goes. Neither happens. The only
+    // file-derived value is the device's own ClawBox AI token, and it travels
+    // in the `Authorization` header of the one service it was minted for — that
+    // is the authorised use of a credential, not a disclosure of it. The
+    // destination is a module constant; nothing read from disk can influence
+    // it, so there is no SSRF to be had either. The prompt comes from the
+    // request, not from a file.
+    //
+    // Deliberately not restructured to quiet the scanner: a credential has to
+    // be read from somewhere and put in a header, and rearranging that to break
+    // the taint path would hide the pattern rather than change it.
     res = await fetchImpl(CLAWBOX_AI_IMAGES_ENDPOINT, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
