@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { sourceLabel, trustMeta } from '@/lib/hermes-skills';
-import { COPY } from './copy';
+import { useCopy } from './copy';
 
 // Shared visual atoms for the Hermes Skills store. Same vocabulary as the
 // OpenClaw AppStore (rounded-2xl cards, material-symbols icons, chip rows) but
@@ -65,6 +65,7 @@ export function SourceChip({ source }: { source?: string }) {
 }
 
 export function ScanChip({ verdict, findings }: { verdict?: string; findings?: number }) {
+  const COPY = useCopy();
   if (!verdict) return null;
   const clean = verdict.toLowerCase() === 'safe' && !findings;
   return (
