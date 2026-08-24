@@ -29,12 +29,35 @@ Started from the **System Update** app (or Settings). Steps, in order — each p
 | `gateway_setup` | (Re)installs the gateway service file + drop-ins |
 | `restart` | **The hard-sync + rebuild**: `git fetch` → `git reset --hard HEAD` → checkout channel branch → `git reset --hard origin/<channel>` → `git clean -fd` → full `bun install` + `next build` → **reboot** |
 | `post_update` | Fixups (hostname, dispatcher, smoke checks) — advisory |
+| `verify_build_identity` | Asserts the build the box rebooted onto names the commit now checked out (`scripts/verify-build-identity.sh`) — the one step that fails loudly on drift |
 
 Key properties:
 
 - **`git clean -fd` (no `-x`)** — gitignored paths are never touched, which is what preserves `data/`, `.env`, `node_modules`, and your state. See [what survives](/technical/filesystem#what-survives-what).
 - **The final step reboots the box.** Expect ~1–2 minutes of unreachability; the UI reconnects and resumes progress reporting afterwards.
 - After reboot, completion is only reported if the build fingerprint (`.next/BUILD_ID`) actually changed and the rebuild unit succeeded — a failed rebuild surfaces as a failed step, not a silent "complete".
+
+## Build identity and drift
+
+`.next/BUILD_ID` proves two asset sets differ; it never says which source produced them. So every build also writes **`.next/build-info.json`** (commit, short commit, branch, dirty flag, build time, the `BUILD_ID` it belongs to, node/bun versions, the Hermes and OpenClaw pins) via `scripts/write-build-info.mjs`, and the postbuild step copies it into `.next/standalone/.next/` — the tree the service actually runs from.
+
+`GET /setup-api/system/build-identity` compares three things that are not assumed to agree:
+
+| | |
+|---|---|
+| **deployed build** | the commit stamped into the build the box is serving |
+| **checkout** | `git rev-parse HEAD` in `/home/clawbox/clawbox` |
+| **pin** | the tested branch in `.update-branch` |
+
+It returns a `drift` object (`buildVsCheckout`, `checkoutVsPin`, `detected`, plus plain-language `reasons` and machine-readable `codes`). Settings → **About** shows the commit, branch and build time; **About** and **System** raise a warning banner as soon as drift is detected.
+
+Drift does **not** block an update. When the updater finds it, the update:
+
+1. **warns** — one line per problem, in the update log and the journal;
+2. **auto-repins** — a box with no usable `.update-branch` is pinned to the branch the update resolved, so the next one is repeatable (an operator's existing pin is never overwritten);
+3. **rebuilds**, then **verifies**. `verify_build_identity` is the only hard gate: a device that has rebuilt and still does not serve its own source fails the update loudly rather than serving 404s for features whose code is on disk.
+
+The same script runs in CI (`.github/workflows/build-identity.yml`), so a pull request whose build cannot be traced back to its own commit goes red.
 
 ## Update channels
 
@@ -77,3 +100,4 @@ On the **beta channel** (and the next stable release), this state is detected ex
 | `GET /setup-api/update/status` | Live step progress (polled by the UI) |
 | `POST /setup-api/update/reset` | Reset-to-channel & update *(beta)* |
 | `GET/POST /setup-api/system/update-branch` | Read/set the channel pin |
+| `GET /setup-api/system/build-identity` | Deployed build vs checkout vs pin, with the drift verdict (add `?force=1` to bypass the 30 s cache) |
