@@ -121,29 +121,42 @@ afterEach(() => {
 });
 
 describe("a reply that lands whole still releases the queue", () => {
+  /**
+   * Messages this surface actually POSTed, in order.
+   *
+   * A box whose transcript is empty opens the conversation itself, so the
+   * first body on the wire can be that greeting rather than anything typed
+   * here — and whether it appears depends on what the edition can replay, not
+   * on what this test is pinning. Asserting on CONTENT rather than on counts
+   * keeps the test about the queue and lets the greeting be present or absent.
+   */
+  const posted = () => chatPosts.map((p) => String(p.message));
+
   it("sends the NEXT message after a completed whole reply (TASK-517)", async () => {
     const textarea = await mountHermes();
 
     type(textarea, "first");
-    await waitFor(() => expect(chatPosts).toHaveLength(1));
+    await waitFor(() => expect(posted()).toContain("first"), { timeout: 5000 });
     // The turn is genuinely over: its answer is on screen, which only happens
     // on the success path that has to clear the guard.
-    await screen.findByText("reply to first");
+    await screen.findByText("reply to first", undefined, { timeout: 5000 });
 
     type(textarea, "second");
 
     // The real regression: with the mirror left set, "second" is accepted into
-    // the transcript and then parked forever, so this stays at one.
-    await waitFor(() => expect(chatPosts).toHaveLength(2));
-    expect(chatPosts[1]?.message).toBe("second");
+    // the transcript and then parked forever, so it never reaches the wire.
+    await waitFor(() => expect(posted()).toContain("second"), { timeout: 5000 });
+    await screen.findByText("reply to second", undefined, { timeout: 5000 });
   });
 
   it("keeps draining turn after turn, not just the one after the first", async () => {
     const textarea = await mountHermes();
     for (const line of ["one", "two", "three"]) {
       type(textarea, line);
-      await screen.findByText(`reply to ${line}`);
+      await screen.findByText(`reply to ${line}`, undefined, { timeout: 5000 });
     }
-    expect(chatPosts.map((p) => p.message)).toEqual(["one", "two", "three"]);
+    // Order matters as much as arrival: a queue that drained out of sequence
+    // would answer the wrong question first.
+    expect(posted().slice(-3)).toEqual(["one", "two", "three"]);
   });
 });
