@@ -25,8 +25,14 @@ You reach it in two places, and they are the same panel:
   </Card>
 </Columns>
 
-Anthropic appears in both lists — sign in with your account, or paste an API
-key, whichever suits you.
+Anthropic appears in both lists — sign in through Hermes' OAuth flow, or paste
+an API key, whichever suits you.
+
+<Note>
+The sign-in row is **Anthropic**, not a Claude Pro/Max subscription lane. It is
+Hermes' own provider OAuth; what it grants is whatever your Anthropic account
+authorises. There is no `claude-code` row in this panel.
+</Note>
 
 **ClawBox AI** sits above the rest as its own row. It works on this edition: it
 is wired into Hermes as a custom provider, so it behaves like any other provider
@@ -47,12 +53,21 @@ it shows up in the ClawBox panel and chat header afterwards.
     Select its row. The panel loads the models that provider offers.
   </Step>
   <Step title="Sign in, or paste a key">
-    For a sign-in provider, use **Sign in ↗**. That opens Hermes' own
-    authentication page in a new tab — the flow is Hermes', not a ClawBox
-    imitation of it. Finish there and come back; the panel notices and refreshes.
+    For a sign-in provider, use **Sign in**. The flow runs **inside the panel**
+    on the same origin — ClawBox drives Hermes' own OAuth rather than sending
+    you to the dashboard on port `8090`, which is what makes it work over a
+    remote-access tunnel. The provider's consent page may open in a new tab;
+    finish there and come back, and the panel picks it up.
 
     For a key provider, paste the key into the **API key** field. The key is
     stored by Hermes on the device and is never displayed back to you.
+
+    <Note>
+    **OpenAI is sign-in only here.** The providers that take a pasted key are
+    exactly OpenRouter, Anthropic, Google Gemini, z.ai/GLM and Kimi — an OpenAI
+    `sk-…` key is rejected by this panel. Use **Sign in with OpenAI (Codex)**,
+    or add the key from the Hermes dashboard, where the full registry lives.
+    </Note>
   </Step>
   <Step title="Choose a default model">
     Pick from **Default model**. The list is what that provider actually offers
@@ -86,8 +101,10 @@ way on both editions.
 - It runs with **on-demand standby**: the model wakes on the first request and
   sleeps again afterwards to give the RAM back. The first message after a quiet
   period is therefore slower than the ones that follow.
-- It has **no reasoning-effort control** — the backend does not take one, so the
-  chat header hides the dial while it is selected.
+- Its reasoning control is a **two-state switch — *Thinking off* / *Thinking on***,
+  not the eight-level effort scale. Its backend takes a boolean
+  (`enable_thinking`) and has no graded middle, so offering Low/Medium/High
+  would be offering settings that all do the same thing.
 - Turning it on makes it *available*; it does not take over. Making it your
   default is a separate, explicit choice.
 
@@ -108,8 +125,11 @@ default. Two details worth knowing:
 - Not every provider accepts every level. Choosing a provider that tops out
   lower clamps your selection **down** to the nearest level it supports rather
   than failing.
-- Providers with no reasoning dial at all — the on-device model among them —
-  hide the control entirely.
+- **ClawBox AI shows seven** — its backend rejects *Ultra* outright, so the
+  level is not offered rather than being offered and failing.
+- **The on-device model shows a two-state switch**, *Thinking off* / *Thinking
+  on*, instead of the eight-level scale.
+- A provider that accepts no reasoning level at all hides the control entirely.
 
 ## Changing provider later
 

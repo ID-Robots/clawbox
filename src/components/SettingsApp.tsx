@@ -97,7 +97,7 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "whatsapp", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "whatsapp", "discord", "remote", "system", "about"] as const;
 
 const REBOOT_PROBE_GRACE_MS = 8_000;
 const REBOOT_PROBE_INTERVAL_MS = 3_000;
@@ -141,19 +141,57 @@ interface WhatsappPairSnapshot {
 }
 
 /* ── Sidebar nav items ── */
-const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string }[] = [
+const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
-  { id: "localAi", icon: "memory", label: "Local AI" },
-  { id: "localModels", icon: "deployed_code", label: "Local Models" },
-  { id: "voice", icon: "record_voice_over", label: "Voice" },
+  { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
+  { id: "localModels", icon: "deployed_code", labelKey: "settings.localModels" },
+  { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
-  { id: "whatsapp", icon: "chat", label: "WhatsApp" },
+  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp" },
+  { id: "discord", icon: "forum", labelKey: "settings.discord" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
+
+/* ── Discord ── */
+// The four states GET /setup-api/discord/status can report, each with exactly
+// one remedy in the UI. "connected" is the only one that may render as live.
+const DISCORD_STATES = ["connected", "intents-missing", "denied-no-allowlist", "offline"] as const;
+type DiscordConnectionState = (typeof DISCORD_STATES)[number];
+
+function isDiscordState(value: unknown): value is DiscordConnectionState {
+  return typeof value === "string" && (DISCORD_STATES as readonly string[]).includes(value);
+}
+
+/** One row of the "who may talk to the assistant" picker. */
+interface DiscordMemberOption {
+  id: string;
+  displayName: string;
+  username: string;
+  isOwner: boolean;
+  guildName: string;
+}
+
+function toDiscordMembers(value: unknown): DiscordMemberOption[] {
+  if (!Array.isArray(value)) return [];
+  const out: DiscordMemberOption[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const m = entry as Record<string, unknown>;
+    if (typeof m.id !== "string") continue;
+    out.push({
+      id: m.id,
+      displayName: typeof m.displayName === "string" ? m.displayName : "",
+      username: typeof m.username === "string" ? m.username : "",
+      isOwner: m.isOwner === true,
+      guildName: typeof m.guildName === "string" ? m.guildName : "",
+    });
+  }
+  return out;
+}
 
 /* ── Helpers ── */
 // Hermes registers the on-device model under this single provider id whichever
@@ -206,7 +244,7 @@ type SectionStatus = { subtitle: string | null };
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
-  const navLabel = useCallback((item: { label?: string; labelKey?: string }) => item.label ?? (item.labelKey ? t(item.labelKey) : ""), [t]);
+  const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
     window.dispatchEvent(new Event("clawbox:chat-model-state-changed"));
   }, []);
@@ -611,7 +649,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   useEffect(() => { void refreshSavedNetworks(); }, []);
   const updateSavedPassword = async (name: string) => {
     if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
-      setSavedStatus({ type: "error", message: "Password must be 8–63 characters" });
+      setSavedStatus({ type: "error", message: t("settings.security.wifiPasswordLength") });
       return;
     }
     setSavedBusy(name); setSavedStatus(null);
@@ -621,11 +659,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: name, password: savedNewPassword, action: "update" }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Failed");
-      setSavedStatus({ type: "success", message: `Password updated for ${name}` });
+      if (!r.ok) throw new Error(d.error || t("settings.security.failed"));
+      setSavedStatus({ type: "success", message: t("settings.security.wifiPasswordUpdated", { ssid: name }) });
       setSavedEditing(null); setSavedNewPassword("");
     } catch (err) {
-      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.failed") });
     } finally {
       setSavedBusy(null);
     }
@@ -822,11 +860,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ password: sysCurrentPassword }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Verification failed");
+      if (!r.ok) throw new Error(d.error || t("settings.security.verificationFailed"));
       setSysCurrentVerified(true);
     } catch (err) {
       setSysCurrentVerified(false);
-      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Verification failed" });
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.verificationFailed") });
     } finally {
       setSysVerifying(false);
     }
@@ -838,10 +876,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setSysPasswordConfirmOpen(false); setSysPasswordConfirmReveal(false);
   };
   const validateNewPassword = (): string | null => {
-    if (sysPassword.length < 8) return "New password must be at least 8 characters";
-    if (sysPassword !== sysPasswordConfirm) return "New passwords don't match";
-    if (sysPassword === sysCurrentPassword) return "New password must differ from current";
-    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return "Password contains invalid characters";
+    if (sysPassword.length < 8) return t("settings.security.errorTooShort");
+    if (sysPassword !== sysPasswordConfirm) return t("settings.security.errorMismatch");
+    if (sysPassword === sysCurrentPassword) return t("settings.security.errorSameAsCurrent");
+    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return t("settings.security.errorInvalidChars");
     return null;
   };
 
@@ -867,11 +905,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ currentPassword: sysCurrentPassword, password: sysPassword }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Failed");
+      if (!r.ok) throw new Error(d.error || t("settings.security.failed"));
       resetSysPasswordForm();
-      setSysPasswordStatus({ type: "success", message: "Password updated. Use the new password next time you sign in or SSH." });
+      setSysPasswordStatus({ type: "success", message: t("settings.security.updateSuccess") });
     } catch (err) {
-      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.failed") });
     } finally {
       setSysPasswordSaving(false);
     }
@@ -1761,6 +1799,278 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     void fetch("/setup-api/whatsapp/pair", { method: "DELETE" }).catch(() => {});
     setWaPair(null);
   }, [whatsappVisible, waPairActive]);
+
+  /* ── Discord ── */
+  // Three things can leave a Discord bot configured and silent, and only the
+  // first was ever visible here:
+  //   * the token is dead                  -> dcTokenRejected
+  //   * MESSAGE CONTENT was never enabled  -> dcIntentsMissing / state
+  //     "intents-missing"
+  //   * nothing is on the allowlist        -> state "denied-no-allowlist",
+  //     fixed by the member picker below
+  // The status card renders exactly one of the four states the route reports,
+  // each next to the one thing that fixes it.
+  const [dcToken, setDcToken] = useState("");
+  const [dcShowToken, setDcShowToken] = useState(false);
+  const [dcSaving, setDcSaving] = useState(false);
+  const [dcStatus, setDcStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [dcConfigured, setDcConfigured] = useState<boolean | null>(null);
+  const [dcBotName, setDcBotName] = useState<string | null>(null);
+  // Discord itself said the stored token is dead — surfaced even while the
+  // section otherwise reads "configured", because nothing else would explain a
+  // bot that is set up and silent.
+  const [dcTokenRejected, setDcTokenRejected] = useState(false);
+  const [dcReconfigure, setDcReconfigure] = useState(false);
+  // Application ID is only ever used in the browser to build the invite URL —
+  // it is public (it is in the invite link itself) and is never sent to the box.
+  const [dcAppId, setDcAppId] = useState("");
+  // What the gateway actually reports, not what a stored token implies.
+  const [dcState, setDcState] = useState<DiscordConnectionState | null>(null);
+  // The picker. `dcMembers` is what the bot can see; `dcSelected` is what the
+  // owner has ticked. Both come back from configure and from status.
+  const [dcMembers, setDcMembers] = useState<DiscordMemberOption[]>([]);
+  const [dcSelected, setDcSelected] = useState<string[]>([]);
+  const [dcAllowlistSupported, setDcAllowlistSupported] = useState(true);
+  const [dcAllowAllUsers, setDcAllowAllUsers] = useState(false);
+  const [dcMembersSaving, setDcMembersSaving] = useState(false);
+  // Set when the preflight refused the save. Kept until the next save attempt
+  // so the fix instructions stay on screen while the owner follows them.
+  const [dcIntentsMissing, setDcIntentsMissing] = useState<string[] | null>(null);
+  const [dcMembersUnavailable, setDcMembersUnavailable] = useState(false);
+  const dcSaveControllerRef = useRef<AbortController | null>(null);
+
+  const refreshDiscordStatus = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/discord/status", { cache: "no-store" });
+      if (!r.ok) {
+        // Transient error — keep the last known state rather than flashing
+        // "not configured" at someone whose bot is fine.
+        console.warn("[discord] /setup-api/discord/status returned", r.status);
+        return;
+      }
+      const d = await r.json();
+      setDcConfigured(d.configured ?? false);
+      setDcBotName(typeof d.username === "string" ? d.username : null);
+      setDcTokenRejected(d.tokenRejected === true);
+      setDcState(isDiscordState(d.state) ? d.state : null);
+      setDcAllowlistSupported(d.allowlistSupported !== false);
+      setDcAllowAllUsers(d.allowAllUsers === true);
+      // The server owns the allowlist; the picker only ever proposes a change.
+      if (Array.isArray(d.allowedUserIds)) {
+        setDcSelected(d.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+    } catch (err) {
+      console.warn("[discord] refresh failed:", err);
+    }
+  }, []);
+
+  // The member list costs Discord API calls, so it is fetched only while the
+  // Discord section is actually open — never from the status poll that backs
+  // the sidebar subtitle.
+  const refreshDiscordMembers = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/discord/members", { cache: "no-store" });
+      if (!r.ok) return;
+      const d = await r.json();
+      if (d.supported === false) {
+        setDcAllowlistSupported(false);
+        return;
+      }
+      if (d.configured === false) return;
+      setDcMembers(toDiscordMembers(d.members));
+      setDcMembersUnavailable(d.available === false);
+      if (Array.isArray(d.allowedUserIds)) {
+        setDcSelected(d.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+    } catch (err) {
+      console.warn("[discord] member refresh failed:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (section !== "discord" && !isMobile) return;
+    refreshDiscordStatus();
+  }, [section, isMobile, refreshDiscordStatus]);
+
+  useEffect(() => {
+    if (section !== "discord") return;
+    if (!dcConfigured) return;
+    refreshDiscordMembers();
+  }, [section, dcConfigured, refreshDiscordMembers]);
+
+  useEffect(() => () => dcSaveControllerRef.current?.abort(), []);
+
+  // The invite link is assembled client-side from a public Application ID.
+  // 274878286912 = view channels + send messages + read history + attach files
+  // + embed links + send in threads + add reactions: what the agent needs to
+  // hold a conversation, and nothing that can moderate or manage a server.
+  const DISCORD_INVITE_PERMISSIONS = "274878286912";
+  // Trim once and build the link from that exact string: the digits-only test
+  // and the interpolation have to see the same value for the guard to mean
+  // anything. Bound to one const, "only 15-25 digits, behind a literal
+  // https://discord.com/ prefix, ever reaches href" holds by construction.
+  const dcAppIdTrimmed = dcAppId.trim();
+  const dcAppIdValid = /^\d{15,25}$/.test(dcAppIdTrimmed);
+  const dcInviteUrl = dcAppIdValid
+    ? `https://discord.com/oauth2/authorize?client_id=${dcAppIdTrimmed}&scope=bot+applications.commands&permissions=${DISCORD_INVITE_PERMISSIONS}`
+    : null;
+
+  /** Warning tokens the configure route returns, mapped to translated copy. */
+  const discordWarningText = (warning: unknown): string | null => {
+    if (warning === "restart_pending") return t("settings.discordSavedRestartPending");
+    if (warning === "no_allowed_users") return t("settings.discordSavedNoUsers");
+    if (warning === "members_unavailable") return t("settings.discordMembersUnavailable");
+    if (warning === "server_members_intent") return t("settings.discordMembersUnavailable");
+    return null;
+  };
+
+  const saveDiscord = async () => {
+    if (!dcToken.trim()) {
+      setDcStatus({ type: "error", message: t("settings.enterToken") });
+      return;
+    }
+    dcSaveControllerRef.current?.abort();
+    const controller = new AbortController();
+    dcSaveControllerRef.current = controller;
+    setDcSaving(true);
+    setDcStatus(null);
+    setDcIntentsMissing(null);
+    try {
+      const res = await fetch("/setup-api/discord/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ botToken: dcToken.trim() }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        // The preflight refusal is not a sentence, it is a checklist — render
+        // the four steps rather than a one-line error nobody can act on.
+        if (data.code === "intents_missing") {
+          setDcIntentsMissing(
+            Array.isArray(data.missingIntents)
+              ? data.missingIntents.filter((i: unknown) => typeof i === "string")
+              : [],
+          );
+          setDcStatus({ type: "error", message: t("settings.discordStateIntentsMissingHint") });
+          return;
+        }
+        // The route already phrases its other errors for a person (bad token vs
+        // "couldn't reach Discord"), so show them rather than a generic line.
+        setDcStatus({ type: "error", message: data.error || t("settings.failedSave") });
+        return;
+      }
+      setDcStatus({
+        type: data.warning ? "error" : "success",
+        message: discordWarningText(data.warning) ?? t("settings.discordConfigured"),
+      });
+      setDcConfigured(true);
+      setDcTokenRejected(false);
+      setDcBotName(typeof data.username === "string" ? data.username : null);
+      setDcMembers(toDiscordMembers(data.members));
+      setDcMembersUnavailable(data.warning === "members_unavailable");
+      setDcAllowlistSupported(data.allowlistSupported !== false);
+      if (Array.isArray(data.allowedUserIds)) {
+        setDcSelected(data.allowedUserIds.filter((id: unknown) => typeof id === "string"));
+      }
+      setDcReconfigure(false);
+      setDcToken("");
+      refreshDiscordStatus();
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      setDcStatus({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      if (!controller.signal.aborted) setDcSaving(false);
+    }
+  };
+
+  const toggleDiscordMember = (id: string) => {
+    setDcStatus(null);
+    setDcSelected((current) =>
+      current.includes(id) ? current.filter((entry) => entry !== id) : [...current, id],
+    );
+  };
+
+  /**
+   * Save the picker on its own — the token is already stored, so this is the
+   * one write that turns a connected-but-denying bot into a working one.
+   */
+  const saveDiscordMembers = async () => {
+    setDcMembersSaving(true);
+    setDcStatus(null);
+    try {
+      const res = await fetch("/setup-api/discord/configure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowedUserIds: dcSelected }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        setDcStatus({
+          type: "error",
+          message:
+            data.code === "empty_allowlist"
+              ? t("settings.discordMembersEmptyWarning")
+              : data.error || t("settings.failedSave"),
+        });
+        return;
+      }
+      setDcStatus({
+        type: data.warning ? "error" : "success",
+        message: discordWarningText(data.warning) ?? t("settings.discordConfigured"),
+      });
+      refreshDiscordStatus();
+    } catch {
+      setDcStatus({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      setDcMembersSaving(false);
+    }
+  };
+
+  // One descriptor per state, so the icon, the colour and the sentence cannot
+  // drift apart — and so "live" is reachable from exactly one of them.
+  const dcStateView = (() => {
+    switch (dcState) {
+      case "connected":
+        return {
+          tone: "live" as const,
+          icon: "check_circle",
+          title: dcBotName || t("settings.discordStateConnected"),
+          hint: t("settings.discordStateConnectedHint"),
+        };
+      case "intents-missing":
+        return {
+          tone: "warn" as const,
+          icon: "report",
+          title: t("settings.discordStateIntentsMissing"),
+          hint: t("settings.discordStateIntentsMissingHint"),
+        };
+      case "denied-no-allowlist":
+        return {
+          tone: "warn" as const,
+          icon: "block",
+          title: t("settings.discordStateDenied"),
+          hint: t("settings.discordStateDeniedHint"),
+        };
+      case "offline":
+        return {
+          tone: "idle" as const,
+          icon: "link_off",
+          title: t("settings.discordStateOffline"),
+          hint: t("settings.discordStateOfflineHint"),
+        };
+      default:
+        // No state reported (OpenClaw, or a status call that has not landed
+        // yet). Say the bot is set up and stop short of claiming it is live.
+        return {
+          tone: "idle" as const,
+          icon: "forum",
+          title: dcBotName || t("settings.botConnected"),
+          hint: "",
+        };
+    }
+  })();
 
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
@@ -3570,6 +3880,344 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Discord ─── */}
+        {activeSection === "discord" && (
+          <div className="max-w-xl space-y-5">
+
+            {/* Status card */}
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <span className="material-symbols-rounded text-[#5865F2]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
+                <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</span>
+              </div>
+              {dcConfigured === null ? (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
+                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
+                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
+                  </div>
+                </div>
+              ) : dcConfigured && !dcReconfigure ? (
+                <div data-testid="discord-status-card" data-state={dcState ?? "unknown"}>
+                  <div
+                    className={`flex items-center gap-4 rounded-xl px-4 py-3.5 mb-4 border ${
+                      dcStateView.tone === "live"
+                        ? "bg-green-500/[0.06] border-green-500/15"
+                        : dcStateView.tone === "warn"
+                          ? "bg-amber-500/[0.06] border-amber-500/15"
+                          : "bg-white/[0.03] border-white/[0.06]"
+                    }`}
+                  >
+                    <div className="w-10 h-10 rounded-full bg-white/[0.06] flex items-center justify-center shrink-0">
+                      <span
+                        className={`material-symbols-rounded ${
+                          dcStateView.tone === "live"
+                            ? "text-green-400"
+                            : dcStateView.tone === "warn"
+                              ? "text-amber-400"
+                              : "text-[var(--text-muted)] opacity-60"
+                        }`}
+                        style={{ fontSize: 22 }}
+                        aria-hidden="true"
+                      >
+                        {dcStateView.icon}
+                      </span>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[var(--text-primary)] font-medium">
+                        {dcStateView.title}
+                      </div>
+                      {/* The live dot is bound to the one state that earns it.
+                          It used to show whenever a token was stored, which is
+                          how a bot that could not connect at all read as
+                          "Discord channel active". */}
+                      {dcState === "connected" ? (
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                          <span className="text-xs text-green-400/80">{t("settings.discordActive")}</span>
+                        </div>
+                      ) : dcStateView.hint ? (
+                        <div className="text-xs text-[var(--text-secondary)] mt-0.5 leading-relaxed">
+                          {dcStateView.hint}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  {dcTokenRejected && (
+                    <div className="mb-4">
+                      <StatusMessage type="error" message={t("settings.discordTokenRejected")} />
+                    </div>
+                  )}
+                  {dcAllowAllUsers && (
+                    <p className="text-xs text-amber-300/90 mb-4 leading-relaxed">
+                      {t("settings.discordAllowAllWarning")}
+                    </p>
+                  )}
+                  <button
+                    onClick={() => { setDcReconfigure(true); setDcStatus(null); }}
+                    className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
+                  >
+                    {t("settings.reconfigureBot")}
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
+                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
+                    <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50" style={{ fontSize: 22 }}>link_off</span>
+                  </div>
+                  <div>
+                    <div className="text-sm text-[var(--text-muted)]">{t("settings.notConfigured")}</div>
+                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.discordSetupBelow")}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Privileged intents — the checklist that fixes a silent bot.
+                Shown either because the save was refused by the preflight, or
+                because the gateway is already reporting that failure. Both are
+                the same problem, so both get the same four steps. */}
+            {(dcIntentsMissing !== null || dcState === "intents-missing") && (
+              <div
+                className="rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] p-5"
+                data-testid="discord-intents-fix"
+              >
+                <div className="flex gap-3 mb-3">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 20 }} aria-hidden="true">warning</span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-amber-200">{t("settings.discordIntentsFixTitle")}</div>
+                    <p className="text-xs text-[var(--text-secondary)] mt-1 leading-relaxed">
+                      {t("settings.discordStateIntentsMissingHint")}
+                    </p>
+                  </div>
+                </div>
+                <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                  <li>
+                    {t("settings.discordIntentsFixStep1")}{" "}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--coral-bright)] hover:text-orange-300 underline underline-offset-2"
+                    >
+                      discord.com/developers
+                    </a>
+                  </li>
+                  <li>{t("settings.discordIntentsFixStep2")}</li>
+                  <li>{t("settings.discordIntentsFixStep3")}</li>
+                  <li>{t("settings.discordIntentsFixStep4")}</li>
+                </ol>
+                {dcIntentsMissing !== null && dcIntentsMissing.length > 0 && (
+                  <ul className="mt-3 space-y-1 list-none p-0">
+                    {dcIntentsMissing.map((intent) => (
+                      <li key={intent} className="text-xs font-mono text-amber-200/90">{intent}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* Who may talk to the assistant.
+                A connected Discord bot denies every message until one of the
+                DISCORD_ALLOWED_* variables exists, and says so only in the
+                gateway log. This is the panel's answer to that: the members the
+                bot can actually see, with the server owner ticked by default. */}
+            {dcConfigured && !dcReconfigure && dcAllowlistSupported && (
+              <div
+                className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5"
+                data-testid="discord-members"
+              >
+                <span className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                  {t("settings.discordMembersTitle")}
+                </span>
+                <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
+                  {t("settings.discordMembersHint")}
+                </p>
+
+                {dcMembersUnavailable && (
+                  <p className="text-xs text-amber-300/90 mt-2 leading-relaxed">
+                    {t("settings.discordMembersUnavailable")}
+                  </p>
+                )}
+
+                <ul className="mt-3 space-y-1.5 list-none p-0">
+                  {dcMembers.map((member) => {
+                    const checked = dcSelected.includes(member.id);
+                    const label = member.displayName || member.username || member.id;
+                    return (
+                      <li key={member.id}>
+                        <label className="flex items-center gap-3 bg-white/[0.03] border border-white/[0.06] rounded-lg px-3 py-2 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => toggleDiscordMember(member.id)}
+                            disabled={dcMembersSaving}
+                            className="shrink-0 accent-[var(--coral-bright)]"
+                          />
+                          <span className="min-w-0 flex-1">
+                            <span className="block text-sm text-[var(--text-primary)] truncate">{label}</span>
+                            <span className="block text-xs text-[var(--text-muted)] truncate">
+                              {member.isOwner ? t("settings.discordMembersOwner") : member.guildName}
+                            </span>
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                  {dcMembers.length === 0 && (
+                    <li className="text-xs text-[var(--text-muted)]">{t("settings.discordMembersNone")}</li>
+                  )}
+                </ul>
+
+                {/* The never-empty invariant, made visible. The save is refused
+                    server-side too — this is so nobody has to click to find
+                    out. */}
+                {dcMembers.length > 0 && dcSelected.length === 0 && (
+                  <p className="text-xs text-amber-300/90 mt-3 leading-relaxed" data-testid="discord-members-empty">
+                    {t("settings.discordMembersEmptyWarning")}
+                  </p>
+                )}
+
+                {dcMembers.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={saveDiscordMembers}
+                    disabled={dcMembersSaving || dcSelected.length === 0}
+                    className="mt-3 px-4 py-2 rounded-lg bg-[var(--coral-bright)]/20 border border-[var(--coral-bright)]/40 text-sm font-semibold text-[var(--coral-bright)] cursor-pointer disabled:opacity-50"
+                  >
+                    {t("settings.discordMembersSave")}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Setup card — shown when not configured or reconfiguring */}
+            {(dcConfigured === false || dcReconfigure) && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
+                  <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                    {dcReconfigure ? t("settings.reconfigureBot") : t("settings.discordGuideTitle")}
+                  </span>
+                </div>
+
+                <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
+                  <li>
+                    {t("settings.discordStep1")}{" "}
+                    <a
+                      href="https://discord.com/developers/applications"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[var(--coral-bright)] hover:text-orange-300 font-semibold no-underline"
+                    >
+                      discord.com/developers
+                    </a>
+                  </li>
+                  <li>{t("settings.discordStep2")}</li>
+                  <li>{t("settings.discordStep3")}</li>
+                  <li>{t("settings.discordStep4")}</li>
+                </ol>
+
+                {/* The single most common Discord support ticket — a checklist
+                    item, not a docs link. */}
+                <div className="flex items-start gap-2 mt-4 px-3 py-2.5 rounded-lg bg-amber-500/[0.08] border border-amber-500/20">
+                  <span className="material-symbols-rounded text-amber-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+                  <p className="text-xs text-amber-200/90 m-0">{t("settings.discordIntentsWarning")}</p>
+                </div>
+
+                {/* Invite-link builder (client-side only) */}
+                <div className="mt-5 pt-4 border-t border-white/[0.06]">
+                  <span className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.discordInviteTitle")}</span>
+                  <p className="text-xs text-[var(--text-secondary)] mb-2">{t("settings.discordInviteHint")}</p>
+                  <input
+                    id="settings-dc-appid"
+                    type="text"
+                    value={dcAppId}
+                    onChange={(e) => setDcAppId(e.target.value)}
+                    placeholder={t("settings.discordAppIdPlaceholder")}
+                    aria-label={t("settings.discordAppIdPlaceholder")}
+                    inputMode="numeric"
+                    spellCheck={false}
+                    autoComplete="off"
+                    className="w-full px-3 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] font-mono outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15 placeholder:font-sans"
+                  />
+                  {dcInviteUrl && (
+                    <a
+                      href={dcInviteUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center justify-center gap-2 w-full px-4 py-3 mt-3 bg-[#5865F2]/15 hover:bg-[#5865F2]/25 border border-[#5865F2]/40 hover:border-[#5865F2]/60 rounded-lg text-sm font-semibold text-[#98a2ff] transition-colors no-underline"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
+                      {t("settings.discordInviteOpen")}
+                    </a>
+                  )}
+                  <p className="text-[11px] text-[var(--text-muted)] mt-2 mb-0">{t("settings.discordPermissionsNote")}</p>
+                </div>
+
+                {/* Token input */}
+                <div className="mt-5">
+                  <label htmlFor="settings-dc-token" className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.botToken")}</label>
+                  <div className="relative">
+                    <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-40" style={{ fontSize: 18 }}>key</span>
+                    <input
+                      id="settings-dc-token"
+                      type={dcShowToken ? "text" : "password"}
+                      value={dcToken}
+                      onChange={(e) => { setDcToken(e.target.value); setDcStatus(null); }}
+                      placeholder="••••••••••••••••••••••••"
+                      spellCheck={false}
+                      autoComplete="off"
+                      className="w-full pl-10 pr-10 py-2.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-orange-400/60 focus:bg-white/[0.06] transition-all placeholder-white/15"
+                      onKeyDown={e => e.key === "Enter" && saveDiscord()}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setDcShowToken(v => !v)}
+                      aria-label={t("settings.botToken")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
+                    >
+                      <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{dcShowToken ? "visibility_off" : "visibility"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {dcStatus && <div className="mt-3"><StatusMessage type={dcStatus.type} message={dcStatus.message} /></div>}
+
+                <div className="flex items-center gap-3 mt-5">
+                  <button
+                    onClick={saveDiscord}
+                    disabled={dcSaving || !dcToken.trim()}
+                    className="px-6 py-2.5 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-xl text-sm font-semibold cursor-pointer border-none transition-all flex items-center justify-center gap-2 shadow-[0_2px_12px_rgba(254,110,0,0.25)]"
+                  >
+                    {dcSaving ? (
+                      <>
+                        <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }}>progress_activity</span>
+                        {t("settings.discordChecking")}
+                      </>
+                    ) : (
+                      <>
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>link</span>
+                        {t("settings.connect")}
+                      </>
+                    )}
+                  </button>
+                  {dcReconfigure && (
+                    <button
+                      onClick={() => { setDcReconfigure(false); setDcStatus(null); setDcToken(""); }}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer"
+                    >
+                      {t("cancel")}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
         {/* ─── System ─── */}
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
@@ -3719,28 +4367,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Password</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</label>
               </div>
+              {/* Split around the font-mono span: markup can't live in a catalogue
+                  value, and `sudo` is a command name that must not be translated. */}
               <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">
-                Used for web sign-in, SSH, and <span className="font-mono">sudo</span>. Updating it here changes all three.
+                {t("settings.security.passwordHintPrefix")} <span className="font-mono">sudo</span>{t("settings.security.passwordHintSuffix")}
               </p>
               <div className="space-y-2">
                 <div className="flex items-stretch gap-2">
                   <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                    <label htmlFor="sys-current-password" className="sr-only">Current password</label>
+                    <label htmlFor="sys-current-password" className="sr-only">{t("settings.security.currentPassword")}</label>
                     <input
                       id="sys-current-password"
                       type={sysPasswordShow ? "text" : "password"}
                       value={sysCurrentPassword}
                       onChange={e => { setSysCurrentPassword(e.target.value); if (sysCurrentVerified) setSysCurrentVerified(false); setSysPasswordStatus(null); }}
                       onKeyDown={e => { if (e.key === "Enter" && !sysCurrentVerified) { e.preventDefault(); void verifyCurrentPassword(); } }}
-                      placeholder="Current password"
+                      placeholder={t("settings.security.currentPassword")}
                       maxLength={128}
                       autoComplete="current-password"
                       disabled={sysCurrentVerified}
                       className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20 disabled:opacity-60"
                     />
-                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? "Hide current password" : "Show current password"}>
+                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? t("settings.security.hideCurrentPassword") : t("settings.security.showCurrentPassword")}>
                       <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysPasswordShow ? "visibility_off" : "visibility"}</span>
                     </button>
                   </div>
@@ -3749,11 +4399,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       type="button"
                       onClick={resetSysPasswordForm}
                       className="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
-                      title="Clear and re-enter current password"
-                      aria-label="Clear and re-enter current password"
+                      title={t("settings.security.clearAndReenter")}
+                      aria-label={t("settings.security.clearAndReenter")}
                     >
                       <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }}>check_circle</span>
-                      Re-enter
+                      {t("settings.security.reenter")}
                     </button>
                   ) : (
                     <button
@@ -3762,7 +4412,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       disabled={sysVerifying || !sysCurrentPassword}
                       className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
                     >
-                      {sysVerifying ? "Checking…" : "Verify"}
+                      {sysVerifying ? t("settings.security.checking") : t("settings.security.verify")}
                     </button>
                   )}
                 </div>
@@ -3770,40 +4420,40 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {sysCurrentVerified && (
                   <>
                     <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-new-password" className="sr-only">New password</label>
+                      <label htmlFor="sys-new-password" className="sr-only">{t("settings.security.newPassword")}</label>
                       <input
                         id="sys-new-password"
                         type={sysNewShow ? "text" : "password"}
                         value={sysPassword}
                         onChange={e => { setSysPassword(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder="New password (8+ characters)"
+                        placeholder={t("settings.security.newPasswordPlaceholder")}
                         maxLength={128}
                         autoComplete="new-password"
                         autoFocus
                         className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
                       />
-                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? "Hide new password" : "Show new password"}>
+                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? t("settings.security.hideNewPassword") : t("settings.security.showNewPassword")}>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysNewShow ? "visibility_off" : "visibility"}</span>
                       </button>
                     </div>
                     <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-confirm-password" className="sr-only">Confirm new password</label>
+                      <label htmlFor="sys-confirm-password" className="sr-only">{t("settings.security.confirmNewPassword")}</label>
                       <input
                         id="sys-confirm-password"
                         type={sysConfirmShow ? "text" : "password"}
                         value={sysPasswordConfirm}
                         onChange={e => { setSysPasswordConfirm(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder="Confirm new password"
+                        placeholder={t("settings.security.confirmNewPassword")}
                         maxLength={128}
                         autoComplete="new-password"
                         className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
                       />
-                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? "Hide confirm password" : "Show confirm password"}>
+                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? t("settings.security.hideConfirmPassword") : t("settings.security.showConfirmPassword")}>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysConfirmShow ? "visibility_off" : "visibility"}</span>
                       </button>
                     </div>
                     {sysPassword.length > 0 && sysPasswordConfirm.length > 0 && sysPassword !== sysPasswordConfirm && (
-                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">Passwords don&apos;t match yet</div>
+                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">{t("settings.security.passwordsDontMatchYet")}</div>
                     )}
                     <div className="flex justify-end">
                       <button
@@ -3811,7 +4461,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         disabled={sysPasswordSaving || sysPassword.length < 8 || sysPassword !== sysPasswordConfirm}
                         className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
                       >
-                        {sysPasswordSaving ? "Saving…" : "Update password"}
+                        {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.updatePassword")}
                       </button>
                     </div>
                   </>
@@ -4043,6 +4693,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         }
         if (waStatus.state === "enabled_not_paired") return { subtitle: t("settings.whatsappEnabledNotPaired") };
         return { subtitle: t("settings.notConfigured") || "Not configured" };
+      }
+      case "discord": {
+        if (dcConfigured === null) return { subtitle: null };
+        if (!dcConfigured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        // A problem the owner has to act on outranks the bot's name here: the
+        // sidebar is the only place a closed section can say anything at all.
+        if (dcState === "intents-missing") return { subtitle: t("settings.discordStateIntentsMissing") };
+        if (dcState === "denied-no-allowlist") return { subtitle: t("settings.discordStateDenied") };
+        if (dcState === "offline") return { subtitle: t("settings.discordStateOffline") };
+        return { subtitle: dcBotName || (t("settings.botConnected") || "Connected") };
       }
       case "remote":
         return { subtitle: null };
@@ -4452,17 +5112,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <div className="flex items-center gap-2 mb-3">
               <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
-              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">Write this password down</h3>
+              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">{t("settings.security.confirmTitle")}</h3>
             </div>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
-              This will change your password for <span className="text-[var(--text-primary)] font-medium">web sign-in, SSH, and sudo</span>. If you forget it, you may be locked out of the device entirely and need a factory reset to recover.
+              {t("settings.security.confirmBodyPrefix")} <span className="text-[var(--text-primary)] font-medium">{t("settings.security.confirmBodyScope")}</span>{t("settings.security.confirmBodySuffix")}
             </p>
             <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
               <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">New password</span>
-                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? "Hide password" : "Reveal password"}>
+                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">{t("settings.security.newPassword")}</span>
+                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? t("settings.security.hidePassword") : t("settings.security.revealPassword")}>
                   <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
-                  {sysPasswordConfirmReveal ? "Hide" : "Reveal"}
+                  {sysPasswordConfirmReveal ? t("settings.security.hide") : t("settings.security.reveal")}
                 </button>
               </div>
               <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
@@ -4472,7 +5132,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="flex gap-3">
               <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
               <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
-                {sysPasswordSaving ? "Saving…" : "I’ve written it down — change"}
+                {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.confirmChange")}
               </button>
             </div>
           </div>

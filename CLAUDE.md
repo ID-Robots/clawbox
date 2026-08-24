@@ -47,6 +47,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Browser**: `browser/` — Chromium automation via CDP (launch, navigate, click, type, screenshot)
 - **Gateway**: `gateway/`, `gateway/health`, `gateway/ws-config` — gateway proxying with HTML injection
 - **Telegram**: `telegram/configure`, `telegram/status` — Telegram bot config
+- **Discord**: `discord/configure`, `discord/status`, `discord/members` — Discord bot config (token validated live against the Discord API before it is saved), gateway connection state, and the guild-member allowlist picker
 - **Setup**: `setup/status`, `setup/complete`, `setup/reset` — setup flow state, factory reset
 - **Update**: `update/run`, `update/status` — git-based system updates
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
@@ -136,14 +137,14 @@ of them kept failing.
   `register`, `context`, `jobs`, `web`).
   - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
     `system_stats`, `system_info`, `system_power`, `disk_usage`, `disk_cleanup`,
-    `update_check`, `logs_tail`, `screen_capture`, `backup_*`,
+    `update_check`, `logs_tail`, `screen_capture`, `backup_status`,
     `telegram_status`, `wifi_scan`, `wifi_status`, `vnc_status`,
     `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`
   - **Hermes only**: `skill_search`, `skill_list`, `skill_info`, `skill_install`,
     `skill_uninstall`, `ai_list_models`, `ai_set_provider`, `ai_set_model`
-  - **OpenClaw only**: `app_search`, `app_install`,
+  - **OpenClaw only**: `app_search`, `app_install`, `backup_list`, `backup_now`,
     `browser_click/type/keypress/scroll`, and the coding family — `bash`,
     `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`,
     `list_directory`, `glob`, `grep`, `notebook_edit`, `web_fetch`, `web_search`

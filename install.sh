@@ -29,7 +29,27 @@ fi
 # already registers. Pulling and re-exec'ing up-front (before constants are
 # parsed) breaks the race. CLAWBOX_INSTALL_BOOTSTRAPPED prevents recursion.
 
-if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
+# Only the update family may self-update. The root-owned dispatcher
+# (/usr/local/libexec/clawbox/clawbox-root-step.sh) sets CLAWBOX_ALLOW_SELF_UPDATE
+# for those steps and pins every other one with CLAWBOX_INSTALL_BOOTSTRAPPED=1.
+# A bare `sudo bash install.sh` (no --step) is an operator running a full
+# install and still bootstraps.
+#
+# This block used to run on EVERY invocation, so `--step chpasswd` did
+# `git fetch` + `git reset --hard origin/<branch>` + `chown -R clawbox` + re-exec
+# before it touched /etc/shadow. A password change must not depend on GitHub
+# being reachable, must not mutate the source tree, and must not be a way to
+# pull new code onto the box. The journal showed it firing for chpasswd,
+# set_hostname and validate_services. TASK-445.
+_clawbox_may_self_update() {
+  [ -n "${CLAWBOX_ALLOW_SELF_UPDATE:-}" ] && return 0
+  [ "${1:-}" != "--step" ] && return 0
+  return 1
+}
+
+if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
+  && _clawbox_may_self_update "${1:-}" \
+  && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
   _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # Resolve the branch like resolve_update_branch() does below — explicit
   # CLAWBOX_BRANCH, else the pinned .update-branch, else the current branch,
@@ -2540,6 +2560,86 @@ step_system_config() {
   step_polkit_rules
   step_nm_dispatcher
   step_sysctl_linkdown
+  step_persistent_journal
+}
+
+step_persistent_journal() {
+  # Make the journal survive a reboot.
+  #
+  # Shipped devices ran journald with `Storage=auto` and no /var/log/journal,
+  # which means volatile: the entire journal lived in /run/log/journal (tmpfs),
+  # was charged to RAM (72 MB measured on a QA box), and was destroyed on every
+  # reboot. "What happened before it rebooted?" — the first question of every
+  # support case — had no answer on any ClawBox ever shipped, and there was
+  # nowhere durable for the web tier's access log to land either.
+  #
+  # Idempotent: cp + mkdir + a journald restart that flushes /run into /var.
+  local drop_in_dir="/etc/systemd/journald.conf.d"
+  local drop_in="$drop_in_dir/10-clawbox.conf"
+  local src="$PROJECT_DIR/config/journald-clawbox.conf"
+
+  if [ ! -f "$src" ]; then
+    echo "  Warning: $src missing, skipping persistent journal setup"
+    return 0
+  fi
+
+  mkdir -p "$drop_in_dir"
+  cp "$src" "$drop_in"
+  chmod 644 "$drop_in"
+
+  # journald creates /var/log/journal itself when Storage=persistent, but only
+  # on its next start — and systemd-tmpfiles is what applies the correct
+  # ownership and the systemd-journal ACL, so do it explicitly rather than
+  # leaving a root-only directory behind.
+  mkdir -p /var/log/journal
+  systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+
+  # Restart rather than reload: Storage= is only read at start. This also
+  # flushes what is currently in /run into /var, so the CURRENT boot's log is
+  # the first one that survives, not the next one.
+  systemctl restart systemd-journald >/dev/null 2>&1 || true
+  journalctl --flush >/dev/null 2>&1 || true
+
+  if [ -d /var/log/journal ]; then
+    echo "  Journal is persistent (/var/log/journal), capped at 200M"
+  else
+    echo "  Warning: /var/log/journal was not created — journal stays volatile"
+  fi
+
+  # NOT fixed here, and not fixable from userspace: the first ~10 s of every
+  # boot (~888 kernel lines) are stamped ~361 days early, because the Jetson has
+  # no battery-backed RTC and nvvrs-pseq-rtc only sets the system clock at
+  # monotonic ~10 s. `journalctl -b` timestamps before that handoff are bogus and
+  # `--list-boots` shows one "boot" spanning the gap. This is a hardware/BSP
+  # property of the Orin Nano dev kit, not something install.sh can correct.
+}
+
+# ── Root-owned entrypoints ───────────────────────────────────────────────────
+#
+# Anything root executes on behalf of the unprivileged clawbox web server must
+# live somewhere clawbox cannot write, or the privilege boundary is decorative.
+# /home/clawbox/clawbox and /home/clawbox/clawbox/scripts are both
+# clawbox-owned and group-writable, and install.sh's own bootstrap hands the
+# tree back with `chown -R clawbox:clawbox` on every root run — so a NOPASSWD
+# grant on a script in there is a one-step local root for anything with
+# clawbox-level code execution (the web server itself, the in-UI terminal, the
+# agent's shell). Copy them here instead, root:root, under root-owned dirs.
+# TASK-445.
+ROOT_LIBEXEC_DIR="/usr/local/libexec/clawbox"
+
+install_root_libexec() {
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
+  local src
+  for src in clawbox-root-step.sh; do
+    if [ -f "$PROJECT_DIR/config/$src" ]; then
+      install -o root -g root -m 0755 "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
+    fi
+  done
+  if [ -f "$PROJECT_DIR/scripts/optimize-ollama.sh" ]; then
+    install -o root -g root -m 0755 "$PROJECT_DIR/scripts/optimize-ollama.sh" \
+      "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
+  fi
 }
 
 step_systemd_services() {
@@ -2635,6 +2735,9 @@ step_systemd_services() {
   if [ ! -x /usr/local/bin/cloudflared ]; then
     systemctl disable --now clawbox-tunnel.service >/dev/null 2>&1 || true
   fi
+  # Root-owned copies of everything root executes on clawbox's behalf. Must run
+  # BEFORE the sudoers drop-in, which points at them.
+  install_root_libexec
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
   if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
@@ -2701,6 +2804,9 @@ step_post_update() {
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  # Without this call the persistent journal would be fresh-install-only, and
+  # every already-shipped box would keep losing its whole log on each reboot.
+  step_persistent_journal || echo "  Warning: persistent_journal step failed (non-fatal)"
   # step_vnc_refresh is a tiny idempotent refresh of the clawbox-vnc.service
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
@@ -3032,9 +3138,11 @@ step_performance_mode() {
   # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
-  # Install sudoers rule so the web UI can run optimize-ollama.sh as root
+  # Install the root-owned copy the sudoers rule points at, then the rule.
+  install_root_libexec
   cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
   chmod 440 /etc/sudoers.d/clawbox-ollama
+  chown root:root /etc/sudoers.d/clawbox-ollama
 }
 
 step_jtop_install() {
@@ -4096,7 +4204,7 @@ DISPATCH_STEPS=(
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
-  nm_dispatcher sysctl_linkdown post_update update_smoke validate_services
+  nm_dispatcher sysctl_linkdown persistent_journal post_update update_smoke validate_services
 )
 
 if [ "${1:-}" = "--step" ]; then

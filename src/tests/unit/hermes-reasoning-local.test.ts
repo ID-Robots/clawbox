@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   HERMES_REASONING_LEVELS,
+  HERMES_REASONING_OFFERED_LEVELS,
   LOCAL_REASONING_LEVELS,
   binaryReasoningLabel,
   binaryReasoningTriggerLabel,
@@ -159,7 +160,7 @@ describe("the label and the wire agree about which end is on", () => {
 describe("providers with a full or restricted dial", () => {
   it("still reports levels for providers that have a real dial", () => {
     expect(providerHasReasoningControl("anthropic")).toBe(true);
-    expect(hermesReasoningLevelsFor("anthropic")).toEqual(HERMES_REASONING_LEVELS);
+    expect(hermesReasoningLevelsFor("anthropic")).toEqual(HERMES_REASONING_OFFERED_LEVELS);
     // clawai has a dial; it just refuses the top notch.
     expect(providerHasReasoningControl("clawai")).toBe(true);
     expect(hermesReasoningLevelsFor("clawai")).not.toContain("ultra");
@@ -167,7 +168,7 @@ describe("providers with a full or restricted dial", () => {
   });
 
   it("treats an unknown provider as having the full dial", () => {
-    expect(hermesReasoningLevelsFor("some-new-provider")).toEqual(HERMES_REASONING_LEVELS);
+    expect(hermesReasoningLevelsFor("some-new-provider")).toEqual(HERMES_REASONING_OFFERED_LEVELS);
     expect(providerHasReasoningControl(undefined)).toBe(true);
   });
 

@@ -1,0 +1,484 @@
+import fs from "fs";
+import path from "path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * TASK-453 — MCP tools that reported success for things that did not happen,
+ * or pointed the agent at a next step it could not follow.
+ *
+ * Every case below was observed live on a Hermes device. The shared failure
+ * mode is that an HTTP 200 was taken as proof: the uninstall route answers
+ * {"ok":true} for a skill the CLI refused to remove, the inspect route
+ * synthesises a record for any well-formed id, the backup route answers 200
+ * with ok:false, and the ClawKeep status route answers 200 with
+ * supportedOnEdition:false. A small model has no way to recover from a tool
+ * that says "done" — it moves on and tells the user it is done.
+ */
+
+const { HOME, apiGet, apiPost, apiTry, spawnArgv, hasBinary } = vi.hoisted(() => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeFs = require("fs") as typeof import("fs");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodeOs = require("os") as typeof import("os");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const nodePath = require("path") as typeof import("path");
+  return {
+    HOME: nodeFs.mkdtempSync(nodePath.join(nodeOs.tmpdir(), "clawbox-mcp-honesty-")),
+    apiGet: vi.fn(),
+    apiPost: vi.fn(),
+    apiTry: vi.fn(),
+    spawnArgv: vi.fn(),
+    hasBinary: vi.fn(),
+  };
+});
+
+vi.mock("../../../mcp/lib/api", async () => {
+  const { ApiError, matchRule } = await import("../../../mcp/lib/errors");
+  const withRules =
+    (fn: (...a: unknown[]) => unknown) =>
+    async (route: string, ...rest: unknown[]) => {
+      try {
+        return await fn(route, ...rest);
+      } catch (err) {
+        const opts = (rest[rest.length - 1] ?? {}) as { rules?: Parameters<typeof matchRule>[1] };
+        if (err instanceof ApiError) throw matchRule(err, opts?.rules) ?? err;
+        throw err;
+      }
+    };
+  return {
+    apiGet: withRules(apiGet),
+    apiPost: withRules(apiPost),
+    apiTry: (...a: unknown[]) => apiTry(...a),
+    API_BASE: "http://127.0.0.1:80",
+    CLAWBOX_ROOT: "/home/clawbox/clawbox",
+  };
+});
+
+vi.mock("../../../mcp/lib/guard", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../mcp/lib/guard")>();
+  return { ...actual, HOME, spawnArgv, hasBinary };
+});
+
+import { ApiError, classifyError } from "../../../mcp/lib/errors";
+import type { McpContext } from "../../../mcp/lib/context";
+import { captureRegistrar } from "../helpers/mcp-registrar";
+import { registerAiTools } from "../../../mcp/tools/ai";
+import { registerBrowserTools } from "../../../mcp/tools/browser";
+import { registerSkillTools } from "../../../mcp/tools/skills";
+import { buildContext } from "../../../mcp/lib/context";
+import { desktopDisplay, registerSystemTools } from "../../../mcp/tools/system";
+
+const ctx = (edition: "openclaw" | "hermes", providers: string[] = []): McpContext => ({
+  edition,
+  install: edition,
+  profile: "full",
+  capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
+  providers,
+});
+
+beforeEach(() => {
+  apiGet.mockReset();
+  apiPost.mockReset();
+  apiTry.mockReset().mockResolvedValue(null);
+  spawnArgv.mockReset();
+  hasBinary.mockReset();
+  delete process.env.CLAWBOX_VNC_DISPLAY;
+  delete process.env.DISPLAY;
+});
+
+afterAll(() => fs.rmSync(HOME, { recursive: true, force: true }));
+
+// ── skill_uninstall ──────────────────────────────────────────────────────────
+
+describe("skill_uninstall — a 200 is not proof anything was removed", () => {
+  function skills() {
+    const h = captureRegistrar("hermes");
+    registerSkillTools(h.reg);
+    return h;
+  }
+
+  const installed = (list: { name: string; origin?: string }[]) =>
+    apiGet.mockResolvedValue({ skills: list });
+
+  it("refuses a name the device has never installed, instead of reporting success", async () => {
+    installed([{ name: "pdf", origin: "hub" }]);
+    const out = await skills().call("skill_uninstall", { name: "no-such-skill" });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_FOUND");
+    expect(out.error.next).toMatch(/skill_list/);
+    // And it never reached the route, so nothing was even attempted.
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("refuses a built-in skill, which the harness silently declines to remove", async () => {
+    installed([{ name: "memo", origin: "builtin" }]);
+    const out = await skills().call("skill_uninstall", { name: "memo" });
+
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/came with the device/i);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("reports failure when the skill is still installed afterwards", async () => {
+    installed([{ name: "pdf", origin: "hub" }]);
+    apiPost.mockResolvedValue({ ok: true, id: "pdf", name: "pdf" });
+
+    const out = await skills().call("skill_uninstall", { name: "pdf" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/still installed/i);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("still reports success when the skill really is gone", async () => {
+    apiGet
+      .mockResolvedValueOnce({ skills: [{ name: "pdf", origin: "hub" }] })
+      .mockResolvedValueOnce({ skills: [] });
+    apiPost.mockResolvedValue({ ok: true });
+
+    const out = await skills().call("skill_uninstall", { name: "pdf" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("Removed the skill \"pdf\"");
+  });
+
+  it("does not block the uninstall when the installed list cannot be read", async () => {
+    apiGet.mockRejectedValue(new ApiError(502, "{}"));
+    apiPost.mockResolvedValue({ ok: true });
+
+    const out = await skills().call("skill_uninstall", { name: "pdf" });
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalled();
+  });
+});
+
+// ── skill_info ───────────────────────────────────────────────────────────────
+
+describe("skill_info — a synthesised record is not a skill", () => {
+  function skills() {
+    const h = captureRegistrar("hermes");
+    registerSkillTools(h.reg);
+    return h;
+  }
+
+  /** Exactly what the live inspect route returns for an id nobody has heard of. */
+  const FABRICATED = {
+    skill: {
+      id: "official/nonexistent-xyz",
+      name: "nonexistent-xyz",
+      provenance: { sourceUrlVerified: false },
+      bodySource: "none",
+      bodyTruncated: false,
+      needsRemoteDocs: true,
+    },
+  };
+
+  it("reports NOT_FOUND rather than inventing a skill", async () => {
+    // Phase 1 fabricates; phase 2 (the CLI) adds nothing.
+    apiGet.mockResolvedValueOnce(FABRICATED).mockResolvedValueOnce({ delta: {} });
+
+    const out = await skills().call("skill_info", { id: "official/nonexistent-xyz" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_FOUND");
+    expect(out.error.next).toMatch(/skill_search/);
+  });
+
+  it("accepts the same shell of a record once the CLI fills the documentation in", async () => {
+    apiGet
+      .mockResolvedValueOnce(FABRICATED)
+      .mockResolvedValueOnce({ delta: { description: "Reads PDFs", body: "# PDF\n" } });
+
+    const out = await skills().call("skill_info", { id: "official/nonexistent-xyz" });
+    expect(out.isError).toBe(false);
+  });
+
+  it("says works_here is unknown when the device never checked", async () => {
+    apiGet.mockResolvedValue({
+      skill: { id: "official/pdf", name: "pdf", description: "Reads PDFs", source: "official", trust: "official" },
+    });
+
+    const out = await skills().call("skill_info", { id: "official/pdf" });
+    if (out.isError) throw new Error("skill_info failed");
+    expect(JSON.parse(out.text).works_here).toBe("unknown");
+  });
+
+  it("still reports a real incompatibility as false", async () => {
+    apiGet.mockResolvedValue({
+      skill: { id: "official/mac", name: "mac", description: "macOS only", source: "official", incompatible: true },
+    });
+
+    const out = await skills().call("skill_info", { id: "official/mac" });
+    if (out.isError) throw new Error("skill_info failed");
+    expect(JSON.parse(out.text).works_here).toBe(false);
+  });
+});
+
+// ── ai_list_models ───────────────────────────────────────────────────────────
+
+describe("ai_list_models — what is in use, and what fits", () => {
+  function ai(providers: string[] = []) {
+    const h = captureRegistrar("hermes");
+    registerAiTools(h.reg, ctx("hermes", providers));
+    return h;
+  }
+
+  const CATALOGUE = {
+    provider: "clawlocal",
+    current: "llama3.2:3b",
+    reasoning: "minimal",
+    models: [{ id: "llama3.2:3b" }],
+    providers: [
+      { id: "clawlocal", name: "Local", authenticated: true, total: 3 },
+      { id: "zai", name: "Z.ai", authenticated: true, total: 3 },
+      ...Array.from({ length: 45 }, (_, i) => ({ id: `p${i}`, name: `P${i}`, authenticated: false, total: 8 })),
+    ],
+  };
+
+  it("does not report the provider you asked about as the one in use", async () => {
+    // The route reuses the `provider` field for the filter it was given.
+    apiGet.mockResolvedValue({ provider: "zai", current: "", models: [{ id: "glm-4" }], providers: [] });
+
+    const out = await ai().call("ai_list_models", { provider: "zai" });
+    if (out.isError) throw new Error("ai_list_models failed");
+    const body = JSON.parse(out.text);
+    expect(body.asked_about).toBe("zai");
+    expect(JSON.stringify(body.in_use)).not.toMatch(/"provider"\s*:\s*"zai"/);
+    expect(String(body.in_use)).toMatch(/ai_list_models with no arguments/);
+  });
+
+  it("reports the real provider and model on an unfiltered call", async () => {
+    apiGet.mockResolvedValue(CATALOGUE);
+    const out = await ai().call("ai_list_models", {});
+    if (out.isError) throw new Error("ai_list_models failed");
+    expect(JSON.parse(out.text).in_use).toEqual({ provider: "clawlocal", model: "llama3.2:3b" });
+  });
+
+  /**
+   * The output cap slices from the END, so a 48-provider directory pushed the
+   * `models` array — the answer to the question — entirely past the cut.
+   */
+  it("keeps the models inside the tool's output cap", async () => {
+    apiGet.mockResolvedValue(CATALOGUE);
+    const h = ai();
+    const out = await h.call("ai_list_models", {});
+    if (out.isError) throw new Error("ai_list_models failed");
+
+    const cap = h.get("ai_list_models").opts.maxChars ?? 4_000;
+    expect(out.text.length).toBeLessThanOrEqual(cap);
+    expect(out.text.indexOf("\"models\"")).toBeLessThan(out.text.indexOf("\"providers\""));
+    expect(JSON.parse(out.text).models).toEqual([{ id: "llama3.2:3b" }]);
+  });
+
+  it("summarises the providers that have no credentials instead of listing them", async () => {
+    apiGet.mockResolvedValue(CATALOGUE);
+    const out = await ai().call("ai_list_models", {});
+    if (out.isError) throw new Error("ai_list_models failed");
+    const body = JSON.parse(out.text);
+    expect(body.providers.map((p: { id: string }) => p.id)).toEqual(["clawlocal", "zai"]);
+    expect(body.providers_without_credentials).toBe(45);
+  });
+});
+
+// ── browser_open ─────────────────────────────────────────────────────────────
+
+describe("browser_open — a refused address is not a dead browser", () => {
+  function browser() {
+    const h = captureRegistrar("hermes");
+    registerBrowserTools(h.reg);
+    return h;
+  }
+
+  it("reports the SSRF refusal as an argument problem", async () => {
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked internal address" })));
+
+    const out = await browser().call("browser_open", { url: "http://127.0.0.1/login" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/private network/i);
+    // The retry loop: browser_open's own failure used to tell the agent to
+    // call browser_open.
+    expect(out.error.next).not.toMatch(/call browser_open/i);
+  });
+
+  it("still reports a genuinely dead browser as ENDPOINT_DOWN", async () => {
+    apiPost.mockRejectedValue(new Error("fetch failed"));
+
+    const out = await browser().call("browser_open", { url: "https://example.com" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("ENDPOINT_DOWN");
+    // browser_open may name itself only to say "stop calling me".
+    expect(out.error.next).toMatch(/do not call browser_open again/i);
+  });
+
+  it("keeps telling the OTHER browser tools to open the browser first", async () => {
+    apiPost.mockRejectedValue(new Error("fetch failed"));
+
+    const out = await browser().call("browser_navigate", { url: "https://example.com" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.next).toMatch(/browser_open/);
+  });
+});
+
+// ── 404 mapping ──────────────────────────────────────────────────────────────
+
+describe("404 mapping — the id or the edition", () => {
+  it("sends a missing resource back to the listing tools, not device_status", () => {
+    const e = classifyError(new ApiError(404, JSON.stringify({ error: "Webapp not found" })), "webapp_update");
+    expect(e.code).toBe("NOT_FOUND");
+    expect(e.next).toMatch(/ui_list_apps/);
+    expect(e.next).not.toMatch(/device_status/);
+  });
+
+  it("keeps the edition wording for a route this build does not have", () => {
+    const e = classifyError(
+      new ApiError(404, "<!DOCTYPE html><html><body>404: This page could not be found.</body></html>"),
+      "app_search",
+    );
+    expect(e.code).toBe("NOT_FOUND");
+    expect(e.next).toMatch(/device_status/);
+  });
+
+  it("treats an empty body as the route case", () => {
+    expect(classifyError(new ApiError(404, ""), "app_search").next).toMatch(/device_status/);
+  });
+});
+
+// ── ClawKeep ─────────────────────────────────────────────────────────────────
+
+describe("ClawKeep is gated on the edition that can actually run it", () => {
+  function system(edition: "openclaw" | "hermes") {
+    const h = captureRegistrar(edition);
+    registerSystemTools(h.reg, ctx(edition));
+    return h;
+  }
+
+  it("does not offer the write and list backup tools on Hermes", () => {
+    const h = system("hermes");
+    expect(h.has("backup_now")).toBe(false);
+    expect(h.has("backup_list")).toBe(false);
+    // Kept, so the agent can answer "do you back up?" instead of going silent.
+    expect(h.has("backup_status")).toBe(true);
+  });
+
+  it("offers all three on OpenClaw, where ClawKeep runs", () => {
+    const h = system("openclaw");
+    expect(h.has("backup_now")).toBe(true);
+    expect(h.has("backup_list")).toBe(true);
+    expect(h.has("backup_status")).toBe(true);
+  });
+
+  it("answers backup_status honestly when the edition cannot run ClawKeep", async () => {
+    // HTTP 200 — which is why the existing 404-only NOT_SUPPORTED_HERE rule
+    // never fired and the agent read this as "not paired yet".
+    apiGet.mockResolvedValue({ paired: false, configured: false, supportedOnEdition: false });
+
+    const out = await system("hermes").call("backup_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/not available on this edition/i);
+    expect(out.text).toMatch(/do not call any backup tool again/i);
+    expect(out.text).not.toMatch(/Settings -> Backup/);
+  });
+
+  it("still reports the real status where ClawKeep is supported", async () => {
+    apiGet.mockResolvedValue({ paired: true, configured: true, supportedOnEdition: true });
+    const out = await system("openclaw").call("backup_status", {});
+    if (out.isError) throw new Error("backup_status failed");
+    expect(JSON.parse(out.text).paired).toBe(true);
+  });
+
+  it("reports a failed backup as a failure, with the reason the route carried", async () => {
+    // The route answers 200 with ok:false, so nothing ever threw.
+    apiPost.mockResolvedValue({
+      exitCode: 1,
+      ok: false,
+      stdoutTail: "",
+      stderrTail: "token error: No token at ~/.clawkeep/token; run 'clawkeep pair' first",
+    });
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/did not run/i);
+    expect(out.error.message).toMatch(/clawkeep pair/);
+    expect(out.error.next).toMatch(/do not start another one/i);
+  });
+
+  it("reports a successful backup as one", async () => {
+    apiPost.mockResolvedValue({ exitCode: 0, ok: true });
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/finished successfully/i);
+  });
+});
+
+// ── screen_capture ───────────────────────────────────────────────────────────
+
+describe("screen_capture photographs the screen the user is looking at", () => {
+  const markerDir = path.join(HOME, ".cache", "clawbox");
+  const marker = path.join(markerDir, "vnc-display.env");
+
+  it("prefers the display the VNC stack recorded over the X default", async () => {
+    fs.mkdirSync(markerDir, { recursive: true });
+    fs.writeFileSync(marker, "CLAWBOX_VNC_DISPLAY=:99\n");
+    // The MCP is spawned with no DISPLAY at all, which is how :0 — a 640x480
+    // headless stub — used to win.
+    await expect(desktopDisplay()).resolves.toBe(":99");
+    fs.rmSync(marker);
+  });
+
+  it("honours an explicit override ahead of the marker", async () => {
+    fs.mkdirSync(markerDir, { recursive: true });
+    fs.writeFileSync(marker, "CLAWBOX_VNC_DISPLAY=:99\n");
+    process.env.CLAWBOX_VNC_DISPLAY = ":7";
+    await expect(desktopDisplay()).resolves.toBe(":7");
+    fs.rmSync(marker);
+  });
+
+  it("falls back to the X default when nothing on the device says otherwise", async () => {
+    await expect(desktopDisplay()).resolves.toBe(":0");
+  });
+});
+
+// ── ai_set_provider ──────────────────────────────────────────────────────────
+
+describe("ai_set_provider is not a one-way door", () => {
+  it("keeps the configured provider reachable even when the catalogue omits it", async () => {
+    // `auto` is a Hermes CLI meta-provider: the route accepts it, and it can
+    // never appear in the credentialed catalogue the enum is built from. The
+    // agent could switch away from it and then had no value to switch back to.
+    hasBinary.mockResolvedValue(false);
+    spawnArgv.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "", timedOut: false });
+    apiTry.mockResolvedValue({
+      provider: "auto",
+      providers: [{ id: "zai", authenticated: true }, { id: "openai", authenticated: false }],
+    });
+
+    const built = await buildContext("hermes", "hermes", "full");
+    expect(built.providers).toContain("auto");
+    expect(built.providers).toContain("zai");
+    expect(built.providers).not.toContain("openai");
+  });
+
+  it("does not duplicate a configured provider the catalogue already lists", async () => {
+    hasBinary.mockResolvedValue(false);
+    spawnArgv.mockResolvedValue({ exitCode: 1, stdout: "", stderr: "", timedOut: false });
+    apiTry.mockResolvedValue({
+      provider: "clawlocal",
+      providers: [{ id: "clawlocal", authenticated: true }],
+    });
+
+    const built = await buildContext("hermes", "hermes", "full");
+    expect(built.providers).toEqual(["clawlocal"]);
+  });
+});

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
@@ -74,6 +75,7 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
 
 describe("POST /setup-api/system/credentials", () => {
   let credentialsPost: (req: Request) => Promise<Response>;
+  let session: SessionFixture;
 
   function jsonRequest(body: unknown, headers?: Record<string, string>): Request {
     return new Request("http://localhost/test", {
@@ -86,6 +88,7 @@ describe("POST /setup-api/system/credentials", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    session = installSessionFixture();
 
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
@@ -103,6 +106,7 @@ describe("POST /setup-api/system/credentials", () => {
   afterEach(() => {
     vi.clearAllMocks();
     delete process.env.CLAWBOX_USER;
+    session.cleanup();
   });
 
   it("sets password successfully", async () => {
@@ -225,7 +229,7 @@ describe("POST /setup-api/system/credentials", () => {
     const res = await credentialsPost(jsonRequest({
       password: "newsecurepassword123",
       currentPassword: "oldpassword123",
-    }));
+    }, { Cookie: session.cookie }));
 
     expect(res.status).toBe(200);
     expect(vi.mocked(bumpSessionGeneration)).toHaveBeenCalled();
@@ -239,7 +243,33 @@ describe("POST /setup-api/system/credentials", () => {
     const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
     expect(res.status).toBe(200);
     expect(vi.mocked(bumpSessionGeneration)).not.toHaveBeenCalled();
-    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("mints the owner's session on the first-boot password set", async () => {
+    // There is no prior session to revoke, but there IS now an owner — so the
+    // wizard's remaining steps run authenticated instead of needing a pre-auth
+    // carve-out, and the bootstrap window closes behind them. TASK-443.
+    const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ success: true, authenticated: true });
+    const cookie = res.headers.get("set-cookie");
+    expect(cookie).toContain("clawbox_session=reissued.cookie");
+    expect(cookie).toContain("HttpOnly");
+  });
+
+  it("refuses an unauthenticated password CHANGE once one is configured", async () => {
+    const { get } = await import("@/lib/config-store");
+    vi.mocked(get).mockResolvedValue(true); // password_configured → this is a change
+
+    const res = await credentialsPost(jsonRequest({
+      password: "newsecurepassword123",
+      currentPassword: "oldpassword123",
+    }));
+
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "Authentication required" });
+    // Nothing was written and the root chpasswd unit was never started.
+    expect(mockSet).not.toHaveBeenCalledWith("password_configured", true);
   });
 
   it("resets rate limit on successful password change", async () => {

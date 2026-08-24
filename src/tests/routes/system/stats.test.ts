@@ -179,6 +179,20 @@ SwapFree:        1500000 kB`;
     expect(body.cpu).toBeDefined();
   });
 
+  it("responds without the 200 ms per-request sleep (TASK-456)", async () => {
+    // The route used to read /proc/stat, `await` a 200 ms timer, then read it
+    // again — a hard ~209 ms floor on every response, measured live on the box
+    // (5 authenticated requests, 208-211 ms), for an endpoint the System app
+    // and Settings > System poll every 3 s. src/lib/cpu-usage.ts diffs against
+    // a cached snapshot instead. Three sequential requests could not finish in
+    // under 600 ms on the old implementation.
+    const startedAt = Date.now();
+    await systemStatsGet();
+    await systemStatsGet();
+    await systemStatsGet();
+    expect(Date.now() - startedAt).toBeLessThan(150);
+  });
+
   it("handles df command failure gracefully", async () => {
     mockExecSync.mockImplementation((cmd: string) => {
       if (cmd.startsWith("df")) {
