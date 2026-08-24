@@ -186,3 +186,80 @@ export function extractReasoningPanels(raw: string): ExtractedReasoning {
 export function stripReasoningPanels(raw: string): string {
   return extractReasoningPanels(raw).text;
 }
+
+// ── The agent's status line is not the model's reasoning ────────────────────
+//
+// While an API call is in flight the agent paints an animated status line built
+// from a kaomoji face and a gerund:
+//
+//   face = random.choice(KawaiiSpinner.get_thinking_faces())
+//   verb = random.choice(KawaiiSpinner.get_thinking_verbs())
+//   agent.thinking_callback(f"{face} {verb}...")
+//
+// (`~/.hermes/hermes-agent/agent/conversation_loop.py`, with the two vocabularies
+// in `agent/display.py` as `KAWAII_THINKING` and `THINKING_VERBS`.) It is a
+// spinner. It is emitted for EVERY model, including ones that return no
+// monologue at all, and it says nothing about what the model was thinking.
+//
+// The streaming transport keeps it away from reasoning structurally — it
+// arrives on `thinking.delta`, a different channel from `reasoning.delta`, and
+// is dropped there. This is the floor UNDER that, for the two paths where the
+// channel separation does not exist: the CLI capture, where the same text can
+// reach stdout as a raw spinner line, and anything already stored by an older
+// build. Customers saw `(⌐■_■) computing...(°ロ°) cogitating...` presented as a
+// model's reasoning; nothing that looks like this should survive to a
+// disclosure.
+
+/**
+ * Upstream's `THINKING_VERBS`, verbatim.
+ *
+ * Copied rather than inferred so this list can be diffed against the agent's
+ * own. A skin may substitute its own verbs, which is exactly why removal is
+ * anchored on the whole `<face> <verb>...` SHAPE and this list is only one of
+ * the two things a match needs.
+ */
+const AGENT_STATUS_VERBS = [
+  "pondering", "contemplating", "musing", "cogitating", "ruminating",
+  "deliberating", "mulling", "reflecting", "processing", "reasoning",
+  "analyzing", "computing", "synthesizing", "formulating", "brainstorming",
+] as const;
+
+/**
+ * One status frame: an optional kaomoji face, a verb from the list, an ellipsis.
+ *
+ * The face is matched by SHAPE rather than by listing the faces, because a skin
+ * can replace them (`get_thinking_faces` falls back to `KAWAII_THINKING` only
+ * when the active skin offers none). Every face in the vocabulary is built
+ * entirely from characters that are not ASCII letters or digits — including
+ * spaces (`( ˘⌣˘)♡`, `( •_•)>⌐■-■`) and non-Latin letters (`(°ロ°)`, `ಠ_ಠ`) —
+ * while the prose this must not touch is written in ASCII words. So the face is
+ * "a run of anything that is not an ASCII letter or digit", held to one line.
+ *
+ * Anchored at a word BOUNDARY before the verb: that is what stops
+ * "reprocessing..." being cut down to "re". The ellipsis is what leaves
+ * ordinary prose alone — a sentence that merely says it is processing the file
+ * does not have one.
+ */
+const STATUS_FRAME_RE = new RegExp(
+  String.raw`[^A-Za-z0-9\n]*\b(?:${AGENT_STATUS_VERBS.join("|")})\.{3}`,
+  "giu",
+);
+
+/**
+ * Reasoning with the agent's status frames taken out.
+ *
+ * Returns an empty string when nothing but status frames was there, so a caller
+ * can tell "no reasoning" from "reasoning" and omit the disclosure entirely
+ * rather than showing an empty one.
+ */
+export function stripAgentStatusFrames(raw: string): string {
+  if (typeof raw !== "string" || !raw) return "";
+  return raw
+    .replace(STATUS_FRAME_RE, " ")
+    // The frames are painted back to back with no separator, so removing them
+    // leaves runs of spaces mid-line and blank lines where one stood alone.
+    .replace(/[^\S\n]{2,}/g, " ")
+    .replace(/^[^\S\n]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}

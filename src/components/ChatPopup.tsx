@@ -2297,12 +2297,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // must not reopen the caret, so a delta is only painted while this run
         // is still the live one.
         if (event.kind === 'delta' && runIdRef.current !== null) setStreaming(event.text)
+        // Live tool steps, through the SAME pills the gateway harness already
+        // feeds. A hermes turn used to reach this callback with nothing but
+        // text, so a turn that spent its time in `web_search` — measured at up
+        // to four minutes on the box — showed an empty bubble and no reason to
+        // believe anything was happening. `applyToolEvent` reads `toolCallId`,
+        // so the transport's stable `id` is handed over under that name.
+        else if (event.kind === 'tool' && runIdRef.current !== null) {
+          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+        }
       })
     } catch (err) {
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
       setStreaming('')
+      clearToolCalls()
       runIdRef.current = null
       // A user-initiated Stop shows nothing, not an error line.
       if (err instanceof HarnessError && err.code === 'aborted') return
@@ -2341,8 +2351,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     sendingRef.current = false
     setSending(false)
     setStreaming('')
+    // The live pills have done their job. The finished message carries the
+    // agent's OWN record of the steps (`result.toolCalls`) and renders it as
+    // summary chips, so leaving the running ones up would show the same turn's
+    // tools twice — once as a guess from the wire, once as the record.
+    clearToolCalls()
     runIdRef.current = null
-  }, [adapter])
+  }, [adapter, applyToolEvent, clearToolCalls])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {

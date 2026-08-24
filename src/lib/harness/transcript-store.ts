@@ -136,6 +136,17 @@ export interface TranscriptRecord {
   reasoning?: string;
   /** The tools the agent used, in call order. */
   toolCalls?: TranscriptToolCall[];
+  /**
+   * The model that actually produced this reply, and the provider behind it.
+   *
+   * Per RECORD rather than per conversation, because one conversation can be
+   * answered by several models: the pills can be changed between turns, and the
+   * whole reason this field exists is that a switch which silently failed to
+   * apply was indistinguishable from one that worked. Written from what the
+   * transport reported for the turn, never from what the picker was showing.
+   */
+  model?: string;
+  provider?: string;
   /** The run this record belongs to, so a reconcile can match it to a bubble. */
   turnId?: string;
   /** Only ever "error", and only on a record that reports a failed turn. */
@@ -209,6 +220,10 @@ function boundRecord(record: TranscriptRecord): TranscriptRecord {
     ...(toolCalls.length
       ? { toolCalls: toolCalls.slice(0, MAX_TOOL_CALLS).map(boundToolCall) }
       : {}),
+    // Short identifiers, clamped the same way everything else on the line is —
+    // they arrive from the dashboard rather than from us.
+    ...(record.model ? { model: String(record.model).slice(0, MAX_DETAIL_CHARS) } : {}),
+    ...(record.provider ? { provider: String(record.provider).slice(0, MAX_DETAIL_CHARS) } : {}),
     ...(record.turnId ? { turnId: record.turnId } : {}),
     ...(record.variant ? { variant: record.variant } : {}),
   };
@@ -428,6 +443,8 @@ function parseRecord(line: string): TranscriptRecord | null {
     ...(audio ? { audio } : {}),
     ...(reasoning ? { reasoning } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
+    ...(typeof row.model === "string" && row.model ? { model: row.model } : {}),
+    ...(typeof row.provider === "string" && row.provider ? { provider: row.provider } : {}),
     ...(typeof row.turnId === "string" && row.turnId ? { turnId: row.turnId } : {}),
     ...(row.variant === "error" ? { variant: "error" as const } : {}),
   };
