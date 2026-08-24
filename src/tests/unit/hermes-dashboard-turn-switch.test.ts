@@ -125,7 +125,16 @@ async function connect(
   info: Record<string, unknown> | null = { model: "deepseek-v4-flash", provider: "custom" },
   switchReply: "ok" | "refused" | "soft-refused" = "ok",
 ) {
-  const opening = openDashboardTurn({ text: "Hey", model: "deepseek-v4-flash", provider: "clawai", ...overrides });
+  let settled = false;
+  const opening = openDashboardTurn({
+    text: "Hey",
+    model: "deepseek-v4-flash",
+    provider: "clawai",
+    ...overrides,
+  }).then((handle) => {
+    settled = true;
+    return handle;
+  });
   const socket = await latest();
   socket.open();
   await Promise.resolve();
@@ -145,8 +154,14 @@ async function connect(
   // puts the reasoning level back afterwards. BOTH are awaited by
   // `openDashboardTurn`, so a helper that left either unanswered would park the
   // open on its own timeout rather than testing anything.
+  //
+  // Stops the moment the open settles rather than spinning a fixed count. The
+  // module's own waits carry REAL deadlines (15s for a session call, 20s for a
+  // switch), so every needless turn of this loop is another chance for a
+  // loaded machine to reach one of them and fail a test for a reason that has
+  // nothing to do with what it asserts.
   const answered = new Set<unknown>();
-  for (let i = 0; i < 200; i++) {
+  for (let i = 0; i < 200 && !settled; i++) {
     await Promise.resolve();
     for (const sent of socket.sent) {
       if (answered.has(sent.id)) continue;
