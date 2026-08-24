@@ -42,6 +42,7 @@ export interface HermesTurnContext {
 
 const CHAT_ROUTE = "/setup-api/hermes/chat";
 const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
+const IMAGES_ROUTE = "/setup-api/chat/images";
 
 /**
  * How long a transcript call may take before it is abandoned.
@@ -474,6 +475,74 @@ export class HermesAdapter implements HarnessAdapter {
     } catch (err) {
       throw asHarnessError(err, "upstream");
     }
+  }
+
+  /**
+   * Draw one picture through the box's own images route.
+   *
+   * This is the half of image generation that OpenClaw gets from its agent and
+   * Hermes had nowhere to get at all: the agent has no image tool and no
+   * provider slot to grow one, so before this a request for a picture reached
+   * nothing and the turn ran until it timed out. The trigger moves to the
+   * composer and the box makes the call — see `imageGenerationTrigger`.
+   *
+   * NOT threaded through `sessionId`, and that is a deliberate limit rather
+   * than an oversight: the picture is fetched from the proxy without the agent
+   * being involved, so the conversation the agent remembers does not contain
+   * it and a follow-up like "make it bluer" cannot work. The transcript the
+   * SCREEN replays does contain it, which is what keeps the two honest — the
+   * customer sees exactly what the box did.
+   *
+   * The route writes both transcript records itself, before and after the
+   * upstream call, so a customer who closes the tab on a 15-second generation
+   * still finds the picture waiting on their next visit.
+   */
+  async generateImage(prompt: string, signal?: AbortSignal): Promise<{ media: readonly string[] }> {
+    if (this.capabilities.imageGenerationTrigger !== "composer") {
+      throw new HarnessError("unsupported", "This box cannot generate pictures.");
+    }
+    let res: Response;
+    try {
+      res = await this.fetchImpl(IMAGES_ROUTE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+        ...(signal ? { signal } : {}),
+      });
+    } catch (err) {
+      throw asHarnessError(err, "upstream");
+    }
+    // The customer hit Stop. Not a failure, and it must not become a red
+    // bubble — same contract as a stopped turn.
+    if (res.status === 499 || signal?.aborted) {
+      throw new HarnessError("aborted", "Stopped.");
+    }
+    const data = await readJsonBody(res);
+    if (!res.ok) {
+      const message = typeof data.error === "string" && data.error
+        ? data.error
+        : "Could not generate the picture.";
+      // The route's own statuses, mapped to the affordance each one wants: 503
+      // is "link this box" and belongs on `not-configured`, a 4xx is the
+      // prompt, and everything else is the far side having a bad day.
+      throw new HarnessError(
+        res.status === 503
+          ? "not-configured"
+          : res.status >= 400 && res.status < 500
+            ? "invalid-input"
+            : "upstream",
+        message,
+      );
+    }
+    const media = Array.isArray(data.media)
+      ? data.media.filter((ref): ref is string => typeof ref === "string" && ref.length > 0)
+      : [];
+    if (media.length === 0) {
+      // A 200 with nothing in it would otherwise end the wait with an empty
+      // bubble, which reads as "the box drew nothing" rather than as a fault.
+      throw new HarnessError("upstream", "ClawBox AI returned no picture.");
+    }
+    return { media };
   }
 
   async patchSessionDefaults(_patch: { thinkingLevel?: string | null }): Promise<void> {

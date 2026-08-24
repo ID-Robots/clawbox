@@ -12,7 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
-import { describeChatFailure } from '@/lib/chat-error-text'
+import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
@@ -526,6 +526,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // landed once that count goes up. A count beats a timestamp here: the browser
   // may be a phone whose clock disagrees with the device's.
   const imageBaselineRef = useRef(0)
+  // The COMPOSER's own picture wait, kept apart from `generatingImage` above.
+  //
+  // Two waits because they end in two different ways. `generatingImage` covers
+  // a picture the AGENT is drawing: nothing hands the media back, so it polls
+  // the transcript until the image count goes up. This one covers a picture the
+  // BOX is fetching, where the call itself resolves with the media — so it ends
+  // when the promise does, and sharing the other flag would start that poll and
+  // let a history read paint the same picture the promise is about to.
+  const [drawing, setDrawing] = useState(false)
+  // Guards re-entry from the render-time state, which lags a rapid second
+  // click, and carries the abort so closing the popup can end a wait nobody is
+  // watching any more.
+  const drawingRef = useRef(false)
+  const drawingAbortRef = useRef<AbortController | null>(null)
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -2415,6 +2429,67 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const enqueueRunRef = useRef(enqueueRun)
   useEffect(() => { enqueueRunRef.current = enqueueRun }, [enqueueRun])
 
+  /**
+   * Draw the composer's text, on a harness whose agent cannot.
+   *
+   * The whole feature the customer sees, and it is short because the decisions
+   * are elsewhere: whether to offer it at all is `imageGenerationTrigger`, and
+   * where the picture comes from is the adapter's. What is left here is what
+   * this component has always owned — putting the exchange on screen.
+   *
+   * The prompt is drawn as a user bubble before the call so the wait has
+   * something to sit under, and the box records the same two lines in the
+   * durable transcript, so closing the tab mid-generation still leaves the
+   * picture waiting on the next visit.
+   */
+  const generatePicture = useCallback(async () => {
+    const prompt = input.trim()
+    // Re-entry is decided from the ref, not from `drawing`: a second click can
+    // land in the window before the state commit, and two generations would be
+    // two charges against the customer's daily allowance for one intent.
+    if (!prompt || drawingRef.current) return
+    setInput('')
+    const controller = new AbortController()
+    drawingAbortRef.current = controller
+    drawingRef.current = true
+    setDrawing(true)
+    setMessages(prev => [...prev, { role: 'user', text: prompt, timestamp: Date.now() }])
+    try {
+      const { media } = await adapter.generateImage(prompt, controller.signal)
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        // A picture with no caption is the whole reply here — there is no model
+        // writing one, so '(no response)' would be describing the absence of
+        // something nobody asked for.
+        text: '',
+        timestamp: Date.now(),
+        images: [...media],
+      }])
+    } catch (err) {
+      // Stopping is not failing, and must not leave a red bubble behind.
+      if (err instanceof HarnessError && err.code === 'aborted') return
+      setMessages(prev => [...prev, {
+        role: 'system',
+        // The same leak rules a failed turn goes through. Everything this path
+        // can report was written by us for a customer, but the layers under it
+        // are a proxy and a filesystem, and both quote what they were handed.
+        text: describeImageFailure(err instanceof Error ? err.message : undefined),
+        timestamp: Date.now(),
+      }])
+    } finally {
+      drawingRef.current = false
+      setDrawing(false)
+      drawingAbortRef.current = null
+    }
+  }, [input, adapter])
+
+  // A wait nobody is watching is a paid generation still running. Closing the
+  // popup ends it, the same way it drops the agent's image wait just above.
+  useEffect(() => {
+    if (isOpen) return
+    drawingAbortRef.current?.abort()
+  }, [isOpen])
+
   const sendMessage = useCallback(() => {
     const text = input.trim()
     if (!text && attachments.length === 0) return
@@ -3584,7 +3659,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         {/* The picture outlives the turn that asked for it, so this banner is
             the only thing on screen during the 20-40s wait — the tool pill has
             already gone green and `sending` is back to false. */}
-        {!reloadingSkill && generatingImage && (
+        {/* One banner, both waits — the agent drawing on its own and the box
+            fetching on the composer's behalf look identical to the person
+            waiting, and should. */}
+        {!reloadingSkill && (generatingImage || drawing) && (
           <div
             role="status"
             aria-live="polite"
@@ -3918,6 +3996,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               </span>
             </button>
           )
+        )}
+        {/* Making a picture, where the AGENT cannot.
+            Shown on the trigger and not on `canGenerateImages`, because the two
+            answer different questions: the flag says a picture can be made
+            here, the trigger says who makes it. On OpenClaw the customer simply
+            asks and the agent's own tool draws — a button there would be a
+            second way to ask for something the chat already does, and the
+            adapter refuses it outright. */}
+        {caps.imageGenerationTrigger === 'composer' && (
+          <button
+            onClick={() => { void generatePicture() }}
+            // Disabled with nothing typed, because the composer's text IS the
+            // prompt and an empty one would spend a generation on silence. The
+            // title says which of the two reasons applies rather than going
+            // blank, so a customer is never left guessing at a dead control.
+            disabled={status !== 'connected' || drawing || input.trim().length === 0}
+            title={input.trim().length === 0 ? t("chat.generatePictureEmpty") : t("chat.generatePicture")}
+            aria-label={t("chat.generatePicture")}
+            data-testid="generate-image"
+            style={{
+              width: 36, height: 36, borderRadius: 10, border: 'none',
+              background: 'rgba(255,255,255,0.06)',
+              color: drawing ? '#f97316' : 'rgba(255,255,255,0.4)',
+              cursor: status === 'connected' && !drawing && input.trim().length > 0 ? 'pointer' : 'default',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 0.15s',
+            }}
+            onMouseEnter={(e) => { if (status === 'connected' && !drawing && input.trim().length > 0) { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; if (!drawing) e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+              {drawing ? 'hourglass_top' : 'imagesmode'}
+            </span>
+          </button>
         )}
         <textarea
           ref={inputRef}

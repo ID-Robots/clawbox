@@ -44,6 +44,74 @@ export async function chatGeneratedImageDir(): Promise<string> {
 }
 
 /**
+ * Nothing this young is ever removed, whatever the totals say.
+ *
+ * A file being written by a concurrent request is the newest thing in the
+ * directory, and deleting it out from under an in-flight write would hand the
+ * caller back a path with nothing at it.
+ */
+const RETENTION_MIN_AGE_MS = 60 * 1000;
+
+export interface MediaRetention {
+  /** Anything older than this goes, regardless of how much room is left. */
+  maxAgeMs: number;
+  /** What age left behind is then trimmed oldest-first down to this. */
+  maxBytes: number;
+}
+
+/**
+ * Drop files that are old, then oldest-first until the directory fits.
+ *
+ * Shared by both ends of the chat's media tree — staged uploads on the way in
+ * and generated pictures on the way out — because the two need exactly this
+ * policy with different numbers, and a second copy of it is a second place to
+ * forget that a directory entry can vanish mid-sweep.
+ *
+ * BEST EFFORT BY CONSTRUCTION. It is called for its side effect before
+ * something is written, and every failure — an unreadable entry, a file another
+ * sweep already removed, a stat racing an unlink — is skipped rather than
+ * raised. Directories and anything else that is not a regular file are left
+ * untouched.
+ */
+export async function pruneMediaDir(dirReal: string, retention: MediaRetention): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(dirReal);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  const kept: { path: string; mtimeMs: number; size: number }[] = [];
+  for (const name of entries) {
+    const full = path.join(dirReal, name);
+    let stat;
+    try {
+      stat = await fsp.lstat(full);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    const age = now - stat.mtimeMs;
+    if (age < RETENTION_MIN_AGE_MS) continue;
+    if (age > retention.maxAgeMs) {
+      try { await fsp.unlink(full); } catch { /* raced another sweep */ }
+      continue;
+    }
+    kept.push({ path: full, mtimeMs: stat.mtimeMs, size: stat.size });
+  }
+  let total = kept.reduce((sum, f) => sum + f.size, 0);
+  if (total <= retention.maxBytes) return;
+  kept.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  for (const f of kept) {
+    if (total <= retention.maxBytes) break;
+    try {
+      await fsp.unlink(f.path);
+      total -= f.size;
+    } catch { /* raced another sweep */ }
+  }
+}
+
+/**
  * Resolve one caller-supplied path against the media root, or null.
  *
  * Used where a path is about to become an ARGV ELEMENT for the Hermes CLI. No

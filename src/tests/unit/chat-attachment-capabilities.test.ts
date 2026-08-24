@@ -21,18 +21,21 @@ const HERMES_WITH_IMAGES = capabilitiesFor("hermes", {
   // table's own tests.
   hermesHasVisionRoute: true,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
 });
 const HERMES_BARE = capabilitiesFor("hermes", {
   hasClawaiToken: false,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
 });
 const OPENCLAW = capabilitiesFor("openclaw", {
   hasClawaiToken: true,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
 });
 
 describe("partitionAttachments", () => {
