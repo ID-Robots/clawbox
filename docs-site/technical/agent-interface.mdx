@@ -112,22 +112,43 @@ Hermes ships its own equivalents, so ClawBox does not add a second set.
 - Telegram senders must be pairing-approved before the agent will act for them
   ([details](/technical/authentication#security-posture-summary)).
 
-## The `clawbox` CLI
+## The `clawbox-cli` wrapper
 
-The same capabilities are shell-callable, from the Terminal app or over SSH:
+The same capabilities are shell-callable, from the Terminal app or over SSH.
+
+<Warning>
+There is **no `clawbox` command on `PATH`** — nothing in the installer creates one.
+The wrapper is a script in the checkout, run through Bun:
+
+```bash
+bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts <args>
+```
+
+`bun` is on the interactive `PATH`, so this works in the Terminal app and in an
+interactive SSH session. In a non-interactive `ssh box '…'` or a systemd unit, use the
+full path `/home/clawbox/.bun/bin/bun`. If you use it often, alias it:
+`alias clawbox='bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts'`.
+</Warning>
+
+The subcommands (shown below with that alias in place):
 
 ```bash
 clawbox webapp create <appId> <name> [--html ...]   # install a desktop webapp
+clawbox webapp update <appId> [--html ...]          # replace its HTML
 clawbox app open <appId> | app list                 # drive the desktop
 clawbox notify "message"                            # desktop notification
 clawbox system stats | system info                  # metrics
 clawbox edition                                     # openclaw | hermes | dual
-clawbox code init|build|read|write|edit|search ...  # code-assistant projects
-sudo clawbox update                                 # full system update — OpenClaw edition only
+clawbox code init|list|build|files|read|write|edit|search|delete ...
+clawbox update                                      # full system update — OpenClaw edition only
 ```
 
-`clawbox update` refuses to run on a Hermes device, because it would re-run the
-OpenClaw installer. Update a Hermes box from **Settings → System Update**.
+`update` asks for `sudo` itself when it re-runs the installer — do **not** prefix the
+command with `sudo`, or it runs under root's `PATH` and environment instead of yours.
+
+On a Hermes device `update` refuses and points you at **Settings → System Update**,
+which runs the edition-correct installer steps. (On the premium `dual` SKU the guard
+does not fire, because the edition lock there reads `dual`.)
 
 ## How authentication works
 
@@ -141,6 +162,10 @@ OpenClaw installer. Update a Hermes box from **Settings → System Update**.
     boot, and again at install time. Both paths are idempotent, so a restart, a
     redeploy or an update all converge on the same entry.
 - If tools suddenly fail with auth errors, `clawbox_health` diagnoses it.
+- On the `dual` SKU the tool set follows the **currently active harness**
+  (`/setup-api/harness/active`), re-resolved when the MCP server starts, rather than
+  being fixed by the edition lock. If the lock file exists but cannot be read, the
+  smaller Hermes tool set is registered on purpose.
 
 ## For agent developers
 
@@ -150,7 +175,7 @@ integration surfaces are:
 1. **MCP tools** (this page) — through the on-device agent.
 2. **`/setup-api/*` HTTP APIs** — session-cookie or MCP-bearer authenticated;
    the same APIs the desktop UI uses.
-3. **`clawbox` CLI** — over SSH or in the Terminal app.
+3. **`mcp/clawbox-cli.ts`** — over SSH or in the Terminal app, run through `bun run`.
 4. The agent workspace guide seeded on the device.
 
 See the [Quick Reference](/technical/quick-reference) for the one-page fact
