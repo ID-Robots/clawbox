@@ -936,11 +936,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => adapter.onStatus((next) => {
     setStatus(next === 'idle' ? 'connecting' : next)
   }), [adapter])
-  // `connect` is a stable `useCallback([])` that several window listeners close
-  // over, so anything it reaches for must be read at call time rather than
-  // captured. Same reason the harness itself used to be a ref.
-  const adapterRef = useRef(adapter)
-  useEffect(() => { adapterRef.current = adapter }, [adapter])
   // Whether this box has a socket to open at all. Read through a ref for the
   // same reason `harnessRef` was: several long-lived window listeners close
   // over the first `connect`, and a value captured in its dependency array
