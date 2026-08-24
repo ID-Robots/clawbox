@@ -544,6 +544,11 @@ describe("middleware", () => {
       "/setup-api/vnc/status",
       "/setup-api/terminal",
       "/setup-api/clawkeep/restore",
+      // Writes a bot credential; configured from Settings, never the wizard.
+      "/setup-api/discord/configure",
+      "/setup-api/discord/status",
+      // Same prefix, and it reads guild member lists through the bot token.
+      "/setup-api/discord/members",
       "/setup-api/tunnel/enable",
       "/setup-api/portal/start", // same privileged tunnel control as /tunnel
       "/setup-api/portal/stop",
