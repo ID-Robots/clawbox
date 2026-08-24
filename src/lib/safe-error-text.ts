@@ -31,6 +31,19 @@ export function sanitizeErrorMessage(raw: unknown): string | null {
   if (/\b(claw_|sk-|Bearer\s)/i.test(trimmed)) return null;
   // `at fn (` — a V8 stack frame.
   if (/\bat\s+\w+\s+\(/.test(trimmed)) return null;
+  // A UUID is always an internal handle here — a session, a run, a device.
+  // It names nothing the customer can look up and cannot help them act, so
+  // it is a leak whether or not a path came with it (TASK-440: the session
+  // UUID reached the transcript alongside the path, and would have reached it
+  // alone had the message been worded slightly differently).
+  if (/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(trimmed)) return null;
+  // OpenClaw's session-key shape, `agent:main:main`. Same reasoning, and it is
+  // one of the strings the acceptance matrix's own leak check looks for.
+  if (/\bagent:[\w.-]+:/.test(trimmed)) return null;
+  // An instruction to run the CLI. `Logs: openclaw logs --follow` is appended
+  // to some gateway failures and carries no path, so nothing above catches it;
+  // a chat bubble is never the right place to send someone to a terminal.
+  if (/\bopenclaw\s+[a-z-]+/i.test(trimmed)) return null;
   return trimmed;
 }
 

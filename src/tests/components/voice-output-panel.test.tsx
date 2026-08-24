@@ -28,7 +28,7 @@ function status(over: Record<string, unknown> = {}) {
     drifted: false,
     engines: [
       engine(),
-      engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", usable: false, configured: false, detail: "ClawBox AI does not serve the voice yet, so this box has no cloud voice to call." }),
+      engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", usable: false, configured: false, detail: "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one." }),
     ],
     lastCheck: null,
     warning: null,
@@ -61,7 +61,7 @@ describe("Voice panel", () => {
     render(<VoiceOutputPanel active />);
     const cloud = await screen.findByTestId("voice-choice-cloud");
     expect(within(cloud).getByText("Not available")).toBeTruthy();
-    expect(within(cloud).getByText(/does not serve the voice yet/)).toBeTruthy();
+    expect(within(cloud).getByText(/comes with ClawBox AI Max/)).toBeTruthy();
     expect(cloud.getAttribute("aria-disabled")).toBe("true");
   });
 

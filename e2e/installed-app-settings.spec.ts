@@ -34,7 +34,7 @@ test("installed app settings can save configuration and toggle enablement", asyn
   const storeWindow = page.getByTestId("chrome-window-store");
   await storeWindow.getByRole("heading", { name: "Home Assistant" }).click();
   await storeWindow.getByRole("button", { name: "Install" }).click();
-  await page.getByRole("button", { name: "Install Anyway" }).click();
+  await page.getByRole("button", { name: "Install skill" }).click();
   await expect(storeWindow.getByText("Installed").first()).toBeVisible();
 
   // The freshly-installed icon animates in, so it never passes Playwright's

@@ -12,12 +12,24 @@ export const dynamic = "force-dynamic";
  */
 const MESSAGES: Record<ForceRegenerateReason, string> = {
   generated: "Fresh phrases generated on the device.",
-  busy: "The on-device model is busy with your chat. Try again in a minute.",
+  // These two are NOT one message. "Busy with your chat" shown while the box
+  // was quietly refreshing the crab's own phrases told the owner something
+  // they could see was untrue — and it is the second one that a Settings
+  // button hits most often, because the page's own background refresh may
+  // have taken the lock moments earlier.
+  "chat-busy": "The on-device model is busy with your chat. Try again in a minute.",
+  "refresh-in-progress": "A mascot phrase refresh is already running. Give it a minute.",
+  "generation-disabled-for-locale":
+    "Phrase generation runs in English only. In this language the mascot uses its hand-written phrases.",
   "low-memory": "Not enough free memory to load the model right now. Try again shortly.",
   unavailable: "Local AI is switched off or no model is installed, so the mascot keeps its built-in phrases.",
   timeout: "The on-device model took too long to answer. The mascot keeps its built-in phrases.",
   transport: "Could not reach the on-device model. The mascot keeps its built-in phrases.",
   malformed: "The on-device model did not return usable phrases. The mascot keeps its built-in phrases.",
+  // Not a failure of the box, and it must not read like one: the model ran and
+  // answered, it just repeated lines the crab already had.
+  "no-new-phrases":
+    "The on-device model only came up with phrases the mascot already knows. Nothing new this time.",
 };
 
 /** Only "generated" produced anything; everything else leaves the pack in place. */

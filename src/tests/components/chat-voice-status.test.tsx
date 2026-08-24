@@ -125,6 +125,18 @@ async function openVoiceStatus() {
   return screen.findByTestId("voice-status");
 }
 
+/**
+ * Say whether this page counts as a secure context.
+ *
+ * jsdom exposes `isSecureContext` as a plain own property, and the component
+ * reads exactly the property the browser gates `getUserMedia` on — so setting
+ * it here reproduces the LAN origin (`http://192.168.x.x/`) and the tunnel
+ * origin (`https://…`) without faking any media API.
+ */
+function setSecureContext(secure: boolean) {
+  Object.defineProperty(window, "isSecureContext", { value: secure, configurable: true });
+}
+
 describe("chat voice status row", () => {
   beforeEach(() => {
     instances.length = 0;
@@ -134,6 +146,9 @@ describe("chat voice status row", () => {
     Element.prototype.scrollIntoView = vi.fn();
     installFetch();
     vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
+    // jsdom's default varies with the test URL; pin it so a test that does not
+    // care about the origin is not silently deciding this behaviour.
+    setSecureContext(true);
   });
 
   afterEach(() => {
@@ -163,5 +178,87 @@ describe("chat voice status row", () => {
       expect(dismiss.getAttribute("aria-label")).toBe(translations.en["chat.voice.dismiss"]),
     );
     expect(dismiss.getAttribute("aria-label")).not.toBe(translations.en["chat.closePreview"]);
+  });
+
+  /**
+   * TASK-470. `http://<ip>/` and `http://clawbox.local/` are how customers
+   * actually reach their box, and they are not secure contexts, so the browser
+   * removes `navigator.mediaDevices` and the microphone can NEVER work there.
+   * The old copy said "This browser cannot record audio", which blames a
+   * browser that is fine and names no remedy the owner can act on.
+   */
+  it("says the connection is the problem, not the browser, on a LAN origin", async () => {
+    setSecureContext(false);
+    const panel = await openVoiceStatus();
+
+    await waitFor(() =>
+      expect(panel.textContent).toContain(translations.en["chat.voice.insecureContext"]),
+    );
+    expect(panel.textContent).not.toContain(translations.en["chat.voice.unsupported"]);
+    // The remedy has to be in the sentence — an accurate diagnosis the owner
+    // cannot act on is no better than the wrong one. And it must be a remedy
+    // that WORKS: Remote Desktop is served from this same insecure origin and
+    // carries no audio, so naming it sent the owner somewhere the mic still
+    // cannot open (TASK-511). The paths voice actually ships on are the
+    // box's Remote Access tunnel and Telegram voice messages.
+    expect(translations.en["chat.voice.insecureContext"]).toContain("Remote Access");
+    expect(translations.en["chat.voice.insecureContext"]).toContain("Telegram");
+    expect(translations.en["chat.voice.insecureContext"]).not.toContain("Remote Desktop");
+
+    // …and it has to be READABLE. The row is one ellipsised line while a
+    // capture is live, which on a real box cut this sentence off at "Open
+    // this ClawBox…" — the half with the fix in it. Errors wrap.
+    const line = panel.querySelector("span");
+    expect(line).not.toBeNull();
+    expect((line as HTMLElement).style.whiteSpace).toBe("normal");
+    expect((line as HTMLElement).style.textOverflow).not.toBe("ellipsis");
+  });
+
+  it("labels the mic button with the reason before anyone clicks it", async () => {
+    setSecureContext(false);
+    render(<I18nProvider><ChatPopup isOpen onClose={() => {}} /></I18nProvider>);
+    const record = await screen.findByTestId("voice-record");
+
+    await waitFor(() =>
+      expect(record.getAttribute("title")).toBe(translations.en["chat.voice.insecureContext"]),
+    );
+    expect(record.getAttribute("aria-label")).toBe(translations.en["chat.voice.insecureContext"]);
+  });
+
+  it("still blames the browser on a secure origin that cannot record", async () => {
+    // Same missing capture API, secure origin: here the browser really is the
+    // problem and the original message is the honest one. jsdom has no
+    // mediaDevices either way, so this is the true fork in the diagnosis.
+    setSecureContext(true);
+    const panel = await openVoiceStatus();
+
+    await waitFor(() =>
+      expect(panel.textContent).toContain(translations.en["chat.voice.unsupported"]),
+    );
+    expect(panel.textContent).not.toContain(translations.en["chat.voice.insecureContext"]);
+    const record = screen.getByTestId("voice-record");
+    expect(record.getAttribute("aria-label")).toBe(translations.en["chat.voice.record"]);
+  });
+
+  /**
+   * Yanko's TASK-470 decision (2026-08-22 19:34): the insecure origin gets a
+   * "notification and popup that redirects to the cloudflare tunnel". The
+   * status-row line above is the notification; this is the popup.
+   */
+  it("opens the tunnel popup from a mic click on a LAN origin", async () => {
+    setSecureContext(false);
+    await openVoiceStatus();
+
+    const dialog = await screen.findByTestId("voice-tunnel-dialog");
+    expect(dialog.getAttribute("aria-label")).toBe(translations.en["chat.voice.tunnel.title"]);
+  });
+
+  it("does not open the tunnel popup on a secure origin", async () => {
+    // A secure origin with no capture API is the browser's problem; the
+    // tunnel would change nothing, so offering it would be a false remedy.
+    setSecureContext(true);
+    await openVoiceStatus();
+
+    expect(screen.queryByTestId("voice-tunnel-dialog")).toBeNull();
   });
 });
