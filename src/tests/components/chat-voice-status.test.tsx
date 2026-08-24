@@ -98,6 +98,18 @@ function installFetch() {
       if (url.includes("/setup-api/harness/active")) {
         return { ok: true, json: async () => ({ active: "openclaw", edition: "openclaw" }) };
       }
+      if (url.includes("/setup-api/chat/capabilities")) {
+        // A LINKED box: the microphone follows the ClawBox AI credential on
+        // both editions, so without a token there would be no button to click
+        // and nothing here to say anything about.
+        return {
+          ok: true,
+          json: async () => ({
+            harness: "openclaw",
+            facts: { hasClawaiToken: true, hermesSupportsImages: false },
+          }),
+        };
+      }
       if (url.includes("/setup-api/chat/model")) {
         return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
       }

@@ -12,12 +12,23 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { describeChatFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
+import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
-import { isInternalRoutingMessage, isFailedImageGenerationNotice } from '@/lib/chat-internal-messages'
-import { splitMediaDirectives, splitAssistantMedia, splitUserAttachments, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments } from '@/lib/chat-media'
+// ── The harness transport ──
+// One adapter, both editions. This surface asks `caps` what the box can do and
+// `adapter` to do it; the only thing left that knows WHICH harness is running
+// is the provider/model header, which renders a different vendor's catalogue
+// and is product identity rather than a capability.
+import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
+import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
+// `extractText` stays with the gateway adapter: it strips that gateway's own
+// wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
+// and now lives with the rest of the media helpers.
+import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+import { HarnessError, type HarnessStatus, type TurnResult } from '@/lib/harness/transport'
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -44,7 +55,6 @@ import {
 
 const MAX_RETRIES = 8
 const MAX_QUEUED_SENDS = 20
-const MAX_AUDIO_PER_MESSAGE = 4
 // The server gives its upstream two minutes. Leave enough room for the upload
 // and response body, while still guaranteeing that a browser-side stall ends
 // in the existing retry UI instead of spinning forever.
@@ -184,7 +194,6 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // client-side filtering exists.
 import { HERMES_MODEL_STATE_EVENT, useHermesModelOptions } from '@/hooks/useHermesModelOptions'
 import {
-  HERMES_AUTO_PROVIDER,
   hermesProviderLabel,
   hermesProviderPillLabel,
 } from '@/lib/hermes-providers'
@@ -207,37 +216,7 @@ import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
-import { fetchHarness } from '@/lib/client-harness'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
-
-// Strip gateway wrapper tags like <final>, <thinking>, etc.
-function stripGatewayTags(text: string): string {
-  return text
-    .replace(/<\/?(?:final|thinking|response|answer|reply)>/gi, '')
-    .trim()
-}
-
-// Extract text content from gateway message object
-function extractText(msg: unknown): string {
-  if (!msg || typeof msg !== 'object') return ''
-  const m = msg as Record<string, unknown>
-  if (typeof m.text === 'string') return stripGatewayTags(m.text)
-  if (typeof m.content === 'string') return stripGatewayTags(m.content)
-  if (Array.isArray(m.content)) {
-    const raw = m.content
-      .map((block: unknown) => {
-        if (!block || typeof block !== 'object') return ''
-        const b = block as Record<string, unknown>
-        if (b.type === 'text' && typeof b.text === 'string') return b.text
-        if (b.type === 'thinking') return ''
-        return ''
-      })
-      .filter(Boolean)
-      .join('\n')
-    return stripGatewayTags(raw)
-  }
-  return ''
-}
 
 // ── Waiting for a generated picture ─────────────────────────────────────────
 //
@@ -383,10 +362,6 @@ function preserveSpokenByOccurrence(previous: ChatMessage[], next: ChatMessage[]
   return restored
 }
 
-function boundedAudio(...groups: string[][]): string[] {
-  return [...new Set(groups.flat())].slice(0, MAX_AUDIO_PER_MESSAGE)
-}
-
 function finiteMessageTimestamp(message: unknown): number | null {
   if (!message || typeof message !== 'object') return null
   const timestamp = (message as { timestamp?: unknown }).timestamp
@@ -454,15 +429,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Timestamp the current wait started from; anything at or before it is a
   // previous generation's outcome, not this one's.
   const imageWaitFromRef = useRef(0)
-  // Which agent harness backs this chat. OpenClaw uses the gateway WebSocket;
-  // Hermes uses the /setup-api/hermes/chat HTTP route (hermes -z, persistent
-  // session). Loaded once on mount; connect() is gated on `harnessLoaded` so we
-  // never open the OpenClaw WS in Hermes mode.
-  const harnessRef = useRef<'openclaw' | 'hermes'>('openclaw')
-  const [harnessLoaded, setHarnessLoaded] = useState(false)
-  // Reactive copy of the harness for rendering (the ref drives connect/send at
-  // call-time; this drives which header controls show).
-  const [harnessMode, setHarnessMode] = useState<'openclaw' | 'hermes'>('openclaw')
+  // Which agent harness backs this chat is resolved by `useHarnessAdapter`
+  // below, together with what this box can actually do. Nothing here keeps its
+  // own copy: a second source of truth for the harness is what let the
+  // capability answer and the transport answer drift apart in the first place.
   // Hermes chat header — the same three controls the OpenClaw header has:
   // PROVIDER → MODEL (scoped to that provider) → THINKING EFFORT.
   //
@@ -471,7 +441,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // config.yaml. The Hermes settings panel stays the only thing that persists a
   // device default; these choices persist in localStorage instead.
   //
-  // Refs mirror the state so dispatchHermes can stay a stable useCallback([])
+  // Refs mirror the state so the send path can stay a stable useCallback([])
   // and read the values at send-time (a pill changed mid-run therefore applies
   // to the NEXT turn, never retroactively).
   const [hermesProviders, setHermesProviders] = useState<HermesChatProvider[]>([])
@@ -486,18 +456,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // pick is still in that provider's live list (see the `hermesModel` memo).
   const [hermesPicks, setHermesPicks] = useState<Record<string, string>>({})
   const hermesModelRef = useRef('')
-  // The Hermes session this chat is threaded through. Empty until the first
-  // reply reports one; every later turn resumes it, which is what gives the
-  // conversation memory. Cleared when the user starts a new chat.
-  const hermesSessionRef = useRef('')
-  // What the LAST turn actually ran on. A resumed session keeps the system
-  // prompt it was created with, so after a switch the agent would still answer
-  // "What model are you?" with the old one (and echo its earlier claims from
-  // the transcript) even though the turn is genuinely routed to the new
-  // provider. Comparing against these lets the next turn state the change
-  // rather than discarding the conversation to get a fresh system prompt.
-  const hermesSentProviderRef = useRef('')
-  const hermesSentModelRef = useRef('')
+  // The threaded session id and the provider/model the last turn ran on used to
+  // live here. They describe what the TRANSPORT did, not what the header shows,
+  // and holding them in the component is what forced "new chat" to reach into
+  // transport state to clear them. They belong to the adapter now; resetting a
+  // conversation is one call.
   const [hermesReasoning, setHermesReasoning] = useState<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
   const hermesReasoningRef = useRef<HermesReasoningLevel>(HERMES_REASONING_DEFAULT)
   // False until the level is real (from localStorage, from the device's
@@ -616,8 +579,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // reported bug — select Anthropic, still see a deepseek id — is structurally
   // impossible here, exactly as in the Hermes settings panel. No second,
   // client-side filter exists to drift from it.
+  //
+  // A non-empty `hermesProvider` is itself the Hermes signal: the only two
+  // things that ever set it are the Hermes header's own picker and the Hermes
+  // seeding fetch. Asking it rather than asking which harness is running keeps
+  // this above the transport, which is resolved further down.
   const { scope: hermesScope, loading: hermesModelsLoading } = useHermesModelOptions(
-    harnessMode === 'hermes' && hermesProvider ? hermesProvider : null,
+    hermesProvider || null,
   )
   // Whether the model pill should hold its place while the new provider's list
   // arrives. Switching provider drops `scope` to null by design — showing the
@@ -719,7 +687,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // resumed session (verified — the billing record shows the new provider);
     // the only casualty was the agent's SELF-knowledge, because a resumed
     // session keeps the system prompt it was created with and the transcript
-    // still contains its earlier "I am X" claims. dispatchHermes therefore
+    // still contains its earlier "I am X" claims. The adapter therefore
     // tells it about the switch on the next turn instead.
     setMessages(msgs => [...msgs, {
       role: 'system',
@@ -897,6 +865,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
 
 
+  /**
+   * Settle every in-flight RPC, then forget them.
+   *
+   * A teardown that merely dropped the map left each caller waiting forever:
+   * the 120-second timeout below only fires while the entry is STILL THERE, so
+   * `pendingRef.current.clear()` silently orphaned the promise instead of
+   * ending it. A `chat.send` orphaned that way is the expensive case — the run
+   * never completes, so the sending guard is never cleared, and the queue parks
+   * behind a turn that can no longer arrive.
+   */
+  const failPending = useCallback((reason: string) => {
+    const waiting = [...pendingRef.current.values()]
+    pendingRef.current.clear()
+    for (const entry of waiting) entry.reject(new Error(reason))
+  }, [])
+
   // Send a request over WS
   const wsRequest = useCallback((method: string, params: unknown): Promise<unknown> => {
     return new Promise((resolve, reject) => {
@@ -920,6 +904,64 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     })
   }, [])
 
+  // ── The one transport ───────────────────────────────────────────────────
+  //
+  // The socket lifecycle (handshake, retry ladder, event stream) still lives in
+  // this component and is handed to the adapter through `GatewayLink`. That is
+  // the deliberate seam: the RPC vocabulary moves first, on its own, so this
+  // change reads as "same frames, new home" rather than as a rewrite of 500
+  // lines of event handling that every OpenClaw customer depends on.
+  //
+  // `connect` is defined further down and re-created when its own inputs
+  // change, so the link reaches it through a ref — which is also what keeps the
+  // long-lived listeners that deliberately close over the first `connect` from
+  // ever holding a stale one.
+  const connectRef = useRef<() => Promise<void> | void>(() => {})
+  const statusListenersRef = useRef(new Set<(s: HarnessStatus, detail?: string) => void>())
+  const gatewayLink = useMemo<GatewayLink>(() => ({
+    request: (method, params) => wsRequest(method, params),
+    sessionKey: () => sessionKeyRef.current,
+    open: async () => { await connectRef.current() },
+    close: () => { wsRef.current?.close(); wsRef.current = null; failPending('Not connected') },
+    onStatus: (cb) => {
+      statusListenersRef.current.add(cb)
+      return () => { statusListenersRef.current.delete(cb) }
+    },
+  }), [wsRequest, failPending])
+  // Read at send time, exactly as the refs behind it always were: a header pill
+  // changed mid-run therefore applies to the NEXT turn, never retroactively to
+  // the one in flight.
+  const hermesContext = useCallback(() => ({
+    devicePairing: hermesDeviceRef.current,
+    modelsReady: hermesScopeReadyRef.current,
+  }), [])
+  // Stable by construction — see HarnessWiring. Everything that moves is read
+  // through a ref inside these callbacks, so the object itself never changes
+  // and the adapter keeps one identity for the life of the resolved harness.
+  const harnessWiring = useMemo(
+    () => ({ gateway: gatewayLink, hermesContext }),
+    [gatewayLink, hermesContext],
+  )
+  const { adapter, capabilities: caps, harnessId, resolved: harnessLoaded } =
+    useHarnessAdapter(harnessWiring)
+  // The gateway's status is produced by the socket handlers below; publish it
+  // so the adapter's subscribers see one stream whichever harness is running.
+  useEffect(() => {
+    for (const cb of statusListenersRef.current) cb(status, errorMsg || undefined)
+  }, [status, errorMsg])
+  // ...and take it back, which is how a harness with no socket reports itself
+  // connected. For the gateway this is the value it just published, so React
+  // bails out of the set and nothing re-renders.
+  useEffect(() => adapter.onStatus((next) => {
+    setStatus(next === 'idle' ? 'connecting' : next)
+  }), [adapter])
+  // Whether this box has a socket to open at all. Read through a ref for the
+  // same reason `harnessRef` was: several long-lived window listeners close
+  // over the first `connect`, and a value captured in its dependency array
+  // would let a Hermes box open a gateway socket after a Settings event.
+  const hasLiveConnectionRef = useRef(true)
+  useEffect(() => { hasLiveConnectionRef.current = caps.hasLiveConnection }, [caps])
+
   // Push thinkingLevel to the gateway as a sticky session override
   // (per OpenClaw control-ui docs: model + thinking pickers patch via
   // sessions.patch and persist for every subsequent turn). 'default'
@@ -929,9 +971,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // change + this effect).
   const lastSentThinkingRef = useRef<string | null | undefined>(undefined)
   useEffect(() => {
-    if (status !== 'connected') return
-    const key = sessionKeyRef.current
-    if (!key) return
+    // A sticky patch is an OpenClaw gateway call. A harness whose reasoning
+    // dial is per-turn carries the level on the turn instead, so pushing here
+    // could only ever reject with 'Not connected' — see the predicate for why
+    // the capability is checked outright rather than left to the key guard.
+    if (!shouldPatchSessionDefaults({ capabilities: caps, status, sessionKey: sessionKeyRef.current })) return
     // Never push a level the ACTIVE model doesn't support. `resolveWireThinkingLevel`
     // clamps to the provider's config (so a stale `high` carried over from a
     // reasoning-capable model is folded to the local model's `off`) and returns
@@ -942,7 +986,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const wireValue: string = wireLevel
     if (wireValue === lastSentThinkingRef.current) return
     lastSentThinkingRef.current = wireValue
-    void wsRequest('sessions.patch', { key, thinkingLevel: wireValue }).catch((err: unknown) => {
+    void adapter.patchSessionDefaults({ thinkingLevel: wireValue }).catch((err: unknown) => {
       // Reset so a reconnect or next user change retries.
       lastSentThinkingRef.current = undefined
       // The gateway itself tells us the level to fall back to when a model
@@ -973,7 +1017,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         variant: 'error',
       }])
     })
-  }, [status, headerProvider, thinkingLevel, wsRequest])
+  }, [status, headerProvider, thinkingLevel, adapter, caps])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -1027,12 +1071,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [])
 
   const connect = useCallback(async () => {
-    // Hermes mode: no gateway WebSocket. Mark connected so the composer is
-    // enabled; startRun routes sends to /setup-api/hermes/chat instead.
-    if (harnessRef.current === 'hermes') {
-      setStatus('connected')
-      return
-    }
+    // A box with no socket has nothing to open. The adapter reports such a
+    // harness connected on its own; this guard is for the window listeners and
+    // recovery paths below, which call `connect` directly and must never open a
+    // gateway socket on an edition that does not run one.
+    if (!hasLiveConnectionRef.current) return
     // Cancel any pending retry / auth-backoff timer so an explicit reconnect
     // (e.g. the "Try again" button) can't race with a previously scheduled one
     // and fire a duplicate connect later.
@@ -1045,7 +1088,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       wsRef.current.close()
       wsRef.current = null
     }
-    pendingRef.current.clear()
+    failPending('Connection restarted')
     setStatus('connecting')
     setErrorMsg('')
     connectedOnceRef.current = false
@@ -1147,7 +1190,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 pendingModelSwitchResetRef.current = null
                 if (pendingModelSwitch) {
                   try {
-                    await resetSessionRef.current(mainSessionKey)
+                    await resetSessionRef.current()
                   } catch (err) {
                     setMessages(prev => [...prev, {
                       role: 'system',
@@ -1448,7 +1491,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
 
     const onClose = (event?: CloseEvent) => {
+      // Only the socket that is CURRENTLY installed may tear anything down. A
+      // close event from a socket this connect already replaced arrives late
+      // and describes a connection nobody is using — acting on it would null
+      // the live socket's reference, reject the requests waiting on IT, and
+      // schedule a reconnect on top of a healthy connection.
+      if (wsRef.current !== ws) return
       wsRef.current = null
+      // The socket is gone; nothing that was waiting on it can still arrive.
+      failPending('Not connected')
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth
@@ -1520,6 +1571,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     ws.onclose = onClose
     ws.onerror = () => {}
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  // The adapter opens the socket through this, not by importing it: `connect`
+  // is declared after the adapter is built, and this ref is what lets the two
+  // reference each other without either being re-created for the other's sake.
+  useEffect(() => { connectRef.current = connect }, [connect])
 
   useEffect(() => {
     if (!isOpen) return
@@ -1531,14 +1586,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const handleModelStateChanged = () => {
       refreshChatModelState()
     }
-    window.addEventListener('clawbox:chat-model-state-changed', handleModelStateChanged)
-    return () => window.removeEventListener('clawbox:chat-model-state-changed', handleModelStateChanged)
+    window.addEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
+    return () => window.removeEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
   const [startingSession, setStartingSession] = useState(false)
   const loadHistory = useCallback(async () => {
+    // A harness with no durable transcript has nothing to replay. Returning
+    // before the bootstrap bookkeeping rather than calling and catching keeps
+    // the auto-greet honest: there is no history read here that can be "empty".
+    if (!caps.canListHistory) return
     // Optimistically show the typing bubble if an auto-greet might still run,
     // so the user sees feedback during the history round-trip (and is locked
     // out of typing via the greetingPending gate on the input). Bootstrap is
@@ -1551,119 +1610,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setStreaming('')
     }
     try {
-      const [result, spokenPayload] = await Promise.all([
-        wsRequest('chat.history', { sessionKey: sessionKeyRef.current, limit: 50 }) as Promise<Record<string, unknown>>,
-        fetch('/setup-api/chat/spoken-history', { cache: 'no-store' })
-          .then(async response => response.ok ? response.json() : { items: [] })
-          .catch(() => ({ items: [] })),
-      ])
-      const msgs = (result.messages as unknown[]) || []
-      const chatMsgs: ChatMessage[] = []
-      for (const msg of msgs) {
-        const m = msg as Record<string, unknown>
-        const role = (m.role as string)?.toLowerCase()
-        if (role !== 'user' && role !== 'assistant') continue
-        const raw = extractText(m)
-        if (isSentinel(raw)) continue
-        // OpenClaw routes background-job results back into the conversation as
-        // `role: "user"` messages. They are instructions to the agent, not
-        // anything the person typed, and rendering them puts a wall of internal
-        // text in the transcript attributed to the user.
-        const timestamp = (m.timestamp as number) || 0
-        if (isInternalRoutingMessage(m, raw)) {
-          // Only a notice NEWER than the wait counts. Every history read
-          // returns the last 50 messages, so failures from earlier generations
-          // are still in the window — treating those as this job's outcome
-          // ended the wait ~400ms after it started and the banner never showed.
-          // Both sides of the comparison are server timestamps, so a browser
-          // clock that disagrees with the device cannot skew it.
-          if (
-            generatingImageRef.current &&
-            timestamp > imageWaitFromRef.current &&
-            isFailedImageGenerationNotice(raw)
-          ) {
-            imageFailedRef.current = true
-          }
-          continue
-        }
-        // Inter-session routing envelopes are machinery addressed to the agent,
-        // not chat content — drop the whole message (TASK-416). Kept alongside
-        // isInternalRoutingMessage rather than replacing it: that one catches
-        // background-job results arriving as role:"user", this one catches the
-        // generic envelope on either role, and the two were written against
-        // different failure reports. Checked BEFORE splitAssistantMedia so an
-        // envelope carrying a MEDIA: line is dropped whole rather than
-        // surviving as a picture. Shared with ChatApp so the surfaces can't drift.
-        //
-        // `timestamp` is already declared above — this commit hoisted it so the
-        // image-failure window could compare against it.
-        if (isInterSessionEnvelope(raw, m)) continue
-        if (role === 'user') {
-          // The customer's own attachments come out first, as picture URLs
-          // rather than as the `[Attached file: /abs/path]` lines the composer
-          // wrote (TASK-436). The generic single-bracket strip below still runs
-          // on what is left, so every OTHER leading prefix — `[System: …]` and
-          // friends — is dropped exactly as before.
-          const { text: withoutAttachments, images, files } = splitUserAttachments(raw)
-          const stripped = withoutAttachments.replace(/^\[[^\]]+\]\s*/, '')
-          // Non-image attachments are re-labelled the way the live composer
-          // labels them, so the bubble a customer sees before and after a
-          // refresh is the same bubble rather than two different ones.
-          const cleaned = [files.map(name => `📎 ${name}`).join('\n'), stripped]
-            .filter(Boolean).join('\n')
-          // An image sent with no caption used to disappear from history
-          // entirely, because nothing survived the strip and this `continue`
-          // took the whole turn with it — leaving the answer replying to a
-          // question that was not there.
-          if (!cleaned && images.length === 0) continue
-          const idempotencyKey = typeof m.idempotencyKey === 'string' ? m.idempotencyKey : undefined
-          chatMsgs.push({ role: 'user', text: cleaned, timestamp, idempotencyKey, images })
-          continue
-        }
-        // Replayed history carries the same MEDIA: lines the live turn did, so
-        // a reopened chat shows its pictures rather than a bare caption.
-        const { text, images, audio: directiveAudio } = splitAssistantMedia(raw)
-        const audio = boundedAudio(extractAudioAttachments(m), directiveAudio)
-        if (!text && images.length === 0 && audio.length === 0) continue
-        // Replayed history repeats the live path's two-message shape: the
-        // spoken reply is stored as its own message carrying the same text.
-        // Folded into the preceding bubble so a reopened chat shows one answer
-        // with a player rather than the answer twice.
-        const previous = chatMsgs[chatMsgs.length - 1]
-        if (text.length > 0 && audio.length > 0 && images.length === 0 && previous && previous.role === 'assistant'
-            && previous.text === text && (previous.audio?.length ?? 0) === 0) {
-          previous.audio = audio
-          continue
-        }
-        chatMsgs.push({
-          role: 'assistant', text, timestamp, images, audio,
-        })
-      }
-      // Current OpenClaw merges TTS supplement records into chat.history, but
-      // older supported gateways do not. The session-gated device route reads
-      // the canonical transcript and returns only target timestamp + playable
-      // URLs, which makes this survive a fresh browser and a full reboot.
-      const durableAudio = new Map<number, string[]>()
-      const spokenItems = spokenPayload && typeof spokenPayload === 'object'
-        ? (spokenPayload as { items?: unknown }).items
-        : null
-      if (Array.isArray(spokenItems)) {
-        for (const item of spokenItems) {
-          if (!item || typeof item !== 'object') continue
-          const candidate = item as { targetTimestamp?: unknown; audio?: unknown }
-          if (typeof candidate.targetTimestamp !== 'number' || !Number.isFinite(candidate.targetTimestamp)
-              || !Array.isArray(candidate.audio)) continue
-          const audio = boundedAudio(candidate.audio.filter((src): src is string =>
-            typeof src === 'string' && src.length > 0 && src.length <= 4096))
-          if (audio.length) durableAudio.set(candidate.targetTimestamp, audio)
-        }
-      }
-      for (let i = 0; i < chatMsgs.length; i++) {
-        const message = chatMsgs[i]
-        if (message.role !== 'assistant' || message.audio?.length || message.timestamp <= 0) continue
-        const audio = durableAudio.get(message.timestamp)
-        if (audio) chatMsgs[i] = { ...message, audio }
-      }
+      // The whole projection — sentinels, routing messages, inter-session
+      // envelopes, the image-failure window, the spoken-reply merge — moved
+      // into the adapter unchanged. It encodes about six independent shipped
+      // fixes with no unifying rule between them; the one thing this call must
+      // never do is re-derive them.
+      const { messages: chatMsgs, imageGenerationFailed } = await adapter.loadHistory({
+        limit: 50,
+        imageWaitFrom: generatingImageRef.current ? imageWaitFromRef.current : null,
+      })
+      if (imageGenerationFailed) imageFailedRef.current = true
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
       // the server yet so chatMsgs doesn't include them.
@@ -1689,12 +1645,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const idempotencyKey = uuid()
         runIdRef.current = idempotencyKey
         try {
-          await wsRequest('chat.send', {
-            sessionKey: sessionKeyRef.current,
-            message: 'hi',
-            deliver: false,
-            idempotencyKey,
-          })
+          await adapter.sendTurn({ text: 'hi', attachments: [], idempotencyKey })
         } catch {
           sendingRef.current = false; setSending(false)
           runIdRef.current = null
@@ -1710,7 +1661,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       console.error('Failed to load history:', err)
       if (mightAutoGreet) setIsBootstrappingHistory(false)
     }
-  }, [wsRequest])
+  }, [adapter, caps])
 
   useEffect(() => { messagesRef.current = messages }, [messages])
 
@@ -1739,22 +1690,36 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // were written out separately they drifted, and the switch stopped clearing
   // the previous model's half-streamed reply off the screen. Throws on
   // failure so each caller can word its own banner.
-  const resetSession = useCallback(async (key: string) => {
-    await wsRequest('sessions.reset', { key, reason: 'new' })
+  // Blank the visible conversation. Shared by both harnesses so the two cannot
+  // drift on what "cleared" means — only the way the AGENT is made to forget
+  // differs, and that difference is the adapter's business, not this one's.
+  const clearTranscript = useCallback(() => {
     setMessages([])
     setStreaming('')
+    // The pills render from their own state, outside the transcript map, and
+    // the socket only clears them on `final`/`aborted`/`error`. New chat during
+    // a live turn beats all three, which left the previous turn's pills sitting
+    // under an empty conversation.
+    clearToolCalls()
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [wsRequest])
+  }, [clearToolCalls])
+
+  const resetSession = useCallback(async () => {
+    await adapter.resetSession()
+    clearTranscript()
+  }, [adapter, clearTranscript])
   const resetSessionRef = useRef(resetSession)
   useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
 
   const startNewSession = useCallback(async () => {
     setStartingSession(true)
     try {
-      await resetSession(sessionKeyRef.current)
+      await resetSession()
     } catch (err) {
+      // Blanking the view on a failed reset is the worst outcome: the agent
+      // still holds the thread, but the user believes it is gone.
       setMessages(prev => [...prev, {
         role: 'system',
         text: `Could not start a new chat: ${err instanceof Error ? err.message : 'unknown error'}`,
@@ -1793,7 +1758,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // list. Shared by the file-input change handler and by the textarea paste
   // handler (Ctrl+V on a clipboard image).
   //
-  // Deliberately NOT the Files API. dispatchSend puts the returned absolute
+  // Deliberately NOT the Files API. The turn puts the returned absolute
   // path in the message, and OpenClaw only reads media from a fixed allowlist
   // of roots; $HOME/uploads, where `/setup-api/files?dir=uploads` writes, is
   // not one of them, so the agent got "Local media path is not under an
@@ -1883,12 +1848,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [uploadFiles])
 
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    // The SAME gate the attach button carries, and it has to be here too: with
+    // only the button hidden, Ctrl+V was still a way in — and a box that cannot
+    // pass the picture to the model drew the screenshot into the user's own
+    // bubble and then answered without ever having looked at it.
+    //
+    // Only the IMAGE is refused. Nothing is preventDefault-ed on this path, so
+    // a paste that also carries text still pastes its text as usual.
+    if (!caps.canAttachImages) return
     if (status !== 'connected') return
     const imageFiles = extractImageFilesFromClipboard(e)
     if (imageFiles.length === 0) return
     e.preventDefault()
     uploadFiles(imageFiles)
-  }, [status, uploadFiles])
+  }, [caps, status, uploadFiles])
 
   const removeAttachment = useCallback((idx: number) => {
     setAttachments(prev => {
@@ -2238,122 +2211,86 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setVoice(IDLE_STATUS)
   }, [isOpen, abandonRecording])
 
-  const dispatchSend = useCallback(async (
+  // Losing the credential mid-capture is the other way a recording can be
+  // orphaned: the entry point disappears, and without this the `MediaRecorder`
+  // would keep running with nothing left on screen to stop it. Nothing is
+  // uploaded — there is no longer anything that could transcribe it.
+  useEffect(() => {
+    if (caps.canTranscribe || voice.state === 'idle') return
+    abandonRecording()
+    setVoice(IDLE_STATUS)
+  }, [caps.canTranscribe, voice.state, abandonRecording])
+
+  // ONE send path.
+  //
+  // Which harness answers, whether the reply streams or lands whole, and
+  // whether the reasoning level rides on the turn or was patched onto the
+  // session are all the adapter's business. What is left here is the part that
+  // was always this component's: putting the answer on screen and ending the
+  // run.
+  const dispatchTurn = useCallback(async (
     text: string,
     sendAttachments: ChatAttachment[],
     idempotencyKey: string,
   ) => {
-    let messageText = text
-    if (sendAttachments.length > 0) {
-      const filePaths = sendAttachments.map(a => `[Attached file: ${a.path}]`).join('\n')
-      messageText = [filePaths, text].filter(Boolean).join('\n')
-    }
+    let result: TurnResult
     try {
-      await wsRequest('chat.send', {
-        sessionKey: sessionKeyRef.current,
-        message: messageText || '(file attached)',
-        deliver: false,
+      result = await adapter.sendTurn({
+        text,
+        attachments: sendAttachments,
         idempotencyKey,
+        // Ignored by a harness with no such dial. Read here, at send time, so a
+        // pill changed mid-run applies to the NEXT turn rather than
+        // retroactively to this one.
+        provider: hermesProviderRef.current,
+        model: hermesModelRef.current,
+        // The default level is only a placeholder for the picker. Until the
+        // level is KNOWN (read from the device, or chosen by the user) send
+        // none at all, so a failed seeding fetch cannot silently override the
+        // device's own reasoning effort with "medium".
+        reasoning: hermesReasoningKnownRef.current ? hermesReasoningRef.current : '',
       })
     } catch (err) {
-      sendingRef.current = false; setSending(false)
-      runIdRef.current = null
-      setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
-    }
-  }, [wsRequest])
-
-  // Hermes send: POST the turn to the HTTP route (hermes -z keeps a persistent
-  // session, so multi-turn memory works without threading context). No
-  // streaming yet — the reply lands whole. Attachments are OpenClaw-only for now.
-  // Holds the in-flight Hermes request so Stop can abort it (which aborts the
-  // fetch → the route sees request.signal abort → kills the `hermes` process).
-  const hermesAbortRef = useRef<AbortController | null>(null)
-  const dispatchHermes = useCallback(async (text: string) => {
-    const controller = new AbortController()
-    hermesAbortRef.current = controller
-    // Read the header selections at send-time (see the refs' comment): the
-    // callback stays stable, and a pill changed mid-run applies to the next
-    // turn rather than retroactively to this one.
-    const provider = hermesProviderRef.current
-    const model = hermesModelRef.current
-    // HERMES_REASONING_DEFAULT is only a placeholder for the picker. Until the
-    // level is KNOWN (read from the device, or chosen by the user) we send no
-    // --reasoning at all, so a failed seeding fetch can't silently override the
-    // device's own agent.reasoning_effort with "medium".
-    const reasoning = hermesReasoningKnownRef.current ? hermesReasoningRef.current : ''
-    try {
-      if (provider && provider !== HERMES_AUTO_PROVIDER && !model && provider !== hermesDeviceRef.current.provider) {
-        // Sending --provider without -m makes hermes fall back to config.yaml's
-        // model.default, which belongs to the CONFIGURED provider — i.e. it
-        // would run this provider against another one's model id. The route
-        // rejects that too (409); catching it here turns a raw error into an
-        // actionable one instead of burning a turn.
-        throw new Error(hermesScopeReadyRef.current
-          ? `No models are available for ${hermesProviderLabel(provider)} on this device. `
-            + 'Add credentials for it in Settings, or pick another provider.'
-          : `Still loading ${hermesProviderLabel(provider)}'s models — try again in a moment.`)
-      }
-      // Announce a mid-conversation switch. Only when we are RESUMING (a fresh
-      // session already gets a correct system prompt) and only when something
-      // actually changed, so a normal turn carries no extra text.
-      const switched = Boolean(hermesSessionRef.current)
-        && (hermesSentProviderRef.current !== provider || hermesSentModelRef.current !== model)
-        && Boolean(hermesSentProviderRef.current || hermesSentModelRef.current)
-      const outbound = switched
-        ? `[System note: this conversation has just been switched to model "${model || 'the provider default'}" `
-          + `via provider "${hermesProviderLabel(provider)}". You are now that model — disregard any earlier `
-          + `statement in this conversation about which model you are. Keep the conversation and its context.]\n\n`
-          + text
-        : text
-      const res = await fetch('/setup-api/hermes/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          message: outbound,
-          ...(model ? { model } : {}),
-          ...(provider ? { provider } : {}),
-          ...(reasoning ? { reasoning } : {}),
-          // Continue this conversation instead of starting a fresh agent every
-          // turn — otherwise a follow-up like "is it removed now?" reaches an
-          // agent with no idea what "it" is.
-          ...(hermesSessionRef.current ? { sessionId: hermesSessionRef.current } : {}),
-        }),
-        signal: controller.signal,
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Hermes chat failed')
-      if (typeof data.sessionId === 'string' && data.sessionId) {
-        hermesSessionRef.current = data.sessionId
-      }
-      // Record what this turn ran on, so the NEXT one only announces a switch
-      // if something really changed. Set after success: a failed turn didn't
-      // establish anything, and the announcement should survive to be made.
-      hermesSentProviderRef.current = provider
-      hermesSentModelRef.current = model
-      // Same MEDIA: split as the gateway path, so a picture renders the same
-      // way whichever edition answered. A reply that is nothing BUT a media
-      // line is still a real answer — don't call it '(no response)'.
-      const hermesReply = splitAssistantMedia(typeof data.text === 'string' ? data.text : '')
-      const hermesHasMedia = hermesReply.images.length > 0 || hermesReply.audio.length > 0
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        text: hermesReply.text || (hermesHasMedia ? '' : '(no response)'),
-        timestamp: Date.now(),
-        images: hermesReply.images,
-        audio: boundedAudio(hermesReply.audio),
-      }])
-    } catch (err) {
-      // A user-initiated Stop shows nothing, not an error line.
-      if ((err as Error)?.name !== 'AbortError') {
-        setMessages(prev => [...prev, { role: 'system', text: describeChatFailure((err as Error)?.message), timestamp: Date.now() }])
-      }
-    } finally {
-      hermesAbortRef.current = null
-      sendingRef.current = false; setSending(false)
+      // Nothing is coming on either path, so the run ends here.
+      sendingRef.current = false
+      setSending(false)
       setStreaming('')
       runIdRef.current = null
+      // A user-initiated Stop shows nothing, not an error line.
+      if (err instanceof HarnessError && err.code === 'aborted') return
+      // Never render a harness's own error text: it is written for an
+      // operator reading a log and has carried an absolute device path and a
+      // session UUID into the customer's transcript (TASK-440). Both harnesses
+      // funnel through here now, so this is the only gate left.
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: describeChatFailure(err instanceof Error ? err.message : undefined),
+        timestamp: Date.now(),
+      }])
+      return
     }
-  }, [])
+    // A harness that merely ACKNOWLEDGED the turn answers on its own event
+    // stream; those handlers paint the reply and end the run.
+    if (result.acknowledgedOnly) return
+    const hasMedia = (result.media?.length ?? 0) > 0 || (result.audio?.length ?? 0) > 0
+    setMessages(prev => [...prev, {
+      role: 'assistant',
+      // A reply that is nothing BUT a picture is still a real answer — don't
+      // call it '(no response)'.
+      text: result.text || (hasMedia ? '' : '(no response)'),
+      timestamp: Date.now(),
+      images: [...(result.media ?? [])],
+      audio: boundedAudio([...(result.audio ?? [])]),
+    }])
+    // Pair the synchronous guard with the state on EVERY completion path, not
+    // just the failing one: the drain effect and both send handlers decide from
+    // `sendingRef`, so a reply that lands whole and forgets to clear it leaves
+    // the queue permanently parked (TASK-517).
+    sendingRef.current = false
+    setSending(false)
+    setStreaming('')
+    runIdRef.current = null
+  }, [adapter])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
     // Pictures render in the bubble; everything else keeps its 📎 line, because
@@ -2379,16 +2316,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setSending(true)
     setStreaming('')
     runIdRef.current = idempotencyKey
-    if (harnessRef.current === 'hermes') {
-      void dispatchHermes(text)
-      return
-    }
-    if (status !== 'connected') {
+    // Queue only where there is a connection that can be down. A harness with
+    // no socket is never "not connected yet", so parking its turns would hold
+    // them forever waiting for a status change that has already happened.
+    if (caps.hasLiveConnection && status !== 'connected') {
       pendingSendsRef.current.push({ text, attachments: sendAttachments, idempotencyKey })
       return
     }
-    void dispatchSend(text, sendAttachments, idempotencyKey)
-  }, [status, dispatchSend, dispatchHermes])
+    void dispatchTurn(text, sendAttachments, idempotencyKey)
+  }, [caps, status, dispatchTurn])
 
   // Send a line the UI composed itself — a voice transcript, or the question
   // that follows a skill change. Both can arrive while the agent is already
@@ -2488,7 +2424,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       pendingSendsRef.current = []
       void (async () => {
         for (const q of queue) {
-          await dispatchSend(q.text, q.attachments, q.idempotencyKey)
+          await dispatchTurn(q.text, q.attachments, q.idempotencyKey)
         }
       })()
     } else if (status === 'error') {
@@ -2500,18 +2436,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         timestamp: Date.now(),
       }])
     }
-  }, [status, dispatchSend])
+  }, [status, dispatchTurn])
 
   // Abort generation
   const abort = useCallback(async () => {
-    if (harnessRef.current === 'hermes') {
-      hermesAbortRef.current?.abort()
-      return
-    }
+    // Bound to onClick, which drops the returned promise — so a rejection here
+    // surfaces as an unhandled rejection rather than as anything the user can
+    // act on. Stop is best-effort by design: a turn that could not be called
+    // back finishes on its own, and a red banner about the Stop button would
+    // tell the customer nothing they can do.
     try {
-      await wsRequest('chat.abort', { sessionKey: sessionKeyRef.current })
-    } catch {}
-  }, [wsRequest])
+      await adapter.abortTurn()
+    } catch (err) {
+      console.warn('[chat] abort failed:', err)
+    }
+  }, [adapter])
 
   const switchChatModel = useCallback(async (target: { model: string; label: string }) => {
     if (switchingModel || chatModelState?.activeModel === target.model) return
@@ -2687,25 +2626,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [])
 
-  // Resolve the active harness once, before connecting, so we never open the
-  // OpenClaw WS in Hermes mode.
+  // Seed the Hermes header once the harness is known. This is the one place
+  // left that asks WHICH harness is running rather than what it can do, and
+  // deliberately so: the header renders a different vendor's model catalogue,
+  // which is a product fact about Hermes and not a capability of the box.
   useEffect(() => {
+    if (harnessId !== 'hermes') return
     const controller = new AbortController()
-    void (async () => {
-      try {
-        const data = await fetchHarness({ signal: controller.signal })
-        if (!controller.signal.aborted && data?.active === 'hermes') {
-          harnessRef.current = 'hermes'
-          setHarnessMode('hermes')
-          await seedHermesHeader(controller.signal)
-        }
-      } catch {
-        // default to openclaw
-      }
-      if (!controller.signal.aborted) setHarnessLoaded(true)
-    })()
+    void seedHermesHeader(controller.signal)
     return () => { controller.abort() }
-  }, [seedHermesHeader])
+  }, [harnessId, seedHermesHeader])
 
   // Re-seed when the settings panel changes the device's provider/model/tier or
   // adds a credential. Without this the header keeps naming the OLD provider
@@ -2723,7 +2653,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // event could not do that anyway) and is handled by the generation guard in
   // `seedHermesHeader`.
   useEffect(() => {
-    if (harnessMode !== 'hermes') return
+    if (harnessId !== 'hermes') return
     const controller = new AbortController()
     const onChanged = () => { void seedHermesHeader(controller.signal) }
     window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
@@ -2731,15 +2661,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       controller.abort()
       window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
     }
-  }, [harnessMode, seedHermesHeader])
+  }, [harnessId, seedHermesHeader])
 
-  // Pre-warm the connection on mount so opening chat is instant. In OpenClaw
-  // mode this silently completes the gateway WS handshake; in Hermes mode
-  // connect() just marks connected (no WS). Gated on the harness resolving.
+  // Pre-warm the transport on mount so opening chat is instant. Gated on the
+  // harness resolving: connecting before that is what would open a gateway
+  // socket on a box that runs no gateway.
   useEffect(() => {
     if (!harnessLoaded) return
-    connect()
-  }, [connect, harnessLoaded])
+    void adapter.connect()
+  }, [adapter, harnessLoaded])
 
   useEffect(() => {
     if (isOpen) {
@@ -2754,6 +2684,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return () => {
       wsRef.current?.close()
       wsRef.current = null
+      failPending('Chat closed')
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
       if (ackOnlyHistoryTimerRef.current !== null) {
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
@@ -2764,7 +2695,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         transcriptReconcileTimerRef.current = null
       }
     }
-  }, [])
+  }, [failPending])
 
   // Focus input when opened
   useEffect(() => {
@@ -3043,7 +2974,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           touchAction: 'none',
         }}>
         <div className="chat-header-pills">
-          {harnessMode === 'hermes' ? (
+          {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
             // below — provider → model (scoped to it) → thinking effort. The
             // row is 262px at the 400px docked default, of which ~142px is
@@ -3725,7 +3656,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           the only signal that the microphone opened, and a screen reader sees
           neither. Polite rather than an alert — the row also hosts the cancel,
           retry and dismiss buttons, which an assertive interrupt talks over. */}
-      {harnessMode !== 'hermes' && voice.state !== 'idle' && (
+      {/* Mounted by the CAPTURE's state, not by the capability. `canTranscribe`
+          follows a credential that is re-probed at runtime, so it can flip to
+          false mid-recording — and gating this on it took the pulsing dot and
+          the running clock off screen while the microphone was still open,
+          breaking the one invariant a live capture has. */}
+      {voice.state !== 'idle' && (
         <div
           data-testid="voice-status"
           role="status"
@@ -3804,7 +3740,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {/* The cloud-privacy line. Voice leaves the box: the recording goes to
           ClawBox AI to be turned into text. That has to be said on the surface
           where it happens, not only in a settings page nobody opens. */}
-      {harnessMode !== 'hermes' && (voice.state === 'recording' || voice.state === 'transcribing') && (
+      {/* Same reason as the status row above: whoever can start a capture must
+          always be able to end one. */}
+      {(voice.state === 'recording' || voice.state === 'transcribing') && (
         <div data-testid="voice-privacy" style={{ padding: '0 14px 6px', background: 'rgba(0,0,0,0.2)', fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>
           {t("chat.voice.privacy")}
         </div>
@@ -3817,10 +3755,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', gap: 8, alignItems: 'flex-end',
       }}>
-        {/* Hermes chat is text-only (the `hermes -z` CLI takes no attachments),
-            so hide the attach control there — otherwise a user could attach a
-            file that startRun silently drops on the Hermes path. */}
-        {harnessMode !== 'hermes' && (
+        {/* Shown only where a file staged here can actually reach the model.
+            The alternative is worse than a missing button: the picture is drawn
+            into the user's own bubble and then dropped, so the customer sees
+            their screenshot in the transcript and an answer that never looked
+            at it. */}
+        {(caps.canAttachImages || caps.canAttachDocuments) && (
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={status !== 'connected'}
@@ -3838,10 +3778,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <span className="material-symbols-rounded" style={{ fontSize: 20 }}>attach_file</span>
         </button>
         )}
-        {/* Voice input. Hidden on the Hermes path for the same reason as the
-            attach control: that harness has no transcription route behind it,
-            so offering the button would promise something that cannot work. */}
-        {harnessMode !== 'hermes' && (
+        {/* Voice input. Shown wherever the box has something to transcribe WITH
+            — the route itself is edition-neutral, so what actually decides is
+            whether this device holds a ClawBox AI credential. Offering the
+            button without one would promise something that cannot work. */}
+        {caps.canTranscribe && (
           voice.state === 'recording' ? (
             <button
               onClick={stopRecording}
