@@ -123,9 +123,12 @@ describe("a text-to-picture turn", () => {
     // that is simulated by remounting against the transcript the box holds.
     boxThatCanDraw();
     const mediaRef = `/setup-api/chat/media?path=${encodeURIComponent(GENERATED_IMAGE_PATH)}`;
+    // `images` and not `media`: the record on DISK holds `media`, and
+    // `/setup-api/chat/history` renames it on the way out because that is the
+    // chat's own message shape. This is the wire, so it is the wire's spelling.
     box.storedTranscript = [
       { role: "user", text: "a red maple leaf", timestamp: 10 },
-      { role: "assistant", text: "", timestamp: 11, media: [mediaRef] },
+      { role: "assistant", text: "", timestamp: 11, images: [mediaRef] },
     ];
     await mountHermesChat(box);
     await screen.findByText("a red maple leaf");
@@ -151,14 +154,19 @@ describe("a text-to-picture turn", () => {
   });
 
   it("never puts the box's internals in the customer's transcript", async () => {
-    // The same rule a failed turn goes through. Everything the route can say
-    // was written for a customer, but the layers under it are a proxy and a
-    // filesystem, and both quote what they were handed.
+    // The SECOND gate. The route already refuses to relay an unexpected
+    // failure's own words (see its own tests), so this string is not one the
+    // real route can produce — which is exactly why it is worth driving
+    // through: a client that trusted the route would render whatever a future
+    // change to it started sending, and TASK-440 is what that looks like when
+    // it happens. An fs error quoting a path is the shape to test with, because
+    // it is the shape image generation newly makes possible: this route writes
+    // files.
     boxThatCanDraw();
     box.imageReply = () => ({
       ok: false,
       status: 500,
-      payload: { error: "EACCES: open '/home/clawbox/clawbox/data/chat-media/x.png'" },
+      payload: { error: "EACCES: permission denied, open '/home/clawbox/clawbox/data/x.png'" },
     });
     const textarea = await mountHermesChat(box);
     await typeAndDraw(textarea, "a red maple leaf");
