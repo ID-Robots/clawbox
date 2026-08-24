@@ -1721,7 +1721,7 @@ export async function POST(request: Request) {
       await ensureFallbackModel(shouldPromoteLocalToPrimary ? config.defaultModel : (isLocalScope ? null : config.defaultModel), config.defaultModel);
       // Ensure Ollama service has memory optimizations (q8_0 KV cache, flash attention)
       try {
-        await runCommand("sudo", ["/home/clawbox/clawbox/scripts/optimize-ollama.sh"]);
+        await runCommand("sudo", ["/usr/local/libexec/clawbox/optimize-ollama.sh"]);
       } catch (err) {
         // Non-fatal: Ollama will still work, just use more memory
         console.warn("[AI Config] Failed to optimize Ollama service:", err instanceof Error ? logSafe(err.message) : err);

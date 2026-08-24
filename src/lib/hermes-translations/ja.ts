@@ -337,6 +337,7 @@ export const ja: Record<string, string> = {
   "localModels.run.idle": "停止中",
   "localModels.run.onDemand": "必要なときに起動",
   "localModels.run.notInstalled": "未インストール",
+  "localModels.run.notOnThisEdition": "このエディションでは利用できません",
 
   // === Panel ===
   "localModels.intro": "本体で動かせるものと、それぞれが今どう動いているかの一覧です。「未インストール」と表示されているものは本当にインストールされていません — ここでオンにできる設定ではありません。",

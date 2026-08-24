@@ -346,6 +346,7 @@ export const zh: Record<string, string> = {
   "localModels.run.idle": "已停止",
   "localModels.run.onDemand": "按需启动",
   "localModels.run.notInstalled": "未安装",
+  "localModels.run.notOnThisEdition": "此版本不提供",
 
   // === Panel ===
   "localModels.intro": "这里是能在这台 ClawBox 上运行的全部模型，以及它们此刻在做什么。显示为未安装的，是这台设备上真的没有 — 而不是您可以在这里打开的开关。",

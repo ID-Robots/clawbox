@@ -330,6 +330,7 @@ export const es: Record<string, string> = {
   "localModels.run.idle": "Detenido",
   "localModels.run.onDemand": "Bajo demanda",
   "localModels.run.notInstalled": "No instalado",
+  "localModels.run.notOnThisEdition": "No disponible en esta edición",
 
   // === Panel ===
   "localModels.intro": "Todo lo que puede ejecutarse en la propia caja y lo que está haciendo ahora mismo. Lo que aparece como no instalado es que de verdad no está — no es un ajuste que puedas activar aquí.",

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { requireSession } from "@/lib/route-auth";
 import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
@@ -385,7 +386,16 @@ function scheduleReboot(): void {
   }, 1_000);
 }
 
-export async function POST() {
+export async function POST(request: Request) {
+  // Factory reset wipes data/, ~/.openclaw, ~/.hermes and reboots. It has no
+  // onboarding role whatsoever, so it never gets the bootstrap carve-out: no
+  // session, no reset, on any device state. This handler USED to be
+  // `export async function POST()` — zero parameters, so it could not read a
+  // cookie even in principle — and an unauthenticated POST really did wipe the
+  // QA box on 2026-08-22T00:04Z. TASK-443.
+  const unauthorized = await requireSession(request);
+  if (unauthorized) return unauthorized;
+
   try {
     resetUpdateState();
 

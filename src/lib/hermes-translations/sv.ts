@@ -331,6 +331,7 @@ export const sv: Record<string, string> = {
   "localModels.run.idle": "Stoppad",
   "localModels.run.onDemand": "Vid behov",
   "localModels.run.notInstalled": "Inte installerad",
+  "localModels.run.notOnThisEdition": "Inte tillgänglig i den här utgåvan",
 
   // === Panel ===
   "localModels.intro": "Allt som kan köras på själva boxen, och vad det gör just nu. Det som står som inte installerat saknas verkligen — det är ingen inställning du kan slå på här.",

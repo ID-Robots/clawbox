@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { requireSession } from "@/lib/route-auth";
+import { UI_ROOT_STEPS } from "@/lib/root-steps";
 
 export const dynamic = "force-dynamic";
 
@@ -14,25 +16,16 @@ const execFileAsync = promisify(execFile);
 // until the install step finishes so the UI can chain a reboot or refresh
 // on success.
 //
-// Steps are whitelisted here on top of install.sh's own DISPATCH_STEPS
-// list. Only steps that are safe to invoke from a clicked button in the
-// UI go in. Anything that would reboot, modify networking, or wipe state
-// stays out — we don't want a one-tap escalation surface.
-const ALLOWED_STEPS = new Set([
-  "cloudflared_install",
-  "vnc_install",
-  "vnc_refresh",
-  "chromium_install",
-  "ai_tools_install",
-  "ollama_install",
-  "llamacpp_install",
-  "ffmpeg_install",
-  "openclaw_install",
-  "openclaw_setup",
-  "openclaw_patch",
-  "openclaw_config",
-  "clawkeep_install",
-]);
+// Steps are whitelisted on top of install.sh's own DISPATCH_STEPS list. Only
+// steps that are safe to invoke from a clicked button in the UI go in. Anything
+// that would reboot, modify networking, or wipe state stays out — we don't want
+// a one-tap escalation surface.
+//
+// This list is advisory-in-depth: the sudoers grant is
+// `clawbox-root-update@*.service`, so the authoritative check is the one the
+// root-owned dispatcher does (config/clawbox-root-step.sh). Keeping both in
+// src/lib/root-steps.ts is what lets a test pin them together. TASK-445.
+const ALLOWED_STEPS = new Set(UI_ROOT_STEPS);
 
 // Most install steps complete in ~30-120s on a warm Jetson. vnc_install /
 // chromium_install can take several minutes when apt has to fetch fresh.
@@ -54,6 +47,12 @@ async function getJournalTail(unit: string): Promise<string> {
 }
 
 export async function POST(req: Request) {
+  // Starts clawbox-root-update@<step>.service, which runs install.sh as root.
+  // Its only callers are VNCApp and RemoteControlPanel — desktop apps, always
+  // post-setup — so it fails closed unconditionally. TASK-443/445.
+  const unauthorized = await requireSession(req);
+  if (unauthorized) return unauthorized;
+
   let step: string;
   try {
     const body = (await req.json()) as { step?: unknown };

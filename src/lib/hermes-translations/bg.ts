@@ -322,6 +322,7 @@ export const bg: Record<string, string> = {
   "localModels.run.idle": "Спрян",
   "localModels.run.onDemand": "При нужда",
   "localModels.run.notInstalled": "Не е инсталиран",
+  "localModels.run.notOnThisEdition": "Не е наличен в това издание",
 
   // === Panel ===
   "localModels.intro": "Всичко, което може да работи на самата кутия, и какво прави в момента. Всичко, отбелязано като неинсталирано, наистина липсва — това не е настройка, която можете да включите оттук.",
