@@ -22,6 +22,9 @@ vi.mock("@/lib/hermes-discord", async () => {
     // `instanceof`, and a stub would make every allowlist refusal fall through
     // to the generic 500 instead of the warning it is supposed to become.
     DiscordEmptyAllowlistError: actual.DiscordEmptyAllowlistError,
+    // Real too: the route validates member ids with it before it writes
+    // anything, so a stub would remove the check under test.
+    normalizeDiscordUserId: actual.normalizeDiscordUserId,
     setHermesDiscordToken: vi.fn(),
     setHermesDiscordAllowlist: vi.fn(),
     ensureHermesGateway: vi.fn(),

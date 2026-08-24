@@ -16,6 +16,7 @@ import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
 import {
   DiscordEmptyAllowlistError,
   ensureHermesGateway,
+  normalizeDiscordUserId,
   setHermesDiscordAllowlist,
   setHermesDiscordToken,
 } from "@/lib/hermes-discord";
@@ -69,6 +70,11 @@ interface ConfigureBody {
   allowedUserIds?: unknown;
 }
 
+// Shape AND format, up front, because the write order downstream makes a late
+// rejection expensive: on the full-save path the token is stored and handed to
+// the harness BEFORE the allowlist is applied, so a bad id discovered inside
+// setHermesDiscordAllowlist surfaces as a 500 for a save that already half
+// happened. Same normaliser the writer uses, so the two cannot drift apart.
 function readUserIds(value: unknown): { ids: string[] } | { error: string } {
   if (!Array.isArray(value)) return { error: "allowedUserIds must be an array" };
   if (value.length > MAX_ALLOWED_USERS) {
@@ -77,7 +83,11 @@ function readUserIds(value: unknown): { ids: string[] } | { error: string } {
   const ids: string[] = [];
   for (const entry of value) {
     if (typeof entry !== "string") return { error: "allowedUserIds must be strings" };
-    ids.push(entry);
+    const id = normalizeDiscordUserId(entry);
+    // Rejected, never dropped: silently discarding one id would save an
+    // allowlist that quietly excludes somebody the owner believes they added.
+    if (!id) return { error: "Invalid Discord user id" };
+    ids.push(id);
   }
   return { ids };
 }

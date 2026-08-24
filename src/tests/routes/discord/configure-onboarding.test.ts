@@ -25,6 +25,9 @@ vi.mock("@/lib/hermes-discord", async () => {
     // Real error class: the route branches on `instanceof`, so a stub would
     // turn every allowlist refusal into a generic 500.
     DiscordEmptyAllowlistError: actual.DiscordEmptyAllowlistError,
+    // Real too: the route validates member ids with it before it writes
+    // anything, so a stub would remove the check under test.
+    normalizeDiscordUserId: actual.normalizeDiscordUserId,
     setHermesDiscordToken: vi.fn(),
     setHermesDiscordAllowlist: vi.fn(),
     ensureHermesGateway: vi.fn(),
@@ -349,6 +352,39 @@ describe("POST /setup-api/discord/configure — onboarding", () => {
       const res = await POST(req({ allowedUserIds: many }));
       expect(res.status).toBe(400);
       expect(mockSetAllowlist).not.toHaveBeenCalled();
+    });
+
+    it("rejects a malformed id before it writes anything", async () => {
+      // Write order is what makes this matter: on the full-save path the token
+      // is stored and handed to the harness BEFORE the allowlist is applied, so
+      // an id only rejected inside setHermesDiscordAllowlist comes back as a
+      // 500 for a save that already half happened.
+      const fetchMock = useApi();
+
+      const res = await POST(req({ botToken: TOKEN, allowedUserIds: [OWNER_ID, "not-an-id"] }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Invalid Discord user id");
+      expect(mockSet).not.toHaveBeenCalled();
+      expect(mockSetToken).not.toHaveBeenCalled();
+      expect(mockSetAllowlist).not.toHaveBeenCalled();
+      // And Discord was never asked either — the body is rejected on shape.
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("rejects a malformed id on the allowlist-only save too", async () => {
+      useApi();
+      const res = await POST(req({ allowedUserIds: [`${OWNER_ID}\nDISCORD_ALLOW_ALL_USERS=true`] }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Invalid Discord user id");
+      expect(mockSetAllowlist).not.toHaveBeenCalled();
+    });
+
+    it("trims a pasted id rather than rejecting it", async () => {
+      useApi();
+      await POST(req({ allowedUserIds: [` ${OWNER_ID} `] }));
+      expect(mockSetAllowlist).toHaveBeenCalledWith([OWNER_ID]);
     });
 
     it("has nothing to do without a token or a selection", async () => {
