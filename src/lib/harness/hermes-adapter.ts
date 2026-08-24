@@ -183,6 +183,11 @@ export class HermesAdapter implements HarnessAdapter {
       // the user as "Unexpected token <" instead of the actionable
       // `invalid-input` the route sent, and the status was lost on the way.
       const data = await readJsonBody(res);
+      // `readJsonBody` answers `{}` for a body it cannot parse, and an abort
+      // mid-read is one of those: the fetch rejects, the parse fails, and an
+      // empty object would sail on to be returned as a successful turn with no
+      // text. A Stop must end the turn as a Stop.
+      if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",

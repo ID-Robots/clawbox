@@ -235,4 +235,31 @@ describe("HermesAdapter", () => {
     expect(adapter.capabilities.canPatchSessionDefaults).toBe(false);
     await expect(adapter.patchSessionDefaults({})).rejects.toMatchObject({ code: "unsupported" });
   });
+
+  it("reports a Stop that lands while the body is still being read", async () => {
+    // The window the defensive body read opened. `readJsonBody` answers `{}`
+    // for anything it cannot parse, and an abort mid-read looks exactly like
+    // that — so without a check afterwards the turn would resolve as a
+    // SUCCESSFUL reply with no text, and the transcript would show the agent
+    // answering nothing instead of the run ending where the user stopped it.
+    let adapter!: HermesAdapter;
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        // Stop pressed after the headers, before the body parses.
+        void adapter.abortTurn();
+        throw new Error("The user aborted a request.");
+      },
+    }) as unknown as Response);
+    adapter = new HermesAdapter(
+      caps,
+      () => ({ devicePairing: { provider: "clawai", model: "deepseek" }, modelsReady: true }),
+      fetchImpl as unknown as typeof fetch,
+    );
+
+    await expect(
+      adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" }),
+    ).rejects.toMatchObject({ code: "aborted" });
+  });
 });
