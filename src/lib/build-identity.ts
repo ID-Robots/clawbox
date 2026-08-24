@@ -35,7 +35,14 @@ export interface BuildInfo {
   commit: string | null;
   shortCommit: string | null;
   branch: string | null;
+  /** TRACKED files differed from the commit at build time (`git status --porcelain -uno`). */
   dirty: boolean | null;
+  /**
+   * Untracked files present at build time, counted separately from `dirty`.
+   * Absent on stamps written before 2026-08 — an older build simply never
+   * recorded it, which is not the same as "there were none".
+   */
+  untracked?: number | null;
   committedAt: string | null;
   builtAt: string | null;
   buildId: string | null;

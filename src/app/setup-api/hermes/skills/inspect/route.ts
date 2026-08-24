@@ -8,6 +8,7 @@ import {
   type SkillProvenance,
   type SkillRequirements,
   checkInstallIdentifier,
+  cliInstallIdentifier,
 } from "@/lib/hermes-skills";
 import {
   type HubLockEntry,
@@ -427,9 +428,15 @@ async function localDetail(id: string, fromInstalled: boolean): Promise<NextResp
 
 /** Phase 2 — the CLI preview, fetched only while the detail view is open. */
 async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse> {
+  // A bare ClawHub slug has to be spelled `clawhub/<slug>` for the CLI, for the
+  // same reason the install route does it — `hermes skills inspect <bare name>`
+  // resolves on the catalog NAME and a ClawHub row's name is its display name,
+  // so every clawhub card dead-ended on "Skill not found" here.
+  const record = await getCatalogRecord(id).catch(() => undefined);
+  const cliId = cliInstallIdentifier(id, record?.source);
   // Queued (max 2 children) and cancelled with the request: clicking through a
   // dozen cards must not leave a dozen Python processes resident on a Jetson.
-  const r = await runSkillsCli(["skills", "inspect", id], {
+  const r = await runSkillsCli(["skills", "inspect", cliId], {
     env: { COLUMNS: "200" },
     timeoutMs: 45_000,
     signal,

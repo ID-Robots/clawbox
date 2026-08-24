@@ -76,17 +76,36 @@ function readHermesPin() {
 }
 
 const commit = gitValue("rev-parse", "HEAD");
-// --porcelain, not --porcelain -uno: an untracked file under src/app/ becomes a
-// compiled route, so "untracked" and "modified" are the same class of problem
-// on an appliance. .gitignore'd paths (data/, .next/, node_modules/) are
-// excluded by git itself and so never make a healthy box read as dirty.
-const status = git("status", "--porcelain");
+// `dirty` answers exactly one question: were the TRACKED files this build was
+// compiled from the ones the commit above describes? So it is sampled with
+// --untracked-files=no.
+//
+// It used to be plain --porcelain, which counts untracked files too, and on a
+// real device that made the flag useless: a QA operator's stray `.deployed-sha`
+// in the project root stamped `dirty: true` on two consecutive builds made from
+// provably clean trees (hwtest-round1, 2026-08-24). A flag that is true on
+// healthy builds teaches operators to ignore it.
+//
+// Untracked files are still reported — as their own count, in their own field —
+// because an untracked file under src/app/ IS a route the next build would
+// serve. That is a different statement from "this build does not match its
+// commit", and it now reads as one. The drift engine
+// (src/lib/build-identity.ts) keeps counting untracked files in the CHECKOUT's
+// dirtiness; that is a deliberate, separate choice about the tree on disk now,
+// not about the tree this build came from.
+const status = git("status", "--porcelain", "--untracked-files=no");
+const untrackedOut = git("ls-files", "--others", "--exclude-standard");
+const untracked = untrackedOut === null
+  ? null
+  : (untrackedOut ? untrackedOut.split("\n").filter(Boolean).length : 0);
 
 const info = {
   commit,
   shortCommit: commit ? commit.slice(0, 7) : null,
   branch: gitValue("rev-parse", "--abbrev-ref", "HEAD"),
   dirty: status === null ? null : status.length > 0,
+  /** How many untracked files sat in the tree at build time. Not part of `dirty` — see above. */
+  untracked,
   committedAt: gitValue("log", "-1", "--format=%cI"),
   builtAt: new Date().toISOString(),
   buildId: readFirstLine(path.join(nextDir, "BUILD_ID")),
@@ -108,5 +127,6 @@ const target = path.join(nextDir, "build-info.json");
 fs.writeFileSync(target, `${JSON.stringify(info, null, 2)}\n`);
 console.log(
   `  build-info.json: commit=${info.shortCommit ?? "unknown"} branch=${info.branch ?? "unknown"}` +
-  `${info.dirty ? " (dirty)" : ""} buildId=${info.buildId ?? "unknown"}`,
+  `${info.dirty ? " (dirty)" : ""}${info.untracked ? ` (${info.untracked} untracked)` : ""}` +
+  ` buildId=${info.buildId ?? "unknown"}`,
 );
