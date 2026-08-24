@@ -250,9 +250,17 @@ function charsetOf(contentType: string): string {
 function decodePart(body: string, contentType: string, encoding: string): string {
   const enc = encoding.trim().toLowerCase();
   const charset = charsetOf(contentType);
+  // base64 and quoted-printable arrive as ASCII that SPELLS bytes, so those
+  // bytes have to be rebuilt and then read in the part's charset.
   if (enc === "base64") return decodeBytes(Buffer.from(body.replace(/\s+/g, ""), "base64"), charset);
   if (enc === "quoted-printable") return decodeBytes(decodeQuotedPrintable(body), charset);
-  return decodeBytes(Buffer.from(body, "binary"), charset);
+  // 7bit, 8bit, binary: nothing spells anything — the part IS its text, already
+  // decoded from the fetched bytes by readMessage. Pushing it back through
+  // latin1 to "decode" it again is not a no-op: `Buffer.from(s, "binary")`
+  // keeps only the low byte of each code unit, so a message sent as plain
+  // 8bit UTF-8 — which a great deal of real mail is — loses every character
+  // outside ASCII. "Здравей" came out as gibberish; "İ" came out as "0".
+  return body;
 }
 
 /**

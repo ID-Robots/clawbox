@@ -366,6 +366,20 @@ describe("readMessage", () => {
     expect(detail.text).toContain("still the body");
   });
 
+  it("reads a message written in a language that needs more than ASCII", async () => {
+    // A part sent as 8bit UTF-8 — no base64, no quoted-printable, which is how
+    // a great deal of real mail arrives. The bytes are already text by the time
+    // a part is decoded, so re-reading them as latin1 to "decode" them turns
+    // every non-ASCII character into a different one.
+    const s = await sink({
+      messages: [msg(7, { subject: "Среща утре", body: "Здравей! Ще се видим в 10.  よろしく。" })],
+    });
+    const detail = await readMessage(cfg(s.port), 7);
+    expect(detail.subject).toBe("Среща утре");
+    expect(detail.text).toContain("Здравей!");
+    expect(detail.text).toContain("よろしく。");
+  });
+
   it("reports a truncated body rather than pretending it is whole", async () => {
     const body = "x".repeat(300_000);
     const s = await sink({ messages: [msg(5, { body })] });
@@ -570,6 +584,18 @@ describe("text extraction", () => {
     const body = ["--B", "Content-Type: text/html", "", "<p>1 < 2 and 3 &gt; 2</p>", "--B--"].join(CRLF);
     const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
     expect(text.trim()).toBe("1 < 2 and 3 > 2");
+  });
+
+  it("keeps the text after a style block in a message written in Turkish", () => {
+    // İ (U+0130) lower-cases to TWO code units, so looking for "</style" in a
+    // lower-cased copy of the message and then using that index in the
+    // original hunts for the ">" past the end of the tag — and swallows the
+    // rest of the message with it. Eight of them are enough to overshoot.
+    const html = `<p>${"İ".repeat(8)}</p><style>body{color:red}</style>Toplantı yarın.`;
+    const body = ["--B", "Content-Type: text/html", "", html, "--B--"].join(CRLF);
+    const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
+    expect(text).toContain("Toplantı yarın.");
+    expect(text).not.toContain("color:red");
   });
 
   it("says so plainly when there is no readable text part", () => {
