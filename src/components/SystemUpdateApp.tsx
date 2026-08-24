@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { useT } from "@/lib/i18n";
+import { BuildDriftBanner, useBuildIdentity } from "@/components/BuildIdentityPanel";
 import type { StepStatus, UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
@@ -44,7 +46,7 @@ function componentNeedsUpdate(component: { current: string | null; target: strin
   return component.updateAvailable ?? isUpdateAvailable(component.current, component.target);
 }
 
-type Status = "loading" | "up-to-date" | "available" | "updating" | "completed" | "failed" | "fetch-error";
+type Status = "loading" | "up-to-date" | "available" | "drift" | "updating" | "completed" | "failed" | "fetch-error";
 
 function StepIcon({ status }: { status: StepStatus }) {
   if (status === "completed") {
@@ -74,6 +76,7 @@ function StepIcon({ status }: { status: StepStatus }) {
 }
 
 export default function SystemUpdateApp() {
+  const { t } = useT();
   const [versions, setVersions] = useState<VersionInfo | null>(null);
   const [versionsError, setVersionsError] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState | null>(null);
@@ -87,6 +90,13 @@ export default function SystemUpdateApp() {
   const [branchError, setBranchError] = useState<string | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [forceConfirm, setForceConfirm] = useState(false);
+
+  // Fetched once on mount, from the same endpoint the About screen uses, so
+  // the two surfaces cannot disagree about whether this box is running its own
+  // code. Not polled: it shells out to git and only changes when the box
+  // rebuilds.
+  const identity = useBuildIdentity(true);
+  const driftDetected = !!identity?.drift?.detected;
 
   const pollRef = useRef<number | null>(null);
   const pollControllerRef = useRef<AbortController | null>(null);
@@ -269,10 +279,17 @@ export default function SystemUpdateApp() {
     // of the ClawBox update, so an OpenClaw-pin delta without a ClawBox
     // delta means a ClawBox release hasn't been cut yet and there's
     // nothing for the user to install.
-    return componentNeedsUpdate(versions.clawbox)
-      ? "available"
-      : "up-to-date";
-  }, [updateStarted, updateError, updateState, versions, versionsError]);
+    if (componentNeedsUpdate(versions.clawbox)) return "available";
+    // Versions cannot see drift: package.json does not change commit-to-commit,
+    // so a box serving a build from another commit — or sitting dozens of
+    // commits behind its tested branch — reports `target: null` and used to be
+    // told "You're up to date" by the one screen whose whole job is "should I
+    // update?", while Settings → About simultaneously said "run Update to
+    // realign" (hwtest-round1, 2026-08-24). Drift offers the update instead,
+    // and the banner below says which drift.
+    if (driftDetected) return "drift";
+    return "up-to-date";
+  }, [updateStarted, updateError, updateState, versions, versionsError, driftDetected]);
 
   // ─── HERO ────────────────────────────────────────────────────────────
   const hero = (() => {
@@ -294,6 +311,12 @@ export default function SystemUpdateApp() {
           icon: "verified", iconClass: "text-emerald-300",
           headline: "You're up to date", subhead: "Every component is on the latest release.",
           tone: "good" as const,
+        };
+      case "drift":
+        return {
+          icon: "sync_problem", iconClass: "text-amber-300",
+          headline: t("update.driftHeadline"), subhead: t("update.driftSubhead"),
+          tone: "warn" as const,
         };
       case "available": {
         const updates: string[] = [];
@@ -338,7 +361,10 @@ export default function SystemUpdateApp() {
     error: "from-red-500/10 via-red-500/5",
   }[hero.tone];
 
-  const clawboxAvail = !!versions && componentNeedsUpdate(versions.clawbox);
+  // Drift counts as "there is an update to run" for the card too: its button
+  // otherwise reads "Up to date" and is disabled, which is the same denial the
+  // hero used to make, one card further down.
+  const clawboxAvail = (!!versions && componentNeedsUpdate(versions.clawbox)) || driftDetected;
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
@@ -371,9 +397,9 @@ export default function SystemUpdateApp() {
               {hero.subhead}
             </p>
 
-            {(status === "available" || status === "up-to-date") && (
+            {(status === "available" || status === "up-to-date" || status === "drift") && (
               <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-                {status === "available" && (
+                {(status === "available" || status === "drift") && (
                   <button
                     type="button"
                     onClick={() => void triggerUpdate()}
@@ -406,6 +432,15 @@ export default function SystemUpdateApp() {
               </button>
             )}
           </div>
+
+          {/* WHY the update is being offered. The same banner, from the same
+              endpoint, as Settings → About — so the screen that says "run
+              Update to realign" and the screen that runs it say the same
+              thing, in the same words, in every locale. Hidden while an update
+              is running: the drift it describes is the one being fixed. */}
+          {driftDetected && status !== "updating" && status !== "completed" && (
+            <BuildDriftBanner identity={identity} />
+          )}
 
           {/* COMPONENTS
               Only ClawBox is exposed as a standalone update target. OpenClaw
