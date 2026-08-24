@@ -372,10 +372,15 @@ describe("stop+disable is the right amount of force", () => {
     // step_edition_gateway_state masks clawbox-gateway because a plain disable
     // is undone from the in-UI terminal. If an equivalent grant ever appears
     // for a Hermes unit, this test fails and the teardown needs revisiting.
+    //
+    // `restart` as well as `start`: TASK-445 round 2 dropped the redundant
+    // `start clawbox-gateway` grant, and `systemctl restart` brings a stopped
+    // unit up just the same — so the escalation the mask exists to block is
+    // unchanged.
     const grants = SUDOERS.split("\n").filter(
       (l) => l.startsWith("clawbox ") && l.includes("systemctl"),
     );
-    expect(grants.some((l) => /\bstart\s+clawbox-gateway/.test(l))).toBe(true);
+    expect(grants.some((l) => /\b(?:re)?start\s+clawbox-gateway/.test(l))).toBe(true);
     for (const unit of ["hermes-dashboard", "hermes-gateway"]) {
       expect(grants.some((l) => l.includes(unit))).toBe(false);
     }

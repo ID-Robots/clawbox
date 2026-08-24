@@ -128,8 +128,17 @@ describe("root-executed paths are outside clawbox's write access", () => {
     expect(sh).toContain("install_root_libexec");
     // The ollama grant's target must be the installed copy, not the repo one.
     expect(read(SUDOERS[1])).toContain("/usr/local/libexec/clawbox/optimize-ollama.sh");
-    const libexecAt = sh.indexOf("  install_root_libexec\n  # Install sudoers rules");
-    expect(libexecAt, "install_root_libexec must run before the sudoers drop-in").toBeGreaterThan(0);
+    // Asserted as an ORDER inside step_systemd_services rather than as one
+    // literal line, so the check survives the surrounding text changing (it did
+    // not, before TASK-445 round 2 rewrote the sudoers install).
+    const step = sh.slice(sh.indexOf("step_systemd_services() {"));
+    const body = step.slice(0, step.indexOf("\n}"));
+    const libexecAt = body.indexOf("install_root_libexec");
+    const grantAt = body.indexOf("install_sudoers_dropin");
+    expect(libexecAt, "install_root_libexec must be called by step_systemd_services").toBeGreaterThan(-1);
+    expect(grantAt, "the sudoers drop-in must be installed by step_systemd_services").toBeGreaterThan(-1);
+    expect(libexecAt, "install_root_libexec must run before the sudoers drop-in that points at it")
+      .toBeLessThan(grantAt);
   });
 
   it("gates install.sh's self-update on an explicit opt-in", () => {
