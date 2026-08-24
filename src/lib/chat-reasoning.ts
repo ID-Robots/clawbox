@@ -3,6 +3,8 @@
 // (which providers offer which levels) is unit-testable without rendering the
 // whole chat component.
 
+import { CLAWBOX_AI_PRO_MODEL_ID, isClawboxAiProModel } from "@/lib/clawbox-ai-models";
+
 // Reasoning effort levels accepted by the OpenClaw gateway. The wire
 // vocabulary is broader than what any single upstream API supports — each
 // provider only honors a subset, with the gateway translating (e.g. DeepSeek
@@ -44,7 +46,8 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
 //
 // Defaults differ on purpose: ClawBox AI / DeepSeek default to `off` so simple
 // prompts stay fast and don't burn reasoning tokens (users opt in), while the
-// reasoning-first cloud providers default to `medium`.
+// reasoning-first cloud providers default to `medium`. The one exception is
+// ClawBox AI's Max tier — see CLAWBOX_AI_MAX_TIER_REASONING_CONFIG below.
 export interface ProviderReasoningConfig {
   levels: readonly ThinkingLevel[];
   default: ThinkingLevel;
@@ -74,15 +77,57 @@ export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   llamacpp: { levels: ["off"], default: "off" },
 };
 
+/**
+ * Providers that are really "the ClawBox AI proxy". `deepseek` is the id the
+ * gateway config registers it under; `clawai` is what the chat header
+ * normalises it to (src/app/setup-api/chat/model/route.ts). Either reaches here.
+ */
+const CLAWBOX_AI_PROVIDERS: ReadonlySet<string> = new Set(["clawai", "deepseek"]);
+
+/**
+ * ClawBox AI on the MAX tier — the DeepSeek V4 Pro frontier weights — reasons
+ * by default. Product decision (2026-08-24): `off` was chosen as the tier-blind
+ * ClawBox AI default so Flash stays fast, and that still holds for the Free and
+ * Pro plans; but a customer paying for the frontier model expects it to think.
+ * Same uniform ladder, only the starting point moves — and a level the user
+ * picked themselves (readPersistedThinkingLevel) still wins over it.
+ *
+ * The tier is a property of the MODEL, not the provider: a Max subscriber who
+ * deliberately drops to Flash gets Flash's fast default again.
+ */
+export const CLAWBOX_AI_MAX_TIER_REASONING_CONFIG: ProviderReasoningConfig = {
+  levels: UNIFORM_LEVELS,
+  default: "medium",
+};
+
+/**
+ * True when `model` is the ClawBox AI Max-tier chat model under a ClawBox AI
+ * provider id. Accepts the fully-qualified refs the chat state carries
+ * (`deepseek/deepseek-v4-pro`, `clawai/deepseek-v4-pro`) and the bare id.
+ */
+export function isClawboxAiMaxTierModel(
+  provider: string | null | undefined,
+  model: string | null | undefined,
+): boolean {
+  if (!provider || !CLAWBOX_AI_PROVIDERS.has(provider)) return false;
+  if (typeof model !== "string") return false;
+  return model === CLAWBOX_AI_PRO_MODEL_ID || isClawboxAiProModel(model);
+}
+
 export const FALLBACK_REASONING_CONFIG: ProviderReasoningConfig = {
   levels: ["off", "low", "medium", "high"],
   default: "medium",
 };
 
+// `model` is optional so provider-only callers keep their behaviour; pass the
+// active fully-qualified model wherever it is known, because for ClawBox AI the
+// default depends on the tier the model belongs to.
 export function getProviderReasoningConfig(
   provider: string | null | undefined,
+  model?: string | null,
 ): ProviderReasoningConfig {
   if (!provider) return FALLBACK_REASONING_CONFIG;
+  if (isClawboxAiMaxTierModel(provider, model)) return CLAWBOX_AI_MAX_TIER_REASONING_CONFIG;
   return REASONING_BY_PROVIDER[provider] ?? FALLBACK_REASONING_CONFIG;
 }
 
@@ -109,9 +154,10 @@ export const SAFE_THINKING_LEVEL: ThinkingLevel = "off";
 export function resolveWireThinkingLevel(
   provider: string | null | undefined,
   desired: ThinkingLevel,
+  model?: string | null,
 ): ThinkingLevel | null {
   if (!provider) return null;
-  const cfg = getProviderReasoningConfig(provider);
+  const cfg = getProviderReasoningConfig(provider, model);
   return cfg.levels.includes(desired) ? desired : cfg.default;
 }
 

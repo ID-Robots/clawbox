@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CLAWBOX_AI_MAX_TIER_REASONING_CONFIG,
+  isClawboxAiMaxTierModel,
   getProviderReasoningConfig,
   readPersistedThinkingLevel,
   resolveWireThinkingLevel,
@@ -48,13 +50,83 @@ describe("chat-reasoning", () => {
     });
 
     it("keeps every config self-consistent (labelled levels, default in range)", () => {
-      for (const cfg of Object.values(REASONING_BY_PROVIDER)) {
+      for (const cfg of [...Object.values(REASONING_BY_PROVIDER), CLAWBOX_AI_MAX_TIER_REASONING_CONFIG]) {
         expect(cfg.levels.length).toBeGreaterThan(0);
         expect(cfg.levels).toContain(cfg.default);
         for (const level of cfg.levels) {
           expect(THINKING_LEVEL_LABELS[level]).toBeTruthy();
         }
       }
+    });
+  });
+
+  describe("ClawBox AI Max tier (DeepSeek V4 Pro)", () => {
+    const PRO = "deepseek/deepseek-v4-pro";
+    const FLASH = "deepseek/deepseek-v4-flash";
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("recognises the Max-tier model under either ClawBox AI provider id, qualified or bare", () => {
+      expect(isClawboxAiMaxTierModel("clawai", PRO)).toBe(true);
+      expect(isClawboxAiMaxTierModel("deepseek", PRO)).toBe(true);
+      expect(isClawboxAiMaxTierModel("clawai", "clawai/deepseek-v4-pro")).toBe(true);
+      expect(isClawboxAiMaxTierModel("clawai", "deepseek-v4-pro")).toBe(true);
+      expect(isClawboxAiMaxTierModel("clawai", FLASH)).toBe(false);
+      expect(isClawboxAiMaxTierModel("clawai", null)).toBe(false);
+      expect(isClawboxAiMaxTierModel(null, PRO)).toBe(false);
+      // The model id alone is not enough — it has to be ClawBox AI serving it.
+      expect(isClawboxAiMaxTierModel("openrouter", PRO)).toBe(false);
+      expect(isClawboxAiMaxTierModel("llamacpp", PRO)).toBe(false);
+    });
+
+    it("reasons by default (medium) on the Max-tier model", () => {
+      expect(getProviderReasoningConfig("clawai", PRO)).toBe(CLAWBOX_AI_MAX_TIER_REASONING_CONFIG);
+      expect(getProviderReasoningConfig("deepseek", PRO).default).toBe("medium");
+      expect(getProviderReasoningConfig("clawai", "deepseek-v4-pro").default).toBe("medium");
+    });
+
+    it("keeps Flash (Free / Pro plans) fast-by-default, and provider-only callers unchanged", () => {
+      expect(getProviderReasoningConfig("clawai", FLASH).default).toBe("off");
+      expect(getProviderReasoningConfig("deepseek", FLASH).default).toBe("off");
+      expect(getProviderReasoningConfig("clawai", null).default).toBe("off");
+      expect(getProviderReasoningConfig("clawai", undefined)).toBe(REASONING_BY_PROVIDER.clawai);
+      expect(getProviderReasoningConfig("clawai")).toBe(REASONING_BY_PROVIDER.clawai);
+    });
+
+    it("offers the same uniform ladder on the Max tier — only the starting point moves", () => {
+      expect(getProviderReasoningConfig("clawai", PRO).levels).toEqual(["off", "low", "medium", "high"]);
+      expect(getProviderReasoningConfig("clawai", PRO).levels).toEqual(getProviderReasoningConfig("clawai", FLASH).levels);
+    });
+
+    it("leaves other providers alone even when handed the Max-tier model id", () => {
+      expect(getProviderReasoningConfig("llamacpp", PRO)).toBe(REASONING_BY_PROVIDER.llamacpp);
+      expect(getProviderReasoningConfig("openrouter", PRO)).toBe(REASONING_BY_PROVIDER.openrouter);
+      expect(getProviderReasoningConfig("bogus", PRO)).toBe(FALLBACK_REASONING_CONFIG);
+    });
+
+    it("starts at medium when the user has never touched the picker", () => {
+      vi.stubGlobal("window", { localStorage: { getItem: () => null } });
+      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", PRO))).toBe("medium");
+      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", FLASH))).toBe("off");
+    });
+
+    it("honours a level the user picked themselves over the tier default", () => {
+      const store: Record<string, string> = { "clawbox:chat:thinkingLevel:clawai": "off" };
+      vi.stubGlobal("window", { localStorage: { getItem: (k: string) => store[k] ?? null } });
+      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", PRO))).toBe("off");
+      store["clawbox:chat:thinkingLevel:clawai"] = "high";
+      expect(readPersistedThinkingLevel("clawai", getProviderReasoningConfig("clawai", FLASH))).toBe("high");
+    });
+
+    it("clamps an unsupported wire level to the tier's own default", () => {
+      expect(resolveWireThinkingLevel("clawai", "xhigh", PRO)).toBe("medium");
+      expect(resolveWireThinkingLevel("clawai", "xhigh", FLASH)).toBe("off");
+      expect(resolveWireThinkingLevel("clawai", "xhigh")).toBe("off");
+      // Supported levels pass through on both tiers.
+      expect(resolveWireThinkingLevel("clawai", "off", PRO)).toBe("off");
+      expect(resolveWireThinkingLevel("clawai", "high", PRO)).toBe("high");
     });
   });
 

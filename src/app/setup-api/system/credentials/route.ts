@@ -7,7 +7,7 @@ import { get, set } from "@/lib/config-store";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { getSystemUsername, verifyPassword, isSafePasswordChars, bumpSessionGeneration, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
-import { hasSystemPassword } from "@/lib/system-password";
+import { hasOwnerPassword } from "@/lib/system-password";
 import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -86,15 +86,25 @@ export async function POST(request: Request) {
     // calls this without `currentPassword` to set the initial value.
     //
     // /etc/shadow is consulted as well as the config flag, and either one
-    // saying "there is a password" is enough (TASK-444a). The flag alone is a
-    // cache that a factory reset wipes and a partial restore can drop; on a box
-    // where config.json says "no password" but the account really has one, the
-    // old check skipped `currentPassword` entirely and let an unauthenticated
-    // caller take the OS account over. `hasSystemPassword()` returns null when
-    // it cannot tell, which is deliberately NOT treated as "no password".
+    // saying "there is an owner's password" is enough (TASK-444a). The flag
+    // alone is a cache that a factory reset wipes and a partial restore can
+    // drop; on a box where config.json says "no password" but the account
+    // really has one, the old check skipped `currentPassword` entirely and let
+    // an unauthenticated caller take the OS account over.
+    //
+    // "Owner's password" deliberately excludes the factory default: the shipped
+    // image and a factory reset both leave `clawbox` on the account, and this
+    // very route is what the wizard uses to replace it on first boot. Treating
+    // that hash as an owner 401'd the initial set on every new device.
+    // `hasOwnerPassword()` returns null when it cannot read /etc/shadow at all,
+    // in which case the config flag alone decides.
+    //
+    // Short-circuit on the flag: once it says "owned" the shadow answer cannot
+    // change the outcome, and asking anyway would spawn unix_chkpwd with the
+    // factory default on every legitimate password change — a "password check
+    // failed" line in auth.log for an attempt nobody made.
     const flagSaysConfigured = !!(await get("password_configured"));
-    const shadowSaysConfigured = await hasSystemPassword();
-    const passwordAlreadyConfigured = flagSaysConfigured || shadowSaysConfigured === true;
+    const passwordAlreadyConfigured = flagSaysConfigured || (await hasOwnerPassword()) === true;
 
     if (passwordAlreadyConfigured) {
       // Defence in depth behind middleware: changing the owner's password is

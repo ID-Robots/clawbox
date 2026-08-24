@@ -44,6 +44,8 @@ describe("verifyPassword", () => {
       expect.objectContaining({
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 5000,
+        // unix_chkpwd ignores SIGTERM; only SIGKILL makes the timeout real.
+        killSignal: "SIGKILL",
       })
     );
     expect(stdinEnd).toHaveBeenCalledWith("secret123\0");

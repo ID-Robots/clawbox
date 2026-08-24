@@ -25,7 +25,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "path";
 import { verifyMcpBearer } from "./mcp-token";
-import { hasSystemPassword } from "./system-password";
+import { hasOwnerPassword } from "./system-password";
 
 function dataDir(): string {
   const root = process.env.CLAWBOX_ROOT
@@ -89,10 +89,15 @@ export interface RequireSessionOptions {
  * /etc/shadow is the real thing. TASK-444a is precisely that drift: config.json
  * says "no password" while the account has one, and the initial-set path
  * re-opens to an anonymous caller.
+ *
+ * "Has one" means a password somebody chose. The shipped image and a factory
+ * reset both leave the published default on the account, and an account anyone
+ * can already log in to has no owner — keying on the bare /etc/shadow hash
+ * locked the first-boot wizard (wifi/connect, update/run) out of every new box.
  */
 export async function deviceHasOwner(): Promise<boolean> {
   if (readConfigFacts().passwordConfigured) return true;
-  return (await hasSystemPassword()) === true;
+  return (await hasOwnerPassword()) === true;
 }
 
 function readSessionCookie(request: Request): string | null {
