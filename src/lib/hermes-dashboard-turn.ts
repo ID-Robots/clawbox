@@ -593,6 +593,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     const info = (result.info || {}) as Record<string, unknown>;
     let activeModel = typeof info.model === "string" ? info.model : "";
     let activeProvider = typeof info.provider === "string" ? info.provider : "";
+    const activeReasoning = typeof info.reasoning_effort === "string" ? info.reasoning_effort : "";
     // On a FRESH session the override is part of the create call itself and is
     // honoured by contract (`session.create` builds the agent with it), so the
     // request is the truth here even if `info` was assembled before the build.
@@ -632,6 +633,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     // provider by its KIND (`custom`) rather than its slug (`clawai`), so
     // comparing providers would report a difference on every single turn and
     // pay that cost forever.
+    let switchedModel = false;
     const alreadyOnModel = Boolean(activeModel) && activeModel === req.model;
     if (wantResume && req.model && !alreadyOnModel) {
       // An id that cannot go on a command line safely does not go on one. The
@@ -674,6 +676,57 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       }
       activeModel = req.model;
       if (req.provider) activeProvider = req.provider;
+      // The switch WIPES the session's reasoning effort — see below.
+      switchedModel = true;
+    }
+
+    // ── Putting the reasoning level back after a switch takes it away ────
+    //
+    // `/model … --session` rebuilds the session's agent, and the rebuild does
+    // not carry the reasoning effort across. Measured on the live box, one
+    // session, three steps: `session.create` with `reasoning_effort: "medium"`
+    // reported `medium`; the very next `/model claude-fable-5 --provider
+    // anthropic --session` reported `""`; nothing else was sent in between.
+    //
+    // That is the whole of the missing-thinking bug. Anthropic with no effort
+    // set returns SIGNATURE-ONLY thinking blocks — `{"type":"thinking",
+    // "thinking":"","signature":"…"}` — so `state.db` stores a
+    // `reasoning_details` blob with no text in it and leaves `reasoning` and
+    // `reasoning_content` NULL, and the turn record has no monologue to show.
+    // Of the 24 such rows on the box, 23 were exactly that shape, and the one
+    // that carried real thinking text carried it in `reasoning` too. The
+    // capture was never broken; the LEVEL was being thrown away, on every turn
+    // where the customer's pills caused a switch.
+    //
+    // `config.set` with a session id and a non-global scope is upstream's own
+    // session-scoped door (server.py :11936, the `reasoning` branch at
+    // :12394): it sets `create_reasoning_override` and the live agent's
+    // `reasoning_config`, and it explicitly does NOT write config.yaml —
+    // upstream's own comment says writing there "let every desktop model-menu
+    // selection rewrite the user's global agent.reasoning_effort". A chat turn
+    // must never change the box's default, and by this door it cannot.
+    //
+    // Sent when a switch has just cleared the level, and also when a resumed
+    // session simply reports a different one — a session wiped by an EARLIER
+    // turn's switch resumes with the wiped value, and re-asserting is the only
+    // thing that repairs it. Best-effort by design: a box that refuses this
+    // answers on the level it already had, which is what it does today.
+    if (req.reasoning && (switchedModel || activeReasoning !== req.reasoning)) {
+      const effortId = nextRpcId();
+      socket.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: effortId,
+          method: "config.set",
+          params: {
+            session_id: transportSid,
+            key: "reasoning",
+            value: req.reasoning,
+            scope: "session",
+          },
+        }),
+      );
+      await awaitReply(effortId, SESSION_TIMEOUT_MS).catch(() => null);
     }
 
     let started = false;

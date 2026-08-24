@@ -140,29 +140,39 @@ async function connect(
       ...(info ? { info } : {}),
     },
   });
-  // Answer a mid-conversation switch the way the dashboard answers it.
-  for (let i = 0; i < 60; i++) {
+  // Answer the RPCs the open makes after the session reply, the way the box
+  // answers them: a mid-conversation model switch, and the `config.set` that
+  // puts the reasoning level back afterwards. BOTH are awaited by
+  // `openDashboardTurn`, so a helper that left either unanswered would park the
+  // open on its own timeout rather than testing anything.
+  const answered = new Set<unknown>();
+  for (let i = 0; i < 200; i++) {
     await Promise.resolve();
-    const sw = socket.sent.find((f) => f.method === "slash.exec");
-    if (sw) {
-      if (switchReply === "ok") {
-        socket.deliver({ jsonrpc: "2.0", id: sw.id, result: { output: "  ✓ Model switched" } });
-      } else if (switchReply === "refused") {
-        socket.deliver({ jsonrpc: "2.0", id: sw.id, error: { message: "session busy" } });
-      } else {
-        // Verbatim from the box: a reply with no `error` member anywhere that
-        // is nonetheless a refusal.
-        socket.deliver({
-          jsonrpc: "2.0",
-          id: sw.id,
-          result: {
-            output: "  ✗ Model `deepseek-v4-flash` was not found in this provider's model listing.",
-            warning:
-              "live session sync failed: Model `deepseek-v4-flash` was not found in this provider's model listing.",
-          },
-        });
+    for (const sent of socket.sent) {
+      if (answered.has(sent.id)) continue;
+      if (sent.method === "slash.exec") {
+        answered.add(sent.id);
+        if (switchReply === "ok") {
+          socket.deliver({ jsonrpc: "2.0", id: sent.id, result: { output: "  ✓ Model switched" } });
+        } else if (switchReply === "refused") {
+          socket.deliver({ jsonrpc: "2.0", id: sent.id, error: { message: "session busy" } });
+        } else {
+          // Verbatim from the box: a reply with no `error` member anywhere that
+          // is nonetheless a refusal.
+          socket.deliver({
+            jsonrpc: "2.0",
+            id: sent.id,
+            result: {
+              output: "  ✗ Model `deepseek-v4-flash` was not found in this provider's model listing.",
+              warning:
+                "live session sync failed: Model `deepseek-v4-flash` was not found in this provider's model listing.",
+            },
+          });
+        }
+      } else if (sent.method === "config.set") {
+        answered.add(sent.id);
+        socket.deliver({ jsonrpc: "2.0", id: sent.id, result: { ok: true } });
       }
-      break;
     }
   }
   return { turn: await opening, socket };
@@ -351,5 +361,87 @@ describe("the agent's spinner is not the model's reasoning", () => {
     socket.event("message.complete", { text: "one", status: "complete" });
     await running;
     expect(chunks).toEqual(["one"]);
+  });
+});
+
+describe("putting the reasoning level back after a switch takes it away", () => {
+  /**
+   * Measured on the live box, one session, three steps with nothing else sent
+   * in between: `session.create` with `reasoning_effort: "medium"` reported
+   * `medium`; the very next `/model claude-fable-5 --provider anthropic
+   * --session` reported `""`.
+   *
+   * That empty string is the whole of the missing-thinking bug. Anthropic with
+   * no effort set returns SIGNATURE-ONLY thinking blocks —
+   * `{"type":"thinking","thinking":"","signature":"…"}` — so `state.db` stores
+   * a `reasoning_details` blob with no text in it and leaves `reasoning` and
+   * `reasoning_content` NULL. The capture was never broken; the LEVEL was
+   * being thrown away, on every turn where the customer's pills caused a
+   * switch.
+   */
+  it("re-asserts the level the switch just cleared, AFTER the switch", async () => {
+    const { turn, socket } = await connect({
+      sessionId: "20260823_185842_1eabd5",
+      model: "claude-fable-5",
+      provider: "anthropic",
+      reasoning: "medium",
+    });
+    const switchAt = socket.sent.findIndex((f) => f.method === "slash.exec");
+    const effortAt = socket.sent.findIndex((f) => f.method === "config.set");
+    expect(switchAt).toBeGreaterThanOrEqual(0);
+    // Order is the property, not merely presence: sent BEFORE the switch, the
+    // rebuild would wipe it again and the turn would run at no effort anyway.
+    expect(effortAt).toBeGreaterThan(switchAt);
+    expect(socket.sent[effortAt].params).toEqual({
+      // The TRANSPORT handle — the live session the prompt is about to go to.
+      session_id: "e0719549",
+      key: "reasoning",
+      value: "medium",
+      scope: "session",
+    });
+    expect(turn).not.toBeNull();
+  });
+
+  it("writes it at SESSION scope and never at the box default", async () => {
+    // The same safety property `--session` carries for the model. Upstream's
+    // own comment on the global branch is that writing there "let every desktop
+    // model-menu selection rewrite the user's global agent.reasoning_effort";
+    // a chat turn that did it would change the effort for Telegram, for cron,
+    // and for the owner's own dashboard tab, and would write config.yaml to do
+    // it.
+    const { socket } = await connect({
+      sessionId: "20260823_185842_1eabd5",
+      model: "claude-fable-5",
+      provider: "anthropic",
+      reasoning: "high",
+    });
+    const params = socket.method("config.set")?.params as Record<string, unknown>;
+    expect(params.scope).toBe("session");
+    expect(params.scope).not.toBe("global");
+    expect(params).not.toHaveProperty("global");
+    expect(params.session_id).toBe("e0719549");
+  });
+
+  it("sends nothing when the turn asked for no reasoning at all", async () => {
+    // Most providers have no reasoning dial and the picker offers none. Setting
+    // a level nobody asked for would be this route inventing a setting.
+    const { socket } = await connect({
+      sessionId: "20260823_185842_1eabd5",
+      model: "claude-fable-5",
+      provider: "anthropic",
+    });
+    expect(socket.method("slash.exec")).toBeDefined();
+    expect(socket.method("config.set")).toBeUndefined();
+  });
+
+  it("leaves a session that already reports the asked-for level alone", async () => {
+    // Nothing was wiped, so there is nothing to repair, and every RPC on the
+    // open is latency the customer waits through before the first token.
+    const { socket } = await connect(
+      { sessionId: "20260823_185842_1eabd5", model: "deepseek-v4-flash", provider: "clawai", reasoning: "medium" },
+      { model: "deepseek-v4-flash", provider: "custom", reasoning_effort: "medium" },
+    );
+    expect(socket.method("slash.exec")).toBeUndefined();
+    expect(socket.method("config.set")).toBeUndefined();
   });
 });
