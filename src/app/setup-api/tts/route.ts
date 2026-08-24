@@ -87,7 +87,23 @@ async function status(): Promise<VoiceOutputStatus> {
   return buildVoiceOutputStatus(config, probe, state);
 }
 
+/**
+ * Every branch below runs through the openclaw CLI — `capability tts convert`
+ * for the check, `config set messages.tts.provider` for the selection. The
+ * Hermes SKU ships no openclaw binary at all, so the panel offered a Check that
+ * spawned nothing and a Select the route then refused with a 409. Say the true
+ * thing once, here, instead of letting the customer discover it a button at a
+ * time. Same shape ClawKeep reports for the same reason (lib/clawkeep.ts).
+ */
+const EDITION_UNSUPPORTED = {
+  supportedOnEdition: false,
+  error: "Voice output is an OpenClaw feature and is not part of this edition.",
+} as const;
+
 export async function GET() {
+  if (openclawIsAbsent()) {
+    return NextResponse.json(EDITION_UNSUPPORTED, { headers: { "Cache-Control": "no-store" } });
+  }
   try {
     return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
@@ -236,6 +252,12 @@ async function handleSelect(choice: VoiceChoice) {
 }
 
 export async function POST(req: Request) {
+  // Refuse before the body is even read: on this edition there is no binary to
+  // spawn, so a check would have burned 120 s waiting on a process that never
+  // started and reported a blank reason.
+  if (openclawIsAbsent()) {
+    return NextResponse.json(EDITION_UNSUPPORTED, { status: 409 });
+  }
   let body: unknown;
   try {
     body = await req.json();

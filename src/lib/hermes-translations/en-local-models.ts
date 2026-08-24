@@ -6,12 +6,14 @@ export const localModelsEn: Record<string, string> = {
   "localModels.kind.embedding": "Memory",
 
   // === Run state ===
-  // Four states, four different sentences — see the comment on RUN_LABEL_KEY
-  // in LocalModelsPanel for why "not installed" must not read as "off".
+  // One state, one sentence — see the comment on RUN_LABEL_KEY in
+  // LocalModelsPanel for why "not installed" must not read as "off", and why
+  // "not on this edition" is kept apart from it.
   "localModels.run.running": "Running",
   "localModels.run.idle": "Stopped",
   "localModels.run.onDemand": "On demand",
   "localModels.run.notInstalled": "Not installed",
+  "localModels.run.notOnThisEdition": "Not on this edition",
 
   // === Panel ===
   "localModels.intro": "Everything that can run on the box itself, and what it is doing right now. Anything shown as not installed is genuinely absent — it is not a setting you can switch on here.",

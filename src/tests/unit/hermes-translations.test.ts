@@ -5,6 +5,7 @@ import { settingsSecurityEn } from "@/lib/hermes-translations/en-settings-securi
 import { providerEn } from "@/lib/hermes-translations/en-provider";
 import { skillsEn } from "@/lib/hermes-translations/en-skills";
 import { localModelsEn } from "@/lib/hermes-translations/en-local-models";
+import { systemProfileEn } from "@/lib/hermes-translations/en-system-profile";
 import { bg } from "@/lib/hermes-translations/bg";
 import { de } from "@/lib/hermes-translations/de";
 import { es } from "@/lib/hermes-translations/es";
@@ -37,12 +38,15 @@ const OVERRIDES: Record<Exclude<Locale, "en">, Record<string, string>> = {
 
 const NON_EN = Object.keys(OVERRIDES) as Exclude<Locale, "en">[];
 
-/** The four surfaces this pass covers, by key prefix. */
+/** The surfaces this catalogue covers, by key prefix. */
 const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   { name: "security/password forms", matches: (k) => k.startsWith("settings.security.") },
   { name: "Hermes provider UI", matches: (k) => k.startsWith("hermesProvider.") },
   { name: "Skills store", matches: (k) => k.startsWith("skills.") },
   { name: "Local Models tab", matches: (k) => k.startsWith("localModels.") },
+  // Desktop & power card (TASK-455). Held to exactly the same bar as the
+  // TASK-458 four: every locale carries its own copy, not an English fallback.
+  { name: "Desktop & power card", matches: (k) => k.startsWith("systemProfile.") },
 ];
 
 /**
@@ -73,12 +77,13 @@ function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {
 }
 
 describe("hermes-translations (TASK-458)", () => {
-  describe("the English catalogue covers all four surfaces", () => {
+  describe("the English catalogue covers every surface", () => {
     const surfaces: [string, Record<string, string>, (k: string) => boolean][] = [
       ["settingsSecurityEn", settingsSecurityEn, (k) => k.startsWith("settings.")],
       ["providerEn", providerEn, (k) => k.startsWith("hermesProvider.")],
       ["skillsEn", skillsEn, (k) => k.startsWith("skills.")],
       ["localModelsEn", localModelsEn, (k) => k.startsWith("localModels.")],
+      ["systemProfileEn", systemProfileEn, (k) => k.startsWith("systemProfile.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {
@@ -89,7 +94,7 @@ describe("hermes-translations (TASK-458)", () => {
       });
     }
 
-    it("the four surface modules do not collide", () => {
+    it("the surface modules do not collide", () => {
       const counts = surfaces.reduce((n, [, table]) => n + Object.keys(table).length, 0);
       expect(Object.keys(hermesEn).length).toBe(counts);
     });

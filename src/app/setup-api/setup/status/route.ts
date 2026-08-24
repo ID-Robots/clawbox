@@ -1,10 +1,20 @@
 import { NextResponse } from "next/server";
 import { getAll } from "@/lib/config-store";
 import { inferConfiguredLocalModel, readConfig as readOpenClawConfig, type OpenClawConfig } from "@/lib/openclaw-config";
+import { hasValidSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
+  // The one genuinely public /setup-api route: /login and the desktop bootstrap
+  // read it before a session exists, and it stays reachable through the
+  // cloudflared tunnel. So an unauthenticated caller gets only what those
+  // bootstraps need — the wizard's own progress. Which local model the box
+  // runs, which cloud provider it is configured against and whether Telegram is
+  // wired up are operational detail that was world-readable to anyone holding
+  // the tunnel URL. TASK-446.
+  const authenticated = await hasValidSession(request);
+
   try {
     const [config, openclawConfig] = await Promise.all([
       getAll(),
@@ -32,19 +42,26 @@ export async function GET() {
     const setupProgressStep = typeof config.setup_progress_step === "number"
       ? config.setup_progress_step
       : Number(config.setup_progress_step ?? 0);
-    return NextResponse.json({
+    // Steps 1-3 of the wizard run before a session can exist, so their state
+    // stays public; everything below is step 4+ and is behind the same session
+    // the wizard holds by then.
+    const publicFields = {
       setup_complete: !!config.setup_complete,
       password_configured: !!config.password_configured,
       update_completed: !!config.update_completed,
       wifi_configured: !!config.wifi_configured,
       setup_progress_step: Number.isInteger(setupProgressStep) && setupProgressStep > 0 ? setupProgressStep : null,
+    };
+
+    return NextResponse.json(authenticated ? {
+      ...publicFields,
       local_ai_configured: localAiConfigured,
       local_ai_provider: localAiProvider,
       local_ai_model: localAiModel,
       ai_model_configured: !!config.ai_model_configured,
       ai_model_provider: liveCloudProvider || config.ai_model_provider || null,
       telegram_configured: !!config.telegram_bot_token,
-    }, {
+    } : publicFields, {
       headers: {
         "Cache-Control": "no-store",
       },

@@ -18,9 +18,19 @@ import { z } from "zod";
 export const TOOL_NAME_RE = /^[a-z][a-z0-9_]{0,49}$/;
 export const PARAM_NAME_RE = /^[a-z][a-z0-9_]{0,31}$/;
 
-/** A bounded integer with a default. */
+/**
+ * A bounded integer with a default — for a knob whose absence has a MEANING:
+ * `limit`, `timeout`, `offset`. `.default()` makes the parameter optional, so
+ * this is the wrong builder for an identifier, where a missing argument would
+ * quietly become a real record's id. Use zReqInt for those.
+ */
 export function zInt(min: number, max: number, def: number, description: string) {
   return z.number().int().min(min).max(max).default(def).describe(description);
+}
+
+/** A bounded integer the caller must supply. */
+export function zReqInt(min: number, max: number, description: string) {
+  return z.number().int().min(min).max(max).describe(description);
 }
 
 /** A length-capped required string. */

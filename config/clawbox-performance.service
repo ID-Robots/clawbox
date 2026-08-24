@@ -1,12 +1,19 @@
 [Unit]
-Description=ClawBox MAXN Power Mode and Jetson Clocks
+Description=ClawBox Jetson Power Profile
 After=multi-user.target nvpmodel.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'MAXN_ID=$(grep -oP "POWER_MODEL ID=\\K\\d+(?=\\s+NAME=MAXN)" /etc/nvpmodel.conf | tail -1); nvpmodel -m ${MAXN_ID:-0} && jetson_clocks'
-ExecStop=/bin/bash -c 'jetson_clocks --restore 2>/dev/null || true'
+# Applies whatever profile is persisted in /etc/clawbox/power-mode, defaulting
+# to BALANCED. Until TASK-455 this unit ran `nvpmodel -m MAXN && jetson_clocks`
+# unconditionally, which pinned every CPU to 1,728 MHz and the GPU to 1,020 MHz
+# at 4% utilisation and disabled the cpuidle states — 7.21 W and ~58 C doing
+# nothing, and 74.8 C median Tj under sustained 3B inference, over the 74 C
+# passive trip. The pinned behaviour is unchanged and still available; it is now
+# Settings -> System -> Performance mode, off by default.
+ExecStart=/usr/local/libexec/clawbox/clawbox-power-mode.sh --apply
+ExecStop=/usr/local/libexec/clawbox/clawbox-power-mode.sh --restore
 
 [Install]
 WantedBy=multi-user.target

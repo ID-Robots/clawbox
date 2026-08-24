@@ -11,6 +11,7 @@ import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { getLlamaCppProvisioningStatus } from "@/lib/llamacpp-server";
 import { getOllamaBaseUrl } from "@/lib/local-ai-runtime";
 import { getMemoryStatus } from "@/lib/clawkeep-memory";
+import { openclawIsAbsent } from "@/lib/openclaw-config";
 
 /** Is llama.cpp answering right now? Same probe the llamacpp status route uses. */
 async function llamaCppRunning(baseUrl: string): Promise<string | null> {
@@ -28,12 +29,18 @@ async function llamaCppRunning(baseUrl: string): Promise<string | null> {
 async function probes(): Promise<InventoryProbes> {
   const llamaBase = getLlamaCppBaseUrl();
   const alias = getDefaultLlamaCppModel();
+  // The memory index belongs to OpenClaw and is read by spawning its CLI. On
+  // the Hermes SKU that binary does not exist, so the call could only fail —
+  // and the failure was swallowed into a probe indistinguishable from "the
+  // embedding provider is down", which is the wrong thing to tell a customer
+  // whose box was never sold with one. Don't ask; report the edition instead.
+  const embeddingsSupported = !openclawIsAbsent();
   // Each probe is independently guarded: an engine that cannot be reached must
   // cost only its own row, never the whole inventory.
   const [provisioning, servedModel, memory] = await Promise.all([
     getLlamaCppProvisioningStatus(alias).catch(() => null),
     llamaCppRunning(llamaBase),
-    getMemoryStatus().catch(() => null),
+    embeddingsSupported ? getMemoryStatus().catch(() => null) : Promise.resolve(null),
   ]);
   return {
     ollamaBaseUrl: getOllamaBaseUrl(),
@@ -43,6 +50,7 @@ async function probes(): Promise<InventoryProbes> {
       model: servedModel || alias || null,
     },
     embeddings: {
+      supported: embeddingsSupported,
       available: !!memory?.available,
       provider: memory?.provider || null,
       model: memory?.model || null,
