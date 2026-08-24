@@ -5,6 +5,7 @@ import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import AIProviderIcon from "./AIProviderIcon";
+import { notifyProvidersChanged } from "@/lib/ui-events";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import {
@@ -851,6 +852,13 @@ export default function AIModelsStep({
     if (configureScope === "primary" && typeof window !== "undefined") {
       window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
     }
+    // "The providers changed." Emitted HERE rather than from each host, because
+    // this is the one point every OpenClaw configure success passes through —
+    // pasted key, provider OAuth, and the ClawBox AI device login alike — and
+    // both the wizard and the embedded Settings panel reach it. A host-side
+    // emit would have to be repeated per host and would miss whichever one was
+    // added next.
+    notifyProvidersChanged();
     completeConfiguring();
   }, [completeConfiguring, configureScope, resetClawaiLogin]);
 
@@ -1814,7 +1822,13 @@ export default function AIModelsStep({
   // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
   // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
   if (edition === "hermes" && configureScope !== "local") {
-    return <HermesProviderConfig embedded={embedded} onNext={onNext} testId={testId} />;
+    return <HermesProviderConfig
+      embedded={embedded}
+      onNext={onNext}
+      testId={testId}
+      requestedProviderId={requestedProviderId}
+      providerSelectionRequest={providerSelectionRequest}
+    />;
   }
 
   return (

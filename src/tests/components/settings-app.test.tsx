@@ -115,6 +115,17 @@ describe("SettingsApp factory reset overlay", () => {
         });
       }
       if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
+      if (url === "/setup-api/providers/status") {
+        return jsonResponse({
+          harness: "openclaw",
+          defaultProvider: "clawai",
+          degraded: false,
+          providers: [
+            { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai" },
+            { id: "anthropic", label: "Anthropic Claude", state: "disconnected", isDefault: false, section: "ai" },
+          ],
+        });
+      }
       if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: false });
       if (url === "/setup-api/llamacpp/status") return jsonResponse({ installed: false });
       if (url === "/setup-api/ollama/status") return jsonResponse({ installed: false });

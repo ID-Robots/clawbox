@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  HERMES_MODEL_STATE_EVENT,
+  notifyHermesModelState,
+  onProvidersChanged,
+} from "@/lib/ui-events";
 
 // Client view of ONE provider's model list.
 //
@@ -25,14 +30,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * models/provider-key/clawai routes, and the `hermes config get` memo keys on
  * config.yaml's mtime), so every listener only has to re-ask. It must stay
  * lightweight — see `refresh` below for what the expensive version costs.
+ *
+ * Both now LIVE in `@/lib/ui-events`, next to the edition-neutral signal that
+ * supersedes them, and are re-exported here so every existing importer — and
+ * the test that pins the string — keeps working unchanged.
  */
-export const HERMES_MODEL_STATE_EVENT = "clawbox:hermes-model-state-changed";
-
-/** Emit the signal above. Call it wherever a provider configure SUCCEEDED. */
-export function notifyHermesModelState(): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
-}
+export { HERMES_MODEL_STATE_EVENT, notifyHermesModelState };
 
 export interface HermesScopedModel {
   id: string;
@@ -115,12 +118,13 @@ export function useHermesModelOptions(provider: string | null): UseHermesModelOp
   //
   // It also leaves `loaded` in place, so `fresh` (and therefore `loading`) is
   // unchanged: the chat's model pill keeps its place instead of collapsing.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onChanged = () => setNonce((n) => n + 1);
-    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged);
-    return () => window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged);
-  }, []);
+  //
+  // Subscribed through `onProvidersChanged` rather than to the Hermes name
+  // alone: a provider connected anywhere in the UI is the same news whichever
+  // vocabulary the emitter happened to use, and the shared subscriber also
+  // debounces — a key save legitimately emits twice (credential, then pairing)
+  // and this hook would otherwise re-ask the route for both halves.
+  useEffect(() => onProvidersChanged(() => setNonce((n) => n + 1)), []);
 
   useEffect(() => {
     if (!provider) return;

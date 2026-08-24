@@ -6,11 +6,13 @@ import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
+import ProviderStatusStrip from "./ProviderStatusStrip";
+import type { ProviderStatusRow } from "@/lib/provider-status";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT } from "@/lib/ui-events";
+import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -300,6 +302,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
     window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
+    // And in the edition-neutral vocabulary, so that "every path that changes
+    // the providers emits `clawbox:providers-changed`" is literally true and a
+    // listener written against that one name alone is never left deaf.
+    notifyProvidersChanged();
   }, []);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
@@ -310,6 +316,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
+
+  /**
+   * A chip in the connection strip was clicked: go to where that provider is
+   * actually configured.
+   *
+   * The local engines are configured in their own section, and sending someone
+   * to the AI Provider panel for one would land them on a panel that cannot
+   * change it — which is the failure the strip exists to end, reintroduced one
+   * click later.
+   */
+  const openProviderConfig = useCallback((row: ProviderStatusRow) => {
+    const target: Section = row.section === "localAi" ? "localAi" : "ai";
+    setSection(target);
+    setMobileSection(target);
+    if (target !== "ai") return;
+    setRequestedAiProviderId(row.id);
+    // A counter rather than a boolean, so clicking the SAME chip twice still
+    // re-selects it after the customer has clicked elsewhere in the panel.
+    setProviderSelectionRequest((current) => current + 1);
+  }, []);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -1207,7 +1233,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     // provider the ACTIVE harness is really set to, which is what separates
     // "the on-device model is installed" from "it is what answers".
     if (section !== "ai" && section !== "localAi" && !isMobile) return;
-    fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    const load = () => {
+      fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    };
+    load();
+    // And again whenever the providers change. This card names the ACTIVE
+    // provider and its model, so a default chosen from the strip directly above
+    // it made the two disagree on screen — the strip showing the new default
+    // while the card underneath still named the old one — until the section was
+    // left and re-entered. Seen on a live box, in the same window.
+    return onProvidersChanged(load);
   }, [section, isMobile]);
   // Which agent consumes the local model. Named the harness outright, and said
   // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
@@ -3192,6 +3227,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── AI Provider ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
+
+            {/* Connection overview — every provider, no clicking required. */}
+            <ProviderStatusStrip onOpenProvider={openProviderConfig} />
 
             {/* Provider status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
