@@ -28,6 +28,7 @@ import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
+import { BuildDriftBanner, BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { useReconnect } from "@/hooks/useReconnect";
 import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
@@ -325,6 +326,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * (arch/platform) render instead of "...".
    */
   const [stats, setStats] = useState<SystemStats | null>(null);
+  // Which commit this box is really running, and whether that agrees with the
+  // code on its disk. Fetched only where it is shown (About + System).
+  const buildIdentity = useBuildIdentity(section === "system" || section === "about");
   useEffect(() => {
     if (section !== "system" && section !== "about") return;
     const poll = () => fetch("/setup-api/system/stats", { cache: "no-store" }).then(r => r.json()).then(setStats).catch(() => {});
@@ -2882,6 +2886,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "system" && (
           <div className="max-w-xl space-y-5">
 
+            {/* Above everything else on the System page: if the box is not
+                running its own code, that changes what every reading below
+                it means. */}
+            <BuildDriftBanner identity={buildIdentity} />
+
             <HarnessPicker />
 
             {stats ? (
@@ -3141,6 +3150,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="max-w-xl space-y-6">
             <h2 className="text-lg font-semibold text-[var(--text-primary)] mb-4">{t("settings.aboutClawBox")}</h2>
 
+            <BuildDriftBanner identity={buildIdentity} />
+
             <div className="bg-white/5 rounded-xl p-5 space-y-4">
               <div className="flex items-center gap-4">
                 <img src="/icon-512.png" alt="ClawBox" className="w-14 h-14 rounded-2xl" onError={e => { (e.target as HTMLImageElement).style.display = "none"; }} />
@@ -3174,6 +3185,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     <span className="text-[var(--text-primary)]">{versionInfo.hermes.current ?? t("settings.notInstalled")}</span>
                   </div>
                 )}
+                <BuildIdentityRows identity={buildIdentity} />
                 <div className="flex justify-between text-sm">
                   <span className="text-[var(--text-muted)]">{t("settings.runtime")}</span>
                   <span className="text-[var(--text-primary)]">Next.js + Bun</span>
