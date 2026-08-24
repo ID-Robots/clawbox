@@ -153,6 +153,12 @@ function coercePreference(key: string, value: string): string | number {
 
 // ── Backup ───────────────────────────────────────────────────────────────────
 
+// ClawKeep archives the OpenClaw agent through the openclaw CLI, so on a Hermes
+// device the feature cannot run at all — src/lib/clawkeep.ts reports
+// supportedOnEdition:false and the Settings app renders an "unavailable on this
+// edition" card with nothing to pair. backup_list and backup_now are therefore
+// not REGISTERED on Hermes (see the registrations below); backup_status stays,
+// because the agent still has to be able to answer "do you back up?" honestly.
 const BACKUP_RULES: ErrorRule[] = [
   {
     status: 409,
@@ -167,6 +173,41 @@ const BACKUP_RULES: ErrorRule[] = [
     next: "Tell the user it is not set up, and do not call the backup tools again this session.",
   },
 ];
+
+interface BackupStatusBody {
+  supportedOnEdition?: boolean;
+  paired?: boolean;
+}
+
+/** What every backup tool says on an edition that cannot run ClawKeep. */
+const NOT_ON_THIS_EDITION =
+  "Cloud backup (ClawKeep) is not available on this edition of ClawBox. There is nothing to pair and nothing to restore from. Tell the user that, and do not call any backup tool again this session.";
+
+// ── Screen ───────────────────────────────────────────────────────────────────
+
+/** Where scripts/start-vnc.sh records the display it actually started. */
+const VNC_DISPLAY_MARKER = join(HOME, ".cache", "clawbox", "vnc-display.env");
+
+/**
+ * The X display the ClawBox DESKTOP is on.
+ *
+ * The MCP is spawned by the harness with no DISPLAY in its environment, so
+ * `process.env.DISPLAY || ":0"` always picked :0 — which on a Jetson is a
+ * 640x480 headless stub showing the vendor wallpaper, while the desktop the
+ * user is looking at is the Xvfb the VNC stack starts (:99 at 1280x720). Every
+ * "look at my screen" answered about the wrong screen, confidently.
+ *
+ * Same resolution order as src/app/setup-api/vnc/clipboard/route.ts, so the
+ * two cannot drift: explicit override, then the marker the VNC start script
+ * writes, then the plain X default.
+ */
+export async function desktopDisplay(): Promise<string> {
+  const override = (process.env.CLAWBOX_VNC_DISPLAY || process.env.DISPLAY || "").trim();
+  if (override) return override;
+  const raw = await readFile(VNC_DISPLAY_MARKER, "utf-8").catch(() => null);
+  const match = raw?.match(/CLAWBOX_VNC_DISPLAY=(:\d+)/);
+  return match ? match[1] : ":0";
+}
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
@@ -335,7 +376,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
                   : ["-window", "root", file]; // ImageMagick `import`
           const r = await spawnArgv(grabber, args, {
             timeoutMs: 15_000,
-            extraEnv: { DISPLAY: process.env.DISPLAY || ":0" },
+            extraEnv: { DISPLAY: await desktopDisplay() },
           });
           const failed = (): ToolError =>
             new ToolError(
@@ -459,14 +500,25 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     "Report whether this ClawBox backs up to the cloud, when it last ran, and whether it succeeded. If backup is not paired, tell the user to set it up in Settings -> Backup — there is no tool that pairs it.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 4_000 },
-    async () => json(await apiGet("/setup-api/clawkeep", { timeoutMs: 20_000, rules: BACKUP_RULES })),
+    async () => {
+      const body = await apiGet<BackupStatusBody>("/setup-api/clawkeep", {
+        timeoutMs: 20_000,
+        rules: BACKUP_RULES,
+      });
+      // The route answers HTTP 200 with supportedOnEdition:false rather than a
+      // 404, so the NOT_SUPPORTED_HERE rule above never fired and the agent was
+      // handed a status object it read as "configured:false, so tell them to
+      // pair it" — advice the Settings app cannot honour on this edition.
+      if (body.supportedOnEdition === false) return text(NOT_ON_THIS_EDITION);
+      return json(body);
+    },
   );
 
   reg.tool(
     "backup_list",
     "List the cloud backups this ClawBox has stored, newest first. Use it to tell the user what they could restore. Restoring is deliberately not available as a tool — it is done in Settings -> Backup.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 6_000 },
+    { editions: ["openclaw"], readOnly: true, maxChars: 6_000 },
     async () => json(await apiGet("/setup-api/clawkeep/snapshots", { timeoutMs: 60_000, rules: BACKUP_RULES })),
   );
 
@@ -474,7 +526,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
     "backup_now",
     "Start a cloud backup of this ClawBox now. It can take several minutes; if this call times out the backup is still running, so do not start another one — call backup_list later to confirm it landed.",
     { label: zText(64, "Short name for this backup, e.g. \"before update\"").optional() },
-    { editions: ["openclaw", "hermes"], readOnly: false },
+    { editions: ["openclaw"], readOnly: false },
     async ({ label }: { label?: string }) => {
       if (label !== undefined && !/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(label)) {
         throw new ToolError(
@@ -483,12 +535,24 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
           "Use letters, digits, spaces, dots, dashes or underscores, starting with a letter or digit.",
         );
       }
-      const body = await apiPost<{ ok?: boolean }>(
+      // The route answers HTTP 200 even when the backup FAILED — ok:false plus
+      // the real reason in stderrTail ("No token at ~/.clawkeep/token; run
+      // 'clawkeep pair' first"). A 200 never raises, so the tool used to return
+      // prose with no isError flag: a failed backup that reads as a success.
+      const body = await apiPost<{ ok?: boolean; exitCode?: number; stderrTail?: string }>(
         "/setup-api/clawkeep/backup",
         { ...(label ? { label } : {}) },
         { timeoutMs: 180_000, rules: BACKUP_RULES },
       );
-      return text(body.ok ? "Backup finished successfully." : "The backup ran but reported a problem — call backup_list to check what landed.");
+      if (body.ok !== true) {
+        const reason = (body.stderrTail || "").trim().split("\n").filter(Boolean).pop();
+        throw new ToolError(
+          "ENDPOINT_DOWN",
+          `The backup did not run${reason ? `: ${reason}` : "."}`,
+          "Do not start another one. Call backup_status, and tell the user what it reports.",
+        );
+      }
+      return text("Backup finished successfully.");
     },
   );
 

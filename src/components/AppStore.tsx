@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useId, useRef, useMemo } from "react"
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
+import { clawhubSkillUrl } from "@/lib/clawhub-url";
 
 const STORE_API = "/setup-api/apps/store";
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
@@ -502,6 +503,10 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // and otherwise fall back to the list's bucketed "2800+" string. One value
     // feeds both the header and the Downloads stat so they can't disagree.
     const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString() : selectedApp.installs;
+    // The API's own `clawhubUrl` omits the publisher segment, so it points at
+    // a page ClawHub does not serve; build the canonical one and keep the API's
+    // links only as a fallback for listings with no publisher.
+    const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || detail?.clawhubUrl || selectedApp.url;
     return (
       <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
         {confirmModal}
@@ -605,9 +610,12 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             </div>
           )}
 
-          {/* Store link — prefer the canonical ClawHub page (full write-up). */}
-          {(detail?.clawhubUrl || selectedApp.url) && (
-            <a href={detail?.clawhubUrl || selectedApp.url} target="_blank" rel="noopener noreferrer"
+          {/* Store link — prefer the canonical ClawHub page (full write-up).
+              Built from publisher + slug, not from the API's `clawhubUrl`:
+              that field omits the publisher segment and lands on a page that
+              does not exist. See src/lib/clawhub-url.ts. */}
+          {hubUrl && (
+            <a href={hubUrl} target="_blank" rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs transition-colors"
               style={{ color: BRAND_ORANGE_LIGHT }}>
               {t("store.viewOnHub")}

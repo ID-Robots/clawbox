@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { translations } from "@/lib/translations";
+import { hermesEn } from "@/lib/hermes-translations";
 import type { Locale } from "@/lib/i18n";
 
 const EXPECTED_LOCALES: Locale[] = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv", "zh"];
@@ -122,6 +123,9 @@ describe("translations", () => {
         "clawkeep",
         "upgradeCard",
         "tierCelebration",
+        "hermesProvider",
+        "skills",
+        "localModels",
       ]);
 
       for (const key of Object.keys(translations.en)) {
@@ -192,10 +196,15 @@ describe("translations", () => {
       it(`'${locale}' has mostly non-English values`, () => {
         const enRecord = translations.en;
         const localeRecord = translations[locale];
-        const totalKeys = Object.keys(enRecord).length;
+        // The TASK-458 surfaces are held to a stricter bar than this ratio —
+        // hermes-translations.test.ts allows them ZERO English residue, per
+        // namespace and per locale. Counting them here as well would only
+        // let a real gap elsewhere hide inside the 15% allowance.
+        const keys = Object.keys(enRecord).filter((k) => !(k in hermesEn));
+        const totalKeys = keys.length;
         let sameCount = 0;
 
-        for (const key of Object.keys(enRecord)) {
+        for (const key of keys) {
           if (enRecord[key] === localeRecord[key]) {
             sameCount++;
           }

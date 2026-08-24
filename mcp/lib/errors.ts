@@ -121,6 +121,23 @@ export function matchRule(err: ApiError, rules: ErrorRule[] | undefined): ToolEr
 
 // ── Classification ───────────────────────────────────────────────────────────
 
+/** True when a body is the route handler's own JSON `{ "error": "..." }`. */
+export function hasJsonErrorBody(body: string): boolean {
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{")) return false;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      typeof (parsed as { error?: unknown }).error === "string" &&
+      (parsed as { error: string }).error.trim().length > 0
+    );
+  } catch {
+    return false;
+  }
+}
+
 function fromApiError(err: ApiError): ToolError {
   if (err.status === 401 || err.status === 403) {
     return new ToolError(
@@ -130,6 +147,26 @@ function fromApiError(err: ApiError): ToolError {
     );
   }
   if (err.status === 404) {
+    // Two very different 404s share one status code, and telling the agent the
+    // wrong one costs it the whole task:
+    //
+    //   ROUTE-level   — this build has no such handler (an older device, or the
+    //                   other edition). Next.js answers with its HTML 404 page.
+    //                   The agent must stop calling this tool.
+    //   RESOURCE-level— the handler ran and could not find the id it was given
+    //                   ({"error":"Webapp not found"}). The agent must fix the
+    //                   ID, and sending it to device_status to re-check the
+    //                   EDITION is advice it cannot act on.
+    //
+    // A JSON body with an `error` string is the handler's own answer, so it is
+    // the resource case; anything else is treated as the route case.
+    if (hasJsonErrorBody(err.body)) {
+      return new ToolError(
+        "NOT_FOUND",
+        "The ClawBox could not find what this tool was pointed at.",
+        "Check the id you passed. List what actually exists first (ui_list_apps, code_project_list or skill_list), then call this tool again with one of those ids.",
+      );
+    }
     return new ToolError(
       "NOT_FOUND",
       "That ClawBox endpoint is not available on this device.",

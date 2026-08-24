@@ -4,6 +4,15 @@ icon: "microchip"
 summary: "Every provider lane in detail: auth modes, where credentials are stored, model namespaces, defaults, and the boot-time self-healing that keeps them working."
 ---
 
+<Note>
+**Edition scope:** this page documents the **OpenClaw / dual** provider stack —
+`~/.openclaw/…` credential files, `openclaw.json`, and the `gateway-pre-start.sh`
+self-heal pass. None of it exists on the [Hermes](/editions/hermes) edition, where
+provider credentials are held by Hermes itself (`hermes auth add`, stored under
+`~/.hermes`) and the provider ids are Hermes' own. See
+[AI Providers on Hermes](/editions/hermes-providers).
+</Note>
+
 For choosing a provider as a user, see [Choose Your AI Provider](/setup/choose-ai-provider). This page is the technical reference: what actually gets written where when you configure each provider, and how the system repairs common broken states.
 
 ## Provider lanes at a glance

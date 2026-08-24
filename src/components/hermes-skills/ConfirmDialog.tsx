@@ -2,7 +2,7 @@
 
 import { type ReactNode } from 'react';
 import { useModalDialog } from '@/hooks/useModalDialog';
-import { COPY } from './copy';
+import { useCopy } from './copy';
 import { FOCUS_RING } from './primitives';
 
 // One accessible modal for both install and uninstall confirmation.
@@ -30,6 +30,7 @@ export function ConfirmDialog({
   onCancel: () => void;
   children: ReactNode;
 }) {
+  const COPY = useCopy();
   // Cancel is first in DOM order, so the shared trap focuses it on open — a
   // stray Enter cannot confirm an install the user never read.
   const panelRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });

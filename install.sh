@@ -2540,6 +2540,58 @@ step_system_config() {
   step_polkit_rules
   step_nm_dispatcher
   step_sysctl_linkdown
+  step_persistent_journal
+}
+
+step_persistent_journal() {
+  # Make the journal survive a reboot.
+  #
+  # Shipped devices ran journald with `Storage=auto` and no /var/log/journal,
+  # which means volatile: the entire journal lived in /run/log/journal (tmpfs),
+  # was charged to RAM (72 MB measured on a QA box), and was destroyed on every
+  # reboot. "What happened before it rebooted?" — the first question of every
+  # support case — had no answer on any ClawBox ever shipped, and there was
+  # nowhere durable for the web tier's access log to land either.
+  #
+  # Idempotent: cp + mkdir + a journald restart that flushes /run into /var.
+  local drop_in_dir="/etc/systemd/journald.conf.d"
+  local drop_in="$drop_in_dir/10-clawbox.conf"
+  local src="$PROJECT_DIR/config/journald-clawbox.conf"
+
+  if [ ! -f "$src" ]; then
+    echo "  Warning: $src missing, skipping persistent journal setup"
+    return 0
+  fi
+
+  mkdir -p "$drop_in_dir"
+  cp "$src" "$drop_in"
+  chmod 644 "$drop_in"
+
+  # journald creates /var/log/journal itself when Storage=persistent, but only
+  # on its next start — and systemd-tmpfiles is what applies the correct
+  # ownership and the systemd-journal ACL, so do it explicitly rather than
+  # leaving a root-only directory behind.
+  mkdir -p /var/log/journal
+  systemd-tmpfiles --create --prefix /var/log/journal >/dev/null 2>&1 || true
+
+  # Restart rather than reload: Storage= is only read at start. This also
+  # flushes what is currently in /run into /var, so the CURRENT boot's log is
+  # the first one that survives, not the next one.
+  systemctl restart systemd-journald >/dev/null 2>&1 || true
+  journalctl --flush >/dev/null 2>&1 || true
+
+  if [ -d /var/log/journal ]; then
+    echo "  Journal is persistent (/var/log/journal), capped at 200M"
+  else
+    echo "  Warning: /var/log/journal was not created — journal stays volatile"
+  fi
+
+  # NOT fixed here, and not fixable from userspace: the first ~10 s of every
+  # boot (~888 kernel lines) are stamped ~361 days early, because the Jetson has
+  # no battery-backed RTC and nvvrs-pseq-rtc only sets the system clock at
+  # monotonic ~10 s. `journalctl -b` timestamps before that handoff are bogus and
+  # `--list-boots` shows one "boot" spanning the gap. This is a hardware/BSP
+  # property of the Orin Nano dev kit, not something install.sh can correct.
 }
 
 step_systemd_services() {
@@ -2701,6 +2753,9 @@ step_post_update() {
   step_set_hostname || echo "  Warning: set_hostname step failed (non-fatal)"
   step_nm_dispatcher || echo "  Warning: nm_dispatcher step failed (non-fatal)"
   step_sysctl_linkdown || echo "  Warning: sysctl_linkdown step failed (non-fatal)"
+  # Without this call the persistent journal would be fresh-install-only, and
+  # every already-shipped box would keep losing its whole log on each reboot.
+  step_persistent_journal || echo "  Warning: persistent_journal step failed (non-fatal)"
   # step_vnc_refresh is a tiny idempotent refresh of the clawbox-vnc.service
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
@@ -4096,7 +4151,7 @@ DISPATCH_STEPS=(
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
-  nm_dispatcher sysctl_linkdown post_update update_smoke validate_services
+  nm_dispatcher sysctl_linkdown persistent_journal post_update update_smoke validate_services
 )
 
 if [ "${1:-}" = "--step" ]; then
