@@ -334,6 +334,7 @@ export const de: Record<string, string> = {
   "localModels.run.idle": "Gestoppt",
   "localModels.run.onDemand": "Bei Bedarf",
   "localModels.run.notInstalled": "Nicht installiert",
+  "localModels.run.notOnThisEdition": "In dieser Edition nicht verfügbar",
 
   // === Panel ===
   "localModels.intro": "Alles, was auf der Box selbst laufen kann, und was es gerade tut. Was hier als nicht installiert steht, fehlt tatsächlich — es ist keine Einstellung, die Sie hier einschalten können.",

@@ -102,8 +102,21 @@ function seconds(ms: number | null): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/**
+ * The box says the whole feature is absent on this SKU. Read as its own field
+ * rather than inferred from a missing engine list: "no voice is installed" and
+ * "this edition has no voice at all" are different answers and the second one
+ * must not be shown as the first, which reads as something the customer could
+ * fix by installing a voice.
+ */
+function isEditionUnsupported(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  return (value as { supportedOnEdition?: unknown }).supportedOnEdition === false;
+}
+
 export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [status, setStatus] = useState<VoiceOutputStatus | null>(null);
+  const [unsupported, setUnsupported] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"select" | "check" | null>(null);
 
@@ -111,6 +124,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     try {
       const res = await fetch("/setup-api/tts", { cache: "no-store" });
       const data = await res.json();
+      if (isEditionUnsupported(data)) {
+        setUnsupported(true);
+        return;
+      }
       if (!isVoiceStatus(data)) return;
       setStatus(data);
     } catch {
@@ -159,6 +176,31 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     reconciled.current = true;
     void post({ action: "select", choice: "auto" }, "select");
   }, [active, status, busy, post]);
+
+  // Before the skeleton: a box that will never answer with a status must stop
+  // here rather than pulse three grey cards forever.
+  if (unsupported) {
+    return (
+      <div className="max-w-2xl" data-testid="voice-output-unsupported">
+        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 space-y-2">
+          <div className="flex items-center gap-2">
+            <span
+              className="material-symbols-rounded text-[var(--text-muted)]"
+              style={{ fontSize: 22 }}
+              aria-hidden="true"
+            >
+              voice_over_off
+            </span>
+            <h2 className="font-semibold text-[var(--text-primary)]">Not available on this edition</h2>
+          </div>
+          <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
+            Speaking out loud is an OpenClaw feature, and this ClawBox does not run OpenClaw.
+            There is nothing to choose here and nothing to check — the box will answer in text.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (!status) {
     return (
