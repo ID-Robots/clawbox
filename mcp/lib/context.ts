@@ -89,7 +89,8 @@ interface ModelsPayload {
 
 interface EmailStatusPayload {
   configured?: boolean;
-  mode?: string;
+  /** The device's own answer to "may the agent read?" — see below. */
+  canRead?: boolean;
 }
 
 /**
@@ -101,7 +102,10 @@ interface EmailStatusPayload {
 async function probeEmailRead(): Promise<boolean> {
   const status = await apiTry<EmailStatusPayload>("/setup-api/email/status", { timeoutMs: 3_000 });
   if (!status?.configured) return false;
-  return status.mode === "read" || status.mode === "answer";
+  // The device answers this itself (src/lib/email-config.ts modeAllowsReading).
+  // Restating which modes allow reading here would be a second copy of the
+  // rule, in the process least likely to be updated when a mode is added.
+  return status.canRead === true;
 }
 
 export async function buildContext(

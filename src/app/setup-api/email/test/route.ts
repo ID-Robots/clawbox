@@ -10,12 +10,29 @@
 // The recipient is fixed to the configured account. A caller-supplied recipient
 // would turn a Settings button into an open relay for anything that can reach
 // the route.
+//
+// It has its OWN budget, separate from /setup-api/email/send's. Two reasons,
+// and they pull in opposite directions:
+//   - the agent can reach this route too (middleware admits the MCP bearer to
+//     /setup-api/*, and only /email/pending refuses it), so a route with no
+//     budget at all is a way around the send budget — to one fixed address,
+//     but unbounded;
+//   - the budget must not be SHARED with /email/send, or an agent that spent
+//     that one would lock the person at the keyboard out of the button that
+//     tells them whether their own mail account works.
 
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
+import { checkRateLimit } from "@/lib/rate-limit";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
 export const dynamic = "force-dynamic";
+
+/** One test message every few minutes is a person pressing a button; ten in an hour
+ *  is already more than one. Keyed device-wide, like the send budget: the caller is either
+ *  the owner's browser or the agent on loopback, so an IP key would be one
+ *  bucket wearing a misleading name. */
+const TEST_BUDGET = { windowMs: 60 * 60 * 1000, max: 10 } as const;
 
 export async function POST() {
   try {
@@ -24,6 +41,17 @@ export async function POST() {
       return NextResponse.json(
         { error: "Email is not set up on this device yet.", kind: "unconfigured" },
         { status: 400 },
+      );
+    }
+
+    if (!checkRateLimit("email-test", "device", TEST_BUDGET)) {
+      console.error("[email/test] refused: test budget exhausted");
+      return NextResponse.json(
+        {
+          error: `This ClawBox has already sent ${TEST_BUDGET.max} test messages in the last hour.`,
+          kind: "rate_limited",
+        },
+        { status: 429 },
       );
     }
 

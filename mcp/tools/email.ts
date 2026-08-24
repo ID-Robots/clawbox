@@ -39,7 +39,7 @@
 import { apiGet, apiPost } from "../lib/api";
 import { ApiError, ToolError } from "../lib/errors";
 import { json, type Registrar } from "../lib/register";
-import { zInt, zText } from "../lib/schema";
+import { zInt, zReqInt, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 
 const UNCONFIGURED_NEXT =
@@ -213,7 +213,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
     "email_read",
     "Read one message from the ClawBox's own mailbox, by the id email_list gave for it. Returns the sender, subject, date and the message text. Long messages are shortened. Reading does NOT mark the message as read.",
     {
-      message_id: zInt(1, 4_294_967_295, 1, "The id of the message, from email_list."),
+      message_id: zReqInt(1, 4_294_967_295, "The id of the message, from email_list."),
     },
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, maxChars: 20_000 },
     async ({ message_id }: { message_id: number }) => {

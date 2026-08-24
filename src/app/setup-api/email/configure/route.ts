@@ -132,8 +132,18 @@ export async function POST(request: Request) {
           // write to the assistant' and re-save" path. Only restart one that is
           // already up; never start one here.
           try {
-            const restarted = await stopHermesEmailPolling(request.signal);
-            return NextResponse.json({ success: true, inbound: false, restarted });
+            const stop = await stopHermesEmailPolling(request.signal);
+            return NextResponse.json({
+              success: true,
+              inbound: false,
+              restarted: stop === "stopped",
+              // A gateway nobody installed cannot be restarted from here, so
+              // it is still receiving on the credentials it loaded at
+              // startup. Saying nothing would read as "receiving stopped".
+              ...(stop === "unmanaged"
+                ? { warning: "Saved — receiving stops on the next gateway restart" }
+                : {}),
+            });
           } catch (gatewayErr) {
             console.error("[email/configure] Hermes gateway restart failed:", gatewayErr);
             return NextResponse.json({
@@ -189,7 +199,7 @@ export async function DELETE(request: Request) {
         // Same reasoning as the inbound-off branch of POST: restart a gateway
         // that is running so it drops the adapter, but do not install one on a
         // device whose owner has just disconnected email.
-        await stopHermesEmailPolling(request.signal).catch(() => false);
+        await stopHermesEmailPolling(request.signal).catch(() => "none-running" as const);
       } catch (err) {
         console.error("[email/configure] Hermes email teardown failed:", err);
       }

@@ -41,15 +41,20 @@
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
 import { notifyOwner } from "@/lib/email-notify";
-import { queuePending } from "@/lib/email-pending";
+// The message limits live with the queue that has the final say on them, so a
+// route that accepts a message the queue then refuses cannot drift into
+// existence — the caller would have spent the send budget on a 400.
+import {
+  MAX_BODY_LEN,
+  MAX_RECIPIENTS,
+  MAX_SUBJECT_LEN,
+  queuePending,
+} from "@/lib/email-pending";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { isEmailAddress, isHeaderSafe, sendMail, SmtpError } from "@/lib/smtp-client";
 
 export const dynamic = "force-dynamic";
 
-const MAX_RECIPIENTS = 10;
-const MAX_SUBJECT_LEN = 200;
-const MAX_BODY_LEN = 20_000;
 
 /**
  * One shared budget for the whole device, not per client IP: the caller is

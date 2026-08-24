@@ -1,7 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/config-store", () => ({ get: vi.fn(), setMany: vi.fn() }));
-vi.mock("@/lib/email-pending", () => ({ queuePending: vi.fn() }));
+// Spread the real module: the pending store (reached through this route's
+// shared message limits) reads DATA_DIR from it at import time.
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  get: vi.fn(),
+  setMany: vi.fn(),
+}));
+// Partial mock: the route imports the message limits from this module, and a
+// bare factory would replace them with undefined — which is a suite that
+// stops testing the very caps it asserts.
+vi.mock("@/lib/email-pending", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/email-pending")>("@/lib/email-pending");
+  return { ...actual, queuePending: vi.fn() };
+});
 vi.mock("@/lib/email-notify", () => ({ notifyOwner: vi.fn() }));
 vi.mock("@/lib/smtp-client", async () => {
   const actual = await vi.importActual<typeof import("@/lib/smtp-client")>("@/lib/smtp-client");
@@ -136,12 +148,27 @@ describe("POST /setup-api/email/send", () => {
     expect((await POST(sendRequest(VALID_BODY))).status).toBe(200);
   });
 
+  it("refuses more than ten recipients", async () => {
+    // mcp/README.md offers the cap as a containment control, so a regression
+    // that removed it should fail here rather than in the field.
+    const many = Array.from({ length: 11 }, (_, i) => `p${i}@example.com`).join(", ");
+    const res = await POST(sendRequest({ ...VALID_BODY, to: many }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/at most 10 recipients/i);
+    expect(mockSend).not.toHaveBeenCalled();
+  });
+
   it("leaves the owner's own test email outside the agent's budget", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     for (let i = 0; i < 5; i++) await POST(sendRequest(VALID_BODY));
     expect((await POST(sendRequest(VALID_BODY))).status).toBe(429);
     // The person at the keyboard must still be able to prove the account works.
     expect((await TEST_POST()).status).toBe(200);
+    // ...but that route is not unbounded either: the agent holds the MCP
+    // bearer and middleware admits it here too, so a budget-free test route
+    // would be a way around the send budget.
+    for (let i = 0; i < 9; i++) expect((await TEST_POST()).status).toBe(200);
+    expect((await TEST_POST()).status).toBe(429);
     errorSpy.mockRestore();
   });
 

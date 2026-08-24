@@ -42,9 +42,17 @@ const PENDING_PATH = path.join(DATA_DIR, "email-pending.json");
  */
 export const MAX_PENDING = 20;
 
-const MAX_RECIPIENTS = 10;
-const MAX_SUBJECT_LEN = 200;
-const MAX_BODY_LEN = 20_000;
+/**
+ * What one message may be. Exported and imported by /setup-api/email/send
+ * rather than restated there: the route checks them first so a caller hears
+ * about a 30,000-character body before the send budget is spent, and this
+ * module checks them again because it is the last step before a file write.
+ * Two copies of the same numbers would drift into a route that accepts what
+ * the queue then refuses.
+ */
+export const MAX_RECIPIENTS = 10;
+export const MAX_SUBJECT_LEN = 200;
+export const MAX_BODY_LEN = 20_000;
 
 /**
  * The repertoire a stored draft may be made of.
@@ -168,8 +176,16 @@ export function queuePending(input: { to: string[]; subject: string; body: strin
     return { ok: false, error: `At most ${MAX_RECIPIENTS} recipients`, reason: "invalid" };
   }
   const subject = input.subject.trim();
-  if (!subject || subject.length > MAX_SUBJECT_LEN) {
-    return { ok: false, error: "A subject is required", reason: "invalid" };
+  if (!subject) return { ok: false, error: "A subject is required", reason: "invalid" };
+  // Reported apart from the empty case on purpose: an agent told a 30,000-
+  // character body is "required" has no reason to shorten it and retries the
+  // same input.
+  if (subject.length > MAX_SUBJECT_LEN) {
+    return {
+      ok: false,
+      error: `A subject may be at most ${MAX_SUBJECT_LEN} characters`,
+      reason: "invalid",
+    };
   }
   if (!DRAFT_SUBJECT_RE.test(subject)) {
     return {
@@ -179,8 +195,13 @@ export function queuePending(input: { to: string[]; subject: string; body: strin
     };
   }
   const body = input.body;
-  if (!body || body.length > MAX_BODY_LEN) {
-    return { ok: false, error: "A message body is required", reason: "invalid" };
+  if (!body) return { ok: false, error: "A message body is required", reason: "invalid" };
+  if (body.length > MAX_BODY_LEN) {
+    return {
+      ok: false,
+      error: `A message body may be at most ${MAX_BODY_LEN} characters`,
+      reason: "invalid",
+    };
   }
   if (!DRAFT_BODY_RE.test(body)) {
     return {
@@ -237,6 +258,17 @@ export function getPending(id: string): PendingEmail | null {
  * Take a draft OUT of the queue, returning it. One draft can only be claimed
  * once: approve reads-and-removes before it sends, so a double click (or a
  * retry) cannot send the same message twice.
+ *
+ * WHAT MAKES THAT TRUE, and why there is no lock: every step in here is
+ * SYNCHRONOUS — readFileSync, then writeFileSync + renameSync — with no await
+ * between the read and the write. One JS thread means a second request's call
+ * cannot start until this one has returned, so two approvals of the same id
+ * cannot both find the draft, and two writers cannot meet in the shared
+ * `.tmp` path. One device runs one server process, so there is no writer
+ * outside this one either.
+ *
+ * Which is to say: an await anywhere in here, or a move to fs/promises, would
+ * silently remove the guarantee and let one approved message be sent twice.
  */
 export function claimPending(id: string): PendingEmail | null {
   const drafts = readAll();

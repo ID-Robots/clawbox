@@ -97,7 +97,7 @@ describe("parseEmailConfigure", () => {
 
 describe("maskAddress", () => {
   it("keeps the domain readable and hides the local part", () => {
-    expect(maskAddress("krasimir@example.com")).toBe("k••••••r@example.com");
+    expect(maskAddress("postmaster@example.com")).toBe("p••••••r@example.com");
   });
 
   it("handles a two-character local part", () => {

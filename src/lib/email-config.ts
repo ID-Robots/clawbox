@@ -127,6 +127,13 @@ export interface PublicEmailStatus {
   mode: EmailMode;
   /** The explicit override only — null when the host is being derived. */
   imapHostExplicit: string | null;
+  /**
+   * Whether the agent may read this mailbox — `modeAllowsReading(mode)`,
+   * answered once here. The MCP server registers email_list and email_read on
+   * it (mcp/lib/context.ts), so deriving it there as well would put the same
+   * rule in two places and a fourth mode would have to be remembered in both.
+   */
+  canRead: boolean;
   askBeforeSend: boolean;
 }
 
@@ -217,6 +224,10 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
       allowedSenders: [],
       mode: "send",
       imapHostExplicit: null,
+      // Answered here rather than re-derived from `mode` by every caller: the
+      // MCP server decides whether to register the read tools on this, and a
+      // second copy of the rule there is a copy that can drift.
+      canRead: false,
       // No account yet, so this is the value the form should start on.
       askBeforeSend: DEFAULT_ASK_BEFORE_SEND,
     };
@@ -235,6 +246,7 @@ export async function publicEmailStatus(): Promise<PublicEmailStatus> {
     allowedSenders: settings.allowedSenders ?? [],
     mode: settings.mode,
     imapHostExplicit: settings.imapHost ?? null,
+    canRead: modeAllowsReading(settings.mode),
     askBeforeSend: settings.askBeforeSend,
   };
 }

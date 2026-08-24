@@ -112,6 +112,17 @@ interface PendingEmail {
   createdAt: number;
 }
 
+/**
+ * A draft that was approved, claimed out of the queue and then failed to send.
+ * /setup-api/email/pending hands the whole message back for exactly this, so
+ * the owner's approved mail is not lost to a transient SMTP error.
+ */
+interface LostDraft {
+  to: string[];
+  subject: string;
+  body: string;
+}
+
 interface SwapStats { used: number; total: number; percent: number }
 interface DiskMount { filesystem: string; size: string; used: string; avail: string; usePercent: number; mountpoint: string }
 interface NetworkIface { name: string; ip: string; rx: number; tx: number }
@@ -1515,6 +1526,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailAskBeforeSend, setEmailAskBeforeSend] = useState(true);
   const [emailPending, setEmailPending] = useState<PendingEmail[]>([]);
   const [emailPendingBusy, setEmailPendingBusy] = useState<string | null>(null);
+  const [emailLostDraft, setEmailLostDraft] = useState<LostDraft | null>(null);
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailTesting, setEmailTesting] = useState(false);
   const [emailReconfigure, setEmailReconfigure] = useState(false);
@@ -1596,6 +1608,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (emailStatus?.configured) {
       setEmailMode(emailStatus.mode);
       setEmailAskBeforeSend(emailStatus.askBeforeSend);
+      // The outgoing server too, not only the new fields: leaving these at
+      // the Gmail defaults means a Fastmail box reopens the form showing
+      // smtp.gmail.com:587, and an owner who only retypes their password
+      // saves that host over the working one.
+      if (emailStatus.smtpHost) setEmailHost(emailStatus.smtpHost);
+      if (emailStatus.smtpPort) setEmailPort(String(emailStatus.smtpPort));
       setEmailImapHost(emailStatus.imapHostExplicit ?? "");
       setEmailAllowedSenders(emailStatus.allowedSenders.join(", "));
     }
@@ -1605,6 +1623,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const decidePending = async (id: string, action: "approve" | "reject") => {
     setEmailPendingBusy(id);
     setEmailMsg(null);
+    setEmailLostDraft(null);
     try {
       const res = await fetch("/setup-api/email/pending", {
         method: "POST",
@@ -1614,6 +1633,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       const data = await res.json().catch(() => null);
       if (!res.ok) {
         setEmailMsg({ type: "error", message: data?.error || t("settings.emailApproveFailed") });
+        // The route claims a draft before it sends, so a failed send has
+        // already taken it out of the queue and refreshEmailPending() is about
+        // to remove the row. Hold what it handed back, or the message the
+        // owner approved disappears from the screen with the error.
+        const lost: unknown = data?.draft;
+        if (lost && typeof lost === "object") {
+          const d = lost as Partial<LostDraft>;
+          if (Array.isArray(d.to) && typeof d.subject === "string" && typeof d.body === "string") {
+            setEmailLostDraft({ to: d.to.map(String), subject: d.subject, body: d.body });
+          }
+        }
       } else {
         setEmailMsg({
           type: "success",
@@ -3235,6 +3265,22 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 empty queue is not news, and this panel is mostly looked at for
                 other reasons. Every string here is agent-composed text, so it
                 is rendered as text and never as markup. */}
+            {emailLostDraft !== null && (
+              <div className="rounded-2xl border border-amber-400/30 bg-amber-500/[0.06] p-5" data-testid="settings-email-lost-draft">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="material-symbols-rounded text-amber-300" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
+                  <span className="text-sm text-[var(--text-primary)]">{t("settings.emailApproveFailedDraft")}</span>
+                </div>
+                <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                  <div className="text-xs text-[var(--text-muted)] break-words">
+                    {t("settings.emailPendingTo")}: {emailLostDraft.to.join(", ")}
+                  </div>
+                  <div className="text-sm text-[var(--text-primary)] font-medium mt-1 break-words">{emailLostDraft.subject}</div>
+                  <div className="text-xs text-[var(--text-secondary)] mt-1 whitespace-pre-wrap break-words">{emailLostDraft.body}</div>
+                </div>
+              </div>
+            )}
+
             {emailPending.length > 0 && (
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-approvals">
                 <div className="flex items-center gap-2 mb-4">
@@ -3340,7 +3386,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       <button
                         type="button"
                         onClick={() => setEmailShowPassword((v) => !v)}
-                        aria-label={t("settings.emailAppPassword")}
+                        aria-label={emailShowPassword ? "Hide password" : "Show password"}
                         className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] opacity-50 hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer p-0.5"
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 18 }}>{emailShowPassword ? "visibility_off" : "visibility"}</span>

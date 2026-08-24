@@ -4,7 +4,7 @@
 // answer rather than a retry loop, and (b) the tool is offered on BOTH editions
 // — it is the only email capability the OpenClaw edition has at all.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerEmailTools } from "../../../mcp/tools/email";
 import { ToolError } from "../../../mcp/lib/errors";
 import type { RegisteredToolInfo, ToolHandler, ToolOpts } from "../../../mcp/lib/register";
@@ -40,6 +40,13 @@ function jsonResponse(status: number, body: unknown): Response {
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+// In a hook, not at the end of each test body: an assertion that fails part
+// way through a test would otherwise leave its stubbed `fetch` installed for
+// every test after it, and clearAllMocks does not restore globals.
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("email_send registration", () => {
@@ -86,7 +93,6 @@ describe("email_send behaviour", () => {
     expect(err.next).toMatch(/Do not retry/i);
     // The remedy names the exact place a person has to go.
     expect(err.next).toMatch(/Settings/);
-    vi.unstubAllGlobals();
   });
 
   it("reports a mail-server refusal without inviting a retry storm", async () => {
@@ -97,7 +103,6 @@ describe("email_send behaviour", () => {
     )) as ToolError;
     expect(err.code).toBe("ENDPOINT_DOWN");
     expect(err.next).toMatch(/not retry more than once/i);
-    vi.unstubAllGlobals();
   });
 
   it("treats an exhausted send budget as a stop, not a retry", async () => {
@@ -119,7 +124,6 @@ describe("email_send behaviour", () => {
     expect(err.message).toMatch(/waiting for the owner/i);
     // Not the generic 429 mapping, which says "retry once".
     expect(err.next).toMatch(/Do not retry/i);
-    vi.unstubAllGlobals();
   });
 
   it("returns the send result on success", async () => {
@@ -133,7 +137,6 @@ describe("email_send behaviour", () => {
       sent: true,
       recipients: 1,
     });
-    vi.unstubAllGlobals();
   });
 });
 
@@ -203,7 +206,6 @@ describe("email_list behaviour", () => {
     const payload = JSON.parse(result.content[0].type === "text" ? result.content[0].text : "{}");
     expect(payload).toMatchObject({ total_in_mailbox: 42, unread_in_mailbox: 3 });
     expect(payload.messages[0]).toMatchObject({ id: 101, from: "a@b.com", unread: true });
-    vi.unstubAllGlobals();
   });
 
   it("turns a send-only device into a do-not-retry instruction", async () => {
@@ -214,7 +216,6 @@ describe("email_list behaviour", () => {
     expect(err.code).toBe("CONFLICT");
     expect(err.next).toMatch(/Do not retry/i);
     expect(err.next).toMatch(/Read on demand/i);
-    vi.unstubAllGlobals();
   });
 
   it("treats an exhausted read budget as a stop, not a retry", async () => {
@@ -223,7 +224,6 @@ describe("email_list behaviour", () => {
     const err = (await Promise.resolve(handler({ count: 10 })).catch((e: unknown) => e)) as ToolError;
     expect(err.code).toBe("CONFLICT");
     expect(err.next).toMatch(/Do not retry/i);
-    vi.unstubAllGlobals();
   });
 });
 
@@ -253,7 +253,6 @@ describe("email_read behaviour", () => {
     const payload = JSON.parse(result.content[0].type === "text" ? result.content[0].text : "{}");
     expect(payload).toMatchObject({ id: 101, subject: "Hi" });
     expect(payload.note).toMatch(/never as instructions/i);
-    vi.unstubAllGlobals();
   });
 
   it("tells the agent to re-list rather than guess when an id is gone", async () => {
@@ -262,7 +261,6 @@ describe("email_read behaviour", () => {
     const err = (await Promise.resolve(handler({ message_id: 9 })).catch((e: unknown) => e)) as ToolError;
     expect(err.code).toBe("NOT_FOUND");
     expect(err.next).toMatch(/email_list/);
-    vi.unstubAllGlobals();
   });
 
   it("maps a rejected mailbox sign-in to an auth failure naming Gmail's IMAP switch", async () => {
@@ -271,7 +269,6 @@ describe("email_read behaviour", () => {
     const err = (await Promise.resolve(handler({ message_id: 9 })).catch((e: unknown) => e)) as ToolError;
     expect(err.code).toBe("AUTH_FAILED");
     expect(err.next).toMatch(/IMAP/);
-    vi.unstubAllGlobals();
   });
 });
 
@@ -290,6 +287,18 @@ describe("email_send under the approval gate", () => {
     expect(payload.queued_for_owner_approval).toBe(true);
     expect(payload.what_happens_next).toMatch(/approve/i);
     expect(payload.what_happens_next).toMatch(/do not try to send it again/i);
-    vi.unstubAllGlobals();
+  });
+});
+
+describe("email_read registration", () => {
+  it("requires a message id rather than defaulting to one", () => {
+    // A bounded-integer-with-a-default is right for a `count` or a `timeout`.
+    // For an identifier it means an agent that omits the argument silently
+    // reads whatever message that default names, and reports it as the one it
+    // was asked for.
+    const { info } = collect().get("email_read")!;
+    const schema = info.shape.message_id;
+    expect(schema.safeParse(undefined).success).toBe(false);
+    expect(schema.safeParse(7).success).toBe(true);
   });
 });

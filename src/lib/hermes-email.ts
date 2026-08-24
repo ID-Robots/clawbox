@@ -115,8 +115,17 @@ export async function restartHermesForEmail(signal?: AbortSignal): Promise<boole
 }
 
 /**
- * Restart the gateway ONLY if one is already up, and report whether anything
- * was restarted.
+ * What happened when email tried to stop Hermes receiving.
+ *
+ *   "none-running" — no gateway was up, so nothing was polling anyway.
+ *   "stopped"      — the service was restarted and has dropped the adapter.
+ *   "unmanaged"    — a gateway is running that this device did not install,
+ *                    and it is STILL RECEIVING. See below.
+ */
+export type EmailPollingStop = "none-running" | "stopped" | "unmanaged";
+
+/**
+ * Restart the gateway ONLY if one is already up, and report what that did.
  *
  * This is the "email is going away" half, and it is deliberately not
  * ensureHermesGateway(): clearing the EMAIL_* block does nothing on its own, so
@@ -124,10 +133,20 @@ export async function restartHermesForEmail(signal?: AbortSignal): Promise<boole
  * something restarts the gateway — but a device that never had a gateway must
  * not have one INSTALLED AND STARTED as a side effect of un-ticking a checkbox
  * or pressing Disconnect. ensureHermesGateway would do exactly that.
+ *
+ * A gateway that is RUNNING WITHOUT A SERVICE UNIT is somebody's foreground
+ * `hermes gateway run`. ensureHermesGateway leaves that one alone on purpose —
+ * `gateway restart` would fall through to running the next one in the
+ * foreground and block this request until the timeout kills it — so nothing
+ * here can make it drop the adapter, and it keeps the EMAIL_* values it read
+ * at startup. That case answers "unmanaged" rather than reporting a restart
+ * that did not happen: the allowlist can still reach the agent until someone
+ * restarts that process, and the owner is told so.
  */
-export async function stopHermesEmailPolling(signal?: AbortSignal): Promise<boolean> {
+export async function stopHermesEmailPolling(signal?: AbortSignal): Promise<EmailPollingStop> {
   const before = await hermesGatewayStatus(signal);
-  if (!before.running) return false;
-  const after = await ensureHermesGateway(signal);
-  return after.running;
+  if (!before.running) return "none-running";
+  if (!before.installed) return "unmanaged";
+  await ensureHermesGateway(signal);
+  return "stopped";
 }

@@ -61,6 +61,15 @@ describe("applyEnvValues", () => {
     expect(out.match(/EMAIL_ADDRESS=/g)).toHaveLength(1);
   });
 
+  it("collapses a duplicated key instead of updating only the first", () => {
+    // Hermes reads the LAST assignment of a key (hermes_cli/config.py), so a
+    // hand-edited .env with two of them would take this write, report success
+    // and change nothing the agent actually reads.
+    const before = `EMAIL_ADDRESS=first@b.com\nFOO=1\nexport EMAIL_ADDRESS=second@b.com\n`;
+    const out = applyEnvValues(before, { EMAIL_ADDRESS: "new@b.com" });
+    expect(out).toBe(`EMAIL_ADDRESS=new@b.com\nFOO=1\n`);
+  });
+
   it("replaces an export-prefixed line instead of shadowing it", () => {
     const out = applyEnvValues("export EMAIL_ADDRESS=old@b.com\n", { EMAIL_ADDRESS: "new@b.com" });
     expect(out).toBe("EMAIL_ADDRESS=new@b.com\n");

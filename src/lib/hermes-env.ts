@@ -78,8 +78,18 @@ export function applyEnvValues(existing: string, values: Record<string, string>)
     const value = rawValue.replace(/[\r\n]/g, "");
     const serialized = `${key}=${quoteEnvValue(value)}`;
     const index = lines.findIndex((line) => envLineDefinesKey(line, key));
-    if (index >= 0) lines[index] = serialized;
-    else lines.push(serialized);
+    if (index < 0) {
+      lines.push(serialized);
+      continue;
+    }
+    // Replace the first assignment in place — keeping a key where its owner
+    // last saw it — and drop any later duplicate. Hermes reads the LAST
+    // assignment of a key, so a hand-edited file with two of them would make
+    // this write look successful and change nothing.
+    lines[index] = serialized;
+    for (let i = lines.length - 1; i > index; i--) {
+      if (envLineDefinesKey(lines[i], key)) lines.splice(i, 1);
+    }
   }
 
   return `${lines.join("\n")}\n`;
@@ -122,8 +132,12 @@ function mutateEnv(transform: (existing: string) => string): Promise<void> {
       existing = await fs.readFile(envPath, "utf-8");
       const stat = await fs.stat(envPath);
       mode = stat.mode & 0o777;
-    } catch {
-      // No .env yet — create one at 0600.
+    } catch (err) {
+      // ENOENT is the only failure that means "there is no .env yet". Any
+      // other one — EACCES, a bad read — must NOT be turned into an empty
+      // base: the write below would then replace every unrelated Hermes
+      // setting with the handful of keys this call is adding.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
 
     const next = transform(existing);
@@ -149,18 +163,20 @@ export async function getHermesEnvValue(key: string): Promise<string | null> {
   } catch {
     return null;
   }
+  // Last assignment wins, because that is the one Hermes itself would read.
+  let found: string | null = null;
   for (const line of raw.split("\n")) {
     if (!envLineDefinesKey(line, key)) continue;
     let stripped = line.trim();
     if (stripped.startsWith("export ")) stripped = stripped.slice(7).replace(/^\s+/, "");
     const value = stripped.slice(key.length + 1);
     if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-      return value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      found = value.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    } else if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
+      found = value.slice(1, -1);
+    } else {
+      found = value;
     }
-    if (value.startsWith("'") && value.endsWith("'") && value.length >= 2) {
-      return value.slice(1, -1);
-    }
-    return value;
   }
-  return null;
+  return found;
 }

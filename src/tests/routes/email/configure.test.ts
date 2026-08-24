@@ -69,7 +69,7 @@ beforeEach(async () => {
   mockVerifyImap.mockResolvedValue(undefined);
   mockApplyHermes.mockResolvedValue({ inbound: false });
   mockRestart.mockResolvedValue(true);
-  mockStopPolling.mockResolvedValue(false);
+  mockStopPolling.mockResolvedValue("none-running");
   const mod = await import("@/app/setup-api/email/configure/route");
   POST = mod.POST;
   DELETE = mod.DELETE;
@@ -201,7 +201,7 @@ describe("POST /setup-api/email/configure — Hermes", () => {
   // adapter kept polling the old mailbox until something else restarted it.
   it("restarts a running gateway when inbound is turned off, so the adapter stops polling", async () => {
     mockApplyHermes.mockResolvedValue({ inbound: false });
-    mockStopPolling.mockResolvedValue(true);
+    mockStopPolling.mockResolvedValue("stopped");
     const res = await POST(request({ address: "box@example.com", password: PASSWORD }));
     const data = await res.json();
     expect(data).toMatchObject({ success: true, inbound: false, restarted: true });
@@ -209,10 +209,21 @@ describe("POST /setup-api/email/configure — Hermes", () => {
     // ensureHermesGateway's wrapper INSTALLS a gateway; the off path must not.
     expect(mockRestart).not.toHaveBeenCalled();
   });
+  it("warns instead of claiming a restart it could not perform", async () => {
+    // A gateway running with no service unit behind it cannot be restarted
+    // from a route handler, so it keeps the EMAIL_* values it loaded and goes
+    // on receiving. Reporting `restarted` here would read as "it stopped".
+    mockApplyHermes.mockResolvedValue({ inbound: false });
+    mockStopPolling.mockResolvedValue("unmanaged");
+    const res = await POST(request({ address: "box@example.com", password: PASSWORD }));
+    const data = await res.json();
+    expect(data.restarted).toBe(false);
+    expect(data.warning).toMatch(/next gateway restart/i);
+  });
 
   it("does not install a gateway on a device that never had one", async () => {
     mockApplyHermes.mockResolvedValue({ inbound: false });
-    mockStopPolling.mockResolvedValue(false);
+    mockStopPolling.mockResolvedValue("none-running");
     const res = await POST(request({ address: "box@example.com", password: PASSWORD }));
     const data = await res.json();
     expect(data).toMatchObject({ success: true, inbound: false, restarted: false });

@@ -46,6 +46,12 @@ interface SinkOptions {
    * to the browser — so the scrubbing has to hold rather than be assumed.
    */
   echoesCredentials?: boolean;
+  /**
+   * Quote the whole offending command LINE back, blob and all. A server that
+   * does this hands back `AUTH PLAIN base64("\0user\0password")`, which
+   * contains neither the password nor base64(password) as a substring.
+   */
+  echoesAuthLine?: boolean;
   /** Refuse AUTH with this code instead of 535 (501 exercises the non-auth throw). */
   authFailureCode?: number;
 }
@@ -117,7 +123,9 @@ async function startSink(options: SinkOptions = {}): Promise<Sink> {
           if (suppliedUser === user && suppliedPassword === password) {
             socket.write("235 2.7.0 Authentication successful\r\n");
           } else {
-            const echo = options.echoesCredentials ? ` (got "${suppliedPassword}")` : "";
+            const echo = options.echoesAuthLine
+              ? ` [${line}]`
+              : options.echoesCredentials ? ` (got "${suppliedPassword}")` : "";
             socket.write(`${authFailure()} Username and Password not accepted${echo}\r\n`);
           }
         } else if (/^AUTH LOGIN$/i.test(line)) {
@@ -228,6 +236,21 @@ describe("verifySmtp", () => {
     expect(err.kind).toBe("auth");
     expect(err.detail).toBeTruthy();
     expect(err.detail).not.toContain(secret);
+    expect(err.detail).toContain("***");
+  });
+
+  it("scrubs the AUTH PLAIN blob out of a detail that quotes the whole command", async () => {
+    // The wire form is base64("\0" + user + "\0" + password): the leading
+    // bytes shift the alignment, so neither the password nor its own base64
+    // appears in it. A server that echoes the command line back would
+    // otherwise hand the app password to the browser in base64.
+    const s = await sink({ echoesAuthLine: true });
+    const secret = "hunter2-app-password";
+    const blob = Buffer.from(`\0box@example.com\0${secret}`, "utf8").toString("base64");
+    const err = (await verifySmtp(config(s.port, secret)).catch((e) => e)) as SmtpError;
+    expect(err.kind).toBe("auth");
+    expect(err.detail).toBeTruthy();
+    expect(err.detail).not.toContain(blob);
     expect(err.detail).toContain("***");
   });
 

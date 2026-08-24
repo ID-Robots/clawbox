@@ -29,14 +29,14 @@ describe("stopHermesEmailPolling", () => {
     mockStatus.mockResolvedValue({ installed: true, running: true, scope: "system" });
     mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system" });
 
-    await expect(stopHermesEmailPolling()).resolves.toBe(true);
+    await expect(stopHermesEmailPolling()).resolves.toBe("stopped");
     expect(mockEnsure).toHaveBeenCalledTimes(1);
   });
 
   it("installs nothing on a device whose gateway is not running", async () => {
     mockStatus.mockResolvedValue({ installed: false, running: false, scope: null });
 
-    await expect(stopHermesEmailPolling()).resolves.toBe(false);
+    await expect(stopHermesEmailPolling()).resolves.toBe("none-running");
     expect(mockEnsure).not.toHaveBeenCalled();
   });
 
@@ -46,7 +46,19 @@ describe("stopHermesEmailPolling", () => {
     // be what starts it.
     mockStatus.mockResolvedValue({ installed: true, running: false, scope: "system" });
 
-    await expect(stopHermesEmailPolling()).resolves.toBe(false);
+    await expect(stopHermesEmailPolling()).resolves.toBe("none-running");
+    expect(mockEnsure).not.toHaveBeenCalled();
+  });
+
+  it("says so when a gateway it cannot restart is still receiving", async () => {
+    // Somebody's foreground `hermes gateway run`: there is no unit to restart,
+    // and ensureHermesGateway leaves that one alone rather than blocking this
+    // request in the foreground. It keeps the EMAIL_* values it loaded at
+    // startup, so answering "stopped" here would tell the owner receiving had
+    // ended while the allowlist can still reach the agent.
+    mockStatus.mockResolvedValue({ installed: false, running: true, scope: null });
+
+    await expect(stopHermesEmailPolling()).resolves.toBe("unmanaged");
     expect(mockEnsure).not.toHaveBeenCalled();
   });
 });

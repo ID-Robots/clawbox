@@ -45,6 +45,13 @@ d("the production build's type-check", () => {
     });
     const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
 
+    // A gate that is green because it never ran is worse than no gate. tsc
+    // that fails to launch, or whose output overflows maxBuffer, reports that
+    // in `error` and leaves `status` null — and an empty `output` then has no
+    // error lines in it to find.
+    expect(result.error).toBeUndefined();
+    expect(result.status).not.toBeNull();
+
     const productErrors = output
       .split(/\r?\n/)
       .filter((line) => {

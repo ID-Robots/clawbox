@@ -84,12 +84,29 @@ const MAX_REPLY_BYTES = 64 * 1024;
 function scrubSecrets(text: string, secrets: string[]): string {
   let out = text;
   for (const secret of secrets) {
-    if (secret && secret.length >= 4) out = out.split(secret).join("***");
-    if (secret && secret.length >= 4) {
-      out = out.split(Buffer.from(secret, "utf8").toString("base64")).join("***");
-    }
+    if (!secret || secret.length < 4) continue;
+    out = out.split(secret).join("***");
+    out = out.split(Buffer.from(secret, "utf8").toString("base64")).join("***");
   }
   return out;
+}
+
+/**
+ * Every form the password takes on the wire, so `scrub` can take all of them
+ * back out.
+ *
+ * The plain password and its own base64 (AUTH LOGIN sends that) are the obvious
+ * two. The third is not: AUTH PLAIN sends `base64("\0" + user + "\0" + pass)`,
+ * whose text contains NEITHER of the first two as a substring, because the
+ * leading bytes shift the base64 alignment. Servers that quote the offending
+ * command back in a 5xx reply are common, and that reply becomes
+ * SmtpError.detail, which /email/configure and /email/test hand to the caller.
+ */
+function wireSecrets(user: string, password: string): string[] {
+  return [
+    password,
+    Buffer.from(`\0${user}\0${password}`, "utf8").toString("base64"),
+  ];
 }
 
 /** CR/LF anywhere in a header value is a header-injection attempt. */
@@ -414,7 +431,7 @@ async function openSession(
   signal?: AbortSignal,
 ): Promise<Session> {
   const socket = await connectSocket(cfg, rejectUnauthorized, signal);
-  const session = new Session(socket, [cfg.password]);
+  const session = new Session(socket, wireSecrets(cfg.user, cfg.password));
   const greeting = await session.greeting();
   session.expect(greeting, [220], "protocol", `${cfg.host} did not greet us as a mail server.`);
 
