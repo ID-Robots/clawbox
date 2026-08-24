@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { StoreApp } from "./AppStore";
 import * as kv from "@/lib/client-kv";
+import { clawhubSkillUrl } from "@/lib/clawhub-url";
 
 interface AppSetting {
   key: string;
@@ -322,7 +323,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
       <div className="shrink-0 px-6 py-4 border-t border-white/10 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <a
-            href={`https://clawhub.ai/skills/${appId}`}
+            href={clawhubSkillUrl(appId, storeApp.developer) || storeApp.url || "https://clawhub.ai"}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors"
