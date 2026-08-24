@@ -32,7 +32,7 @@ import {
   getLlamaCppMaxTokens,
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
-import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { unpairLocal as unpairClawKeep } from "@/lib/clawkeep";
 import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
@@ -1212,8 +1212,45 @@ export async function POST(request: Request) {
 
     // A fresh device promotes its first local model automatically; an existing
     // device only promotes when the user explicitly asked to switch to it.
+    // A device that was ON the local model when it was switched off promotes it
+    // again, so off -> on round-trips instead of leaving the box on nothing:
+    // `local_ai_was_default` is the flag POST /setup-api/local-ai leaves behind
+    // when it clears a `model.provider` that pointed at the local model.
+    const localWasDefaultBeforeDisable = isLocalScope && configStore.local_ai_was_default === true;
+    if (!isLocalScope && configStore.local_ai_was_default === true) {
+      // The owner has since chosen a different provider on purpose. Re-enabling
+      // the local model later must not evict that choice.
+      await setMany({ local_ai_was_default: undefined });
+    }
     const shouldPromoteLocalToPrimary =
-      isLocalScope && (!configStore.ai_model_configured || body.activate === true);
+      isLocalScope && (!configStore.ai_model_configured || body.activate === true || localWasDefaultBeforeDisable);
+
+    // Bring the runtime up BEFORE anything is registered. Registering a model
+    // whose service is down produces exactly the device this task exists to fix:
+    // Settings says "configured", the picker offers the model, and the first
+    // message 502s. For Ollama that also ENABLES the unit, so the choice
+    // survives a reboot — an unprivileged `systemctl start` had been failing
+    // silently, which is why toggling Local AI off and on left ollama.service
+    // dead (TASK-446).
+    if (isLocalScope && (isOllama || isLlamaCpp)) {
+      try {
+        await activateLocalAiProvider(isOllama ? "ollama" : "llamacpp");
+      } catch (err) {
+        console.error("[AI Config] Local AI runtime did not come up:", err instanceof Error ? logSafe(err.message) : err);
+        if (isOllama) {
+          return NextResponse.json(
+            {
+              error: "Could not start the on-device model service, so Local AI was not switched on.",
+              code: "local_ai_runtime_unavailable",
+            },
+            { status: 503 },
+          );
+        }
+        // llama.cpp keeps the behaviour it always had: the proxy provisions and
+        // wakes it on the first request, so a failed pre-wake is a slower first
+        // message, not a failed save.
+      }
+    }
     // Resolve the ClawBox AI tier once and reuse it for both the primary
     // model selection (below) and the config-store write (further down).
     // Inlining the same `?? storedTier ?? DEFAULT_TIER` chain in two
@@ -1352,6 +1389,9 @@ export async function POST(request: Request) {
             local_ai_provider: ocProvider,
             local_ai_model: config.defaultModel,
             local_ai_configured_at: new Date().toISOString(),
+            // Consumed by shouldPromoteLocalToPrimary above; leaving it set
+            // would re-promote the local model on every later save.
+            local_ai_was_default: undefined,
           });
           await applyLocalAiToHermes({
             provider: ocProvider as "llamacpp" | "ollama",
@@ -1584,6 +1624,8 @@ export async function POST(request: Request) {
         local_ai_provider: ocProvider,
         local_ai_model: config.defaultModel,
         local_ai_configured_at: new Date().toISOString(),
+        // Consumed by shouldPromoteLocalToPrimary above.
+        local_ai_was_default: undefined,
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });

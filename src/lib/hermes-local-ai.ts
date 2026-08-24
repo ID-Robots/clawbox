@@ -1,5 +1,6 @@
 import { runHermesCli } from "@/lib/hermes-cli";
 import { get } from "@/lib/config-store";
+import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
@@ -47,21 +48,26 @@ export async function applyLocalAiToHermes(options: {
     throw new HermesLocalApplyError("Local model id is missing or malformed.");
   }
 
-  const steps: string[][] = [
-    ["config", "set", `providers.${HERMES_LOCAL_PROVIDER}.base_url`, getLocalAiProxyBaseUrl(options.provider)],
-    ["config", "set", `providers.${HERMES_LOCAL_PROVIDER}.api_key`, getLocalAiToken()],
-    ["config", "set", `providers.${HERMES_LOCAL_PROVIDER}.api_mode`, "openai"],
-  ];
+  const set: Record<string, string> = {
+    [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: getLocalAiProxyBaseUrl(options.provider),
+    [`providers.${HERMES_LOCAL_PROVIDER}.api_key`]: getLocalAiToken(),
+    [`providers.${HERMES_LOCAL_PROVIDER}.api_mode`]: "openai",
+  };
   if (options.makeDefault) {
-    steps.push(["config", "set", "model.provider", HERMES_LOCAL_PROVIDER]);
-    steps.push(["config", "set", "model.default", model]);
+    set["model.provider"] = HERMES_LOCAL_PROVIDER;
+    set["model.default"] = model;
   }
 
-  for (const args of steps) {
-    const r = await runHermesCli(args, { timeoutMs: 15_000 });
-    if (r.code !== 0) {
-      throw new HermesLocalApplyError(r.stderr || "Failed to register the local model with Hermes");
-    }
+  // One read-merge-write instead of three-to-five `hermes config set` calls.
+  // Each of those re-serialised config.yaml and took every comment in it with
+  // them — a customer who clicked "save local model" lost the file's Security
+  // and Fallback Model documentation for good (b10).
+  try {
+    await patchHermesConfig({ set });
+  } catch (err) {
+    throw new HermesLocalApplyError(
+      err instanceof Error ? err.message : "Failed to register the local model with Hermes",
+    );
   }
 
   invalidateModelOptions();
@@ -112,17 +118,36 @@ export function _resetLocalAiReconcileForTests(): void {
 
 /**
  * Remove the provider when local AI is turned off, so the picker stops offering
- * a model that is no longer running. If it was also the active provider, that
- * is left alone deliberately — silently reassigning the device to some other
- * provider on a "disable" is a bigger surprise than an entry that errors once.
+ * a model that is no longer running.
+ *
+ * It also clears `model.provider` when that still points at us. The previous
+ * behaviour — documented at the time as deliberate, "an entry that errors once
+ * is a smaller surprise than a silent reassignment" — turned out to be neither
+ * small nor once: with the providers block gone and `model.provider: clawlocal`
+ * left behind, EVERY chat turn 502s with
+ * `Unknown provider 'clawlocal'. Check 'hermes model' …` and the picker keeps
+ * offering the dead model, because a stored current provider is unshifted into
+ * the list whether or not it exists. That is the state a fresh Hermes box lands
+ * in the moment its owner toggles Local AI off, since the local model was its
+ * only provider. No provider selected is a state the product already renders
+ * ("Choose a provider"); a provider that cannot answer is not.
+ *
+ * The caller gets `wasDefault` back so a later enable can restore the selection
+ * rather than leaving the device on nothing — off → on round-trips.
  */
-export async function removeLocalAiFromHermes(): Promise<void> {
-  for (const key of ["base_url", "api_key", "api_mode"]) {
-    // `unset` on an absent key is a no-op, so a partial registration cleans up
-    // as happily as a complete one.
-    await runHermesCli(["config", "unset", `providers.${HERMES_LOCAL_PROVIDER}.${key}`], {
-      timeoutMs: 15_000,
-    });
+export async function removeLocalAiFromHermes(): Promise<{ wasDefault: boolean; model: string | null }> {
+  const activeProvider = await readHermesConfigValue("model.provider").catch(() => null);
+  const wasDefault = activeProvider === HERMES_LOCAL_PROVIDER;
+  const model = wasDefault ? await readHermesConfigValue("model.default").catch(() => null) : null;
+
+  const unset = ["base_url", "api_key", "api_mode"].map(
+    (key) => `providers.${HERMES_LOCAL_PROVIDER}.${key}`,
+  );
+  if (wasDefault) {
+    unset.push("model.provider", "model.default");
   }
+  await patchHermesConfig({ unset });
+
   invalidateModelOptions();
+  return { wasDefault, model };
 }

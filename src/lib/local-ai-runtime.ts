@@ -194,13 +194,53 @@ export function endLocalAiUse(provider: LocalAiProvider) {
   }
 }
 
-async function startOllamaIfNeeded(): Promise<void> {
-  if (await isOllamaReachable()) {
+// systemctl argv, verbatim, matching the Cmnd_Specs in config/clawbox-sudoers.
+// sudoers matches the argument list EXACTLY, so these are literals and the unit
+// carries its `.service` suffix — `ollama` and `ollama.service` are different
+// strings to sudo even though they are the same unit to systemd.
+const OLLAMA_ENABLE_NOW_ARGV = ["/usr/bin/systemctl", "enable", "--now", "ollama.service"];
+const OLLAMA_START_ARGV = ["/usr/bin/systemctl", "start", "ollama.service"];
+const OLLAMA_STOP_ARGV = ["/usr/bin/systemctl", "stop", "ollama.service"];
+
+/**
+ * Run a systemctl verb on ollama.service, through sudo first.
+ *
+ * The web server runs as `clawbox`, which does not own a system unit. The
+ * unprivileged `systemctl start ollama` this used to issue therefore failed with
+ * "Interactive authentication required" on any box whose sudoers is the shipped
+ * one — which is how a device ended up with Local AI switched on in Settings and
+ * ollama.service dead underneath it. Keep the unprivileged call as the fallback:
+ * it is the one that works in dev shells and on boxes with a permissive polkit.
+ */
+async function systemctlOllama(argv: string[]): Promise<void> {
+  try {
+    await execFile("/usr/bin/sudo", ["-n", ...argv], { timeout: 60_000 });
+    return;
+  } catch (sudoErr) {
+    try {
+      await execFile(argv[0], argv.slice(1), { timeout: 60_000 });
+    } catch {
+      throw sudoErr instanceof Error ? sudoErr : new Error("systemctl call failed");
+    }
+  }
+}
+
+/**
+ * Bring ollama.service up and, when asked, make that survive a reboot.
+ *
+ * `persist` is for the deliberate "turn Local AI on" action: enabling the unit
+ * is what stops the choice from evaporating at the next boot. The on-demand wake
+ * path leaves the unit's enabled-state alone, because Settings → Local Models
+ * owns that switch and a wake must not silently undo an owner who turned it off.
+ */
+export async function startOllamaService(options: { persist?: boolean } = {}): Promise<void> {
+  const persist = options.persist === true;
+  if (!persist && (await isOllamaReachable())) {
     return;
   }
 
   try {
-    await execFile("/usr/bin/systemctl", ["start", "ollama"], { timeout: 60_000 });
+    await systemctlOllama(persist ? OLLAMA_ENABLE_NOW_ARGV : OLLAMA_START_ARGV);
   } catch (err) {
     if (!(await isOllamaReachable())) {
       throw new Error(err instanceof Error ? err.message : "Failed to start Ollama");
@@ -208,6 +248,33 @@ async function startOllamaIfNeeded(): Promise<void> {
   }
 
   await waitForOllamaReady();
+}
+
+async function startOllamaIfNeeded(): Promise<void> {
+  await startOllamaService();
+}
+
+/**
+ * Make a local provider actually runnable, for the enable path.
+ *
+ * Registering a model with Hermes while its runtime is down produces a device
+ * that reports "configured" and 502s on the first message, so the enable path
+ * waits for readiness before it writes any provider config.
+ *
+ * llama.cpp is only woken when its weights are already on disk. Otherwise the
+ * launcher would DOWNLOAD a multi-GB GGUF inside this request — a 20-minute
+ * budget the caller is an HTTP handler for. In that case the proxy provisions it
+ * on first use, exactly as it does today.
+ */
+export async function activateLocalAiProvider(provider: LocalAiProvider): Promise<void> {
+  if (provider === "ollama") {
+    await startOllamaService({ persist: true });
+    return;
+  }
+  const alias = await getConfiguredLlamaCppAlias();
+  const provisioning = await getLlamaCppProvisioningStatus(alias).catch(() => null);
+  if (!provisioning?.modelAvailable) return;
+  await ensureLocalAiReady("llamacpp");
 }
 
 export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<void> {
@@ -270,7 +337,10 @@ function isOllamaExecutable(argv0: string): boolean {
 
 async function stopOllama(): Promise<void> {
   try {
-    await execFile("/usr/bin/systemctl", ["stop", "ollama"], { timeout: 30_000 });
+    // `stop`, never `disable`: this is also the idle-standby path, and a
+    // standby that quietly un-enabled the unit would mean the model never came
+    // back after a reboot.
+    await systemctlOllama(OLLAMA_STOP_ARGV);
     return;
   } catch {
     // Was `pgrep -f "ollama serve"`, then SIGTERM to every hit. `-f` matches

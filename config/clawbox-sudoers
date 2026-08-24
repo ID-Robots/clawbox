@@ -72,6 +72,17 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel
 # prompt no one can answer.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  --now ollama.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable --now ollama.service
+# `start` and `stop` without the enable/disable half, for the local-AI standby
+# (src/lib/local-ai-runtime.ts): the runtime stops ollama after 10 idle minutes
+# to give the 8 GB board its RAM back and starts it again on the next request.
+# Doing that through the grants above would flip the owner's boot preference in
+# Settings -> Local Models every time a model went to sleep. No new privilege:
+# `enable --now` already implies starting, `disable --now` already implies
+# stopping. Until these existed the unprivileged systemctl call failed with
+# "Interactive authentication required" and Local AI sat switched-on over a dead
+# service (TASK-446).
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   ollama.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    ollama.service
 
 # Update / power / install paths.
 #
