@@ -92,6 +92,63 @@ describe("queue", () => {
   });
 });
 
+describe("what may reach the file", () => {
+  // Every case here is the same question: the queue file is written from data
+  // that arrived over HTTP, so what lands in it has to be text this module has
+  // agreed to store rather than whatever the request happened to carry.
+
+  it("refuses a subject with a control character in it", () => {
+    const result = store.queuePending({ ...DRAFT, subject: "Invoice\u001b[2K attached" });
+    expect(result.ok).toBe(false);
+    expect(store.listPending()).toEqual([]);
+    expect(fs.existsSync(pendingPath)).toBe(false);
+  });
+
+  it("refuses a subject with a line break in it, which is a header injection", () => {
+    const result = store.queuePending({ ...DRAFT, subject: "Hello\r\nBcc: someone@example.com" });
+    expect(result.ok).toBe(false);
+    expect(store.listPending()).toEqual([]);
+  });
+
+  it("refuses a body with a NUL or an escape sequence in it", () => {
+    expect(store.queuePending({ ...DRAFT, body: "before\u0000after" }).ok).toBe(false);
+    expect(store.queuePending({ ...DRAFT, body: "\u001b[31mred" }).ok).toBe(false);
+    expect(store.listPending()).toEqual([]);
+  });
+
+  it("refuses a bidi override, which makes the approval read differently from the send", () => {
+    expect(store.queuePending({ ...DRAFT, subject: "invoice\u202e fdp.exe" }).ok).toBe(false);
+  });
+
+  it("refuses a recipient that is not an address", () => {
+    const result = store.queuePending({ ...DRAFT, to: ["owner@example.com", "not an address"] });
+    expect(result.ok).toBe(false);
+    expect(result.ok === false && result.reason).toBe("invalid");
+    expect(store.listPending()).toEqual([]);
+  });
+
+  it("refuses a recipient with a NUL in it, which SMTP would read as a command", () => {
+    expect(store.queuePending({ ...DRAFT, to: ["own\u0000er@example.com"] }).ok).toBe(false);
+  });
+
+  it("still takes text in any language, with emoji and paragraphs", () => {
+    const subject = "Здравей 👋 — среща утре";
+    const body = "Ред едно\n\nРед две\tс табулация 🎉";
+    const result = store.queuePending({ ...DRAFT, subject, body });
+    expect(result.ok).toBe(true);
+    const [draft] = store.listPending();
+    expect(draft.subject).toBe(subject);
+    expect(draft.body).toBe(body);
+  });
+
+  it("writes nothing but the characters it agreed to store", () => {
+    store.queuePending({ ...DRAFT, subject: "Plain subject", body: "Line one\nLine two" });
+    const raw = fs.readFileSync(pendingPath, "utf-8");
+    // No C0 control byte other than the newlines JSON.stringify adds itself.
+    expect(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(raw)).toBe(false);
+  });
+});
+
 describe("approve and reject", () => {
   it("claims a draft exactly once", () => {
     // Read-and-remove in one step is what stops a double click sending twice.

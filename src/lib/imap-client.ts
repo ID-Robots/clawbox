@@ -255,19 +255,168 @@ function decodePart(body: string, contentType: string, encoding: string): string
   return decodeBytes(Buffer.from(body, "binary"), charset);
 }
 
+/**
+ * Tags whose CONTENT is machinery rather than words. Keyed by our own copy of
+ * the name so the closing tag we then search for is this file's string, not a
+ * name taken from the message.
+ */
+const DROP_CONTENT_TAGS = new Map<string, string>([
+  ["script", "script"],
+  ["style", "style"],
+  ["head", "head"],
+  ["title", "title"],
+]);
+
+/** Tags that end a visual line, so the text keeps the message's shape. */
+const LINE_BREAK_TAGS = new Set([
+  "br", "p", "div", "tr", "li", "ul", "ol", "table", "blockquote",
+  "h1", "h2", "h3", "h4", "h5", "h6",
+]);
+
+/** The named entities that turn up in mail, and our copy of what each means. */
+const NAMED_ENTITIES = new Map<string, string>([
+  ["nbsp", " "],
+  ["amp", "&"],
+  ["lt", "<"],
+  ["gt", ">"],
+  ["quot", '"'],
+  ["apos", "'"],
+  ["#39", "'"],
+]);
+
+interface HtmlTag {
+  /** Lower-cased element name; "" for a doctype or a bare "<!". */
+  name: string;
+  closing: boolean;
+  /** Index just past the ">" that ends the tag. */
+  end: number;
+}
+
+/**
+ * Read one tag starting at `start` (which must be a "<"), or null when the tag
+ * never closes.
+ *
+ * Attribute values are stepped over in quotes, so `<a title="a>b">` ends at the
+ * real ">" instead of the one inside the title — a regex that stops at the
+ * first ">" leaves `b">` behind as visible text.
+ */
+function readTag(html: string, start: number): HtmlTag | null {
+  let i = start + 1;
+  const closing = html[i] === "/";
+  if (closing) i += 1;
+  const name = (/^[A-Za-z][A-Za-z0-9:-]*/.exec(html.slice(i, i + 64))?.[0] ?? "").toLowerCase();
+  i += name.length;
+  let quote = "";
+  for (; i < html.length; i++) {
+    const ch = html[i];
+    if (quote) {
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === ">") return { name, closing, end: i + 1 };
+  }
+  return null;
+}
+
+/**
+ * Index just past `</name ...>`, or the end of the input when it never closes.
+ *
+ * The scan walks the ORIGINAL string and lower-cases only the few characters
+ * that could be the tag name. Searching a lower-cased COPY instead would be
+ * wrong twice over: `toLowerCase()` is not length-preserving (U+0130, Turkish
+ * dotted capital I, becomes two code units), so an index into the copy is not
+ * an index into the input, and a copy per dropped element makes a message with
+ * many <style> blocks quadratic work on a body we did not write.
+ */
+function skipElementContent(html: string, name: string, from: number): number {
+  for (let i = from; i + name.length + 2 <= html.length; i++) {
+    if (html[i] !== "<" || html[i + 1] !== "/") continue;
+    if (html.slice(i + 2, i + 2 + name.length).toLowerCase() !== name) continue;
+    const end = html.indexOf(">", i + 2 + name.length);
+    return end < 0 ? html.length : end + 1;
+  }
+  return html.length;
+}
+
+function decodeEntities(text: string): string {
+  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (whole, body: string) => {
+    const named = NAMED_ENTITIES.get(body.toLowerCase());
+    if (named !== undefined) return named;
+    if (body[0] !== "#") return whole;
+    const code = body[1] === "x" || body[1] === "X"
+      ? parseInt(body.slice(2), 16)
+      : parseInt(body.slice(1), 10);
+    // Controls, surrogates and out-of-range code points are not text a reader
+    // asked for; leaving the entity as written says more than dropping it.
+    if (!Number.isInteger(code) || code < 0x20 || code > 0x10ffff) return whole;
+    if (code >= 0xd800 && code <= 0xdfff) return whole;
+    return String.fromCodePoint(code);
+  });
+}
+
+/**
+ * HTML to plain text in ONE forward pass.
+ *
+ * WHY NOT A CHAIN OF `.replace()` CALLS: deleting `<script>…</script>` and then
+ * deleting `<…>` rewrites the string, and the rewritten string can contain
+ * markup the earlier pass has already walked past — `<scr<script>ipt>` loses
+ * its inner tag and leaves a working `<script>` behind. CodeQL calls this an
+ * incomplete multi-character sanitization, and it is right: any "remove the
+ * dangerous sequence" pass can put the sequence back together.
+ *
+ * A scanner has no such failure mode. It reads the input once, left to right,
+ * and never re-reads what it has emitted: every "<" that starts a tag is
+ * consumed together with everything up to the ">" that ends it, so no leftover
+ * can be assembled into a tag. Entities are decoded afterwards, on the emitted
+ * TEXT only — decoding first, or stripping again after decoding, is what turns
+ * `&lt;script&gt;` back into markup.
+ *
+ * The result is TEXT, not sanitized HTML, and every caller treats it as such:
+ * it reaches JSON responses that React escapes, and the MCP reply, and nothing
+ * inserts it into a page as markup.
+ */
 function stripHtml(html: string): string {
-  return html
-    .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&")
-    .replace(/\n{3,}/g, "\n\n");
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const ch = html[i];
+    if (ch !== "<") {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    // "a < b" in a message body is arithmetic, not a tag: only a name, a
+    // closer, a comment or a declaration starts markup.
+    if (!/[A-Za-z!/?]/.test(html[i + 1] ?? "")) {
+      out += ch;
+      i += 1;
+      continue;
+    }
+    if (html.startsWith("<!--", i)) {
+      const close = html.indexOf("-->", i + 4);
+      i = close < 0 ? html.length : close + 3;
+      continue;
+    }
+    const tag = readTag(html, i);
+    // A "<" with no ">" after it is an unterminated tag; everything left is
+    // inside it, so there is no more text to take.
+    if (!tag) break;
+    i = tag.end;
+    const dropped = DROP_CONTENT_TAGS.get(tag.name);
+    if (dropped) {
+      if (!tag.closing) i = skipElementContent(html, dropped, i);
+      continue;
+    }
+    if (LINE_BREAK_TAGS.has(tag.name)) out += "\n";
+  }
+  return decodeEntities(out)
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
@@ -422,7 +571,7 @@ class Session {
       const start = nl + 2;
       if (this.buf.length < start + size) return null;
       literals.push(this.buf.subarray(start, start + size));
-      text += `${segment.slice(0, m.index)} LIT${literals.length - 1} `;
+      text += `${segment.slice(0, m.index)}\u0000LIT${literals.length - 1}\u0000`;
       pos = start + size;
     }
   }
@@ -546,7 +695,7 @@ class Session {
    * caller that puts server text into an ImapError must go through here.
    */
   scrub(text: string): string {
-    return scrubSecrets(text, this.secrets).replace(/ LIT\d+ /g, "[data]").slice(0, 300);
+    return scrubSecrets(text, this.secrets).replace(/\u0000LIT\d+\u0000/g, "[data]").slice(0, 300);
   }
 
   close(): void {
@@ -765,7 +914,7 @@ export function parseFetchLine(line: ImapLine): FetchItem | null {
   const flagsMatch = /\bFLAGS \(([^)]*)\)/i.exec(line.text);
   const dateMatch = /\bINTERNALDATE "([^"]*)"/i.exec(line.text);
   // BODY[...] — the response name, even though the request said BODY.PEEK[...].
-  const bodyMatch = /\bBODY\[[^\]]*\](?:<\d+>)? ( LIT(\d+) |"([^"]*)"|NIL)/i.exec(line.text);
+  const bodyMatch = /\bBODY\[[^\]]*\](?:<\d+>)? (\u0000LIT(\d+)\u0000|"([^"]*)"|NIL)/i.exec(line.text);
 
   let body: Buffer | null = null;
   if (bodyMatch) {

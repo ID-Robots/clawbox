@@ -23,6 +23,7 @@ import {
   ImapError,
   isMailboxNameSafe,
   listMessages,
+  parseFetchLine,
   parseHeaders,
   readMessage,
   verifyImap,
@@ -535,9 +536,67 @@ describe("text extraction", () => {
     expect(text).toBe("hidden text");
   });
 
+  it("cannot be tricked into reassembling a tag it just removed", () => {
+    // A stripper that rewrites the string in passes can hand the next pass a
+    // tag that was not in the input: deleting the <script>…</script> block from
+    // "<scr<script>x</script>ipt src=y" leaves "<script src=y" behind, and the
+    // pass that removes "<…>" cannot clean it up because it never closes.
+    const body = ["--B", "Content-Type: text/html", "", "<scr<script>x</script>ipt src=y", "--B--"]
+      .join(CRLF);
+    const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
+    expect(text).not.toContain("<script");
+    expect(text).not.toContain("</script");
+  });
+
+  it("does not leak an attribute value that contains a '>'", () => {
+    const body = ["--B", "Content-Type: text/html", "", '<a href="/x" title="a>b">link</a>', "--B--"].join(CRLF);
+    const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
+    expect(text.trim()).toBe("link");
+  });
+
+  it("drops the content of a style block that is never closed", () => {
+    const body = ["--B", "Content-Type: text/html", "", "<style>body{color:red}", "--B--"].join(CRLF);
+    const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
+    expect(text).not.toContain("color:red");
+  });
+
+  it("drops a comment even when there is a '>' inside it", () => {
+    const body = ["--B", "Content-Type: text/html", "", "<!-- 3 > 2 -->the text", "--B--"].join(CRLF);
+    const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
+    expect(text.trim()).toBe("the text");
+  });
+
+  it("keeps a '<' that is arithmetic rather than markup", () => {
+    const body = ["--B", "Content-Type: text/html", "", "<p>1 < 2 and 3 &gt; 2</p>", "--B--"].join(CRLF);
+    const text = extractText(body, { "content-type": "multipart/alternative; boundary=B" });
+    expect(text.trim()).toBe("1 < 2 and 3 > 2");
+  });
+
   it("says so plainly when there is no readable text part", () => {
     const body = ["--B", "Content-Type: image/png", "", "binary", "--B--"].join(CRLF);
     const text = extractText(body, { "content-type": "multipart/mixed; boundary=B" });
     expect(text).toMatch(/no readable text part/i);
+  });
+});
+
+describe("FETCH parsing", () => {
+  // Every byte-counted literal is replaced by a placeholder before this regex
+  // sees the response, so what the placeholder is MADE of decides whether a
+  // server can hand-write one into ordinary text and be believed.
+
+  it("does not read a literal reference the server merely typed out", () => {
+    const line = {
+      text: "* 1 FETCH (UID 5 BODY[]  LIT0 )",
+      literals: [Buffer.from("a literal meant for another item")],
+    };
+    expect(parseFetchLine(line)?.body).toBeNull();
+  });
+
+  it("reads the literal the framing layer actually attached", () => {
+    const line = {
+      text: "* 1 FETCH (UID 5 BODY[] \u0000LIT0\u0000)",
+      literals: [Buffer.from("the real body")],
+    };
+    expect(parseFetchLine(line)?.body?.toString("utf8")).toBe("the real body");
   });
 });

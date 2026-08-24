@@ -97,8 +97,22 @@ export function isHeaderSafe(value: string): boolean {
   return !/[\r\n\0]/.test(value);
 }
 
-/** Deliberately permissive: the SMTP server is the real authority on an address. */
-export const EMAIL_ADDRESS_RE = /^[^\s@,<>]+@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
+/**
+ * The RFC 5322 dot-atom repertoire on the left of the "@", a hostname on the
+ * right, and nothing else.
+ *
+ * The local part used to be `[^\s@,<>]+`, which reads as "permissive" but
+ * actually means "anything that is not one of five characters" — NUL, CR, LF
+ * and every other control character included. An address is written straight
+ * into `RCPT TO:<...>`, so a control character in one is an SMTP command
+ * injection attempt rather than an unusual mailbox. Naming the characters that
+ * ARE allowed makes the list itself the answer to "what can reach the wire".
+ *
+ * The one legal shape this turns away is a quoted local part
+ * (`"a b"@example.com`). No mailbox anyone puts into a ClawBox needs one.
+ */
+export const EMAIL_ADDRESS_RE =
+  /^[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&'*+\/=?^_`{|}~-]+)*@[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$/;
 
 export function isEmailAddress(value: string): boolean {
   return value.length <= 254 && EMAIL_ADDRESS_RE.test(value);

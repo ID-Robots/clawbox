@@ -385,6 +385,12 @@ describe("header encoding and validation helpers", () => {
     expect(isEmailAddress("two@@example.com")).toBe(false);
     expect(isEmailAddress("spaced address@example.com")).toBe(false);
     expect(isEmailAddress("a@b")).toBe(false);
+    // The local part is a named repertoire, not "anything but five characters":
+    // a control character here would be written straight into RCPT TO:<...>.
+    expect(isEmailAddress("own\u0000er@example.com")).toBe(false);
+    expect(isEmailAddress("own\rer@example.com")).toBe(false);
+    expect(isEmailAddress("owner@exa\u0000mple.com")).toBe(false);
+    expect(isEmailAddress(".leading.dot@example.com")).toBe(false);
   });
 
   it("validates hosts and ports", () => {
