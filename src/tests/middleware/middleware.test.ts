@@ -673,6 +673,17 @@ describe("middleware", () => {
       "/setup-api/hermes/models",
       "/setup-api/hermes/clawai",
       "/setup-api/hermes/oauth",
+      // The four leaves of the provider sign-in flow, named one by one rather
+      // than left to the subtree above. They are the routes that mint, advance
+      // and destroy a real provider-OAuth session, so "the prefix covers them"
+      // is not something to infer from a passing test of the parent path — an
+      // exact entry in BOOTSTRAP_ALLOWED_EXACT beside them would gate the
+      // parent and open all four, which is the shape the mascot-lines pair
+      // already has in that file. TASK-527.
+      "/setup-api/hermes/oauth/start",
+      "/setup-api/hermes/oauth/submit",
+      "/setup-api/hermes/oauth/poll",
+      "/setup-api/hermes/oauth/cancel",
       "/setup-api/hermes/provider-key",
       "/setup-api/ai-models/configure",
       "/setup-api/telegram/configure",

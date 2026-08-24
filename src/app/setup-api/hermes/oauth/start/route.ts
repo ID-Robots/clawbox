@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
-import { dashboardUnreachable, hermesGate, isValidProviderId, readJsonBody, relayJson } from "../shared";
+import { dashboardUnreachable, isValidProviderId, ownerGate, readJsonBody, relayJson } from "../shared";
 
 // Start a Hermes provider-OAuth session on behalf of the wizard. The dashboard
 // answers with the flow it runs for this provider:
@@ -23,7 +23,7 @@ const START_KEYS = [
 ] as const;
 
 export async function POST(request: Request) {
-  const gate = await hermesGate();
+  const gate = await ownerGate(request);
   if (gate) return gate;
 
   const body = await readJsonBody(request);

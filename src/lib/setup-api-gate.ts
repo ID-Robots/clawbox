@@ -30,6 +30,15 @@
  * that `system/credentials` mints on the initial password set, so those routes
  * are deliberately NOT here.
  *
+ * The whole `/setup-api/hermes/oauth` subtree (start / submit / poll / cancel)
+ * is part of that "after": AIModelsStep drives it on step 4, holding the cookie
+ * step 3 handed it. Under the old deny-list none of those four was ever named,
+ * which is how the provider sign-in flow ended up answering an anonymous caller
+ * in radio range of the open AP; the inversion is what closed it, and their
+ * absence from this list is load-bearing rather than an oversight. The three
+ * that change something check for themselves as well — see `ownerGate` in
+ * src/app/setup-api/hermes/oauth/shared.ts. TASK-527.
+ *
  * Prefix match on a path-segment boundary (`/a` matches `/a` and `/a/b`, never
  * `/ab`).
  */
