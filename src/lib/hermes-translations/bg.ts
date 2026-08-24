@@ -1,0 +1,339 @@
+/**
+ * Bulgarian (български) — TASK-458.
+ *
+ * Register follows the shipped ClawBox copy: short controls are imperative
+ * singular ("Запази", "Опитай отново"), whole sentences address the user with
+ * the polite plural ("Изберете", "Опитайте отново"), quotes are „…“ and the
+ * em dash — and ellipsis … are kept as the English uses them.
+ */
+export const bg: Record<string, string> = {
+  // === Sidebar sections that had no key at all ===
+  "settings.localAi": "Локален AI",
+  "settings.localModels": "Локални модели",
+  "settings.voice": "Глас",
+
+  // === System password card ===
+  "settings.security.passwordLabel": "Парола",
+  "settings.security.passwordHintPrefix": "Използва се за влизане в уеб интерфейса, SSH и",
+  "settings.security.passwordHintSuffix": ". Промяната ѝ тук важи и за трите.",
+  "settings.security.currentPassword": "Текуща парола",
+  "settings.security.newPassword": "Нова парола",
+  "settings.security.newPasswordPlaceholder": "Нова парола (8+ символа)",
+  "settings.security.confirmNewPassword": "Потвърдете новата парола",
+  "settings.security.hideCurrentPassword": "Скрий текущата парола",
+  "settings.security.showCurrentPassword": "Покажи текущата парола",
+  "settings.security.hideNewPassword": "Скрий новата парола",
+  "settings.security.showNewPassword": "Покажи новата парола",
+  "settings.security.hideConfirmPassword": "Скрий потвърждението на паролата",
+  "settings.security.showConfirmPassword": "Покажи потвърждението на паролата",
+  "settings.security.clearAndReenter": "Изчисти и въведи отново текущата парола",
+  "settings.security.reenter": "Въведи отново",
+  "settings.security.checking": "Проверка…",
+  "settings.security.verify": "Провери",
+  "settings.security.passwordsDontMatchYet": "Паролите още не съвпадат",
+  "settings.security.saving": "Запазване…",
+  "settings.security.updatePassword": "Смени паролата",
+
+  // === "Write this password down" confirmation dialog ===
+  "settings.security.confirmTitle": "Запишете тази парола",
+  "settings.security.confirmBodyPrefix": "Това ще смени паролата ви за",
+  "settings.security.confirmBodyScope": "влизане в уеб интерфейса, SSH и sudo",
+  "settings.security.confirmBodySuffix": ". Ако я забравите, може да останете напълно без достъп до устройството и да е нужно фабрично нулиране, за да го върнете.",
+  "settings.security.hidePassword": "Скрий паролата",
+  "settings.security.revealPassword": "Покажи паролата",
+  "settings.security.hide": "Скрий",
+  "settings.security.reveal": "Покажи",
+  "settings.security.confirmChange": "Записах я — смени",
+
+  // === Validation and status ===
+  "settings.security.errorTooShort": "Новата парола трябва да е поне 8 символа",
+  "settings.security.errorMismatch": "Новите пароли не съвпадат",
+  "settings.security.errorSameAsCurrent": "Новата парола трябва да е различна от текущата",
+  "settings.security.errorInvalidChars": "Паролата съдържа непозволени символи",
+  "settings.security.verificationFailed": "Проверката не успя",
+  "settings.security.updateSuccess": "Паролата е сменена. Използвайте новата парола при следващото влизане или SSH.",
+  "settings.security.failed": "Неуспешно",
+
+  // === Saved Wi-Fi password editor ===
+  "settings.security.wifiPasswordLength": "Паролата трябва да е 8–63 символа",
+  "settings.security.wifiPasswordUpdated": "Паролата за {ssid} е сменена",
+
+  // === Panel chrome ===
+  "hermesProvider.title": "Модели на Hermes",
+  "hermesProvider.intro":
+    "Това устройство работи с Hermes. Изберете AI доставчик и модел по подразбиране — Hermes ги превключва сам, без нужда от табло.",
+  "hermesProvider.radioGroupLabel": "AI доставчик",
+  "hermesProvider.continue": "Продължи",
+
+  // === Provider rows ===
+  "hermesProvider.row.desc.openrouter": "300+ модела с един API ключ",
+  "hermesProvider.row.desc.anthropic": "Claude — влизане или API ключ",
+  "hermesProvider.row.desc.openaiCodex": "Влизане с OpenAI (Codex)",
+  "hermesProvider.row.desc.gemini": "Модели Gemini, директно",
+  "hermesProvider.row.desc.zai": "Модели GLM от Zhipu",
+  "hermesProvider.row.desc.kimiCoding": "Moonshot Kimi (за код)",
+  "hermesProvider.row.desc.copilot": "Влизане с GitHub",
+  "hermesProvider.row.desc.nous": "Влизане с Nous",
+
+  // === ClawBox AI card ===
+  "hermesProvider.clawai.activeBadge": "Активен",
+  "hermesProvider.clawai.switching": "Превключване…",
+  "hermesProvider.clawai.switchTo": "Премини към {tier}",
+  "hermesProvider.clawai.inUse": "ClawBox AI се използва",
+  "hermesProvider.clawai.modelLabel": "Модел:",
+  "hermesProvider.clawai.finishingSetup": "Завършване на настройката на това устройство…",
+  "hermesProvider.clawai.nowActive": "ClawBox AI вече е активният ви модел",
+  "hermesProvider.clawai.switchFailed": "Превключването към ClawBox AI не успя",
+
+  // === Provider sign-in (Hermes-native OAuth) ===
+  "hermesProvider.oauth.signInWith": "Влез с {provider}",
+  "hermesProvider.oauth.connectedDesc": "Свързан. OAuth данните за достъп са активни.",
+  "hermesProvider.oauth.cliOnlyDesc": "При този доставчик влизането става през Hermes CLI.",
+  "hermesProvider.oauth.availableDesc": "OAuth през Hermes (не е нужен API ключ).",
+  "hermesProvider.oauth.connectedBadge": "Свързан",
+  "hermesProvider.oauth.signIn": "Влез",
+  "hermesProvider.oauth.tryAgain": "Опитай отново",
+  "hermesProvider.oauth.cliInstructions": "Изпълнете това в терминала на устройството и отворете този панел отново:",
+  "hermesProvider.oauth.starting": "Стартиране на влизането с {provider}...",
+  "hermesProvider.oauth.pkceInstructions":
+    "Отвори се раздел за влизане в {provider}. Одобрете достъпа там, копирайте показания код и го поставете тук.",
+  "hermesProvider.oauth.reopenSignInPage": "Отвори отново страницата за влизане",
+  "hermesProvider.oauth.codeLabel": "Поставете кода от {provider}",
+  "hermesProvider.oauth.submitting": "Изпращане...",
+  "hermesProvider.oauth.submitCode": "Изпрати кода",
+  "hermesProvider.oauth.startOver": "Започни отначало",
+  "hermesProvider.oauth.deviceInstructions":
+    "Въведете този код на страницата за потвърждение на {provider}. Панелът се обновява сам, щом одобрите.",
+  "hermesProvider.oauth.copyCode": "Копирай кода",
+  "hermesProvider.oauth.copied": "Копирано",
+  "hermesProvider.oauth.openVerificationPage": "Отвори страницата за потвърждение",
+  "hermesProvider.oauth.waitingApproval": "Изчакване на одобрение...",
+  "hermesProvider.oauth.orPasteKey": "…или вместо това поставете API ключ по-долу.",
+  "hermesProvider.oauth.advancedLabel": "Разширени:",
+  "hermesProvider.oauth.dashboardLink": "Табло на Hermes (само в LAN)",
+
+  // === Provider sign-in failures raised by this panel ===
+  "hermesProvider.oauth.unexpectedResponse": "Неочакван отговор от Hermes",
+  "hermesProvider.oauth.startFailed": "Влизането не можа да започне",
+  "hermesProvider.oauth.codeRejected": "Кодът не беше приет",
+  "hermesProvider.oauth.expired": "Заявката за влизане изтече. Опитайте отново.",
+  "hermesProvider.oauth.failed": "Влизането не успя. Опитайте отново.",
+
+  // === Model picker ===
+  "hermesProvider.model.label": "Модел по подразбиране",
+  "hermesProvider.model.loading": "Зареждане…",
+  "hermesProvider.model.noCredentials": "Още няма данни за достъп до този доставчик",
+  "hermesProvider.model.noModels": "Няма налични модели",
+  "hermesProvider.model.savedElsewherePrefix": "Това устройство в момента използва",
+  "hermesProvider.model.savedElsewhereSuffix": ". Запазването ще го превключи към {provider}.",
+  "hermesProvider.model.staleColdStart": "Hermes още не е публикувал списък с модели — показва се минимален резервен списък.",
+  "hermesProvider.model.staleCached": "Показва се кеширан списък с модели; живият каталог на Hermes е недостъпен.",
+
+  // === API key + save ===
+  "hermesProvider.key.label": "API ключ за {provider}",
+  "hermesProvider.key.placeholder": "Поставете API ключ (по избор, ако вече е зададен)",
+  "hermesProvider.save.button": "Запази модела и доставчика",
+  "hermesProvider.save.saving": "Запазване…",
+  "hermesProvider.save.ok": "Запазено",
+  "hermesProvider.save.keySavedOk": "Ключът е запазен — доставчикът и моделът са обновени",
+  "hermesProvider.save.failed": "Запазването не успя",
+  "hermesProvider.save.keySavedNoCatalog":
+    "Ключът за {provider} е запазен, но доставчикът още не е публикувал списък с модели — отворете този панел отново след малко и изберете модел.",
+  "hermesProvider.save.noCredentials": "{provider} още няма данни за достъп — първо влезте или поставете API ключ.",
+  "hermesProvider.save.catalogUnavailable":
+    "Списъкът с модели на Hermes е недостъпен в момента, затова моделите на {provider} не могат да бъдат проверени. Опитайте отново след малко.",
+
+  // === Header ===
+  "skills.title": "Умения на Hermes",
+  "skills.subtitleWithCount": "{n} умения, налични за вашия Hermes агент",
+  "skills.subtitleFallback": "Добавете възможности към вашия Hermes агент",
+
+  // === Tabs ===
+  "skills.tablistLabel": "Изглед на уменията",
+  "skills.tabInstalled.withCount": "Инсталирани ({n})",
+  "skills.tabInstalled.empty": "Инсталирани",
+  "skills.tabBrowse": "Разгледай",
+
+  // === Search and filters ===
+  "skills.searchPlaceholder": "Търси умения…",
+  "skills.searchLabel": "Търсене на умения",
+  "skills.searchBusy": "Зареждане",
+  "skills.clearSearch": "Изчисти търсенето",
+  "skills.sortLabel": "Подреди",
+  "skills.sortOptions.relevance": "Най-подходящи",
+  "skills.sortOptions.name": "Име А–Я",
+  "skills.sortOptions.trust": "Най-надеждни",
+  "skills.sortOptions.popular": "Най-инсталирани",
+  "skills.sourceLabel": "Източник",
+  "skills.allSources": "Всички източници",
+  "skills.providerLabel": "Издател",
+  "skills.allProviders": "Всички издатели",
+  "skills.categoryLabel": "Категория",
+  "skills.allCategories": "Всички категории",
+  "skills.showingRange": "Показани {from}–{to} от {total}",
+  "skills.degradedCount": "Първите {n} съвпадения — уточнете търсенето, за да го стесните",
+  "skills.loadMore": "Зареди още",
+  "skills.loadingMore": "Зареждане на още умения…",
+
+  // === Scan verdicts ===
+  "skills.scanPassed": "Проверката е успешна",
+  "skills.scanFlagged.one": "Проверката отбеляза {n} находка",
+  "skills.scanFlagged.other": "Проверката отбеляза {n} находки",
+  "skills.notScanned": "Не е проверявано",
+
+  // === Where a skill came from ===
+  "skills.originBuiltin": "Вградено",
+  "skills.originHub": "Инсталирано",
+  "skills.originLocal": "Създадено тук",
+  "skills.originLocalHelp": "Написано на това устройство от вашия агент — не идва от регистър.",
+
+  // === Actions ===
+  "skills.install": "Инсталирай",
+  "skills.installing": "Инсталиране…",
+  "skills.installed": "Инсталирано",
+  "skills.remove": "Премахни",
+  "skills.removing": "Премахване…",
+  "skills.retry": "Опитай отново",
+  "skills.builtinLocked": "Вече е налично (вградено)",
+  "skills.cancel": "Отказ",
+
+  // === Install / remove confirmation ===
+  "skills.installTitle": "Инсталиране на {name}?",
+  "skills.installTrustedBody": "Това умение се изпълнява във вашия Hermes агент. Hermes го проверява, преди да го включи.",
+  "skills.installCommunityBody": "Създадено от общността и непрегледано от ID Robots. Проверете дали идентификаторът по-долу съвпада с издателя, когото очаквате.",
+  "skills.installWillAsk": "Ще поиска от вас: {labels}",
+  "skills.uninstallTitle": "Премахване на {name}?",
+  "skills.uninstallBody.withPath": "Това изтрива {path} от вашия агент. Можете да го инсталирате отново от „Разгледай“.",
+  "skills.uninstallBody.generic": "Това изтрива умението от вашия агент. Можете да го инсталирате отново от „Разгледай“.",
+
+  // === Mutation status (announced in the store's live region) ===
+  "skills.liveInstalling": "Инсталиране на {name}",
+  "skills.liveInstalled": "{name} е инсталирано",
+  "skills.liveInstallFailed": "{name} не можа да бъде инсталирано",
+  "skills.installFailed": "Инсталацията не успя",
+  "skills.liveRemoving": "Премахване на {name}",
+  "skills.liveRemoved": "{name} е премахнато",
+  "skills.liveRemoveFailed": "{name} не можа да бъде премахнато",
+  "skills.uninstallFailed": "Премахването не успя",
+
+  // === Empty and error states ===
+  "skills.emptySearch": "Няма умения, които да съвпадат с „{q}“",
+  "skills.emptySearchHint": "Опитайте с друга дума.",
+  "skills.emptySearchAllSources": "Търси във всички източници",
+  "skills.emptySource": "Още няма нищо в {label}",
+  "skills.clearSourceFilter": "Изчисти филтъра {label}",
+  "skills.emptyInstalled": "Няма инсталирани умения",
+  "skills.emptyInstalledHint": "Разгледайте регистъра, за да добавите възможности.",
+  "skills.browseSkills": "Разгледай уменията",
+  "skills.installedError": "Инсталираните умения не можаха да бъдат прочетени.",
+  "skills.installedStale": "Списъкът не можа да бъде обновен — показва се последното известно състояние.",
+  "skills.buildingCatalog": "Каталогът с умения се изгражда — първото разглеждане на ново устройство отнема около минута.",
+  "skills.buildingCatalogAuto": "Уменията ще се появят тук веднага щом каталогът е готов — можете да оставите това отворено.",
+  "skills.catalogStale": "Каталогът е свален последно {when}.",
+
+  // === Ambiguous identifier ===
+  "skills.ambiguousTitle": "{n} умения носят името „{q}“. Изберете това, което искате:",
+  "skills.ambiguousPickFirst": "Изберете едно по-долу, за да го инсталирате",
+
+  // === Platform compatibility ===
+  "skills.platformWarning": "Изисква {platforms} — това умение няма да работи на вашия ClawBox.",
+  "skills.platformOnly": "Само за {platforms}",
+
+  // === Detail sections ===
+  "skills.sectionRequirements": "Изисквания",
+  "skills.sectionGlance": "Накратко",
+  "skills.sectionAbout": "Относно",
+  "skills.sectionSecurity": "Сигурност и произход",
+  "skills.sectionRelated": "Сродни умения",
+  "skills.sectionDocs": "Документация",
+  "skills.docsOutline": "В този документ",
+  "skills.docsSections": "{n} раздела",
+  "skills.readMore": "Прочети повече",
+  "skills.showLess": "Покажи по-малко",
+  "skills.docsFull": "Пълен SKILL.md",
+  "skills.docsPreview": "Преглед на документацията — пълният текст е достъпен след инсталиране",
+  "skills.docsLoading": "Зареждане на документацията…",
+  "skills.docsUnavailable": "За това умение още няма документация.",
+
+  // === Requirements card ===
+  "skills.reqCommands": "Команди",
+  "skills.reqCommandPresent": "налична на това устройство",
+  "skills.reqCommandMissing": "не е инсталирана",
+  "skills.reqEnvVars": "Променливи на средата",
+  "skills.reqDependencies": "Пакети",
+  "skills.reqCredentials": "Файлове с данни за достъп",
+  "skills.reqCompatibility": "Съвместимост",
+  "skills.reqSetup": "Настройка",
+  "skills.reqSecrets": "Ще поиска от вас",
+  "skills.reqGetKey": "Вземи ключ",
+  "skills.reqSetupGuide": "Ръководство за настройка",
+
+  // === Provenance card ===
+  "skills.provSource": "Източник",
+  "skills.provSourceUnverified": "Сайт на издателя (непроверен)",
+  "skills.provRepo": "Хранилище",
+  "skills.provDetailPage": "Страница с детайли",
+  "skills.provHomepage": "Начална страница",
+  "skills.provInstallCommand": "Команда за инсталиране",
+  "skills.provWeeklyInstalls": "Инсталации",
+  "skills.provContentHash": "Хеш на съдържанието",
+  "skills.showAllFindings": "Покажи всички {n} находки",
+  "skills.copyIdentifier": "Копирай идентификатора",
+  "skills.copied": "Копирано",
+
+  // === "At a glance" fields and card facts ===
+  "skills.fieldVersion": "Версия",
+  "skills.fieldAuthor": "Автор",
+  "skills.fieldLicense": "Лиценз",
+  "skills.fieldCategory": "Категория",
+  "skills.fieldPlatforms": "Платформи",
+  "skills.fieldSize": "Размер",
+  "skills.fieldIncludes": "Включва",
+  "skills.fieldInstalled": "Инсталирано",
+  "skills.fieldUpdated": "Обновено",
+  "skills.fileCount.one": "{n} файл",
+  "skills.fileCount.other": "{n} файла",
+  "skills.installedAgo": "Инсталирано {when}",
+
+  // === Navigation ===
+  "skills.back": "Назад към уменията",
+  "skills.breadcrumbLabel": "Навигационен път",
+  "skills.breadcrumbBrowse": "Разгледай",
+  "skills.breadcrumbInstalled": "Инсталирани",
+
+  // === Relative dates (hub lock timestamps) ===
+  "skills.relative.justNow": "току-що",
+  "skills.relative.minutes": "преди {n} мин",
+  "skills.relative.hours": "преди {n} ч",
+  "skills.relative.days.one": "преди {n} ден",
+  "skills.relative.days.other": "преди {n} дни",
+  "skills.relative.months.one": "преди {n} месец",
+  "skills.relative.months.other": "преди {n} месеца",
+  "skills.relative.years": "преди {n} г",
+
+  // === Kind of model ===
+  "localModels.kind.llm": "Език",
+  "localModels.kind.tts": "Изходяща реч",
+  "localModels.kind.stt": "Входяща реч",
+  "localModels.kind.embedding": "Памет",
+
+  // === Run state ===
+  "localModels.run.running": "Работи",
+  "localModels.run.idle": "Спрян",
+  "localModels.run.onDemand": "При нужда",
+  "localModels.run.notInstalled": "Не е инсталиран",
+
+  // === Panel ===
+  "localModels.intro": "Всичко, което може да работи на самата кутия, и какво прави в момента. Всичко, отбелязано като неинсталирано, наистина липсва — това не е настройка, която можете да включите оттук.",
+  "localModels.unavailable": "Състоянието на следните не можа да бъде прочетено: {list}.",
+  "localModels.disk": "Диск {size}",
+  "localModels.memoryInUse": "Използвана памет {size}",
+  "localModels.managedInClawKeep": "Управлява се в ClawKeep.",
+  "localModels.managedInLocalAi": "Управлява се в Настройки → Локален AI.",
+  "localModels.toggleLabel": "{name} е включен",
+  "localModels.footer": "Изключването на модел го спира веднага и го оставя изключен след рестарт.",
+
+  // === Errors ===
+  "localModels.error.changeFailed": "Моделът не можа да бъде променен.",
+  "localModels.error.unreachable": "Кутията не отговори, за да бъде променен моделът.",
+};

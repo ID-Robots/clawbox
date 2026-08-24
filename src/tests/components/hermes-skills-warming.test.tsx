@@ -14,6 +14,30 @@ import HermesSkillsStore from "@/components/HermesSkillsStore";
  * reopened.
  */
 
+/**
+ * The store renders its copy through `t()` (TASK-458). On the desktop it sits
+ * under the page's I18nProvider; here it is rendered bare, so resolve keys
+ * against the real English catalogue — the assertions below then stay on the
+ * sentences a user actually reads, not on test ids.
+ */
+vi.mock("@/lib/i18n", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/i18n")>();
+  const { skillsEn } = await import("@/lib/hermes-translations/en-skills");
+  return {
+    ...actual,
+    useT: () => ({
+      locale: "en" as const,
+      localeResolved: true,
+      setLocale: () => {},
+      t: (key: string, params?: Record<string, string | number>) =>
+        Object.entries(params ?? {}).reduce(
+          (out, [name, value]) => out.replaceAll(`{${name}}`, String(value)),
+          skillsEn[key] ?? key,
+        ),
+    }),
+  };
+});
+
 const WARMING = {
   skills: [],
   page: 1,

@@ -9,10 +9,13 @@ import {
   type LocalAiProvider,
 } from "@/lib/local-ai-runtime";
 import {
+  applyOllamaThinkingToChatBody,
   applyThinkingToChatBody,
+  chatBodyModelId,
   isChatCompletionsPath,
   MAX_REWRITABLE_BODY_BYTES,
 } from "@/lib/local-ai-thinking";
+import { ollamaModelCanThink } from "@/lib/ollama-capabilities";
 
 /** True when Content-Length already says the body is too big to buffer. */
 function declaredOverCap(request: Request, maxBytes: number): boolean {
@@ -109,6 +112,22 @@ function trackResponseBody(body: ReadableStream<Uint8Array> | null, provider: Lo
   });
 }
 
+/**
+ * Translate a buffered chat-completions body for whichever backend will serve
+ * it. Both translations are in src/lib/local-ai-thinking.ts; this is only the
+ * part that has to reach the network.
+ */
+async function rewriteChatBody(provider: LocalAiProvider, raw: string): Promise<string> {
+  if (provider === "llamacpp") return applyThinkingToChatBody(raw);
+  // No field, nothing to decide — and, more importantly, no reason to spend a
+  // round trip on the capability probe. Most turns take this branch.
+  if (!raw.includes('"reasoning_effort"')) return raw;
+  // Cached per model, so a warm conversation pays for the probe once a minute
+  // at most; a failed probe answers null and the body is forwarded verbatim.
+  const canThink = await ollamaModelCanThink(chatBodyModelId(raw));
+  return applyOllamaThinkingToChatBody(raw, canThink);
+}
+
 export async function proxyLocalAiRequest(
   request: Request,
   provider: LocalAiProvider,
@@ -146,15 +165,15 @@ export async function proxyLocalAiRequest(
     };
 
     if (request.method !== "GET" && request.method !== "HEAD" && request.body) {
-      // Chat completions are the only path with a chat template to influence,
-      // so they are the only one we buffer — everything else keeps streaming.
-      // See src/lib/local-ai-thinking.ts for why the rewrite exists at all
-      // (llama.cpp ignores `reasoning_effort`; `chat_template_kwargs` is the
-      // field it actually reads).
+      // Chat completions are the only path whose thinking we can influence, so
+      // they are the only one we buffer — everything else keeps streaming.
+      // See src/lib/local-ai-thinking.ts for what each backend needs: llama.cpp
+      // ignores `reasoning_effort` and reads `chat_template_kwargs`, while
+      // Ollama reads `reasoning_effort` and 400s every value but `none` on a
+      // model that cannot think.
       // An oversized body is forwarded untouched rather than refused: a turn
       // that runs with the server's default thinking setting beats no turn.
-      const rewritable = provider === "llamacpp"
-        && request.method === "POST"
+      const rewritable = request.method === "POST"
         && isChatCompletionsPath(pathSegments)
         && !declaredOverCap(request, MAX_REWRITABLE_BODY_BYTES);
 
@@ -173,7 +192,7 @@ export async function proxyLocalAiRequest(
         }
         // A string body — fetch sets Content-Length from it, replacing the
         // client's header that forwardHeaders stripped.
-        init.body = applyThinkingToChatBody(raw);
+        init.body = await rewriteChatBody(provider, raw);
       } else {
         init.body = request.body;
         init.duplex = "half";

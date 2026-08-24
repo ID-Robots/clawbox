@@ -13,6 +13,9 @@ vi.mock("@/lib/code-projects", () => ({
   deleteFile: vi.fn().mockResolvedValue(undefined),
   searchFiles: vi.fn().mockResolvedValue([]),
   buildProject: vi.fn().mockResolvedValue({ url: "/test", filesInlined: 0 }),
+  // Absolute, and stubbed as such: the agent edits these files from a process
+  // with a different working directory, so a relative path resolves elsewhere.
+  projectPath: vi.fn((id: string) => `/home/clawbox/clawbox/data/code-projects/${id}`),
   validateProjectId: vi.fn((id: string) => /^[a-zA-Z0-9_-]{1,64}$/.test(id)),
   NotFoundError: class extends Error { constructor(m: string) { super(m); this.name = "NotFoundError"; } },
   ValidationError: class extends Error { constructor(m: string) { super(m); this.name = "ValidationError"; } },
@@ -65,6 +68,9 @@ describe("/setup-api/code", () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(body.project.projectId).toBe("test");
+    // The path the agent is handed has to be absolute — see
+    // src/tests/unit/mcp-code-project-paths.test.ts for why.
+    expect(body.path).toBe("/home/clawbox/clawbox/data/code-projects/test");
   });
 
   it("init: rejects invalid ID", async () => {
@@ -83,11 +89,21 @@ describe("/setup-api/code", () => {
     expect(body.projects).toEqual([]);
   });
 
+  it("list-projects: carries an absolute path per project", async () => {
+    vi.mocked(listProjects).mockResolvedValueOnce([
+      { projectId: "notes", name: "Notes", color: "", description: "", created: "", updated: "" },
+    ]);
+    const res = await POST(req({ action: "list-projects" }));
+    const body = await res.json();
+    expect(body.projects[0].path).toBe("/home/clawbox/clawbox/data/code-projects/notes");
+  });
+
   it("get-project: returns project", async () => {
     mockGetProject.mockResolvedValue({ projectId: "test", name: "Test", color: "", description: "", created: "", updated: "" });
     const res = await POST(req({ action: "get-project", projectId: "test" }));
     const body = await res.json();
     expect(body.project.projectId).toBe("test");
+    expect(body.path).toBe("/home/clawbox/clawbox/data/code-projects/test");
   });
 
   it("delete-project: deletes", async () => {
@@ -100,6 +116,7 @@ describe("/setup-api/code", () => {
     const res = await POST(req({ action: "file-list", projectId: "test" }));
     const body = await res.json();
     expect(body.files).toEqual([]);
+    expect(body.path).toBe("/home/clawbox/clawbox/data/code-projects/test");
   });
 
   it("file-read: returns content", async () => {
