@@ -24,7 +24,10 @@ import { z } from "zod";
 import { contractViolations, type RegisteredToolInfo } from "./lib/register";
 
 const HERMES_ONLY = ["skill_search", "skill_list", "skill_info", "skill_install", "skill_uninstall", "ai_list_models", "ai_set_provider", "ai_set_model"];
-const OPENCLAW_ONLY = ["app_search", "app_install", "bash", "job_status", "job_stop", "read_file", "write_file", "edit_file", "list_directory", "glob", "grep", "notebook_edit", "web_fetch", "web_search", "browser_click", "browser_type", "browser_keypress", "browser_scroll"];
+// backup_list / backup_now are here because ClawKeep archives the OpenClaw
+// agent through the openclaw CLI: on Hermes the feature reports
+// supportedOnEdition:false and there is nothing to list or write.
+const OPENCLAW_ONLY = ["app_search", "app_install", "bash", "job_status", "job_stop", "read_file", "write_file", "edit_file", "list_directory", "glob", "grep", "notebook_edit", "web_fetch", "web_search", "browser_click", "browser_type", "browser_keypress", "browser_scroll", "backup_list", "backup_now"];
 
 /** The real tools/list payload: what the model actually pays for. */
 function schemaBytes(tools: RegisteredToolInfo[]): number {

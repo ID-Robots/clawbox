@@ -735,8 +735,13 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
 
       {/* Top-anchored, not centred: the steps range from ~430px to ~700px
           tall, so a centred card slides its own H1 up and down on every
-          advance. Anchored, all five screens share one horizon. */}
-      <main className="setup-main">
+          advance. Anchored, all five screens share one horizon.
+
+          The welcome screen is the one exception — it is the shortest of the
+          five and the first thing the customer sees, so on a desktop-width
+          display it centres in the stage rather than stranding half a screen
+          of empty ground beneath it. See `.setup-main[data-welcome]`. */}
+      <main className="setup-main" data-welcome={currentStep === 1 && !completionStarted ? "" : undefined}>
         <div className="w-full flex flex-col items-center">
         {completionStarted ? (
           <SetupCompletionOverlay

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 
 vi.mock("@/lib/local-ai-runtime", () => ({
   ensureLocalAiReady: vi.fn(),
@@ -7,17 +8,19 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 
 describe("POST /setup-api/ollama/pull", () => {
   let ollamaPullPost: (req: Request) => Promise<Response>;
+  let session: SessionFixture;
 
   function jsonRequest(body: unknown): Request {
     return new Request("http://localhost/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Cookie: session.cookie },
       body: JSON.stringify(body),
     });
   }
 
   beforeEach(async () => {
     vi.resetModules();
+    session = installSessionFixture();
     vi.stubGlobal("fetch", vi.fn());
     const mod = await import("@/app/setup-api/ollama/pull/route");
     ollamaPullPost = mod.POST;
@@ -25,12 +28,13 @@ describe("POST /setup-api/ollama/pull", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    session.cleanup();
   });
 
   it("returns 400 for invalid JSON", async () => {
     const req = new Request("http://localhost/test", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Cookie: session.cookie },
       body: "not json",
     });
     const res = await ollamaPullPost(req);

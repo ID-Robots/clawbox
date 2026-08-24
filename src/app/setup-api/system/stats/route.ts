@@ -4,6 +4,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs";
 import fsP from "fs/promises";
+import { getCpuUsage } from "@/lib/cpu-usage";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,36 +32,6 @@ interface ProcessEntry {
   cpu: number;
   mem: number;
   command: string;
-}
-
-async function getCpuUsage(): Promise<number> {
-  try {
-    const stat1 = fs.readFileSync("/proc/stat", "utf-8");
-    const line1 = stat1.split("\n")[0];
-    const parts1 = line1.trim().split(/\s+/).slice(1).map(Number);
-    const idle1 = parts1[3];
-    const total1 = parts1.reduce((a, b) => a + b, 0);
-
-    // Sample /proc/stat twice with a non-blocking 200ms gap. A synchronous
-    // busy-wait here would freeze the single Node event loop on every poll.
-    await new Promise((r) => setTimeout(r, 200));
-
-    const stat2 = fs.readFileSync("/proc/stat", "utf-8");
-    const line2 = stat2.split("\n")[0];
-    const parts2 = line2.trim().split(/\s+/).slice(1).map(Number);
-    const idle2 = parts2[3];
-    const total2 = parts2.reduce((a, b) => a + b, 0);
-
-    const dIdle = idle2 - idle1;
-    const dTotal = total2 - total1;
-
-    if (dTotal === 0) return 0;
-    return Math.round(((dTotal - dIdle) / dTotal) * 100);
-  } catch {
-    // Fallback: use load average approximation
-    const cpuCount = os.cpus().length;
-    return Math.min(100, Math.round((os.loadavg()[0] / cpuCount) * 100));
-  }
 }
 
 async function getDiskUsage(): Promise<DiskMount[]> {
@@ -228,11 +199,11 @@ export async function GET() {
     const freeMem = os.freemem();
     const usedMem = totalMem - freeMem;
 
-    // Gather everything that touches the event loop (the 200ms CPU sample,
-    // temp/gpu reads, and the promisified execFile shells) in parallel so we
-    // never block the single Node process.
-    const [cpuUsage, temp, gpuUsage, kernel, storage, processes] = await Promise.all([
-      getCpuUsage(),
+    // CPU usage is a cached-delta read now (src/lib/cpu-usage.ts) — no sleep, no
+    // await. Everything below it still touches the event loop (temp/gpu reads,
+    // promisified execFile shells) so it stays in one Promise.all.
+    const cpuUsage = getCpuUsage();
+    const [temp, gpuUsage, kernel, storage, processes] = await Promise.all([
       getTemperature(),
       getGpuUsage(),
       getKernelRelease(),

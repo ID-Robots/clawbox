@@ -16,6 +16,16 @@ WorkingDirectory=/home/clawbox/clawbox
 ExecStart=/usr/bin/node /home/clawbox/clawbox/production-server.js
 Restart=always
 RestartSec=3
+# A clean stop is not a failure. systemd stops this unit with SIGTERM; with no
+# SuccessExitStatus every `systemctl restart clawbox-setup` (which the in-app
+# updater and every deploy end with) wrote
+#   clawbox-setup.service: Main process exited, code=exited, status=143/n/a
+#   clawbox-setup.service: Failed with result 'exit-code'.
+# into the journal and left the unit red in `systemctl status` — indistinguishable
+# from a real crash for anyone triaging the device. production-server.js now
+# handles SIGTERM and exits 0 on its own; this line covers the window before that
+# handler is installed and any Node/Next path that still exits 143.
+SuccessExitStatus=143 SIGTERM
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 EnvironmentFile=-/home/clawbox/clawbox/.env
 # MUST stay LAST of the EnvironmentFile= lines. /home/clawbox/clawbox/.env is

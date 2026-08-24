@@ -34,10 +34,19 @@ Same update, no browser needed:
 
 ```bash
 ssh clawbox@YOUR_BOX_IP        # your system password from setup
-sudo clawbox update
+sudo bash /home/clawbox/clawbox/install.sh
 ```
 
 The password prompt won't show characters as you type — that's normal. Let the installer finish completely (it prints numbered steps), then the box reboots.
+
+<Note>
+There is **no `clawbox` command on `PATH`**. The CLI wrapper exists in the checkout and is
+run through Bun — `bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts update` — but all it
+does is re-run `install.sh` with `sudo`, so calling the installer directly is equivalent
+and works in a non-interactive SSH session too. On a [Hermes](/editions/hermes) box the CLI
+path refuses; use **Settings → System Update** or the installer command above, which reads
+the edition lock and runs the edition-correct steps.
+</Note>
 
 ## An update got stuck, or the box misbehaves afterward
 

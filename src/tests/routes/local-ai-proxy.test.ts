@@ -160,3 +160,127 @@ describe("local AI proxy routes", () => {
     expect(mockFetch).toHaveBeenCalled();
   });
 });
+
+/**
+ * TASK-457 (a), the backend half. The picker change stops a level Ollama
+ * refuses from being OFFERED; this stops one that arrives anyway — a stale
+ * client, a direct API caller, or "Thinking on" (`max`) against a model that
+ * simply cannot think — from failing the turn.
+ *
+ * Measured on the box (Ollama 0.32.15, qwen2.5:0.5b, capabilities
+ * ["completion","tools"]): every reasoning_effort but `none` → HTTP 400
+ * "does not support thinking"; no field at all → HTTP 200.
+ */
+describe("ollama chat-completions reasoning rewrite", () => {
+  const CHAT_PATH = ["v1", "chat", "completions"];
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    mockEnsureLocalAiReady.mockResolvedValue();
+    const { _resetOllamaCapabilityCacheForTests } = await import("@/lib/ollama-capabilities");
+    _resetOllamaCapabilityCacheForTests();
+  });
+
+  /** fetch stub answering /api/show with `capabilities` and everything else 200. */
+  function stubOllama(capabilities: string[] | null) {
+    const calls: { url: string; body: string }[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const body = typeof init?.body === "string" ? init.body : "";
+      calls.push({ url, body });
+      if (url.endsWith("/api/show")) {
+        if (capabilities === null) return new Response("nope", { status: 500 });
+        return new Response(JSON.stringify({ capabilities }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return calls;
+  }
+
+  async function chat(body: unknown) {
+    const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
+    return mod.POST(
+      new Request("http://localhost/setup-api/local-ai/ollama/v1/chat/completions", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      }),
+      { params: Promise.resolve({ path: CHAT_PATH }) },
+    );
+  }
+
+  const upstreamBody = (calls: { url: string; body: string }[]) =>
+    JSON.parse(calls.find((c) => c.url.endsWith("/chat/completions"))!.body);
+
+  it("drops reasoning_effort for a model that cannot think", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    const res = await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "max" });
+
+    expect(res.status).toBe(200);
+    const sent = upstreamBody(calls);
+    expect(sent).not.toHaveProperty("reasoning_effort");
+    expect(sent.model).toBe("qwen2.5:3b");
+  });
+
+  it("folds the OFF end onto ollama's own word for a model that can think", async () => {
+    const calls = stubOllama(["completion", "tools", "thinking"]);
+
+    const res = await chat({ model: "gpt-oss:20b", messages: [], reasoning_effort: "minimal" });
+
+    expect(res.status).toBe(200);
+    expect(upstreamBody(calls).reasoning_effort).toBe("none");
+  });
+
+  it("keeps a thinking level for a model that can think", async () => {
+    const calls = stubOllama(["completion", "thinking"]);
+
+    await chat({ model: "gpt-oss:20b", messages: [], reasoning_effort: "max" });
+
+    expect(upstreamBody(calls).reasoning_effort).toBe("max");
+  });
+
+  it("forwards the body untouched when the capability probe fails", async () => {
+    const calls = stubOllama(null);
+
+    await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "max" });
+
+    expect(upstreamBody(calls).reasoning_effort).toBe("max");
+  });
+
+  it("does not probe at all when the body asks for no reasoning", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    await chat({ model: "qwen2.5:3b", messages: [] });
+
+    expect(calls.some((c) => c.url.endsWith("/api/show"))).toBe(false);
+  });
+
+  it("caches the probe across turns", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "max" });
+    await chat({ model: "qwen2.5:3b", messages: [], reasoning_effort: "high" });
+
+    expect(calls.filter((c) => c.url.endsWith("/api/show"))).toHaveLength(1);
+  });
+
+  it("leaves a non-chat ollama path streaming, untouched", async () => {
+    const calls = stubOllama(["completion", "tools"]);
+
+    const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
+    await mod.POST(
+      new Request("http://localhost/setup-api/local-ai/ollama/api/chat", {
+        method: "POST",
+        headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ model: "qwen2.5:3b", reasoning_effort: "max" }),
+      }),
+      { params: Promise.resolve({ path: ["api", "chat"] }) },
+    );
+
+    expect(calls.some((c) => c.url.endsWith("/api/show"))).toBe(false);
+  });
+});

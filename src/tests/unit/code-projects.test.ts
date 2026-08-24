@@ -59,6 +59,7 @@ import {
   APP_ID_RE,
   MAX_PROJECT_NAME_LENGTH,
   WEBAPPS_DIR,
+  projectPath,
   ValidationError,
   NotFoundError,
 } from "@/lib/code-projects";
@@ -114,6 +115,29 @@ describe("code-projects", () => {
     it("is defined", () => {
       expect(WEBAPPS_DIR).toBeDefined();
       expect(WEBAPPS_DIR).toContain("webapps");
+    });
+  });
+
+  // The agent edits project files from a process whose working directory is
+  // NOT the web tier's, so a relative path resolves to a different tree — it
+  // read nothing and wrote into /home/clawbox/data/... Absolute is the only
+  // form both processes agree on.
+  describe("projectPath", () => {
+    it("is absolute and points into the code-projects directory", () => {
+      const dir = projectPath("notes");
+      expect(path.isAbsolute(dir)).toBe(true);
+      expect(dir).toBe(path.join(path.dirname(WEBAPPS_DIR), "code-projects", "notes"));
+    });
+
+    it("resolves the same from any working directory", () => {
+      const dir = projectPath("notes");
+      for (const cwd of ["/", "/home/clawbox", "/home/clawbox/clawbox"]) {
+        expect(path.resolve(cwd, dir)).toBe(dir);
+      }
+    });
+
+    it("refuses an id that could escape the projects directory", () => {
+      expect(() => projectPath("../hack")).toThrow(ValidationError);
     });
   });
 
