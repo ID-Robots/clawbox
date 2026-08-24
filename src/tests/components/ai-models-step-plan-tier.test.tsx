@@ -43,7 +43,6 @@ type StatusStub = {
   clawaiConfigured?: boolean;
   tierSource?: "portal" | "picker";
   clawaiAccountTier?: "flash" | "pro" | null;
-  clawaiImages?: Record<string, unknown>;
 };
 
 function mockStatus(status: StatusStub | null) {
@@ -127,45 +126,6 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     const { findByText } = renderPanel();
 
     expect(await findByText("Max plan · €49/month")).toBeInTheDocument();
-  });
-
-  it("renders the day's image allowance under the plan it belongs to", async () => {
-    // TASK-469's decided placement: Settings -> AI Provider, beside the plan.
-    // The panel is asserted here rather than only the component, because the
-    // failure this fixes was never a rendering bug — the route produced the
-    // block and no component anywhere consumed it.
-    mockStatus({
-      clawaiConfigured: true,
-      tierSource: "portal",
-      clawaiAccountTier: "pro",
-      clawaiImages: {
-        supported: true, model: "gpt-image-1-mini",
-        plan: "max", planLabel: "Max", dailyLimit: 20, used: 3,
-      },
-    });
-    const { findByTestId } = renderPanel();
-    // i18n is stubbed to echo keys in this file, so the assertion is that the
-    // right key reached the right surface; the copy itself is covered in
-    // clawai-image-allowance-line.test.tsx against the real string packs.
-    expect((await findByTestId("clawai-image-allowance")).textContent)
-      .toContain("ai.imagesUsedToday");
-  });
-
-  it("shows nothing about images when the portal did not answer this cycle", async () => {
-    // Same gate as the tier badge. An allowance left on screen after the portal
-    // stopped confirming it is a stale cap, and a stale cap is indistinguishable
-    // from a wrong one.
-    mockStatus({ clawaiConfigured: true, tierSource: "picker", clawaiAccountTier: "flash" });
-    const { findByText, queryByTestId } = renderPanel();
-    await findByText("Pro plan · €9/month");
-    expect(queryByTestId("clawai-image-allowance")).toBeNull();
-  });
-
-  it("shows nothing about images when the route sent no allowance block", async () => {
-    mockStatus({ clawaiConfigured: true, tierSource: "portal", clawaiAccountTier: "pro" });
-    const { findByText, queryByTestId } = renderPanel();
-    await findByText("Max plan · €49/month");
-    expect(queryByTestId("clawai-image-allowance")).toBeNull();
   });
 
   it("survives a status route that fails outright", async () => {

@@ -814,7 +814,7 @@ async function configureClawboxAi(
 
   // Images ride on the same token and the same proxy, so they are provisioned
   // here rather than behind a separate opt-in — a box that has ClawBox AI has
-  // an image allowance whether or not ClawBox AI is also the chat provider.
+  // image generation whether or not ClawBox AI is also the chat provider.
   // Non-fatal: a chat provider that works is worth more than an image tool, so
   // a failure here must not fail the whole "Connect ClawBox AI" flow.
   let imageOps: OpenclawConfigSetArgs[] = [];
