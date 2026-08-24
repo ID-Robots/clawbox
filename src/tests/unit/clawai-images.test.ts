@@ -115,13 +115,15 @@ describe("clawaiImageRouteReachable", () => {
   };
 
   it("says yes when the proxy serves the model this box would ask for", async () => {
-    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
-      jsonResponse({ ...discovery, models: [IMAGE_MODEL] }));
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      // A GET at the images endpoint: the proxy's own discovery read, which
+      // costs no generation and no daily allowance to ask.
+      expect(String(url)).toBe(CLAWBOX_AI_IMAGES_ENDPOINT);
+      expect(init?.method).toBe("GET");
+      return jsonResponse({ ...discovery, models: [IMAGE_MODEL] });
+    });
     await expect(clawaiImageRouteReachable(fetchImpl)).resolves.toBe(true);
-    expect(fetchImpl).toHaveBeenCalledWith(
-      CLAWBOX_AI_IMAGES_ENDPOINT,
-      expect.objectContaining({ method: "GET" }),
-    );
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("says no when the route is up but no longer serves that model", async () => {
