@@ -1122,6 +1122,10 @@ export async function POST(request: Request) {
     requestScope = scope;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
+    // Normalized once, like the key above: this handler reads the `model`
+    // field in four branches, and inlining the same ternary in each let the
+    // copies drift.
+    const normalizedModel = typeof bodyModel === "string" ? bodyModel.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
@@ -1304,9 +1308,7 @@ export async function POST(request: Request) {
       // an API caller who wrote { model: "qwen2.5:3b" } used to have the field
       // silently ignored and llama3.2:3b saved in its place — a "success" that
       // configured a model this box does not have.
-      const requestedOllamaModel =
-        normalizedApiKey || (typeof bodyModel === "string" ? bodyModel.trim() : "");
-      const modelName = requestedOllamaModel || "llama3.2:3b";
+      const modelName = normalizedApiKey || normalizedModel || "llama3.2:3b";
 
       // Ask Ollama about the id BEFORE anything is written. Both refusals below
       // used to be discovered by the customer one dead chat turn at a time: an
@@ -1335,23 +1337,24 @@ export async function POST(request: Request) {
         return NextResponse.json(
           {
             error:
-              `"${modelName}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window, `
-              + `and the assistant needs ${HERMES_MINIMUM_CONTEXT_TOKENS.toLocaleString("en-US")} tokens to run. `
-              + `Pick a model with at least a ${Math.floor(HERMES_MINIMUM_CONTEXT_TOKENS / 1000)}K window.`,
+              `"${modelName}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window; `
+              + `the assistant needs at least ${HERMES_MINIMUM_CONTEXT_TOKENS.toLocaleString("en-US")}. `
+              + "Pick a larger model.",
           },
           { status: 400 },
         );
       }
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
-      const modelName = normalizedApiKey || getDefaultLlamaCppModel();
+      // Same two slots as the Ollama branch above, for the same reason.
+      const modelName = normalizedApiKey || normalizedModel || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
     } else if (
       authMode === "subscription"
       && ocProvider === "codex"
-      && !(typeof bodyModel === "string" && bodyModel.trim())
+      && !normalizedModel
     ) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
@@ -1376,7 +1379,7 @@ export async function POST(request: Request) {
         // Never let model selection break sign-in.
         console.warn("[configure] codex entitlement probe failed:", err);
       }
-    } else if (typeof bodyModel === "string" && bodyModel.trim()) {
+    } else if (normalizedModel) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
       // from silently saving a broken primary. We don't check against
@@ -1391,7 +1394,7 @@ export async function POST(request: Request) {
       // `config.defaultModel` was already set to the correct namespace
       // above by applying subscriptionOverride, so we derive the
       // target provider from the existing default instead of `provider`.
-      const requestedModel = bodyModel.trim();
+      const requestedModel = normalizedModel;
       const targetProvider = config.defaultModel.split("/", 1)[0];
       const supportedProviders = new Set([
         "openrouter",

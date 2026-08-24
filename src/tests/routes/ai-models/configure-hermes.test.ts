@@ -86,11 +86,13 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 }));
 
 // The save-time probe (TASK-448). Mocked so no test opens a socket; each test
-// states what Ollama would have answered about the requested model.
+// states what Ollama would have answered about the requested model. The floor
+// constant stays the REAL one — a hand-copied 64_000 would silently keep
+// testing the old number if the agent's floor ever moved.
 const probeMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/ollama-model-context", () => ({
+vi.mock("@/lib/ollama-model-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ollama-model-context")>()),
   probeOllamaModel: probeMock,
-  HERMES_MINIMUM_CONTEXT_TOKENS: 64_000,
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({
@@ -158,7 +160,6 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
 
     // A healthy default: the requested model exists and its window clears the
     // 64K floor, so only the tests ABOUT the gate have to say otherwise.
-    probeMock.mockReset();
     probeMock.mockResolvedValue({ status: "ok", contextLength: 128_000 });
 
     // mockReset strips every factory-time mockResolvedValue, so the harness —
@@ -288,6 +289,17 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expect(probeMock).toHaveBeenCalledWith("qwen3:8b");
     expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "ollama", model: "qwen3:8b" }),
+    );
+  });
+
+  it("honours the model FIELD for llama.cpp too", async () => {
+    // Same two slots as Ollama, same reason: a caller naming a model must
+    // never have a different one saved in its place.
+    const res = await POST(jsonRequest({ provider: "llamacpp", model: "gemma4-e4b-it-q4_0", scope: "local" }));
+
+    expect(res.status).toBe(200);
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "llamacpp", model: "gemma4-e4b-it-q4_0" }),
     );
   });
 

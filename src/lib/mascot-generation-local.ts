@@ -72,35 +72,6 @@ export function buildResponseSchema(): Record<string, unknown> {
 }
 
 /**
- * The alias the CUSTOMER configured, or null — the SAME resolution
- * `ensureLocalAiReady` uses to start the server, with one deliberate
- * difference: no default is substituted.
- *
- * Substituting one is what made a page load able to provision a model. It also
- * used to make this module ask for a different model than the one the launcher
- * started, on a device configured with a non-default alias. One resolution,
- * one answer, and "nothing is configured" stays sayable.
- */
-async function resolveConfiguredAlias(): Promise<string | null> {
-  try {
-    return await resolveConfiguredLlamaCppAlias();
-  } catch {
-    return null;
-  }
-}
-
-/** Null when the answer is unknowable — treated as "not on disk" by the
- *  caller, because "cannot verify the weights exist" must never launch a
- *  process that downloads them. */
-async function getProvisioningStatus(alias: string) {
-  try {
-    return await getLlamaCppProvisioningStatus(alias);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * The request body, exported so a test can assert on it without a server.
  *
  * `chat_template_kwargs.enable_thinking: false` is load-bearing, not a
@@ -221,17 +192,26 @@ export async function generatePhrasesLocally(
   // path's own fallback used to substitute the default Gemma alias, so merely
   // opening the desktop could arm an unattended multi-GB download. Consent to
   // download lives in the enable path (`activateLocalAiProvider` keeps the
-  // same rule); a cosmetic refresh that cannot PROVE the weights are on disk
-  // reports "unavailable" and the mascot keeps its pack.
-  const configuredAlias = await resolveConfiguredAlias();
-  if (!configuredAlias) {
-    return { status: "failed", failure: "unavailable" };
+  // same rule); a cosmetic refresh that cannot PROVE the weights are on disk —
+  // resolution errors included — reports "unavailable" and the mascot keeps
+  // its pack. No default alias is substituted here: that substitution is
+  // exactly what handed the launcher a model to fetch.
+  let configuredAlias: string | null = null;
+  let modelOnDisk = false;
+  try {
+    configuredAlias = await resolveConfiguredLlamaCppAlias();
+    if (configuredAlias) {
+      modelOnDisk = (await getLlamaCppProvisioningStatus(configuredAlias)).modelAvailable;
+    }
+  } catch {
+    // Cannot verify == not on disk; never launch a process that downloads.
   }
-  const provisioning = await getProvisioningStatus(configuredAlias);
-  if (!provisioning?.modelAvailable) {
-    console.warn(
-      `[mascot-generation] skipping for ${locale}: local model ${configuredAlias} is not on disk, and a background refresh never downloads one`,
-    );
+  if (!configuredAlias || !modelOnDisk) {
+    if (configuredAlias) {
+      console.warn(
+        `[mascot-generation] skipping for ${locale}: local model ${configuredAlias} is not on disk, and a background refresh never downloads one`,
+      );
+    }
     return { status: "failed", failure: "unavailable" };
   }
 

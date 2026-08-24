@@ -17,15 +17,12 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
 }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
-// Mirrors the REAL url builders byte-for-byte. The previous mock returned
-// `/v1` from getLocalAiProxyBaseUrl for both providers — which is what the
-// real one never did for Ollama, so this suite asserted the /v1 base_url
-// while every actual device wrote the bare root and 404'd (TASK-448).
+// Mirrors the REAL url builders byte-for-byte — the previous mock answered a
+// /v1 Ollama URL the real builder never produced, so this suite asserted a
+// base_url no device ever wrote (TASK-448). The real builders' exact strings
+// are pinned, unmocked, in local-ai-openai-base-url.test.ts.
 vi.mock("@/lib/local-ai-runtime", () => ({
-  getLocalAiProxyBaseUrl: (p: string) =>
-    p === "llamacpp"
-      ? "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"
-      : "http://127.0.0.1/setup-api/local-ai/ollama",
+  getLocalAiProxyRootUrl: () => "http://127.0.0.1",
   getLocalAiOpenAiBaseUrl: (p: string) =>
     p === "llamacpp"
       ? "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"
@@ -156,14 +153,12 @@ describe("registering the local model with Hermes", () => {
 });
 
 describe("reconciling an already-configured device", () => {
+  // No mockReset ritual: vitest.config.ts already runs clearMocks/mockReset
+  // between tests — only the behaviour each test needs is established here.
   beforeEach(() => {
     _resetLocalAiReconcileForTests();
-    cliMock.mockReset();
-    patchMock.mockReset();
     patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
-    readMock.mockReset();
     readMock.mockResolvedValue(null);
-    getConfigMock.mockReset();
     getConfigMock.mockImplementation(async (key: string) => {
       if (key === "local_ai_configured") return true;
       if (key === "local_ai_provider") return "ollama";
@@ -171,7 +166,6 @@ describe("reconciling an already-configured device", () => {
       return undefined;
     });
   });
-  afterEach(() => vi.clearAllMocks());
 
   /** What `hermes config get providers.clawlocal.base_url` answers. */
   function registeredBaseUrl(value: string) {

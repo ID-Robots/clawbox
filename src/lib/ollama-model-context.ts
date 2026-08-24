@@ -18,7 +18,7 @@
  * `parameters` and `model_info`.
  */
 
-import { getOllamaBaseUrl } from "@/lib/local-ai-runtime";
+import { fetchOllamaShow } from "@/lib/ollama-capabilities";
 
 /**
  * The smallest context window the Hermes agent will run in.
@@ -96,32 +96,13 @@ export function contextLengthFromShow(payload: unknown): number | null {
 }
 
 /** Ask Ollama about one model. Never throws — the caller decides what a
- *  failed question means, and "we could not ask" is not "the model is bad". */
+ *  failed question means, and "we could not ask" is not "the model is bad".
+ *  The transport is ollama-capabilities' `fetchOllamaShow`, shared with the
+ *  thinking probe, so the two can never address `/api/show` differently. */
 export async function probeOllamaModel(model: string): Promise<OllamaModelProbe> {
-  const id = model.trim();
-  if (!id) return { status: "not-installed" };
-
-  let response: Response;
-  try {
-    response = await fetch(`${getOllamaBaseUrl()}/api/show`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: id }),
-      cache: "no-store",
-      signal: AbortSignal.timeout(SHOW_TIMEOUT_MS),
-    });
-  } catch {
-    return { status: "unreachable" };
-  }
-
-  if (response.status === 404) return { status: "not-installed" };
-  if (!response.ok) return { status: "unreachable" };
-
-  try {
-    return { status: "ok", contextLength: contextLengthFromShow(await response.json()) };
-  } catch {
-    // A 200 that is not JSON still proves the model exists; we simply learned
-    // nothing about its window, and an unknown window is not a rejection.
-    return { status: "ok", contextLength: null };
-  }
+  const result = await fetchOllamaShow(model, SHOW_TIMEOUT_MS);
+  if (result.status !== "ok") return result;
+  // A non-JSON 200 arrives as a null payload: the model exists, we simply
+  // learned nothing about its window, and an unknown window is not a rejection.
+  return { status: "ok", contextLength: contextLengthFromShow(result.payload) };
 }
