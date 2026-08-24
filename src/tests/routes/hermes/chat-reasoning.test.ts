@@ -12,7 +12,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * the clamp alone would have shown it, because the clamp was doing exactly what
  * it was told.
  */
-vi.mock("child_process", () => ({ spawn: vi.fn() }));
+// `execFile` as well as `spawn`. The route reaches `openclaw-config` through
+// the media root it now resolves, and that module does `promisify(execFile)` at
+// import time — so a mock without it makes the route unloadable rather than
+// making a case fail.
+vi.mock("child_process", () => ({ spawn: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ HERMES_BIN: "/home/clawbox/.local/bin/hermes" }));
 vi.mock("@/lib/hermes-model-options", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/hermes-model-options")>();
