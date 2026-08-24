@@ -3196,7 +3196,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[#5865F2]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
+                <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</span>
               </div>
               {dcConfigured === null ? (
                 <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
@@ -3336,9 +3336,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5"
                 data-testid="discord-members"
               >
-                <label className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
+                <span className="block text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
                   {t("settings.discordMembersTitle")}
-                </label>
+                </span>
                 <p className="text-xs text-[var(--text-secondary)] leading-relaxed">
                   {t("settings.discordMembersHint")}
                 </p>
@@ -3405,9 +3405,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>add_circle</span>
-                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  <span className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
                     {dcReconfigure ? t("settings.reconfigureBot") : t("settings.discordGuideTitle")}
-                  </label>
+                  </span>
                 </div>
 
                 <ol className="ml-0 pl-5 leading-[1.9] text-sm text-white/70 list-decimal">
