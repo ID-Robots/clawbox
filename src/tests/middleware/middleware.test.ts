@@ -490,6 +490,10 @@ describe("middleware", () => {
       // POST rewrites messages.tts.provider and spawns the openclaw CLI. Same
       // radio-range reasoning as local-models: onboarding never calls it.
       "/setup-api/tts",
+      // POST downloads ~2.2 MB from a third-party CDN and rewrites
+      // display.pet.*. Cosmetic, desktop-only, and never part of onboarding.
+      "/setup-api/pets",
+      "/setup-api/pets/select",
       "/setup-api/gateway",
       "/setup-api/gateway/", // trailing slash must not dodge the exact match
       // Each call cold-loads a ~3.8 GB model on a Jetson for up to three

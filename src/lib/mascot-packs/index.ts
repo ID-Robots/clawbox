@@ -12,8 +12,8 @@
 // dynamically imported the first time it is asked for, so a Japanese box does
 // not ship nine unused packs to the browser.
 
-import { en } from "./en";
-import { neutral } from "./neutral";
+import { en, enCrab } from "./en";
+import { neutral, neutralCrab } from "./neutral";
 import {
   mergeWithPackSync,
   type MascotPhraseSet,
@@ -24,7 +24,23 @@ export { en, neutral };
 /** The language-free pack. Safe to render in any locale, at any time. */
 export const NEUTRAL_PACK: MascotPhraseSet = neutral;
 
-type PackLoader = () => Promise<MascotPhraseSet>;
+/** The 🦀-literal entries of the neutral pack — see `mascot-pet-voice.ts`. */
+export const NEUTRAL_CRAB_LINES: readonly string[] = neutralCrab;
+
+/**
+ * A locale's pack together with the crab-literal lines inside it.
+ *
+ * Loaded as one unit because they live in one module: the crab tags are only
+ * useful next to the pack they describe, and pairing them here means a locale
+ * still downloads exactly one chunk.
+ */
+export interface LocalePack {
+  phrases: MascotPhraseSet;
+  /** Entries a pet must never speak. Subtracted by `petSafePhrases`. */
+  crab: readonly string[];
+}
+
+type PackLoader = () => Promise<LocalePack>;
 
 // One entry per locale ClawBox ships a UI language for. Each import specifier
 // is a string literal on purpose: that is what lets the bundler code-split the
@@ -34,19 +50,24 @@ type PackLoader = () => Promise<MascotPhraseSet>;
 // (language-free) if joyless — and `mascot-packs.test.ts` fails, because every
 // PREFERENCE_LANGUAGES entry is required to have a real pack.
 const LOADERS: Readonly<Record<string, PackLoader>> = {
-  en: async () => en,
-  bg: async () => (await import("./bg")).bg,
-  de: async () => (await import("./de")).de,
-  es: async () => (await import("./es")).es,
-  fr: async () => (await import("./fr")).fr,
-  it: async () => (await import("./it")).it,
-  ja: async () => (await import("./ja")).ja,
-  nl: async () => (await import("./nl")).nl,
-  sv: async () => (await import("./sv")).sv,
-  zh: async () => (await import("./zh")).zh,
+  en: async () => ({ phrases: en, crab: enCrab }),
+  bg: async () => { const m = await import("./bg"); return { phrases: m.bg, crab: m.bgCrab }; },
+  de: async () => { const m = await import("./de"); return { phrases: m.de, crab: m.deCrab }; },
+  es: async () => { const m = await import("./es"); return { phrases: m.es, crab: m.esCrab }; },
+  fr: async () => { const m = await import("./fr"); return { phrases: m.fr, crab: m.frCrab }; },
+  it: async () => { const m = await import("./it"); return { phrases: m.it, crab: m.itCrab }; },
+  ja: async () => { const m = await import("./ja"); return { phrases: m.ja, crab: m.jaCrab }; },
+  nl: async () => { const m = await import("./nl"); return { phrases: m.nl, crab: m.nlCrab }; },
+  sv: async () => { const m = await import("./sv"); return { phrases: m.sv, crab: m.svCrab }; },
+  zh: async () => { const m = await import("./zh"); return { phrases: m.zh, crab: m.zhCrab }; },
 };
 
-const loaded = new Map<string, MascotPhraseSet>([["en", en], ["neutral", neutral]]);
+const NEUTRAL_LOCALE_PACK: LocalePack = { phrases: neutral, crab: neutralCrab };
+
+const loaded = new Map<string, LocalePack>([
+  ["en", { phrases: en, crab: enCrab }],
+  ["neutral", NEUTRAL_LOCALE_PACK],
+]);
 
 /**
  * The pack for `locale` if it is already in memory, otherwise the neutral
@@ -54,7 +75,13 @@ const loaded = new Map<string, MascotPhraseSet>([["en", en], ["neutral", neutral
  * tick). Never returns English for a non-English locale.
  */
 export function packForSync(locale: string): MascotPhraseSet {
-  return loaded.get(locale) ?? NEUTRAL_PACK;
+  return (loaded.get(locale) ?? NEUTRAL_LOCALE_PACK).phrases;
+}
+
+/** The crab tags for `locale` if its pack is already in memory, else the
+ *  neutral pack's. Sync companion to `packForSync`. */
+export function crabLinesForSync(locale: string): readonly string[] {
+  return (loaded.get(locale) ?? NEUTRAL_LOCALE_PACK).crab;
 }
 
 /** True when `locale` has a real pack (as opposed to falling back to neutral). */
@@ -67,18 +94,28 @@ export function hasPack(locale: string): boolean {
  * a locale whose pack file has not landed yet, or whose import fails.
  */
 export async function packFor(locale: string): Promise<MascotPhraseSet> {
+  return (await localePackFor(locale)).phrases;
+}
+
+/** As `packFor`, but keeps the crab tags alongside the phrases. */
+export async function localePackFor(locale: string): Promise<LocalePack> {
   const cached = loaded.get(locale);
   if (cached) return cached;
   const loader = Object.prototype.hasOwnProperty.call(LOADERS, locale) ? LOADERS[locale] : undefined;
-  if (!loader) return NEUTRAL_PACK;
+  if (!loader) return NEUTRAL_LOCALE_PACK;
   try {
     const pack = await loader();
     loaded.set(locale, pack);
     return pack;
   } catch (err) {
     console.error(`[mascot-packs] failed to load pack for ${locale}:`, err);
-    return NEUTRAL_PACK;
+    return NEUTRAL_LOCALE_PACK;
   }
+}
+
+/** The crab-literal entries of `locale`'s pack. Neutral's for an unknown one. */
+export async function crabLinesFor(locale: string): Promise<readonly string[]> {
+  return (await localePackFor(locale)).crab;
 }
 
 /**

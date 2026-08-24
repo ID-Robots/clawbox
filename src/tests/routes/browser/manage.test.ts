@@ -80,6 +80,22 @@ describe("/setup-api/browser/manage", () => {
       expect(body.cdpPort).toBe(18800);
     });
 
+    /**
+     * TASK-515 regression: the agent's own headless browser answers the CDP
+     * port, but no process on the clawbox-browser profile exists. That must
+     * be reported as agentBrowsing, never as a running desktop browser.
+     */
+    it("reports a CDP answerer without a desktop-profile process as agentBrowsing, not running", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as never);
+
+      const res = await GET();
+      const body = await res.json();
+
+      expect(body.browser.running).toBe(false);
+      expect(body.browser.agentBrowsing).toBe(true);
+      expect(body.browser.pid).toBeUndefined();
+    });
+
     it("returns enabled true when tools profile is full", async () => {
       const res = await GET();
       const body = await res.json();
@@ -211,6 +227,28 @@ describe("/setup-api/browser/manage", () => {
       });
       const res = await POST(req);
       expect(res.status).toBe(400);
+    });
+
+    /**
+     * TASK-515 regression: open-browser used to short-circuit to
+     * "alreadyRunning" whenever ANYTHING answered the CDP port — including the
+     * agent's headless browser — making the button a no-op that reported
+     * success. With the port answering but no desktop-profile process, the
+     * route must proceed as "not running" (here: fail on missing Chromium
+     * rather than pretend a desktop browser exists).
+     */
+    it("open-browser does not claim alreadyRunning off the agent's headless browser", async () => {
+      mockFetch.mockResolvedValue({ ok: true } as never);
+      mockExec.mockRejectedValue(new Error("not found"));
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "open-browser" }),
+      });
+      const res = await POST(req);
+      const body = await res.json();
+      expect(body.alreadyRunning).toBeUndefined();
+      expect(res.status).toBe(400);
+      expect(body.error).toContain("Chromium not installed");
     });
 
     it("handles invalid JSON", async () => {

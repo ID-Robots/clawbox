@@ -7,6 +7,7 @@ import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
 import HarnessPicker from "./HarnessPicker";
+import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { dispatchOpenApp } from "@/lib/ui-events";
@@ -2132,6 +2133,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 )}
               </div>
             </div>
+
+            {/* Mascot pet — Hermes editions only; renders nothing on OpenClaw. */}
+            <PetPicker />
+
 
             {/* Language card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">

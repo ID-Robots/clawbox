@@ -150,6 +150,7 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/chat",        // reads generated media out of the harness media tree
   "/setup-api/local-models", // POST enables/disables real systemd units through sudo
   "/setup-api/tts",         // POST rewrites messages.tts.provider and spawns the openclaw CLI
+  "/setup-api/pets",        // POST downloads ~2.2 MB from a third party and rewrites display.pet.*
   // Hermes edition. During setup the device broadcasts an OPEN `ClawBox-Setup`
   // AP, so anything left pre-auth is reachable by anyone in radio range.
   //   - /hermes/chat runs a full agent turn with shell/tool access, unlimited.
