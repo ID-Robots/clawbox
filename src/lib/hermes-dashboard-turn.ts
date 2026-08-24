@@ -45,6 +45,30 @@ const EVENT = {
    * correct.
    */
   reasoningDelta: "reasoning.delta",
+  /**
+   * NOT reasoning. The agent's animated STATUS LINE — the spinner text.
+   *
+   * Upstream is explicit about this. `thinking_callback` is documented as the
+   * live status line ("CLI: updates the prompt_toolkit spinner text. TUI /
+   * Desktop: the same callback is bridged to the `thinking.delta` event, which
+   * both render as the live spinner/status line" — run_agent.py `_emit_wait_notice`),
+   * and the gateway wires it straight through: `"thinking_callback": lambda text:
+   * _emit("thinking.delta", sid, {"text": text})` (tui_gateway/server.py). What
+   * it carries is composed in agent/conversation_loop.py as `f"{face} {verb}..."`
+   * from a fixed kaomoji list and a fixed verb list (agent/display.py:
+   * KAWAII_THINKING / THINKING_VERBS).
+   *
+   * So this channel emits things like `(⌐■_■) computing...` — for EVERY model,
+   * including ones that do no reasoning at all. Collecting it alongside
+   * `reasoning.delta` put exactly that in the customer's Reasoning disclosure:
+   * a turn on claude-fable-5 (which returned no monologue) showed
+   * `(⊙_⊙) musing...` as though the model had thought it.
+   *
+   * It is named here so the frame is recognised and deliberately dropped,
+   * rather than falling to `default` and being reported as unknown. Excluded at
+   * the SOURCE — no regex scrubs a status vocabulary out of reasoning text
+   * afterwards, because the wire already tells us which channel is which.
+   */
   thinkingDelta: "thinking.delta",
   /**
    * The agent is BLOCKED, asking a person whether a tool may run.
@@ -96,6 +120,16 @@ const DEBUG_FRAMES = process.env.HERMES_STREAM_DEBUG === "1";
 
 /** Bound on `session.create` / `session.resume`, likewise local. */
 const SESSION_TIMEOUT_MS = 15_000;
+
+/**
+ * Bound on a mid-conversation `/model` switch.
+ *
+ * Wider than the session calls because it is not just bookkeeping: the switch
+ * rebuilds the agent's client against the new provider, measured at ~3.3s on
+ * the bench box. Generous enough that a slow rebuild still lands, tight enough
+ * that a wedged one does not eat the turn.
+ */
+const SWITCH_TIMEOUT_MS = 20_000;
 
 /**
  * The most answer text we will hold. The route caps the CLI's stdout the same
@@ -160,6 +194,14 @@ export interface DashboardTurnFinal {
   /** The dashboard's own word for how the turn ended: `complete`, `error`, … */
   readonly status: string;
   readonly error?: string;
+  /**
+   * The model that ACTUALLY served this turn, as the dashboard reported it —
+   * not the one the pills asked for. The two can differ (a refused switch), and
+   * when they do the record has to say what really answered.
+   */
+  readonly model?: string;
+  /** The provider behind `model`, when the dashboard names one. */
+  readonly provider?: string;
 }
 
 export interface DashboardTurn {
@@ -169,6 +211,13 @@ export interface DashboardTurn {
    * reads, so threading and the turn record are unchanged by the transport.
    */
   readonly sessionId: string;
+  /**
+   * The model this session is set to run when the turn is submitted, and the
+   * provider behind it. Read from the dashboard rather than echoed back from
+   * the request, so a switch that did not take is visible instead of assumed.
+   */
+  readonly model: string;
+  readonly provider: string;
   /** Run the submitted turn, reporting each fragment of the answer as it lands. */
   run(onDelta: (chunk: string) => void): Promise<DashboardTurnFinal>;
   /** Drop the socket. Safe to call twice, and safe to call after `run` settles. */
@@ -197,6 +246,52 @@ function parseFrame(raw: unknown): GatewayFrame | null {
 function frameType(frame: GatewayFrame): string {
   const type = frame.params?.type;
   return typeof type === "string" ? type : "";
+}
+
+/**
+ * Did a `/model` switch actually take?
+ *
+ * It cannot be read from the JSON-RPC envelope alone, and assuming otherwise is
+ * a bug this had. A REFUSED switch comes back as a perfectly successful reply:
+ *
+ *   { "output": "  ✗ Model `deepseek-v4-flash` was not found in this
+ *                 provider's model listing.",
+ *     "warning": "live session sync failed: …" }
+ *
+ * No `error` member anywhere. Treating that as success is what made the turn
+ * report a model it was not running — the exact dishonesty the model field was
+ * added to remove. Captured verbatim from the bench box.
+ *
+ * Read conservatively: a switch counts as made only when nothing says it was
+ * not. `warning` is upstream's own channel for "the live session did not sync",
+ * and `✗` is the marker its own output uses for a refusal.
+ */
+/**
+ * Ids that are safe to place in a `/model …` command line.
+ *
+ * The switch is a COMMAND STRING the gateway parses into flags, so a value
+ * carrying whitespace could add its own — and the flag it would reach for is
+ * `--global`, the one that writes config.yaml and changes the model for every
+ * other session, Telegram and cron. The chat route already charset-checks both
+ * values (`isSafeHermesModelId`, `isPlausibleHermesProviderId`, neither of
+ * which admits a space or a leading `-`), but this module is a library and must
+ * not depend on its caller having done that: the whole point of `--session` is
+ * that a chat turn cannot change the device default, and one unvalidated caller
+ * would be enough to undo it.
+ */
+const COMMAND_SAFE_ID = /^[A-Za-z0-9_./:-]+$/;
+
+function commandSafe(value: string): boolean {
+  return !value.startsWith("-") && COMMAND_SAFE_ID.test(value);
+}
+
+function modelSwitchTook(frame: GatewayFrame): boolean {
+  if (frame.error) return false;
+  const result = frame.result || {};
+  const warning = result.warning;
+  if (typeof warning === "string" && warning.trim()) return false;
+  const output = typeof result.output === "string" ? result.output : "";
+  return !output.includes("✗");
 }
 
 function payloadText(frame: GatewayFrame): string {
@@ -345,25 +440,127 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       }),
     );
 
-    let sessionId = "";
-    let transportSid = "";
-    const sessionDeadline = Date.now() + SESSION_TIMEOUT_MS;
-    for (;;) {
-      if (Date.now() > sessionDeadline) throw new Error("dashboard session setup timed out");
-      const frame = await nextFrame(Math.max(1, sessionDeadline - Date.now()));
-      if (frame.id !== rpcId) continue;
-      if (frame.error) throw new Error(String(frame.error.message || "dashboard refused the session"));
-      const result = frame.result || {};
-      transportSid = typeof result.session_id === "string" ? result.session_id : "";
-      const stored = result.stored_session_id;
-      sessionId = typeof stored === "string" && stored ? stored : req.sessionId || "";
-      break;
+    /**
+     * Read frames until the reply to `id` arrives, ignoring events on the way.
+     *
+     * The server opens with `gateway.ready` and keeps emitting housekeeping
+     * events throughout, so a reply is found by its id rather than by position.
+     */
+    const awaitReply = async (id: number, timeoutMs: number): Promise<GatewayFrame> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (Date.now() > deadline) throw new Error("dashboard reply timed out");
+        const frame = await nextFrame(Math.max(1, deadline - Date.now()));
+        if (frame.id === id) return frame;
+      }
+    };
+
+    const sessionFrame = await awaitReply(rpcId, SESSION_TIMEOUT_MS);
+    if (sessionFrame.error) {
+      throw new Error(String(sessionFrame.error.message || "dashboard refused the session"));
     }
+    const result = sessionFrame.result || {};
+    const transportSid = typeof result.session_id === "string" ? result.session_id : "";
+    const stored = result.stored_session_id;
+    const sessionId = typeof stored === "string" && stored ? stored : req.sessionId || "";
     if (!transportSid) throw new Error("dashboard returned no session handle");
+
+    // What this session is ACTUALLY set to run, as the dashboard reports it.
+    // `session.resume` returns it in `info` ({model, provider, reasoning_effort,
+    // …}); `session.create` returns the model there too. This is the only
+    // trustworthy answer to "which model will the next turn use" — the pills in
+    // our UI are a request, not a fact.
+    const info = (result.info || {}) as Record<string, unknown>;
+    let activeModel = typeof info.model === "string" ? info.model : "";
+    let activeProvider = typeof info.provider === "string" ? info.provider : "";
+    // On a FRESH session the override is part of the create call itself and is
+    // honoured by contract (`session.create` builds the agent with it), so the
+    // request is the truth here even if `info` was assembled before the build.
+    if (!wantResume && req.model) {
+      activeModel = req.model;
+      if (req.provider) activeProvider = req.provider;
+    }
+
+    // ── Making a mid-conversation switch REAL ────────────────────────────
+    //
+    // `session.create` takes model/provider/reasoning_effort as per-session
+    // overrides, so the FIRST turn of a chat already lands on the picked model.
+    // `session.resume` takes none of them — it restores the session's stored
+    // override and ignores anything else in params — so every LATER turn used
+    // to run on whatever the conversation started with. Changing the pills
+    // mid-chat therefore did nothing at all: a session opened on claude-fable-5
+    // kept answering from claude-fable-5 after being switched to gpt-5.6-sol,
+    // and said so when asked.
+    //
+    // Upstream's own answer to this is `/model <id> --provider <slug> --session`,
+    // which is what the dashboard's Chat tab runs when its picker changes. It
+    // swaps the live agent's client in place and pins the choice as a
+    // PER-SESSION override; `resolve_persist_behavior` returns false for
+    // `--session`, so config.yaml is never written and — upstream's own words —
+    // the switch cannot leak "into every OTHER live session's next agent
+    // rebuild". A chat turn must never change the box's default, and with this
+    // flag it cannot.
+    //
+    // Skipped ONLY when the session is already provably on the requested model.
+    // The switch costs ~3.3s on this hardware (it rebuilds the agent's client),
+    // which is most of a fast turn, so re-asserting a model the session already
+    // runs is worth avoiding — but silence is not proof: when the dashboard did
+    // not say what the session is on, the turn is switched rather than assumed,
+    // because assuming is precisely the bug this fixes.
+    //
+    // Compared on the MODEL id alone. `info.provider` reports a user-defined
+    // provider by its KIND (`custom`) rather than its slug (`clawai`), so
+    // comparing providers would report a difference on every single turn and
+    // pay that cost forever.
+    const alreadyOnModel = Boolean(activeModel) && activeModel === req.model;
+    if (wantResume && req.model && !alreadyOnModel) {
+      // An id that cannot go on a command line safely does not go on one. The
+      // turn drops to the CLI instead, where the same values travel as separate
+      // argv elements and cannot become flags.
+      if (!commandSafe(req.model) || (req.provider && !commandSafe(req.provider))) {
+        throw new Error("model or provider is not safe to switch with");
+      }
+      const switchId = nextRpcId();
+      socket.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: switchId,
+          method: "slash.exec",
+          params: {
+            session_id: transportSid,
+            command: `/model ${req.model}${req.provider ? ` --provider ${req.provider}` : ""} --session`,
+          },
+        }),
+      );
+      const switched = await awaitReply(switchId, SWITCH_TIMEOUT_MS);
+      // A switch that did not take gives this transport UP, rather than
+      // answering on the wrong model.
+      //
+      // There is a real case for it, found on the box: switching TO a
+      // user-defined provider is refused, because the switch validates the
+      // model against the target provider's model listing and a
+      // `providers.<slug>` entry in config.yaml carries none. On this device
+      // that is `clawai` — the DEFAULT provider — so "go back to ClawBox AI
+      // mid-conversation" is exactly the combination that cannot be made here.
+      //
+      // Throwing lands in the catch below, which returns null, and the route
+      // then spawns the CLI for this turn. That path passes `-m` and
+      // `--provider` as argv to a fresh process, with no session to re-point,
+      // and is proven to run both of them correctly. The turn is slower and
+      // not streamed, and it is ANSWERED BY THE MODEL THE CUSTOMER PICKED —
+      // which is the property that matters more.
+      if (!modelSwitchTook(switched)) {
+        throw new Error(`dashboard would not switch this session to ${req.model}`);
+      }
+      activeModel = req.model;
+      if (req.provider) activeProvider = req.provider;
+    }
 
     let started = false;
     return {
       sessionId,
+      model: activeModel,
+      provider: activeProvider,
       close,
       async run(onDelta: (chunk: string) => void): Promise<DashboardTurnFinal> {
         if (started) throw new Error("this turn has already run");
@@ -405,11 +602,17 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 break;
               }
               case EVENT.reasoningDelta:
-              case EVENT.thinkingDelta:
                 // Collected, never forwarded. The bubble shows the answer; the
                 // monologue belongs behind the reasoning disclosure, and the
                 // authoritative copy is read from the agent's database at the end.
                 if (reasoning.length < MAX_TEXT_BYTES) reasoning += payloadText(frame);
+                break;
+              case EVENT.thinkingDelta:
+                // Dropped on purpose — see EVENT.thinkingDelta. This is the
+                // spinner's status line, not the model's reasoning, and a turn
+                // whose model reasons about nothing must end with NO reasoning
+                // rather than a kaomoji. Still counts as activity: arriving here
+                // has already restarted the idle clock.
                 break;
               case EVENT.approvalRequest: {
                 // Answer immediately. The agent thread is parked waiting for
@@ -436,11 +639,18 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 const finalReasoning = typeof payload.reasoning === "string" ? payload.reasoning : reasoning;
                 const status = typeof payload.status === "string" ? payload.status : "complete";
                 const error = typeof payload.error === "string" ? payload.error : "";
+                // The turn may name the model that served it; otherwise the one
+                // this session was settled on above is the answer.
+                const servedModel = typeof payload.model === "string" && payload.model ? payload.model : activeModel;
+                const servedProvider =
+                  typeof payload.provider === "string" && payload.provider ? payload.provider : activeProvider;
                 return {
                   text: truncated ? `${finalText}\n\n[Reply truncated — it was too long to hold.]` : finalText,
                   reasoning: finalReasoning,
                   status,
                   ...(error ? { error } : {}),
+                  ...(servedModel ? { model: servedModel } : {}),
+                  ...(servedProvider ? { provider: servedProvider } : {}),
                 };
               }
               case EVENT.error: {
