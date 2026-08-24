@@ -9,7 +9,20 @@ const execFileAsync = promisify(execFile);
 export const CLOUDFLARED_BIN = process.env.CLOUDFLARED_BIN || "/usr/local/bin/cloudflared";
 export const CLOUDFLARED_DIR = path.join(DATA_DIR, "cloudflared");
 export const TUNNEL_URL_FILE = path.join(CLOUDFLARED_DIR, "tunnel.url");
+/**
+ * Append-only record of every URL the tunnel has published, written by
+ * scripts/run-tunnel.sh as `<iso8601> <url>` lines, newest last.
+ *
+ * `tunnel.url` is erased on every stop, so it can only ever answer "what is the
+ * URL right now". When a retired *.trycloudflare.com hostname was still serving
+ * this box, nobody could say which URLs it had ever published — the journal was
+ * volatile and there was no HTTP access log. This file is that record.
+ */
+export const TUNNEL_URL_LOG_FILE = path.join(CLOUDFLARED_DIR, "tunnel-url.log");
 export const TUNNEL_SERVICE = "clawbox-tunnel.service";
+
+/** Shape of a Cloudflare Quick Tunnel hostname — nothing else is ever returned. */
+const TUNNEL_URL_PATTERN = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i;
 
 export async function isInstalled(): Promise<boolean> {
   try {
@@ -26,11 +39,45 @@ export async function readTunnelUrl(): Promise<string | null> {
     const raw = (await fs.readFile(TUNNEL_URL_FILE, "utf-8")).trim();
     if (!raw) return null;
     // Sanity-check the shape so we never return garbage.
-    if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i.test(raw)) return null;
+    if (!TUNNEL_URL_PATTERN.test(raw)) return null;
     return raw.replace(/\/+$/, "");
   } catch {
     return null;
   }
+}
+
+export interface TunnelUrlRecord {
+  /** ISO-8601 UTC timestamp of when the URL was published. */
+  at: string;
+  url: string;
+}
+
+/**
+ * Recent tunnel URLs, newest first. Missing or unparsable lines are skipped
+ * rather than thrown — this is a diagnostic, and a half-written line must never
+ * take the status endpoint down.
+ */
+export async function readTunnelUrlHistory(limit = 10): Promise<TunnelUrlRecord[]> {
+  if (!Number.isFinite(limit) || limit <= 0) return [];
+  let raw: string;
+  try {
+    raw = await fs.readFile(TUNNEL_URL_LOG_FILE, "utf-8");
+  } catch {
+    return [];
+  }
+
+  const records: TunnelUrlRecord[] = [];
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const [at, url] = trimmed.split(/\s+/, 2);
+    if (!at || !url) continue;
+    if (!TUNNEL_URL_PATTERN.test(url)) continue;
+    if (Number.isNaN(Date.parse(at))) continue;
+    records.push({ at, url: url.replace(/\/+$/, "") });
+  }
+
+  return records.reverse().slice(0, limit);
 }
 
 export async function startTunnelService(): Promise<void> {

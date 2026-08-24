@@ -28,6 +28,7 @@ vi.mock("child_process", () => ({
 
 let cloudflared: typeof import("@/lib/cloudflared");
 let TUNNEL_URL_FILE: string;
+let TUNNEL_URL_LOG_FILE: string;
 
 beforeAll(async () => {
   process.env.CLAWBOX_ROOT = TEST_ROOT;
@@ -37,6 +38,7 @@ beforeAll(async () => {
   cloudflared = await import("@/lib/cloudflared");
   await fs.mkdir(cloudflared.CLOUDFLARED_DIR, { recursive: true });
   TUNNEL_URL_FILE = cloudflared.TUNNEL_URL_FILE;
+  TUNNEL_URL_LOG_FILE = cloudflared.TUNNEL_URL_LOG_FILE;
 });
 
 afterAll(async () => {
@@ -48,6 +50,7 @@ afterAll(async () => {
 beforeEach(async () => {
   execFileMock.mockReset();
   await fs.rm(TUNNEL_URL_FILE, { force: true });
+  await fs.rm(TUNNEL_URL_LOG_FILE, { force: true });
   await fs.rm(FAKE_BIN, { force: true });
 });
 
@@ -147,5 +150,69 @@ describe("cloudflared — getTunnelServiceState", () => {
   it("returns `unknown` for unrecognized output", async () => {
     execFileMock.mockReturnValue({ stdout: "weird\n" });
     expect(await cloudflared.getTunnelServiceState()).toBe("unknown");
+  });
+});
+
+describe("cloudflared — readTunnelUrlHistory", () => {
+  // `tunnel.url` is deleted by run-tunnel.sh on every stop, so it can only ever
+  // answer "what is the URL right now". When a retired *.trycloudflare.com
+  // hostname was found still serving the box, nobody could say which URLs it
+  // had published — the journal was volatile and there was no access log. This
+  // file is that record.
+  it("returns [] when the history file does not exist", async () => {
+    expect(await cloudflared.readTunnelUrlHistory()).toEqual([]);
+  });
+
+  it("returns records newest-first", async () => {
+    await fs.writeFile(
+      TUNNEL_URL_LOG_FILE,
+      [
+        "2026-08-20T10:00:00Z https://old-one.trycloudflare.com",
+        "2026-08-21T11:30:00Z https://middle-one.trycloudflare.com",
+        "2026-08-22T09:15:00Z https://newest-one.trycloudflare.com",
+        "",
+      ].join("\n"),
+    );
+
+    expect(await cloudflared.readTunnelUrlHistory()).toEqual([
+      { at: "2026-08-22T09:15:00Z", url: "https://newest-one.trycloudflare.com" },
+      { at: "2026-08-21T11:30:00Z", url: "https://middle-one.trycloudflare.com" },
+      { at: "2026-08-20T10:00:00Z", url: "https://old-one.trycloudflare.com" },
+    ]);
+  });
+
+  it("honours the limit", async () => {
+    const lines = Array.from(
+      { length: 20 },
+      (_, i) => `2026-08-22T00:00:${String(i).padStart(2, "0")}Z https://url-${i}.trycloudflare.com`,
+    );
+    await fs.writeFile(TUNNEL_URL_LOG_FILE, lines.join("\n"));
+
+    expect(await cloudflared.readTunnelUrlHistory()).toHaveLength(10); // default
+    expect(await cloudflared.readTunnelUrlHistory(3)).toEqual([
+      { at: "2026-08-22T00:00:19Z", url: "https://url-19.trycloudflare.com" },
+      { at: "2026-08-22T00:00:18Z", url: "https://url-18.trycloudflare.com" },
+      { at: "2026-08-22T00:00:17Z", url: "https://url-17.trycloudflare.com" },
+    ]);
+    expect(await cloudflared.readTunnelUrlHistory(0)).toEqual([]);
+    expect(await cloudflared.readTunnelUrlHistory(-1)).toEqual([]);
+  });
+
+  it("skips garbage instead of throwing — a half-written line must not 500 the status route", async () => {
+    await fs.writeFile(
+      TUNNEL_URL_LOG_FILE,
+      [
+        "not-a-timestamp https://ok.trycloudflare.com",
+        "2026-08-22T09:00:00Z https://evil.example.com",
+        "2026-08-22T09:00:01Z",
+        "",
+        "   ",
+        "2026-08-22T09:00:02Z https://good.trycloudflare.com/",
+      ].join("\n"),
+    );
+
+    expect(await cloudflared.readTunnelUrlHistory()).toEqual([
+      { at: "2026-08-22T09:00:02Z", url: "https://good.trycloudflare.com" },
+    ]);
   });
 });
