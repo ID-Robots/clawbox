@@ -63,6 +63,17 @@ describe("plainTextForLabel", () => {
     expect(out).toBe("x".repeat(20) + "…");
   });
 
+  it("reads a table as words, not as pipes", () => {
+    // renderText draws these as a real table, so the walls are layout. Spoken
+    // verbatim the old output was "pipe Part pipe Value pipe pipe dash dash
+    // dash…", which is the whole label gone to punctuation.
+    const table = "## Hardware\n| Part | Value |\n| --- | --- |\n| CPU | 6 cores |\n| RAM | 7.6 GB |";
+    const spoken = plainTextForLabel(table);
+    expect(spoken).toBe("Hardware Part Value CPU 6 cores RAM 7.6 GB");
+    expect(spoken).not.toContain("|");
+    expect(spoken).not.toContain("---");
+  });
+
   it("leaves a short plain message exactly as it is", () => {
     expect(plainTextForLabel("The lantern is green.")).toBe("The lantern is green.");
   });
