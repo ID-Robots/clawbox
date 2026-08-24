@@ -73,14 +73,17 @@ export async function POST(request: Request) {
   if (!isValidEnvKey(key)) {
     return NextResponse.json({ error: "Invalid secret name" }, { status: 400 });
   }
-  if (!isValidEnvValue(value)) {
-    return NextResponse.json({ error: "Invalid value" }, { status: 400 });
-  }
 
   try {
+    // An empty value is the "remove this key" request, not a secret to store,
+    // so it is answered before the value alphabet is checked — the alphabet
+    // describes what a stored secret may contain, and nothing is being stored.
     if (!value) {
       await clearHermesSecret(key);
       return NextResponse.json({ ok: true, key, set: false });
+    }
+    if (!isValidEnvValue(value)) {
+      return NextResponse.json({ error: "Invalid value" }, { status: 400 });
     }
     const stored = await setHermesSecret(key, value);
     if (!stored) return NextResponse.json({ error: "Invalid value" }, { status: 400 });

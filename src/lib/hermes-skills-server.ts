@@ -88,6 +88,23 @@ export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
   }
 }
 
+/**
+ * The lock entry stored under exactly `key`, or undefined.
+ *
+ * Every lookup into `installed` goes through here because the key is caller
+ * data: a plain `installed[key]` answers '__proto__', 'constructor' and
+ * 'toString' out of Object.prototype even for a lock that lists none of them,
+ * and an inherited member is not an installed skill.
+ */
+function ownEntry(
+  installed: Record<string, HubLockEntry>,
+  key: string,
+): HubLockEntry | undefined {
+  if (!Object.prototype.hasOwnProperty.call(installed, key)) return undefined;
+  const entry = new Map(Object.entries(installed)).get(key);
+  return entry && typeof entry === 'object' ? entry : undefined;
+}
+
 /** True when a skill matching `name` OR `identifier` is present in the lock. */
 export async function isInHubLock(name: string, identifier?: string): Promise<boolean> {
   const installed = await readHubLock();
@@ -564,7 +581,15 @@ export async function updateLockFiles(name: string, files: string[]): Promise<bo
   } catch {
     return false;
   }
-  const entry = doc?.installed?.[name];
+  const installed = doc?.installed;
+  if (!installed || typeof installed !== 'object') return false;
+  // `name` reaches here from the install request body, so the entry is looked
+  // up through an own-key map rather than by `installed[name]`. On a lock that
+  // has no such entry, `installed['__proto__']` is not undefined — it is
+  // Object.prototype, which is truthy, and the assignment below would then hang
+  // a `files` property off every object in the process. Object.entries() only
+  // ever yields own enumerable keys, so no inherited member can be selected.
+  const entry = ownEntry(installed, name);
   if (!entry) return false;
   entry.files = files.slice(0, 500).sort();
   try {

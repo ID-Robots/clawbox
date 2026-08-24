@@ -488,6 +488,39 @@ describe("incomplete download is refused (TASK-452 crit9a)", () => {
   });
 });
 
+/**
+ * CodeQL js/prototype-polluting-assignment (PR #465). `updateLockFiles` took the
+ * lock key straight from the install request body and did `installed[name]`. On
+ * a lock with no such entry that is not undefined for '__proto__' — it is
+ * Object.prototype, which is truthy — so the `entry.files = …` that follows
+ * hung a `files` property off every object in the process.
+ */
+describe("a lock key from the request body cannot reach Object.prototype (TASK-452)", () => {
+  it.each(["__proto__", "constructor", "toString"])(
+    "refuses %s as a lock key instead of writing through it",
+    async (key) => {
+      await writeLock({ "algorithmic-art": { install_path: "algorithmic-art", files: ["SKILL.md"] } });
+      const { updateLockFiles } = await import("@/lib/hermes-skills-server");
+
+      expect(await updateLockFiles(key, ["pwned.md"])).toBe(false);
+
+      // Nothing was hung off the prototype chain...
+      expect(({} as Record<string, unknown>).files).toBeUndefined();
+      expect(Object.prototype.hasOwnProperty.call(Object.prototype, "files")).toBe(false);
+      // ...and the one real entry is untouched.
+      expect((await readLock())["algorithmic-art"].files).toEqual(["SKILL.md"]);
+    },
+  );
+
+  it("still rewrites the files of an entry that is really there", async () => {
+    await writeLock({ "algorithmic-art": { install_path: "algorithmic-art", files: ["SKILL.md"] } });
+    const { updateLockFiles } = await import("@/lib/hermes-skills-server");
+
+    expect(await updateLockFiles("algorithmic-art", ["templates/viewer.html", "SKILL.md"])).toBe(true);
+    expect((await readLock())["algorithmic-art"].files).toEqual(["SKILL.md", "templates/viewer.html"]);
+  });
+});
+
 describe("input validation still holds", () => {
   it("rejects a URL install", async () => {
     const { status } = await install({ id: "https://evil.example/SKILL.md" });

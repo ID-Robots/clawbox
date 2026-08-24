@@ -1,3 +1,4 @@
+import { execFileSync } from "child_process";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
@@ -123,6 +124,57 @@ describe("skill secrets (TASK-452)", () => {
   it("refuses a value carrying a newline, which would start a second assignment", async () => {
     const { status } = await post({ key: "BRAVE_API_KEY", value: "good\nEVIL=1" });
     expect(status).toBe(400);
+  });
+
+  // CodeQL js/http-to-file-access on the .env write (PR #465). The answer was
+  // to state the whole accepted alphabet instead of blacklisting the three
+  // characters that were known to hurt, so these pin the alphabet rather than
+  // the old blacklist.
+  it.each([
+    ["a carriage return", "good\rEVIL=1"],
+    ["a NUL", "good\u0000EVIL=1"],
+    ["an ANSI escape that would rewrite a support engineer's terminal", "k\u001b[2Jey"],
+    ["a bare control byte", "key\u0007"],
+    ["a DEL", "key\u007f"],
+    ["a non-ASCII character", "clé_secrète"],
+  ])("refuses a value containing %s", async (_label, value) => {
+    const { status } = await post({ key: "BRAVE_API_KEY", value });
+    expect(status).toBe(400);
+    await expect(fs.access(envPath())).rejects.toThrow();
+  });
+
+  it("accepts every printable ASCII character, which is what real tokens use", async () => {
+    // 0x20..0x7E, the whole allowed range in one value.
+    const all = Array.from({ length: 0x7f - 0x20 }, (_, i) => String.fromCharCode(0x20 + i)).join("");
+    expect((await post({ key: "BRAVE_API_KEY", value: all })).status).toBe(200);
+    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    expect((await readHermesEnv()).get("BRAVE_API_KEY")).toBe(all);
+  });
+
+  it("refuses a value past the length cap and stores one at it", async () => {
+    expect((await post({ key: "BRAVE_API_KEY", value: "x".repeat(4097) })).status).toBe(400);
+    expect((await post({ key: "BRAVE_API_KEY", value: "x".repeat(4096) })).status).toBe(200);
+  });
+
+  // CodeQL js/file-system-race on readHermesEnv (PR #465): the size and
+  // regular-file checks used to run against a stat of the path, then the read
+  // ran against the path again. They now run against one open descriptor, and
+  // the open is non-blocking so the regular-file check can still be reached.
+  it("reads nothing through a path that is not a regular file, and does not hang", async () => {
+    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    execFileSync("mkfifo", [envPath()]);
+    await expect(
+      Promise.race([
+        readHermesEnv(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("readHermesEnv hung on a fifo")), 2000)),
+      ]),
+    ).resolves.toEqual(new Map());
+  });
+
+  it("reads nothing when the path is a directory", async () => {
+    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    await fs.mkdir(envPath());
+    expect(await readHermesEnv()).toEqual(new Map());
   });
 
   it("is 404 off Hermes, like the rest of the skills family", async () => {

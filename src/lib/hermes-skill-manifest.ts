@@ -47,6 +47,7 @@
 import { createHash } from 'crypto';
 import type { Dirent } from 'fs';
 import fs from 'fs/promises';
+import type { FileHandle } from 'fs/promises';
 import path from 'path';
 
 // ── Limits ──────────────────────────────────────────────────────────────────
@@ -438,15 +439,32 @@ export async function repairFromGithub(
       stillMissing.push(rel);
       continue;
     }
+    let handle: FileHandle | undefined;
     try {
       await fs.mkdir(path.dirname(abs), { recursive: true });
+      // 'wx' is O_CREAT|O_EXCL|O_WRONLY, and both halves of that matter.
+      //
+      // resolveInside() is a lexical check — path.resolve plus a prefix test —
+      // so it proves `rel` contains no '..' and nothing else about the file
+      // system. It cannot see a symlink. If `abs` already exists as a link to
+      // ~/.hermes/config.yaml, an ordinary write follows it and lands outside
+      // the skill directory, and a dangling link reads as "missing" to the
+      // completeness scan that produced this list in the first place. O_EXCL
+      // refuses to follow a final symlink and refuses an existing file, which
+      // is precisely the contract here: repair only ever creates files the
+      // installer failed to write, so a target that already exists means the
+      // premise is wrong and the safe answer is to write nothing.
+      //
       // Support files are data the agent reads, never something it executes
       // directly, so 0644 regardless of the upstream mode bit.
-      await fs.writeFile(abs, content, { mode: 0o644 });
+      handle = await fs.open(abs, 'wx', 0o644);
+      await handle.writeFile(content);
       budget -= content.length;
       repaired.push(rel);
     } catch {
       stillMissing.push(rel);
+    } finally {
+      await handle?.close().catch(() => {});
     }
   }
   return { repaired, stillMissing };

@@ -18,14 +18,17 @@
 // Rules that make a direct write safe:
 //   * the KEY must look like an environment variable and nothing else, so a
 //     value can never smuggle in a second assignment or a shell fragment;
-//   * the VALUE may not contain a newline, so one secret is always one line;
+//   * the VALUE must be printable ASCII, so one secret is always one line and
+//     no control byte survives into a file support engineers read;
 //   * the file is rewritten whole from a parsed map, so a malformed pre-existing
 //     line cannot be duplicated or half-edited;
 //   * it is written 0600 through a temp file + rename, so a reader never sees a
 //     half-written secrets file and no other account can read it;
 //   * values are NEVER read back out to the browser — only whether a key is set.
 
+import { constants } from 'fs';
 import fs from 'fs/promises';
+import type { FileHandle } from 'fs/promises';
 import path from 'path';
 
 const HERMES_HOME =
@@ -42,13 +45,21 @@ export function isValidEnvKey(key: string): boolean {
   return typeof key === 'string' && ENV_KEY_RE.test(key);
 }
 
-const MAX_VALUE_LEN = 4096;
+// A secret is a credential some provider issued: an API key, a token, a service
+// account string. Every one of those is printable ASCII on a single line.
+//
+// This is an allowlist of the whole accepted alphabet rather than a blacklist
+// of the three characters that were known to hurt, and the difference matters
+// twice over. A newline still cannot end the assignment and start a second one,
+// but neither can any other C0 control byte reach a file that support engineers
+// read with `cat` — an escape sequence inside a value can rewrite what their
+// terminal shows them. Anchored end to end: a value is accepted whole or not at
+// all, and the 4096-character cap is part of the same expression rather than
+// a second check that could drift away from it.
+const ENV_VALUE_RE = /^[\x20-\x7E]{1,4096}$/;
 
 export function isValidEnvValue(value: string): boolean {
-  if (typeof value !== 'string') return false;
-  if (value.length > MAX_VALUE_LEN) return false;
-  // A newline would end the assignment and start a new one.
-  return !/[\r\n\u0000]/.test(value);
+  return typeof value === 'string' && ENV_VALUE_RE.test(value);
 }
 
 const MAX_ENV_BYTES = 256 * 1024;
@@ -62,12 +73,28 @@ const MAX_ENV_BYTES = 256 * 1024;
 export async function readHermesEnv(): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   let raw: string;
+  // Open once, then stat and read through that SAME descriptor. Statting the
+  // path and then reading the path are two lookups, and between them the name
+  // ~/.hermes/.env can come to mean a different file — a symlink swap, or a
+  // rename by anything else that writes this file. The size cap would then have
+  // been checked against a file we never read, and the regular-file check
+  // against a path that is now a fifo, which blocks the read forever. A handle
+  // is pinned to one inode, so what we measured is what we get.
+  let handle: FileHandle | undefined;
   try {
-    const st = await fs.stat(HERMES_ENV_PATH);
+    // O_NONBLOCK, because the regular-file check now happens after the open
+    // rather than before it: opening a fifo for reading otherwise parks here
+    // until someone opens the write end, and a hang is a worse outcome than the
+    // stale-stat race this open is meant to close. It has no effect on regular
+    // files, which is the only case that goes on to read.
+    handle = await fs.open(HERMES_ENV_PATH, constants.O_RDONLY | constants.O_NONBLOCK);
+    const st = await handle.stat();
     if (!st.isFile() || st.size > MAX_ENV_BYTES) return out;
-    raw = await fs.readFile(HERMES_ENV_PATH, 'utf8');
+    raw = await handle.readFile('utf8');
   } catch {
     return out;
+  } finally {
+    await handle?.close().catch(() => {});
   }
   for (const line of raw.split('\n')) {
     const trimmed = line.trim();
@@ -121,7 +148,13 @@ async function writeHermesEnv(env: Map<string, string>): Promise<void> {
 
 /** Set one skill secret. Returns false when the key or value is not acceptable. */
 export async function setHermesSecret(key: string, value: string): Promise<boolean> {
-  if (!isValidEnvKey(key) || !isValidEnvValue(value)) return false;
+  // Both alphabets are re-tested here, against the same anchored expressions
+  // the exported predicates use, rather than being delegated to them. This is
+  // the function that puts bytes in the file, so the check that decides what
+  // may end up there belongs on this line: a future caller that forgets to
+  // pre-validate, or a predicate that grows a special case, cannot widen what
+  // reaches ~/.hermes/.env without editing the write path itself.
+  if (!ENV_KEY_RE.test(key) || !ENV_VALUE_RE.test(value)) return false;
   const env = await readHermesEnv();
   env.set(key, value);
   await writeHermesEnv(env);

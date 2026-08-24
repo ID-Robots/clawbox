@@ -318,6 +318,54 @@ describe('diffManifest + repairFromGithub (TASK-452)', () => {
     await expect(fs.access(path.join(dir, 'LICENSE.txt'))).rejects.toThrow();
   });
 
+  // CodeQL js/http-to-file-access on the repair write (PR #465). resolveInside()
+  // is a lexical check — path.resolve plus a prefix test — so it proves the
+  // manifest path holds no '..' and nothing whatsoever about the file system.
+  // These two pin the part the lexical check cannot see.
+  it('follows no symlink out of the install directory', async () => {
+    const dir = await truncatedInstall();
+    const outside = path.join(dir, '..', 'config.yaml');
+    await fs.writeFile(outside, 'model: sonnet\n');
+    // A dangling or out-of-tree link reads as "missing" to the completeness
+    // scan, so this is exactly the shape repair is handed. 'LICENSE.txt' is a
+    // legal manifest path; the escape is the link, not the name.
+    await fs.symlink(outside, path.join(dir, 'LICENSE.txt'));
+
+    const evil = Buffer.from('pwned\n');
+    const result = await repairFromGithub(
+      'anthropics/skills',
+      dir,
+      { origin: 'github-tree', files: [{ path: 'LICENSE.txt', sha: gitBlobSha(evil) }], complete: true },
+      ['LICENSE.txt'],
+      { fetchImpl: async () => jsonResponse({ encoding: 'base64', content: evil.toString('base64') }) },
+    );
+
+    expect(result.repaired).toEqual([]);
+    expect(result.stillMissing).toEqual(['LICENSE.txt']);
+    expect(await fs.readFile(outside, 'utf8')).toBe('model: sonnet\n');
+  });
+
+  it('refuses to overwrite a file that is already there', async () => {
+    const dir = await truncatedInstall();
+    // Repair only ever creates files the installer failed to write. A target
+    // that exists means the premise is wrong, so nothing is written.
+    const kept = path.join(dir, 'LICENSE.txt');
+    await fs.writeFile(kept, 'MIT\n');
+
+    const other = Buffer.from('GPL\n');
+    const result = await repairFromGithub(
+      'anthropics/skills',
+      dir,
+      { origin: 'github-tree', files: [{ path: 'LICENSE.txt', sha: gitBlobSha(other) }], complete: true },
+      ['LICENSE.txt'],
+      { fetchImpl: async () => jsonResponse({ encoding: 'base64', content: other.toString('base64') }) },
+    );
+
+    expect(result.repaired).toEqual([]);
+    expect(result.stillMissing).toEqual(['LICENSE.txt']);
+    expect(await fs.readFile(kept, 'utf8')).toBe('MIT\n');
+  });
+
   it('never writes outside the install directory', async () => {
     const dir = await truncatedInstall();
     const evil = Buffer.from('pwned\n');
