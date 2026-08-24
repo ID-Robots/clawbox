@@ -314,6 +314,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.mascot.petInstallFailed": "Could not set that pet up. Check the connection and try again.",
     "settings.mascot.petAttribution": "Pet art comes from the Petdex community and stays credited to its authors. Sprites download to this device when you pick one.",
     "settings.mascot.petBrowseAll": "Browse the full gallery",
+    "settings.mascot.eggHatch": "Hatch your pet",
     "settings.status": "Status",
     "settings.connected": "Connected",
     "settings.noWifiConnection": "No WiFi connection",
