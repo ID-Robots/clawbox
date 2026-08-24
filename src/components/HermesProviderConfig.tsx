@@ -460,10 +460,31 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           `/setup-api/hermes/oauth/poll?providerId=${encodeURIComponent(providerId)}&sessionId=${encodeURIComponent(sessionId)}`,
           { cache: "no-store" },
         );
-        const data = (await res.json().catch(() => ({}))) as { status?: unknown; error_message?: unknown };
+        const data = (await res.json().catch(() => ({}))) as {
+          status?: unknown;
+          error_message?: unknown;
+          error?: unknown;
+        };
         if (!alive) return;
         const status = typeof data.status === "string" ? data.status : "";
-        if (status === "approved") {
+        // A 4xx is the relay's verdict on THIS session — not found, expired, or
+        // minted for another provider — and it answers with `error`, never
+        // `status`. Reading `status` alone made those bodies indistinguishable
+        // from "keep polling", so a session that was already dead sat behind
+        // "Waiting for approval..." until the deadline above. 5xx stays
+        // transient (the dashboard may be mid-restart) and the deadline still
+        // bounds that case.
+        if (!res.ok && res.status < 500) {
+          terminal = true;
+          setSignin({
+            stage: "failed",
+            providerId,
+            message:
+              typeof data.error === "string" && data.error
+                ? data.error
+                : "Sign-in failed. Try again.",
+          });
+        } else if (status === "approved") {
           terminal = true;
           onOauthConnected(providerId);
         } else if (status === "error" || status === "expired") {

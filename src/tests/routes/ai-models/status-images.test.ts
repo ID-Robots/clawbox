@@ -1,13 +1,17 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { CLAWBOX_AI_IMAGE_MODEL_ID } from "@/lib/clawbox-ai-models";
 
-// The `clawaiImages` block of /setup-api/ai-models/status (TASK-413): the
-// monthly image allowance, so a user learns the cap exists before hitting it.
+// The `clawaiImages` block of /setup-api/ai-models/status (TASK-413), now the
+// DAILY image allowance (TASK-485) plus the day's usage (TASK-469), so a user
+// learns the cap exists before hitting it rather than from a refusal.
 //
-// It is an allowance, never a usage count — the cloud proxy holds the only
-// counter and reports it in X-ClawBox-Images-* headers the device never sees.
-// `monthlyLimit: null` therefore means "we do not know", and the only honest
-// source for the plan is a live portal answer on this poll.
+// The device still holds no counter of its own — the cloud proxy holds the only
+// one, and it reports it in X-ClawBox-Images-* headers the gateway consumes and
+// this process never sees. `used` therefore arrives back through the portal's
+// device-info, off that same counter. Both fields are null when we genuinely do
+// not know, and the only honest source for either is a live portal answer on
+// this poll: a `used: 0` default would be a guess that always reads as good
+// news, and a `dailyLimit` default would be a guess at somebody's subscription.
 //
 // Mocks mirror status.test.ts exactly: the route's four collaborators plus
 // global fetch, and nothing inside the route itself.
@@ -47,8 +51,21 @@ const clawaiConfig = {
   models: { providers: { deepseek: { apiKey: "claw_test123" } } },
 };
 
-function portalSays(tier: string | null, deviceTier: string | null = null) {
-  return new Response(JSON.stringify({ tier, deviceTier, allowedModels: [] }), { status: 200 });
+function portalSays(
+  tier: string | null,
+  deviceTier: string | null = null,
+  meters?: unknown,
+) {
+  const body: Record<string, unknown> = { tier, deviceTier, allowedModels: [] };
+  if (meters !== undefined) body.meters = meters;
+  return new Response(JSON.stringify(body), { status: 200 });
+}
+
+/** A device-info body from a portal that reports live meters. */
+function portalSaysWithUsage(tier: string, used: number, limit: number) {
+  return portalSays(tier, null, {
+    images: { used, limit, remaining: Math.max(0, limit - used), period: "day" },
+  });
 }
 
 describe("/setup-api/ai-models/status — clawaiImages", () => {
@@ -80,10 +97,10 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
   }
 
   it.each<[string, number, string]>([
-    ["free", 5, "Free"],
-    ["pro", 50, "Pro"],
-    ["max", 200, "Max"],
-  ])("reports the %s plan's allowance of %i", async (plan, monthlyLimit, planLabel) => {
+    ["free", 1, "Free"],
+    ["pro", 5, "Pro"],
+    ["max", 20, "Max"],
+  ])("reports the %s plan's allowance of %i a day", async (plan, dailyLimit, planLabel) => {
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     fetchSpy.mockResolvedValue(portalSays(plan));
 
@@ -92,11 +109,51 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
       model: CLAWBOX_AI_IMAGE_MODEL_ID,
       plan,
       planLabel,
-      monthlyLimit,
+      dailyLimit,
+      // No meters in this portal answer, so no usage. Null, never 0.
+      used: null,
     });
   });
 
-  it("reports Free's real 5-image allowance even though its device tier is null", async () => {
+  it("reports the day's usage when the portal sends live meters", async () => {
+    // The read path TASK-469 added. Without it the cap was real, enforced and
+    // invisible: the first time an owner learned it existed was the refusal.
+    mockReadConfig.mockResolvedValue(clawaiConfig as never);
+    fetchSpy.mockResolvedValue(portalSaysWithUsage("max", 3, 20));
+
+    expect(await images()).toMatchObject({ plan: "max", dailyLimit: 20, used: 3 });
+  });
+
+  it("prefers the portal's live limit over the compiled-in table", async () => {
+    // The device table is a snapshot of what the cloud believed on release day,
+    // and it was a release behind reality for the whole of TASK-485. When the
+    // cloud states a limit, the cloud wins.
+    mockReadConfig.mockResolvedValue(clawaiConfig as never);
+    fetchSpy.mockResolvedValue(portalSaysWithUsage("max", 0, 40));
+
+    expect(await images()).toMatchObject({ dailyLimit: 40 });
+  });
+
+  it.each<[string, unknown]>([
+    ["no meters block at all (an older portal)", undefined],
+    ["a null meters block", null],
+    ["meters without images", { audioSeconds: { used: 0, limit: 60 } }],
+    ["a non-integer count", { images: { used: 1.5, limit: 20 } }],
+    ["a negative count", { images: { used: -1, limit: 20 } }],
+    ["a stringly-typed count", { images: { used: "3", limit: 20 } }],
+    ["a zero limit", { images: { used: 3, limit: 0 } }],
+  ])("reports a null usage, never 0, for %s", async (_label, meters) => {
+    mockReadConfig.mockResolvedValue(clawaiConfig as never);
+    fetchSpy.mockResolvedValue(portalSays("max", null, meters));
+
+    const img = await images();
+    expect(img.used).toBeNull();
+    expect(img.used).not.toBe(0);
+    // The allowance still shows — knowing the ceiling is worth something.
+    expect(img.dailyLimit).toBe(20);
+  });
+
+  it("reports Free's real 1-image allowance even though its device tier is null", async () => {
     // The reason the route carries `plan` next to `tier`: `tier` collapses Free
     // and "portal said something we don't recognise" into the same null, and
     // Free has an allowance worth showing.
@@ -105,10 +162,10 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
 
     const body = await (await GET()).json();
     expect(body.clawaiTier).toBeNull();
-    expect(body.clawaiImages.monthlyLimit).toBe(5);
+    expect(body.clawaiImages.dailyLimit).toBe(1);
   });
 
-  it("returns a null monthlyLimit when the portal is unreachable", async () => {
+  it("returns a null dailyLimit when the portal is unreachable", async () => {
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     mockGetConfigValue.mockResolvedValue("pro"); // stale local picker — must not leak into the allowance
     fetchSpy.mockRejectedValue(new Error("ETIMEDOUT"));
@@ -117,48 +174,62 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
     expect(img.supported).toBe(true);
     expect(img.plan).toBeNull();
     expect(img.planLabel).toBeNull();
-    expect(img.monthlyLimit).toBeNull();
-    expect(img.monthlyLimit).not.toBe(0);
+    expect(img.dailyLimit).toBeNull();
+    expect(img.dailyLimit).not.toBe(0);
   });
 
-  it("returns a null monthlyLimit on a portal 5xx", async () => {
+  it("returns a null dailyLimit on a portal 5xx", async () => {
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     fetchSpy.mockResolvedValue(new Response("boom", { status: 502 }));
 
-    expect(await images()).toMatchObject({ plan: null, planLabel: null, monthlyLimit: null });
+    expect(await images()).toMatchObject({ plan: null, planLabel: null, dailyLimit: null, used: null });
   });
 
-  it("returns a null monthlyLimit on a portal 401/403", async () => {
+  it("returns a null dailyLimit on a portal 401/403", async () => {
     // Ambiguous auth failure: could be genuinely Free, could be a revoked token
     // on a paid account. Either way we did not learn the plan.
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     fetchSpy.mockResolvedValue(new Response("invalid_token", { status: 403 }));
 
-    expect(await images()).toMatchObject({ plan: null, planLabel: null, monthlyLimit: null });
+    expect(await images()).toMatchObject({ plan: null, planLabel: null, dailyLimit: null, used: null });
   });
 
   it.each(["enterprise", "", "  ", "flash"])(
-    "returns a null monthlyLimit when the portal reports the unrecognised tier %j",
+    "returns a null dailyLimit when the portal reports the unrecognised tier %j",
     async (tier) => {
       mockReadConfig.mockResolvedValue(clawaiConfig as never);
       fetchSpy.mockResolvedValue(portalSays(tier));
 
-      expect(await images()).toMatchObject({ plan: null, planLabel: null, monthlyLimit: null });
+      expect(await images()).toMatchObject({ plan: null, planLabel: null, dailyLimit: null, used: null });
     },
   );
 
-  it("returns a null monthlyLimit when the portal omits `tier` entirely", async () => {
+  it("returns a null dailyLimit when the portal omits `tier` entirely", async () => {
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     fetchSpy.mockResolvedValue(new Response(JSON.stringify({ deviceTier: "pro" }), { status: 200 }));
 
-    expect(await images()).toMatchObject({ plan: null, monthlyLimit: null });
+    expect(await images()).toMatchObject({ plan: null, dailyLimit: null, used: null });
   });
 
   it("normalises the portal's casing and padding", async () => {
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     fetchSpy.mockResolvedValue(portalSays("  MAX "));
 
-    expect(await images()).toMatchObject({ plan: "max", planLabel: "Max", monthlyLimit: 200 });
+    expect(await images()).toMatchObject({ plan: "max", planLabel: "Max", dailyLimit: 20 });
+  });
+
+  it("serves the usage from the portal cache too, so the line does not flicker", async () => {
+    // Cached alongside the plan on the same TTL. Usage is the one field that
+    // genuinely moves inside that window — a couple of minutes of lag on a
+    // ceiling readout is acceptable; a second uncached round trip on the
+    // render path of the Settings card is not, and this line never decides a
+    // refusal. The cloud does that, live.
+    mockReadConfig.mockResolvedValue(clawaiConfig as never);
+    fetchSpy.mockResolvedValue(portalSaysWithUsage("pro", 4, 5));
+
+    expect(await images()).toMatchObject({ dailyLimit: 5, used: 4 });
+    expect(await images()).toMatchObject({ dailyLimit: 5, used: 4 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("serves the plan from the portal cache on a second poll within the TTL", async () => {
@@ -167,8 +238,8 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
     mockReadConfig.mockResolvedValue(clawaiConfig as never);
     fetchSpy.mockResolvedValue(portalSays("max"));
 
-    expect((await images()).monthlyLimit).toBe(200);
-    expect((await images()).monthlyLimit).toBe(200);
+    expect((await images()).dailyLimit).toBe(20);
+    expect((await images()).dailyLimit).toBe(20);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -183,7 +254,7 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
       model: CLAWBOX_AI_IMAGE_MODEL_ID,
       plan: null,
       planLabel: null,
-      monthlyLimit: null,
+      dailyLimit: null, used: null,
     });
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -199,7 +270,7 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
     const img = await images();
     expect(img.supported).toBe(true); // the clawai profile is there…
     expect(img.plan).toBeNull(); // …but no portal token means no plan
-    expect(img.monthlyLimit).toBeNull();
+    expect(img.dailyLimit).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -215,7 +286,7 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
       model: CLAWBOX_AI_IMAGE_MODEL_ID,
       plan: null,
       planLabel: null,
-      monthlyLimit: null,
+      dailyLimit: null, used: null,
     });
   });
 
@@ -235,6 +306,6 @@ describe("/setup-api/ai-models/status — clawaiImages", () => {
     );
     fetchSpy.mockResolvedValue(portalSays("max"));
 
-    expect(await images()).toMatchObject({ supported: true, plan: "max", monthlyLimit: 200 });
+    expect(await images()).toMatchObject({ supported: true, plan: "max", dailyLimit: 20 });
   });
 });

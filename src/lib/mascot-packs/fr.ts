@@ -122,3 +122,23 @@ export const fr: MascotPhraseSet = {
   ],
 };
 
+// ── The crab-literal lines in this pack ──
+//
+// A Hermes pet wears someone else's body, so it must never say "crab", "claw"
+// or wear the 🦀. `mascot-pet-voice.ts` subtracts this set from the pack
+// before a pet speaks; the crab itself is served the pack untouched.
+//
+// Tagged HERE, next to the lines themselves, so adding a joke and declaring it
+// crab-specific is one edit in one file — and so a locale's tags travel in the
+// same code-split chunk as its pack. `mascot-pet-voice.test.ts` re-derives
+// this list from a crab lexicon and fails if the two disagree, which is what
+// stops it drifting.
+export const frCrab: readonly string[] = [
+  "Parkour, version crabe.",
+  "Hé {name} 🦀",
+  "🔥 SUPER PINCE !",
+  "🦀👑 ROI CRABE !",
+  "🦀 LES CRABES AU POUVOIR !",
+  "💎 PINCES EN DIAMANT !",
+  "🦀 ROI DU TABLEAU DE BORD !",
+];

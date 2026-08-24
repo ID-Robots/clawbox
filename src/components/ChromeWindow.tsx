@@ -36,9 +36,26 @@ type SnapZone = "left" | "right" | "top" | "top-left" | "top-right" | "bottom-le
 const SNAP_THRESHOLD = 12; // pixels from edge to trigger snap
 const SHELF_HEIGHT = 56;
 
+/**
+ * The shelf's real height, safe-area inset included.
+ *
+ * ChromeShelf is `calc(56px + env(safe-area-inset-bottom))`; this file assumed
+ * a flat 56, so on a device WITH an inset a maximized window overlapped the
+ * bar — and the mascot standing on it. The inset is a device property that
+ * cannot be read from JS, so the live element is measured (it marks itself
+ * `data-mascot-ground` for the mascot already) and 56 stays the fallback for
+ * a surface that has no shelf mounted.
+ */
+function shelfHeight(): number {
+  if (typeof document === "undefined") return SHELF_HEIGHT;
+  const el = document.querySelector("[data-mascot-ground]") as HTMLElement | null;
+  const h = el?.getBoundingClientRect().height ?? 0;
+  return h > 0 ? h : SHELF_HEIGHT;
+}
+
 function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
   const w = window.innerWidth - rInset;
-  const h = window.innerHeight - SHELF_HEIGHT;
+  const h = window.innerHeight - shelfHeight();
   const nearLeft = clientX <= SNAP_THRESHOLD;
   const nearRight = clientX >= w - SNAP_THRESHOLD;
   const nearTop = clientY <= SNAP_THRESHOLD;
@@ -57,7 +74,7 @@ function getSnapZone(clientX: number, clientY: number, rInset = 0): SnapZone {
 function getSnapRect(zone: SnapZone, rInset = 0): { x: number; y: number; width: number; height: number } | null {
   if (!zone) return null;
   const w = window.innerWidth - rInset;
-  const h = window.innerHeight - SHELF_HEIGHT;
+  const h = window.innerHeight - shelfHeight();
   switch (zone) {
     case "left": return { x: 0, y: 0, width: w / 2, height: h };
     case "right": return { x: w / 2, y: 0, width: w / 2, height: h };
@@ -74,7 +91,7 @@ function getSnapRect(zone: SnapZone, rInset = 0): { x: number; y: number; width:
 function getInitialPosition(width: number, height: number, rInset = 0) {
   if (typeof window === "undefined") return { x: 100, y: 50 };
   const maxWidth = window.innerWidth - rInset;
-  const maxHeight = window.innerHeight - SHELF_HEIGHT;
+  const maxHeight = window.innerHeight - shelfHeight();
   return {
     x: Math.max(20, (maxWidth - width) / 2),
     y: Math.max(20, (maxHeight - height) / 2),
@@ -391,7 +408,7 @@ export default function ChromeWindow({
   if (minimized && !restoring) return null;
 
   const windowStyle = maximized
-    ? { left: 0, top: 0, width: `calc(100% - ${rightInset}px)`, height: `calc(100vh - ${SHELF_HEIGHT}px)` }
+    ? { left: 0, top: 0, width: `calc(100% - ${rightInset}px)`, height: `calc(100vh - ${SHELF_HEIGHT}px - env(safe-area-inset-bottom, 0px))` }
     : { left: position.x, top: position.y, width: size.width, height: size.height };
 
   return (

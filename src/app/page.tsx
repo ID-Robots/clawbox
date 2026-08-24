@@ -510,6 +510,7 @@ function ChromeDesktopInner() {
   }, []);
 
   const [clawkeepStale, setClawkeepStale] = useState(false);
+  const [clawkeepUnconfigured, setClawkeepUnconfigured] = useState(false);
   const [clawkeepBusy, setClawkeepBusy] = useState(false);
   const [clawkeepRestoring, setClawkeepRestoring] = useState(false);
   useEffect(() => {
@@ -531,10 +532,16 @@ function ChromeDesktopInner() {
           restoring?: boolean;
         };
         if (aborted) return;
+        // A box that was never paired has no backup that could be "overdue";
+        // it gets the calm not-set-up-yet shield, not the red alert. Only an
+        // explicit `paired: false` counts — a response missing the field keeps
+        // the old alert fallback rather than silencing a real overdue backup.
+        const unconfigured = data.paired === false;
         const stale =
-          !data.paired
-          || !data.lastBackupAtMs
-          || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS;
+          !unconfigured
+          && (!data.lastBackupAtMs
+            || Date.now() - data.lastBackupAtMs > STALE_AFTER_MS);
+        setClawkeepUnconfigured(unconfigured);
         setClawkeepStale(stale);
         setClawkeepBusy(data.lastHeartbeatStatus === "running");
         setClawkeepRestoring(!!data.restoring);
@@ -2354,7 +2361,7 @@ function ChromeDesktopInner() {
           // Clock click — no-op for now (could open a calendar/notifications panel)
         }}
         onClawKeepShieldClick={openClawKeepOrAiProvider}
-        clawkeepStatus={{ stale: clawkeepStale, busy: clawkeepBusy, restoring: clawkeepRestoring }}
+        clawkeepStatus={{ stale: clawkeepStale, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);

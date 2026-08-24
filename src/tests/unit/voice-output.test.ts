@@ -129,8 +129,32 @@ describe("status", () => {
     const status = buildVoiceOutputStatus(config(), healthyLocal, state());
     const cloud = status.engines.find(e => e.id === "cloud")!;
     expect(cloud.usable).toBe(false);
-    expect(cloud.detail).toContain("does not serve the voice yet");
+    // The old copy said ClawBox AI "does not serve the voice yet". It does, on
+    // Max, since 2026-08-22 — so what a box landing here has to be told is that
+    // ITS key does not open one, not that the product has none (TASK-490).
+    expect(cloud.detail).toContain("comes with ClawBox AI Max");
+    expect(cloud.detail).not.toContain("does not serve the voice yet");
     expect(cloud.detail).not.toContain("claw_");
+  });
+
+  it("does not promise an on-device voice to a box that has none", () => {
+    // This branch is reached from the CLOUD credential alone and knows nothing
+    // about the local engine. A box with no installed voice reaches it too, and
+    // telling that customer the box "speaks with its own voice" would be the
+    // same class of confident wrong sentence the old copy was.
+    const bare: LocalVoiceProbe = {
+      providerConfigured: false,
+      commandPresent: false,
+      engineInstalled: false,
+      engineNames: [],
+    };
+    const status = buildVoiceOutputStatus(config(), bare, state());
+    const cloud = status.engines.find(e => e.id === "cloud")!;
+    const local = status.engines.find(e => e.id === "local")!;
+
+    expect(local.usable).toBe(false);
+    expect(status.preferredEngine).toBe(null);
+    expect(cloud.detail).not.toMatch(/own voice|speaks on the box|this box speaks/i);
   });
 
   it("resolves Auto to the on-device voice when the cloud one cannot be used", () => {

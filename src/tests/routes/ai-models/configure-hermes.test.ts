@@ -39,6 +39,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  runOpenclawConfigSetBatch: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn((fq: string) => {
     const i = fq.indexOf("/");
@@ -105,6 +106,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
   let POST: (req: Request) => Promise<Response>;
   let mockSetMany: ReturnType<typeof vi.fn>;
   let mockRunOpenclawConfigSet: ReturnType<typeof vi.fn>;
+  let mockRunOpenclawConfigSetBatch: ReturnType<typeof vi.fn>;
   let mockRestartGateway: ReturnType<typeof vi.fn>;
   let mockApplyLocalAiToHermes: ReturnType<typeof vi.fn>;
   let mockApplyClawaiToHermes: ReturnType<typeof vi.fn>;
@@ -121,6 +123,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     const oc = await import("@/lib/openclaw-config");
     vi.mocked(oc.openclawIsAbsent).mockReturnValue(true);
     mockRunOpenclawConfigSet = vi.mocked(oc.runOpenclawConfigSet) as unknown as ReturnType<typeof vi.fn>;
+    mockRunOpenclawConfigSetBatch = vi.mocked(oc.runOpenclawConfigSetBatch) as unknown as ReturnType<typeof vi.fn>;
     mockRestartGateway = vi.mocked(oc.restartGateway) as unknown as ReturnType<typeof vi.fn>;
 
     const cs = await import("@/lib/config-store");
@@ -148,6 +151,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
   /** Assert that nothing in this call reached the OpenClaw CLI. */
   function expectNoOpenclawSpawn() {
     expect(mockRunOpenclawConfigSet).not.toHaveBeenCalled();
+    expect(mockRunOpenclawConfigSetBatch).not.toHaveBeenCalled();
     expect(mockRestartGateway).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
   }

@@ -487,8 +487,17 @@ describe("middleware", () => {
       // POST rewrites messages.tts.provider and spawns the openclaw CLI. Same
       // radio-range reasoning as local-models: onboarding never calls it.
       "/setup-api/tts",
+      // POST downloads ~2.2 MB from a third-party CDN and rewrites
+      // display.pet.*. Cosmetic, desktop-only, and never part of onboarding.
+      "/setup-api/pets",
+      "/setup-api/pets/select",
       "/setup-api/gateway",
       "/setup-api/gateway/", // trailing slash must not dodge the exact match
+      // Each call cold-loads a ~3.8 GB model on a Jetson for up to three
+      // minutes, and its only caller is a desktop Settings button — so during
+      // the open-AP setup window it was a free way for anyone in radio range
+      // to pin the box's memory and CPU.
+      "/setup-api/mascot-lines/regenerate",
     ])("gates sensitive %s during the setup window", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
@@ -508,6 +517,18 @@ describe("middleware", () => {
       const mod = await import("@/middleware");
 
       const response = await mod.middleware(createRequest("/setup-api/gateway/health"));
+      expect(response.status).toBe(200);
+    });
+
+    it("still allows the mascot GET during the setup window", async () => {
+      // Only the /regenerate leaf is gated, not the subtree: the crab reads
+      // its phrases from the bare path and it renders on the wizard, so
+      // gating the subtree would leave the mascot mute during setup.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup-api/mascot-lines"));
       expect(response.status).toBe(200);
     });
 

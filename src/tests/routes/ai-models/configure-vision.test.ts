@@ -76,6 +76,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfig: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  runOpenclawConfigSetBatch: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
@@ -111,15 +112,18 @@ import {
   readConfig,
   restartGateway,
   runOpenclawConfigSet,
+  runOpenclawConfigSetBatch,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
 } from "@/lib/openclaw-config";
+import { configSetCalls as recordedConfigSetCalls, failConfigSetsMatching } from "./config-set-calls";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
 const mockSetMany = vi.mocked(setMany);
 const mockReadConfig = vi.mocked(readConfig);
 const mockRunOpenclawConfigSet = vi.mocked(runOpenclawConfigSet);
+const mockRunOpenclawConfigSetBatch = vi.mocked(runOpenclawConfigSetBatch);
 const mockFs = vi.mocked(fsp);
 
 function createSuccessfulChildProcess(): ChildProcess {
@@ -156,8 +160,13 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     });
   }
 
+  /**
+   * Every `openclaw config set` assignment the route made, as [path, ...rest]
+   * tuples — whether it went out on its own or inside a batch.
+   */
   function configSetCalls(): string[][] {
-    return mockRunOpenclawConfigSet.mock.calls.map((call) => call[0] as string[]);
+    return recordedConfigSetCalls(mockRunOpenclawConfigSet, mockRunOpenclawConfigSetBatch)
+      .map((call) => call.args);
   }
 
   function callFor(path: string): string[] | undefined {
@@ -193,6 +202,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     vi.mocked(restartGateway).mockResolvedValue();
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     mockRunOpenclawConfigSet.mockResolvedValue(undefined);
+    mockRunOpenclawConfigSetBatch.mockResolvedValue(undefined);
     vi.mocked(unpairLocal).mockResolvedValue(undefined);
     vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
     vi.mocked(parseFullyQualifiedModel).mockImplementation(parseFullyQualifiedModelImpl);
@@ -318,9 +328,12 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
   it("still configures chat when the vision write fails", async () => {
     // Non-fatal by design: a chat provider that works is worth more than a
     // vision model, so this must not fail the whole Connect ClawBox AI flow.
-    mockRunOpenclawConfigSet.mockImplementation(async (args: string[]) => {
-      if (args[0] === "agents.defaults.imageModel") throw new Error("config set exploded");
-    });
+    failConfigSetsMatching(
+      mockRunOpenclawConfigSet,
+      mockRunOpenclawConfigSetBatch,
+      (path) => path === "agents.defaults.imageModel",
+      () => new Error("config set exploded"),
+    );
 
     const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: CLAWAI_TOKEN }));
 

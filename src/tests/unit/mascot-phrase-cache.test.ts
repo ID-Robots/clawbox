@@ -59,18 +59,21 @@ describe("mascot phrase cache", () => {
   });
 
   it("reads and writes a key per locale", async () => {
-    store.set(KEY("bg"), envelope("bg", { sass: ["Пак ли ти? 🙄", "Стига 😤"] }));
+    // Only English generates (GENERATION_LOCALES), so English is the locale
+    // with a cache to serve — but the KEY-per-locale shape is what stops one
+    // language's lines reaching another, and that is what this asserts.
+    store.set(KEY("en"), envelope("en", { sass: ["I audit the dust.", "Ship it, coward."] }));
 
-    const served = await server.getMascotPhrases("bg");
-    expect(served.meta.locale).toBe("bg");
+    const served = await server.getMascotPhrases("en");
+    expect(served.meta.locale).toBe("en");
     expect(served.meta.source).toBe("local");
     // Cached entries first, then the pack's — generation adds to the pack.
-    expect(served.phrases.sass).toEqual(["Пак ли ти? 🙄", "Стига 😤", ...bg.sass]);
+    expect(served.phrases.sass).toEqual(["I audit the dust.", "Ship it, coward.", ...en.sass]);
 
-    // The English box must not see the Bulgarian cache.
-    const english = await server.getMascotPhrases("en");
-    expect(english.meta.source).toBe("pack");
-    expect(english.phrases.sass).toEqual(en.sass);
+    // The Bulgarian box must not see the English cache — it gets its own pack.
+    const bulgarian = await server.getMascotPhrases("bg");
+    expect(bulgarian.meta.source).toBe("pack");
+    expect(bulgarian.phrases.sass).toEqual(bg.sass);
   });
 
   it("ignores an envelope missing either timestamp", async () => {
@@ -79,20 +82,20 @@ describe("mascot phrase cache", () => {
     // served forever and never topped up again.
     for (const field of ["lastFullRegen", "lastTopUp"]) {
       store.clear();
-      const parsed = JSON.parse(envelope("bg", { sass: ["Пак ли ти? 🙄", "Стига 😤"] }));
+      const parsed = JSON.parse(envelope("en", { sass: ["I audit the dust.", "Ship it, coward."] }));
       delete parsed[field];
-      store.set(KEY("bg"), JSON.stringify(parsed));
+      store.set(KEY("en"), JSON.stringify(parsed));
 
-      const result = await server.getMascotPhrases("bg");
+      const result = await server.getMascotPhrases("en");
       expect(result.meta.source, field).toBe("pack");
     }
   });
 
   it("ignores an envelope filed under the wrong locale", async () => {
-    store.set(KEY("bg"), envelope("de", { sass: ["Kaffee zuerst ☕"] }));
-    const bg = await server.getMascotPhrases("bg");
-    expect(bg.meta.source).toBe("pack");
-    expect(bg.phrases.sass).not.toContain("Kaffee zuerst ☕");
+    store.set(KEY("en"), envelope("bg", { sass: ["Кафе първо ☕"] }));
+    const english = await server.getMascotPhrases("en");
+    expect(english.meta.source).toBe("pack");
+    expect(english.phrases.sass).not.toContain("Кафе първо ☕");
   });
 
   it("re-filters a cache written under an older validator version, and rewrites it", async () => {
