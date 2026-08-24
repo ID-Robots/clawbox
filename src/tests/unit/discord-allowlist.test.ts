@@ -144,6 +144,50 @@ describe("setHermesDiscordAllowlist on disk", () => {
     expect(definitions).toEqual([`${DISCORD_ENV_ALLOWED_USERS}=${FRIEND}`]);
   });
 
+  it("rewrites every duplicate definition, not just the first", async () => {
+    // A .env can hold the same key twice — the export-form miss documented in
+    // hermes-env.ts is how upstream produced exactly that. Hermes' loader (and
+    // parseHermesEnv) keep the LAST assignment, so rewriting only the first
+    // leaves the old allowlist live behind the new one and the save silently
+    // does nothing.
+    await fs.writeFile(
+      envPath(),
+      `${DISCORD_ENV_ALLOWED_USERS}=${FRIEND}\nexport ${DISCORD_ENV_ALLOWED_USERS}=${FRIEND}\n`,
+      { mode: 0o600 },
+    );
+
+    await setHermesDiscordAllowlist([OWNER]);
+
+    const text = await fs.readFile(envPath(), "utf-8");
+    const definitions = text.split("\n").filter((line) => line.includes(DISCORD_ENV_ALLOWED_USERS));
+    expect(definitions).toEqual([`${DISCORD_ENV_ALLOWED_USERS}=${OWNER}`]);
+    // What Hermes would actually read back is the value that was just saved.
+    expect((await readHermesDiscordAccess()).allowedUsers).toEqual([OWNER]);
+  });
+
+  it("removes every duplicate definition when the key is cleared", async () => {
+    // Same failure pointing the other way: deleting the first line only leaves
+    // the second one still granting access.
+    await fs.writeFile(
+      envPath(),
+      [
+        "DISCORD_ALLOWED_CHANNELS=7",
+        `${DISCORD_ENV_ALLOWED_USERS}=${OWNER}`,
+        `export ${DISCORD_ENV_ALLOWED_USERS}=${FRIEND}`,
+        "",
+      ].join("\n"),
+      { mode: 0o600 },
+    );
+
+    // Allowed to empty the user list because a channel rule still admits people.
+    await setHermesDiscordAllowlist([]);
+
+    const text = await fs.readFile(envPath(), "utf-8");
+    expect(text).not.toContain(DISCORD_ENV_ALLOWED_USERS);
+    expect(text).toContain("DISCORD_ALLOWED_CHANNELS=7");
+    expect((await readHermesDiscordAccess()).allowedUsers).toEqual([]);
+  });
+
   it("removes somebody the picker deselected", async () => {
     await fs.writeFile(envPath(), `${DISCORD_ENV_ALLOWED_USERS}=${OWNER},${FRIEND}\n`, { mode: 0o600 });
     const result = await setHermesDiscordAllowlist([OWNER]);
@@ -282,9 +326,10 @@ describe("mapDiscordConnectionState", () => {
     ).toBe("intents-missing");
   });
 
-  it("keeps intents-missing visible even while an allowlist exists", () => {
-    // Both problems can be true at once; the one that stops the bot connecting
-    // at all is the one to act on first.
+  it("reports intents-missing ahead of denied-no-allowlist when both are true", () => {
+    // Both problems are true at once here: the intents are missing AND nobody is
+    // allowed. The one that stops the bot connecting at all is the one to act
+    // on first, so that is the state the panel gets.
     expect(
       mapDiscordConnectionState({
         gatewayRunning: true,

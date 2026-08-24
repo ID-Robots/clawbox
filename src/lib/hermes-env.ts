@@ -94,7 +94,8 @@ export function quoteEnvValue(value: string): string {
 
 /**
  * Apply assignments to .env text: replace in place where the key already
- * exists, append otherwise, and delete the line for a `null` value.
+ * exists, append otherwise, and delete the line for a `null` value. Every line
+ * defining the key is acted on, because Hermes' loader keeps the last one.
  *
  * Pure, so ordering, quoting and the export-line rules are unit-testable
  * without touching a filesystem.
@@ -108,17 +109,34 @@ export function applyEnvValues(existing: string, values: Record<string, string |
 
   for (const [key, rawValue] of Object.entries(values)) {
     if (!ENV_VAR_NAME_RE.test(key)) throw new Error(`Invalid environment variable name: ${key}`);
-    const index = lines.findIndex((line) => envLineDefinesKey(line, key));
+    // EVERY line that defines the key, not just the first. parseHermesEnv and
+    // Hermes' own load_env both keep the LAST assignment, so acting on the
+    // first line alone is silently wrong on a file that holds two: a set would
+    // rewrite a line nobody reads while the old value stays live, and a delete
+    // would remove a line nobody reads while the key stays set. Duplicates are
+    // not hypothetical — the export-form miss described at the top of this file
+    // is exactly how upstream produced them.
+    const indices: number[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (envLineDefinesKey(lines[i], key)) indices.push(i);
+    }
 
     if (rawValue === null) {
-      if (index >= 0) lines.splice(index, 1);
+      // Back to front, so each splice leaves the earlier indices valid.
+      for (let i = indices.length - 1; i >= 0; i--) lines.splice(indices[i], 1);
       continue;
     }
 
     const value = rawValue.replace(/[\r\n]/g, "");
     const serialized = `${key}=${quoteEnvValue(value)}`;
-    if (index >= 0) lines[index] = serialized;
-    else lines.push(serialized);
+    if (indices.length === 0) {
+      lines.push(serialized);
+    } else {
+      // Keep the first definition's position — a rewrite should not reshuffle a
+      // hand-maintained .env — and drop every later duplicate.
+      lines[indices[0]] = serialized;
+      for (let i = indices.length - 1; i >= 1; i--) lines.splice(indices[i], 1);
+    }
   }
 
   return lines.length > 0 ? `${lines.join("\n")}\n` : "";
