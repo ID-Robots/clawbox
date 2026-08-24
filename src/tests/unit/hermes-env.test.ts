@@ -13,6 +13,7 @@ import {
   quoteEnvValue,
   readHermesEnv,
   setHermesEnvValues,
+  removeEnvValues,
 } from "@/lib/hermes-env";
 
 describe("quoteEnvValue", () => {
@@ -227,5 +228,23 @@ describe("setHermesEnvValues on disk", () => {
     await fs.mkdir(hermesEnvPath(), { recursive: true });
     await expect(readHermesEnv()).rejects.toMatchObject({ code: "EISDIR" });
     await expect(getHermesEnvValue("A")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+});
+
+describe("removeEnvValues", () => {
+  it("drops plain and export-prefixed assignments and keeps everything else", () => {
+    const before = [
+      "# EMAIL_ADDRESS=template",
+      "EMAIL_ADDRESS=a@b.com",
+      "export EMAIL_PASSWORD=secret",
+      "TELEGRAM_BOT_TOKEN=keepme",
+      "",
+    ].join("\n");
+    const out = removeEnvValues(before, ["EMAIL_ADDRESS", "EMAIL_PASSWORD"]);
+    expect(out).toBe("# EMAIL_ADDRESS=template\nTELEGRAM_BOT_TOKEN=keepme\n");
+  });
+
+  it("is a no-op when nothing matches", () => {
+    expect(removeEnvValues("FOO=1\n", ["EMAIL_ADDRESS"])).toBe("FOO=1\n");
   });
 });

@@ -238,3 +238,19 @@ export async function setHermesEnvValues(values: Record<string, string | null>):
   writeChain = queued.catch(() => undefined);
   return queued;
 }
+
+/**
+ * Drop every definition of each key from .env text. A thin spelling of
+ * applyEnvValues' delete mode (a `null` value), kept as its own name because
+ * the email settings clear a whole group of keys at once and read better for
+ * it. Like applyEnvValues it removes EVERY line defining a key, not just the
+ * first, so a duplicate cannot resurrect a cleared credential.
+ */
+export function removeEnvValues(existing: string, keys: string[]): string {
+  return applyEnvValues(existing, Object.fromEntries(keys.map((key) => [key, null])));
+}
+
+/** Delete `keys` from ~/.hermes/.env, sharing the single-writer chain. */
+export async function clearHermesEnvValues(keys: string[]): Promise<void> {
+  return setHermesEnvValues(Object.fromEntries(keys.map((key) => [key, null])));
+}
