@@ -720,6 +720,9 @@ describe("updater", () => {
         "restart",
         "post_update",
         "hermes_edition",
+        // Every edition builds a .next, so every edition verifies that the
+        // build it rebooted onto is the code it just synced.
+        "verify_build_identity",
       ]);
     });
 
@@ -739,6 +742,7 @@ describe("updater", () => {
         "restart",
         "post_update",
         "gateway_verify",
+        "verify_build_identity",
       ]);
       expect(ids).not.toContain("hermes_edition");
     });

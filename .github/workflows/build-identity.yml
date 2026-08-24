@@ -1,0 +1,56 @@
+name: Build Identity
+
+on:
+  pull_request:
+  push:
+    branches: [main, beta]
+
+# A full `bun run build` per PR event adds up; a superseded run tells nobody
+# anything the newer one will not.
+concurrency:
+  group: build-identity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# A deployed asset set that cannot be traced back to a commit is how a fix
+# looks shipped and is not: a QA box served a build made from 1b21187 while its
+# checkout sat on d285cfd, 404'ing two features whose source was on disk, and
+# nothing in the repo could have caught it.
+#
+# So the build is asserted to know its own source, on every PR, using the SAME
+# script the device runs after an update (scripts/verify-build-identity.sh).
+# One implementation, two callers — a second copy would eventually disagree
+# with the first, and the whole value of the check is that it does not.
+jobs:
+  build-identity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Read-only job: it builds and reads git locally, and never pushes.
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.10"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build
+        run: bun run build
+
+      # actions/checkout leaves HEAD at the exact commit under test (the merge
+      # commit for a PR), which is what the built artefact must name. Passing
+      # it explicitly rather than letting the script read HEAD keeps the
+      # assertion honest even if a later step moves the ref.
+      - name: Assert the build names the commit it was built from
+        run: |
+          bash scripts/verify-build-identity.sh --expect-sha "$(git rev-parse HEAD)"
+
+      - name: Show the build record
+        if: always()
+        run: cat .next/build-info.json || echo "no build-info.json was produced"
