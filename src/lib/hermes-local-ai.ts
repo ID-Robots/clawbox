@@ -4,7 +4,7 @@ import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-ya
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
-import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { getLocalAiOpenAiBaseUrl, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 
 /**
  * Register the on-device model with Hermes.
@@ -49,7 +49,11 @@ export async function applyLocalAiToHermes(options: {
   }
 
   const set: Record<string, string> = {
-    [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: getLocalAiProxyBaseUrl(options.provider),
+    // The OpenAI-compatible root, NOT the bare proxy root: Hermes appends
+    // /chat/completions to base_url, and Ollama only serves that under /v1.
+    // The bare root used to be written here, so every Ollama-backed chat turn
+    // 404'd upstream and surfaced as a 502.
+    [`providers.${HERMES_LOCAL_PROVIDER}.base_url`]: getLocalAiOpenAiBaseUrl(options.provider),
     [`providers.${HERMES_LOCAL_PROVIDER}.api_key`]: getLocalAiToken(),
     [`providers.${HERMES_LOCAL_PROVIDER}.api_mode`]: "openai",
   };
@@ -93,12 +97,19 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
     if (configured !== true) return;
     const provider = await get("local_ai_provider");
     if (provider !== "llamacpp" && provider !== "ollama") return;
-    // Already registered? Then this is a normal device and we are done.
+    // Already registered? Then this is a normal device and we are done —
+    // unless what is registered is the bare (pre-/v1) Ollama proxy root, the
+    // value every Ollama-configured Hermes box got before the fix above. That
+    // URL 404s every chat turn, so treat it as "needs repair", exactly like an
+    // absent registration. Any other non-empty value is somebody's deliberate
+    // configuration and stays untouched.
     const existing = await runHermesCli(
       ["config", "get", `providers.${HERMES_LOCAL_PROVIDER}.base_url`],
       { timeoutMs: 15_000 },
     );
-    if (existing.code === 0 && existing.stdout.trim()) return;
+    const registered = existing.code === 0 ? existing.stdout.trim() : "";
+    const knownBroken = provider === "ollama" && registered === getLocalAiProxyBaseUrl(provider);
+    if (registered && !knownBroken) return;
 
     const stored = await get("local_ai_model");
     // Stored as "llamacpp/gemma4-e2b-it-q4_0"; Hermes wants the bare id.

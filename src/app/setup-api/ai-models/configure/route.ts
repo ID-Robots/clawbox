@@ -33,6 +33,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
 import { unpairLocal as unpairClawKeep } from "@/lib/clawkeep";
 import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
@@ -1299,7 +1300,48 @@ export async function POST(request: Request) {
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
-      const modelName = normalizedApiKey || "llama3.2:3b";
+      // `model` is honoured too: every cloud provider sends its pick there, so
+      // an API caller who wrote { model: "qwen2.5:3b" } used to have the field
+      // silently ignored and llama3.2:3b saved in its place — a "success" that
+      // configured a model this box does not have.
+      const requestedOllamaModel =
+        normalizedApiKey || (typeof bodyModel === "string" ? bodyModel.trim() : "");
+      const modelName = requestedOllamaModel || "llama3.2:3b";
+
+      // Ask Ollama about the id BEFORE anything is written. Both refusals below
+      // used to be discovered by the customer one dead chat turn at a time: an
+      // id that names nothing on this machine, and — on Hermes — a model whose
+      // window is under the agent's floor (qwen2.5:3b reports 32K against
+      // Hermes' 64K minimum, so every turn 502s while Settings says
+      // "configured", and no config override can widen a model's trained
+      // window). An unreachable Ollama keeps the old behaviour and saves: on
+      // the local-scope path the service was already started (and 503'd above
+      // when it could not be), so a dead probe here is the primary-scope case
+      // where the runtime starts Ollama on demand — "we could not ask" must
+      // not brick that flow.
+      const probe = await probeOllamaModel(modelName);
+      if (probe.status === "not-installed") {
+        return NextResponse.json(
+          { error: `Ollama does not have "${modelName}" on this device. Pull the model first, then save it.` },
+          { status: 400 },
+        );
+      }
+      if (
+        probe.status === "ok"
+        && probe.contextLength !== null
+        && probe.contextLength < HERMES_MINIMUM_CONTEXT_TOKENS
+        && (await getActiveHarness()) === "hermes"
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              `"${modelName}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window, `
+              + `and the assistant needs ${HERMES_MINIMUM_CONTEXT_TOKENS.toLocaleString("en-US")} tokens to run. `
+              + `Pick a model with at least a ${Math.floor(HERMES_MINIMUM_CONTEXT_TOKENS / 1000)}K window.`,
+          },
+          { status: 400 },
+        );
+      }
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
       const modelName = normalizedApiKey || getDefaultLlamaCppModel();
