@@ -4,6 +4,7 @@ import path from "path";
 import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
 import { setPreferences } from "@/lib/preference-store";
 import { getSkillsDir } from "@/lib/openclaw-config";
+import { WEBAPPS_DIR } from "@/lib/code-projects";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,21 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
     await fs.rm(skillDir, { recursive: true, force: true });
+
+    // Remove the deployed webapp, if this app is one. `webapp_create`,
+    // `webapp_update` and `code_project_build` all deploy to
+    // data/webapps/<appId>/, and /setup-api/webapps serves straight off that
+    // directory — so an uninstall that only dropped the preference left the
+    // page live at /setup-api/webapps?app=<appId> for anyone who still had the
+    // URL, while the desktop said the app was gone. code_project_delete's own
+    // guidance ("any copy already installed on the desktop stays until it is
+    // removed with app_uninstall") promises this removal.
+    const webappRoot = path.resolve(WEBAPPS_DIR);
+    const webappDir = path.resolve(webappRoot, appId);
+    if (!webappDir.startsWith(webappRoot + path.sep)) {
+      return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
+    }
+    await fs.rm(webappDir, { recursive: true, force: true });
 
     // Remove cached icon from the same location the install/icon routes use
     // (DATA_DIR/icons). The old hardcoded ~/clawbox/data/icons path diverged

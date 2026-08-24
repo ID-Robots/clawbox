@@ -97,7 +97,7 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
     return h;
   }
 
-  const installed = (list: { name: string; origin?: string }[]) =>
+  const installed = (list: { name: string; origin?: string; identifier?: string }[]) =>
     apiGet.mockResolvedValue({ skills: list });
 
   it("refuses a name the device has never installed, instead of reporting success", async () => {
@@ -145,6 +145,63 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toContain("Removed the skill \"pdf\"");
+  });
+
+  /**
+   * TASK-453 round 2 — the inverse bug the post-condition introduced.
+   *
+   * A store skill can SHADOW a builtin of the same name; the README's own
+   * worked example is exactly that (`skill_install official/pdf` ->
+   * `skill_uninstall pdf`). The installed list is keyed by name, so removing
+   * the store copy does not empty the name — the builtin underneath resurfaces
+   * with origin "builtin". Live on the QA box the removal SUCCEEDED on disk and
+   * the tool still answered CONFLICT "The device did not remove \"pdf\"".
+   */
+  it("reports success when removing a store skill that was shadowing a builtin", async () => {
+    apiGet
+      .mockResolvedValueOnce({
+        skills: [{ name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" }],
+      })
+      // The hub entry is gone; the bundled `pdf` is back under the same name.
+      .mockResolvedValueOnce({ skills: [{ name: "pdf", origin: "builtin" }] });
+    apiPost.mockResolvedValue({ ok: true });
+
+    const out = await skills().call("skill_uninstall", { name: "pdf" });
+
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/Removed the store skill "pdf"/);
+    // And the agent is told why the name is still in skill_list.
+    expect(out.text).toMatch(/built-in "pdf" .* available again/);
+  });
+
+  it("still reports failure when the SAME store skill survives the uninstall", async () => {
+    const entry = { name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" };
+    apiGet.mockResolvedValueOnce({ skills: [entry] }).mockResolvedValueOnce({ skills: [entry] });
+    apiPost.mockResolvedValue({ ok: true });
+
+    const out = await skills().call("skill_uninstall", { name: "pdf" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/still installed/i);
+  });
+
+  it("prefers the removable store row when a builtin of the same name is listed too", async () => {
+    apiGet
+      .mockResolvedValueOnce({
+        skills: [
+          { name: "pdf", origin: "builtin" },
+          { name: "pdf", origin: "hub", identifier: "openai/skills/skills/.curated/pdf" },
+        ],
+      })
+      .mockResolvedValueOnce({ skills: [{ name: "pdf", origin: "builtin" }] });
+    apiPost.mockResolvedValue({ ok: true });
+
+    const out = await skills().call("skill_uninstall", { name: "pdf" });
+    // The builtin row must not make this look unremovable before the POST.
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalled();
   });
 
   it("does not block the uninstall when the installed list cannot be read", async () => {
@@ -257,6 +314,37 @@ describe("ai_list_models — what is in use, and what fits", () => {
     const out = await ai().call("ai_list_models", {});
     if (out.isError) throw new Error("ai_list_models failed");
     expect(JSON.parse(out.text).in_use).toEqual({ provider: "clawlocal", model: "llama3.2:3b" });
+  });
+
+  /**
+   * TASK-453 round 2. `/setup-api/hermes/models` answers with EMPTY STRINGS,
+   * not null, on a device where nothing has been configured yet, so `??` never
+   * fired and the tool returned `{"in_use":{"provider":"","model":""},
+   * "thinking":""}` — observed live on a box whose data/config.json had no
+   * provider or model key at all. Two blanks are an invitation to a small model
+   * to fill them in; "unknown" is not.
+   */
+  it("says unknown, not an empty string, when nothing is configured", async () => {
+    apiGet.mockResolvedValue({
+      provider: "",
+      current: "",
+      reasoning: "",
+      models: [{ id: "glm-4" }],
+      providers: [],
+    });
+
+    const out = await ai().call("ai_list_models", {});
+    if (out.isError) throw new Error("ai_list_models failed");
+    const body = JSON.parse(out.text);
+    expect(body.in_use).toEqual({ provider: "unknown", model: "unknown" });
+    expect(body.thinking).toBe("unknown");
+  });
+
+  it("treats a whitespace-only field as unreported too", async () => {
+    apiGet.mockResolvedValue({ provider: "  ", current: "\t", reasoning: " ", models: [], providers: [] });
+    const out = await ai().call("ai_list_models", {});
+    if (out.isError) throw new Error("ai_list_models failed");
+    expect(JSON.parse(out.text).in_use).toEqual({ provider: "unknown", model: "unknown" });
   });
 
   /**
