@@ -10,7 +10,7 @@ import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp } from "@/lib/ui-events";
+import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -172,7 +172,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
   const navLabel = useCallback((item: { label?: string; labelKey?: string }) => item.label ?? (item.labelKey ? t(item.labelKey) : ""), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
-    window.dispatchEvent(new Event("clawbox:chat-model-state-changed"));
+    window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
   }, []);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);

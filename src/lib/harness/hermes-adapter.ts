@@ -39,6 +39,23 @@ export interface HermesTurnContext {
 
 const CHAT_ROUTE = "/setup-api/hermes/chat";
 
+/**
+ * The response body as an object, or an empty one.
+ *
+ * A route is not obliged to answer JSON — an upstream can interpose an HTML
+ * error page, and a 503 may carry no body at all. Callers here only ever read
+ * named fields off the result, so an empty object is the honest stand-in and
+ * lets the STATUS decide what went wrong.
+ */
+async function readJsonBody(res: Response): Promise<Record<string, unknown>> {
+  try {
+    const parsed = await res.json();
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
 export class HermesAdapter implements HarnessAdapter {
   readonly id = "hermes" as const;
 
@@ -159,7 +176,13 @@ export class HermesAdapter implements HarnessAdapter {
         }),
         signal: controller.signal,
       });
-      const data = await res.json();
+      // Read the body defensively and AFTER branching on the status. Parsing
+      // first meant a non-JSON error body — a proxy's HTML 502, an empty 503 —
+      // rejected inside `res.json()`, and the catch below relabelled it
+      // `upstream` with the parser's text as the message. A 409 then reached
+      // the user as "Unexpected token <" instead of the actionable
+      // `invalid-input` the route sent, and the status was lost on the way.
+      const data = await readJsonBody(res);
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",

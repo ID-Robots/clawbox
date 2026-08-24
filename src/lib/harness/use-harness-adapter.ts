@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { CHAT_MODEL_STATE_EVENT } from "@/lib/ui-events";
 import { fetchHarness } from "@/lib/client-harness";
 import { HERMES_MODEL_STATE_EVENT } from "@/hooks/useHermesModelOptions";
 import { capabilitiesFor, UNKNOWN_FACTS, type HarnessFacts } from "./capabilities";
@@ -99,10 +100,10 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
   }, []);
   useEffect(() => {
     window.addEventListener(HERMES_MODEL_STATE_EVENT, reprobe);
-    window.addEventListener("clawbox:chat-model-state-changed", reprobe);
+    window.addEventListener(CHAT_MODEL_STATE_EVENT, reprobe);
     return () => {
       window.removeEventListener(HERMES_MODEL_STATE_EVENT, reprobe);
-      window.removeEventListener("clawbox:chat-model-state-changed", reprobe);
+      window.removeEventListener(CHAT_MODEL_STATE_EVENT, reprobe);
     };
   }, [reprobe]);
 

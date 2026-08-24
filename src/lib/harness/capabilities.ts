@@ -1,4 +1,4 @@
-import type { HarnessCapabilities, HarnessId } from "./transport";
+import type { HarnessCapabilities, HarnessId, HarnessStatus } from "./transport";
 
 /**
  * What the chat surface may offer, per harness, on THIS box.
@@ -96,7 +96,13 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     canAttachImages: true,
     canAttachDocuments: true,
     maxAttachmentsPerTurn: MAX_ATTACHMENTS.openclaw,
-    canTranscribe: true,
+    // Follows the credential here too, for the same reason it does on Hermes:
+    // `/setup-api/chat/transcribe` resolves the token with `resolveClawaiToken`
+    // and answers 503 "not linked" without one, and that route is
+    // edition-neutral. Hardcoding `true` put a microphone on an OpenClaw box
+    // whose owner never linked ClawBox AI, where every recording was uploaded,
+    // refused, and thrown away.
+    canTranscribe: facts.hasClawaiToken,
     // Honest on OpenClaw too: pictures are generated through the ClawBox AI
     // credential, and a box whose owner never linked one cannot make them.
     canGenerateImages: facts.hasClawaiToken,
@@ -130,7 +136,9 @@ export const UNKNOWN_FACTS: HarnessFacts = {
  */
 export function shouldPatchSessionDefaults(input: {
   capabilities: Pick<HarnessCapabilities, "canPatchSessionDefaults">;
-  status: string;
+  // `HarnessStatus`, not `string`: a plain string accepts any literal, so a
+  // typo compiles and silently makes this always answer false.
+  status: HarnessStatus;
   sessionKey: string;
 }): boolean {
   if (!input.capabilities.canPatchSessionDefaults) return false;

@@ -178,6 +178,21 @@ export function isAudioMedia(source: string): boolean {
   return AUDIO_EXT_RE.test(bare);
 }
 
+/** Spoken replies kept per message. */
+const MAX_AUDIO_PER_MESSAGE = 4;
+
+/**
+ * De-duplicate and cap the spoken-reply refs attached to one message.
+ *
+ * Edition-neutral, which is why it lives here rather than beside the gateway
+ * adapter: every transcript path caps the same way, including the Hermes reply
+ * and the history merge, and importing it from the OpenClaw adapter made the
+ * Hermes path depend on a module it has nothing else to do with.
+ */
+export function boundedAudio(...groups: string[][]): string[] {
+  return [...new Set(groups.flat())].slice(0, MAX_AUDIO_PER_MESSAGE);
+}
+
 /**
  * Playable URLs for the audio attachments on one gateway message.
  *

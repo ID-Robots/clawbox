@@ -1,6 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import ChatPopup from "@/components/ChatPopup";
+import { fireEvent, screen, waitFor } from "@/tests/helpers/test-utils";
+import {
+  HERMES_SESSION,
+  installHermesBox,
+  mountHermesChat,
+  type HermesBox,
+} from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 /**
@@ -18,94 +23,7 @@ import { resetHarnessCache } from "@/lib/client-harness";
  * by not offering a microphone. Link one and the same code offers it.
  */
 
-const HERMES_SESSION = "20260810_221825_609d1e";
-
-/** Bodies POSTed to the Hermes chat route, in order. */
-let chatPosts: Record<string, unknown>[] = [];
-/** Every URL the surface fetched, so an upload can be asserted absent. */
-let fetchedUrls: string[] = [];
-/** Constructed WebSockets. A box with no gateway must never open one. */
-let socketsOpened = 0;
-/** Whether this box holds a ClawBox AI credential — the microphone's real gate. */
-let hasClawaiToken = false;
-
-class ForbiddenWs {
-  static readonly OPEN = 1;
-  readyState = ForbiddenWs.OPEN;
-  onmessage: ((event: MessageEvent) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor() {
-    socketsOpened += 1;
-  }
-  send() {}
-  close() {}
-  addEventListener() {}
-  removeEventListener() {}
-}
-
-function installFetch() {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: unknown, init?: RequestInit) => {
-      const url = String(input);
-      fetchedUrls.push(url);
-      if (url.includes("/setup-api/harness/active")) {
-        return { ok: true, json: async () => ({ active: "hermes", edition: "hermes" }) };
-      }
-      if (url.includes("/setup-api/chat/capabilities")) {
-        return {
-          ok: true,
-          json: async () => ({
-            harness: "hermes",
-            facts: { hasClawaiToken, hermesSupportsImages: false },
-          }),
-        };
-      }
-      if (url.includes("/setup-api/hermes/models")) {
-        return {
-          ok: true,
-          json: async () => ({
-            providers: [{ id: "clawlocal", name: "On this box", authenticated: true }],
-            // The scoped form of this route (?provider=…) answers the model
-            // pill; one model means no pill, which is the plain case here.
-            models: [{ id: "gemma", name: "Gemma" }],
-            provider: "clawlocal",
-            current: "gemma",
-            defaultModel: "gemma",
-            reasoning: "off",
-          }),
-        };
-      }
-      if (url.includes("/setup-api/chat/model")) {
-        return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
-      }
-      if (url.includes("/setup-api/chat/spoken-history")) {
-        return { ok: true, json: async () => ({ items: [] }) };
-      }
-      if (url.includes("/setup-api/hermes/chat")) {
-        chatPosts.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
-        return { ok: true, json: async () => ({ text: "hello back", sessionId: HERMES_SESSION }) };
-      }
-      return { ok: true, json: async () => ({}) };
-    }),
-  );
-}
-
-async function mountHermes() {
-  render(<ChatPopup isOpen onClose={() => {}} />);
-  const textarea = await screen.findByRole("textbox");
-  // The harness resolves through a fetch; until it lands the surface still
-  // assumes the gateway and the gates under test are not in force yet. Seeding
-  // the Hermes header is the one thing only this path does, so it is the signal
-  // that the mode really switched — waiting on the attach button to vanish
-  // would also "pass" if the button were never rendered at all.
-  await waitFor(() => {
-    expect(fetchedUrls.some((u) => u.includes("/setup-api/hermes/models"))).toBe(true);
-  });
-  await waitFor(() => expect(textarea).not.toBeDisabled());
-  return textarea;
-}
+let box: HermesBox;
 
 /** Ctrl+V of a screenshot, exactly as the gateway-mode staging test does it. */
 function pasteImage(textarea: HTMLElement) {
@@ -118,25 +36,18 @@ function pasteImage(textarea: HTMLElement) {
 }
 
 async function sendTurn(textarea: HTMLElement, text: string) {
-  const before = chatPosts.length;
+  const before = box.chatPosts.length;
   await waitFor(() => expect(textarea).not.toBeDisabled());
   fireEvent.change(textarea, { target: { value: text } });
   fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
-  await waitFor(() => expect(chatPosts.length).toBe(before + 1));
+  await waitFor(() => expect(box.chatPosts.length).toBe(before + 1));
 }
 
 beforeEach(() => {
-  chatPosts = [];
-  fetchedUrls = [];
-  socketsOpened = 0;
-  // The default box below is a customer on their own provider key: no ClawBox
-  // AI credential, so nothing on it can turn a recording into text.
-  hasClawaiToken = false;
   resetHarnessCache();
   window.localStorage.clear();
   Element.prototype.scrollIntoView = vi.fn();
-  installFetch();
-  vi.stubGlobal("WebSocket", ForbiddenWs as unknown as typeof WebSocket);
+  box = installHermesBox();
 });
 
 afterEach(() => {
@@ -147,35 +58,35 @@ afterEach(() => {
 
 describe("what the composer offers when the box cannot do it", () => {
   it("offers no attach button where a staged file could not reach the model", async () => {
-    await mountHermes();
+    await mountHermesChat(box);
     expect(screen.queryByTitle("Attach file")).toBeNull();
   });
 
   it("offers no microphone on a box with no transcription credential", async () => {
-    await mountHermes();
+    await mountHermesChat(box);
     // Not because of the edition — the transcription route is edition-neutral.
     // Because THIS device holds nothing to transcribe with.
     expect(screen.queryByTestId("voice-record")).toBeNull();
   });
 
   it("never opens a gateway socket on a box that runs no gateway", async () => {
-    await mountHermes();
-    expect(socketsOpened).toBe(0);
+    await mountHermesChat(box);
+    expect(box.socketsOpened).toBe(0);
   });
 
   it("DOES offer the microphone once the same box is linked", async () => {
     // The inverse is the point. Nothing about the edition changed here — only
     // whether this device holds a credential — and that is what decides. A gate
     // written against the harness would keep a working microphone hidden.
-    hasClawaiToken = true;
-    await mountHermes();
+    box.facts.hasClawaiToken = true;
+    await mountHermesChat(box);
     await screen.findByTestId("voice-record");
   });
 });
 
 describe("pasting an image the turn could not carry", () => {
   it("stages nothing, rather than promising something and dropping it", async () => {
-    const textarea = await mountHermes();
+    const textarea = await mountHermesChat(box);
 
     pasteImage(textarea);
     // The upload is a fetch and the chip is painted from its response, so let
@@ -185,25 +96,25 @@ describe("pasting an image the turn could not carry", () => {
     // The strip is the promise: a chip says "this went with your message". If
     // the turn cannot carry it, that chip is a lie the customer only discovers
     // from an answer that never looked at the picture.
-    expect(fetchedUrls.some((u) => u.includes("/setup-api/chat/attachments"))).toBe(false);
+    expect(box.fetchedUrls.some((u) => u.includes("/setup-api/chat/attachments"))).toBe(false);
     expect(screen.queryByTestId("chat-attachments")).toBeNull();
   });
 
   it("still lets the turn be typed and sent as text", async () => {
-    const textarea = await mountHermes();
+    const textarea = await mountHermesChat(box);
 
     pasteImage(textarea);
     await sendTurn(textarea, "what does this say?");
 
     // Refusing the picture must not disable the composer: the paste is ignored,
     // not swallowed along with the conversation.
-    expect(chatPosts[0].message).toBe("what does this say?");
+    expect(box.chatPosts[0].message).toBe("what does this say?");
   });
 });
 
 describe("New chat where there is no gateway to reset", () => {
   it("clears the conversation without reaching for one", async () => {
-    const textarea = await mountHermes();
+    const textarea = await mountHermesChat(box);
     await sendTurn(textarea, "remember the number 41");
     await screen.findByText("hello back");
 
@@ -215,16 +126,16 @@ describe("New chat where there is no gateway to reset", () => {
     // fail — and it did, with a red 'Not connected' banner over a conversation
     // that was never cleared.
     expect(screen.queryByText(/Could not start a new chat/)).toBeNull();
-    expect(socketsOpened).toBe(0);
+    expect(box.socketsOpened).toBe(0);
   });
 
   it("makes the next turn a new session rather than a resumed one", async () => {
-    const textarea = await mountHermes();
+    const textarea = await mountHermesChat(box);
     await sendTurn(textarea, "remember the number 41");
     // The route echoes the session id; the next turn resumes it. That is the
     // whole of this conversation's memory.
     await sendTurn(textarea, "what was the number?");
-    expect(chatPosts[1].sessionId).toBe(HERMES_SESSION);
+    expect(box.chatPosts[1].sessionId).toBe(HERMES_SESSION);
 
     fireEvent.click(screen.getByRole("button", { name: "New chat" }));
     await waitFor(() => expect(screen.queryByText("hello back")).toBeNull());
@@ -232,6 +143,6 @@ describe("New chat where there is no gateway to reset", () => {
     await sendTurn(textarea, "what was the number?");
     // Blanking the screen while the agent still holds the thread is the worst
     // outcome of the two: the customer believes the box forgot and it has not.
-    expect(chatPosts[2]).not.toHaveProperty("sessionId");
+    expect(box.chatPosts[2]).not.toHaveProperty("sessionId");
   });
 });

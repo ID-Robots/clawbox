@@ -24,9 +24,24 @@ describe("capabilitiesFor", () => {
   it("follows the credential, not the edition, for transcription", () => {
     expect(capabilitiesFor("hermes", linked).canTranscribe).toBe(true);
     expect(capabilitiesFor("hermes", bare).canTranscribe).toBe(false);
-    // OpenClaw's microphone has always been shown and stays shown: the route
-    // behind it resolves the same credential either way.
-    expect(capabilitiesFor("openclaw", bare).canTranscribe).toBe(true);
+    // And the same on OpenClaw, which is the half this used to get wrong. The
+    // route behind the microphone resolves the same credential on both
+    // editions and answers 503 without one, so a bare OpenClaw box that showed
+    // the button was promising something the box could not do.
+    expect(capabilitiesFor("openclaw", linked).canTranscribe).toBe(true);
+    expect(capabilitiesFor("openclaw", bare).canTranscribe).toBe(false);
+  });
+
+  it("answers transcription and image generation alike — one credential, one answer", () => {
+    // Both features are reached through the ClawBox AI credential, so no fact
+    // combination may separate them on either edition. The asymmetry this
+    // replaces is what let the microphone be offered where pictures were not.
+    for (const harness of ["openclaw", "hermes"] as const) {
+      for (const facts of [linked, bare]) {
+        const caps = capabilitiesFor(harness, facts);
+        expect(caps.canTranscribe).toBe(caps.canGenerateImages);
+      }
+    }
   });
 
   it("reports image generation from the credential on BOTH editions", () => {
