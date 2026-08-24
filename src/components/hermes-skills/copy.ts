@@ -1,154 +1,274 @@
-// Every user-facing string of the Hermes Skills store lives here.
+'use client';
+
+import { useMemo } from 'react';
+import { useT } from '@/lib/i18n';
+
+// Every user-facing string of the Hermes Skills store, resolved through `t()`.
 //
-// WHY one map: the store is not translated yet (the rest of the desktop is, via
-// lib/i18n). Keeping the strings in one place means the eventual i18n pass is a
-// mechanical swap of this module for `t(...)` calls, instead of a hunt through
-// eight components.
+// WHY one hook: keeping the store's copy in a single object means a component
+// still reads `COPY.installTitle(name)` rather than a key literal, so the shape
+// the store was written against survives translation — and a new string has
+// exactly one place to land. The catalogue lives in
+// lib/hermes-translations/en-skills.ts under `skills.*`.
+//
+// Plurals branch HERE, in TypeScript, with one key per branch: the catalogue is
+// a flat string map and encoding plural rules in it would make every translator
+// reimplement them.
 
-export const COPY = {
-  title: 'Hermes Skills',
-  subtitleWithCount: (n: number) => `${n.toLocaleString()} skills available for your Hermes agent`,
-  subtitleFallback: 'Add capabilities to your Hermes agent',
+export function useCopy() {
+  const { t } = useT();
+  return useMemo(
+    () => ({
+      title: t('skills.title'),
+      subtitleWithCount: (n: number) =>
+        t('skills.subtitleWithCount', { n: n.toLocaleString() }),
+      subtitleFallback: t('skills.subtitleFallback'),
 
-  tabInstalled: (n: number) => (n > 0 ? `Installed (${n})` : 'Installed'),
-  tabBrowse: 'Browse',
+      tablistLabel: t('skills.tablistLabel'),
+      tabInstalled: (n: number) =>
+        n > 0 ? t('skills.tabInstalled.withCount', { n }) : t('skills.tabInstalled.empty'),
+      tabBrowse: t('skills.tabBrowse'),
 
-  searchPlaceholder: 'Search skills…',
-  searchLabel: 'Search skills',
-  clearSearch: 'Clear search',
-  sortLabel: 'Sort',
-  sortOptions: {
-    relevance: 'Best match',
-    name: 'Name A–Z',
-    trust: 'Most trusted',
-    popular: 'Most installed',
-  } as const,
-  sourceLabel: 'Source',
-  allSources: 'All sources',
-  providerLabel: 'Publisher',
-  allProviders: 'All publishers',
-  categoryLabel: 'Category',
-  allCategories: 'All categories',
-  showingRange: (from: number, to: number, total: number) =>
-    `Showing ${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}`,
-  degradedCount: (n: number) => `Top ${n} matches — refine your search to narrow it`,
-  loadMore: 'Load more',
-  loadingMore: 'Loading more skills…',
+      searchPlaceholder: t('skills.searchPlaceholder'),
+      searchLabel: t('skills.searchLabel'),
+      searchBusy: t('skills.searchBusy'),
+      clearSearch: t('skills.clearSearch'),
+      sortLabel: t('skills.sortLabel'),
+      sortOptions: {
+        relevance: t('skills.sortOptions.relevance'),
+        name: t('skills.sortOptions.name'),
+        trust: t('skills.sortOptions.trust'),
+        popular: t('skills.sortOptions.popular'),
+      } as const,
+      sourceLabel: t('skills.sourceLabel'),
+      allSources: t('skills.allSources'),
+      providerLabel: t('skills.providerLabel'),
+      allProviders: t('skills.allProviders'),
+      categoryLabel: t('skills.categoryLabel'),
+      allCategories: t('skills.allCategories'),
+      showingRange: (from: number, to: number, total: number) =>
+        t('skills.showingRange', {
+          from: from.toLocaleString(),
+          to: to.toLocaleString(),
+          total: total.toLocaleString(),
+        }),
+      degradedCount: (n: number) => t('skills.degradedCount', { n }),
+      loadMore: t('skills.loadMore'),
+      loadingMore: t('skills.loadingMore'),
 
-  scanPassed: 'Scan passed',
-  scanFlagged: (n: number) => `Scan flagged ${n} ${n === 1 ? 'finding' : 'findings'}`,
-  notScanned: 'Not scanned',
+      scanPassed: t('skills.scanPassed'),
+      scanFlagged: (n: number) =>
+        n === 1 ? t('skills.scanFlagged.one', { n }) : t('skills.scanFlagged.other', { n }),
+      notScanned: t('skills.notScanned'),
 
-  originBuiltin: 'Built-in',
-  originHub: 'Installed',
-  originLocal: 'Created here',
-  originLocalHelp: 'Written on this device by your agent — not from a registry.',
+      originBuiltin: t('skills.originBuiltin'),
+      originHub: t('skills.originHub'),
+      originLocal: t('skills.originLocal'),
+      originLocalHelp: t('skills.originLocalHelp'),
 
-  install: 'Install',
-  installing: 'Installing…',
-  installed: 'Installed',
-  remove: 'Remove',
-  removing: 'Removing…',
-  retry: 'Retry',
-  builtinLocked: 'Already available (built-in)',
+      install: t('skills.install'),
+      installing: t('skills.installing'),
+      installed: t('skills.installed'),
+      remove: t('skills.remove'),
+      removing: t('skills.removing'),
+      retry: t('skills.retry'),
+      builtinLocked: t('skills.builtinLocked'),
 
-  installTitle: (name: string) => `Install ${name}?`,
-  installTrustedBody:
-    'This skill runs inside your Hermes agent. Hermes scans it before enabling it.',
-  installCommunityBody:
-    'Community-contributed and not reviewed by ID Robots. Check the identifier below matches the publisher you expect.',
-  installWillAsk: (labels: string[]) => `Will ask you for: ${labels.join(', ')}`,
-  cancel: 'Cancel',
+      installTitle: (name: string) => t('skills.installTitle', { name }),
+      installTrustedBody: t('skills.installTrustedBody'),
+      installCommunityBody: t('skills.installCommunityBody'),
+      installWillAsk: (labels: string[]) => t('skills.installWillAsk', { labels: labels.join(', ') }),
+      cancel: t('skills.cancel'),
 
-  uninstallTitle: (name: string) => `Remove ${name}?`,
-  uninstallBody: (installPath?: string) =>
-    installPath
-      ? `This deletes ${installPath} from your agent. You can install it again from Browse.`
-      : 'This deletes the skill from your agent. You can install it again from Browse.',
+      uninstallTitle: (name: string) => t('skills.uninstallTitle', { name }),
+      uninstallBody: (installPath?: string) =>
+        installPath
+          ? t('skills.uninstallBody.withPath', { path: installPath })
+          : t('skills.uninstallBody.generic'),
 
-  emptySearch: (q: string) => `No skills match “${q}”`,
-  emptySearchHint: 'Try a different term.',
-  emptySearchAllSources: 'Search all sources instead',
-  emptySource: (label: string) => `Nothing in ${label} yet`,
-  clearSourceFilter: (label: string) => `Clear the ${label} filter`,
-  emptyInstalled: 'No skills installed',
-  emptyInstalledHint: 'Browse the registry to add capabilities.',
-  browseSkills: 'Browse skills',
-  installedError: 'Couldn’t read your installed skills.',
-  installedStale: 'Couldn’t refresh this list — showing the last known state.',
-  buildingCatalog:
-    'Building the skill catalogue — the first browse on a new device takes about a minute.',
-  // The store re-asks on a timer while the index builds, so say so: the earlier
-  // wording left people closing and reopening the window to make skills appear.
-  buildingCatalogAuto: 'Skills will appear here as soon as it is ready — you can leave this open.',
-  // Keyed off when THIS device last downloaded the catalogue. The publisher's
-  // own build date never moves on a refetch, so it can't say anything here.
-  catalogStale: (when: string) => `Catalogue last downloaded ${when}.`,
+      liveInstalling: (name: string) => t('skills.liveInstalling', { name }),
+      liveInstalled: (name: string) => t('skills.liveInstalled', { name }),
+      liveInstallFailed: (name: string) => t('skills.liveInstallFailed', { name }),
+      installFailed: t('skills.installFailed'),
+      liveRemoving: (name: string) => t('skills.liveRemoving', { name }),
+      liveRemoved: (name: string) => t('skills.liveRemoved', { name }),
+      liveRemoveFailed: (name: string) => t('skills.liveRemoveFailed', { name }),
+      uninstallFailed: t('skills.uninstallFailed'),
 
-  ambiguousTitle: (n: number, q: string) => `${n} skills are named “${q}”. Pick the one you want:`,
-  ambiguousPickFirst: 'Pick one below to install',
+      emptySearch: (q: string) => t('skills.emptySearch', { q }),
+      emptySearchHint: t('skills.emptySearchHint'),
+      emptySearchAllSources: t('skills.emptySearchAllSources'),
+      emptySource: (label: string) => t('skills.emptySource', { label }),
+      clearSourceFilter: (label: string) => t('skills.clearSourceFilter', { label }),
+      emptyInstalled: t('skills.emptyInstalled'),
+      emptyInstalledHint: t('skills.emptyInstalledHint'),
+      browseSkills: t('skills.browseSkills'),
+      installedError: t('skills.installedError'),
+      installedStale: t('skills.installedStale'),
+      buildingCatalog: t('skills.buildingCatalog'),
+      // The store re-asks on a timer while the index builds, so say so: the earlier
+      // wording left people closing and reopening the window to make skills appear.
+      buildingCatalogAuto: t('skills.buildingCatalogAuto'),
+      // Keyed off when THIS device last downloaded the catalogue. The publisher's
+      // own build date never moves on a refetch, so it can't say anything here.
+      catalogStale: (when: string) => t('skills.catalogStale', { when }),
 
-  platformWarning: (platforms: string[]) =>
-    `Requires ${platforms.map(platformName).join(' or ')} — this skill won’t run on your ClawBox.`,
+      ambiguousTitle: (n: number, q: string) => t('skills.ambiguousTitle', { n, q }),
+      ambiguousPickFirst: t('skills.ambiguousPickFirst'),
 
-  sectionRequirements: 'Requirements',
-  sectionGlance: 'At a glance',
-  sectionAbout: 'About',
-  sectionSecurity: 'Security & provenance',
-  sectionRelated: 'Related skills',
-  sectionDocs: 'Documentation',
-  docsOutline: 'In this document',
-  readMore: 'Read more',
-  showLess: 'Show less',
-  docsFull: 'Full SKILL.md',
-  docsPreview: 'Documentation preview — the full text is available after install',
-  docsLoading: 'Loading documentation…',
-  docsUnavailable: 'No documentation available for this skill yet.',
+      platformWarning: (platforms: string[]) =>
+        t('skills.platformWarning', { platforms: platforms.map(platformName).join(' or ') }),
 
-  reqCommands: 'Commands',
-  reqCommandPresent: 'available on this device',
-  reqCommandMissing: 'not installed',
-  reqEnvVars: 'Environment variables',
-  reqDependencies: 'Packages',
-  reqCredentials: 'Credential files',
-  reqCompatibility: 'Compatibility',
-  reqSetup: 'Setup',
-  reqSecrets: 'Will ask you for',
-  reqGetKey: 'Get a key',
-  reqSetupGuide: 'Setup guide',
+      sectionRequirements: t('skills.sectionRequirements'),
+      sectionGlance: t('skills.sectionGlance'),
+      sectionAbout: t('skills.sectionAbout'),
+      sectionSecurity: t('skills.sectionSecurity'),
+      sectionRelated: t('skills.sectionRelated'),
+      sectionDocs: t('skills.sectionDocs'),
+      docsOutline: t('skills.docsOutline'),
+      docsSections: (n: number) => t('skills.docsSections', { n }),
+      readMore: t('skills.readMore'),
+      showLess: t('skills.showLess'),
+      docsFull: t('skills.docsFull'),
+      docsPreview: t('skills.docsPreview'),
+      docsLoading: t('skills.docsLoading'),
+      docsUnavailable: t('skills.docsUnavailable'),
 
-  provSource: 'Source',
-  provSourceUnverified: 'Publisher site (unverified)',
-  provRepo: 'Repository',
-  provDetailPage: 'Detail page',
-  provHomepage: 'Homepage',
-  provInstallCommand: 'Install command',
-  provWeeklyInstalls: 'Installs',
-  provContentHash: 'Content hash',
-  copyIdentifier: 'Copy identifier',
-  copied: 'Copied',
+      reqCommands: t('skills.reqCommands'),
+      reqCommandPresent: t('skills.reqCommandPresent'),
+      reqCommandMissing: t('skills.reqCommandMissing'),
+      reqEnvVars: t('skills.reqEnvVars'),
+      reqDependencies: t('skills.reqDependencies'),
+      reqCredentials: t('skills.reqCredentials'),
+      reqCompatibility: t('skills.reqCompatibility'),
+      reqSetup: t('skills.reqSetup'),
+      reqSecrets: t('skills.reqSecrets'),
+      reqGetKey: t('skills.reqGetKey'),
+      reqSetupGuide: t('skills.reqSetupGuide'),
 
-  // "At a glance" field labels + the small card facts. They live here, not in
-  // the components, so the eventual i18n pass stays the mechanical swap the
-  // header comment promises.
-  fieldVersion: 'Version',
-  fieldAuthor: 'Author',
-  fieldLicense: 'License',
-  fieldCategory: 'Category',
-  fieldPlatforms: 'Platforms',
-  fieldSize: 'Size',
-  fieldIncludes: 'Includes',
-  fieldInstalled: 'Installed',
-  fieldUpdated: 'Updated',
-  fileCount: (n: number) => `${n} ${n === 1 ? 'file' : 'files'}`,
-  platformOnly: (platforms: string[]) => `${platforms.join(' / ')} only`,
-  installedAgo: (when: string) => `Installed ${when}`,
-  showAllFindings: (n: number) => `Show all ${n} findings`,
+      provSource: t('skills.provSource'),
+      provSourceUnverified: t('skills.provSourceUnverified'),
+      provRepo: t('skills.provRepo'),
+      provDetailPage: t('skills.provDetailPage'),
+      provHomepage: t('skills.provHomepage'),
+      provInstallCommand: t('skills.provInstallCommand'),
+      provWeeklyInstalls: t('skills.provWeeklyInstalls'),
+      provContentHash: t('skills.provContentHash'),
+      copyIdentifier: t('skills.copyIdentifier'),
+      copied: t('skills.copied'),
 
-  back: 'Back to skills',
-  breadcrumbBrowse: 'Browse',
-  breadcrumbInstalled: 'Installed',
-} as const;
+      // "At a glance" field labels + the small card facts. They live here, not in
+      // the components, so a component never has to name a translation key.
+      fieldVersion: t('skills.fieldVersion'),
+      fieldAuthor: t('skills.fieldAuthor'),
+      fieldLicense: t('skills.fieldLicense'),
+      fieldCategory: t('skills.fieldCategory'),
+      fieldPlatforms: t('skills.fieldPlatforms'),
+      fieldSize: t('skills.fieldSize'),
+      fieldIncludes: t('skills.fieldIncludes'),
+      fieldInstalled: t('skills.fieldInstalled'),
+      fieldUpdated: t('skills.fieldUpdated'),
+      fileCount: (n: number) =>
+        n === 1 ? t('skills.fileCount.one', { n }) : t('skills.fileCount.other', { n }),
+      platformOnly: (platforms: string[]) =>
+        t('skills.platformOnly', { platforms: platforms.join(' / ') }),
+      installedAgo: (when: string) => t('skills.installedAgo', { when }),
+      showAllFindings: (n: number) => t('skills.showAllFindings', { n }),
+
+      // === TASK-452: the flagged-skill warning + confirm ===
+      dangerTitle: (name: string) => t('skills.dangerTitle', { name }),
+      dangerLead: (verdict: string) => t('skills.dangerLead', { verdict }),
+      dangerSeverity: (critical: number, high: number) =>
+        t('skills.dangerSeverity', { critical, high }),
+      dangerCanDo: t('skills.dangerCanDo'),
+      dangerNoCapabilities: t('skills.dangerNoCapabilities'),
+      dangerOther: (n: number) =>
+        n === 1 ? t('skills.dangerOther.one', { n }) : t('skills.dangerOther.other', { n }),
+      dangerTrustNote: t('skills.dangerTrustNote'),
+      dangerShowFindings: (n: number) => t('skills.dangerShowFindings', { n }),
+      dangerUnderstand: t('skills.dangerUnderstand'),
+      dangerInstallAnyway: t('skills.dangerInstallAnyway'),
+      dangerCancel: t('skills.dangerCancel'),
+      /** Plain-language name for one capability bucket. */
+      capability: (id: string) =>
+        t(`skills.capability.${CAPABILITY_KEYS.has(id) ? id : 'other'}`),
+
+      // === TASK-452: install refusals ===
+      installIncomplete: (files: string[]) =>
+        t('skills.installIncomplete', { files: files.slice(0, 5).join(', ') }),
+      installIncompleteHint: t('skills.installIncompleteHint'),
+      nameConflict: (name: string) => t('skills.nameConflict', { name }),
+      nameConflictHint: t('skills.nameConflictHint'),
+      installRepaired: (n: number) =>
+        n === 1 ? t('skills.installRepaired.one', { n }) : t('skills.installRepaired.other', { n }),
+
+      // === TASK-452: enabled/disabled ===
+      skillDisabled: t('skills.skillDisabled'),
+      skillDisabledHelp: t('skills.skillDisabledHelp'),
+      countDisabled: (n: number) => t('skills.countDisabled', { n }),
+
+      // === TASK-452: API keys ===
+      secretSaveLabel: (label: string) => t('skills.secretSaveLabel', { label }),
+      secretPlaceholder: t('skills.secretPlaceholder'),
+      secretSave: t('skills.secretSave'),
+      secretSaving: t('skills.secretSaving'),
+      secretSaved: t('skills.secretSaved'),
+      secretStored: t('skills.secretStored'),
+      secretClear: t('skills.secretClear'),
+      secretFailed: t('skills.secretFailed'),
+      secretHelp: t('skills.secretHelp'),
+
+      back: t('skills.back'),
+      breadcrumbLabel: t('skills.breadcrumbLabel'),
+      breadcrumbBrowse: t('skills.breadcrumbBrowse'),
+      breadcrumbInstalled: t('skills.breadcrumbInstalled'),
+
+      /** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601). */
+      relativeDate: (iso?: string): string | undefined => {
+        if (!iso) return undefined;
+        const parsed = Date.parse(iso);
+        if (Number.isNaN(parsed)) return undefined;
+        const seconds = Math.round((Date.now() - parsed) / 1000);
+        if (seconds < 60) return t('skills.relative.justNow');
+        const minutes = Math.round(seconds / 60);
+        if (minutes < 60) return t('skills.relative.minutes', { n: minutes });
+        const hours = Math.round(minutes / 60);
+        if (hours < 24) return t('skills.relative.hours', { n: hours });
+        const days = Math.round(hours / 24);
+        if (days < 31) {
+          return days === 1
+            ? t('skills.relative.days.one', { n: days })
+            : t('skills.relative.days.other', { n: days });
+        }
+        const months = Math.round(days / 30);
+        if (months < 12) {
+          return months === 1
+            ? t('skills.relative.months.one', { n: months })
+            : t('skills.relative.months.other', { n: months });
+        }
+        return t('skills.relative.years', { n: Math.round(months / 12) });
+      },
+    }),
+    [t],
+  );
+}
+
+// The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a
+// bucket a newer scanner introduces falls back to the generic line instead of
+// rendering a raw translation key at the customer.
+const CAPABILITY_KEYS = new Set([
+  'shell',
+  'filesystem',
+  'network',
+  'credentials',
+  'browser',
+  'system',
+  'agentInstructions',
+  'other',
+]);
+
+/** The copy object every component in the store reads its strings from. */
+export type SkillsCopy = ReturnType<typeof useCopy>;
 
 const PLATFORM_NAMES: Record<string, string> = {
   macos: 'macOS',
@@ -158,24 +278,7 @@ const PLATFORM_NAMES: Record<string, string> = {
   linux: 'Linux',
 };
 
+/** Proper nouns, not copy: the same on every locale. */
 export function platformName(id: string): string {
   return PLATFORM_NAMES[id.toLowerCase()] || id;
-}
-
-/** "3 days ago" / "just now" — dates come from the hub lock (ISO-8601). */
-export function relativeDate(iso?: string): string | undefined {
-  if (!iso) return undefined;
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return undefined;
-  const seconds = Math.round((Date.now() - t) / 1000);
-  if (seconds < 60) return 'just now';
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 31) return `${days} ${days === 1 ? 'day' : 'days'} ago`;
-  const months = Math.round(days / 30);
-  if (months < 12) return `${months} ${months === 1 ? 'month' : 'months'} ago`;
-  return `${Math.round(months / 12)} y ago`;
 }

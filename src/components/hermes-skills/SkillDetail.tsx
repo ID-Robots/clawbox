@@ -10,7 +10,7 @@ import {
   trustMeta,
 } from '@/lib/hermes-skills';
 import { renderText } from '@/lib/chat-markdown';
-import { COPY, platformName, relativeDate } from './copy';
+import { platformName, useCopy } from './copy';
 import {
   Alert,
   EmptyState,
@@ -62,6 +62,7 @@ function DocumentBody({
   expanded: boolean;
   onToggle: () => void;
 }) {
+  const COPY = useCopy();
   const body = detail.body || '';
   const rendered = useMemo(() => renderText(hardenMarkdownLinks(body)), [body]);
   if (!body) return null;
@@ -106,6 +107,7 @@ function Field({ label, title, children }: { label: string; title?: string; chil
 }
 
 function RequirementsCard({ detail }: { detail: HermesSkillDetail }) {
+  const COPY = useCopy();
   const req = detail.requirements;
   if (!req) return null;
   const anything =
@@ -199,15 +201,20 @@ function RequirementsCard({ detail }: { detail: HermesSkillDetail }) {
             {req.setupHelp && <p className="text-xs mb-2">{req.setupHelp}</p>}
             {req.setupHelpUrl && <ExternalLink href={req.setupHelpUrl}>{COPY.reqSetupGuide}</ExternalLink>}
             {req.secrets.length > 0 && (
-              <ul className="mt-2 space-y-1 list-none p-0 m-0">
+              <ul className="mt-2 space-y-2 list-none p-0 m-0">
                 {req.secrets.map((s) => (
-                  <li key={s.label} className="flex items-center gap-2 text-xs flex-wrap">
-                    <span className="material-symbols-rounded shrink-0" style={{ fontSize: 15 }} aria-hidden="true">
-                      key
-                    </span>
-                    <span>{s.label}</span>
-                    {s.envVar && <span className="font-mono text-[var(--text-secondary)]">{s.envVar}</span>}
-                    {s.providerUrl && <ExternalLink href={s.providerUrl}>{COPY.reqGetKey}</ExternalLink>}
+                  <li key={s.label} className="text-xs">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="material-symbols-rounded shrink-0" style={{ fontSize: 15 }} aria-hidden="true">
+                        key
+                      </span>
+                      <span>{s.label}</span>
+                      {s.envVar && <span className="font-mono text-[var(--text-secondary)]">{s.envVar}</span>}
+                      {s.providerUrl && <ExternalLink href={s.providerUrl}>{COPY.reqGetKey}</ExternalLink>}
+                    </div>
+                    {/* TASK-452: the store named the key and linked to where to
+                        buy it, then offered nowhere to type it. */}
+                    {s.envVar && <SecretInput label={s.label} envVar={s.envVar} />}
                   </li>
                 ))}
               </ul>
@@ -219,6 +226,98 @@ function RequirementsCard({ detail }: { detail: HermesSkillDetail }) {
   );
 }
 
+/**
+ * Write-only input for one API key a skill declares.
+ *
+ * WRITE-ONLY is the whole design. The route never returns a stored value, only
+ * whether the variable is set, so this component asks that question once on
+ * mount and otherwise holds the typed value in local state that is cleared the
+ * moment it has been sent. There is no reveal affordance because there is
+ * nothing to reveal it from.
+ *
+ * The key lands in ~/.hermes/.env, which is where Hermes reads environment
+ * from — the same place `hermes config set TELEGRAM_BOT_TOKEN` puts the
+ * Telegram token.
+ */
+function SecretInput({ label, envVar }: { label: string; envVar: string }) {
+  const COPY = useCopy();
+  const [value, setValue] = useState('');
+  const [stored, setStored] = useState<boolean | null>(null);
+  const [state, setState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/setup-api/hermes/skills/secrets?keys=${encodeURIComponent(envVar)}`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled) setStored(d?.secrets?.[envVar] === true);
+      })
+      .catch(() => {
+        if (!cancelled) setStored(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [envVar]);
+
+  const save = async (next: string) => {
+    setState('saving');
+    try {
+      const res = await fetch('/setup-api/hermes/skills/secrets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: envVar, value: next }),
+      });
+      if (!res.ok) throw new Error('save failed');
+      setStored(next.length > 0);
+      setValue('');
+      setState(next ? 'saved' : 'idle');
+    } catch {
+      setState('error');
+    }
+  };
+
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-2" data-testid={`skill-secret-${envVar}`}>
+      <label className="sr-only" htmlFor={`hs-secret-${envVar}`}>
+        {COPY.secretSaveLabel(label)}
+      </label>
+      <input
+        id={`hs-secret-${envVar}`}
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          if (state !== 'idle') setState('idle');
+        }}
+        placeholder={COPY.secretPlaceholder}
+        className={`min-w-0 flex-1 h-8 px-2 rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] text-xs
+                    text-[var(--text-primary)] placeholder:text-[var(--text-secondary)] focus:outline-none
+                    focus:border-[var(--coral-bright)] ${FOCUS_RING}`}
+      />
+      <GhostButton onClick={() => save(value)} disabled={!value || state === 'saving'}>
+        {state === 'saving' ? COPY.secretSaving : COPY.secretSave}
+      </GhostButton>
+      {stored && (
+        <GhostButton tone="danger" onClick={() => save('')} disabled={state === 'saving'}>
+          {COPY.secretClear}
+        </GhostButton>
+      )}
+      <span className="text-[10px] text-[var(--text-secondary)] basis-full">
+        {state === 'error'
+          ? COPY.secretFailed
+          : state === 'saved'
+            ? COPY.secretSaved
+            : stored
+              ? COPY.secretStored
+              : COPY.secretHelp}
+      </span>
+    </div>
+  );
+}
+
 const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 
 function severityRank(f: ScanFinding): number {
@@ -227,6 +326,7 @@ function severityRank(f: ScanFinding): number {
 }
 
 function SecurityCard({ detail }: { detail: HermesSkillDetail }) {
+  const COPY = useCopy();
   const [showAll, setShowAll] = useState(false);
   const security = detail.security;
   const prov = detail.provenance;
@@ -256,7 +356,7 @@ function SecurityCard({ detail }: { detail: HermesSkillDetail }) {
                   : COPY.scanFlagged(findings.length)}
               </span>
               {security.scannerVersion && <> · {security.scannerVersion}</>}
-              {relativeDate(security.scannedAt) && <> · {relativeDate(security.scannedAt)}</>}
+              {COPY.relativeDate(security.scannedAt) && <> · {COPY.relativeDate(security.scannedAt)}</>}
             </p>
             {security.summary && <p>{security.summary}</p>}
           </div>
@@ -353,6 +453,7 @@ function SecurityCard({ detail }: { detail: HermesSkillDetail }) {
 }
 
 function IdentityGrid({ detail }: { detail: HermesSkillDetail }) {
+  const COPY = useCopy();
   const install = detail.install;
   const fields: { label: string; value: string }[] = [];
   if (detail.version) fields.push({ label: COPY.fieldVersion, value: detail.version });
@@ -371,11 +472,11 @@ function IdentityGrid({ detail }: { detail: HermesSkillDetail }) {
   if (install?.supportDirs.length) {
     fields.push({ label: COPY.fieldIncludes, value: install.supportDirs.join(', ') });
   }
-  const installedAgo = relativeDate(install?.installedAt);
+  const installedAgo = COPY.relativeDate(install?.installedAt);
   if (installedAgo) fields.push({ label: COPY.fieldInstalled, value: installedAgo });
   const updatedAgo =
     install?.updatedAt && install.updatedAt !== install.installedAt
-      ? relativeDate(install.updatedAt)
+      ? COPY.relativeDate(install.updatedAt)
       : undefined;
   if (updatedAgo) fields.push({ label: COPY.fieldUpdated, value: updatedAgo });
   if (!fields.length) return null;
@@ -406,6 +507,7 @@ function RelatedSkills({
   installedNames: Set<string>;
   onOpen: (name: string) => void;
 }) {
+  const COPY = useCopy();
   if (!names.length) return null;
   return (
     <Section title={COPY.sectionRelated}>
@@ -438,6 +540,7 @@ function AmbiguityChooser({
   candidates: HermesSkill[];
   onPick: (skill: HermesSkill) => void;
 }) {
+  const COPY = useCopy();
   return (
     <Section title={COPY.ambiguousTitle(candidates.length, query)}>
       <ul className="space-y-2 list-none p-0 m-0">
@@ -487,6 +590,7 @@ export function SkillDetail({
   onBack: () => void;
   onOpenSkill: (skill: HermesSkill) => void;
 }) {
+  const COPY = useCopy();
   const [copied, setCopied] = useState(false);
   // Doc expansion is DERIVED from the body (long docs start collapsed) with an
   // explicit user override keyed to that body — so switching skills resets it
@@ -548,7 +652,7 @@ export function SkillDetail({
             arrow_back
           </span>
         </button>
-        <nav aria-label="Breadcrumb" className="text-sm text-[var(--text-secondary)] min-w-0 truncate">
+        <nav aria-label={COPY.breadcrumbLabel} className="text-sm text-[var(--text-secondary)] min-w-0 truncate">
           {breadcrumb} <span aria-hidden="true">›</span>{' '}
           <span className="text-[var(--text-primary)]">{detail?.name || skill.name}</span>
         </nav>
@@ -660,7 +764,7 @@ export function SkillDetail({
                   action={
                     detail.headings && detail.headings.length > 2 ? (
                       <span className="text-[10px] text-[var(--text-secondary)]">
-                        {detail.headings.length} sections
+                        {COPY.docsSections(detail.headings.length)}
                       </span>
                     ) : undefined
                   }

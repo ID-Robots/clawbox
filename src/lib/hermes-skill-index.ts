@@ -62,6 +62,15 @@ export interface CatalogRecord {
   sourceUrl?: string;
   /** Repo-relative path of an `official` skill inside hermes-agent/. */
   localPath?: string;
+  /**
+   * `owner/repo` the row was indexed from, and the skill's directory inside it.
+   * Kept (they were previously read only to build a provenance note) because
+   * they are what lets the install route ask GitHub for the skill's COMPLETE
+   * file list and repair an install the Hermes fetcher truncated — see
+   * hermes-skill-manifest.ts.
+   */
+  repo?: string;
+  repoPath?: string;
   /** Lowercased name+id, precomputed — the hot path of every query. */
   hay: string;
 }
@@ -224,6 +233,8 @@ function project(raw: RawRecord): CatalogRecord | null {
     repoUrl: httpsOnly(extra.repo_url),
     sourceUrl: httpsOnly(extra.source_url) || httpsOnly(extra.url),
     localPath: source === 'official' ? str(raw.path, 300) : undefined,
+    repo: str(raw.repo, 160),
+    repoPath: source === 'official' ? undefined : str(raw.path, 300),
     hay: hayOf(name, id),
   };
   return record;

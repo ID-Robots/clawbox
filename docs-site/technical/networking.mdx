@@ -1,7 +1,7 @@
 ---
 title: "Networking"
 icon: "network-wired"
-summary: "AP setup mode, captive portal, mDNS discovery, finding the device IP, and the complete port map."
+summary: "AP setup mode, what the captive portal really does, mDNS discovery, finding the device IP, remote access, the portal heartbeat, and the complete port map."
 ---
 
 ## Two network modes
@@ -11,10 +11,10 @@ summary: "AP setup mode, captive portal, mDNS discovery, finding the device IP, 
 | Property | Value |
 |---|---|
 | SSID | `ClawBox-Setup` (open by default; WPA-PSK if a hotspot password was configured) |
-| AP address | `10.42.0.1/24` normally; the box automatically falls back to `10.43.0.1/24` if the primary subnet is already in use upstream — the captive portal and wizard follow whichever is active |
+| AP address | `10.42.0.1/24` normally; the box automatically falls back to `10.43.0.1/24` if the primary subnet is already in use upstream. dnsmasq's `clawbox.local` mapping follows the active address; the middleware's probe redirect targets `http://10.42.0.1/` unless `PORTAL_URL` overrides it, so on the fallback subnet browse to `http://10.43.0.1` directly |
 | Wi-Fi interface | `wlP1p1s0` (Jetson default; overridable via `NETWORK_INTERFACE`) |
-| DNS | dnsmasq answers **every** name with the active AP address (captive hijack) |
-| Captive portal | OS probe URLs (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) are intercepted by the web app's middleware and redirected to the active AP address — phones auto-open the wizard |
+| DNS | **No hijack.** NetworkManager's shared-mode dnsmasq forwards queries upstream (`8.8.8.8`, `8.8.4.4`, `1.1.1.1`); the only local override is `clawbox.local` → the active AP address. `start-ap.sh` deletes the old `captive-portal.conf` on every start |
+| Captive portal | Partial — the web app's middleware answers OS probe paths (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) *when the request reaches the box on port 80*, but nothing at the DNS or iptables layer steers probes there (the legacy port-80 DNAT rule is actively removed on AP start and stop). **Browse to the AP address yourself** |
 | Watchdog | `clawbox-ap-watchdog.timer` re-raises the hotspot every 20 s until setup completes |
 
 If an Ethernet uplink is connected while in AP mode, the box **shares** that internet connection to hotspot clients (IP forwarding + NAT).
@@ -46,7 +46,8 @@ The box already ships mitigations (avahi tuned for Windows quirks, re-announce o
 |---|---|---|
 | **80** | ClawBox web OS (login, desktop, wizard, `/setup-api/*`) | LAN |
 | 443 | HTTPS (only if certs are installed at `data/certs/`) | LAN |
-| **18789** | OpenClaw gateway | LAN, **token-gated** — the page loads, but never browse it directly: it won't accept your password. Everything goes through port 80 |
+| **18789** | OpenClaw gateway — **OpenClaw / dual only** | LAN, **token-gated** — the page loads, but never browse it directly: it won't accept your password. Everything goes through port 80. On [Hermes](/editions/hermes) the unit is masked and the port is closed (connection refused) |
+| 8090 | Hermes dashboard auth proxy — **Hermes / dual only** | LAN, gated by your ClawBox session; fronts the dashboard on `127.0.0.2:9119` |
 | 3006 | Terminal (xterm.js) WebSocket PTY | LAN (proxied at `/terminal-ws`) |
 | 5900 / 6080 | x11vnc / noVNC websockify (Remote Desktop app) | localhost / proxied at `/novnc-ws` |
 | 18800 | Chromium DevTools Protocol (AI browser control) | localhost |
@@ -57,9 +58,31 @@ The box already ships mitigations (avahi tuned for Windows quirks, re-announce o
 
 ## Remote access
 
-- **Cloudflare Quick Tunnel** — `clawbox-tunnel.service` (toggle via Settings / `setup-api/tunnel/*`) exposes port 80 through a temporary `*.trycloudflare.com` URL written to `data/cloudflared/tunnel.url`. No port-forwarding required.
+- **Cloudflare Quick Tunnel** — `clawbox-tunnel.service` exposes port 80 through a temporary `*.trycloudflare.com` URL written to `data/cloudflared/tunnel.url`. No port-forwarding required. It is **opt-in** and off by default.
+- **Settings → Remote Control** drives it through `GET /setup-api/portal/status`, `POST /setup-api/portal/start` and `POST /setup-api/portal/stop`. (`/setup-api/tunnel/*` also exists but nothing in the UI calls it — it is a separate legacy surface and can report `running:false` while a tunnel is in fact up.)
+- **Start also regenerates.** `start` is a `systemctl restart`, so pressing it on a running tunnel publishes a *new* URL. Stopping is a clean `SIGTERM`, which the unit currently records as exit status 143 — systemd scores that as `failed`, which the panel renders as a red error box even though the stop worked.
 - **SSH** — standard Ubuntu OpenSSH on port 22, user `clawbox`, same password as the browser login.
-- The gateway's allowed origins are managed automatically (localhost, `<hostname>.local`, the AP addresses, and the box's live LAN IPs) — this is refreshed on every gateway start.
+- On the OpenClaw/dual editions, the gateway's allowed origins are managed automatically (localhost, `<hostname>.local`, the AP addresses, and the box's live LAN IPs) — refreshed on every gateway start.
+
+### Portal heartbeat
+
+`clawbox-heartbeat.timer` fires `clawbox-heartbeat.service` every 5 minutes (30 s after
+boot). That oneshot only curls `http://127.0.0.1/setup-api/portal/heartbeat-tick` on
+loopback; the outbound request happens inside the web app.
+
+| | |
+|---|---|
+| Destination | `https://clawbox.com/api/portal/devices/heartbeat` (override: `PORTAL_HEARTBEAT_URL`) |
+| Method | `POST`, `Authorization: Bearer <your ClawBox AI pairing token>` |
+| Payload | exactly `{ deviceId, tunnelUrl, name }` — no chat content, no file contents, no system metrics |
+| Device ID | `dev_<first 16 hex of /etc/machine-id>`, cached in `data/cloudflared/device-id` |
+| When it actually sends | only when **both** a ClawBox AI token is paired **and** a tunnel URL exists. With no tunnel or no subscription the timer ticks and sends nothing |
+
+<Note>
+The device ID is derived from `/etc/machine-id`, which a factory reset does not touch —
+so a reset box reappears in the portal as the same device. The cached copy under
+`data/cloudflared/` is deleted by the reset and simply re-derived.
+</Note>
 
 ## DNS & hostname
 

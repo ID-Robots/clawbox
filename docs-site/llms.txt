@@ -2,7 +2,7 @@
 
 > ClawBox is pre-configured AI hardware (NVIDIA Jetson) running OpenClaw OS — a self-hosted AI assistant reachable from Telegram and the web. This documentation covers consumer setup, deep technical reference, troubleshooting, and recovery. Site: https://docs.clawbox.com · Source: https://github.com/ID-Robots/clawbox (docs live in docs-site/, releases are vX.Y.Z tags on main, integration branch is beta).
 
-Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-gated gateway; it loads but rejects passwords); one Linux password (`clawbox` user) for both SSH and browser login; device state in /home/clawbox/clawbox/data and ~/.openclaw (survives updates; wiped by factory reset); updates are git-tag based and reboot the box at the end; provider credentials live in ~/.openclaw/agents/main/agent/auth-profiles.json.
+Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-gated gateway; it loads but rejects passwords); one Linux password (`clawbox` user) for both SSH and browser login; device state in /home/clawbox/clawbox/data and, per edition, ~/.openclaw or ~/.hermes (survives updates; wiped by factory reset, except data/network.env, data/llamacpp/models and ~/.hermes/hermes-agent); updates are git-tag based and reboot the box at the end; provider credentials live in ~/.openclaw/agents/main/agent/auth-profiles.json.
 
 ## Start Here
 
@@ -12,27 +12,27 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 
 ## Setup
 
-- [First Boot](https://docs.clawbox.com/setup/first-boot): unbox, connect, pair via QR code — the first-run guide
+- [First Boot](https://docs.clawbox.com/setup/first-boot): unbox, join the ClawBox-Setup hotspot (open, 10.42.0.1 / fallback 10.43.0.1), run the 5-step browser wizard (Wi-Fi → update → password → AI provider → optional Telegram) — the first-run guide. There is NO QR-code pairing; the only QR in the product opens Telegram's @BotFather
 - [Connect to a Network](https://docs.clawbox.com/setup/connect-network): joining Wi-Fi or Ethernet after setup
 - [Choose Your AI Provider](https://docs.clawbox.com/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models
 - [OpenClaw Setup](https://docs.clawbox.com/setup/openclaw-setup): gateway configuration
 
 ## Editions
 
-- [Editions](https://docs.clawbox.com/editions/overview): the three editions (openclaw | hermes | dual), chosen at flash time and recorded in the root-owned /etc/clawbox/edition.env; `clawbox edition` prints it
-- [Hermes Edition](https://docs.clawbox.com/editions/hermes): Hermes Agent as the only agent — no OpenClaw gateway (unit masked, :18789 closed, /api/* and /chat 404), no App Store or Control UI, Skills + Hermes dashboard instead; `clawbox update` refused, use Settings → System Update
-- [AI Providers on Hermes](https://docs.clawbox.com/editions/hermes-providers): the Hermes models panel — sign-in vs API-key providers, ClawBox AI as a custom provider, on-device Gemma 4 with standby and no reasoning dial, eight reasoning levels
+- [Editions](https://docs.clawbox.com/editions/overview): the three editions (openclaw | hermes | dual), chosen at flash time and recorded in the root-owned /etc/clawbox/edition.env; no `clawbox` command is installed — run `bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts edition` to print it
+- [Hermes Edition](https://docs.clawbox.com/editions/hermes): Hermes Agent as the only agent — no OpenClaw gateway (unit masked, :18789 closed, /api/* and /chat 404), no App Store or Control UI, Skills + Hermes dashboard instead; the CLI update path is refused on this edition, use Settings → System Update. ClawKeep backups are not available on this edition. There is no VS Code / code-server app on ANY edition — it was removed from the product
+- [AI Providers on Hermes](https://docs.clawbox.com/editions/hermes-providers): the Hermes models panel — sign-in vs API-key providers, ClawBox AI as a custom provider, on-device Gemma 4 with standby and a two-state Thinking off/on switch, eight reasoning levels for effort-scale providers (seven on ClawBox AI — no Ultra)
 - [Hermes Skills](https://docs.clawbox.com/editions/hermes-skills): the capability store replacing the App Store; offline catalogue; install takes a full identifier, uninstall takes the short name; skills live in ~/.hermes/skills
 
 ## Technical Reference
 
-- [System Architecture](https://docs.clawbox.com/technical/architecture): service topology, request routing, boot lifecycle, ClawBox↔OpenClaw relationship
-- [Networking](https://docs.clawbox.com/technical/networking): AP mode, captive portal, mDNS/clawbox.local reliability, full port map
+- [System Architecture](https://docs.clawbox.com/technical/architecture): service topology, request routing, boot lifecycle, and how the OS relates to its AI harness (OpenClaw on openclaw/dual, Hermes on hermes/dual)
+- [Networking](https://docs.clawbox.com/technical/networking): AP mode (no DNS hijack — dnsmasq forwards upstream; the middleware answers captive-portal probe paths), mDNS/clawbox.local reliability, full port map, remote access via /setup-api/portal/*, portal heartbeat
 - [Filesystem Layout](https://docs.clawbox.com/technical/filesystem): where everything lives; what survives updates vs factory reset; where secrets are
 - [Authentication & Security](https://docs.clawbox.com/technical/authentication): browser login flow (unix_chkpwd), session cookies, gateway token, service tokens
-- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (openai/ vs codex/), boot-time self-healing
+- [AI Providers](https://docs.clawbox.com/technical/ai-providers): every provider lane, credential storage map, the two OpenAI lanes (openai/ vs codex/), boot-time self-healing — OpenClaw/dual editions only; Hermes provider config is Hermes' own
 - [Update System](https://docs.clawbox.com/technical/update-system): tag-based updates, channels (main/beta), divergence/"Updates paused", manual-update pitfalls
-- [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface): the device tools the AI agent gets, clawbox CLI, auth model — the tool set differs by edition (app_* + coding family + coordinate browser control on OpenClaw only; skill_* + ai_* on Hermes only)
+- [Agent Interface (MCP)](https://docs.clawbox.com/technical/agent-interface): the device tools the AI agent gets, the clawbox-cli.ts wrapper (invoked via bun; no `clawbox` command on PATH), auth model — the tool set differs by edition (app_* + coding family + coordinate browser control on OpenClaw only; skill_* + ai_* on Hermes only)
 
 ## Troubleshooting & Recovery
 

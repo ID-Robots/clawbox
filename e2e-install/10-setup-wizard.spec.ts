@@ -26,7 +26,7 @@ import {
   readInstallLog,
   waitForHttpReady,
 } from "./helpers/container";
-import { getStatus } from "./helpers/setup-api";
+import { getStatus, getStatusAuthed } from "./helpers/setup-api";
 
 const env = loadEnvTest();
 
@@ -172,11 +172,43 @@ test.describe("fresh-install setup wizard (UI)", () => {
   });
 
   test("setup is complete after the wizard", async () => {
+    // The wizard's progress flags are public — /login reads them with no
+    // session to decide whether to bounce an unfinished setup to /setup.
     const status = await getStatus();
     expect(status.setup_complete).toBe(true);
     expect(status.wifi_configured).toBe(true);
     expect(status.password_configured).toBe(true);
-    expect(status.ai_model_configured).toBe(true);
+
+    // Which provider the box got wired to is NOT public, so ask the way the
+    // desktop asks: with a session.
+    const authed = await getStatusAuthed();
+    expect(authed.ai_model_configured).toBe(true);
+  });
+
+  test("setup status does not leak provider detail to an anonymous caller", async () => {
+    // /setup-api/setup/status is public by design and is also served through
+    // the cloudflared tunnel, so whatever it returns unauthenticated is
+    // readable by anyone holding that URL. It must carry the wizard's progress
+    // and nothing else. The wizard above configured OpenAI, so if the trim
+    // regressed, `ai_model_provider` is sitting right here. TASK-446.
+    const anonymous = (await getStatus()) as unknown as Record<string, unknown>;
+
+    for (const field of [
+      "local_ai_configured",
+      "local_ai_provider",
+      "local_ai_model",
+      "ai_model_configured",
+      "ai_model_provider",
+      "telegram_configured",
+    ]) {
+      expect(anonymous, `${field} must not be readable without a session`).not.toHaveProperty(field);
+    }
+    expect(JSON.stringify(anonymous)).not.toContain("openai");
+
+    // ...and the same box does hand all of it back once you authenticate, so
+    // this is a gate, not a removed feature.
+    const authed = await getStatusAuthed();
+    expect(authed.ai_model_configured).toBe(true);
   });
 });
 

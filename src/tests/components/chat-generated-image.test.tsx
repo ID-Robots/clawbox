@@ -28,6 +28,19 @@ function installFetch(replyText: string) {
       if (url.includes("/setup-api/hermes/chat")) {
         return { ok: true, json: async () => ({ text: replyText, sessionId: "s1" }) };
       }
+      // A conversation that already exists, so the auto-greet does not run.
+      // Hermes keeps a durable transcript now, which means an EMPTY one is the
+      // "first conversation" signal that fires the greeting — and the greeting
+      // would come back through the same mock, putting a second copy of the
+      // reply under test on screen.
+      if (url.includes("/setup-api/chat/history")) {
+        return {
+          ok: true,
+          json: async () => ({
+            messages: [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }],
+          }),
+        };
+      }
       if (url.includes("/setup-api/chat/model")) {
         return { ok: true, json: async () => ({ options: [], activeOptionId: "" }) };
       }

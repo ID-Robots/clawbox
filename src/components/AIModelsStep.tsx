@@ -118,6 +118,15 @@ function getConnectButtonLabel(providerName?: string | null) {
  */
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
+/**
+ * How often the plan/allowance card re-asks the portal while mounted
+ * (TASK-516). Slow on purpose: the number it protects moves at most twenty
+ * times a day, and every tick is a portal round-trip. What it must beat is
+ * "forever", which is what a mount-only read gave a Settings window the
+ * desktop never unmounts.
+ */
+const ALLOWANCE_REFRESH_MS = 30_000;
+
 type ConfiguringKind = "generic" | "ollama" | "llamacpp";
 
 interface ConfiguringState {
@@ -716,33 +725,64 @@ export default function AIModelsStep({
   // in the shared tier module so these two panels cannot drift again. It reads
   // the account only when the box is actually paired, so the wizard's
   // choose-a-plan flow on an unpaired box is untouched.
+  //
+  // Not once per mount but on a slow poll (TASK-516): the desktop keeps the
+  // Settings window mounted while it is "closed", so a mount-only read froze
+  // the allowance at whatever the page load saw. The one moment the line is
+  // needed — right after the chat refused a picture at the cap — it showed the
+  // morning's number and contradicted the assistant on the same screen. The
+  // interval matches how the Voice and Local Models panels stay honest, and it
+  // pauses while the tab is hidden so a background desktop does not poll the
+  // portal all day; coming back to the tab refreshes immediately.
   useEffect(() => {
-    if (userPickedTierRef.current) return;
-    const controller = new AbortController();
-    fetch("/setup-api/ai-models/status", { cache: "no-store", signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (!data || typeof data !== "object") return;
-        // Only a live portal answer may move the card. `tierSource: "picker"`
-        // means the status route never reached the portal this cycle, and the
-        // stored device tier cannot tell Free from "we never asked" — guessing
-        // from it is how a Free user got shown a paid plan in the first place.
-        if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
-        // The allowance rides on the same live-portal gate as the tier badge,
-        // and for the same reason: `tierSource: "picker"` means nobody asked
-        // the portal this cycle, so any number attached to it is a leftover.
-        // Set unconditionally, including to null — an allowance that stays on
-        // screen after the portal stopped confirming it is a stale cap, and a
-        // stale cap is indistinguishable from a wrong one.
-        setImageAllowance(readImageAllowance(data.clawaiImages));
-        if (userPickedTierRef.current) return;
-        setClawaiTier(resolveUiTier(true, data.clawaiAccountTier ?? null));
-      })
-      .catch(() => {
-        // Offline or mid-restart: keep the stored intent rather than blanking
-        // or guessing at someone's subscription.
-      });
-    return () => controller.abort();
+    let controller: AbortController | null = null;
+    const refresh = () => {
+      controller?.abort();
+      const own = new AbortController();
+      controller = own;
+      fetch("/setup-api/ai-models/status", { cache: "no-store", signal: own.signal })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (!data || typeof data !== "object") return;
+          // Only a live portal answer may move the card. `tierSource: "picker"`
+          // means the status route never reached the portal this cycle, and the
+          // stored device tier cannot tell Free from "we never asked" — guessing
+          // from it is how a Free user got shown a paid plan in the first place.
+          if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
+          // The allowance rides on the same live-portal gate as the tier badge,
+          // and for the same reason: `tierSource: "picker"` means nobody asked
+          // the portal this cycle, so any number attached to it is a leftover.
+          // Set unconditionally, including to null — an allowance that stays on
+          // screen after the portal stopped confirming it is a stale cap, and a
+          // stale cap is indistinguishable from a wrong one.
+          setImageAllowance(readImageAllowance(data.clawaiImages));
+          // The tier guard sits at resolution time, not at fetch time: a pick
+          // made while this request was in flight must win over its answer —
+          // and the allowance above is real either way.
+          if (userPickedTierRef.current) return;
+          setClawaiTier(resolveUiTier(true, data.clawaiAccountTier ?? null));
+        })
+        .catch(() => {
+          // Offline or mid-restart: keep the stored intent rather than blanking
+          // or guessing at someone's subscription.
+        });
+    };
+    // The mount read gets the same visibility gate as the ticks: a panel
+    // mounting in a background tab waits for `visibilitychange` like any
+    // other hidden refresh would.
+    if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
+    const interval = setInterval(() => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
+    }, ALLOWANCE_REFRESH_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      controller?.abort();
+    };
   }, []);
 
   useEffect(() => {

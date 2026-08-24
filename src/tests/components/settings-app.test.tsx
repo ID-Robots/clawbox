@@ -3,6 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
+// Every test in this file mounts the WHOLE settings app — every panel, every
+// status fetch, and now the pet picker as well. On a Jetson under full-suite
+// load that mount alone eats most of the default 5 s budget, so these tests
+// were failing on the clock rather than on an assertion. The work is real and
+// the assertions are cheap; the budget is what was wrong.
+vi.setConfig({ testTimeout: 20_000 });
+
 vi.mock("@/lib/i18n", () => ({
   LANGUAGES: [{ code: "en", name: "English" }],
   I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,

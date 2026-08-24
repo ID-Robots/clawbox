@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { sourceLabel, trustMeta } from '@/lib/hermes-skills';
-import { COPY } from './copy';
+import { useCopy } from './copy';
 
 // Shared visual atoms for the Hermes Skills store. Same vocabulary as the
 // OpenClaw AppStore (rounded-2xl cards, material-symbols icons, chip rows) but
@@ -65,6 +65,7 @@ export function SourceChip({ source }: { source?: string }) {
 }
 
 export function ScanChip({ verdict, findings }: { verdict?: string; findings?: number }) {
+  const COPY = useCopy();
   if (!verdict) return null;
   const clean = verdict.toLowerCase() === 'safe' && !findings;
   return (
@@ -266,10 +267,12 @@ export function GhostButton({
   children,
   onClick,
   tone = 'neutral',
+  disabled,
 }: {
   children: ReactNode;
   onClick?: () => void;
   tone?: 'neutral' | 'danger';
+  disabled?: boolean;
 }) {
   const cls =
     tone === 'danger'
@@ -279,7 +282,8 @@ export function GhostButton({
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${cls} ${FOCUS_RING}`}
+      disabled={disabled}
+      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${cls} ${FOCUS_RING}`}
     >
       {children}
     </button>

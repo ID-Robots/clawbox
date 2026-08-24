@@ -5,8 +5,8 @@
 // retries forever — and a chronically-404ing tool is exactly what trips
 // Hermes' per-server circuit breaker and takes EVERY ClawBox tool offline.
 
-import { apiGet, apiPost } from "../lib/api";
-import { ToolError } from "../lib/errors";
+import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
+import { ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, type McpContext } from "../lib/context";
@@ -40,6 +40,28 @@ async function installedAppIds(): Promise<string[]> {
 interface InstalledSkillsBody {
   skills?: { name: string; category?: string }[];
 }
+
+// /setup-api/code answers 404 for a project id that does not exist. Without a
+// rule that is the generic "this endpoint is not available on this device"
+// mapping, which sends the agent to device_status to re-check its EDITION over
+// a typo'd id it could have fixed itself.
+const CODE_RULES: ErrorRule[] = [
+  {
+    status: 404,
+    code: "NOT_FOUND",
+    message: "There is no code project with that id on this ClawBox.",
+    next: "Call code_project_list for the ids that exist here, or create one with code_project_init.",
+  },
+];
+
+const WEBAPP_RULES: ErrorRule[] = [
+  {
+    status: 404,
+    code: "NOT_FOUND",
+    message: "There is no web app with that id on this ClawBox.",
+    next: "Call ui_list_apps for the ids that exist here, or create the app first with webapp_create.",
+  },
+];
 
 export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   const apps = builtInApps(ctx.edition);
@@ -236,7 +258,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
     async ({ app_id, html }: { app_id: string; html: string }) => {
-      await apiPost("/setup-api/webapps", { appId: app_id, html }, { timeoutMs: 30_000 });
+      await apiPost("/setup-api/webapps", { appId: app_id, html }, { timeoutMs: 30_000, rules: WEBAPP_RULES });
       return text(`Updated the web app "${app_id}". The user may need to reopen its window to see the change.`);
     },
   );
@@ -244,11 +266,29 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   // ── Code projects ──────────────────────────────────────────────────────────
 
   const codeApi = <T = unknown>(action: string, body: Record<string, unknown> = {}, timeoutMs = 30_000) =>
-    apiPost<T>("/setup-api/code", { action, ...body }, { timeoutMs });
+    apiPost<T>("/setup-api/code", { action, ...body }, { timeoutMs, rules: CODE_RULES });
+
+  // The one string in this whole server that HAS to be absolute.
+  //
+  // The agent edits project files with its harness's own file tools, and those
+  // resolve a relative path against the HARNESS process's working directory —
+  // /home/clawbox on a Hermes device — while the project lives under the WEB
+  // tier's, /home/clawbox/clawbox. Handing out "data/code-projects/<id>/" made
+  // every read answer "File not found" and every write report verified:true
+  // into /home/clawbox/data/..., a parallel tree code_project_build never looks
+  // at: three success messages and an untouched scaffold on the desktop.
+  //
+  // The route now reports its own absolute directory, which is the only place
+  // that actually knows it; CLAWBOX_ROOT is the fallback for an older device
+  // whose /setup-api/code predates that field.
+  const projectDirOf = (projectId: string, reported?: unknown): string =>
+    typeof reported === "string" && reported.startsWith("/")
+      ? reported
+      : `${CLAWBOX_ROOT}/data/code-projects/${projectId}`;
 
   reg.tool(
     "code_project_init",
-    "Start a multi-file web app project on the ClawBox. It creates a folder of starter files and returns its path; write the files with your own file-editing tools, then call code_project_build to install it on the desktop. Call clawbox_context first for the storage rules.",
+    "Start a multi-file web app project on the ClawBox. It creates a folder of starter files and returns the ABSOLUTE path of that folder; edit the files with your own file-editing tools using that absolute path exactly as given, never a shortened or relative form, then call code_project_build to install it on the desktop. Call clawbox_context first for the storage rules.",
     {
       project_id: zSlug("Unique id, lowercase with hyphens"),
       name: zText(60, "Name shown under the desktop icon"),
@@ -258,12 +298,13 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     { editions: ["openclaw", "hermes"], readOnly: false, maxChars: 3_000 },
     async ({ project_id, name, template, color }: { project_id: string; name: string; template: string; color?: string }) => {
       const iconColor = color && /^#[0-9a-fA-F]{6}$/.test(color) ? color : "#f97316";
-      await codeApi("init", { projectId: project_id, name, template, color: iconColor });
-      const files = await codeApi<{ files?: { name: string; type: string }[] }>("file-list", { projectId: project_id });
-      const list = (files.files ?? []).map((f) => `  ${f.name}${f.type === "directory" ? "/" : ""}`).join("\n");
+      const created = await codeApi<{ path?: string }>("init", { projectId: project_id, name, template, color: iconColor });
+      const files = await codeApi<{ files?: { name: string; type: string }[]; path?: string }>("file-list", { projectId: project_id });
+      const dir = projectDirOf(project_id, created.path ?? files.path);
+      const list = (files.files ?? []).map((f) => `  ${dir}/${f.name}${f.type === "directory" ? "/" : ""}`).join("\n");
       return text(
-        `Created the project "${name}".\nIts files live in data/code-projects/${project_id}/ inside the ClawBox project folder:\n${list}\n`
-        + `Edit them there, then call code_project_build with the id "${project_id}".`,
+        `Created the project "${name}".\nIts files live in ${dir}/ — these are full paths, use them exactly as written:\n${list}\n`
+        + `Read and edit them with your own file tools at those absolute paths, then call code_project_build with the id "${project_id}".`,
       );
     },
   );
@@ -274,16 +315,24 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, maxChars: 3_000 },
     async () => {
-      const data = await codeApi<{ projects?: { projectId: string; name: string; updated: string }[] }>("list-projects");
+      const data = await codeApi<{ projects?: { projectId: string; name: string; updated: string; path?: string }[] }>("list-projects");
       const projects = data.projects ?? [];
       if (!projects.length) return text("There are no code projects on this ClawBox yet. Create one with code_project_init.");
-      return json(projects.map((p) => ({ id: p.projectId, name: p.name, updated: p.updated })));
+      return json(
+        projects.map((p) => ({
+          id: p.projectId,
+          name: p.name,
+          updated: p.updated,
+          // Absolute, for the same reason code_project_init reports one.
+          path: projectDirOf(p.projectId, p.path),
+        })),
+      );
     },
   );
 
   reg.tool(
     "code_project_build",
-    "Bundle a code project into a single page and install it on the ClawBox desktop. Call this after every set of edits — the desktop shows the last build, not the source files.",
+    "Bundle a code project into a single page and install it on the ClawBox desktop. Call this after every set of edits — the desktop shows the last build, not the source files. The source files are the ones under the absolute path code_project_init and code_project_list report; edits written anywhere else are not part of the build.",
     {
       project_id: zSlug("The project id from code_project_list"),
       open_after_build: zBool(true, "Open it on the desktop after building."),

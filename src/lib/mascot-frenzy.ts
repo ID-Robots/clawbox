@@ -13,6 +13,7 @@
 // A locale without an entry here uses its own pack's `power` lines instead.
 
 import type { MascotPhraseSet } from "./mascot-phrases";
+import { isCrabLine } from "./mascot-pet-voice";
 
 export const FRENZY_QUOTES: Readonly<Record<string, readonly string[]>> = {
   en: [
@@ -57,19 +58,44 @@ export const FRENZY_QUOTES: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
+ * The crab-literal frenzy lines.
+ *
+ * Frenzy is not one of the nine phrase categories, so it is not reached by the
+ * pack-level crab tags — but it is still the mascot talking, and a penguin
+ * shouting "CRAB GOT PAID!" is the same bug. Tagged the same way the packs are,
+ * and cross-checked against the crab lexicon by `mascot-pet-voice.test.ts`.
+ */
+export const FRENZY_CRAB_LINES: readonly string[] = [
+  "🦀💸 CRAB GOT PAID!",
+  "💎 DIAMOND CLAWS!",
+  "🦀 CRAB GOES BRRRRRR!!!",
+  "🦀💰 CRAB MANSION INCOMING!",
+];
+
+/**
  * The frenzy lines to cycle through for `locale`.
  *
  * `locale` may be empty while the UI has not resolved its language yet — that
  * matches nothing and falls through to `fallback`, which the caller seeds from
  * the (language-free) neutral pack until it knows better.
+ *
+ * `petVoice` drops the crab-literal entries. The remaining fifteen English
+ * lines are about money, not crustaceans, so a pet still gets a full set
+ * rather than being pushed onto the neutral `power` floor.
  */
 export function frenzyQuotesFor(
   locale: string,
   fallback: MascotPhraseSet,
   neutralFallback: MascotPhraseSet,
+  petVoice = false,
 ): readonly string[] {
   const quotes = FRENZY_QUOTES[locale];
-  if (quotes && quotes.length > 0) return quotes;
+  if (quotes && quotes.length > 0) {
+    const kept = petVoice
+      ? quotes.filter((line) => !FRENZY_CRAB_LINES.includes(line) && !isCrabLine(line, locale))
+      : quotes;
+    if (kept.length > 0) return kept;
+  }
   if (fallback.power.length > 0) return fallback.power;
   return neutralFallback.power;
 }

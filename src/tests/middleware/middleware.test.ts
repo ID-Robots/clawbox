@@ -300,10 +300,20 @@ describe("middleware", () => {
       expect(response.status).toBe(401);
     });
 
-    it.each(["/setup-api/wifi/scan", "/setup-api/update/status", "/setup-api/update/run", "/setup-api/system/credentials", "/setup-api/ai-models/configure", "/setup-api/telegram/configure"])("allows %s during setup wizard bootstrap", async (p) => {
+    it.each([
+      "/setup-api/wifi/scan",
+      "/setup-api/wifi/connect",
+      "/setup-api/update/status",
+      "/setup-api/update/run",
+      "/setup-api/system/credentials",
+      "/setup-api/system/hostname",
+      "/setup-api/system/hotspot",
+      "/setup-api/gateway/health",
+      "/setup-api/harness/active",
+    ])("allows %s during setup wizard bootstrap", async (p) => {
       // production-server.js auto-creates SESSION_SECRET so the env-var
-      // short-circuit never fires; the wizard must still reach its API
-      // surface before setup_complete is written. Regression for the
+      // short-circuit never fires; the wizard must still reach the routes
+      // steps 1-3 need before a password can exist. Regression for the
       // "Failed to check update status" wizard breakage.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
@@ -312,6 +322,69 @@ describe("middleware", () => {
       const req = createRequest(p);
       const response = await mod.middleware(req);
       expect(response.status).toBe(200);
+    });
+
+    // TASK-443. The gate is an ALLOW-list now, so a route nobody thought about
+    // is closed rather than open. These six were all reachable with no
+    // credential from radio range of the OPEN `ClawBox-Setup` AP; setup/reset
+    // in that state really did wipe the QA box.
+    it.each([
+      "/setup-api/setup/reset",
+      "/setup-api/system/power",
+      "/setup-api/install/run-step",
+      "/setup-api/ollama/pull",
+      // The telemetry family (TASK-446). Every one of these answered 200 with
+      // no session while the open AP was up: hostname, kernel, CPU model, RAM,
+      // uptime, disk, the LAN address, raw UI state, and which AI provider and
+      // Telegram bot the box is wired to.
+      "/setup-api/system/info",
+      "/setup-api/system/stats",
+      "/setup-api/wifi/status",
+      "/setup-api/kv",
+      "/setup-api/ai-models/status",
+      "/setup-api/telegram/status",
+    ])("gates %s even during setup wizard bootstrap", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest(p));
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({ error: "Authentication required" });
+    });
+
+    // TASK-443. The window used to be keyed on setup_complete alone, so a box
+    // that had a password but an unfinished wizard — including one whose
+    // config.json had simply lost the setup_complete key — served the whole
+    // bootstrap surface to anyone. A device with a password has an owner.
+    it.each([
+      "/setup-api/wifi/connect",
+      "/setup-api/update/run",
+      "/setup-api/system/credentials",
+      "/setup-api/harness/active",
+    ])("closes the bootstrap window for %s once a password is configured", async (p) => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ password_configured: true }); // setup_complete still absent
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest(p));
+      expect(response.status).toBe(401);
+    });
+
+    it("fails closed when config.json exists but cannot be parsed", async () => {
+      // A missing config.json is a first-boot device and must open the window.
+      // A corrupt one is a provisioned box with a damaged (or clobbered) file,
+      // and treating that as "pre-setup" hands the window back. TASK-446.
+      process.env.SESSION_SECRET = "test-secret";
+      const dataDir = path.join(tmpRoot, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), "{ this is not json");
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      expect((await mod.middleware(createRequest("/setup-api/update/run"))).status).toBe(401);
+      expect((await mod.middleware(createRequest("/setup-api/wifi/scan"))).status).toBe(401);
     });
 
     it("re-locks /setup-api/* after config.json flips setup_complete", async () => {
@@ -471,6 +544,11 @@ describe("middleware", () => {
       "/setup-api/vnc/status",
       "/setup-api/terminal",
       "/setup-api/clawkeep/restore",
+      // Writes a bot credential; configured from Settings, never the wizard.
+      "/setup-api/discord/configure",
+      "/setup-api/discord/status",
+      // Same prefix, and it reads guild member lists through the bot token.
+      "/setup-api/discord/members",
       "/setup-api/tunnel/enable",
       "/setup-api/portal/start", // same privileged tunnel control as /tunnel
       "/setup-api/portal/stop",
@@ -487,6 +565,10 @@ describe("middleware", () => {
       // POST rewrites messages.tts.provider and spawns the openclaw CLI. Same
       // radio-range reasoning as local-models: onboarding never calls it.
       "/setup-api/tts",
+      // POST downloads ~2.2 MB from a third-party CDN and rewrites
+      // display.pet.*. Cosmetic, desktop-only, and never part of onboarding.
+      "/setup-api/pets",
+      "/setup-api/pets/select",
       "/setup-api/gateway",
       "/setup-api/gateway/", // trailing slash must not dodge the exact match
       // Each call cold-loads a ~3.8 GB model on a Jetson for up to three
@@ -565,6 +647,10 @@ describe("middleware", () => {
       "/setup-api/hermes/skills/uninstall",
       "/setup-api/harness/select",     // rewrites which agent the device runs
       "/setup-api/harness/status",     // desktop picker only, never the wizard
+      "/setup-api/whatsapp/status",    // WhatsApp lives only in Settings
+      "/setup-api/whatsapp/configure", // writes who may talk to the agent
+      "/setup-api/whatsapp/pair",      // hands back live QR pairing material
+      "/setup-api/whatsapp/unpair",    // deletes the linked-device session
     ])("gates %s during the setup window", async (p) => {
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
@@ -573,20 +659,92 @@ describe("middleware", () => {
       expect((await mod.middleware(createRequest(p))).status).toBe(401);
     });
 
-    it.each([
-      "/setup-api/harness/active",
-      "/setup-api/hermes/models",
-      "/setup-api/hermes/clawai",
-      "/setup-api/hermes/oauth",
-      "/setup-api/hermes/provider-key",
-    ])("still allows the wizard's %s during the setup window", async (p) => {
-      // AIModelsStep → HermesProviderConfig calls all five before setup
-      // completes; gating them would make the Hermes SKU unprovisionable.
+    it("still allows the wizard's /setup-api/harness/active during the setup window", async () => {
+      // AIModelsStep reads which agent this SKU runs on the step boundary,
+      // before a password can exist, so it is on the bootstrap allow-list.
       process.env.SESSION_SECRET = "test-secret";
       vi.resetModules();
       const mod = await import("@/middleware");
 
-      expect((await mod.middleware(createRequest(p))).status).toBe(200);
+      expect((await mod.middleware(createRequest("/setup-api/harness/active"))).status).toBe(200);
+    });
+
+    it.each([
+      "/setup-api/hermes/models",
+      "/setup-api/hermes/clawai",
+      "/setup-api/hermes/oauth",
+      "/setup-api/hermes/provider-key",
+      "/setup-api/ai-models/configure",
+      "/setup-api/telegram/configure",
+    ])("requires the wizard's own session for %s", async (p) => {
+      // These are steps 4-5, which run AFTER CredentialsStep. The password set
+      // hands back a session cookie, so the wizard reaches them authenticated
+      // and they need no pre-auth carve-out — which matters because the device
+      // is broadcasting an OPEN AP for this whole window. TASK-443/446.
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      expect((await mod.middleware(createRequest(p))).status).toBe(401);
+
+      const authed = new NextRequest(new URL(`http://localhost${p}`), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      expect((await mod.middleware(authed)).status).toBe(200);
+    });
+  });
+
+  describe("the wizard page follows the same window as its API", () => {
+    it("serves /setup unauthenticated while the device has no owner", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      expect((await mod.middleware(createRequest("/setup"))).status).toBe(200);
+    });
+
+    it("redirects /setup to /login once a password is configured", async () => {
+      // A resumed or half-finished wizard has an owner, so it logs in first —
+      // and then steps 4-5 work through the session gate rather than needing a
+      // pre-auth carve-out. TASK-443.
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const response = await mod.middleware(createRequest("/setup"));
+      expect(response.status).toBe(307);
+      const location = new URL(response.headers.get("Location")!);
+      expect(location.pathname).toBe("/login");
+      expect(location.searchParams.get("redirect")).toBe("/setup");
+    });
+
+    it("serves /setup again to a caller with a valid session", async () => {
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      const req = new NextRequest(new URL("http://localhost/setup"), {
+        headers: {
+          cookie: `clawbox_session=${await createSignedSessionCookie(Math.floor(Date.now() / 1000) + 60)}`,
+        },
+      });
+      expect((await mod.middleware(req)).status).toBe(200);
+    });
+
+    it("does not let the /setup prefix leak /setup-api past the gate", async () => {
+      // `startsWith("/setup")` also matches `/setup-api/...`; that was the
+      // original auth bypass, and the wizard-page carve-out must not reopen it.
+      process.env.SESSION_SECRET = "test-secret";
+      writeConfig({ setup_complete: true, password_configured: true });
+      vi.resetModules();
+      const mod = await import("@/middleware");
+
+      expect((await mod.middleware(createRequest("/setup-api/system/info"))).status).toBe(401);
+      expect((await mod.middleware(createRequest("/setupmagic"))).status).toBe(307);
     });
   });
 

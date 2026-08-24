@@ -4,6 +4,7 @@ import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
+  CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
 
@@ -63,6 +64,59 @@ export async function applyClawaiToHermes(
     // so it doesn't shadow the clawai provider block.
     ["config", "unset", "model.base_url"],
     ["config", "unset", "model.api_key"],
+    // ── Looking at a picture ────────────────────────────────────────────────
+    //
+    // Without these two, an attached image is quietly degraded to a text
+    // description of itself. `agent/image_routing.py` runs in `auto` mode: it
+    // attaches the image natively when the ACTIVE model reports
+    // `supports_vision`, and otherwise routes it through `vision_analyze` using
+    // whatever `auxiliary.vision` names. The chat model here is a bare DeepSeek
+    // id, which is not vision-capable — so with `auxiliary.vision` unset there
+    // is no second model to fall back to and the user gets an answer about an
+    // image nobody looked at.
+    //
+    // Verified on the live box (2026-08-22): `hermes config get auxiliary`
+    // reports the block exists with `vision: { provider: auto, model: '',
+    // base_url: '', api_key: '', … }` — i.e. present in the schema and unset,
+    // which is exactly the state that degrades a picture to a description.
+    //
+    // Only provider and model are written. `base_url` and `api_key` are left
+    // empty ON PURPOSE so they inherit from the `providers.clawai` block set
+    // above, for the same reason the two `unset` lines above exist: a spelled-out
+    // endpoint shadows the provider block, and this one would shadow it with no
+    // credential beside it. Naming the provider is what carries the URL and the
+    // token together.
+    //
+    // This is the Hermes spelling of what `agents.defaults.imageModel` does on
+    // the OpenClaw side — one capability, two harnesses, no second provider to
+    // credential.
+    ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
+    ["config", "set", "auxiliary.vision.model", CLAWBOX_AI_VISION_MODEL_ID],
+    // ── Naming the session titler, for the same reason ──────────────────────
+    //
+    // `auxiliary.title_generation` ships as `provider: auto`, and auto is not a
+    // guess about the configured provider — it is a SEARCH. Captured from a
+    // box's own error log before it was linked:
+    //
+    //   Auxiliary title_generation: connection error on auto and no fallback
+    //   available (tried: openrouter, nous, local/custom, api-key)
+    //
+    // Four credential-less providers tried in turn, each its own connection
+    // attempt, on a box that had a perfectly good endpoint configured all along.
+    // Naming clawai here is the same move as naming it for vision above: it
+    // stops auto from wandering off to services this device has no account with.
+    //
+    // Measured honestly, this buys nothing on a HEALTHY box — the titler runs
+    // on its own thread, concurrently with the turn's own request, and finishes
+    // well inside it. What it removes is the unhealthy case, where that search
+    // is four timeouts long and the retry ladder is the thing the customer is
+    // waiting behind.
+    //
+    // The model is the chat model rather than a cheaper one for the same reason
+    // `base_url` is left alone: the proxy serves a short allowlist, and naming
+    // anything outside it turns every title into an HTTP 400.
+    ["config", "set", "auxiliary.title_generation.provider", CLAWAI_PROVIDER],
+    ["config", "set", "auxiliary.title_generation.model", model],
   ];
 
   for (const args of steps) {

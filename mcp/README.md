@@ -84,6 +84,15 @@ The **id vs name** split is the trap: `skill_install` takes the full store id
 (`official/pdf`), `skill_uninstall` takes the short lock name (`pdf`).
 `skill_install` returns the lock name so the model never has to guess it.
 
+`skill_install` also carries a `confirm` flag, and it is the one argument the
+model must never set on its own judgement (TASK-452). When the device's scanner
+flags a skill the install route answers 409 with what the skill can do; the tool
+turns that into a CONFLICT whose `next` is "tell the user what it can do and ask
+them", and `confirm: true` is only correct on a second call after the user has
+said yes. A bundled-name collision and an incomplete download are separate
+CONFLICTs with their own instructions — the first is never retryable, the second
+is retryable once the device is back online.
+
 ### AI configuration (Hermes only)
 `ai_list_models` · `ai_set_provider` · `ai_set_model`
 
@@ -99,17 +108,104 @@ There is also no thinking/reasoning setter yet — see "Work owned by others".
 `reason`) · `disk_usage` · `disk_cleanup` · `update_check` (reports only, never
 installs) · `logs_tail` · `screen_capture` · `wifi_scan` · `wifi_status` ·
 `vnc_status` · `preferences_get` · `preferences_set` · `backup_status` ·
-`backup_list` · `backup_now` · `telegram_status`
+`backup_list`* · `backup_now`* · `telegram_status`  &nbsp;&nbsp;*(\* OpenClaw
+only)*
 
 `disk_usage`, `disk_cleanup`, `logs_tail` and `screen_capture` are
 **capability-probed at startup** — no `du`, no readable journal, or no screen
 grabber, and the tool is simply not offered.
+
+ClawKeep archives the OpenClaw agent through the `openclaw` CLI, so on Hermes
+the feature reports `supportedOnEdition:false` and Settings offers nothing to
+pair: `backup_list` and `backup_now` are not registered there, and
+`backup_status` answers "not available on this edition" rather than a status
+object the agent reads as "not paired yet".
+
+`screen_capture` resolves the display from `CLAWBOX_VNC_DISPLAY`, then
+`~/.cache/clawbox/vnc-display.env`, then `:0` — the harness spawns this server
+with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 
 ### Desktop, apps and building
 `ui_open_app` · `ui_list_apps` · `ui_notify` · `app_search`* · `app_install`* ·
 `app_uninstall` · `webapp_create` · `webapp_update` · `code_project_init` ·
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
+
+`code_project_init` and `code_project_list` report the project directory as an
+ABSOLUTE path. The agent edits those files with its harness's own file tools,
+and that process has a different working directory than the web tier — a
+relative path read nothing and wrote into a parallel tree the build never
+looks at.
+
+
+### Email
+`email_send` (both editions) · `email_list` · `email_read` (both editions, only
+when the mailbox mode allows reading)
+
+The owner picks ONE of three mailbox modes in Settings → Email, and it decides
+which of these tools exist:
+
+| mode | what the agent may do | read tools registered |
+| --- | --- | --- |
+| **Send only** | send mail; never opens the mailbox | no |
+| **Read on demand** | send, plus list/read WHEN ASKED — nothing polls | yes |
+| **Answer senders** | Hermes' native adapter polls and replies to an allowlist | yes |
+
+`email_list`/`email_read` are **not registered at all** unless a mail account is
+connected AND the mode allows reading (probed once at startup — `mcp/lib/context.ts`).
+Same rule as edition gating and for the same reason: a tool that could only ever
+answer 409 is a tool that trips Hermes' circuit breaker and takes every ClawBox
+tool offline. The route enforces the gate independently, because the two live on
+opposite sides of a process boundary and the owner can change the mode under a
+running server.
+
+Both read tools ARE `readOnly`, and that claim is literal rather than polite: the
+mailbox is opened with `EXAMINE` (read-only at the protocol level) and every
+fetch uses `BODY.PEEK`, so listing and reading do not even set `\Seen`. No
+`STORE`, `APPEND`, `EXPUNGE`, `COPY` or `MOVE` appears anywhere in
+`src/lib/imap-client.ts`, and `src/tests/unit/imap-client.test.ts` asserts that
+against a server that records every command it is sent.
+
+`email_read` returns the message with an explicit note that its contents are
+information, never instructions — an email is the payload most likely to carry an
+injected instruction, being text a stranger wrote and chose to send to the device.
+
+The only outbound-mail capability the agent has, and on the OpenClaw edition the
+only email capability at all — OpenClaw has no email channel, and inventing one
+in its config would fail the gateway's strict schema and silence the channels
+that do work. Hermes' native adapter can reply to mail that arrives; it cannot
+start a thread.
+
+Deliberately NOT read-only: a sent email cannot be recalled, so the tool carries
+no `readOnlyHint`. On a real ClawBox that annotation buys no approval prompt —
+ClawBox registers this server with `trust: full` (`scripts/register-mcp.sh`),
+because a headless one-shot turn has nobody to answer a prompt. **`email_send`
+runs unsupervised**, and its arguments may come from text the agent only read.
+
+**"Ask me before sending" is the consent**, and it is a separate setting from the
+mode (default ON for new accounts; accounts configured before it existed migrate
+with it OFF, so nobody's device changes behaviour on upgrade). With it on,
+`/setup-api/email/send` never reaches the SMTP client: the message becomes a
+draft in `data/email-pending.json`, the desktop shows a notification, and the
+tool answers `sent: false, queued_for_owner_approval: true` — which the agent
+must not report as a delivered message.
+
+Approving happens at `/setup-api/email/pending`, which is the one route in this
+subtree that **refuses the MCP bearer**. Middleware admits callers to
+`/setup-api/*` on either a session cookie or that bearer, and the agent holds the
+bearer — so a route that trusted middleware here would let a prompt-injected
+agent queue a draft and approve it on its next tool call. It re-checks for a real
+browser session (`src/lib/owner-session.ts`) and 403s everything else.
+
+The remaining containment is server-side, in `/setup-api/email/send`: CR/LF
+rejected in every header value, at most 10 recipients, and a per-hour send budget
+(5) that bounds a runaway — a blast-radius limit, not consent. The owner's own "Send test
+email" button is a different route with its own budget, so the agent cannot lock
+the person at the keyboard out. The credentials never enter the MCP process, an
+unconfigured device answers `CONFLICT` with "do not retry, tell the user to open
+Settings → Email". An exhausted budget answers `CONFLICT` too — the generic 429
+mapping is `ENDPOINT_DOWN` ("retry once"), which is the loop the budget exists
+to stop.
 
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
@@ -189,7 +285,8 @@ and it drags server-only Next.js code into this stdio process.
 |---|---|
 | `CLAWBOX_API_BASE` | Device API origin. Default `http://127.0.0.1:80`. |
 | `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. |
-| `CLAWBOX_MCP_PROFILE` | `full` (default) or `core` — `core` registers only the handful of tools a 4–8B local model needs, for the on-device model bake-off. |
+| `CLAWBOX_MCP_PROFILE` | `full` (default) or `core` pins the tool set; `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
+| `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |
 
 ## Work owned by others

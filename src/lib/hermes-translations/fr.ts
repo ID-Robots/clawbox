@@ -1,0 +1,409 @@
+/**
+ * French (Français) — TASK-458.
+ *
+ * Register follows the shipped ClawBox copy: the user is addressed with the
+ * polite "vous" ("Choisissez", "Réessayez"), short controls stay in the
+ * infinitive the rest of the app uses for buttons ("Installer", "Enregistrer",
+ * "Annuler", "Réessayer"), quotes are « … » and the em dash —, the arrow → and
+ * the ellipsis … are kept exactly where English puts them.
+ *
+ * Terminology taken from the existing catalogues (desktop-translations-part2,
+ * translations.ts, clawkeep-translations): skill = "compétence",
+ * provider = "fournisseur", publisher = "éditeur", model = "modèle",
+ * device = "appareil" (the hardware itself is "la box"), sign in =
+ * "se connecter", API key = "clé API", Save = "Enregistrer".
+ *
+ * Two label pairs would otherwise be byte-identical to English, so they use the
+ * fuller French wording instead: "Source" (filter) → "Origine" and the
+ * provenance link row → "Site source"; "Version" → "N° de version";
+ * "Documentation" (section heading) → "Documentation de la compétence";
+ * "{n} sections" → "{n} rubriques".
+ */
+export const fr: Record<string, string> = {
+  // === Sidebar sections that had no key at all ===
+  "settings.localAi": "IA locale",
+  "settings.localModels": "Modèles locaux",
+  "settings.voice": "Voix",
+
+  // === System password card ===
+  "settings.security.passwordLabel": "Mot de passe",
+  "settings.security.passwordHintPrefix": "Utilisé pour la connexion web, SSH et",
+  "settings.security.passwordHintSuffix": ". Le modifier ici change les trois.",
+  "settings.security.currentPassword": "Mot de passe actuel",
+  "settings.security.newPassword": "Nouveau mot de passe",
+  "settings.security.newPasswordPlaceholder": "Nouveau mot de passe (8 caractères minimum)",
+  "settings.security.confirmNewPassword": "Confirmer le nouveau mot de passe",
+  "settings.security.hideCurrentPassword": "Masquer le mot de passe actuel",
+  "settings.security.showCurrentPassword": "Afficher le mot de passe actuel",
+  "settings.security.hideNewPassword": "Masquer le nouveau mot de passe",
+  "settings.security.showNewPassword": "Afficher le nouveau mot de passe",
+  "settings.security.hideConfirmPassword": "Masquer la confirmation du mot de passe",
+  "settings.security.showConfirmPassword": "Afficher la confirmation du mot de passe",
+  "settings.security.clearAndReenter": "Effacer et ressaisir le mot de passe actuel",
+  "settings.security.reenter": "Ressaisir",
+  "settings.security.checking": "Vérification…",
+  "settings.security.verify": "Vérifier",
+  "settings.security.passwordsDontMatchYet": "Les mots de passe ne correspondent pas encore",
+  "settings.security.saving": "Enregistrement…",
+  "settings.security.updatePassword": "Modifier le mot de passe",
+
+  // === "Write this password down" confirmation dialog ===
+  "settings.security.confirmTitle": "Notez ce mot de passe",
+  "settings.security.confirmBodyPrefix": "Cela changera votre mot de passe pour",
+  "settings.security.confirmBodyScope": "la connexion web, SSH et sudo",
+  "settings.security.confirmBodySuffix": ". Si vous l'oubliez, vous risquez de perdre totalement l'accès à l'appareil et une réinitialisation d'usine sera nécessaire pour le récupérer.",
+  "settings.security.hidePassword": "Masquer le mot de passe",
+  "settings.security.revealPassword": "Afficher le mot de passe",
+  "settings.security.hide": "Masquer",
+  "settings.security.reveal": "Afficher",
+  "settings.security.confirmChange": "Je l'ai noté — modifier",
+
+  // === Validation and status ===
+  "settings.security.errorTooShort": "Le nouveau mot de passe doit contenir au moins 8 caractères",
+  "settings.security.errorMismatch": "Les nouveaux mots de passe ne correspondent pas",
+  "settings.security.errorSameAsCurrent": "Le nouveau mot de passe doit être différent de l'actuel",
+  "settings.security.errorInvalidChars": "Le mot de passe contient des caractères non valides",
+  "settings.security.verificationFailed": "Échec de la vérification",
+  "settings.security.updateSuccess": "Mot de passe modifié. Utilisez le nouveau mot de passe à votre prochaine connexion ou en SSH.",
+  "settings.security.failed": "Échec",
+
+  // === Saved Wi-Fi password editor ===
+  "settings.security.wifiPasswordLength": "Le mot de passe doit contenir 8–63 caractères",
+  "settings.security.wifiPasswordUpdated": "Mot de passe modifié pour {ssid}",
+
+  // === Panel chrome ===
+  "hermesProvider.title": "Modèles Hermes",
+  "hermesProvider.intro":
+    "Cet appareil fonctionne avec Hermes. Choisissez un fournisseur d'inférence et un modèle par défaut — Hermes bascule de l'un à l'autre nativement, aucun tableau de bord n'est nécessaire.",
+  "hermesProvider.radioGroupLabel": "Fournisseur IA",
+  "hermesProvider.continue": "Continuer",
+
+  // === Provider rows ===
+  "hermesProvider.row.desc.openrouter": "Plus de 300 modèles avec une seule clé API",
+  "hermesProvider.row.desc.anthropic": "Claude — connexion ou clé API",
+  "hermesProvider.row.desc.openaiCodex": "Se connecter avec OpenAI (Codex)",
+  "hermesProvider.row.desc.gemini": "Modèles Gemini, en accès direct",
+  "hermesProvider.row.desc.zai": "Modèles GLM de Zhipu",
+  "hermesProvider.row.desc.kimiCoding": "Moonshot Kimi (code)",
+  "hermesProvider.row.desc.copilot": "Se connecter avec GitHub",
+  "hermesProvider.row.desc.nous": "Se connecter avec Nous",
+
+  // === ClawBox AI card ===
+  "hermesProvider.clawai.activeBadge": "Actif",
+  "hermesProvider.clawai.switching": "Changement…",
+  "hermesProvider.clawai.switchTo": "Passer à {tier}",
+  "hermesProvider.clawai.inUse": "ClawBox AI est utilisé",
+  "hermesProvider.clawai.modelLabel": "Modèle :",
+  "hermesProvider.clawai.finishingSetup": "Finalisation de la configuration sur cet appareil…",
+  "hermesProvider.clawai.nowActive": "ClawBox AI est désormais votre modèle actif",
+  "hermesProvider.clawai.switchFailed": "Impossible de passer à ClawBox AI",
+
+  // === Provider sign-in (Hermes-native OAuth) ===
+  "hermesProvider.oauth.signInWith": "Se connecter avec {provider}",
+  "hermesProvider.oauth.connectedDesc": "Connecté. Identifiants OAuth actifs.",
+  "hermesProvider.oauth.cliOnlyDesc": "La connexion à ce fournisseur se fait via Hermes CLI.",
+  "hermesProvider.oauth.availableDesc": "OAuth via Hermes (aucune clé API nécessaire).",
+  "hermesProvider.oauth.connectedBadge": "Connecté",
+  "hermesProvider.oauth.signIn": "Se connecter",
+  "hermesProvider.oauth.tryAgain": "Réessayer",
+  "hermesProvider.oauth.cliInstructions": "Exécutez ceci dans le terminal de l'appareil, puis rouvrez ce panneau :",
+  "hermesProvider.oauth.starting": "Démarrage de la connexion avec {provider}...",
+  "hermesProvider.oauth.pkceInstructions":
+    "Un onglet de connexion à {provider} s'est ouvert. Autorisez l'accès, copiez le code affiché et collez-le ici.",
+  "hermesProvider.oauth.reopenSignInPage": "Rouvrir la page de connexion",
+  "hermesProvider.oauth.codeLabel": "Collez le code fourni par {provider}",
+  "hermesProvider.oauth.submitting": "Envoi...",
+  "hermesProvider.oauth.submitCode": "Envoyer le code",
+  "hermesProvider.oauth.startOver": "Recommencer",
+  "hermesProvider.oauth.deviceInstructions":
+    "Saisissez ce code sur la page de vérification de {provider}. Ce panneau se met à jour tout seul dès que vous validez.",
+  "hermesProvider.oauth.copyCode": "Copier le code",
+  "hermesProvider.oauth.copied": "Copié",
+  "hermesProvider.oauth.openVerificationPage": "Ouvrir la page de vérification",
+  "hermesProvider.oauth.waitingApproval": "En attente d'autorisation...",
+  "hermesProvider.oauth.orPasteKey": "…ou collez plutôt une clé API ci-dessous.",
+  "hermesProvider.oauth.advancedLabel": "Avancé :",
+  "hermesProvider.oauth.dashboardLink": "Tableau de bord Hermes (LAN uniquement)",
+
+  // === Provider sign-in failures raised by this panel ===
+  "hermesProvider.oauth.unexpectedResponse": "Réponse inattendue d'Hermes",
+  "hermesProvider.oauth.startFailed": "Impossible de démarrer la connexion",
+  "hermesProvider.oauth.codeRejected": "Le code n'a pas été accepté",
+  "hermesProvider.oauth.expired": "La demande de connexion a expiré. Réessayez.",
+  "hermesProvider.oauth.failed": "Échec de la connexion. Réessayez.",
+
+  // === Model picker ===
+  "hermesProvider.model.label": "Modèle par défaut",
+  "hermesProvider.model.loading": "Chargement…",
+  "hermesProvider.model.noCredentials": "Aucun identifiant enregistré pour ce fournisseur",
+  "hermesProvider.model.noModels": "Aucun modèle disponible",
+  "hermesProvider.model.savedElsewherePrefix": "Cet appareil utilise actuellement",
+  "hermesProvider.model.savedElsewhereSuffix": ". L'enregistrement le fera passer à {provider}.",
+  "hermesProvider.model.staleColdStart": "Hermes n'a pas encore publié de liste de modèles — une liste de secours minimale est affichée.",
+  "hermesProvider.model.staleCached": "Une liste de modèles en cache est affichée ; le catalogue en ligne d'Hermes est injoignable.",
+
+  // === API key + save ===
+  "hermesProvider.key.label": "Clé API {provider}",
+  "hermesProvider.key.placeholder": "Collez la clé API (facultatif si elle est déjà définie)",
+  "hermesProvider.save.button": "Enregistrer modèle et fournisseur",
+  "hermesProvider.save.saving": "Enregistrement…",
+  "hermesProvider.save.ok": "Enregistré",
+  "hermesProvider.save.keySavedOk": "Clé enregistrée — fournisseur et modèle mis à jour",
+  "hermesProvider.save.failed": "Échec de l'enregistrement",
+  "hermesProvider.save.keySavedNoCatalog":
+    "Clé enregistrée pour {provider}, mais ce fournisseur n'a pas encore publié de liste de modèles — rouvrez ce panneau dans un instant et choisissez un modèle.",
+  "hermesProvider.save.noCredentials": "{provider} n'a encore aucun identifiant — connectez-vous ou collez d'abord une clé API.",
+  "hermesProvider.save.catalogUnavailable":
+    "La liste de modèles d'Hermes est inaccessible pour le moment ; impossible de vérifier les modèles de {provider}. Réessayez dans un instant.",
+
+  // === Header ===
+  "skills.title": "Compétences Hermes",
+  "skills.subtitleWithCount": "{n} compétences disponibles pour votre agent Hermes",
+  "skills.subtitleFallback": "Ajoutez des capacités à votre agent Hermes",
+
+  // === Tabs ===
+  "skills.tablistLabel": "Affichage des compétences",
+  "skills.tabInstalled.withCount": "Installées ({n})",
+  "skills.tabInstalled.empty": "Installées",
+  "skills.tabBrowse": "Parcourir",
+
+  // === Search and filters ===
+  "skills.searchPlaceholder": "Rechercher des compétences…",
+  "skills.searchLabel": "Rechercher des compétences",
+  "skills.searchBusy": "Chargement",
+  "skills.clearSearch": "Effacer la recherche",
+  "skills.sortLabel": "Trier",
+  "skills.sortOptions.relevance": "Meilleure correspondance",
+  "skills.sortOptions.name": "Nom A–Z",
+  "skills.sortOptions.trust": "Les plus fiables",
+  "skills.sortOptions.popular": "Les plus installées",
+  "skills.sourceLabel": "Origine",
+  "skills.allSources": "Toutes les origines",
+  "skills.providerLabel": "Éditeur",
+  "skills.allProviders": "Tous les éditeurs",
+  "skills.categoryLabel": "Catégorie",
+  "skills.allCategories": "Toutes les catégories",
+  "skills.showingRange": "Affichage de {from}–{to} sur {total}",
+  "skills.degradedCount": "Les {n} meilleures correspondances — affinez votre recherche pour réduire la liste",
+  "skills.loadMore": "Charger plus",
+  "skills.loadingMore": "Chargement d'autres compétences…",
+
+  // === Scan verdicts ===
+  "skills.scanPassed": "Analyse réussie",
+  "skills.scanFlagged.one": "L'analyse a signalé {n} problème",
+  "skills.scanFlagged.other": "L'analyse a signalé {n} problèmes",
+  "skills.notScanned": "Non analysée",
+
+  // === Where a skill came from ===
+  "skills.originBuiltin": "Intégrée",
+  "skills.originHub": "Installée",
+  "skills.originLocal": "Créée ici",
+  "skills.originLocalHelp": "Écrite sur cet appareil par votre agent — elle ne vient pas d'un registre.",
+
+  // === Actions ===
+  "skills.install": "Installer",
+  "skills.installing": "Installation…",
+  "skills.installed": "Installée",
+  "skills.remove": "Supprimer",
+  "skills.removing": "Suppression…",
+  "skills.retry": "Réessayer",
+  "skills.builtinLocked": "Déjà disponible (intégrée)",
+  "skills.cancel": "Annuler",
+
+  // === Install / remove confirmation ===
+  "skills.installTitle": "Installer {name} ?",
+  "skills.installTrustedBody": "Cette compétence s'exécute dans votre agent Hermes. Hermes l'analyse avant de l'activer.",
+  "skills.installCommunityBody": "Proposée par la communauté et non vérifiée par ID Robots. Vérifiez que l'identifiant ci-dessous correspond bien à l'éditeur que vous attendez.",
+  "skills.installWillAsk": "Vous devrez fournir : {labels}",
+  "skills.uninstallTitle": "Supprimer {name} ?",
+  "skills.uninstallBody.withPath": "Cela supprime {path} de votre agent. Vous pourrez la réinstaller depuis « Parcourir ».",
+  "skills.uninstallBody.generic": "Cela supprime la compétence de votre agent. Vous pourrez la réinstaller depuis « Parcourir ».",
+
+  // === Mutation status (announced in the store's live region) ===
+  "skills.liveInstalling": "Installation de {name}",
+  "skills.liveInstalled": "{name} installée",
+  "skills.liveInstallFailed": "Impossible d'installer {name}",
+  "skills.installFailed": "Échec de l'installation",
+  "skills.liveRemoving": "Suppression de {name}",
+  "skills.liveRemoved": "{name} supprimée",
+  "skills.liveRemoveFailed": "Impossible de supprimer {name}",
+  "skills.uninstallFailed": "Échec de la suppression",
+
+  // === Empty and error states ===
+  "skills.emptySearch": "Aucune compétence ne correspond à « {q} »",
+  "skills.emptySearchHint": "Essayez un autre terme.",
+  "skills.emptySearchAllSources": "Rechercher plutôt dans toutes les origines",
+  "skills.emptySource": "Rien dans {label} pour l'instant",
+  "skills.clearSourceFilter": "Effacer le filtre {label}",
+  "skills.emptyInstalled": "Aucune compétence installée",
+  "skills.emptyInstalledHint": "Parcourez le registre pour ajouter des capacités.",
+  "skills.browseSkills": "Parcourir les compétences",
+  "skills.installedError": "Impossible de lire vos compétences installées.",
+  "skills.installedStale": "Impossible d'actualiser cette liste — le dernier état connu est affiché.",
+  "skills.buildingCatalog": "Construction du catalogue de compétences — la première consultation sur un nouvel appareil prend environ une minute.",
+  "skills.buildingCatalogAuto": "Les compétences apparaîtront ici dès que le catalogue sera prêt — vous pouvez laisser cette page ouverte.",
+  "skills.catalogStale": "Catalogue téléchargé pour la dernière fois {when}.",
+
+  // === Ambiguous identifier ===
+  "skills.ambiguousTitle": "{n} compétences portent le nom « {q} ». Choisissez celle que vous voulez :",
+  "skills.ambiguousPickFirst": "Choisissez-en une ci-dessous pour l'installer",
+
+  // === Platform compatibility ===
+  "skills.platformWarning": "Nécessite {platforms} — cette compétence ne fonctionnera pas sur votre ClawBox.",
+  "skills.platformOnly": "{platforms} uniquement",
+
+  // === Detail sections ===
+  "skills.sectionRequirements": "Prérequis",
+  "skills.sectionGlance": "En bref",
+  "skills.sectionAbout": "À propos",
+  "skills.sectionSecurity": "Sécurité et provenance",
+  "skills.sectionRelated": "Compétences liées",
+  "skills.sectionDocs": "Documentation de la compétence",
+  "skills.docsOutline": "Dans ce document",
+  "skills.docsSections": "{n} rubriques",
+  "skills.readMore": "Lire la suite",
+  "skills.showLess": "Réduire",
+  "skills.docsFull": "SKILL.md complet",
+  "skills.docsPreview": "Aperçu de la documentation — le texte complet est disponible après l'installation",
+  "skills.docsLoading": "Chargement de la documentation…",
+  "skills.docsUnavailable": "Aucune documentation n'est encore disponible pour cette compétence.",
+
+  // === Requirements card ===
+  "skills.reqCommands": "Commandes",
+  "skills.reqCommandPresent": "disponible sur cet appareil",
+  "skills.reqCommandMissing": "non installée",
+  "skills.reqEnvVars": "Variables d'environnement",
+  "skills.reqDependencies": "Paquets",
+  "skills.reqCredentials": "Fichiers d'identifiants",
+  "skills.reqCompatibility": "Compatibilité",
+  "skills.reqSetup": "Configuration",
+  "skills.reqSecrets": "Vous devrez fournir",
+  "skills.reqGetKey": "Obtenir une clé",
+  "skills.reqSetupGuide": "Guide de configuration",
+
+  // === Provenance card ===
+  "skills.provSource": "Site source",
+  "skills.provSourceUnverified": "Site de l'éditeur (non vérifié)",
+  "skills.provRepo": "Dépôt",
+  "skills.provDetailPage": "Page de détails",
+  "skills.provHomepage": "Page d'accueil",
+  "skills.provInstallCommand": "Commande d'installation",
+  "skills.provWeeklyInstalls": "Installations",
+  "skills.provContentHash": "Empreinte du contenu",
+  "skills.showAllFindings": "Afficher les {n} problèmes",
+  "skills.copyIdentifier": "Copier l'identifiant",
+  "skills.copied": "Copié",
+
+  // === "At a glance" fields and card facts ===
+  "skills.fieldVersion": "N° de version",
+  "skills.fieldAuthor": "Auteur",
+  "skills.fieldLicense": "Licence",
+  "skills.fieldCategory": "Catégorie",
+  "skills.fieldPlatforms": "Plateformes",
+  "skills.fieldSize": "Taille",
+  "skills.fieldIncludes": "Contient",
+  "skills.fieldInstalled": "Installée",
+  "skills.fieldUpdated": "Mise à jour",
+  "skills.fileCount.one": "{n} fichier",
+  "skills.fileCount.other": "{n} fichiers",
+  "skills.installedAgo": "Installée {when}",
+
+  // === Navigation ===
+  "skills.back": "Retour aux compétences",
+  "skills.breadcrumbLabel": "Fil d'Ariane",
+  "skills.breadcrumbBrowse": "Parcourir",
+  "skills.breadcrumbInstalled": "Installées",
+
+  // === Relative dates (hub lock timestamps) ===
+  "skills.relative.justNow": "à l'instant",
+  "skills.relative.minutes": "il y a {n} min",
+  "skills.relative.hours": "il y a {n} h",
+  "skills.relative.days.one": "il y a {n} jour",
+  "skills.relative.days.other": "il y a {n} jours",
+  "skills.relative.months.one": "il y a {n} mois",
+  "skills.relative.months.other": "il y a {n} mois",
+  "skills.relative.years": "il y a {n} ans",
+
+  // === Kind of model ===
+  "localModels.kind.llm": "Langage",
+  "localModels.kind.tts": "Voix en sortie",
+  "localModels.kind.stt": "Voix en entrée",
+  "localModels.kind.embedding": "Mémoire",
+
+  // === Run state ===
+  "localModels.run.running": "En cours",
+  "localModels.run.idle": "Arrêté",
+  "localModels.run.onDemand": "À la demande",
+  "localModels.run.notInstalled": "Non installé",
+  "localModels.run.notOnThisEdition": "Indisponible dans cette édition",
+
+  // === Panel ===
+  "localModels.intro": "Tout ce qui peut fonctionner sur la box elle-même, et ce que chacun fait en ce moment. Ce qui est indiqué comme non installé est réellement absent — ce n'est pas un réglage que vous pouvez activer ici.",
+  "localModels.unavailable": "Impossible de lire l'état de : {list}.",
+  "localModels.disk": "Disque {size}",
+  "localModels.memoryInUse": "Mémoire utilisée {size}",
+  "localModels.managedInClawKeep": "Géré dans ClawKeep.",
+  "localModels.managedInLocalAi": "Géré dans Paramètres → IA locale.",
+  "localModels.toggleLabel": "{name} activé",
+  "localModels.footer": "Désactiver un modèle l'arrête tout de suite et le laisse désactivé après un redémarrage.",
+
+  // === Errors ===
+  "localModels.error.changeFailed": "Impossible de modifier ce modèle.",
+  "localModels.error.unreachable": "Impossible de joindre la box pour modifier ce modèle.",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "Bureau et alimentation",
+  "systemProfile.desktopLabel": "Environnement de bureau",
+  "systemProfile.desktopHelp": "Lance le bureau GNOME complet sur la sortie HDMI de la box et dans le Bureau à distance. Désactivez-le pour fonctionner sans écran et récupérer environ 700 Mo de mémoire — rien n'est désinstallé, vous pouvez le réactiver à tout moment.",
+  "systemProfile.performanceLabel": "Mode performance",
+  "systemProfile.performanceHelp": "Fige le processeur et le GPU à leur fréquence maximale au lieu de les laisser varier. Le premier jeton arrive plus vite, mais la carte reste alors à environ 7,2 W au repos et l'inférence locale prolongée a été mesurée à 74,8 °C, juste au-dessus de la limite de 74 °C du refroidissement passif. Laissez-le désactivé sauf pour de longues tâches avec une bonne ventilation.",
+  "systemProfile.rebootRequired": "Redémarrez la box pour appliquer ce changement.",
+  "systemProfile.unsupported": "Non disponible sur cet appareil.",
+  "systemProfile.powerState": "Profil d'alimentation : {profile} · fréquences : {clocks}",
+  "systemProfile.clocksPinned": "figées",
+  "systemProfile.clocksDynamic": "dynamiques",
+  "systemProfile.memoryGuards": "Limites de mémoire en vigueur : IA locale {ollama}, navigateur {browser}, bureau {desktop}. L'IA locale traite {parallel} requêtes à la fois.",
+  "systemProfile.loadFailed": "Impossible de lire les réglages de bureau et d'alimentation.",
+  "systemProfile.desktopFailed": "Impossible de modifier le réglage du bureau.",
+  "systemProfile.powerFailed": "Impossible de modifier le profil d'alimentation.",
+
+  // === TASK-452: skills store safety (flagged skills, incomplete downloads, keys) ===
+  "skills.dangerTitle": "Vérifiez « {name} » avant de l’installer",
+  "skills.dangerLead": "Cet appareil a analysé la compétence et l’a signalée comme « {verdict} ». L’installer relève de votre décision.",
+  "skills.dangerSeverity": "L’analyse a relevé {critical} constats critiques et {high} constats graves.",
+  "skills.dangerCanDo": "Ce que cette compétence peut faire sur votre appareil",
+  "skills.dangerNoCapabilities": "L’analyse n’a pas précisé quelle partie de l’appareil la compétence touche.",
+  "skills.dangerOther.one": "Et {n} autre constat que l’analyse n’a pas su classer.",
+  "skills.dangerOther.other": "Et {n} autres constats que l’analyse n’a pas su classer.",
+  "skills.dangerTrustNote": "La réputation de l’éditeur n’y change rien : chaque compétence est analysée et chaque compétence signalée est confirmée par vous.",
+  "skills.dangerShowFindings": "Afficher les {n} constats de l’analyse",
+  "skills.dangerUnderstand": "Je comprends ce que cette compétence peut faire et je veux l’installer quand même.",
+  "skills.dangerInstallAnyway": "Installer quand même",
+  "skills.dangerCancel": "Ne pas installer",
+  "skills.capability.shell": "Exécuter des commandes sur votre appareil",
+  "skills.capability.filesystem": "Lire, modifier ou supprimer vos fichiers",
+  "skills.capability.network": "Envoyer et recevoir des données sur internet",
+  "skills.capability.credentials": "Lire vos clés, jetons et mots de passe enregistrés",
+  "skills.capability.browser": "Piloter le navigateur de votre appareil",
+  "skills.capability.system": "Modifier les réglages système ou installer des logiciels",
+  "skills.capability.agentInstructions": "Modifier les instructions que suit votre assistant",
+  "skills.capability.other": "Quelque chose que l’analyse a signalé sans pouvoir le nommer",
+  "skills.installIncomplete": "Le téléchargement est incomplet — manquants : {files}",
+  "skills.installIncompleteHint": "Rien n’a été installé. Vérifiez votre connexion internet et réessayez.",
+  "skills.nameConflict": "« {name} » était déjà fournie avec cet appareil.",
+  "skills.nameConflictHint": "Les compétences intégrées sont mises à jour avec l’appareil, pas depuis la boutique.",
+  "skills.installRepaired.one": "Téléchargement complété : {n} fichier que l’installateur avait ignoré.",
+  "skills.installRepaired.other": "Téléchargement complété : {n} fichiers que l’installateur avait ignorés.",
+  "skills.skillDisabled": "Désactivée",
+  "skills.skillDisabledHelp": "Installée mais désactivée — votre assistant ne l’utilisera pas.",
+  "skills.countDisabled": "{n} désactivées",
+  "skills.secretSaveLabel": "Saisissez {label}",
+  "skills.secretPlaceholder": "Collez la clé ici",
+  "skills.secretSave": "Enregistrer la clé",
+  "skills.secretSaving": "Enregistrement…",
+  "skills.secretSaved": "Clé enregistrée",
+  "skills.secretStored": "Enregistrée sur cet appareil",
+  "skills.secretClear": "Retirer la clé",
+  "skills.secretFailed": "La clé n’a pas pu être enregistrée.",
+  "skills.secretHelp": "La clé est stockée uniquement sur cet appareil et n’est plus jamais affichée.",
+};

@@ -1,46 +1,61 @@
 ---
 title: "First Boot"
 icon: "power-off"
-summary: "Unbox, connect, pair via QR code, and start chatting with your ClawBox in ~5 minutes."
+summary: "Unbox, join the ClawBox-Setup hotspot, and finish the on-device wizard in your browser."
 ---
 
-Get your ClawBox up and running in about **5 minutes**. No tools required — just a
-Wi-Fi or Ethernet connection.
+Everything happens in a browser, on the box's own Wi-Fi hotspot. No app to install, no code to scan,
+no account to create first.
 
 <Info>
-**Setup time:** ~5 minutes · **Tools:** none · **Needed:** Wi-Fi or Ethernet
+**Hands-on time:** ~5 minutes · **Tools:** none · **Needed:** a phone or laptop with Wi-Fi, plus
+Ethernet or Wi-Fi for the box itself. The wizard also runs a system update, which can take longer
+and reboots the box.
 </Info>
 
 ## What's in the box
 
 - ClawBox unit (NVIDIA Jetson Orin Nano 8 GB)
-- 512 GB NVMe SSD with OpenClaw pre-installed
+- 512 GB NVMe SSD with the OS pre-installed
 - 20 W USB-C power adapter
 - Ethernet cable
-- Quick-start card with QR code
 
 ## Setup steps
 
 <Steps>
-  <Step title="Unbox your ClawBox">
-    Remove it from the packaging, check all components are present, and place it on a
-    flat, ventilated surface. Keep the quick-start card handy.
+  <Step title="Unbox and power on">
+    Place the unit on a flat, ventilated surface, plug in Ethernet if you have it (recommended — it
+    is the most reliable path), then connect the power adapter.
   </Step>
-  <Step title="Connect to your network">
-    Plug the Ethernet cable into your router (recommended), or use Wi-Fi — the setup
-    wizard will guide you. A stable connection matters for first-time setup.
+  <Step title="Join the ClawBox-Setup hotspot">
+    After about a minute the box broadcasts its own Wi-Fi network, **`ClawBox-Setup`** — open by
+    default (it takes a password only if you set one later, in the wizard's security step). Join it from your phone or laptop. Its appearance in your Wi-Fi list is the signal that
+    the box is ready.
   </Step>
-  <Step title="Power on">
-    Connect the power adapter and plug it into an outlet. Wait for the status LED to turn
-    **solid green** (~60 seconds).
+  <Step title="Open the wizard">
+    Browse to **`http://10.42.0.1`**. If your home network already uses `10.42.0.0/24`, the box falls
+    back to `http://10.43.0.1`.
+
+    Some phones pop the page up on their own when they join the hotspot, but many will not — ClawBox
+    does not hijack DNS to force it (see [Networking](/technical/networking#two-network-modes)), so
+    typing the address is the reliable path.
   </Step>
-  <Step title="Pair your device">
-    Open your phone camera or a QR scanner and scan the QR code on the quick-start card.
-    Connect Telegram when prompted, then follow the pairing wizard to link your account.
+  <Step title="Run the five-step wizard">
+    1. **Wi-Fi** — pick your network and enter its password. Ethernet is detected automatically. The
+       box then leaves the hotspot to join your network, so you have to rejoin your own Wi-Fi before
+       the wizard continues.
+    2. **Update** — the box pulls the current release. This is not optional and can reboot the box.
+    3. **Security** — set the device password. It is the same password for the browser login and for
+       SSH. You can also rename the setup hotspot and give it a password here.
+    4. **AI provider** — pick what powers the assistant, see [Choose your AI provider](/setup/choose-ai-provider). On a
+       [Hermes](/editions/hermes) box this step shows the Hermes provider panel instead — see
+       [AI Providers on Hermes](/editions/hermes-providers).
+    5. **Telegram** *(optional)* — create a bot with [@BotFather](https://t.me/BotFather) and paste
+       its token. The wizard shows a QR code that opens BotFather on your phone. **Skip** is a
+       first-class option; you can connect Telegram later from Settings.
   </Step>
   <Step title="Start chatting">
-    Send your first message to test the connection. Try a question or a command, then
-    explore features like browser automation and voice.
+    Setup finishes on the desktop. Open **Chat** and send your first message.
   </Step>
 </Steps>
 
@@ -48,15 +63,18 @@ Wi-Fi or Ethernet connection.
 A reply to your first message means your ClawBox is live. 🦀
 </Check>
 
-## Reaching the device directly
+## Reaching the device afterwards
 
-If you prefer the browser setup page, visit `http://clawbox.local` from a device on the
-same network.
+Once the box has joined your network, the hotspot goes away and you reach it at:
+
+1. `http://<device-ip>` — always works; find the IP in your router's client list (look for `clawbox`).
+2. `http://clawbox.local` — mDNS, convenient but not universally reliable.
 
 <Warning>
-If `clawbox.local` doesn't load, **disable any active VPN** first (the most common
-cause), or use the device's IP address from your router's client list:
-`http://<device-ip>`. Some networks also block mDNS — Ethernet is the most reliable path.
+If `clawbox.local` doesn't load, **disable any active VPN** first (the most common cause), or use the
+device's IP address. Some networks drop mDNS between Wi-Fi and wired segments entirely — Ethernet
+plus a DHCP reservation is the most reliable setup. See
+[Networking](/technical/networking#why-clawboxlocal-sometimes-fails--and-what-to-do).
 </Warning>
 
 ## Next steps
@@ -66,6 +84,6 @@ cause), or use the device's IP address from your router's client list:
     Channels, voice, AI models, advanced options.
   </Card>
   <Card title="Choose your AI" href="/setup/choose-ai-provider" icon="robot">
-    ClawBox AI, or bring Claude / GPT / Gemini.
+    ClawBox AI, or bring Claude / Gemini / OpenRouter.
   </Card>
 </CardGroup>

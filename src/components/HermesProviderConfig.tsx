@@ -7,6 +7,7 @@ import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
 import { copyToClipboard } from "@/lib/clipboard";
+import { useT } from "@/lib/i18n";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
 import {
   HERMES_PANEL_PROVIDERS,
@@ -90,7 +91,25 @@ interface Props {
 // is the SAME step on a Hermes device, so it advances the same way.
 const AUTO_ADVANCE_DELAY_MS = 900;
 
+// The provider registry is shared with the server routes (/setup-api/hermes/*
+// imports it), so it cannot call `t` — but a row's `description` is copy, not
+// data, and this panel is the only place it is rendered. Re-key it here, by
+// slug: a slug may carry a hyphen ("openai-codex") and a catalogue key segment
+// may not. A provider with no entry keeps the registry's own English rather
+// than rendering a raw key.
+const PROVIDER_DESCRIPTION_KEYS: Record<string, string> = {
+  openrouter: "hermesProvider.row.desc.openrouter",
+  anthropic: "hermesProvider.row.desc.anthropic",
+  "openai-codex": "hermesProvider.row.desc.openaiCodex",
+  gemini: "hermesProvider.row.desc.gemini",
+  zai: "hermesProvider.row.desc.zai",
+  "kimi-coding": "hermesProvider.row.desc.kimiCoding",
+  copilot: "hermesProvider.row.desc.copilot",
+  nous: "hermesProvider.row.desc.nous",
+};
+
 export default function HermesProviderConfig({ embedded, onNext, testId }: Props) {
+  const { t } = useT();
   const uid = useId();
 
   // Seeded from the DEVICE's configured provider by the mount effect below;
@@ -391,14 +410,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           expiresAt: Date.now() + expiresIn * 1000,
         });
       } else {
-        throw new Error("Unexpected response from Hermes");
+        throw new Error(t("hermesProvider.oauth.unexpectedResponse"));
       }
     } catch (e) {
       if (gen !== signinGenRef.current) return;
       setSignin({
         stage: "failed",
         providerId,
-        message: e instanceof Error ? e.message : "Could not start sign-in",
+        message: e instanceof Error ? e.message : t("hermesProvider.oauth.startFailed"),
       });
     }
   }
@@ -428,7 +447,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       onOauthConnected(s.providerId);
     } catch (e) {
       // Stay on the paste step: a mistyped code must not force a new session.
-      setSignin({ ...s, error: e instanceof Error ? e.message : "Code was not accepted" });
+      setSignin({ ...s, error: e instanceof Error ? e.message : t("hermesProvider.oauth.codeRejected") });
     } finally {
       setOauthBusy(false);
     }
@@ -451,7 +470,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
         setSignin({
           stage: "failed",
           providerId,
-          message: "The sign-in request expired. Try again.",
+          message: t("hermesProvider.oauth.expired"),
         });
         return;
       }
@@ -496,8 +515,8 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
               typeof data.error_message === "string" && data.error_message
                 ? data.error_message
                 : status === "expired"
-                  ? "The sign-in request expired. Try again."
-                  : "Sign-in failed. Try again.",
+                  ? t("hermesProvider.oauth.expired")
+                  : t("hermesProvider.oauth.failed"),
           });
         }
       } catch {
@@ -507,7 +526,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     };
     timer = setTimeout(tick, pollMs);
     return () => { alive = false; clearTimeout(timer); };
-  }, [signin, onOauthConnected]);
+  }, [signin, onOauthConnected, t]);
 
   function copyUserCode(code: string) {
     // copyToClipboard, not navigator.clipboard directly: the device is served
@@ -532,7 +551,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     getTier: () => uiTier,
     onStart: () => setClawaiStatus(null),
     onBusyChange: setLoginBusy,
-    onConfiguring: () => setClawaiStatus({ kind: "ok", msg: "Finishing setup on this device…" }),
+    onConfiguring: () => setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.finishingSetup") }),
     onComplete: () => {
       // Only reached on the poll's terminal `complete` status, i.e. after the
       // device finished configuring — never mid-handshake.
@@ -541,7 +560,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       // The device-code handoff configures the provider server-side, so this is
       // a successful configure like any other — the chat picker has to hear it.
       notifyChatHeader();
-      setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+      setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
       setConfigured(true);
     },
     onError: (msg) => setClawaiStatus({ kind: "err", msg }),
@@ -590,7 +609,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     await reloadClawai();
     setSelectedProvider(CLAWAI_PROVIDER);
     notifyChatHeader();
-    setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+    setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
     setConfigured(true);
   }
 
@@ -611,11 +630,11 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       const applied = uiTierToDeviceTier(uiTier);
       setClawai((c) => (c ? { ...c, active: true, tier: applied, tierStored: applied, model: data.model } : c));
       setAppliedUiTier(uiTier);
-      setClawaiStatus({ kind: "ok", msg: "ClawBox AI is now your active model" });
+      setClawaiStatus({ kind: "ok", msg: t("hermesProvider.clawai.nowActive") });
       notifyChatHeader();
       setConfigured(true);
     } catch (e) {
-      setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : "Couldn't switch to ClawBox AI" });
+      setClawaiStatus({ kind: "err", msg: e instanceof Error ? e.message : t("hermesProvider.clawai.switchFailed") });
     } finally {
       setApplyingClawai(false);
     }
@@ -628,11 +647,11 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       // published a model list for the provider yet. Saying "no credentials"
       // here would be flatly wrong and send the user back to re-paste it.
       return keySaved
-        ? `Key saved for ${name}, but it hasn't published a model list yet — reopen this panel in a moment and pick a model.`
-        : `${name} has no credentials yet — sign in or paste an API key first.`;
+        ? t("hermesProvider.save.keySavedNoCatalog", { provider: name })
+        : t("hermesProvider.save.noCredentials", { provider: name });
     }
     if (data?.error === "catalog_unavailable") {
-      return `Hermes' model list is unreachable right now, so ${name}'s models can't be checked. Try again in a moment.`;
+      return t("hermesProvider.save.catalogUnavailable", { provider: name });
     }
     return typeof data?.error === "string" && data.error ? data.error : `HTTP ${statusCode}`;
   }
@@ -681,11 +700,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
       setClawai((c) => (c ? { ...c, active: false } : c));
       setAppliedUiTier(null);
       if (!modelInScope) refreshModels();
-      setSaveStatus({ kind: "ok", msg: savingKey ? "Key saved — provider & model updated" : "Saved" });
+      setSaveStatus({
+        kind: "ok",
+        msg: savingKey ? t("hermesProvider.save.keySavedOk") : t("hermesProvider.save.ok"),
+      });
       notifyChatHeader();
       setConfigured(true);
     } catch (e) {
-      setSaveStatus({ kind: "err", msg: e instanceof Error ? e.message : "Save failed" });
+      setSaveStatus({ kind: "err", msg: e instanceof Error ? e.message : t("hermesProvider.save.failed") });
     } finally {
       setSaving(false);
     }
@@ -717,16 +739,15 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
       <div className="card-surface rounded-2xl p-5 sm:p-8">
-        <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">Hermes models</h1>
+        <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">{t("hermesProvider.title")}</h1>
         <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
-          This device runs on Hermes. Choose an inference provider and default model —
-          they switch through Hermes natively, no dashboard needed.
+          {t("hermesProvider.intro")}
         </p>
 
         {/* Provider radio-cards (OpenClaw-style) */}
         <div
           role="radiogroup"
-          aria-label="AI Provider"
+          aria-label={t("hermesProvider.radioGroupLabel")}
           aria-describedby={`${uid}-intro`}
           className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden"
         >
@@ -737,12 +758,13 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
             onSelect={() => pickProvider(CLAWAI_PROVIDER)}
             trailingBadge={clawai?.active ? (
               <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
-                Active
+                {t("hermesProvider.clawai.activeBadge")}
               </span>
             ) : null}
           />
           {HERMES_PANEL_PROVIDERS.map((provider) => {
             const isSelected = selectedProvider === provider.id;
+            const descriptionKey = PROVIDER_DESCRIPTION_KEYS[provider.id];
             return (
               <label key={provider.id} className={rowCls(isSelected)}>
                 <input
@@ -768,7 +790,9 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
                     {provider.name}
                   </span>
-                  <span className="block text-xs text-[var(--text-muted)]">{provider.description}</span>
+                  <span className="block text-xs text-[var(--text-muted)]">
+                    {descriptionKey ? t(descriptionKey) : provider.description}
+                  </span>
                 </div>
               </label>
             );
@@ -794,14 +818,14 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     className="mt-4 w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-2.5 hover:opacity-90 transition-opacity disabled:opacity-50"
                   >
                     {applyingClawai
-                      ? "Switching…"
+                      ? t("hermesProvider.clawai.switching")
                       : clawaiDirty
-                        ? `Switch to ${CLAWAI_TIER_INFO[uiTier].pillLabel}`
-                        : "ClawBox AI in use"}
+                        ? t("hermesProvider.clawai.switchTo", { tier: CLAWAI_TIER_INFO[uiTier].pillLabel })
+                        : t("hermesProvider.clawai.inUse")}
                   </button>
                   {clawai.model && (
                     <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-                      Model: <span className="font-mono">{clawai.model}</span>
+                      {t("hermesProvider.clawai.modelLabel")} <span className="font-mono">{clawai.model}</span>
                     </p>
                   )}
                 </>
@@ -830,19 +854,21 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-deep)]/50 p-3">
                     <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-gray-200">Sign in with {selectedDef.name}</p>
+                        <p className="text-sm font-medium text-gray-200">
+                          {t("hermesProvider.oauth.signInWith", { provider: selectedDef.name })}
+                        </p>
                         <p className="text-xs text-[var(--text-muted)]">
                           {connected
-                            ? "Connected. OAuth credentials active."
+                            ? t("hermesProvider.oauth.connectedDesc")
                             : external
-                              ? "This provider signs in through the Hermes CLI."
-                              : "OAuth through Hermes (no API key needed)."}
+                              ? t("hermesProvider.oauth.cliOnlyDesc")
+                              : t("hermesProvider.oauth.availableDesc")}
                         </p>
                       </div>
                       {connected && (
                         <span className="shrink-0 flex items-center gap-1 text-xs font-semibold text-emerald-400">
                           <span className="material-symbols-rounded" style={{ fontSize: 14 }}>check_circle</span>
-                          Connected
+                          {t("hermesProvider.oauth.connectedBadge")}
                         </span>
                       )}
                       {showSignInButton && (
@@ -851,14 +877,16 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                           onClick={() => { void startOauth(oauthId); }}
                           className="shrink-0 rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity"
                         >
-                          {flow?.stage === "failed" ? "Try again" : "Sign in"}
+                          {flow?.stage === "failed"
+                            ? t("hermesProvider.oauth.tryAgain")
+                            : t("hermesProvider.oauth.signIn")}
                         </button>
                       )}
                     </div>
                     {!connected && external && st?.cliCommand && (
                       <div className="mt-3">
                         <p className="text-xs text-[var(--text-muted)]">
-                          Run this in the device terminal, then reopen this panel:
+                          {t("hermesProvider.oauth.cliInstructions")}
                         </p>
                         <code className="mt-1.5 block rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2 text-xs font-mono text-[var(--text-primary)] overflow-x-auto">
                           {st.cliCommand}
@@ -867,31 +895,30 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     )}
                     {!connected && flow?.stage === "starting" && (
                       <p className="mt-3 text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
-                        Starting sign-in with {selectedDef.name}...
+                        {t("hermesProvider.oauth.starting", { provider: selectedDef.name })}
                       </p>
                     )}
                     {!connected && flow?.stage === "pkce" && (
                       <div className="mt-3 space-y-2">
                         <p className="text-xs text-[var(--text-muted)]">
-                          A {selectedDef.name} sign-in tab has opened. Approve access there, copy the code it
-                          shows, and paste it here.{" "}
+                          {t("hermesProvider.oauth.pkceInstructions", { provider: selectedDef.name })}{" "}
                           <a
                             href={flow.authUrl}
                             target="_blank"
                             rel="noopener noreferrer"
                             className="underline text-[var(--text-secondary)]"
                           >
-                            Reopen the sign-in page
+                            {t("hermesProvider.oauth.reopenSignInPage")}
                           </a>
                         </p>
                         <label className="sr-only" htmlFor={`${uid}-oauth-code`}>
-                          Paste the code from {selectedDef.name}
+                          {t("hermesProvider.oauth.codeLabel", { provider: selectedDef.name })}
                         </label>
                         <input
                           id={`${uid}-oauth-code`}
                           type="text"
                           className={selectCls}
-                          placeholder={`Paste the code from ${selectedDef.name}`}
+                          placeholder={t("hermesProvider.oauth.codeLabel", { provider: selectedDef.name })}
                           value={oauthCode}
                           autoComplete="off"
                           onChange={(e) => setOauthCode(e.target.value)}
@@ -903,14 +930,16 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                             disabled={oauthBusy || !oauthCode.trim()}
                             className="rounded-lg bg-[var(--coral-bright)] px-3 py-2 text-sm font-semibold text-white hover:opacity-90 transition-opacity disabled:opacity-50"
                           >
-                            {oauthBusy ? "Submitting..." : "Submit code"}
+                            {oauthBusy
+                              ? t("hermesProvider.oauth.submitting")
+                              : t("hermesProvider.oauth.submitCode")}
                           </button>
                           <button
                             type="button"
                             onClick={resetSignin}
                             className="text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
                           >
-                            Start over
+                            {t("hermesProvider.oauth.startOver")}
                           </button>
                         </div>
                         {flow.error && (
@@ -921,8 +950,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     {!connected && flow?.stage === "device" && (
                       <div className="mt-3 space-y-2">
                         <p className="text-xs text-[var(--text-muted)]">
-                          Enter this code on the {selectedDef.name} verification page. This panel updates by
-                          itself once you approve.
+                          {t("hermesProvider.oauth.deviceInstructions", { provider: selectedDef.name })}
                         </p>
                         <div className="flex items-center gap-2">
                           <span
@@ -936,7 +964,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                             onClick={() => copyUserCode(flow.userCode)}
                             className="rounded-lg border border-[var(--border-subtle)] px-2.5 py-2 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--surface-card)] transition-colors"
                           >
-                            {codeCopied ? "Copied" : "Copy code"}
+                            {codeCopied ? t("hermesProvider.oauth.copied") : t("hermesProvider.oauth.copyCode")}
                           </button>
                         </div>
                         {flow.verificationUrl && (
@@ -946,19 +974,19 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                             rel="noopener noreferrer"
                             className="inline-block text-xs font-semibold text-[var(--coral-bright)] underline"
                           >
-                            Open the verification page
+                            {t("hermesProvider.oauth.openVerificationPage")}
                           </a>
                         )}
                         <div className="flex items-center gap-3">
                           <p className="text-xs text-[var(--text-muted)]" role="status" aria-live="polite">
-                            Waiting for approval...
+                            {t("hermesProvider.oauth.waitingApproval")}
                           </p>
                           <button
                             type="button"
                             onClick={resetSignin}
                             className="text-xs text-[var(--text-muted)] underline hover:text-[var(--text-secondary)]"
                           >
-                            Start over
+                            {t("hermesProvider.oauth.startOver")}
                           </button>
                         </div>
                       </div>
@@ -967,17 +995,17 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                       <p role="alert" aria-live="polite" className="mt-2 text-xs text-red-400">{flow.message}</p>
                     )}
                     {selectedDef.keyProvider && (
-                      <p className="text-[11px] text-[var(--text-muted)] mt-2">…or paste an API key below instead.</p>
+                      <p className="text-[11px] text-[var(--text-muted)] mt-2">{t("hermesProvider.oauth.orPasteKey")}</p>
                     )}
                     {!connected && !external && (
                       <p className="mt-2 text-[11px] text-[var(--text-muted)]">
-                        Advanced:{" "}
+                        {t("hermesProvider.oauth.advancedLabel")}{" "}
                         <button
                           type="button"
                           onClick={openHermesOAuth}
                           className="underline hover:text-[var(--text-secondary)]"
                         >
-                          Hermes dashboard (LAN only)
+                          {t("hermesProvider.oauth.dashboardLink")}
                         </button>
                       </p>
                     )}
@@ -985,7 +1013,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                 );
               })()}
               <div>
-                <label className={labelCls} htmlFor={`${uid}-model`}>Default model</label>
+                <label className={labelCls} htmlFor={`${uid}-model`}>{t("hermesProvider.model.label")}</label>
                 <select
                   id={`${uid}-model`}
                   className={selectCls}
@@ -994,12 +1022,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   aria-busy={loading}
                   onChange={(e) => setPicked(e.target.value)}
                 >
-                  {loading && <option value="">Loading…</option>}
+                  {loading && <option value="">{t("hermesProvider.model.loading")}</option>}
                   {!loading && !scope?.models.length && (
                     <option value="">
                       {scope?.authenticated === false
-                        ? "No credentials for this provider yet"
-                        : "No models available"}
+                        ? t("hermesProvider.model.noCredentials")
+                        : t("hermesProvider.model.noModels")}
                     </option>
                   )}
                   {(scope?.models ?? []).map((m) => (
@@ -1015,33 +1043,37 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   // The server tells us the device's saved pairing belongs to a
                   // DIFFERENT provider. Say so, so Save is never a surprise.
                   <p className="mt-1.5 text-[11px] text-[var(--text-muted)]">
-                    This device is currently using{" "}
+                    {t("hermesProvider.model.savedElsewherePrefix")}{" "}
                     <span className="text-[var(--text-secondary)]">
                       {hermesProviderLabel(scope.savedElsewhere.provider)}
                     </span>
                     {scope.savedElsewhere.model ? (
                       <> · <span className="font-mono">{scope.savedElsewhere.model}</span></>
                     ) : null}
-                    . Saving switches it to {selectedDef?.name ?? selectedProvider}.
+                    {t("hermesProvider.model.savedElsewhereSuffix", {
+                      provider: selectedDef?.name ?? selectedProvider,
+                    })}
                   </p>
                 )}
                 {scope?.stale && !loading && (
                   <p className="mt-1.5 text-[11px] text-amber-400/80">
                     {scope.source === "cold-start"
-                      ? "Hermes hasn't published a model list yet — showing a minimal fallback."
-                      : "Showing a cached model list; Hermes' live catalogue is unreachable."}
+                      ? t("hermesProvider.model.staleColdStart")
+                      : t("hermesProvider.model.staleCached")}
                   </p>
                 )}
               </div>
 
               {selectedDef?.keyProvider && (
                 <div>
-                  <label className={labelCls} htmlFor={`${uid}-key`}>{selectedDef.name} API key</label>
+                  <label className={labelCls} htmlFor={`${uid}-key`}>
+                    {t("hermesProvider.key.label", { provider: selectedDef.name })}
+                  </label>
                   <input
                     id={`${uid}-key`}
                     type="password"
                     className={selectCls}
-                    placeholder="Paste API key (optional if already set)"
+                    placeholder={t("hermesProvider.key.placeholder")}
                     value={apiKey}
                     autoComplete="off"
                     onChange={(e) => setApiKey(e.target.value)}
@@ -1065,7 +1097,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                 disabled={saving || loading || (!modelInScope && !hasPendingKey)}
                 className="w-full rounded-xl bg-[var(--coral-bright)] text-white font-semibold py-3 hover:opacity-90 transition-opacity disabled:opacity-50"
               >
-                {saving ? "Saving…" : "Save model & provider"}
+                {saving ? t("hermesProvider.save.saving") : t("hermesProvider.save.button")}
               </button>
               {statusLine(saveStatus)}
             </div>
@@ -1078,7 +1110,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
             onClick={() => onNext?.()}
             className="mt-7 w-full rounded-xl bg-[var(--surface-card)] text-[var(--text-primary)] font-semibold py-3 hover:opacity-90 transition-opacity"
           >
-            Continue
+            {t("hermesProvider.continue")}
           </button>
         )}
       </div>

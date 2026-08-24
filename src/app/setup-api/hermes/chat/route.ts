@@ -14,11 +14,20 @@ import {
 import {
   clampReasoningForProvider,
   hermesReasoningLevelsFor,
+  normalizeReasoningForWire,
+  HERMES_LOCAL_REASONING_PROVIDER,
   providerHasBinaryReasoning,
   providerHasReasoningControl,
   isHermesReasoningLevel,
   isReasoningLevelAllowedFor,
+  type HermesLocalBackend,
 } from "@/lib/hermes-reasoning";
+import { getConfiguredLocalAiBackend } from "@/lib/local-ai-backend";
+import {
+  isSmallLocalModel,
+  slimLocalProfileEnabled,
+  smallLocalModelToolsets,
+} from "@/lib/local-model-profile";
 import {
   getModelOptions,
   isAllowedProvider,
@@ -26,6 +35,21 @@ import {
   shouldEnforcePairing,
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
+import { appendTranscript } from "@/lib/harness/transcript-store";
+import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
+import { extractReasoningPanels } from "@/lib/hermes-reasoning-panel";
+import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
+import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
+import { openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
+
+/**
+ * How many images one turn may carry — the same number the composer is told,
+ * read from the capability table rather than written down twice. Only the FIRST
+ * rides `--image`; the rest are resolved out of the prompt text, which is why
+ * the Hermes number is the lower of the two.
+ */
+const MAX_IMAGES_PER_TURN = capabilitiesFor("hermes", UNKNOWN_FACTS).maxAttachmentsPerTurn;
 
 // Chat turn against the Hermes harness, via `hermes chat -q <message> -Q`
 // (single query, non-interactive). The message is passed as an argv element
@@ -278,9 +302,184 @@ function parseSessionId(stderr: string): string {
   return match ? match[1] : "";
 }
 
+/** The reply this route hands back, whichever transport produced it. */
+interface TurnPayload {
+  text: string;
+  harness: "hermes";
+  reasoning?: string;
+  toolCalls?: readonly unknown[];
+  sessionId?: string;
+}
+
+/** Did the caller ask to be streamed to, rather than handed a finished turn? */
+function wantsStream(request: Request): boolean {
+  return (request.headers.get("accept") || "").includes("text/event-stream");
+}
+
+/**
+ * Turn a finished run into the answer, and record it.
+ *
+ * ── Answer, thinking and tool steps, pulled apart ─────────────────────────
+ *
+ * TWO SOURCES, IN THIS ORDER, and the order is the whole point.
+ *
+ * What `chat -q … -Q` prints is a console rendering, and on this hardware it is
+ * a lossy one. Captured from the live box with deepseek-v4-flash, a bare "Hey"
+ * arrives as an OPENED reasoning frame that is never closed, the monologue
+ * printed TWICE by two different producers, then the answer — and no tool
+ * activity at all, because quiet mode prints none. Nothing in that stream marks
+ * where thinking stops and the reply starts, so the parser below can only ever
+ * handle the closed, framed case.
+ *
+ * The agent already has it right. `~/.hermes/state.db` stores the same turn as
+ * `content`, `reasoning_content` and `tool_calls` in separate columns,
+ * deduplicated, which is exactly the split the UI wants. So we ask the agent's
+ * own record first, keyed by the session id the run reported, and keep the
+ * console parse as the floor under it.
+ *
+ * The streaming transport lands here too, and needs the same treatment for a
+ * different reason: its text is already clean (the answer and the monologue
+ * arrive on separate channels), but only the database has the TOOL STEPS, which
+ * no amount of reading the reply can recover.
+ */
+async function settleTurn(
+  threaded: string,
+  consoleText: string,
+  streamedReasoning: string,
+): Promise<TurnPayload> {
+  const consoleReply = extractReasoningPanels(consoleText);
+  const record = await readHermesTurn(threaded);
+  const answer = record?.text ?? consoleReply.text;
+  // The database first, the console parse next, and what the stream itself
+  // carried as the floor — the last only matters when the turn ran but its row
+  // could not be read back, which is the one case the other two are both empty.
+  const settledReasoning = record?.reasoning || consoleReply.reasoning || streamedReasoning;
+  const toolCalls = record?.toolCalls;
+  // The ANSWER, and only on success. Media is split here rather than stored raw
+  // so that the record holds exactly what the bubble renders, and a refreshed
+  // transcript is byte-identical to the live one instead of showing a MEDIA:
+  // directive as text.
+  const reply = splitAssistantMedia(answer);
+  await appendTranscript({
+    role: "assistant",
+    text: reply.text,
+    timestamp: Date.now(),
+    ...(reply.images.length ? { media: reply.images } : {}),
+    ...(reply.audio.length ? { audio: reply.audio } : {}),
+    // Persisted beside the answer, never inside it: replay has to be able to
+    // collapse the monologue the same way the live turn did.
+    ...(settledReasoning ? { reasoning: settledReasoning } : {}),
+    ...(toolCalls?.length ? { toolCalls } : {}),
+  });
+  return {
+    text: answer,
+    harness: "hermes",
+    ...(settledReasoning ? { reasoning: settledReasoning } : {}),
+    ...(toolCalls?.length ? { toolCalls } : {}),
+    ...(threaded ? { sessionId: threaded } : {}),
+  };
+}
+
+/**
+ * Stream a dashboard turn to the caller as it is written.
+ *
+ * Server-sent events, one named event per kind, because the two are genuinely
+ * different things and the client must not have to guess which it is holding:
+ *
+ *   `delta` — a FRAGMENT of the answer, to append. Only ever the answer: the
+ *             model's monologue arrives on its own channel upstream and this
+ *             route does not forward it, so the raw thinking cannot flash into
+ *             the bubble mid-stream. That is a property of the transport, not a
+ *             filter that has to stay correct.
+ *   `done`  — the settled turn, byte-identical in shape to what the non-
+ *             streaming path returns, including the tool steps and the
+ *             deduplicated reasoning that only the agent's database has.
+ *   `error` — the turn failed; the message is already customer-readable.
+ *
+ * Once the first byte is out the status code is spent, so a failure after that
+ * point is reported inside the stream rather than as an HTTP error. Everything
+ * that could have produced a clean 4xx/5xx has already run before this is called.
+ */
+function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: string, data: unknown) => {
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
+      };
+      try {
+        const final = await turn.run((chunk) => send("delta", { text: chunk }));
+        const threaded = turn.sessionId || fallbackSessionId;
+        if (final.status === "error") {
+          const detail = final.error || final.text || "Hermes chat failed";
+          await appendTranscript({
+            role: "system",
+            text: `Error: ${detail}`,
+            timestamp: Date.now(),
+            variant: "error",
+          });
+          send("error", { error: detail });
+        } else {
+          send("done", await settleTurn(threaded, final.text, final.reasoning));
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : "Hermes chat failed";
+        // A failure is recorded too — see the non-streaming path's note. The one
+        // exception is a caller who hung up: the socket dies as a consequence of
+        // their own Stop, and their unanswered question is already recorded.
+        if (!isAbort(err)) {
+          await appendTranscript({
+            role: "system",
+            text: `Error: ${detail}`,
+            timestamp: Date.now(),
+            variant: "error",
+          });
+          send("error", { error: detail });
+        }
+      } finally {
+        turn.close();
+        try {
+          controller.close();
+        } catch {
+          /* the caller already went away */
+        }
+      }
+    },
+    cancel() {
+      turn.close();
+    },
+  });
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+      // Nginx and friends buffer a proxied response by default, which would
+      // hold every fragment until the turn ended and undo the whole point.
+      "x-accel-buffering": "no",
+    },
+  });
+}
+
+function isAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 export async function POST(request: Request) {
   let body: {
     message?: string;
+    /**
+     * What the USER's bubble shows, when that differs from what the agent is
+     * sent. Today the one case is the mid-conversation model-switch note the
+     * adapter prefixes onto the prompt: the agent has to read it, and the
+     * transcript must not replay it as something the customer typed.
+     *
+     * Only ever narrows what is recorded — the turn itself always runs on
+     * `message`.
+     */
+    displayText?: string;
+    /** Absolute paths of staged images to attach to this turn. */
+    imagePaths?: unknown;
     model?: string;
     provider?: string;
     reasoning?: string;
@@ -317,6 +516,15 @@ export async function POST(request: Request) {
   if (rawReasoning && !isHermesReasoningLevel(rawReasoning)) {
     return NextResponse.json({ error: "Invalid reasoning level" }, { status: 400 });
   }
+  // Fold a level the wire collapses onto the one it collapses to, BEFORE any
+  // provider check runs. Today that is `ultra` → `max`: Hermes' own
+  // clamp_effort does it for every OpenAI-compatible provider, so the two are
+  // the same turn — but clawai answers the word `ultra` with HTTP 400, which
+  // turned "a level with no effect" into "a level that fails". A client holding
+  // a saved `ultra` from before it left the picker must not hit that.
+  if (rawReasoning && isHermesReasoningLevel(rawReasoning)) {
+    rawReasoning = normalizeReasoningForWire(rawReasoning);
+  }
   // "auto" is ClawBox's pseudo-provider for "let Hermes decide", not a slug the
   // CLI knows — it maps to omitting the flag entirely, which is exactly what
   // hermes does without an override.
@@ -331,6 +539,10 @@ export async function POST(request: Request) {
   // we fall back to the static allowlist and let hermes itself judge the
   // pairing — a chat turn must not become impossible because the dashboard
   // blinked.
+  // The built-in toolsets this turn is narrowed to, or null for "all of them".
+  // Set only for a small on-device model — see the slim-profile block below.
+  let slimToolsets: readonly string[] | null = null;
+
   let payload: ModelOptionsPayload | null = null;
   if (wantsProvider || rawModel) {
     try {
@@ -354,6 +566,15 @@ export async function POST(request: Request) {
     // what hermes falls back to. `current` comes from `hermes config get`, so
     // it is accurate even when the model lists themselves are stale.
     const effectiveProvider = wantsProvider ? rawProvider : payload.current.provider;
+    // Which runtime hosts the on-device model, when that is what this turn runs
+    // on. It decides WHICH pair the two-state switch has: llama.cpp's off is
+    // `minimal`, Ollama's is `none`, and Ollama answers `minimal` with HTTP 400
+    // "does not support thinking" on a model without the capability — so
+    // clamping to the wrong pair is a guaranteed failed turn. Only read for the
+    // provider that needs it; every other turn skips the config-store hit.
+    const localBackend: HermesLocalBackend | null = providerHasBinaryReasoning(effectiveProvider)
+      ? await getConfiguredLocalAiBackend()
+      : null;
 
     // The CLI accepting a level does not mean the PROVIDER does — Hermes passes
     // it through as `reasoning_effort` and the upstream API can reject it.
@@ -378,19 +599,34 @@ export async function POST(request: Request) {
       && isHermesReasoningLevel(rawReasoning)
       && providerHasBinaryReasoning(effectiveProvider)
     ) {
-      rawReasoning = clampReasoningForProvider(effectiveProvider, rawReasoning);
+      rawReasoning = clampReasoningForProvider(effectiveProvider, rawReasoning, localBackend);
     } else if (
       rawReasoning
       && isHermesReasoningLevel(rawReasoning)
-      && !isReasoningLevelAllowedFor(effectiveProvider, rawReasoning)
+      && !isReasoningLevelAllowedFor(effectiveProvider, rawReasoning, localBackend)
     ) {
       return NextResponse.json(
         {
           error: `Provider "${effectiveProvider}" does not support the "${rawReasoning}" reasoning effort.`,
-          allowed: hermesReasoningLevelsFor(effectiveProvider),
+          allowed: hermesReasoningLevelsFor(effectiveProvider, localBackend),
         },
         { status: 400 },
       );
+    }
+
+    // The slim profile. On the on-device provider the fixed per-turn payload —
+    // ~30 KB of system text plus 61 tool schemas, ~113 KB in total, measured
+    // with `hermes prompt-size` and a live tools/list — is most of a small
+    // model's budget, and it answers with tool preamble instead of the answer.
+    // `-t` is a whitelist over the BUILT-IN toolsets only (verified against
+    // agent_init.py / model_tools.py); MCP tools are merged separately, so the
+    // ClawBox device tools survive it. See src/lib/local-model-profile.ts.
+    if (
+      effectiveProvider === HERMES_LOCAL_REASONING_PROVIDER
+      && slimLocalProfileEnabled()
+      && isSmallLocalModel({ modelId: rawModel || payload.current.model })
+    ) {
+      slimToolsets = smallLocalModelToolsets();
     }
 
     // Same pairing gate the config POST enforces: a provider must never run a
@@ -437,13 +673,72 @@ export async function POST(request: Request) {
   // "is it removed now?" was answered with "what are we trying to remove?".
   // `chat -q` threads: resuming returns the SAME session id and the prior
   // turns are in context. `-Q` is its documented programmatic/quiet mode.
-  const args = ["chat", "-q", safeMessage, "-Q"];
+  // ── Images ──────────────────────────────────────────────────────────────
+  //
+  // Two mechanisms, both native to the agent and both verified against the
+  // checkout on the live box (`~/.hermes/hermes-agent` @ 1091472, 2026-08-22):
+  //
+  //   1. `--image IMAGE  Optional local image path to attach to a single
+  //      query` — one image, explicit, straight into the request.
+  //   2. `agent/image_routing.py:extract_image_refs()` scans the PROMPT for
+  //      absolute or `~/`-rooted paths with a picture extension that exist on
+  //      disk, skipping anything inside backticks or a fence, and `cli.py`
+  //      dedupes the result against `--image`. So the extras ride as one bare
+  //      path per line.
+  //
+  // (The old "attachments are OpenClaw-only" note in the composer was about
+  // `-z/--oneshot`, which really does take no image flag. This route stopped
+  // using `-z` when it needed session threading, and `chat` has had `--image`
+  // all along.)
+  //
+  // Every path is re-resolved against the staging root here rather than
+  // trusted from the body: it is about to become an argv element, and the
+  // agent opens any readable absolute path it is handed.
+  const requestedImages = Array.isArray(body.imagePaths)
+    ? body.imagePaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)
+    : [];
+  const imagePaths: string[] = [];
+  for (const requested of requestedImages) {
+    const safe = await resolveInMediaRoot(requested);
+    // A path that does not resolve is dropped rather than 400-ing the turn.
+    // The alternative is worse than it sounds: the staging tree is swept on a
+    // retention schedule, so a file that aged out between being attached and
+    // being sent would turn an ordinary message into a failed one.
+    if (safe && !imagePaths.includes(safe)) imagePaths.push(safe);
+  }
+  const [firstImage, ...extraImages] = imagePaths;
+
+  const promptWithImages = extraImages.length
+    ? `${safeMessage}\n\n${extraImages.join("\n")}`
+    : safeMessage;
+
+  // ── The transcript ──────────────────────────────────────────────────────
+  //
+  // The QUESTION is recorded before the child is spawned, so a turn whose
+  // process dies mid-run leaves a question with no answer — visibly incomplete
+  // — rather than vanishing or, worse, leaving an answer to nothing. It is also
+  // why this is written here and not in the browser: a customer who closes the
+  // tab on a 600-second turn still gets the exchange back on their next visit.
+  await appendTranscript({
+    role: "user",
+    text: typeof body.displayText === "string" && body.displayText.trim()
+      ? body.displayText.trim()
+      : message,
+    timestamp: Date.now(),
+    ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
+  });
+
+  const args = ["chat", "-q", promptWithImages, "-Q"];
+  if (firstImage) args.push("--image", firstImage);
   // No model → omit -m and let hermes use config.yaml's model.default, which is
   // by definition valid for the configured provider. (The previous hardcoded
   // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
   // model.provider=clawai only accepts BARE deepseek ids and answers a
   // vendor-prefixed one with HTTP 400 "Model not allowed".)
   if (rawModel) args.push("-m", rawModel);
+  // Names are charset-checked in smallLocalModelToolsets(), so this can never
+  // carry a leading "-" into argv.
+  if (slimToolsets) args.push("-t", slimToolsets.join(","));
   if (wantsProvider) args.push("--provider", rawProvider);
   if (rawReasoning) args.push("--reasoning", rawReasoning);
   // Continue the SAME conversation. Without this every turn is a fresh `-z`
@@ -455,24 +750,54 @@ export async function POST(request: Request) {
   // runs) into each other.
   if (rawSessionId) args.push("--resume", rawSessionId);
 
+  // ── The fast path ───────────────────────────────────────────────────────
+  //
+  // Try the already-running dashboard first, and only when the caller asked to
+  // be streamed to. Opening the socket and settling the session costs about a
+  // tenth of a second and answers "can this box stream?" honestly, so a box
+  // where it cannot falls through to the spawn below having lost nothing.
+  //
+  // Attachments stay on the CLI path deliberately: `--image` is a flag on that
+  // command, and `prompt.submit` takes its attachments through a separate
+  // `image.attach` handshake this route has not been taught. A turn carrying a
+  // picture is rare and already slow; correctness first.
+  if (wantsStream(request) && imagePaths.length === 0) {
+    const turn = await openDashboardTurn({
+      text: promptWithImages,
+      ...(rawModel ? { model: rawModel } : {}),
+      ...(wantsProvider ? { provider: rawProvider } : {}),
+      ...(rawReasoning ? { reasoning: rawReasoning } : {}),
+      ...(rawSessionId ? { sessionId: rawSessionId } : {}),
+      signal: request.signal,
+    });
+    if (turn) return streamTurn(turn, rawSessionId);
+  }
+
   try {
     const { out: text, err } = await runHermes(args, request.signal);
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
-    return NextResponse.json({
-      text,
-      harness: "hermes",
-      ...(threaded ? { sessionId: threaded } : {}),
-    });
+    const answered = await settleTurn(threaded, text, "");
+    return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      // Client hit Stop / disconnected; the child was already killed.
+      // Client hit Stop / disconnected; the child was already killed. Nothing
+      // is recorded: the user cancelled, and the question they typed is already
+      // in the transcript above where an unanswered question belongs.
       return new NextResponse(null, { status: 499 });
     }
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Hermes chat failed" },
-      { status: 502 },
-    );
+    const detail = err instanceof Error ? err.message : "Hermes chat failed";
+    // A failure is recorded too. Without this a refresh shows a question with
+    // nothing under it and no hint that the box tried and failed — the same
+    // screen a still-running turn produces, which is the worse of the two to
+    // be wrong about.
+    await appendTranscript({
+      role: "system",
+      text: `Error: ${detail}`,
+      timestamp: Date.now(),
+      variant: "error",
+    });
+    return NextResponse.json({ error: detail }, { status: 502 });
   }
 }
