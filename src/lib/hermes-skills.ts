@@ -409,6 +409,25 @@ export function isValidQuery(q: string): boolean {
   return !hasControlChar(v);
 }
 
+/**
+ * How deep Browse can page.
+ *
+ * The old cap was 1000. The catalogue holds ~90 200 rows and the endpoint
+ * cheerfully advertised `totalPages: 3760, hasMore: true` at page 1000 — and
+ * then 400ed page 1001, so the infinite-scroll sentinel asked for a page the
+ * server had just promised and got an error. At the UI's page size that made
+ * 73 % of the catalogue unreachable and the last scroll of every deep browse
+ * an error state.
+ *
+ * The catalogue is an in-memory array that is sorted once at load, so an offset
+ * this large costs a slice and nothing else — the cap was never about
+ * performance. It is kept only as a bound on a hostile query string, set above
+ * `ceil(rows / min page size)` for any catalogue this device can hold, and the
+ * response now clamps `totalPages`/`hasMore` to it so the client is never told
+ * about a page it may not ask for.
+ */
+export const MAX_BROWSE_PAGE = 200_000;
+
 export function clampInt(raw: string | null, min: number, max: number, fallback: number): number | null {
   if (raw === null || raw === '') return fallback;
   const n = Number(raw);
