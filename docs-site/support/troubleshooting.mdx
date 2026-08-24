@@ -217,6 +217,33 @@ journalctl -u clawbox-setup -n 50 --no-pager     # web app / login / setup API
 journalctl -u clawbox-gateway -n 50 --no-pager   # AI gateway / providers / channels
 ```
 
+The journal is **persistent** — it lives in `/var/log/journal` and survives a
+reboot, so a log tail is still useful after the box has been power-cycled. Add
+`-b -1` to read the previous boot, or `--since "1 hour ago"`.
+
+Every HTTP request the web app serves is logged to the `clawbox-setup` journal,
+which is the fastest way to tell whether a request reached the device at all and
+where it came from:
+
+```bash
+journalctl -u clawbox-setup --no-pager | grep '\[access\]'
+# [access] 200 GET /setup-api/system/stats 9ms ip=192.168.50.10 host=clawbox.local
+```
+
+`ip=` is the real client address (it reads Cloudflare's `CF-Connecting-IP`, so
+requests arriving over Remote Access show the visitor, not `127.0.0.1`), and
+`host=` is the hostname the request arrived on — useful for telling LAN traffic
+apart from traffic through a `*.trycloudflare.com` Remote Access URL. Sensitive
+query values are replaced with `REDACTED`.
+
+<Note>
+The first ~10 seconds of every boot (roughly 888 kernel lines) are timestamped
+about a year early. The Jetson Orin Nano has no battery-backed real-time clock,
+so the kernel starts with an incorrect date and only picks up the right one when
+the `nvvrs-pseq-rtc` driver hands over. Timestamps after that point — including
+everything from ClawBox's own services — are correct.
+</Note>
+
 You can also message the assistant `/diagnostics` in chat (if it's responding) to get a self-report.
 
 ## Still stuck?

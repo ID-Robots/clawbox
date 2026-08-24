@@ -175,6 +175,53 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     expect(await findByText("Pro plan · €9/month")).toBeInTheDocument();
   });
 
+  it("moves the allowance while the panel stays mounted, without a reload", async () => {
+    // TASK-516. The desktop never unmounts the Settings window, so a
+    // mount-only read froze this line at whatever the page load saw: an owner
+    // who had just been refused at 20 of 20 opened Settings and was told
+    // "1 of 20 images today" by the very surface built to explain the
+    // refusal. The acceptance is the card's own: with the session left open,
+    // spend an image and watch the number move.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const status: StatusStub = {
+        clawaiConfigured: true,
+        tierSource: "portal",
+        clawaiAccountTier: "pro",
+        clawaiImages: {
+          supported: true, model: "gpt-image-1-mini",
+          plan: "max", planLabel: "Max", dailyLimit: 20, used: 1,
+        },
+      };
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+        if (url.includes("/setup-api/ai-models/oauth/providers")) {
+          return { ok: true, json: async () => ({ providers: [] }) };
+        }
+        if (url.includes("/setup-api/ai-models/status")) {
+          return { ok: true, json: async () => ({ ...status, clawaiImages: { ...status.clawaiImages } }) };
+        }
+        return { ok: true, json: async () => ({}) };
+      }));
+
+      const { findByTestId } = renderPanel();
+      const line = await findByTestId("clawai-image-allowance");
+      await waitFor(() => expect(line.textContent).toContain("ai.imagesUsedToday"));
+
+      // The day moves on the backend — the chat spent the allowance.
+      (status.clawaiImages as Record<string, unknown>).used = 20;
+      await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+
+      // The line follows without any remount or reload, and flips to the
+      // exhausted state (the reset-tomorrow suffix only renders at the wall).
+      await waitFor(() =>
+        expect((line.textContent ?? "")).toContain("ai.imagesResetTomorrow"),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("never overrides a plan the user picked in this session", async () => {
     // A late status answer must not yank the card out from under a click that
     // already happened — the wizard is where someone upgrades.

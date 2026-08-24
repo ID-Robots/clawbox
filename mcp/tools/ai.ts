@@ -42,6 +42,12 @@ interface ModelsBody {
 }
 
 const MODEL_LIMIT = 40;
+// A device answers with ~48 providers, three of which have credentials. Pretty-
+// printed, the full list alone is over the tool's 6,000-char cap, and the cap
+// slices from the END — so the whole `models` array, the part the question was
+// about, was what got cut. Only the usable providers are listed; the rest are a
+// count.
+const PROVIDER_LIMIT = 12;
 
 const SET_RULES: ErrorRule[] = [
   {
@@ -126,18 +132,33 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
           ? { id: m.id, price_per_million: `in ${m.pricing.input ?? "?"} / out ${m.pricing.output ?? "?"}` }
           : { id: m.id },
       );
+      const allProviders = body.providers ?? [];
+      const usable = allProviders.filter((p) => p.authenticated !== false);
+      // KEY ORDER IS LOAD-BEARING. The output cap truncates from the end, so
+      // what the caller asked about goes first and the provider directory last.
       return json({
-        in_use: { provider: body.provider ?? "unknown", model: body.current ?? "unknown" },
+        // When a provider FILTER was given the route echoes that provider back
+        // in the same `provider` field it otherwise uses for "the one in use",
+        // so reading in_use off a filtered reply reported the device as running
+        // whatever was asked about. A filtered call now says so instead.
+        ...(provider
+          ? {
+              asked_about: provider,
+              in_use: "not reported for a filtered query — call ai_list_models with no arguments to see what this device is using",
+            }
+          : { in_use: { provider: body.provider ?? "unknown", model: body.current ?? "unknown" } }),
         thinking: body.reasoning ?? "unknown",
-        providers: (body.providers ?? []).map((p) => ({
-          id: p.id,
-          name: p.name,
-          has_credentials: p.authenticated !== false,
-          model_count: p.total,
-        })),
         models,
         models_truncated: (body.models ?? []).length > MODEL_LIMIT,
         catalogue_stale: body.stale === true,
+        providers: usable.slice(0, PROVIDER_LIMIT).map((p) => ({
+          id: p.id,
+          name: p.name,
+          has_credentials: true,
+          model_count: p.total,
+        })),
+        providers_truncated: usable.length > PROVIDER_LIMIT,
+        providers_without_credentials: allProviders.length - usable.length,
       });
     },
   );

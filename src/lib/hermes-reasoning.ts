@@ -9,6 +9,36 @@
 // OpenClaw GATEWAY's vocabulary (it has 'off' and 'adaptive', and no 'ultra').
 // One union covering both would let the chat header offer a level the Hermes
 // CLI rejects — and the reverse. Two backends, two vocabularies.
+//
+// THE MAPPING, end to end. Every row is measured, not assumed; the evidence
+// sits next to the constant that encodes it. `docs/hermes-reasoning-levels.md`
+// is the reader-facing copy of this table.
+//
+//   picked      cloud provider    clawlocal/llamacpp     clawlocal/ollama
+//   ---------------------------------------------------------------------
+//   none        none              minimal (thinking off) none  (thinking off)
+//   minimal     minimal           minimal (thinking off) none  (thinking off)
+//   low..xhigh  as picked         minimal (thinking off) none  (thinking off) ²
+//   max         max               max     (thinking on)  max   (thinking on)
+//   ultra       max ¹             max     (thinking on)  max   (thinking on)
+//
+//   ¹ Hermes' own clamp_effort() does this for every OpenAI-compatible wire;
+//     `ultra` is therefore never OFFERED here — see
+//
+//   ² The two-state pickers only ever OFFER the two ends, so a middle level
+//     reaches this clamp only from a stale client or a preference saved while
+//     a cloud provider was selected. clampReasoningForProvider walks DOWN to
+//     the nearest allowed level, which for a two-state provider is the OFF
+//     end — dropping effort is the safe direction and silently raising it is
+//     not. Longstanding behaviour, unchanged here; this row is written out
+//     because the table read the opposite way and a reader would have used it
+//     to "fix" the clamp backwards.
+//     HERMES_REASONING_WIRE_EQUIVALENT.
+//
+// On llamacpp the level never reaches the model as `reasoning_effort` at all:
+// the proxy turns it into `chat_template_kwargs.enable_thinking`. On ollama it
+// does reach the model, and the proxy drops it when the model has no `thinking`
+// capability — both in src/lib/local-ai-thinking.ts.
 
 export const HERMES_REASONING_LEVELS = [
   'none',
@@ -71,6 +101,50 @@ const UNSUPPORTED_BY_PROVIDER: Record<string, readonly HermesReasoningLevel[]> =
 };
 
 /**
+ * Levels that are not a level at all: the wire collapses them onto another one,
+ * so offering them is offering the customer a setting that cannot differ from
+ * its neighbour.
+ *
+ * VERIFIED live on the device, both halves of the chain:
+ *
+ *   1. Hermes' own clamp, executed against the installed agent
+ *      (agent/reasoning_effort.py:54-64) — `OPENAI_COMPAT_WIRE_EFFORTS` stops at
+ *      `max` and its comment states it outright: "``ultra`` is Hermes-internal
+ *      ladder vocabulary (the Codex product tier); no provider wire accepts it
+ *      verbatim anywhere". `clamp_effort('ultra')` returns `'max'`.
+ *   2. The local provider is registered with `api_mode: "openai"`
+ *      (src/lib/hermes-local-ai.ts), i.e. exactly that wire.
+ *
+ * So on this device NO reachable provider can tell Ultra from Max, and one
+ * (clawai) answers it with HTTP 400 outright. A picker that lists both is
+ * claiming a distinction the product does not have.
+ *
+ * The word stays ACCEPTED as input — `isHermesReasoningLevel('ultra')` is still
+ * true and a client holding a saved "ultra" preference must not start failing —
+ * it is just never OFFERED, and normalizeReasoningForWire() folds it onto the
+ * level it was always going to become anyway.
+ */
+export const HERMES_REASONING_WIRE_EQUIVALENT: Readonly<Partial<Record<HermesReasoningLevel, HermesReasoningLevel>>> = {
+  ultra: 'max',
+};
+
+/**
+ * The levels a picker may offer: the CLI vocabulary minus everything the wire
+ * collapses. Providers narrow this further (see hermesReasoningLevelsFor).
+ */
+export const HERMES_REASONING_OFFERED_LEVELS: readonly HermesReasoningLevel[] =
+  HERMES_REASONING_LEVELS.filter((level) => !(level in HERMES_REASONING_WIRE_EQUIVALENT));
+
+/**
+ * What a level ACTUALLY becomes on the wire. Applied before any provider check,
+ * so a stale client that still asks for `ultra` gets the `max` turn it would
+ * have got anyway instead of a 400 from the one provider that rejects the word.
+ */
+export function normalizeReasoningForWire(level: HermesReasoningLevel): HermesReasoningLevel {
+  return HERMES_REASONING_WIRE_EQUIVALENT[level] ?? level;
+}
+
+/**
  * REVERSAL, recorded because the evidence for it was expensive.
  *
  * `clawlocal` used to be listed here as a provider with NO reasoning control,
@@ -115,14 +189,68 @@ const UNSUPPORTED_BY_PROVIDER: Record<string, readonly HermesReasoningLevel[]> =
  */
 export const LOCAL_REASONING_LEVELS: readonly HermesReasoningLevel[] = ['minimal', 'max'];
 
+/** The two runtimes that can host the on-device model. */
+export type HermesLocalBackend = 'llamacpp' | 'ollama';
+
+/** The runtime a device runs when nothing says otherwise — the shipped default. */
+export const DEFAULT_HERMES_LOCAL_BACKEND: HermesLocalBackend = 'llamacpp';
+
 /**
- * The level that means "don't think". Named rather than positional: every
+ * The switch's two ends PER BACKEND, because the two runtimes disagree about
+ * which word means "off" — and one of them rejects the other's word outright.
+ *
+ * MEASURED against the box's Ollama 0.32.15 with `qwen2.5:0.5b`, whose
+ * `/api/show` capabilities are `["completion","tools"]` (no `thinking`):
+ *
+ *   reasoning_effort=none            → HTTP 200
+ *   reasoning_effort=minimal|low|medium|high|max|ultra
+ *                                    → HTTP 400 "…does not support thinking"
+ *   reasoning_effort=banana-nonsense → HTTP 400 "invalid reasoning value:
+ *                                      … (must be "minimal", "low", "medium",
+ *                                      "high", "xhigh", "ultra", "max", "none")"
+ *
+ * The last line is the one that decides this table. Ollama's VOCABULARY is the
+ * same eight words as Hermes' — a word it does not know gets a different error
+ * — so the 400 above is a CAPABILITY check, not a spelling one. `none` is the
+ * only value a model without the `thinking` capability accepts, and the llamacpp
+ * table's `minimal` is therefore a guaranteed failed turn on that backend.
+ *
+ * llamacpp keeps `minimal`: `reasoning_effort` is inert there (the proxy
+ * translates it to `chat_template_kwargs.enable_thinking`), and `none` reads as
+ * "no reasoning at all" in other providers' pickers when this switch only
+ * controls thinking — see the note above LOCAL_REASONING_LEVELS.
+ *
+ * Both entries are [OFF, ON]; nothing derives the direction from the position
+ * (see THINKING_OFF_LEVELS).
+ */
+export const LOCAL_REASONING_LEVELS_BY_BACKEND: Readonly<Record<HermesLocalBackend, readonly HermesReasoningLevel[]>> = {
+  llamacpp: LOCAL_REASONING_LEVELS,
+  ollama: ['none', 'max'],
+};
+
+/** The two levels the on-device switch offers on `backend` (default: llamacpp). */
+export function localReasoningLevelsFor(
+  backend?: HermesLocalBackend | null,
+): readonly HermesReasoningLevel[] {
+  return LOCAL_REASONING_LEVELS_BY_BACKEND[backend ?? DEFAULT_HERMES_LOCAL_BACKEND]
+    ?? LOCAL_REASONING_LEVELS_BY_BACKEND[DEFAULT_HERMES_LOCAL_BACKEND];
+}
+
+/**
+ * The levels that mean "don't think". Named rather than positional: every
  * caller needs to know which END of the pair it is holding, and deriving that
  * from a position (`levels[0]`, or the UI's `levels[levels.length - 1]`)
  * silently inverts the moment anyone reorders the array — labels would still
  * look right while the "much slower" hint attached to the fast option.
+ *
+ * TWO members, not one, because the OFF end is backend-dependent
+ * (LOCAL_REASONING_LEVELS_BY_BACKEND) while this predicate is not: a level from
+ * the middle of the scale still has to resolve, and answering "is this the OFF
+ * end?" must not need to know which runtime is loaded. Everything at or below
+ * `minimal` is off, everything above it is on — monotonic either way, so raising
+ * the level can never reduce thinking.
  */
-const THINKING_OFF_LEVEL: HermesReasoningLevel = 'minimal';
+const THINKING_OFF_LEVELS: readonly HermesReasoningLevel[] = ['none', 'minimal'];
 
 /**
  * The on-device model's provider id. Mirrors HERMES_LOCAL_PROVIDER in
@@ -132,13 +260,23 @@ const THINKING_OFF_LEVEL: HermesReasoningLevel = 'minimal';
 export const HERMES_LOCAL_REASONING_PROVIDER = 'clawlocal';
 
 /** Providers whose reasoning control is a two-state thinking switch. */
-const BINARY_REASONING_CONTROL: ReadonlyMap<string, readonly HermesReasoningLevel[]> = new Map([
-  [HERMES_LOCAL_REASONING_PROVIDER, LOCAL_REASONING_LEVELS],
-]);
+const BINARY_REASONING_PROVIDERS: ReadonlySet<string> = new Set([HERMES_LOCAL_REASONING_PROVIDER]);
 
-/** The two levels of a switch-style provider, or null for an effort scale. */
-function binaryLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] | null {
-  return BINARY_REASONING_CONTROL.get((provider || '').trim()) ?? null;
+/**
+ * The two levels of a switch-style provider, or null for an effort scale.
+ *
+ * `backend` only names WHICH pair — every provider in the set above is
+ * on-device — so an omitted backend still returns a valid two-state answer
+ * (the shipped runtime's). Callers that cannot know the runtime, i.e. the
+ * browser, get the default and the route re-clamps with the real one.
+ */
+function binaryLevelsFor(
+  provider: string | null | undefined,
+  backend?: HermesLocalBackend | null,
+): readonly HermesReasoningLevel[] | null {
+  return BINARY_REASONING_PROVIDERS.has((provider || '').trim())
+    ? localReasoningLevelsFor(backend)
+    : null;
 }
 
 /** True when this provider's dial is a thinking switch rather than an effort scale. */
@@ -157,7 +295,7 @@ export function isThinkingOnLevel(
   provider: string | null | undefined,
   level: HermesReasoningLevel,
 ): boolean {
-  return binaryLevelsFor(provider) !== null && level !== THINKING_OFF_LEVEL;
+  return binaryLevelsFor(provider) !== null && !THINKING_OFF_LEVELS.includes(level);
 }
 
 /**
@@ -205,26 +343,39 @@ export function binaryReasoningTriggerLabel(
  * EMPTY means the provider has no reasoning control and the UI should not
  * render the picker at all.
  */
-export function hermesReasoningLevelsFor(provider: string | null | undefined): readonly HermesReasoningLevel[] {
+export function hermesReasoningLevelsFor(
+  provider: string | null | undefined,
+  backend?: HermesLocalBackend | null,
+): readonly HermesReasoningLevel[] {
   const id = (provider || '').trim();
-  const binary = BINARY_REASONING_CONTROL.get(id);
+  const binary = binaryLevelsFor(id, backend);
   if (binary) return binary;
   const blocked = UNSUPPORTED_BY_PROVIDER[id];
-  if (!blocked || blocked.length === 0) return HERMES_REASONING_LEVELS;
-  return HERMES_REASONING_LEVELS.filter((level) => !blocked.includes(level));
+  // HERMES_REASONING_OFFERED_LEVELS, not HERMES_REASONING_LEVELS: a level the
+  // wire collapses is never offered by anyone (see
+  // HERMES_REASONING_WIRE_EQUIVALENT). That already removes `ultra`, so the
+  // clawai entry above is currently a no-op — it is kept because it records a
+  // measurement, and the day a wire grows a real `ultra` it is the only thing
+  // that remembers clawai still 400s it.
+  if (!blocked || blocked.length === 0) return HERMES_REASONING_OFFERED_LEVELS;
+  return HERMES_REASONING_OFFERED_LEVELS.filter((level) => !blocked.includes(level));
 }
 
 /** True when this provider exposes a reasoning-effort dial worth showing. */
-export function providerHasReasoningControl(provider: string | null | undefined): boolean {
-  return hermesReasoningLevelsFor(provider).length > 0;
+export function providerHasReasoningControl(
+  provider: string | null | undefined,
+  backend?: HermesLocalBackend | null,
+): boolean {
+  return hermesReasoningLevelsFor(provider, backend).length > 0;
 }
 
 /** True when `provider` accepts `level`. */
 export function isReasoningLevelAllowedFor(
   provider: string | null | undefined,
   level: HermesReasoningLevel,
+  backend?: HermesLocalBackend | null,
 ): boolean {
-  return hermesReasoningLevelsFor(provider).includes(level);
+  return hermesReasoningLevelsFor(provider, backend).includes(level);
 }
 
 /**
@@ -235,8 +386,9 @@ export function isReasoningLevelAllowedFor(
 export function clampReasoningForProvider(
   provider: string | null | undefined,
   level: HermesReasoningLevel,
+  backend?: HermesLocalBackend | null,
 ): HermesReasoningLevel {
-  const allowed = hermesReasoningLevelsFor(provider);
+  const allowed = hermesReasoningLevelsFor(provider, backend);
   if (allowed.includes(level)) return level;
   // Walk DOWN the canonical order to the closest supported level — dropping
   // effort is the safe direction; silently raising it is not.

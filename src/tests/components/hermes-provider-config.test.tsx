@@ -8,10 +8,24 @@ import HermesProviderConfig from "@/components/HermesProviderConfig";
 // — otherwise a customer who successfully configures a provider is left sitting
 // on a step that has already finished.
 
-vi.mock("@/lib/i18n", () => ({
-  I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
-  useT: () => ({ t: (key: string) => key, locale: "en", setLocale: vi.fn() }),
-}));
+// This panel's copy lives in the Hermes catalogue (TASK-458), so resolve keys
+// against the real English table instead of echoing them back: the assertions
+// below stay on the sentence a customer actually reads.
+vi.mock("@/lib/i18n", async () => {
+  const { providerEn } = await import("@/lib/hermes-translations/en-provider");
+  return {
+    I18nProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
+    useT: () => ({
+      t: (key: string, params?: Record<string, string | number>) =>
+        Object.entries(params ?? {}).reduce(
+          (out, [name, value]) => out.replaceAll(`{${name}}`, String(value)),
+          providerEn[key] ?? key,
+        ),
+      locale: "en",
+      setLocale: vi.fn(),
+    }),
+  };
+});
 
 vi.mock("next/image", () => ({
   default: ({ alt = "" }: { alt?: string }) => <img alt={alt} />,

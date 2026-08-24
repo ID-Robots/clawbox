@@ -809,6 +809,26 @@ h6 {
   z-index: 1;
 }
 
+/* ── the welcome screen is the exception ─────────────────────────────────
+   Step 1 is the shortest screen in the wizard and the one the customer meets
+   first — a crab, a wordmark, a line of status and two buttons. Top-anchored
+   on a desktop display it hangs under the bar with the whole lower half of
+   the glass empty, which reads as a page that failed to finish loading. Only
+   this screen centres, and only where there is width to spend; from step 2 on
+   the shared-horizon rule above still holds.
+
+   `safe center`, never a plain `center`: this element is the scroll
+   container, and a centred flex item taller than its box overflows in BOTH
+   directions — the card's top edge lands above the scrollable origin where no
+   scrollbar can reach it. `safe` collapses to flex-start the instant the card
+   outgrows the stage, so a short window, a zoomed page or a large font scale
+   degrades to the anchored layout instead of clipping the crab. */
+@media (min-width: 720px) {
+  .setup-main[data-welcome] {
+    justify-content: safe center;
+  }
+}
+
 .setup-footer {
   margin-top: auto;
   display: flex;
