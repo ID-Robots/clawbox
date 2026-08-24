@@ -39,7 +39,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 50+ Next.js Route Handlers namespaced under `/setup-api/` to avoid conflicts with the OpenClaw gateway's `/api/*`:
 
 - **WiFi**: `wifi/scan`, `wifi/connect`, `wifi/status`, `wifi/ethernet` — WiFi and Ethernet management
-- **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot` — system info, power control, password, hotspot config
+- **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot`, `system/desktop`, `system/power-profile` — system info, power control, password, hotspot config, desktop/headless toggle, Jetson power profile + memory guards
 - **AI Models**: `ai-models/configure`, `ai-models/status`, `ai-models/oauth/*` — API key config with OAuth flows (device auth + authorization code)
 - **Ollama**: `ollama/status`, `ollama/pull`, `ollama/search`, `ollama/delete` — local model management
 - **Apps**: `apps/store`, `apps/install`, `apps/uninstall`, `apps/icon/[appId]`, `apps/settings` — app store integration
@@ -47,6 +47,8 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Browser**: `browser/` — Chromium automation via CDP (launch, navigate, click, type, screenshot)
 - **Gateway**: `gateway/`, `gateway/health`, `gateway/ws-config` — gateway proxying with HTML injection
 - **Telegram**: `telegram/configure`, `telegram/status` — Telegram bot config
+- **Email**: `email/configure`, `email/status`, `email/test`, `email/send`, `email/messages`, `email/pending` — a mail account (any provider; Gmail app-password guide in the UI) with ONE of three modes: send only, read on demand (`email/messages` backs the `email_list`/`email_read` MCP tools over ClawBox's own IMAP client — no polling, EXAMINE + BODY.PEEK so reading never marks mail seen), or answer senders (Hermes' native adapter, allowlist-only). A separate "ask me before sending" gate turns `email/send` into a queued draft; `email/pending` approves or deletes it and is the one route that refuses the MCP bearer, because the agent is the party it gates.
+- **Discord**: `discord/configure`, `discord/status`, `discord/members` — Discord bot config (token validated live against the Discord API before it is saved), gateway connection state, and the guild-member allowlist picker
 - **Setup**: `setup/status`, `setup/complete`, `setup/reset` — setup flow state, factory reset
 - **Update**: `update/run`, `update/status` — git-based system updates
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
@@ -72,6 +74,13 @@ Handles two concerns:
 - **`auth.ts`** — session cookie generation/verification (HMAC-SHA256).
 - **`oauth-config.ts`** / **`oauth-utils.ts`** / **`google-project.ts`** — OAuth provider configuration and flows.
 - **`openclaw-config.ts`** — read/write OpenClaw gateway config (`~/.openclaw/openclaw.json`).
+- **`smtp-client.ts`** — dependency-free SMTP submission client (STARTTLS/implicit TLS, AUTH PLAIN/LOGIN) used for the email feature. Never authenticates over an unencrypted connection.
+- **`email-config.ts`** — the mail account in `data/config.json`: the three mailbox modes and their migration, IMAP-host derivation (`smtp.gmail.com` → `imap.gmail.com`), validation, masking, and the only reader of the stored app password.
+- **`imap-client.ts`** — dependency-free, READ-ONLY IMAP client (implicit TLS 993, STARTTLS, LOGIN). EXAMINE and BODY.PEEK only; it contains no verb that can modify a mailbox. Never authenticates over an unencrypted connection.
+- **`email-pending.ts`** — outgoing drafts waiting for the owner's approval (`data/email-pending.json`, 0600, capped; a full queue refuses rather than evicting).
+- **`owner-session.ts`** — "is the PERSON asking, or the agent?". Accepts a session cookie only, and is what stops the MCP bearer from opening the approval gate.
+- **`hermes-env.ts`** — writes `~/.hermes/.env` with Hermes' own `save_env_value` semantics. Needed because `hermes config set` routes no `EMAIL_*` key to `.env` and would put a mailbox password in `config.yaml` instead.
+- **`hermes-email.ts`** — Hermes' native inbound email adapter (opt-in, allowlist-only).
 - **`gateway-proxy.ts`** — fetch gateway HTML, inject ClawBox nav bar + auth token.
 - **`i18n.tsx`** — i18n context provider with browser language detection.
 - **`translations.ts`** — translation strings for 10 languages (en, de, es, fr, it, ja, nl, sv, zh, bg).
@@ -109,7 +118,7 @@ Handles two concerns:
 - **`VNCApp.tsx`** — NoVNC remote desktop viewer
 - **`VSCodeApp.tsx`** — VS Code server integration
 - **`AppStore.tsx`** — discover and install apps from clawbox.com
-- **`SettingsApp.tsx`** — appearance, WiFi, AI provider, Telegram, system settings
+- **`SettingsApp.tsx`** — appearance, WiFi, AI provider, Telegram, Email, system settings
 - **`OllamaModelPanel.tsx`** — local model pull, search, delete
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper
 
@@ -131,13 +140,13 @@ of them kept failing.
 
 - **`clawbox-mcp.ts`** — server entry: resolve edition → probe capabilities →
   register → connect. Tool families live in `mcp/tools/` (`orientation`,
-  `skills`, `ai`, `system`, `desktop`, `browser`, `coding`) and the shared
+  `skills`, `ai`, `system`, `desktop`, `browser`, `email`, `coding`) and the shared
   machinery in `mcp/lib/` (`edition`, `guard`, `api`, `errors`, `schema`,
   `register`, `context`, `jobs`, `web`).
   - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
     `system_stats`, `system_info`, `system_power`, `disk_usage`, `disk_cleanup`,
     `update_check`, `logs_tail`, `screen_capture`, `backup_status`,
-    `telegram_status`, `wifi_scan`, `wifi_status`, `vnc_status`,
+    `telegram_status`, `email_send`, `wifi_scan`, `wifi_status`, `vnc_status`,
     `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`

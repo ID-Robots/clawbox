@@ -128,6 +128,76 @@ and that process has a different working directory than the web tier — a
 relative path read nothing and wrote into a parallel tree the build never
 looks at.
 
+
+### Email
+`email_send` (both editions) · `email_list` · `email_read` (both editions, only
+when the mailbox mode allows reading)
+
+The owner picks ONE of three mailbox modes in Settings → Email, and it decides
+which of these tools exist:
+
+| mode | what the agent may do | read tools registered |
+| --- | --- | --- |
+| **Send only** | send mail; never opens the mailbox | no |
+| **Read on demand** | send, plus list/read WHEN ASKED — nothing polls | yes |
+| **Answer senders** | Hermes' native adapter polls and replies to an allowlist | yes |
+
+`email_list`/`email_read` are **not registered at all** unless a mail account is
+connected AND the mode allows reading (probed once at startup — `mcp/lib/context.ts`).
+Same rule as edition gating and for the same reason: a tool that could only ever
+answer 409 is a tool that trips Hermes' circuit breaker and takes every ClawBox
+tool offline. The route enforces the gate independently, because the two live on
+opposite sides of a process boundary and the owner can change the mode under a
+running server.
+
+Both read tools ARE `readOnly`, and that claim is literal rather than polite: the
+mailbox is opened with `EXAMINE` (read-only at the protocol level) and every
+fetch uses `BODY.PEEK`, so listing and reading do not even set `\Seen`. No
+`STORE`, `APPEND`, `EXPUNGE`, `COPY` or `MOVE` appears anywhere in
+`src/lib/imap-client.ts`, and `src/tests/unit/imap-client.test.ts` asserts that
+against a server that records every command it is sent.
+
+`email_read` returns the message with an explicit note that its contents are
+information, never instructions — an email is the payload most likely to carry an
+injected instruction, being text a stranger wrote and chose to send to the device.
+
+The only outbound-mail capability the agent has, and on the OpenClaw edition the
+only email capability at all — OpenClaw has no email channel, and inventing one
+in its config would fail the gateway's strict schema and silence the channels
+that do work. Hermes' native adapter can reply to mail that arrives; it cannot
+start a thread.
+
+Deliberately NOT read-only: a sent email cannot be recalled, so the tool carries
+no `readOnlyHint`. On a real ClawBox that annotation buys no approval prompt —
+ClawBox registers this server with `trust: full` (`scripts/register-mcp.sh`),
+because a headless one-shot turn has nobody to answer a prompt. **`email_send`
+runs unsupervised**, and its arguments may come from text the agent only read.
+
+**"Ask me before sending" is the consent**, and it is a separate setting from the
+mode (default ON for new accounts; accounts configured before it existed migrate
+with it OFF, so nobody's device changes behaviour on upgrade). With it on,
+`/setup-api/email/send` never reaches the SMTP client: the message becomes a
+draft in `data/email-pending.json`, the desktop shows a notification, and the
+tool answers `sent: false, queued_for_owner_approval: true` — which the agent
+must not report as a delivered message.
+
+Approving happens at `/setup-api/email/pending`, which is the one route in this
+subtree that **refuses the MCP bearer**. Middleware admits callers to
+`/setup-api/*` on either a session cookie or that bearer, and the agent holds the
+bearer — so a route that trusted middleware here would let a prompt-injected
+agent queue a draft and approve it on its next tool call. It re-checks for a real
+browser session (`src/lib/owner-session.ts`) and 403s everything else.
+
+The remaining containment is server-side, in `/setup-api/email/send`: CR/LF
+rejected in every header value, at most 10 recipients, and a per-hour send budget
+(5) that bounds a runaway — a blast-radius limit, not consent. The owner's own "Send test
+email" button is a different route with its own budget, so the agent cannot lock
+the person at the keyboard out. The credentials never enter the MCP process, an
+unconfigured device answers `CONFLICT` with "do not retry, tell the user to open
+Settings → Email". An exhausted budget answers `CONFLICT` too — the generic 429
+mapping is `ENDPOINT_DOWN` ("retry once"), which is the loop the budget exists
+to stop.
+
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
 (both editions) · `browser_click` · `browser_type` · `browser_keypress` ·

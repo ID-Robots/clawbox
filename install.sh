@@ -29,7 +29,27 @@ fi
 # already registers. Pulling and re-exec'ing up-front (before constants are
 # parsed) breaks the race. CLAWBOX_INSTALL_BOOTSTRAPPED prevents recursion.
 
-if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
+# Only the update family may self-update. The root-owned dispatcher
+# (/usr/local/libexec/clawbox/clawbox-root-step.sh) sets CLAWBOX_ALLOW_SELF_UPDATE
+# for those steps and pins every other one with CLAWBOX_INSTALL_BOOTSTRAPPED=1.
+# A bare `sudo bash install.sh` (no --step) is an operator running a full
+# install and still bootstraps.
+#
+# This block used to run on EVERY invocation, so `--step chpasswd` did
+# `git fetch` + `git reset --hard origin/<branch>` + `chown -R clawbox` + re-exec
+# before it touched /etc/shadow. A password change must not depend on GitHub
+# being reachable, must not mutate the source tree, and must not be a way to
+# pull new code onto the box. The journal showed it firing for chpasswd,
+# set_hostname and validate_services. TASK-445.
+_clawbox_may_self_update() {
+  [ -n "${CLAWBOX_ALLOW_SELF_UPDATE:-}" ] && return 0
+  [ "${1:-}" != "--step" ] && return 0
+  return 1
+}
+
+if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
+  && _clawbox_may_self_update "${1:-}" \
+  && [ -d "$(dirname "${BASH_SOURCE[0]}")/.git" ]; then
   _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # Resolve the branch like resolve_update_branch() does below — explicit
   # CLAWBOX_BRANCH, else the pinned .update-branch, else the current branch,
@@ -2594,6 +2614,44 @@ step_persistent_journal() {
   # property of the Orin Nano dev kit, not something install.sh can correct.
 }
 
+# ── Root-owned entrypoints ───────────────────────────────────────────────────
+#
+# Anything root executes on behalf of the unprivileged clawbox web server must
+# live somewhere clawbox cannot write, or the privilege boundary is decorative.
+# /home/clawbox/clawbox and /home/clawbox/clawbox/scripts are both
+# clawbox-owned and group-writable, and install.sh's own bootstrap hands the
+# tree back with `chown -R clawbox:clawbox` on every root run — so a NOPASSWD
+# grant on a script in there is a one-step local root for anything with
+# clawbox-level code execution (the web server itself, the in-UI terminal, the
+# agent's shell). Copy them here instead, root:root, under root-owned dirs.
+# TASK-445.
+ROOT_LIBEXEC_DIR="/usr/local/libexec/clawbox"
+
+install_root_libexec() {
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
+  local src
+  for src in clawbox-root-step.sh; do
+    if [ -f "$PROJECT_DIR/config/$src" ]; then
+      install -o root -g root -m 0755 "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
+    fi
+  done
+  # Everything the web server may invoke as root via a NOPASSWD grant. Same
+  # rule as above: the copy that runs must not be the one clawbox can rewrite.
+  for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
+             clawbox-resource-limits.sh; do
+    if [ -f "$PROJECT_DIR/scripts/$src" ]; then
+      install -o root -g root -m 0755 "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
+    fi
+  done
+  # The limits the scripts above read. Root-owned for the same reason they are.
+  install -d -o root -g root -m 0755 /etc/clawbox
+  if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
+    install -o root -g root -m 0644 "$PROJECT_DIR/config/clawbox-resource-limits.env" \
+      /etc/clawbox/resource-limits.env
+  fi
+}
+
 step_systemd_services() {
   local ALL_SERVICES=("${EXPECTED_ACTIVE_SERVICES[@]}" "${EXPECTED_INSTALLED_SERVICES[@]}")
   # The registry the drift guard checks against: this edition's install lists
@@ -2687,6 +2745,9 @@ step_systemd_services() {
   if [ ! -x /usr/local/bin/cloudflared ]; then
     systemctl disable --now clawbox-tunnel.service >/dev/null 2>&1 || true
   fi
+  # Root-owned copies of everything root executes on clawbox's behalf. Must run
+  # BEFORE the sudoers drop-in, which points at them.
+  install_root_libexec
   # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
   if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
     cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
@@ -2756,6 +2817,12 @@ step_post_update() {
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   step_persistent_journal || echo "  Warning: persistent_journal step failed (non-fatal)"
+  # Re-assert the cgroup memory guards and re-sync /etc/clawbox/resource-limits.env
+  # from the repo. Without this the guards would be fresh-install-only and every
+  # already-shipped box would keep running an unbounded ollama. Idempotent.
+  # NOTE: there is deliberately no step_desktop_mode call here — the desktop
+  # toggle is the owner's decision and an update must never flip it.
+  step_resource_limits || echo "  Warning: resource_limits step failed (non-fatal)"
   # step_vnc_refresh is a tiny idempotent refresh of the clawbox-vnc.service
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
@@ -3065,19 +3132,26 @@ step_nvidia_jetpack() {
 }
 
 step_performance_mode() {
+  # Install the root-owned copies the sudoers rules point at FIRST — both the
+  # unit below and the ollama optimiser are now invoked through them.
+  install_root_libexec
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping nvpmodel/jetson_clocks"
     return 0
   fi
-  # Find the highest MAXN mode (MAXN_SUPER > MAXN); fall back to mode 0
-  local MAXN_LINE MAXN_ID MAXN_NAME
-  MAXN_LINE=$(grep -oP 'POWER_MODEL ID=\K\d+\s+NAME=\S+' /etc/nvpmodel.conf | grep 'NAME=MAXN' | tail -1)
-  MAXN_ID="${MAXN_LINE%% *}"
-  MAXN_ID="${MAXN_ID:-0}"
-  MAXN_NAME="${MAXN_LINE#*NAME=}"
-  echo "  Setting power mode to $MAXN_ID (${MAXN_NAME:-unknown})"
-  nvpmodel -m "$MAXN_ID"
-  jetson_clocks
+  # Apply whatever profile is persisted in /etc/clawbox/power-mode. On a fresh
+  # box nothing is persisted, so this resolves to BALANCED: a real nvpmodel cap
+  # with jetson_clocks OFF.
+  #
+  # This used to be an unconditional `nvpmodel -m MAXN && jetson_clocks`, which
+  # pinned all six CPUs to 1,728 MHz and the GPU to 1,020 MHz at 4% load and
+  # disabled the cpuidle states — 7.21 W / ~58 C at idle, and 74.8 C median Tj
+  # under sustained 3B inference, over the 74 C passive-cooling trip. The pinned
+  # profile is unchanged and still one toggle away (Settings -> System ->
+  # Performance mode); it is simply no longer what a box does by default.
+  # TASK-455.
+  "$ROOT_LIBEXEC_DIR/clawbox-power-mode.sh" --apply || \
+    echo "  Warning: power profile apply failed (non-fatal)"
   # Ensure persistent service is installed and enabled for next boot
   if [ -f "$PROJECT_DIR/config/clawbox-performance.service" ]; then
     cp "$PROJECT_DIR/config/clawbox-performance.service" /etc/systemd/system/
@@ -3087,9 +3161,50 @@ step_performance_mode() {
   # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
   bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
-  # Install sudoers rule so the web UI can run optimize-ollama.sh as root
   cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
   chmod 440 /etc/sudoers.d/clawbox-ollama
+  chown root:root /etc/sudoers.d/clawbox-ollama
+  if ! visudo -cf /etc/sudoers.d/clawbox-ollama >/dev/null; then
+    rm -f /etc/sudoers.d/clawbox-ollama
+    echo "Error: clawbox-ollama sudoers drop-in failed visudo validation; removed" >&2
+    exit 1
+  fi
+  # The cgroup memory guards. Deliberately AFTER the ollama optimiser, so the
+  # unit it just restarted picks the limits up on the daemon-reload below.
+  step_resource_limits
+}
+
+step_resource_limits() {
+  # cgroup v2 MemoryHigh/MemoryMax for ollama, the automation browser and the
+  # GNOME session. Every number comes from
+  # config/clawbox-resource-limits.env — see that file. Idempotent: it only
+  # ever writes three files called 50-clawbox-memory.conf.
+  #
+  # The root-owned copy of the env file is what the script prefers at runtime;
+  # the repo copy is only a fallback, because /home/clawbox/clawbox is
+  # clawbox-writable and this runs as root.
+  install -d -o root -g root -m 0755 /etc/clawbox
+  if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
+    install -o root -g root -m 0644 "$PROJECT_DIR/config/clawbox-resource-limits.env" \
+      /etc/clawbox/resource-limits.env
+  fi
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/clawbox-resource-limits.sh" --apply || \
+    echo "  Warning: resource limits apply failed (non-fatal)"
+}
+
+step_desktop_mode() {
+  # DELIBERATELY DOES NOTHING to the boot target.
+  #
+  # The desktop is shipped and default-ON (Krasi's ruling, 2026-08-24) and the
+  # headless toggle is a SETTING, not an install-time or update-time decision:
+  # an owner who switched their box to console-only must not silently get GNOME
+  # back on the next `git pull`. So install/update only make the mechanism
+  # available (the root-owned script + its sudoers grant, both handled by
+  # install_root_libexec and step_systemd_services) and report where the box
+  # currently stands. TASK-455.
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/clawbox-desktop-mode.sh" --check || true
 }
 
 step_jtop_install() {
@@ -4151,7 +4266,8 @@ DISPATCH_STEPS=(
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   directories_permissions captive_portal_dns desktop_theme
   fix_git_perms browser_launch cloudflared_install
-  nm_dispatcher sysctl_linkdown persistent_journal post_update update_smoke validate_services
+  nm_dispatcher sysctl_linkdown persistent_journal resource_limits desktop_mode
+  post_update update_smoke validate_services
 )
 
 if [ "${1:-}" = "--step" ]; then

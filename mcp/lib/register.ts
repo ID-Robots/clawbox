@@ -5,10 +5,14 @@
 //      edition is never registered. Hermes runs a per-server circuit breaker —
 //      one chronically-404ing tool takes ALL ClawBox tools offline for the
 //      agent — so hiding is an availability requirement, not politeness.
-//   2. ANNOTATIONS. readOnlyHint is exactly what exempts a tool from Hermes'
-//      `trust: untrusted` approval gate (which fails CLOSED on a missing
-//      annotation), and it is free on OpenClaw. Getting these right is what
-//      makes `trust: untrusted` a usable containment for the write tools.
+//   2. ANNOTATIONS. readOnlyHint is exactly what exempts a tool from an MCP
+//      host's approval gate (Hermes' `trust: untrusted` fails CLOSED on a
+//      missing annotation), and it is free on OpenClaw. Note what this does NOT
+//      mean on a ClawBox: scripts/register-mcp.sh registers this server with
+//      `trust: full`, because the appliance agent is headless and one-shot and a
+//      prompt would hang the turn. So no gate runs here — the annotations are
+//      for hosts that do enforce one, and the containment that actually applies
+//      to a write tool on this device is its own per-tool guard.
 //   3. OUTPUT CAPS, so a 10 MB stdout cannot be dumped into a small model's
 //      context window.
 //   4. THE ERROR ENVELOPE. Every throw becomes { error, code, message, next } —
