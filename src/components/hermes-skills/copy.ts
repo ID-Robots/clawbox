@@ -175,6 +175,49 @@ export function useCopy() {
       installedAgo: (when: string) => t('skills.installedAgo', { when }),
       showAllFindings: (n: number) => t('skills.showAllFindings', { n }),
 
+      // === TASK-452: the flagged-skill warning + confirm ===
+      dangerTitle: (name: string) => t('skills.dangerTitle', { name }),
+      dangerLead: (verdict: string) => t('skills.dangerLead', { verdict }),
+      dangerSeverity: (critical: number, high: number) =>
+        t('skills.dangerSeverity', { critical, high }),
+      dangerCanDo: t('skills.dangerCanDo'),
+      dangerNoCapabilities: t('skills.dangerNoCapabilities'),
+      dangerOther: (n: number) =>
+        n === 1 ? t('skills.dangerOther.one', { n }) : t('skills.dangerOther.other', { n }),
+      dangerTrustNote: t('skills.dangerTrustNote'),
+      dangerShowFindings: (n: number) => t('skills.dangerShowFindings', { n }),
+      dangerUnderstand: t('skills.dangerUnderstand'),
+      dangerInstallAnyway: t('skills.dangerInstallAnyway'),
+      dangerCancel: t('skills.dangerCancel'),
+      /** Plain-language name for one capability bucket. */
+      capability: (id: string) =>
+        t(`skills.capability.${CAPABILITY_KEYS.has(id) ? id : 'other'}`),
+
+      // === TASK-452: install refusals ===
+      installIncomplete: (files: string[]) =>
+        t('skills.installIncomplete', { files: files.slice(0, 5).join(', ') }),
+      installIncompleteHint: t('skills.installIncompleteHint'),
+      nameConflict: (name: string) => t('skills.nameConflict', { name }),
+      nameConflictHint: t('skills.nameConflictHint'),
+      installRepaired: (n: number) =>
+        n === 1 ? t('skills.installRepaired.one', { n }) : t('skills.installRepaired.other', { n }),
+
+      // === TASK-452: enabled/disabled ===
+      skillDisabled: t('skills.skillDisabled'),
+      skillDisabledHelp: t('skills.skillDisabledHelp'),
+      countDisabled: (n: number) => t('skills.countDisabled', { n }),
+
+      // === TASK-452: API keys ===
+      secretSaveLabel: (label: string) => t('skills.secretSaveLabel', { label }),
+      secretPlaceholder: t('skills.secretPlaceholder'),
+      secretSave: t('skills.secretSave'),
+      secretSaving: t('skills.secretSaving'),
+      secretSaved: t('skills.secretSaved'),
+      secretStored: t('skills.secretStored'),
+      secretClear: t('skills.secretClear'),
+      secretFailed: t('skills.secretFailed'),
+      secretHelp: t('skills.secretHelp'),
+
       back: t('skills.back'),
       breadcrumbLabel: t('skills.breadcrumbLabel'),
       breadcrumbBrowse: t('skills.breadcrumbBrowse'),
@@ -209,6 +252,20 @@ export function useCopy() {
     [t],
   );
 }
+
+// The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a
+// bucket a newer scanner introduces falls back to the generic line instead of
+// rendering a raw translation key at the customer.
+const CAPABILITY_KEYS = new Set([
+  'shell',
+  'filesystem',
+  'network',
+  'credentials',
+  'browser',
+  'system',
+  'agentInstructions',
+  'other',
+]);
 
 /** The copy object every component in the store reads its strings from. */
 export type SkillsCopy = ReturnType<typeof useCopy>;

@@ -18,9 +18,9 @@ import {
   isValidSkillName,
 } from "../../src/lib/hermes-skills";
 import { apiGet, apiPost } from "../lib/api";
-import { ToolError, type ErrorRule } from "../lib/errors";
+import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
-import { zEnumOf, zInt, zText } from "../lib/schema";
+import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
 
 const BROWSABLE_SOURCES = HERMES_SKILL_SOURCES.filter((s) => isBrowsableSource(s));
 
@@ -121,6 +121,78 @@ function shortDescription(s: BrowseSkill): string | undefined {
   const d = s.description || s.provenanceNote;
   if (!d) return undefined;
   return d.length > 180 ? `${d.slice(0, 180)}…` : d;
+}
+
+interface InstallRefusal {
+  code?: string;
+  conflictsWith?: string;
+  missingFiles?: string[];
+  warning?: {
+    verdict?: string;
+    capabilities?: { id?: string }[];
+    severityCounts?: Record<string, number>;
+  };
+}
+
+// What each capability bucket means, in the words the agent should use with the
+// user. Kept here rather than reusing the UI copy because that is translated
+// and this text is model-facing.
+const CAPABILITY_TEXT: Record<string, string> = {
+  shell: "run commands on the device",
+  filesystem: "read, change or delete files",
+  network: "send and receive data over the internet",
+  credentials: "read saved keys, tokens and passwords",
+  browser: "control the browser",
+  system: "change system settings or install software",
+  agentInstructions: "change the instructions you follow",
+  other: "something the scan flagged but could not name",
+};
+
+/**
+ * Decode the install route's structured refusals (TASK-452) into instructions.
+ *
+ * The important one is the 409 `dangerous_skill`: it is NOT a failure, it is
+ * the device asking the owner a question. The tool must not answer it — so the
+ * error text says what the skill can do and puts the decision back on the user,
+ * and `confirm` is the only way to proceed. Returns null when the error is
+ * something else, so the caller can rethrow it untouched.
+ */
+function refusalToToolError(err: unknown): ToolError | null {
+  if (!(err instanceof ApiError)) return null;
+  let payload: InstallRefusal;
+  try {
+    payload = JSON.parse(err.body) as InstallRefusal;
+  } catch {
+    return null;
+  }
+  if (err.status === 409 && payload.code === "dangerous_skill") {
+    const caps = (payload.warning?.capabilities ?? [])
+      .map((c) => CAPABILITY_TEXT[c.id ?? "other"] ?? CAPABILITY_TEXT.other)
+      .slice(0, 6);
+    const what = caps.length ? `It can ${caps.join("; ")}.` : "The scan did not say which part of the device it touches.";
+    return new ToolError(
+      "CONFLICT",
+      `The device's security scan flagged this skill as "${payload.warning?.verdict ?? "unsafe"}". ${what}`,
+      "Do NOT install it yourself. Tell the user exactly what the skill can do and ask whether to install it anyway. "
+        + "Only if they say yes, call skill_install again with the same id and confirm=true.",
+    );
+  }
+  if (err.status === 409 && payload.code === "bundled_conflict") {
+    return new ToolError(
+      "CONFLICT",
+      `"${payload.conflictsWith ?? "That skill"}" already came with this device, and a store skill of the same name would replace it.`,
+      "Do not retry. Tell the user the device already has that skill built in; built-in skills update with the device.",
+    );
+  }
+  if (payload.code === "incomplete_install") {
+    const missing = (payload.missingFiles ?? []).slice(0, 5).join(", ");
+    return new ToolError(
+      "CONFLICT",
+      `The skill's download was incomplete, so nothing was installed${missing ? ` (missing: ${missing})` : ""}.`,
+      "Call wifi_status. If the device is online, retry once; otherwise tell the user the download could not be completed.",
+    );
+  }
+  return null;
 }
 
 export function registerSkillTools(reg: Registrar): void {
@@ -306,10 +378,16 @@ export function registerSkillTools(reg: Registrar): void {
 
   reg.tool(
     "skill_install",
-    "Install a skill from the store onto this device. Takes the full store id from skill_search (for example \"official/pdf\"), NOT the short name that skill_list shows. The install runs a security scan and can take up to two minutes; if it is refused, do not retry.",
-    { id: zText(128, "Full store id from skill_search, e.g. \"official/pdf\"") },
+    "Install a skill from the store onto this device. Takes the full store id from skill_search (for example \"official/pdf\"), NOT the short name that skill_list shows. The install runs a security scan and can take up to two minutes. If the device flags the skill, this tool refuses and tells you what the skill can do; relay that to the user in your own words and only call again with confirm=true if THEY say to go ahead.",
+    {
+      id: zText(128, "Full store id from skill_search, e.g. \"official/pdf\""),
+      confirm: zBool(
+        false,
+        "Only set this after the device refused the install AND the user, having been told what the skill can do, told you to install it anyway. Never set it on a first attempt and never set it on your own judgement.",
+      ),
+    },
     { editions: ["hermes"], readOnly: false, profile: "core" },
-    async ({ id }: { id: string }) => {
+    async ({ id, confirm }: { id: string; confirm: boolean }) => {
       if (!checkInstallIdentifier(id).ok) {
         throw new ToolError(
           "BAD_ARGUMENT",
@@ -317,15 +395,29 @@ export function registerSkillTools(reg: Registrar): void {
           "Call skill_search and pass the id field from its results, unchanged.",
         );
       }
-      const body = await apiPost<{ ok?: boolean; name?: string }>(
-        "/setup-api/hermes/skills/install",
-        { id },
-        { timeoutMs: 120_000, rules: INSTALL_RULES },
-      );
+      let body: { ok?: boolean; name?: string; files?: { repaired?: string[] } };
+      try {
+        body = await apiPost<{ ok?: boolean; name?: string; files?: { repaired?: string[] } }>(
+          "/setup-api/hermes/skills/install",
+          confirm ? { id, confirmDangerous: true } : { id },
+          { timeoutMs: 180_000, rules: INSTALL_RULES },
+        );
+      } catch (err) {
+        // The route's structured refusals carry more than a status code, and
+        // the difference between them is the difference between "ask the user"
+        // and "stop". INSTALL_RULES cannot see the body, so they are decoded
+        // here and only fall through to the generic mapping when they do not
+        // match.
+        throw refusalToToolError(err) ?? err;
+      }
       const name = body.name ?? id.split("/").pop() ?? id;
+      const repaired = body.files?.repaired?.length ?? 0;
       // Return the LOCK NAME: it is the argument skill_uninstall needs, and
       // handing it over now is what stops the model guessing it later.
-      return text(`Installed "${name}". Remove it later with skill_uninstall using the name "${name}".`);
+      return text(
+        `Installed "${name}"${repaired ? ` (the device completed ${repaired} file(s) the installer had skipped)` : ""}. `
+          + `Remove it later with skill_uninstall using the name "${name}".`,
+      );
     },
   );
 
