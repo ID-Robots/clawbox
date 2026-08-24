@@ -5,6 +5,17 @@
 export const OPEN_APP_EVENT = "clawbox:open-app";
 export const FIX_ERROR_EVENT = "clawbox:fix-error";
 
+/**
+ * "The chat's model or provider selection changed."
+ *
+ * The OpenClaw-side counterpart to `HERMES_MODEL_STATE_EVENT`, and a signal
+ * rather than data for the same reason: every listener re-asks the server.
+ * Named here because it has three listen sites and an emit site in three
+ * different files — as a bare string, a rename in one of them would leave the
+ * others silently deaf, with the capability stale until a page reload.
+ */
+export const CHAT_MODEL_STATE_EVENT = "clawbox:chat-model-state-changed";
+
 export function dispatchOpenApp(appId: string): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(OPEN_APP_EVENT, { detail: { appId } }));

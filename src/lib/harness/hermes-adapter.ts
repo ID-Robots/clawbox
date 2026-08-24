@@ -119,7 +119,12 @@ function isEventStream(res: { headers?: { get(name: string): string | null } }):
  */
 async function readStreamedTurn(
   res: Response,
-  onEvent: (event: TurnEvent) => void,
+  // OPTIONAL, because the route can stream to a caller that never asked: a
+  // proxy that upgrades the response, or a version skew between the two halves
+  // of an upgrade. The adapter only ASKS when someone is listening, but what it
+  // asked for does not decide what arrives — and a non-null assertion here
+  // turned that case into a TypeError that lost a turn the box had already run.
+  onEvent?: (event: TurnEvent) => void,
 ): Promise<Record<string, unknown>> {
   const body = res.body;
   if (!body) throw new HarnessError("upstream", "Hermes streamed an empty response");
@@ -151,7 +156,7 @@ async function readStreamedTurn(
       const chunk = typeof payload.text === "string" ? payload.text : "";
       if (!chunk) return;
       answer += chunk;
-      onEvent({ kind: "delta", text: answer });
+      onEvent?.({ kind: "delta", text: answer });
     } else if (name === "done") {
       settled = payload;
     } else if (name === "error") {
@@ -177,6 +182,23 @@ async function readStreamedTurn(
   if (failure) throw new HarnessError("upstream", failure);
   if (!settled) throw new HarnessError("upstream", "The reply was cut off before it finished.");
   return settled;
+}
+
+/**
+ * The response body as an object, or an empty one.
+ *
+ * A route is not obliged to answer JSON — an upstream can interpose an HTML
+ * error page, and a 503 may carry no body at all. Callers here only ever read
+ * named fields off the result, so an empty object is the honest stand-in and
+ * lets the STATUS decide what went wrong.
+ */
+async function readJsonBody(res: Response): Promise<Record<string, unknown>> {
+  try {
+    const parsed = await res.json();
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
 export class HermesAdapter implements HarnessAdapter {
@@ -316,12 +338,19 @@ export class HermesAdapter implements HarnessAdapter {
         signal: controller.signal,
       });
       // A streamed answer is read frame by frame; anything else is one JSON
-      // body, exactly as before. The CONTENT TYPE decides, not what we asked
-      // for — the route falls back to spawning the CLI whenever the box cannot
-      // stream this minute, and that answer must still be understood.
+      // body. The CONTENT TYPE decides, not what we asked for — the route falls
+      // back to spawning the CLI whenever the box cannot stream this minute,
+      // and that answer must still be understood.
+      //
+      // The JSON side is read defensively, and the status is branched on below
+      // rather than above: parsing first meant a non-JSON error body — a
+      // proxy's HTML 502, an empty 503 — rejected inside `res.json()`, and the
+      // catch relabelled it `upstream` carrying the parser's text, so a 409
+      // reached the user as "Unexpected token <" instead of the actionable
+      // `invalid-input` the route actually sent.
       const data = isEventStream(res)
-        ? await readStreamedTurn(res, onEvent!)
-        : ((await res.json()) as Record<string, unknown>);
+        ? await readStreamedTurn(res, onEvent)
+        : await readJsonBody(res);
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",

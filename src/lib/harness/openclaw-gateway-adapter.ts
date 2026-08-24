@@ -7,6 +7,7 @@ import {
   splitAssistantMedia,
   splitUserAttachments,
   extractAudioAttachments,
+  boundedAudio,
 } from "@/lib/chat-media";
 import {
   asHarnessError,
@@ -43,8 +44,12 @@ import {
 /** How many messages a history read asks the gateway for. */
 export const HISTORY_LIMIT = 50;
 
-/** Spoken replies kept per message. */
-const MAX_AUDIO_PER_MESSAGE = 4;
+/**
+ * How long the spoken-reply side-fetch may take before the transcript gives up
+ * on it. Generous for a request that never leaves the box, and short enough
+ * that a wedged local server cannot hold the history read open.
+ */
+export const SPOKEN_HISTORY_TIMEOUT_MS = 10_000;
 
 /** Strip gateway wrapper tags like `<final>`, `<thinking>`, etc. */
 export function stripGatewayTags(text: string): string {
@@ -73,10 +78,6 @@ export function extractText(msg: unknown): string {
   return "";
 }
 
-/** De-duplicate and cap the spoken-reply refs attached to one message. */
-export function boundedAudio(...groups: string[][]): string[] {
-  return [...new Set(groups.flat())].slice(0, MAX_AUDIO_PER_MESSAGE);
-}
 
 /**
  * Turn a raw `chat.history` page into the transcript the chat renders.
@@ -116,6 +117,11 @@ export function projectGatewayHistory(
   let imageGenerationFailed = false;
   const chatMsgs: HistoryMessage[] = [];
   for (const msg of rawMessages) {
+    // A row off the wire is not guaranteed to be an object. `extractText`
+    // guards this itself, but the `role` read below runs first and would throw
+    // a TypeError on a `null` or a primitive, taking the whole transcript down
+    // rather than dropping one unusable row.
+    if (!msg || typeof msg !== "object") continue;
     const m = msg as Record<string, unknown>;
     const role = (m.role as string)?.toLowerCase();
     if (role !== "user" && role !== "assistant") continue;
@@ -296,6 +302,12 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
       const filePaths = req.attachments.map((a) => `[Attached file: ${a.path}]`).join("\n");
       messageText = [filePaths, req.text].filter(Boolean).join("\n");
     }
+    // The transport contract says a turn rejects `HarnessError('aborted')` when
+    // `req.signal` fires, and this adapter used to be the one that did not
+    // honour it. Nothing passes a signal here today, so the gap was invisible —
+    // which is exactly how it would have stayed until the first caller that
+    // does, and then a Stop would have looked like a hung send.
+    if (req.signal?.aborted) throw new HarnessError("aborted", "Stopped.");
     try {
       await this.link.request("chat.send", {
         sessionKey: this.link.sessionKey(),
@@ -306,6 +318,9 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
     } catch (err) {
       throw gatewayError(err);
     }
+    // A Stop that landed while the ack was in flight still ends the run here:
+    // the turn is on the gateway, and `abortTurn` is what calls it back.
+    if (req.signal?.aborted) throw new HarnessError("aborted", "Stopped.");
     return { text: "", acknowledgedOnly: true };
   }
 
@@ -347,7 +362,14 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
           sessionKey: this.link.sessionKey(),
           limit: options?.limit ?? HISTORY_LIMIT,
         }) as Promise<Record<string, unknown>>,
-        this.fetchImpl("/setup-api/chat/spoken-history", { cache: "no-store" })
+        this.fetchImpl("/setup-api/chat/spoken-history", {
+          cache: "no-store",
+          // `.catch` covers a REJECTED request; it does nothing for one that
+          // never settles, and this sits inside a `Promise.all` the transcript
+          // load awaits. On an embedded box a stalled local request would hang
+          // the history read with no error and no recovery.
+          signal: AbortSignal.timeout(SPOKEN_HISTORY_TIMEOUT_MS),
+        })
           .then(async (response) => (response.ok ? response.json() : { items: [] }))
           .catch(() => ({ items: [] })),
       ]);

@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 
@@ -24,11 +26,19 @@ vi.mock("@/lib/config-store", () => ({
 const OPENCLAW_TOKEN = "tok-from-openclaw-store";
 const HERMES_TOKEN = "tok-from-hermes-store";
 
+/**
+ * The provider slot ClawBox AI occupies in `openclaw.json`.
+ *
+ * Written as a LITERAL on purpose. This is a persisted on-disk key —
+ * `install.sh` writes `models.providers.deepseek` as a bare string and
+ * `scripts/gateway-pre-start.sh` reads it back — so a test that derived it from
+ * the TypeScript constant would follow a rename of that constant and keep
+ * passing while the real contract with the shell broke.
+ */
+const PERSISTED_PROVIDER_KEY = "deepseek";
+
 function openclawConfigWith(apiKey: unknown) {
-  // `deepseek` is the provider slot ClawBox AI occupies in openclaw.json
-  // (CLAWBOX_AI_PROVIDER) — the proxy serves DeepSeek models under the device
-  // token, so that is the key the gateway config writes.
-  return { models: { providers: { [CLAWBOX_AI_PROVIDER]: { apiKey } } } };
+  return { models: { providers: { [PERSISTED_PROVIDER_KEY]: { apiKey } } } };
 }
 
 async function resolve() {
@@ -37,6 +47,12 @@ async function resolve() {
 }
 
 describe("resolveClawaiToken", () => {
+  it("keeps the TypeScript constant and the on-disk key in step", () => {
+    // The one place the two are allowed to meet. If this fails, the rename that
+    // caused it has to be carried into install.sh and gateway-pre-start.sh too.
+    expect(CLAWBOX_AI_PROVIDER).toBe(PERSISTED_PROVIDER_KEY);
+  });
+
   beforeEach(() => {
     vi.resetModules();
     readConfig.mockReset();
@@ -92,11 +108,68 @@ describe("resolveClawaiToken", () => {
     expect(await resolve()).toBe(HERMES_TOKEN);
   });
 
+  it("answers null when NEITHER store can be read", async () => {
+    // A box with no OpenClaw tree and an unreadable or corrupt
+    // `data/config.json` reaches the fallback's own catch. That branch is the
+    // difference between the transcribe route answering a clean 503 "not
+    // linked" and an unhandled rejection escaping it.
+    readConfig.mockRejectedValue(new Error("ENOENT"));
+    configStoreGet.mockRejectedValue(new Error("EACCES"));
+    expect(await resolve()).toBeNull();
+    const { hasClawaiToken } = await import("@/lib/harness/credentials");
+    expect(await hasClawaiToken()).toBe(false);
+  });
+
   it("re-reads on every call, because the portal can re-mint at any time", async () => {
     readConfig.mockResolvedValueOnce(openclawConfigWith("first"));
     readConfig.mockResolvedValueOnce(openclawConfigWith("second"));
     const { resolveClawaiToken } = await import("@/lib/harness/credentials");
     expect(await resolveClawaiToken()).toBe("first");
     expect(await resolveClawaiToken()).toBe("second");
+  });
+});
+
+/**
+ * The server-only boundary, enforced without a new runtime dependency.
+ *
+ * `resolveClawaiToken` returns the device's raw credential. Next's `server-only`
+ * package turns a client import into a build failure, which is the strongest
+ * form of this check — but it is not a dependency this repo carries, and adding
+ * one drags `package.json` and `bun.lock` into a chat refactor. The property
+ * that actually matters is testable directly: nothing the browser bundles may
+ * reach this module.
+ */
+describe("the credential module stays on the server", () => {
+  function filesUnder(dir: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) out.push(...filesUnder(full));
+      else if (/\.tsx?$/.test(entry)) out.push(full);
+    }
+    return out;
+  }
+
+  it("is imported by no client component", () => {
+    const offenders = filesUnder(join(process.cwd(), "src", "components")).filter((f) =>
+      /from\s+["']@\/lib\/harness\/credentials["']/.test(readFileSync(f, "utf8")),
+    );
+    // A component is bundled for the browser. An import here would ship the
+    // lookup — and on the wrong build, the value — to every page that loads it.
+    expect(offenders).toEqual([]);
+  });
+
+  it("is imported only by route handlers on the server side of the app", () => {
+    const appDir = join(process.cwd(), "src", "app");
+    const importers = filesUnder(appDir).filter((f) =>
+      /from\s+["']@\/lib\/harness\/credentials["']/.test(readFileSync(f, "utf8")),
+    );
+    expect(importers.length).toBeGreaterThan(0);
+    for (const file of importers) {
+      // Route handlers only. A `page.tsx` or a "use client" module reaching for
+      // this is the case the boundary exists to stop.
+      expect(file.endsWith(`${"route"}.ts`)).toBe(true);
+      expect(readFileSync(file, "utf8")).not.toMatch(/^\s*["']use client["']/m);
+    }
   });
 });

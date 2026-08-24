@@ -13,7 +13,7 @@ import {
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { describeChatFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
+import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -24,9 +24,12 @@ import { useModalDialog } from '@/hooks/useModalDialog'
 // and is product identity rather than a capability.
 import { useHarnessAdapter } from '@/lib/harness/use-harness-adapter'
 import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
-import { extractText, boundedAudio, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
+// `extractText` stays with the gateway adapter: it strips that gateway's own
+// wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
+// and now lives with the rest of the media helpers.
+import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { HarnessError, type HarnessStatus, type TurnResult } from '@/lib/harness/transport'
-import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments } from '@/lib/chat-media'
+import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -880,6 +883,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { if (visible) scrollToBottom() }, [visible, scrollToBottom])
 
 
+  /**
+   * Settle every in-flight RPC, then forget them.
+   *
+   * A teardown that merely dropped the map left each caller waiting forever:
+   * the 120-second timeout below only fires while the entry is STILL THERE, so
+   * `pendingRef.current.clear()` silently orphaned the promise instead of
+   * ending it. A `chat.send` orphaned that way is the expensive case — the run
+   * never completes, so the sending guard is never cleared, and the queue parks
+   * behind a turn that can no longer arrive.
+   */
+  const failPending = useCallback((reason: string) => {
+    const waiting = [...pendingRef.current.values()]
+    pendingRef.current.clear()
+    for (const entry of waiting) entry.reject(new Error(reason))
+  }, [])
+
   // Send a request over WS
   const wsRequest = useCallback((method: string, params: unknown): Promise<unknown> => {
     return new Promise((resolve, reject) => {
@@ -921,12 +940,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     request: (method, params) => wsRequest(method, params),
     sessionKey: () => sessionKeyRef.current,
     open: async () => { await connectRef.current() },
-    close: () => { wsRef.current?.close(); wsRef.current = null },
+    close: () => { wsRef.current?.close(); wsRef.current = null; failPending('Not connected') },
     onStatus: (cb) => {
       statusListenersRef.current.add(cb)
       return () => { statusListenersRef.current.delete(cb) }
     },
-  }), [wsRequest])
+  }), [wsRequest, failPending])
   // Read at send time, exactly as the refs behind it always were: a header pill
   // changed mid-run therefore applies to the NEXT turn, never retroactively to
   // the one in flight.
@@ -1087,7 +1106,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       wsRef.current.close()
       wsRef.current = null
     }
-    pendingRef.current.clear()
+    failPending('Connection restarted')
     setStatus('connecting')
     setErrorMsg('')
     connectedOnceRef.current = false
@@ -1491,6 +1510,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
     const onClose = (event?: CloseEvent) => {
       wsRef.current = null
+      // The socket is gone; nothing that was waiting on it can still arrive.
+      failPending('Not connected')
 
       // Auth rejection (gateway closes with 1008 / "unauthorized" / "rate
       // limited" — it rate-limits a client after too many failed auth
@@ -1577,8 +1598,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const handleModelStateChanged = () => {
       refreshChatModelState()
     }
-    window.addEventListener('clawbox:chat-model-state-changed', handleModelStateChanged)
-    return () => window.removeEventListener('clawbox:chat-model-state-changed', handleModelStateChanged)
+    window.addEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
+    return () => window.removeEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, auto-greet if empty
@@ -1682,10 +1703,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const clearTranscript = useCallback(() => {
     setMessages([])
     setStreaming('')
+    // The pills render from their own state, outside the transcript map, and
+    // the socket only clears them on `final`/`aborted`/`error`. New chat during
+    // a live turn beats all three, which left the previous turn's pills sitting
+    // under an empty conversation.
+    clearToolCalls()
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [])
+  }, [clearToolCalls])
 
   const resetSession = useCallback(async () => {
     await adapter.resetSession()
@@ -2202,6 +2228,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setVoice(IDLE_STATUS)
   }, [isOpen, abandonRecording])
 
+  // Losing the credential mid-capture is the other way a recording can be
+  // orphaned: the entry point disappears, and without this the `MediaRecorder`
+  // would keep running with nothing left on screen to stop it. Nothing is
+  // uploaded — there is no longer anything that could transcribe it.
+  useEffect(() => {
+    if (caps.canTranscribe || voice.state === 'idle') return
+    abandonRecording()
+    setVoice(IDLE_STATUS)
+  }, [caps.canTranscribe, voice.state, abandonRecording])
+
   // ONE send path.
   //
   // Which harness answers, whether the reply streams or lands whole, and
@@ -2437,7 +2473,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Abort generation
   const abort = useCallback(async () => {
-    await adapter.abortTurn()
+    // Bound to onClick, which drops the returned promise — so a rejection here
+    // surfaces as an unhandled rejection rather than as anything the user can
+    // act on. Stop is best-effort by design: a turn that could not be called
+    // back finishes on its own, and a red banner about the Stop button would
+    // tell the customer nothing they can do.
+    try {
+      await adapter.abortTurn()
+    } catch (err) {
+      console.warn('[chat] abort failed:', err)
+    }
   }, [adapter])
 
   const switchChatModel = useCallback(async (target: { model: string; label: string }) => {
@@ -2676,11 +2721,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const replayedRef = useRef(false)
   useEffect(() => {
     if (!harnessLoaded) return
+    // Not while the popup is closed. This surface stays MOUNTED behind the
+    // desktop, so "the harness resolved" is not the same as "the user is
+    // looking at this" — and on an empty transcript the replay ends in the
+    // auto-greet, which persisted a turn the owner never asked for, before
+    // they had opened chat at all.
+    if (!isOpen) return
     if (caps.hasLiveConnection || !caps.canListHistory) return
     if (replayedRef.current) return
     replayedRef.current = true
     void loadHistory()
-  }, [harnessLoaded, caps, loadHistory])
+  }, [harnessLoaded, isOpen, caps, loadHistory])
 
   useEffect(() => {
     if (isOpen) {
@@ -2695,6 +2746,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return () => {
       wsRef.current?.close()
       wsRef.current = null
+      failPending('Chat closed')
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current)
       if (ackOnlyHistoryTimerRef.current !== null) {
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
@@ -2705,7 +2757,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         transcriptReconcileTimerRef.current = null
       }
     }
-  }, [])
+  }, [failPending])
 
   // Focus input when opened
   useEffect(() => {
@@ -3677,7 +3729,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           the only signal that the microphone opened, and a screen reader sees
           neither. Polite rather than an alert — the row also hosts the cancel,
           retry and dismiss buttons, which an assertive interrupt talks over. */}
-      {caps.canTranscribe && voice.state !== 'idle' && (
+      {/* Mounted by the CAPTURE's state, not by the capability. `canTranscribe`
+          follows a credential that is re-probed at runtime, so it can flip to
+          false mid-recording — and gating this on it took the pulsing dot and
+          the running clock off screen while the microphone was still open,
+          breaking the one invariant a live capture has. */}
+      {voice.state !== 'idle' && (
         <div
           data-testid="voice-status"
           role="status"
@@ -3756,7 +3813,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {/* The cloud-privacy line. Voice leaves the box: the recording goes to
           ClawBox AI to be turned into text. That has to be said on the surface
           where it happens, not only in a settings page nobody opens. */}
-      {caps.canTranscribe && (voice.state === 'recording' || voice.state === 'transcribing') && (
+      {/* Same reason as the status row above: whoever can start a capture must
+          always be able to end one. */}
+      {(voice.state === 'recording' || voice.state === 'transcribing') && (
         <div data-testid="voice-privacy" style={{ padding: '0 14px 6px', background: 'rgba(0,0,0,0.2)', fontSize: 10.5, color: 'rgba(255,255,255,0.45)' }}>
           {t("chat.voice.privacy")}
         </div>
