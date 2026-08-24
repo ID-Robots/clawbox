@@ -267,10 +267,12 @@ export function GhostButton({
   children,
   onClick,
   tone = 'neutral',
+  disabled,
 }: {
   children: ReactNode;
   onClick?: () => void;
   tone?: 'neutral' | 'danger';
+  disabled?: boolean;
 }) {
   const cls =
     tone === 'danger'
@@ -280,7 +282,8 @@ export function GhostButton({
     <button
       type="button"
       onClick={onClick}
-      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${cls} ${FOCUS_RING}`}
+      disabled={disabled}
+      className={`px-3 py-1 rounded-md text-xs font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${cls} ${FOCUS_RING}`}
     >
       {children}
     </button>

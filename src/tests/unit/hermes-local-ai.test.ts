@@ -8,7 +8,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * closes that gap.
  */
 const cliMock = vi.hoisted(() => vi.fn());
+const patchMock = vi.hoisted(() => vi.fn());
+const readMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
+vi.mock("@/lib/hermes-config-yaml", () => ({
+  patchHermesConfig: patchMock,
+  readHermesConfigValue: readMock,
+}));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
 vi.mock("@/lib/local-ai-runtime", () => ({
@@ -22,18 +28,31 @@ import {
   removeLocalAiFromHermes,
 } from "@/lib/hermes-local-ai";
 
-/** The args of every `config set`, as "key=value". */
+/** Every key the module wrote, as "key=value".
+ *
+ * One read-merge-write, not three-to-five `hermes config set` calls: each of
+ * those re-serialised config.yaml and deleted every comment in it (b10), so the
+ * assertion is on the patch, not on argv.
+ */
 function sets(): string[] {
-  return cliMock.mock.calls
-    .map((c) => c[0] as string[])
-    .filter((a) => a[1] === "set")
-    .map((a) => `${a[2]}=${a[3]}`);
+  return patchMock.mock.calls.flatMap((c) =>
+    Object.entries((c[0]?.set ?? {}) as Record<string, string>).map(([k, v]) => `${k}=${v}`),
+  );
+}
+
+/** Every key the module removed. */
+function unsets(): string[] {
+  return patchMock.mock.calls.flatMap((c) => (c[0]?.unset ?? []) as string[]);
 }
 
 describe("registering the local model with Hermes", () => {
   beforeEach(() => {
     cliMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    patchMock.mockReset();
+    patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
+    readMock.mockReset();
+    readMock.mockResolvedValue(null);
   });
   afterEach(() => vi.clearAllMocks());
 
@@ -73,11 +92,17 @@ describe("registering the local model with Hermes", () => {
     await expect(
       applyLocalAiToHermes({ provider: "llamacpp", model: "--yolo" }),
     ).rejects.toBeInstanceOf(HermesLocalApplyError);
+    expect(patchMock).not.toHaveBeenCalled();
     expect(cliMock).not.toHaveBeenCalled();
   });
 
+  it("writes the whole registration in ONE read-merge-write", async () => {
+    await applyLocalAiToHermes({ provider: "ollama", model: "qwen2.5:3b", makeDefault: true });
+    expect(patchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("surfaces a failed write rather than reporting success", async () => {
-    cliMock.mockResolvedValueOnce({ code: 1, stdout: "", stderr: "nope" });
+    patchMock.mockRejectedValueOnce(new Error("nope"));
     await expect(
       applyLocalAiToHermes({ provider: "llamacpp", model: "gemma4-e2b-it-q4_0" }),
     ).rejects.toThrow(/nope/);
@@ -85,14 +110,32 @@ describe("registering the local model with Hermes", () => {
 
   it("unregisters on disable so the picker stops offering a stopped model", async () => {
     await removeLocalAiFromHermes();
-    const unset = cliMock.mock.calls
-      .map((c) => (c[0] as string[]))
-      .filter((a) => a[1] === "unset")
-      .map((a) => a[2]);
-    expect(unset).toEqual([
+    expect(unsets()).toEqual([
       `providers.${HERMES_LOCAL_PROVIDER}.base_url`,
       `providers.${HERMES_LOCAL_PROVIDER}.api_key`,
       `providers.${HERMES_LOCAL_PROVIDER}.api_mode`,
     ]);
+  });
+
+  it("clears a model.provider that still points at the local model", async () => {
+    // Leaving it set with the providers block gone is what made every chat turn
+    // 502 with "Unknown provider 'clawlocal'" after a Local AI toggle-off.
+    readMock.mockImplementation(async (key: string) =>
+      key === "model.provider" ? HERMES_LOCAL_PROVIDER : "qwen2.5:3b",
+    );
+    const result = await removeLocalAiFromHermes();
+    expect(result).toEqual({ wasDefault: true, model: "qwen2.5:3b" });
+    expect(unsets()).toContain("model.provider");
+    expect(unsets()).toContain("model.default");
+  });
+
+  it("leaves someone else's provider selection alone", async () => {
+    readMock.mockImplementation(async (key: string) =>
+      key === "model.provider" ? "openrouter" : "anthropic/claude-sonnet-4",
+    );
+    const result = await removeLocalAiFromHermes();
+    expect(result.wasDefault).toBe(false);
+    expect(unsets()).not.toContain("model.provider");
+    expect(unsets()).not.toContain("model.default");
   });
 });

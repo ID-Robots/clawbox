@@ -7,6 +7,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NextResponse } from "next/server";
+
+const routeAuth = { requireSession: vi.fn() };
+const internalToken = { isInternalRequest: vi.fn() };
 
 const cloudflared = {
   readTunnelUrl: vi.fn(),
@@ -22,22 +26,88 @@ const liveness = {
 vi.mock("@/lib/cloudflared", () => cloudflared);
 vi.mock("@/lib/portal-heartbeat", () => heartbeat);
 vi.mock("@/lib/tunnel-liveness", () => liveness);
+vi.mock("@/lib/route-auth", () => routeAuth);
+vi.mock("@/lib/internal-token", () => internalToken);
 
-async function tick() {
+function request(headers: Record<string, string> = {}) {
+  return new Request("http://127.0.0.1/setup-api/portal/heartbeat-tick", { headers });
+}
+
+async function tick(req: Request = request()) {
   const mod = await import("@/app/setup-api/portal/heartbeat-tick/route");
-  return mod.GET();
+  return mod.GET(req);
 }
 
 beforeEach(() => {
   vi.resetModules();
   liveness.mayRestart.mockReturnValue(true);
   cloudflared.startTunnelService.mockResolvedValue(undefined);
+  // Default for the behavioural tests below: the systemd unit, presenting the
+  // install's internal token.
+  internalToken.isInternalRequest.mockReturnValue(true);
+  routeAuth.requireSession.mockResolvedValue(null);
 });
 
 afterEach(() => {
-  for (const fn of [...Object.values(cloudflared), ...Object.values(heartbeat), ...Object.values(liveness)]) {
+  for (const fn of [
+    ...Object.values(cloudflared),
+    ...Object.values(heartbeat),
+    ...Object.values(liveness),
+    ...Object.values(routeAuth),
+    ...Object.values(internalToken),
+  ]) {
     fn.mockReset();
   }
+});
+
+/**
+ * The tick is pre-auth in middleware because the timer runs on a device nobody
+ * has logged into. That had become "anyone may call it" — and the dead-tunnel
+ * branch RESTARTS clawbox-tunnel, so any LAN neighbour, or anyone holding the
+ * box's public tunnel URL, could bounce a systemd unit four times an hour
+ * (TASK-446).
+ */
+describe("who may call the tick", () => {
+  beforeEach(() => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://dead-tunnel-example.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("dead");
+  });
+
+  it("refuses an anonymous caller, and restarts nothing", async () => {
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick();
+
+    expect(res.status).toBe(401);
+    expect(cloudflared.startTunnelService).not.toHaveBeenCalled();
+    expect(heartbeat.pushHeartbeatTick).not.toHaveBeenCalled();
+  });
+
+  it("accepts our own unit on its internal token, with no session", async () => {
+    internalToken.isInternalRequest.mockReturnValue(true);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick(request({ "x-clawbox-internal-token": "a".repeat(64) }));
+
+    expect(res.status).toBe(200);
+    // The token is checked BEFORE the session, so the timer never depends on
+    // anyone being logged in.
+    expect(routeAuth.requireSession).not.toHaveBeenCalled();
+  });
+
+  it("accepts the owner's browser on its session cookie", async () => {
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(null);
+
+    const res = await tick();
+
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("a live tunnel", () => {

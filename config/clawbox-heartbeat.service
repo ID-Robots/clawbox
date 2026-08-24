@@ -5,11 +5,23 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# The per-install internal token, in KEY=value form. PID 1 reads this as root
+# BEFORE the sandbox below applies, which is the only reason a unit with
+# ProtectHome=yes can present a credential that lives under /home. Optional
+# (`-`) on purpose: on a box whose web server has not yet seeded the file the
+# tick simply 401s, curl exits 22, and SuccessExitStatus below swallows it.
+EnvironmentFile=-/home/clawbox/clawbox/data/internal-token.env
 # Hit the tick endpoint on the local web app. The handler calls
 # pushHeartbeatTick(readTunnelUrl()) and returns immediately —
 # the actual portal POST happens in the Next.js process, not here,
 # so this curl is a cheap kick rather than a heavy request.
-ExecStart=/usr/bin/curl -fsS --max-time 10 http://127.0.0.1/setup-api/portal/heartbeat-tick
+#
+# The header is what distinguishes this unit from any other caller: the handler
+# restarts clawbox-tunnel when the advertised hostname has died, and until this
+# existed an anonymous GET from the LAN (or through the public tunnel) could
+# trigger that restart four times an hour. ${VAR} interpolates as ONE argument,
+# so a token with a space in it could not split the header.
+ExecStart=/usr/bin/curl -fsS --max-time 10 -H "X-ClawBox-Internal-Token: ${CLAWBOX_INTERNAL_TOKEN}" http://127.0.0.1/setup-api/portal/heartbeat-tick
 # Don't fail the unit if the local app is briefly down — the next tick
 # will retry on the timer's normal cadence. Curl exit codes 7/22/28
 # = connection refused, HTTP error, timeout: all transient and

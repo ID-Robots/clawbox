@@ -555,7 +555,9 @@ export async function applyModelOverrideToAllAgentSessions(
       // (use off)`. Only rewrite when the existing level is actually
       // unsupported, so a compatible level (e.g. cloud→cloud) is left intact.
       if (isThinkingLevel(session.thinkingLevel)) {
-        const reasoning = getProviderReasoningConfig(update.provider);
+        // Model-qualified: ClawBox AI's default depends on the tier the target
+        // model belongs to, so a stale level folds to the RIGHT default.
+        const reasoning = getProviderReasoningConfig(update.provider, `${update.provider}/${update.modelId}`);
         if (!reasoning.levels.includes(session.thinkingLevel)) {
           session.thinkingLevel = reasoning.default;
         }

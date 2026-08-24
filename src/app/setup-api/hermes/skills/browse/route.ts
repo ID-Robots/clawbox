@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import {
   type BrowseResponse,
   type CatalogFacet,
+  MAX_BROWSE_PAGE,
   clampInt,
   isBrowsableSource,
   isValidMeta,
@@ -65,7 +66,7 @@ export async function GET(request: Request) {
   const source = (params.get("source") || "").trim();
   const provider = (params.get("provider") || "").trim();
   const sortRaw = (params.get("sort") || "").trim();
-  const page = clampInt(params.get("page"), 1, 1000, 1);
+  const page = clampInt(params.get("page"), 1, MAX_BROWSE_PAGE, 1);
   const pageSize = clampInt(params.get("size"), 1, 48, 24);
 
   if (page === null) return NextResponse.json({ error: "Invalid page" }, { status: 400 });
@@ -97,13 +98,17 @@ export async function GET(request: Request) {
       pageSize,
     });
     const age = ageHours(state.fetchedAt);
+    // Only promise pages the client is allowed to ask for. Advertising
+    // totalPages/hasMore past MAX_BROWSE_PAGE is what made the load-more
+    // sentinel request a page this handler then rejected with a 400.
+    const reachablePages = Math.min(Math.max(1, Math.ceil(result.total / pageSize)), MAX_BROWSE_PAGE);
     const body: BrowseResponse = {
       skills: result.skills,
       page,
       pageSize,
       total: result.total,
-      totalPages: Math.max(1, Math.ceil(result.total / pageSize)),
-      hasMore: page * pageSize < result.total,
+      totalPages: reachablePages,
+      hasMore: page < reachablePages && page * pageSize < result.total,
       facets: { sources: result.sources, providers: source === "github" ? result.providers : [] },
       catalog: {
         origin: "index",

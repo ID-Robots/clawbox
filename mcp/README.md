@@ -84,6 +84,15 @@ The **id vs name** split is the trap: `skill_install` takes the full store id
 (`official/pdf`), `skill_uninstall` takes the short lock name (`pdf`).
 `skill_install` returns the lock name so the model never has to guess it.
 
+`skill_install` also carries a `confirm` flag, and it is the one argument the
+model must never set on its own judgement (TASK-452). When the device's scanner
+flags a skill the install route answers 409 with what the skill can do; the tool
+turns that into a CONFLICT whose `next` is "tell the user what it can do and ask
+them", and `confirm: true` is only correct on a second call after the user has
+said yes. A bundled-name collision and an incomplete download are separate
+CONFLICTs with their own instructions — the first is never retryable, the second
+is retryable once the device is back online.
+
 ### AI configuration (Hermes only)
 `ai_list_models` · `ai_set_provider` · `ai_set_model`
 

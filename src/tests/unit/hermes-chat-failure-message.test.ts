@@ -76,6 +76,72 @@ describe("the message shown for a failed Hermes turn", () => {
 });
 
 /**
+ * Hermes hard-wraps at ~76 columns. Keeping only the first line therefore cut
+ * every multi-line message mid-clause, and the half that was dropped was the
+ * half the customer could act on. Both stdout blocks below are the exact bytes
+ * captured from `hermes chat -q` on the QA box (TASK-451 / TASK-446).
+ */
+describe("a Hermes message that arrives hard-wrapped", () => {
+  it("keeps the remedy half of 'No inference provider configured'", () => {
+    const stdout = [
+      "No inference provider configured. Run 'hermes model' to choose a provider and",
+      "model, or set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in",
+      "~/.hermes/.env.",
+    ].join("\r\n");
+
+    const msg = hermesFailureMessage(stdout, "");
+
+    // It used to end on a dangling "and".
+    expect(msg).not.toMatch(/\band$/);
+    expect(msg).toContain("OPENROUTER_API_KEY");
+    expect(msg).toContain("~/.hermes/.env");
+    expect(msg).toBe(
+      "No inference provider configured. Run 'hermes model' to choose a provider and "
+      + "model, or set an API key (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) in ~/.hermes/.env.",
+    );
+  });
+
+  it("keeps the whole context-window explanation, all five lines of it", () => {
+    const stdout = [
+      "Failed to initialize agent: Model qwen2.5:3b has a context window of 32,768",
+      "tokens, which is below the minimum 64,000 required by Hermes Agent. Choose a",
+      "model with at least 64K context. If your server reports a window smaller than",
+      "the model's true window, set model.context_length in config.yaml to the real",
+      "value (this must be at least 64K).",
+    ].join("\n");
+
+    const msg = hermesFailureMessage(stdout, "");
+
+    expect(msg).toContain("at least 64K context");
+    expect(msg).toContain("model.context_length");
+    expect(msg).toMatch(/\)\.$/);
+    expect(msg.length).toBeLessThanOrEqual(400);
+  });
+
+  it("does not glue two independent failures together", () => {
+    const stdout = [
+      "API call failed after 3 retries: HTTP 404: model: claude-opus-4-20250514xxxx",
+      "HTTP 401: invalid api key",
+    ].join("\n");
+    // The second line opens with its own `HTTP nnn` marker, so it is a new
+    // record however long the line above it is.
+    expect(hermesFailureMessage(stdout, "")).toBe(
+      "API call failed after 3 retries: HTTP 404: model: claude-opus-4-20250514xxxx",
+    );
+  });
+
+  it("leaves a short two-line report as two lines", () => {
+    // Nothing was wrapped here — the first line is well under the wrap column.
+    expect(hermesFailureMessage("failed early\nsomething else entirely", "")).toBe("failed early");
+  });
+
+  it("marks a message it had to cut", () => {
+    const long = "error: " + "x".repeat(5000);
+    expect(hermesFailureMessage(long, "").endsWith("…")).toBe(true);
+  });
+});
+
+/**
  * An interrupted turn used to surface as "hermes exited with code 130".
  *
  * Captured on-device by sending each of SIGTERM, SIGHUP and SIGINT to a live

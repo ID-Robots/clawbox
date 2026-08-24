@@ -219,6 +219,38 @@ try {
   console.warn("[production-server] Failed to set up local-ai token:", err.message);
 }
 
+// ─── Internal-unit token ───
+// Per-install credential ClawBox's own systemd units present when they call
+// back into this server. clawbox-heartbeat.timer is the first user: its tick
+// endpoint is pre-auth (nobody may be logged in) and restarts clawbox-tunnel
+// when the advertised hostname has died, so leaving it anonymous handed anyone
+// on the LAN — or anyone holding the box's public tunnel URL — a systemd
+// restart four times an hour. See src/lib/internal-token.ts.
+//
+// Written as KEY=value rather than a bare token so systemd can read it with
+// `EnvironmentFile=`: PID 1 parses that as root before the unit's ProtectHome
+// sandbox applies, which is how a sandboxed unit can present a secret that
+// lives under /home.
+const INTERNAL_TOKEN_PATH = path.join(__dirname, "data", "internal-token.env");
+try {
+  let internalToken;
+  try {
+    const raw = fs.readFileSync(INTERNAL_TOKEN_PATH, "utf-8");
+    const match = /^\s*(?:export\s+)?CLAWBOX_INTERNAL_TOKEN=(.*)$/m.exec(raw);
+    if (match) internalToken = match[1].trim().replace(/^"(.*)"$/, "$1");
+  } catch {}
+  if (!internalToken || internalToken.length < 32) {
+    internalToken = require("crypto").randomBytes(32).toString("hex");
+    fs.mkdirSync(path.dirname(INTERNAL_TOKEN_PATH), { recursive: true });
+    fs.writeFileSync(INTERNAL_TOKEN_PATH, `CLAWBOX_INTERNAL_TOKEN=${internalToken}\n`, { mode: 0o600 });
+  }
+  // Re-harden on every boot: writeFileSync only applies `mode` when creating.
+  fs.chmodSync(INTERNAL_TOKEN_PATH, 0o600);
+  process.env.CLAWBOX_INTERNAL_TOKEN = internalToken;
+} catch (err) {
+  console.warn("[production-server] Failed to set up internal token:", err.message);
+}
+
 // ─── Honest shutdown ───
 // systemd stops this unit with SIGTERM. With no handler the process died on the
 // default disposition and systemd recorded

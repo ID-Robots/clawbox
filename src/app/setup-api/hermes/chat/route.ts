@@ -199,15 +199,62 @@ function errorFromStderr(stderr: string): string {
   return usefulLines(stderr)[0] ?? "";
 }
 
+/**
+ * Hermes hard-wraps its output at ~76 columns, so ONE sentence arrives as
+ * several lines. Rejoining them is the difference between
+ *
+ *   "No inference provider configured. Run 'hermes model' to choose a provider and"
+ *
+ * — which is what the customer used to get, ending on a dangling "and" — and the
+ * whole message, whose second half is the part they can act on: which API key to
+ * set, and that it goes in ~/.hermes/.env.
+ *
+ * A line continues the one above it when the one above looks WRAPPED: long
+ * enough to have hit the wrap column, and followed by something that does not
+ * start a new record of its own (a list item, a `key: value` line, an
+ * `HTTP 404:` / `SomeError:` header). Nothing here joins two independent
+ * failures — those start with one of those markers — and a short line is never
+ * treated as wrapped, so a terse two-line report stays two lines.
+ */
+const WRAP_COLUMN_HINT = 60;
+
+function startsNewRecord(line: string): boolean {
+  return /^(?:[-*•]|\d+[.)])\s/.test(line)
+    || /^HTTP\s+\d{3}\b/.test(line)
+    || /^[A-Za-z][\w.]*(?:Error|Exception|Warning)\b/.test(line)
+    || /^[A-Za-z][\w .\-]*:\s/.test(line);
+}
+
+function unwrap(lines: string[]): string[] {
+  const paragraphs: string[] = [];
+  for (const line of lines) {
+    const previous = paragraphs[paragraphs.length - 1];
+    if (previous !== undefined && previous.length >= WRAP_COLUMN_HINT && !startsNewRecord(line)) {
+      paragraphs[paragraphs.length - 1] = `${previous} ${line}`;
+    } else {
+      paragraphs.push(line);
+    }
+  }
+  return paragraphs;
+}
+
+/** The cap is per MESSAGE, not per line — a bubble is not a log viewer. */
+const MAX_MESSAGE_CHARS = 400;
+
 /** Bookkeeping and stack noise, dropped before we look for a cause. */
 function usefulLines(stream: string): string[] {
   const lines = stream
     .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l && !/^session_id:/i.test(l) && !/^\s*(?:Traceback|File ")/.test(l));
-  const named = lines.filter((l) =>
+  // Unwrap FIRST: the filter below keeps lines that themselves name a failure,
+  // and the continuation lines of a wrapped message read as prose. That is how
+  // the remedy half of every multi-line Hermes error was being dropped.
+  const paragraphs = unwrap(lines);
+  const named = paragraphs.filter((l) =>
     /\b(?:HTTP\s+\d{3}|error|failed|not found|denied|invalid|unauthor)/i.test(l));
-  return (named.length ? named : lines).map((l) => l.slice(0, 400));
+  return (named.length ? named : paragraphs).map((l) =>
+    l.length > MAX_MESSAGE_CHARS ? `${l.slice(0, MAX_MESSAGE_CHARS - 1)}…` : l);
 }
 
 /**

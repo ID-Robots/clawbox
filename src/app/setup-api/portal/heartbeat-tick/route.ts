@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { readTunnelUrl, startTunnelService } from "@/lib/cloudflared";
+import { isInternalRequest } from "@/lib/internal-token";
 import { pushHeartbeatTick } from "@/lib/portal-heartbeat";
+import { requireSession } from "@/lib/route-auth";
 import { checkTunnelLiveness, markRestarted, mayRestart } from "@/lib/tunnel-liveness";
 
 export const dynamic = "force-dynamic";
@@ -28,12 +30,27 @@ export const dynamic = "force-dynamic";
 // surfaces distinct also means a future addition to /portal/status
 // can't accidentally widen the timer's blast radius.
 //
-// Always returns 200. The tick helper is fire-and-forget: it no-ops on
+// Authenticated, despite being pre-auth in middleware. The route has to stay
+// reachable without a session — the timer curls it on a device nobody has logged
+// into — but "no session required" had become "anyone may call it", and the dead
+// -tunnel branch below RESTARTS a systemd unit. Anyone on the LAN, or anyone
+// holding the box's public tunnel URL, could bounce clawbox-tunnel four times an
+// hour by hitting this path (TASK-446). So: our own units present the
+// per-install internal token (see src/lib/internal-token.ts, and the
+// EnvironmentFile line in config/clawbox-heartbeat.service), the owner's browser
+// presents a session cookie, and everyone else gets 401.
+//
+// Otherwise always returns 200. The tick helper is fire-and-forget: it no-ops on
 // missing token, missing tunnel URL, or network failure — surfacing a 500
 // here would just make the systemd unit flap, which the timer's
 // SuccessExitStatus already tolerates. The restart is best-effort for the
 // same reason.
-export async function GET() {
+export async function GET(request: Request) {
+  if (!isInternalRequest(request)) {
+    const unauthorized = await requireSession(request);
+    if (unauthorized) return unauthorized;
+  }
+
   const tunnelUrl = await readTunnelUrl();
   const liveness = await checkTunnelLiveness(tunnelUrl);
 

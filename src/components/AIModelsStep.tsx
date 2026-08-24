@@ -876,10 +876,21 @@ export default function AIModelsStep({
     };
   }, [showConfiguring, showError, showSuccessAndContinue]);
 
+  // Route errors are English sentences written for whoever is reading them —
+  // fine for the ones nobody can act on, wrong for the ones we know how to say
+  // in the customer's language. A route that returns a `code` gets translated;
+  // everything else falls through to the text it sent, as before.
+  const TRANSLATED_ERROR_CODES: Record<string, string> = useMemo(
+    () => ({ local_ai_runtime_unavailable: "ai.localRuntimeUnavailable" }),
+    [],
+  );
+
   const extractError = useCallback(async (res: Response, fallback: string) => {
     const data = await res.json().catch(() => ({}));
+    const key = typeof data.code === "string" ? TRANSLATED_ERROR_CODES[data.code] : undefined;
+    if (key) return t(key);
     return typeof data.error === "string" ? data.error : fallback;
-  }, []);
+  }, [TRANSLATED_ERROR_CODES, t]);
 
   // Ollama hook
   const ollamaCallbacks = useMemo<OllamaCallbacks>(() => ({

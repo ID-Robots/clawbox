@@ -145,10 +145,64 @@ unpin_cpu_freq() {
   done
 }
 
+# Where the pre-pin clock state is snapshotted, so switching back to balanced
+# can hand every knob back rather than only the ones we remembered to name.
+#
+# `nvpmodel -m <balanced>` rewrites the CPU and GPU caps for us — measured: the
+# GPU devfreq really does return to 306-918 MHz with no help. It does NOT clear
+# the EMC rate lock that jetson_clocks sets, so on the QA box a
+# performance -> balanced round trip left EMC pinned at 3,199 MHz with
+# FreqOverride=1 and idle draw at 5,992 mW instead of 4,831 mW — +1,161 mW,
+# half of everything this profile saves, held until the next reboot
+# (measured 2026-08-24).
+#
+# Writing 0 to .../clk/emc/mrq_rate_locked clears the override flag but leaves
+# the rate itself at 3,199 MHz (also measured), so the flag alone is not the
+# fix. jetson_clocks' own --store/--restore is, and it covers whatever else a
+# future JetPack decides to pin.
+CLOCK_SNAPSHOT="/var/lib/clawbox/l4t_dfs.conf"
+EMC_RATE_LOCK="/sys/kernel/debug/bpmp/debug/clk/emc/mrq_rate_locked"
+
+# Snapshot the UNPINNED state, once. Guarded because a second --performance on
+# an already-pinned box would otherwise overwrite the pristine snapshot with a
+# pinned one, and then --balanced would "restore" the pinning.
+store_clock_state() {
+  have jetson_clocks || return 0
+  [ -e "$CLOCK_SNAPSHOT" ] && return 0
+  mkdir -p "$(dirname "$CLOCK_SNAPSHOT")" 2>/dev/null || return 0
+  if jetson_clocks --store "$CLOCK_SNAPSHOT" >/dev/null 2>&1; then
+    echo "clock state stored to $CLOCK_SNAPSHOT"
+  else
+    echo "warning: could not store clock state; EMC may stay pinned until reboot" >&2
+  fi
+}
+
+# Hand the clocks back. Falls back to clearing the EMC lock directly for boxes
+# that were already pinned when this build landed and so have no snapshot —
+# they still need a reboot to drop the rate, but they stop being *locked*.
+restore_clock_state() {
+  if have jetson_clocks && [ -e "$CLOCK_SNAPSHOT" ]; then
+    if jetson_clocks --restore "$CLOCK_SNAPSHOT" >/dev/null 2>&1; then
+      echo "clock state restored from $CLOCK_SNAPSHOT"
+    else
+      echo "warning: jetson_clocks --restore failed" >&2
+    fi
+    # Consume it, so the next --performance snapshots a fresh unpinned state.
+    rm -f "$CLOCK_SNAPSHOT" 2>/dev/null || true
+    return 0
+  fi
+  if [ -w "$EMC_RATE_LOCK" ] && [ "$(cat "$EMC_RATE_LOCK" 2>/dev/null || echo 0)" = "1" ]; then
+    echo 0 > "$EMC_RATE_LOCK" 2>/dev/null || true
+    echo "EMC rate lock cleared (no snapshot; rate drops at next reboot)"
+  fi
+}
+
 apply_balanced() {
   local id name
   id="$(balanced_mode_id)"
   name="$(mode_name_for_id "$id")"
+  # Before nvpmodel, so the mode's own caps are the last word.
+  restore_clock_state
   if have nvpmodel; then
     nvpmodel -m "$id" >/dev/null 2>&1 || echo "warning: nvpmodel -m $id failed" >&2
     echo "nvpmodel mode $id (${name:-unknown})"
@@ -173,6 +227,8 @@ apply_performance() {
     echo "nvpmodel not present, skipping mode select"
   fi
   if have jetson_clocks; then
+    # Snapshot BEFORE pinning — after it, there is nothing worth remembering.
+    store_clock_state
     jetson_clocks >/dev/null 2>&1 || echo "warning: jetson_clocks failed" >&2
     echo "jetson_clocks: applied (clocks pinned)"
   else

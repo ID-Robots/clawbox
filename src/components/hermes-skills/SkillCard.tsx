@@ -35,9 +35,12 @@ export function SkillCard({
 
   return (
     <li
-      className="relative h-full card-surface rounded-2xl p-3 flex gap-3 border border-[var(--border-subtle)]
-                 hover:border-[var(--coral-bright)]/40 hover:-translate-y-0.5 hover:shadow-lg transition-all"
+      className={`relative h-full card-surface rounded-2xl p-3 flex gap-3 border border-[var(--border-subtle)]
+                 hover:border-[var(--coral-bright)]/40 hover:-translate-y-0.5 hover:shadow-lg transition-all${
+                   installedSkill?.enabled === false ? ' opacity-60' : ''
+                 }`}
       data-testid="skill-card"
+      data-skill-enabled={installedSkill ? String(installedSkill.enabled !== false) : undefined}
     >
       <SkillTile name={skill.name} category={skill.category} tags={tags} />
       <div className="flex-1 min-w-0 flex flex-col">
@@ -63,6 +66,18 @@ export function SkillCard({
           )}
           {installedSkill && (
             <ScanChip verdict={installedSkill.scanVerdict} findings={installedSkill.scanFindingCount} />
+          )}
+          {/* TASK-452: the API used to hardcode `enabled: true` on every row,
+              so a skill switched off in Hermes' own config still read as live
+              here and in the agent's skill_list. It is now computed from
+              skills.disabled, and this is where it is finally shown. */}
+          {installedSkill?.enabled === false && (
+            <MetaChip
+              icon="toggle_off"
+              tone="warn"
+              text={COPY.skillDisabled}
+              title={COPY.skillDisabledHelp}
+            />
           )}
         </div>
 
