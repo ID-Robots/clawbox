@@ -313,6 +313,17 @@ export interface DiscordGuildMembers {
 const MAX_GUILDS = 25;
 const MEMBER_PAGE_LIMIT = 1000;
 
+/**
+ * One ceiling for the WHOLE walk.
+ *
+ * Every call below already carries its own VALIDATE_TIMEOUT_MS, but the walk
+ * makes up to 1 + 2 x MAX_GUILDS of them in series, so per-call ceilings alone
+ * bound this at roughly seven minutes — behind a Settings spinner that has no
+ * client-side timeout of its own. The per-call limit stays (it is what catches
+ * one hung connection); this is what bounds the sequence.
+ */
+export const MEMBER_WALK_TIMEOUT_MS = 30_000;
+
 function memberDisplayName(user: Record<string, unknown>, nick: unknown): string {
   if (typeof nick === "string" && nick.trim()) return nick;
   if (typeof user.global_name === "string" && user.global_name.trim()) return user.global_name;
@@ -339,13 +350,25 @@ export async function fetchDiscordGuildMembers(
   token: string,
   signal?: AbortSignal,
 ): Promise<DiscordGuildMembers> {
-  const raw = await discordGet(token, "/users/@me/guilds?limit=200", signal);
+  // Every request in the walk shares this, so the caller's reason to give up
+  // and the walk's own deadline both reach each call — and neither replaces the
+  // per-call ceiling, which discordGet still applies on top.
+  const deadline = AbortSignal.timeout(MEMBER_WALK_TIMEOUT_MS);
+  const walkSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
+
+  const raw = await discordGet(token, "/users/@me/guilds?limit=200", walkSignal);
   if (!Array.isArray(raw)) throw new DiscordUnavailableError();
 
   const guilds: DiscordGuild[] = [];
   const byId = new Map<string, DiscordMember>();
 
   for (const entry of raw.slice(0, MAX_GUILDS)) {
+    // The deadline expired, or the caller gave up. Both per-guild calls below
+    // catch their own failures and degrade, so without this the walk would keep
+    // marching through the remaining guilds appending unreadable rows. Return
+    // the servers already gathered instead: the picker degrades, it does not
+    // grow a page of empty entries.
+    if (walkSignal.aborted) break;
     if (!isRecord(entry) || typeof entry.id !== "string") continue;
     const guildId = entry.id;
     const guildName = typeof entry.name === "string" ? entry.name : guildId;
@@ -353,7 +376,7 @@ export async function fetchDiscordGuildMembers(
 
     let ownerId: string | null = null;
     try {
-      const full = await discordGet(token, `/guilds/${encoded}`, signal);
+      const full = await discordGet(token, `/guilds/${encoded}`, walkSignal);
       if (isRecord(full) && typeof full.owner_id === "string") ownerId = full.owner_id;
     } catch (err) {
       // A rejected token is a verdict about the whole call, not this one guild.
@@ -363,7 +386,7 @@ export async function fetchDiscordGuildMembers(
     let membersReadable = true;
     let page: unknown = null;
     try {
-      page = await discordGet(token, `/guilds/${encoded}/members?limit=${MEMBER_PAGE_LIMIT}`, signal);
+      page = await discordGet(token, `/guilds/${encoded}/members?limit=${MEMBER_PAGE_LIMIT}`, walkSignal);
     } catch (err) {
       if (err instanceof DiscordAuthError) throw err;
       membersReadable = false;

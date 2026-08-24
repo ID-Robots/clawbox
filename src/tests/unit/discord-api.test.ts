@@ -2,7 +2,9 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   DiscordAuthError,
   DiscordUnavailableError,
+  MEMBER_WALK_TIMEOUT_MS,
   fetchDiscordBotInfo,
+  fetchDiscordGuildMembers,
   fetchDiscordIntents,
   isSafeDiscordToken,
 } from "@/lib/discord-api";
@@ -230,6 +232,90 @@ describe("stored-token guard at the network boundary", () => {
     const secret = `${TOKEN}\nDISCORD_ALLOW_ALL_USERS=true`;
     const err = (await fetchDiscordBotInfo(secret).catch((e: Error) => e)) as Error;
     expect(err.message).not.toContain(TOKEN);
+  });
+});
+
+// The guild walk is the only place in this module that makes many calls in a
+// row. Each one carries its own 8 s ceiling, but 1 + 2 x 25 of them in series
+// is bounded at minutes, not seconds — so the walk needs a ceiling of its own,
+// and it has to be one signal shared by every call rather than a per-call one.
+describe("fetchDiscordGuildMembers — bounding the walk", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  /** Three guilds, so "stopped early" is distinguishable from "ran to the end". */
+  const GUILDS = [
+    { id: "900000000000000001", name: "one" },
+    { id: "900000000000000002", name: "two" },
+    { id: "900000000000000003", name: "three" },
+  ];
+
+  /**
+   * Answers the walk's three call shapes and runs `onGuildDone` after each
+   * guild's member page, which is where a deadline or a disconnect lands.
+   */
+  function stubWalk(onGuildDone: () => void) {
+    return vi.fn(async (url: string) => {
+      if (url.endsWith("/users/@me/guilds?limit=200")) return jsonResponse(GUILDS);
+      if (url.includes("/members?limit=")) {
+        onGuildDone();
+        return jsonResponse([]);
+      }
+      return jsonResponse({ id: "900000000000000001", owner_id: "100000000000000001" });
+    });
+  }
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("visits every guild when nothing interrupts it", async () => {
+    fetchMock = stubWalk(() => {});
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDiscordGuildMembers(TOKEN);
+
+    expect(result.guilds).toHaveLength(3);
+    // 1 guild list + 2 calls per guild.
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+  });
+
+  it("stops the walk when the shared deadline fires", async () => {
+    // Replace only the walk's own deadline with a signal this test controls;
+    // the per-call ceilings inside discordGet keep their real timers.
+    const deadline = new AbortController();
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) =>
+      ms === MEMBER_WALK_TIMEOUT_MS ? deadline.signal : realTimeout(ms),
+    );
+
+    fetchMock = stubWalk(() => deadline.abort());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDiscordGuildMembers(TOKEN);
+
+    // The deadline expired inside the first guild, so the other two are never
+    // walked — rather than each contributing two more doomed requests.
+    expect(result.guilds).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops the walk when the caller gives up", async () => {
+    // Without a shared signal the per-guild failures are simply caught and the
+    // loop marches on, so an abandoned request still pays for every guild.
+    const caller = new AbortController();
+    fetchMock = stubWalk(() => caller.abort());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchDiscordGuildMembers(TOKEN, caller.signal);
+
+    expect(result.guilds).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
 
