@@ -12,7 +12,7 @@ import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged } from "@/lib/ui-events";
+import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -1103,7 +1103,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     // provider the ACTIVE harness is really set to, which is what separates
     // "the on-device model is installed" from "it is what answers".
     if (section !== "ai" && section !== "localAi" && !isMobile) return;
-    fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    const load = () => {
+      fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    };
+    load();
+    // And again whenever the providers change. This card names the ACTIVE
+    // provider and its model, so a default chosen from the strip directly above
+    // it made the two disagree on screen — the strip showing the new default
+    // while the card underneath still named the old one — until the section was
+    // left and re-entered. Seen on a live box, in the same window.
+    return onProvidersChanged(load);
   }, [section, isMobile]);
   // Which agent consumes the local model. Named the harness outright, and said
   // "OpenClaw" on a Hermes box where OpenClaw isn't installed.

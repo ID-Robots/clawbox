@@ -152,13 +152,22 @@ async function readHermesStatus(): Promise<ProviderStatusSummary> {
 
   const providers = ids.map((id) => {
     const isDefault = id === defaultProvider;
-    // ClawBox AI is answered by the CREDENTIAL, not by the dashboard's row.
-    // The token is ClawBox's own (minted by the portal and stored by us), and a
-    // box that holds one is linked whether or not Hermes has got around to
-    // enumerating the custom provider yet.
+    const reported = byId.get(id)?.authenticated ?? null;
+    // ClawBox AI is judged like every other provider — by what the dashboard
+    // reports — and falls back to OUR credential only when the dashboard has no
+    // opinion (no clawai row yet, or a catalogue read that could not say).
+    //
+    // It used to read the credential FIRST, and that was wrong in the one
+    // direction that matters: `resolveClawaiToken` looks in ClawBox's own
+    // stores, so on a Hermes box whose token Hermes holds — the dashboard
+    // reporting `authenticated: true`, `providers.clawai.base_url` set, chat
+    // working — the strip called the box's ACTIVE provider "Needs sign-in".
+    // Caught on a live linked device. The fallback is kept because it is the
+    // honest direction: a held credential is evidence of a link, while the
+    // absence of one is not evidence of its absence.
     const credentialed = id === CLAWAI_PROVIDER
-      ? clawaiLinked
-      : (byId.get(id)?.authenticated ?? null);
+      ? (reported ?? (clawaiLinked ? true : null))
+      : reported;
     return {
       id,
       label: hermesProviderLabel(id, byId.get(id)?.name),

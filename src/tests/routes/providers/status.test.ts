@@ -99,13 +99,42 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     expect(rowFor(body, "anthropic")!.state).toBe("connected");
   });
 
-  it("reads ClawBox AI from the credential rather than the dashboard row", async () => {
+  it("falls back to our credential when the dashboard has no ClawBox AI row", async () => {
     getModelOptions.mockResolvedValue(hermesPayload());
     hasClawaiToken.mockResolvedValue(true);
     const body = await (await GET()).json();
 
-    // The dashboard never enumerated a `clawai` row; the box is linked anyway.
+    // The dashboard never enumerated a `clawai` row; the box is linked anyway,
+    // and a held credential is evidence of that.
     expect(rowFor(body, "clawai")!.state).toBe("connected");
+  });
+
+  it("believes the dashboard about ClawBox AI even when we hold no token", async () => {
+    // The live regression this replaced: on a linked Hermes box the token is
+    // Hermes' to hold, so `hasClawaiToken` is false while the dashboard reports
+    // the provider authenticated and chat works through it. Reading the
+    // credential first called the box's ACTIVE provider "Needs sign-in".
+    getModelOptions.mockResolvedValue(hermesPayload({
+      providers: [
+        ...hermesPayload().providers,
+        { id: "clawai", name: "clawai", authenticated: true, isUserDefined: true, source: "d", total: 2, models: [] },
+      ],
+      current: { provider: "clawai", model: "deepseek-v4-flash" },
+    }));
+    hasClawaiToken.mockResolvedValue(false);
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "clawai")!.state).toBe("connected");
+    expect(rowFor(body, "clawai")!.isDefault).toBe(true);
+  });
+
+  it("says unknown for ClawBox AI when neither source can tell", async () => {
+    getModelOptions.mockResolvedValue(hermesPayload());
+    hasClawaiToken.mockResolvedValue(false);
+    const body = await (await GET()).json();
+
+    // Not "disconnected": nothing here is evidence the box is unlinked.
+    expect(rowFor(body, "clawai")!.state).toBe("unknown");
   });
 
   it("shows a provider configured outside our curated list", async () => {

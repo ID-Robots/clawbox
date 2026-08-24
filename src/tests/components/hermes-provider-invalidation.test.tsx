@@ -143,6 +143,17 @@ describe("who emits the signal and who listens", () => {
     }
   });
 
+  it("has the Settings status card re-read on the signal too", () => {
+    // It names the ACTIVE provider and model, directly under the strip. Without
+    // this the two disagreed on screen after a default was chosen from the
+    // strip — new default above, old one still named below — until the section
+    // was left and re-entered.
+    const SETTINGS = read("src", "components", "SettingsApp.tsx");
+    expect(between(SETTINGS, 'fetch("/setup-api/ai-models/status"', "}, [section, isMobile]);")).toContain(
+      "return onProvidersChanged(load);",
+    );
+  });
+
   it("emits the edition-neutral signal from every configure success", () => {
     expect(PANEL).toContain("notifyProvidersChanged()");
     // OpenClaw's single choke point — pasted key, provider OAuth and the
