@@ -64,9 +64,19 @@ export async function POST(request: Request) {
     // there too — otherwise the picker keeps offering a model that is no longer
     // running, which fails only once the customer actually sends a message.
     if ((await getActiveHarness()) === "hermes") {
-      await removeLocalAiFromHermes().catch((err) => {
+      // `wasDefault` is the round-trip half: when the local model was the
+      // device's active provider, removeLocalAiFromHermes clears the selection
+      // (leaving it set with the providers block gone 502s every chat turn with
+      // "Unknown provider 'clawlocal'"), and we remember that it WAS the
+      // selection so re-enabling puts the device back where it was rather than
+      // on nothing.
+      const removal = await removeLocalAiFromHermes().catch((err) => {
         console.error("[local-ai] Hermes local provider removal failed:", err);
+        return null;
       });
+      if (removal?.wasDefault) {
+        await setMany({ local_ai_was_default: true });
+      }
     }
 
     await restartGateway().catch(() => {});
