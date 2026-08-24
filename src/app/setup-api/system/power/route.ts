@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
+import { requireSession } from "@/lib/route-auth";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +13,14 @@ const POWER_ACTIONS: Record<string, string> = {
 };
 
 export async function POST(req: Request) {
+  // Shutdown/reboot is only ever driven from the desktop (SettingsApp, the
+  // taskbar power menu) or the MCP `system_power` tool, both of which are
+  // authenticated. Nothing in the wizard calls it, so there is no bootstrap
+  // carve-out — an anonymous POST could otherwise power the box off from
+  // radio range of the open setup AP. TASK-443.
+  const unauthorized = await requireSession(req);
+  if (unauthorized) return unauthorized;
+
   let action: unknown;
   try {
     ({ action } = await req.json());

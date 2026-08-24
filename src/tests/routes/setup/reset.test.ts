@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
@@ -71,6 +72,7 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
 
 describe("POST /setup-api/setup/reset", () => {
   let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -102,14 +104,22 @@ describe("POST /setup-api/setup/reset", () => {
       systemctl: { stdout: "", stderr: "" },
     });
 
+    session = installSessionFixture();
     const mod = await import("@/app/setup-api/setup/reset/route");
-    resetPost = mod.POST;
+    // The handler now requires a session (TASK-443), so every call in this
+    // file goes through an authenticated request. `reset-requires-auth.test.ts`
+    // covers the unauthenticated case.
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie },
+    }));
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    session.cleanup();
   });
 
   it("performs factory reset successfully", async () => {
@@ -462,6 +472,7 @@ describe("POST /setup-api/setup/reset", () => {
  */
 describe("POST /setup-api/setup/reset — Hermes agent + offline model survive", () => {
   let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
   const HOME = process.env.HOME || "/home/clawbox";
   const HERMES = `${HOME}/.hermes`;
 
@@ -511,14 +522,22 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     mockResetUpdateState.mockReturnValue();
     setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
 
+    session = installSessionFixture();
     const mod = await import("@/app/setup-api/setup/reset/route");
-    resetPost = mod.POST;
+    // The handler now requires a session (TASK-443), so every call in this
+    // file goes through an authenticated request. `reset-requires-auth.test.ts`
+    // covers the unauthenticated case.
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie },
+    }));
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+    session.cleanup();
   });
 
   it("never removes ~/.hermes/hermes-agent, directly or via its parent", async () => {

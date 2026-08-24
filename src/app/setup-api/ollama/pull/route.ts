@@ -2,10 +2,18 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { ensureLocalAiReady, getOllamaBaseUrl } from "@/lib/local-ai-runtime";
+import { requireSession } from "@/lib/route-auth";
 
 const OLLAMA_BASE = getOllamaBaseUrl();
 
 export async function POST(request: Request) {
+  // A bodyless POST used to default to pulling llama3.2:3b, so an anonymous
+  // caller on the setup AP could fill the disk one multi-GB pull at a time.
+  // Local Models is a desktop/AIModelsStep surface and both are authenticated
+  // by the time they run, so it fails closed. TASK-443.
+  const unauthorized = await requireSession(request);
+  if (unauthorized) return unauthorized;
+
   let body: { model?: string };
   try {
     body = await request.json();
