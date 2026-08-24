@@ -19,6 +19,25 @@ vi.mock("child_process", () => ({
     else cb(null, { stdout: result?.stdout ?? "", stderr: "" });
   },
   spawn: (...args: unknown[]) => spawnMock(...args),
+  execFile: (...args: unknown[]) => {
+    const cb = args[args.length - 1];
+    if (typeof cb === "function") (cb as (e: Error | null, o: unknown) => void)(null, { stdout: "", stderr: "" });
+  },
+}));
+
+/**
+ * TASK-453 round 2 — the device's REAL tunnel is clawbox-tunnel.service, and
+ * this module only ever knew about a cloudflared it spawned itself. The unit
+ * lives behind @/lib/cloudflared, so it is faked here the way the box answers.
+ */
+const serviceStateMock = vi.fn(async () => "inactive");
+const unitUrlMock = vi.fn(async () => null as string | null);
+const journalUrlMock = vi.fn(async () => null as string | null);
+
+vi.mock("@/lib/cloudflared", () => ({
+  getTunnelServiceState: () => serviceStateMock(),
+  readTunnelUrl: () => unitUrlMock(),
+  readTunnelUrlFromJournal: () => journalUrlMock(),
 }));
 
 let tunnel: typeof import("@/lib/tunnel");
@@ -41,6 +60,12 @@ beforeEach(async () => {
   await fs.rm(URL_FILE, { force: true });
   execMock.mockReset();
   spawnMock.mockReset();
+  serviceStateMock.mockReset();
+  serviceStateMock.mockResolvedValue("inactive");
+  unitUrlMock.mockReset();
+  unitUrlMock.mockResolvedValue(null);
+  journalUrlMock.mockReset();
+  journalUrlMock.mockResolvedValue(null);
 });
 
 describe("tunnel — state persistence", () => {
@@ -129,7 +154,14 @@ describe("tunnel — isCloudflaredInstalled", () => {
 describe("tunnel — getTunnelStatus", () => {
   it("reports disabled+not-running when nothing is set up", async () => {
     const status = await tunnel.getTunnelStatus();
-    expect(status).toEqual({ enabled: false, running: false, tunnelUrl: null, error: null });
+    expect(status).toEqual({
+      enabled: false,
+      running: false,
+      tunnelUrl: null,
+      error: null,
+      service: "inactive",
+      managedBy: null,
+    });
   });
 
   it("reports running+url when pid + url + state are present", async () => {
@@ -158,6 +190,100 @@ describe("tunnel — getTunnelStatus", () => {
     expect(status.running).toBe(false);
     expect(status.enabled).toBe(false);
     expect(status.tunnelUrl).toBeNull();
+  });
+
+  /**
+   * The smoke finding, verbatim. On the QA box on 2026-08-24:
+   *
+   *   $ systemctl is-active clawbox-tunnel  -> active
+   *   $ cat data/cloudflared/tunnel.url     -> https://stat-door-...trycloudflare.com
+   *   $ ls data/tunnel.pid                  -> does not exist
+   *   $ curl -b jar .../setup-api/tunnel/status
+   *     {"enabled":false,"running":false,"tunnelUrl":null,...}
+   *
+   * The owner is told remote access is off while the whole desktop is on the
+   * public internet behind one password — and is given neither the URL nor a
+   * reason to look for an off switch.
+   */
+  it("sees the systemd tunnel even with no pid file of its own", async () => {
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue("https://stat-door-tournament-resorts.trycloudflare.com");
+
+    const status = await tunnel.getTunnelStatus();
+
+    expect(status.running).toBe(true);
+    expect(status.enabled).toBe(true);
+    expect(status.tunnelUrl).toBe("https://stat-door-tournament-resorts.trycloudflare.com");
+    expect(status.service).toBe("active");
+    expect(status.managedBy).toBe("systemd");
+  });
+
+  it("recovers the URL from the unit journal when tunnel.url is missing", async () => {
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue(null);
+    journalUrlMock.mockResolvedValue("https://from-journal.trycloudflare.com");
+
+    const status = await tunnel.getTunnelStatus();
+
+    expect(status.tunnelUrl).toBe("https://from-journal.trycloudflare.com");
+    // Never worth denying a live tunnel just because its URL file went missing.
+    expect(status.running).toBe(true);
+  });
+
+  it("counts a still-activating unit as up rather than flickering to off", async () => {
+    serviceStateMock.mockResolvedValue("activating");
+    const status = await tunnel.getTunnelStatus();
+    expect(status.running).toBe(true);
+    expect(status.managedBy).toBe("systemd");
+  });
+
+  it("reports not-running for a failed or stopped unit", async () => {
+    for (const state of ["failed", "inactive", "unknown"] as const) {
+      serviceStateMock.mockResolvedValue(state);
+      unitUrlMock.mockResolvedValue("https://stale.trycloudflare.com");
+      const status = await tunnel.getTunnelStatus();
+      expect(status.running, state).toBe(false);
+      expect(status.tunnelUrl, state).toBeNull();
+      expect(status.managedBy, state).toBeNull();
+    }
+  });
+
+  it("still describes a tunnel this module spawned itself", async () => {
+    await fs.writeFile(PID_FILE, String(process.pid), "utf-8");
+    await fs.writeFile(URL_FILE, "https://spawned.trycloudflare.com", "utf-8");
+    await tunnel.writeState({
+      enabled: true,
+      tunnelUrl: "https://spawned.trycloudflare.com",
+      startedAt: new Date().toISOString(),
+    });
+
+    const status = await tunnel.getTunnelStatus();
+    expect(status.managedBy).toBe("spawned");
+    expect(status.tunnelUrl).toBe("https://spawned.trycloudflare.com");
+  });
+});
+
+describe("tunnel — start/stop cannot lie about the systemd tunnel", () => {
+  it("does not spawn a second cloudflared next to a running unit", async () => {
+    execMock.mockReturnValue({ stdout: "/usr/local/bin/cloudflared" });
+    serviceStateMock.mockResolvedValue("active");
+    unitUrlMock.mockResolvedValue("https://already-up.trycloudflare.com");
+
+    const result = await tunnel.startTunnel();
+
+    expect(result).toEqual({ success: true, tunnelUrl: "https://already-up.trycloudflare.com" });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses to claim it stopped a unit it cannot stop", async () => {
+    serviceStateMock.mockResolvedValue("active");
+
+    const result = await tunnel.stopTunnel();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/clawbox-tunnel/);
+    // And it names the control that does work, so the answer is followable.
+    expect(result.error).toMatch(/Remote Control|portal\/stop/);
   });
 });
 

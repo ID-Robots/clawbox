@@ -80,6 +80,35 @@ export async function readTunnelUrlHistory(limit = 10): Promise<TunnelUrlRecord[
   return records.reverse().slice(0, limit);
 }
 
+/**
+ * The URL the running tunnel published, recovered from the unit's journal.
+ *
+ * LAST RESORT, behind `tunnel.url` and `tunnel-url.log`. cloudflared announces
+ * its quick-tunnel hostname once, on startup ("Your quick Tunnel has been
+ * created! Visit it at ... https://<x>.trycloudflare.com"), and
+ * scripts/run-tunnel.sh copies that into `tunnel.url`. If that file was never
+ * written, or was truncated, or the unit was started by hand outside the
+ * script, the journal is the only remaining record of a hostname that is at
+ * that moment serving the whole device to the public internet — and answering
+ * "remote access is off" in that state is the worst thing this API can do.
+ *
+ * Newest line wins: the unit restarts on failure and every restart publishes a
+ * new hostname.
+ */
+export async function readTunnelUrlFromJournal(lines = 200): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "journalctl",
+      ["-u", TUNNEL_SERVICE, "-n", String(lines), "--no-pager", "-o", "cat"],
+      { maxBuffer: 4 * 1024 * 1024 },
+    );
+    const found = stdout.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi);
+    return found?.length ? found[found.length - 1].replace(/\/+$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function startTunnelService(): Promise<void> {
   await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
   // Persist the user's intent across reboots — without `enable`, the next

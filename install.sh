@@ -53,9 +53,11 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
   _b="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # Resolve the branch like resolve_update_branch() does below — explicit
   # CLAWBOX_BRANCH, else the pinned .update-branch, else the current branch,
-  # else main. Defaulting straight to main (Gap 1) force-reset a beta (or any
-  # non-main) box toward main on a bare `install.sh`. is_safe_git_ref() isn't
-  # defined this early, so validate inline before the value reaches a git ref.
+  # else (detached) what the box can prove about itself, else nothing at all.
+  # Defaulting straight to main (Gap 1) force-reset a beta (or any non-main) box
+  # toward main on a bare `install.sh`, and the detached-HEAD case defaulted the
+  # same way until TASK-447 round 2. is_safe_git_ref() isn't defined this early,
+  # so validate inline before the value reaches a git ref.
   _br="${CLAWBOX_BRANCH:-}"
   if [ -z "$_br" ] && [ -f "$_b/.update-branch" ]; then
     _br="$(head -n 1 "$_b/.update-branch" | tr -d '[:space:]')"
@@ -63,17 +65,41 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
   if [ -z "$_br" ]; then
     _br="$(git -C "$_b" -c safe.directory="$_b" symbolic-ref --short HEAD 2>/dev/null || true)"
   fi
-  # Empty (no env/file/branch) or unsafe (defends against a malicious
-  # .update-branch — the value is interpolated into a git ref below) → main.
-  case "$_br" in ""|*[!A-Za-z0-9._/-]*) _br="main" ;; esac
-  echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
-  git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
-  if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
-    chown -R clawbox:clawbox "$_b" 2>/dev/null || true
-    echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
-    exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
+  # Detached HEAD (symbolic-ref failed): recover from the deployed build's own
+  # stamp, then from the local branches that contain HEAD. recover_detached_branch
+  # is defined far below and this block runs before it, so the two cheapest of
+  # its three probes are inlined. Never `main` — see resolve_update_branch: this
+  # block does `reset --hard origin/$_br`, so guessing here IS the retarget.
+  if [ -z "$_br" ]; then
+    for _stamp in "$_b/.next/standalone/.next/build-info.json" "$_b/.next/build-info.json"; do
+      [ -f "$_stamp" ] || continue
+      _br="$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_stamp" | head -n 1)"
+      [ "$_br" = "HEAD" ] && _br=""
+      [ -n "$_br" ] && break
+    done
   fi
-  echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+  if [ -z "$_br" ]; then
+    _br="$(git -C "$_b" -c safe.directory="$_b" for-each-ref --format='%(refname:short)' \
+             --contains HEAD refs/heads 2>/dev/null | grep -v '^main$' | head -n 1 || true)"
+  fi
+  # Unsafe (defends against a malicious .update-branch — the value is
+  # interpolated into a git ref below) → treat as no answer.
+  case "$_br" in *[!A-Za-z0-9._/-]*) _br="" ;; esac
+  if [ -z "$_br" ]; then
+    # Nothing says which branch this device belongs to. Skip the refresh rather
+    # than reset --hard onto the fleet release channel; the step that follows
+    # resolves the target properly, and refuses just as loudly if it cannot.
+    echo "[bootstrap] WARN: cannot tell which branch this checkout belongs to; running the on-disk copy."
+  else
+    echo "[bootstrap] Refreshing install.sh from origin/${_br} before running..."
+    git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
+    if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
+      chown -R clawbox:clawbox "$_b" 2>/dev/null || true
+      echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
+      exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
+    fi
+    echo "[bootstrap] WARN: couldn't reset to origin/${_br}; continuing with on-disk copy."
+  fi
 fi
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -1125,9 +1151,80 @@ is_safe_git_ref() {
   git -C / check-ref-format --branch "$ref" >/dev/null 2>&1
 }
 
+# Which branch does a DETACHED checkout belong to? Prints it, or nothing.
+#
+# `git symbolic-ref HEAD` fails on a detached HEAD — the state a support
+# engineer leaves behind with `git checkout <sha>` — and that failure used to
+# land on resolve_update_branch's `main` default, so one debugging checkout
+# hard-reset the device onto the fleet release channel. main is never a guess
+# worth making, so the branch is recovered from evidence instead:
+#
+#   1. the deployed build's own stamp (.next/build-info.json "branch"), written
+#      on this device at build time and therefore surviving the checkout;
+#   2. local branches that CONTAIN HEAD — git's own record;
+#   3. name-rev against origin's refs, which is all a re-clone leaves.
+#
+# Mirrors recoverDetachedBranch() in src/lib/updater.ts, including the order and
+# the two filters: `main` is accepted only when it turns up AS evidence and is
+# tried last, and a candidate is used only if origin actually carries it (a
+# branch with no upstream would fail later at `reset --hard origin/<branch>`).
+recover_detached_branch() {
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+
+  local candidates=() stamp branch info others named
+  for stamp in "$PROJECT_DIR/.next/standalone/.next/build-info.json" "$PROJECT_DIR/.next/build-info.json"; do
+    [ -f "$stamp" ] || continue
+    info=$(sed -n 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$stamp" | head -n 1)
+    if [ -n "$info" ] && [ "$info" != "HEAD" ]; then
+      candidates+=("$info")
+      break
+    fi
+  done
+
+  others=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    for-each-ref --format='%(refname:short)' --contains HEAD refs/heads 2>/dev/null || true)
+  while IFS= read -r branch; do
+    [ -n "$branch" ] && candidates+=("$branch")
+  done <<< "$others"
+
+  named=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+    name-rev --name-only --refs='refs/remotes/origin/*' HEAD 2>/dev/null || true)
+  if [ -n "$named" ] && [ "$named" != "undefined" ]; then
+    named="${named#remotes/}"
+    named="${named#origin/}"
+    named="${named%%[~^]*}"
+    [ -n "$named" ] && candidates+=("$named")
+  fi
+
+  # Non-main candidates first: a box carrying any other evidence keeps its channel.
+  local pass
+  for pass in other main; do
+    for branch in ${candidates+"${candidates[@]}"}; do
+      [ -n "$branch" ] || continue
+      [ "$branch" != "HEAD" ] || continue
+      if [ "$pass" = "main" ]; then
+        [ "$branch" = "main" ] || continue
+      else
+        [ "$branch" != "main" ] || continue
+      fi
+      is_safe_git_ref "$branch" || continue
+      git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+        rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1 || continue
+      printf '%s\n' "$branch"
+      return 0
+    done
+  done
+}
+
+# Resolve the update target: CLAWBOX_BRANCH > .update-branch > current branch >
+# (detached) recovered branch. Sets UPDATE_TARGET_LOCAL/UPSTREAM, and
+# UPDATE_TARGET_UNRESOLVED=1 when the only remaining answer would be a guess —
+# callers must refuse rather than sync. `main` is still the default for a
+# directory that is not a checkout at all (a fresh install about to clone).
 resolve_update_branch() {
   UPDATE_TARGET_LOCAL="main"
   UPDATE_TARGET_UPSTREAM="origin/main"
+  UPDATE_TARGET_UNRESOLVED=0
 
   # An explicit CLAWBOX_BRANCH (CLI or systemd env) wins over everything else.
   if [ -n "${CLAWBOX_BRANCH:-}" ] && is_safe_git_ref "${CLAWBOX_BRANCH}"; then
@@ -1146,15 +1243,52 @@ resolve_update_branch() {
     fi
   fi
 
-  local current upstream
+  # Not a checkout — nothing to protect; main is the repository's default.
+  [ -d "$PROJECT_DIR/.git" ] || return 0
+
+  local current upstream recovered
   current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
-  if [ -n "$current" ] && [ "$current" != "main" ] && is_safe_git_ref "$current"; then
-    upstream=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" rev-parse --abbrev-ref "${current}@{u}" 2>/dev/null || true)
-    if [ -n "$upstream" ] && is_safe_git_ref "$upstream"; then
-      UPDATE_TARGET_LOCAL="$current"
-      UPDATE_TARGET_UPSTREAM="$upstream"
+
+  if [ -n "$current" ]; then
+    if [ "$current" != "main" ] && is_safe_git_ref "$current"; then
+      upstream=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" rev-parse --abbrev-ref "${current}@{u}" 2>/dev/null || true)
+      if [ -n "$upstream" ] && is_safe_git_ref "$upstream"; then
+        UPDATE_TARGET_LOCAL="$current"
+        UPDATE_TARGET_UPSTREAM="$upstream"
+      elif git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" \
+             rev-parse --verify --quiet "refs/remotes/origin/$current" >/dev/null 2>&1; then
+        # The upstream LINK does not survive a re-clone even though the branch
+        # does; origin carrying the branch is the same evidence by another route.
+        UPDATE_TARGET_LOCAL="$current"
+        UPDATE_TARGET_UPSTREAM="origin/$current"
+      fi
     fi
+    return 0
   fi
+
+  # Detached HEAD: evidence, or refuse. Never the main default.
+  recovered="$(recover_detached_branch)"
+  if [ -n "$recovered" ]; then
+    UPDATE_TARGET_LOCAL="$recovered"
+    UPDATE_TARGET_UPSTREAM="origin/$recovered"
+    return 0
+  fi
+
+  UPDATE_TARGET_LOCAL=""
+  UPDATE_TARGET_UPSTREAM=""
+  UPDATE_TARGET_UNRESOLVED=1
+  return 0
+}
+
+# The message a device gets instead of being moved to another channel.
+refuse_unresolved_update_target() {
+  echo "Error: this device is not on a branch (detached HEAD), carries no update pin," >&2
+  echo "       and nothing on it records which branch it was built from." >&2
+  echo "       Refusing to update: the only remaining answer is 'main', the fleet release" >&2
+  echo "       channel, and moving this device there would be a channel change, not an update." >&2
+  echo "       Set the update branch in System Update -> Advanced options (or check out the" >&2
+  echo "       branch this device belongs to) and run the update again." >&2
+  exit 1
 }
 
 # The branch this checkout is already sitting on, when that is worth recording.
@@ -1163,8 +1297,13 @@ resolve_update_branch() {
 # Deliberately narrow, because this runs without anyone having asked for a
 # branch. Every condition below is a case where writing a pin would be a guess
 # rather than a record:
-#   - not a repo, or HEAD is detached → there is no branch name to record. A
-#     detached device still falls through to `main`; see step_git_pull.
+#   - not a repo → there is no branch name to record.
+#   - HEAD is detached → no branch name is directly readable, but the box may
+#     still be able to PROVE which branch it belongs to (build stamp, refs that
+#     contain HEAD). recover_detached_branch answers that, and its answer is
+#     evidence, not a guess, so it is worth recording — a detached device that
+#     records nothing has to re-derive the same answer on every future update,
+#     and refuses the update outright the day the evidence goes away.
 #   - `main` → rule 3's fallback is already main, so a pin changes nothing today
 #     and would only freeze a device an operator later moves by hand.
 #   - not a ref both resolvers accept → a pin the updater refuses resolves to
@@ -1176,6 +1315,7 @@ adoptable_checkout_branch() {
   [ -d "$PROJECT_DIR/.git" ] || return 0
   local current
   current=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
+  [ -n "$current" ] || current="$(recover_detached_branch)"
   [ -n "$current" ] || return 0
   [ "$current" != "main" ] || return 0
   is_safe_git_ref "$current" || return 0
@@ -1346,7 +1486,14 @@ step_bootstrap_updater() {
   # next root step will launch a fresh shell against the updated install.sh.
   step_fix_git_perms
   resolve_update_branch
+  [ "${UPDATE_TARGET_UNRESOLVED:-0}" -eq 1 ] && refuse_unresolved_update_target
   echo "  Refreshing updater files on branch '$UPDATE_TARGET_LOCAL'..."
+  # An orphan of the pre-3.9 hand-deploy method that nothing reads. Left in
+  # place it is an untracked file in the project root, which the drift engine
+  # reads as "the code on disk matches no commit" — it raised the About-screen
+  # drift banner on a healthy box and stamped `dirty: true` on clean builds.
+  # It is gitignored now, so `git clean -fd` will not take it: drop it here.
+  rm -f "$PROJECT_DIR/.deployed-sha"
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 
@@ -1378,7 +1525,9 @@ step_git_pull() {
   # robust path the in-app updater takes: fetch, drop local changes, checkout,
   # and reset --hard to the upstream. sync_repo_to_update_target chowns too.
   resolve_update_branch
+  [ "${UPDATE_TARGET_UNRESOLVED:-0}" -eq 1 ] && refuse_unresolved_update_target
   echo "  Repository exists, hard-syncing to '$UPDATE_TARGET_LOCAL'..."
+  rm -f "$PROJECT_DIR/.deployed-sha"
   sync_repo_to_update_target "$UPDATE_TARGET_LOCAL" "$UPDATE_TARGET_UPSTREAM"
 }
 

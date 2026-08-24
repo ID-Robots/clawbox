@@ -4,7 +4,7 @@ import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { checkInstallIdentifier, isValidMeta } from "@/lib/hermes-skills";
+import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta } from "@/lib/hermes-skills";
 import {
   type HubLockEntry,
   SKILLS_DIR,
@@ -139,7 +139,11 @@ export async function POST(request: Request) {
   // `--yes` runs non-interactively. `--force` is intentionally NOT passed: the
   // scan gate is enforced below on the RESULT, where we can see the verdict and
   // ask the owner, rather than blanket-overridden here.
-  const args = ["skills", "install", id, "--yes"];
+  // A bare ClawHub slug has to be sent as `clawhub/<slug>` or the CLI resolves
+  // nothing — see cliInstallIdentifier(). `id` itself stays as the customer
+  // typed/clicked it for the catalog lookup, the lock check and the audit log.
+  const cliId = cliInstallIdentifier(id, record?.source);
+  const args = ["skills", "install", cliId, "--yes"];
   if (category) args.push("--category", category);
   if (name) args.push("--name", name);
 
@@ -170,13 +174,18 @@ export async function POST(request: Request) {
   // success — every accepted id is a registry identifier, so it always keys
   // on a name we can check.
   const fallbackName = name || id.split("/").pop() || id;
-  if (!(await isInHubLock(fallbackName, id))) {
+  // Either spelling can end up in the lock's `identifier`: the CLI records what
+  // the adapter returned, and ClawHub's adapter normalises `clawhub/<slug>`
+  // back to the bare slug.
+  const landed = (await isInHubLock(fallbackName, id))
+    || (cliId !== id && (await isInHubLock(fallbackName, cliId)));
+  if (!landed) {
     return NextResponse.json(
       { error: "Skill could not be resolved — try the full identifier" },
       { status: 502 },
     );
   }
-  const lockName = (await resolveLockKey(id)) || fallbackName;
+  const lockName = (await resolveLockKey(id)) || (cliId !== id ? await resolveLockKey(cliId) : null) || fallbackName;
   const entry = (await readHubLock())[lockName];
 
   // ── 3. Did the scanner flag it? ──────────────────────────────────────────
