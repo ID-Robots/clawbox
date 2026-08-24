@@ -181,9 +181,8 @@ describe("writeDiscordGatewayEnv (env-file injection guard)", () => {
   const UNSAFE = [
     // The payload that matters: a second assignment that would open the bot to
     // everyone who can find the server.
-    ["a newline that would append a second assignment", "
-DISCORD_ALLOW_ALL_USERS=true"],
-    ["a carriage return", "DISCORD_ALLOW_ALL_USERS=true"],
+    ["a newline that would append a second assignment", "\nDISCORD_ALLOW_ALL_USERS=true"],
+    ["a carriage return", "\rDISCORD_ALLOW_ALL_USERS=true"],
     ["a quote that would escape the value", '"'],
     ["a shell substitution", "$(id)"],
   ] as const;
@@ -196,8 +195,7 @@ DISCORD_ALLOW_ALL_USERS=true"],
 
   it("does not leak the rejected token into the error message", async () => {
     const err = (await openclawConfig
-      .writeDiscordGatewayEnv(`${TOKEN}
-DISCORD_ALLOW_ALL_USERS=true`)
+      .writeDiscordGatewayEnv(`${TOKEN}\nDISCORD_ALLOW_ALL_USERS=true`)
       .catch((e: Error) => e)) as Error;
     expect(err.message).not.toContain(TOKEN);
   });

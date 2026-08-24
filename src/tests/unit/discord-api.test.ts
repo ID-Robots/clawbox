@@ -199,10 +199,8 @@ describe("stored-token guard at the network boundary", () => {
   // A newline is the one that matters most: it is what an attacker with write
   // access to the env file would use to append DISCORD_ALLOW_ALL_USERS=true.
   const TAMPERED = [
-    ["a newline, as an injected env line would carry", `${TOKEN}
-DISCORD_ALLOW_ALL_USERS=true`],
-    ["a carriage return, which would split an HTTP header", `${TOKEN}
-X-Injected: 1`],
+    ["a newline, as an injected env line would carry", `${TOKEN}\nDISCORD_ALLOW_ALL_USERS=true`],
+    ["a carriage return, which would split an HTTP header", `${TOKEN}\r\nX-Injected: 1`],
     ["a leading dash the Hermes CLI would read as a flag", `-${TOKEN}`],
     ["a truncated value that could not be a token", "abc"],
     ["an empty file", ""],
@@ -223,15 +221,13 @@ X-Injected: 1`],
   // second to "we could not reach Discord", which would leave a box with an
   // unusable credential looking merely offline.
   it("reports an unusable stored token as rejected, not as Discord being down", async () => {
-    const err = await fetchDiscordBotInfo(`${TOKEN}
-`).catch((e: Error) => e);
+    const err = await fetchDiscordBotInfo(`${TOKEN}\n`).catch((e: Error) => e);
     expect(err).toBeInstanceOf(DiscordAuthError);
     expect(err).not.toBeInstanceOf(DiscordUnavailableError);
   });
 
   it("never echoes the offending value in the error message", async () => {
-    const secret = `${TOKEN}
-DISCORD_ALLOW_ALL_USERS=true`;
+    const secret = `${TOKEN}\nDISCORD_ALLOW_ALL_USERS=true`;
     const err = (await fetchDiscordBotInfo(secret).catch((e: Error) => e)) as Error;
     expect(err.message).not.toContain(TOKEN);
   });

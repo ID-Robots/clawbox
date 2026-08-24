@@ -20,6 +20,11 @@ import {
 
 // Bit positions, spelled out rather than reused from the module, so a typo in
 // the module's constants cannot make these tests agree with it.
+// Same fixture as the other Discord tests: long enough and in the charset that
+// isSafeDiscordToken accepts, since the API helpers now refuse to send anything
+// that could not be a bot token. Deliberately NOT shaped like a real one.
+const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
+
 const PRESENCE_LIMITED = 1 << 13;
 const GUILD_MEMBERS = 1 << 14;
 const GUILD_MEMBERS_LIMITED = 1 << 15;
@@ -107,23 +112,23 @@ describe("fetchDiscordIntents", () => {
 
   it("asks the documented endpoint and never puts the token in the URL", async () => {
     fetchMock.mockResolvedValue(appResponse({ flags: MESSAGE_CONTENT_LIMITED }));
-    await fetchDiscordIntents("a-token");
+    await fetchDiscordIntents(TOKEN);
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/applications/@me");
-    expect(String(url)).not.toContain("a-token");
-    expect((init.headers as Record<string, string>).Authorization).toBe("Bot a-token");
+    expect(String(url)).not.toContain(TOKEN);
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bot ${TOKEN}`);
   });
 
   it("treats an unreadable answer as unknown, not as 'intents are off'", async () => {
     // No `flags` key at all. Reporting this as "missing" would block a save on
     // a response shape change, which is the same dishonesty in reverse.
     fetchMock.mockResolvedValue(appResponse({ id: "1" }));
-    await expect(fetchDiscordIntents("a-token")).rejects.toBeInstanceOf(DiscordUnavailableError);
+    await expect(fetchDiscordIntents(TOKEN)).rejects.toBeInstanceOf(DiscordUnavailableError);
   });
 
   it("treats a network failure as unknown rather than as a verdict", async () => {
     fetchMock.mockRejectedValue(new TypeError("fetch failed"));
-    await expect(fetchDiscordIntents("a-token")).rejects.toBeInstanceOf(DiscordUnavailableError);
+    await expect(fetchDiscordIntents(TOKEN)).rejects.toBeInstanceOf(DiscordUnavailableError);
   });
 });
