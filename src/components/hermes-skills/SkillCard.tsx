@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { type HermesSkill, type InstalledHermesSkill, formatBytes } from '@/lib/hermes-skills';
-import { COPY, platformName, relativeDate } from './copy';
+import { platformName, useCopy } from './copy';
 import { FOCUS_RING, MetaChip, ScanChip, SkillTile, SourceChip, TagPill, TrustChip } from './primitives';
 
 // One card shape for both tabs. The information order is fixed: what it is
@@ -25,8 +25,9 @@ export function SkillCard({
   onOpen: () => void;
   action: ReactNode;
 }) {
+  const COPY = useCopy();
   const installedSkill = isInstalledSkill(skill) ? skill : null;
-  const installedAgo = relativeDate(installedSkill?.installedAt);
+  const installedAgo = COPY.relativeDate(installedSkill?.installedAt);
   const tags = skill.tags || [];
   // Only catalog records carry a provenance note (installed skills always have
   // their own description from SKILL.md).

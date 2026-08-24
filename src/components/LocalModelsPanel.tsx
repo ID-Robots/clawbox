@@ -1,13 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useT } from "@/lib/i18n";
 import type { LocalModelEntry, LocalModelsSnapshot, RunState } from "@/lib/local-models";
 
-const KIND_LABEL: Record<LocalModelEntry["kind"], string> = {
-  llm: "Language",
-  tts: "Speech out",
-  stt: "Speech in",
-  embedding: "Memory",
+// Module scope cannot call `t`, so the tables hold catalogue KEYS and the
+// render resolves them; the enums below still come from these tables.
+const KIND_LABEL_KEY: Record<LocalModelEntry["kind"], string> = {
+  llm: "localModels.kind.llm",
+  tts: "localModels.kind.tts",
+  stt: "localModels.kind.stt",
+  embedding: "localModels.kind.embedding",
 };
 
 const KIND_ICON: Record<LocalModelEntry["kind"], string> = {
@@ -22,11 +25,11 @@ const KIND_ICON: Record<LocalModelEntry["kind"], string> = {
  * is the exact drift this panel exists to make visible (TASK-420: the installer
  * announced Kokoro on boxes that had never had it).
  */
-const RUN_LABEL: Record<RunState, string> = {
-  running: "Running",
-  idle: "Stopped",
-  "on-demand": "On demand",
-  "not-installed": "Not installed",
+const RUN_LABEL_KEY: Record<RunState, string> = {
+  running: "localModels.run.running",
+  idle: "localModels.run.idle",
+  "on-demand": "localModels.run.onDemand",
+  "not-installed": "localModels.run.notInstalled",
 };
 
 const RUN_TONE: Record<RunState, string> = {
@@ -54,8 +57,8 @@ export function formatBytes(bytes: number | null): string | null {
   return `${value.toFixed(value >= 100 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
-const RUN_STATES = Object.keys(RUN_LABEL) as RunState[];
-const KINDS = Object.keys(KIND_LABEL) as LocalModelEntry["kind"][];
+const RUN_STATES = Object.keys(RUN_LABEL_KEY) as RunState[];
+const KINDS = Object.keys(KIND_LABEL_KEY) as LocalModelEntry["kind"][];
 const CONTROLS = ["none", "user-unit", "system-unit"];
 
 /**
@@ -95,6 +98,7 @@ function isSnapshot(value: unknown): value is LocalModelsSnapshot {
 }
 
 export default function LocalModelsPanel({ active }: { active: boolean }) {
+  const { t } = useT();
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -117,8 +121,9 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
   useEffect(() => {
     if (!active) return;
     refresh();
-    const t = setInterval(() => { refresh().catch(() => {}); }, 5000);
-    return () => clearInterval(t);
+    // Named `timer`, not `t`: `t` is the translator in this scope now.
+    const timer = setInterval(() => { refresh().catch(() => {}); }, 5000);
+    return () => clearInterval(timer);
   }, [active, refresh]);
 
   const toggle = useCallback(async (entry: LocalModelEntry, next: boolean) => {
@@ -133,17 +138,17 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(typeof data?.error === "string" ? data.error : "Could not change that model.");
+        setError(typeof data?.error === "string" ? data.error : t("localModels.error.changeFailed"));
         return;
       }
       if (isSnapshot(data)) setSnapshot(data);
     } catch {
-      setError("Could not reach the box to change that model.");
+      setError(t("localModels.error.unreachable"));
     } finally {
       pendingRef.current = null;
       setPendingId(null);
     }
-  }, []);
+  }, [t]);
 
   if (!snapshot) {
     return (
@@ -161,8 +166,7 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
   return (
     <div className="max-w-2xl space-y-4">
       <p className="text-sm text-[var(--text-secondary)]">
-        Everything that can run on the box itself, and what it is doing right now. Anything shown as
-        not installed is genuinely absent — it is not a setting you can switch on here.
+        {t("localModels.intro")}
       </p>
 
       {error && (
@@ -173,7 +177,7 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
 
       {snapshot.unavailable.length > 0 && (
         <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-200">
-          Could not read the state of: {snapshot.unavailable.join(", ")}.
+          {t("localModels.unavailable", { list: snapshot.unavailable.join(", ") })}
         </div>
       )}
 
@@ -197,24 +201,24 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-sm font-semibold text-[var(--text-primary)]">{entry.name}</span>
                   <span className={`text-[11px] px-2 py-0.5 rounded-full border ${RUN_TONE[entry.running]}`}>
-                    {RUN_LABEL[entry.running]}
+                    {t(RUN_LABEL_KEY[entry.running])}
                   </span>
                 </div>
                 <div className="text-xs text-[var(--text-muted)] mt-0.5">
-                  {KIND_LABEL[entry.kind]} · {entry.runtime}
+                  {t(KIND_LABEL_KEY[entry.kind])} · {entry.runtime}
                 </div>
                 <p className="text-sm text-[var(--text-secondary)] mt-2">{entry.detail}</p>
                 {(disk || memory) && (
                   <div className="flex gap-4 mt-2 text-xs text-[var(--text-muted)]">
-                    {disk && <span>Disk {disk}</span>}
-                    {memory && <span>Memory in use {memory}</span>}
+                    {disk && <span>{t("localModels.disk", { size: disk })}</span>}
+                    {memory && <span>{t("localModels.memoryInUse", { size: memory })}</span>}
                   </div>
                 )}
                 {entry.managedBy === "clawkeep" && (
-                  <p className="text-xs text-[var(--text-muted)] mt-2">Managed in ClawKeep.</p>
+                  <p className="text-xs text-[var(--text-muted)] mt-2">{t("localModels.managedInClawKeep")}</p>
                 )}
                 {entry.managedBy === "localAi" && (
-                  <p className="text-xs text-[var(--text-muted)] mt-2">Managed in Settings → Local AI.</p>
+                  <p className="text-xs text-[var(--text-muted)] mt-2">{t("localModels.managedInLocalAi")}</p>
                 )}
               </div>
               {entry.control !== "none" && entry.enabled !== null && (
@@ -227,7 +231,7 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
                   <button
                     type="button"
                     role="switch"
-                    aria-label={`${entry.name} enabled`}
+                    aria-label={t("localModels.toggleLabel", { name: entry.name })}
                     aria-checked={entry.enabled}
                     aria-busy={busy}
                     disabled={busy}
@@ -246,7 +250,7 @@ export default function LocalModelsPanel({ active }: { active: boolean }) {
       })}
 
       <p className="text-xs text-[var(--text-muted)]">
-        Turning a model off stops it now and keeps it off after a reboot.
+        {t("localModels.footer")}
       </p>
     </div>
   );

@@ -17,7 +17,7 @@ import {
   sourceLabel,
   trustMeta,
 } from '@/lib/hermes-skills';
-import { COPY, relativeDate } from './hermes-skills/copy';
+import { useCopy } from './hermes-skills/copy';
 import {
   Alert,
   EmptyState,
@@ -58,6 +58,7 @@ const SELECT_CLS =
   'focus:outline-none focus:border-[var(--coral-bright)]';
 
 export default function HermesSkillsStore({ testId }: { testId?: string }) {
+  const COPY = useCopy();
   const [tab, setTab] = useState<'installed' | 'browse'>('installed');
   const [selected, setSelected] = useState<AnySkill | null>(null);
   const [progress, setProgress] = useState<Record<string, ProgressState>>({});
@@ -150,7 +151,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       setConfirmInstall(null);
       const key = skill.id;
       setProgress((p) => ({ ...p, [key]: { status: 'working' } }));
-      setLive(`Installing ${skill.name}`);
+      setLive(COPY.liveInstalling(skill.name));
       try {
         const res = await fetch('/setup-api/hermes/skills/install', {
           method: 'POST',
@@ -165,25 +166,25 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // open detail view keys its fetch on the id, which did not change, so
         // it has to be told to run again.
         detail.refresh(key);
-        setLive(`${skill.name} installed`);
+        setLive(COPY.liveInstalled(skill.name));
         await installed.refresh();
       } catch (err) {
         setProgressAutoClear(
           key,
-          { status: 'error', message: err instanceof Error ? err.message : 'Install failed' },
+          { status: 'error', message: err instanceof Error ? err.message : COPY.installFailed },
           6000,
         );
-        setLive(`Could not install ${skill.name}`);
+        setLive(COPY.liveInstallFailed(skill.name));
       }
     },
-    [detail, installed, setProgressAutoClear],
+    [COPY, detail, installed, setProgressAutoClear],
   );
 
   const doUninstall = useCallback(
     async ({ name, key, identifier }: UninstallTarget) => {
       setConfirmUninstall(null);
       setProgress((p) => ({ ...p, [key]: { status: 'working' } }));
-      setLive(`Removing ${name}`);
+      setLive(COPY.liveRemoving(name));
       try {
         const res = await fetch('/setup-api/hermes/skills/uninstall', {
           method: 'POST',
@@ -204,18 +205,18 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         // tab), the registry identifier (Browse card and the detail view), and
         // whatever the button tracked progress under.
         detail.refresh(key, name, identifier);
-        setLive(`${name} removed`);
+        setLive(COPY.liveRemoved(name));
         await installed.refresh();
       } catch (err) {
         setProgressAutoClear(
           key,
-          { status: 'error', message: err instanceof Error ? err.message : 'Uninstall failed' },
+          { status: 'error', message: err instanceof Error ? err.message : COPY.uninstallFailed },
           6000,
         );
-        setLive(`Could not remove ${name}`);
+        setLive(COPY.liveRemoveFailed(name));
       }
     },
-    [detail, installed, setProgressAutoClear],
+    [COPY, detail, installed, setProgressAutoClear],
   );
 
   // ── Actions ───────────────────────────────────────────────────────────────
@@ -271,7 +272,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         </span>
       );
     },
-    [progress, uninstallTargetFor, isInstalled],
+    [COPY, progress, uninstallTargetFor, isInstalled],
   );
 
   const renderInstalledAction = useCallback(
@@ -311,7 +312,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         </GhostButton>
       );
     },
-    [progress],
+    [COPY, progress],
   );
 
   // ── Load-more sentinel (browse) ───────────────────────────────────────────
@@ -504,7 +505,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const showFirstRun = browsing && (catalog.preparing || (catalog.loading && catalog.slow));
   // Dated by the DOWNLOAD, not the publisher's build stamp — the latter never
   // moves on a refetch, so it said "21 days ago" about a fresh catalogue.
-  const staleWhen = catalog.catalog?.stale ? relativeDate(catalog.catalog.fetchedAt) : undefined;
+  const staleWhen = catalog.catalog?.stale ? COPY.relativeDate(catalog.catalog.fetchedAt) : undefined;
 
   return (
     <div
@@ -533,7 +534,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           </div>
         </div>
 
-        <div className="flex gap-1.5 mb-3" role="tablist" aria-label="Skills view">
+        <div className="flex gap-1.5 mb-3" role="tablist" aria-label={COPY.tablistLabel}>
           {(['installed', 'browse'] as const).map((key) => (
             <button
               key={key}
@@ -805,6 +806,7 @@ function SearchInput({
   busy?: boolean;
   testId?: string;
 }) {
+  const COPY = useCopy();
   return (
     <div className="relative flex-1">
       <span
@@ -828,7 +830,7 @@ function SearchInput({
           className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 border-2 border-[var(--border-subtle)] rounded-full animate-spin"
           style={{ borderTopColor: 'var(--coral-bright)' }}
           role="status"
-          aria-label="Loading"
+          aria-label={COPY.searchBusy}
         />
       )}
       {!busy && value && (

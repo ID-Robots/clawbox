@@ -44,7 +44,8 @@ not exist on the box. Everything that depended on it is gone with it:
 | Gateway web paths (`/api/*`, `/chat`) | Return **404**. |
 | Gateway port `18789` | Closed — nothing is listening. |
 | Apps previously installed from the App Store | Hidden from the desktop. ClawBox webapps you or the agent built stay visible. |
-| `clawbox update` in the terminal | **Refused.** It would re-run the OpenClaw installer. Update from **Settings → System Update** instead. |
+| **ClawKeep** cloud backups | Not available. ClawKeep archives the OpenClaw agent through the `openclaw` CLI, which this edition does not ship — the app opens and says so. |
+| The CLI update path (`clawbox-cli.ts update`) | **Refused.** It is an OpenClaw-edition tool. Update from **Settings → System Update** instead, which runs the edition-correct installer steps. |
 
 <Warning>
 Do not try to start `clawbox-gateway.service` on a Hermes device. The unit is
@@ -56,8 +57,9 @@ the box in a state that support cannot reason about. Update through
 ## The desktop
 
 Everything else on the desktop is unchanged — Chat, Terminal, Files, Browser,
-VS Code, Remote Desktop, Settings, ClawKeep and any webapps. Two icons are
-specific to this edition:
+Coding, Remote Desktop, System Update, Settings and any webapps. The ClawKeep
+icon is present but the feature is not available on this edition (see the table
+above). Two icons are specific to this edition:
 
 - **Skills** — the [Hermes Skills](/editions/hermes-skills) store.
 - **Hermes** — the Hermes dashboard. It opens through an authenticated proxy on
@@ -76,8 +78,11 @@ change:
 - **Provider** and **model** — the pills in the chat header.
 - **Reasoning effort** — the brain icon, eight levels from *None* to *Ultra*.
   This is a per-conversation override; the device default lives in Hermes'
-  own configuration. Providers that do not accept a reasoning level — including
-  the on-device model — simply do not show the control.
+  own configuration. ClawBox AI shows seven: its backend rejects *Ultra*.
+  The **on-device model is a two-state switch** — *Thinking off* / *Thinking on*
+  — not an effort scale, because its backend has a boolean and no graded middle.
+  A provider that accepts no reasoning level at all simply does not show the
+  control.
 
 Setting the device's default provider and model is a Settings job — see
 [AI Providers on Hermes](/editions/hermes-providers).

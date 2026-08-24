@@ -10,6 +10,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const WebSocket = require("ws");
+const { attachAccessLog } = require("./scripts/access-log.js");
 
 const GATEWAY_PORT = parseInt(process.env.GATEWAY_PORT || "18789", 10);
 const TERMINAL_WS_PORT = parseInt(process.env.TERMINAL_WS_PORT || "3006", 10);
@@ -218,6 +219,58 @@ try {
   console.warn("[production-server] Failed to set up local-ai token:", err.message);
 }
 
+// ─── Honest shutdown ───
+// systemd stops this unit with SIGTERM. With no handler the process died on the
+// default disposition and systemd recorded
+//   `Main process exited, code=exited, status=143/n/a` + `Failed with result 'exit-code'`
+// for EVERY clean stop or restart — so `systemctl status clawbox-setup` showed
+// red for the rest of the session and the Remote Access panel rendered a
+// "failed" alert after a perfectly normal restart. A support engineer cannot
+// tell that state apart from a real crash.
+//
+// Belt and braces with `SuccessExitStatus=143 SIGTERM` in the unit file: this
+// makes the exit genuinely 0, the unit line covers the window before this
+// handler is installed and any child that still exits 143.
+const SHUTDOWN_GRACE_MS = parseInt(process.env.SHUTDOWN_GRACE_MS || "5000", 10);
+const managedServers = new Set();
+let shuttingDown = false;
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[production-server] ${signal} received — closing listeners`);
+
+  // Backstop: a socket that refuses to drain must not turn a clean stop into a
+  // SIGKILL (which systemd DOES report as a failure, and rightly).
+  const force = setTimeout(() => {
+    console.log("[production-server] shutdown grace elapsed — exiting");
+    process.exit(0);
+  }, SHUTDOWN_GRACE_MS);
+
+  let pending = managedServers.size;
+  if (pending === 0) {
+    clearTimeout(force);
+    process.exit(0);
+    return;
+  }
+  const done = () => {
+    if (--pending === 0) {
+      clearTimeout(force);
+      process.exit(0);
+    }
+  };
+  for (const server of managedServers) {
+    try {
+      server.close(done);
+    } catch {
+      done();
+    }
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
 // HTTP upgrade proxy — raw TCP pipe (works fine with bun's http.Server).
 // Routes by path: UPGRADE_ROUTES entries (e.g. /terminal-ws) go to their
 // configured port; everything else goes to the OpenClaw gateway.
@@ -328,6 +381,7 @@ function startHttpsServer(httpServer) {
       });
     });
 
+    managedServers.add(httpsServer);
     httpsServer.listen(HTTPS_PORT, "0.0.0.0", () => {
       console.log(`[production-server] HTTPS server listening on port ${HTTPS_PORT}`);
     });
@@ -347,6 +401,13 @@ function startHttpsServer(httpServer) {
 // Monkey-patch http.Server.prototype.listen to capture the server instance
 const originalListen = http.Server.prototype.listen;
 http.Server.prototype.listen = function (...args) {
+  managedServers.add(this);
+  // Attached here, on the ONE server Next actually creates, before it starts
+  // accepting. HTTPS requests are re-emitted onto this same server (see
+  // startHttpsServer), so this single call covers :80 and :443 both.
+  if (attachAccessLog(this)) {
+    console.log("[production-server] HTTP access log enabled");
+  }
   if (IS_DEV) {
     attachUpgradeProxy(this);
   } else {

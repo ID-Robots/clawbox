@@ -10,19 +10,22 @@ Everything load-bearing about a ClawBox on one page. Facts only — explanations
 
 | Fact | Value |
 |---|---|
-| Product | ClawBox — OpenClaw OS on NVIDIA Jetson (Ubuntu 22.04 aarch64) |
+| Product | ClawBox — AI appliance OS on NVIDIA Jetson (Ubuntu 22.04 aarch64) |
+| Edition | `openclaw` \| `hermes` \| `dual`, from the root-owned `/etc/clawbox/edition.env`. Print it with `bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts edition` |
 | Repo | `github.com/ID-Robots/clawbox` · releases = `vX.Y.Z` tags on `main` · integration branch `beta` |
 | System user | `clawbox` (uid 1000) · one password for SSH **and** browser login |
 | Web UI | `http://<box-ip>` (port 80) · `http://clawbox.local` when mDNS works |
 | Setup hotspot | SSID `ClawBox-Setup` → `http://10.42.0.1` (fallback subnet `10.43.0.1`) |
-| Stack | Next.js 16 / React 19 / Node 22 runtime / Bun builds / OpenClaw gateway (npm-pinned) |
+| Stack | Next.js 16 / React 19 / Node 22 runtime / Bun builds · AI harness: OpenClaw gateway (npm-pinned) on OpenClaw/dual, Hermes CLI + dashboard on Hermes/dual |
 
 ## Ports
 
 | Port | Service | Exposure |
 |---|---|---|
 | 80 | Web OS (`clawbox-setup`) — UI, login, `/setup-api/*`, proxies to gateway | LAN |
-| 18789 | OpenClaw gateway | LAN, token-gated — **never browse it directly** |
+| 18789 | OpenClaw gateway — **OpenClaw/dual only** | LAN, token-gated — **never browse it directly**. Closed on Hermes |
+| 8090 | Hermes dashboard auth proxy — **Hermes/dual only** | LAN, ClawBox-session-gated |
+| 9119 | Hermes dashboard itself | `127.0.0.2` loopback |
 | 22 | SSH | LAN |
 | 3006 | Terminal WS (proxied at `/terminal-ws`) | LAN |
 | 5900/6080 | VNC (localhost) / noVNC (proxied at `/novnc-ws`) | localhost / LAN |
@@ -35,36 +38,64 @@ Everything load-bearing about a ClawBox on one page. Facts only — explanations
 | Path | Contents |
 |---|---|
 | `/home/clawbox/clawbox` | App (git checkout) |
-| `…/clawbox/data/` | Device state: `config.json`, `kv.json`, `.session-secret`, `.mcp-token`, `network.env` — survives updates, wiped by factory reset (except `network.env`) |
+| `…/clawbox/data/` | Device state: `config.json`, `kv.json`, `.session-secret`, `.mcp-token`, `network.env`, `llamacpp/` (offline weights), `cloudflared/` (tunnel URL + device id) — survives updates, wiped by factory reset **except `network.env` and `llamacpp/models`** |
 | `…/clawbox/.env` | App env — survives everything |
 | `…/clawbox/.update-branch` | Channel pin (`beta`) — survives everything |
 | `…/clawbox/config/openclaw-target.txt` | Pinned OpenClaw version |
+| `/etc/clawbox/edition.env` | Root-owned edition lock — survives updates **and** factory reset |
+| `~/.clawkeep/` | Backup pairing/config/passphrase (ClawKeep is OpenClaw/dual only) |
+
+**OpenClaw / dual editions only**
+
+| Path | Contents |
+|---|---|
 | `~/.openclaw/openclaw.json` | Gateway config (auth **metadata** only) |
 | `~/.openclaw/agents/main/agent/auth-profiles.json` | **Real provider credentials** |
 | `~/.openclaw/agents/<agent>/agent/codex-home/auth.json` | ChatGPT-subscription session (synced per-agent) |
 | `~/.openclaw/credentials/telegram-*.json` | Telegram pairing approvals |
-| `~/.clawkeep/` | Backup pairing/config/passphrase |
 | `~/.npm-global/bin/openclaw` | Gateway binary |
+
+**Hermes / dual editions only**
+
+| Path | Contents |
+|---|---|
+| `~/.local/bin/hermes` | Harness shim into `~/.hermes/hermes-agent/venv` |
+| `~/.hermes/config.yaml` | Harness config + `mcp_servers.clawbox` (0600). Every writer rewrites the whole file — comments are not preserved |
+| `~/.hermes/.env`, `~/.hermes/auth.json` | **Provider keys and OAuth tokens** |
+| `~/.hermes/hermes-agent/` | The agent checkout + venv — **kept** by factory reset |
+| `data/.hermes-dashboard-pw` | Dashboard auth material |
 
 ## Services (systemd)
 
-`clawbox-setup` (web, port 80) · `clawbox-gateway` (OpenClaw, pre-start self-heal script) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (CDP, on demand) · `clawbox-heartbeat.timer` · `clawbox-tunnel` (optional) · `clawbox-performance` · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
+**Every edition:** `clawbox-setup` (web, port 80) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (CDP, on demand) · `clawbox-heartbeat.timer` (+ `.service`) · `clawbox-tunnel` (optional, off by default) · `clawbox-performance` · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
+
+**OpenClaw / dual:** `clawbox-gateway` (pre-start self-heal script).
+**Hermes / dual:** `clawbox-hermes-dashboard` · `clawbox-hermes-dashboard-proxy`. On Hermes the gateway unit is **masked** — an active `clawbox-gateway` there is a hard install failure.
 
 ## Commands (over SSH)
 
 ```bash
-# Health / logs
-systemctl status clawbox-setup clawbox-gateway --no-pager
-journalctl -u clawbox-setup -n 50 --no-pager      # web/login
-journalctl -u clawbox-gateway -n 50 --no-pager    # AI/providers/channels
+# Which edition is this?
+cat /etc/clawbox/edition.env
 
-# Restart services
+# Health / logs — every edition
+systemctl status clawbox-setup --no-pager
+journalctl -u clawbox-setup -n 50 --no-pager      # web/login
+
+# Health / logs — OpenClaw / dual
+systemctl status clawbox-gateway --no-pager
+journalctl -u clawbox-gateway -n 50 --no-pager    # AI/providers/channels
 sudo systemctl restart clawbox-setup clawbox-gateway
 
-# Update (full, correct way)
-sudo clawbox update            # == sudo bash /home/clawbox/clawbox/install.sh
+# Health / logs — Hermes / dual (the gateway unit is masked; restarting it fails)
+journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
+sudo systemctl restart clawbox-setup clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
 
-# Targeted repairs
+# Update (full, correct way) — == sudo bash /home/clawbox/clawbox/install.sh
+bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts update   # asks for sudo itself; refused on Hermes
+# Hermes: use Settings → System Update instead.
+
+# Targeted repairs — OpenClaw / dual only; both print '[hermes edition] skipping …' and exit on Hermes
 sudo bash install.sh --step gateway_setup     # fixes 'gateway token mismatch'
 sudo bash install.sh --step openclaw_install  # fixes stale core / 'Unrecognized key' / plugin skew
 
@@ -96,21 +127,23 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `POST /setup-api/ai-models/configure` | Write provider config |
 | `GET /setup-api/ai-models/status` · `catalog?provider=…` | Provider status / live model catalog |
 | `POST /setup-api/telegram/configure` · `pairing` | Bot token / approve pairing codes |
-| `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token |
+| `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token — **OpenClaw/dual**; on Hermes health always reports unavailable |
+| `/setup-api/hermes/{chat,models,provider-key,oauth,clawai,skills}` · `/setup-api/harness/active` | **Hermes/dual** — chat, model catalog, provider key/OAuth, ClawBox AI, Skills |
+| `GET /setup-api/portal/status` · `POST portal/start` · `portal/stop` | Remote access (Cloudflare Quick Tunnel). **Not** `/setup-api/tunnel/*`, which the UI does not use |
 | `POST /setup-api/setup/reset` | **Factory reset** (destructive) |
 | `/setup-api/wifi/*` · `files/*` · `apps/*` · `clawkeep/*` · `code/*` · `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs (all under `/setup-api/`) |
 
 ## Gotchas (hard-won)
 
-1. **`:18789` never accepts your password** — it's the gateway; use plain `http://<ip>`.
+1. **`:18789` never accepts your password** — it's the OpenClaw gateway (OpenClaw/dual); use plain `http://<ip>`. On Hermes it is closed entirely (connection refused) and the equivalent surface is the session-gated dashboard proxy on `:8090`.
 2. **Browser login ≠ separate password** — same Linux password as SSH; failures are usually autofill, `unix_chkpwd` perms (`-rwxr-sr-x root shadow`), a stale build, or password encoding. Ladder: [Troubleshooting](/support/troubleshooting#the-browser-rejects-my-password-but-ssh-accepts-it).
-3. **`git pull` is not an update** — always finish with `sudo bash install.sh`; otherwise service files + OpenClaw core go stale (`token mismatch`, `Unrecognized key`).
+3. **`git pull` is not an update** — always finish with `sudo bash install.sh`; otherwise service files + the agent core go stale (`token mismatch`, `Unrecognized key`). Hard-sync to the box's own `.update-branch`, not a hardcoded `main`.
 4. **Local commits silently block updates** on stable ≤ current release ("up to date" forever); beta shows "Updates paused" + one-click reset. Manual fix = hard-sync ([Recovery C](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss)).
-5. **Two OpenAI lanes**: API key = `openai/…` + `sk-…` key; ChatGPT subscription = `codex/…` + OAuth. Different catalogs (`gpt-5` vs `gpt-5.4/5.5`), different credentials. Stale-key 401s after switching are self-healed on beta.
-6. **Secrets live in `auth-profiles.json`**, not `openclaw.json` (metadata only). The codex session is *additionally* per-agent in `codex-home/auth.json`.
+5. **Two OpenAI lanes (OpenClaw/dual)**: API key = `openai/…` + `sk-…` key; ChatGPT subscription = `codex/…` + OAuth. Different catalogs (`gpt-5` vs `gpt-5.4/5.5`), different credentials. Stale-key 401s after switching are self-healed on beta. **On Hermes there is no OpenAI API-key lane at all** — OpenAI is sign-in (Codex) only, and the key providers are OpenRouter, Anthropic, Gemini, z.ai and Kimi.
+6. **Secrets live in `auth-profiles.json`** (OpenClaw/dual), not `openclaw.json` (metadata only). The codex session is *additionally* per-agent in `codex-home/auth.json`. On Hermes, credentials are held by `hermes auth add` under `~/.hermes`.
 7. **`clawbox.local` failing ≠ box down** — mDNS/Windows/router multicast issue; the IP always works.
 8. **The last update step reboots the box** — 1–2 min offline is normal, not a hang.
-9. **Factory reset password is `clawbox`** — and the box comes back in AP mode (`ClawBox-Setup` → `10.42.0.1`).
+9. **Factory reset password is `clawbox`** — and the box comes back in AP mode (`ClawBox-Setup` → `10.42.0.1`). It keeps `data/network.env`, `data/llamacpp/models` and `~/.hermes/hermes-agent`, and the portal device id is re-derived from `/etc/machine-id`. Never hand-roll it with `rm -rf ~/.hermes` or `rm -rf data/*` — see [Recovery D](/support/recovery#d--factory-reset-wipes-everything).
 10. **Version label ≠ running code** — `package.json` is read live; verify actual deployment via `.next/BUILD_ID` mtime.
 
 ## Chapter index

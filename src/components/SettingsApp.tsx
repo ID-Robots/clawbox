@@ -106,13 +106,13 @@ const REBOOT_HARD_REDIRECT_MS = 45_000;
 type Section = typeof SECTIONS[number];
 
 /* ── Sidebar nav items ── */
-const NAV_ITEMS: { id: Section; icon: string; labelKey?: string; label?: string }[] = [
+const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
-  { id: "localAi", icon: "memory", label: "Local AI" },
-  { id: "localModels", icon: "deployed_code", label: "Local Models" },
-  { id: "voice", icon: "record_voice_over", label: "Voice" },
+  { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
+  { id: "localModels", icon: "deployed_code", labelKey: "settings.localModels" },
+  { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "telegram", icon: "send", labelKey: "settings.telegram" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
@@ -170,7 +170,7 @@ type SectionStatus = { subtitle: string | null };
 
 export default function SettingsApp({ ui }: SettingsAppProps) {
   const { t, locale, setLocale } = useT();
-  const navLabel = useCallback((item: { label?: string; labelKey?: string }) => item.label ?? (item.labelKey ? t(item.labelKey) : ""), [t]);
+  const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
     window.dispatchEvent(new Event("clawbox:chat-model-state-changed"));
   }, []);
@@ -575,7 +575,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   useEffect(() => { void refreshSavedNetworks(); }, []);
   const updateSavedPassword = async (name: string) => {
     if (savedNewPassword.length < 8 || savedNewPassword.length > 63) {
-      setSavedStatus({ type: "error", message: "Password must be 8–63 characters" });
+      setSavedStatus({ type: "error", message: t("settings.security.wifiPasswordLength") });
       return;
     }
     setSavedBusy(name); setSavedStatus(null);
@@ -585,11 +585,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: name, password: savedNewPassword, action: "update" }),
       });
       const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Failed");
-      setSavedStatus({ type: "success", message: `Password updated for ${name}` });
+      if (!r.ok) throw new Error(d.error || t("settings.security.failed"));
+      setSavedStatus({ type: "success", message: t("settings.security.wifiPasswordUpdated", { ssid: name }) });
       setSavedEditing(null); setSavedNewPassword("");
     } catch (err) {
-      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+      setSavedStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.failed") });
     } finally {
       setSavedBusy(null);
     }
@@ -786,11 +786,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ password: sysCurrentPassword }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Verification failed");
+      if (!r.ok) throw new Error(d.error || t("settings.security.verificationFailed"));
       setSysCurrentVerified(true);
     } catch (err) {
       setSysCurrentVerified(false);
-      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Verification failed" });
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.verificationFailed") });
     } finally {
       setSysVerifying(false);
     }
@@ -802,10 +802,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     setSysPasswordConfirmOpen(false); setSysPasswordConfirmReveal(false);
   };
   const validateNewPassword = (): string | null => {
-    if (sysPassword.length < 8) return "New password must be at least 8 characters";
-    if (sysPassword !== sysPasswordConfirm) return "New passwords don't match";
-    if (sysPassword === sysCurrentPassword) return "New password must differ from current";
-    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return "Password contains invalid characters";
+    if (sysPassword.length < 8) return t("settings.security.errorTooShort");
+    if (sysPassword !== sysPasswordConfirm) return t("settings.security.errorMismatch");
+    if (sysPassword === sysCurrentPassword) return t("settings.security.errorSameAsCurrent");
+    if (/[\r\n\x00-\x1f\x7f]/.test(sysPassword)) return t("settings.security.errorInvalidChars");
     return null;
   };
 
@@ -831,11 +831,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ currentPassword: sysCurrentPassword, password: sysPassword }),
       });
       const d = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(d.error || "Failed");
+      if (!r.ok) throw new Error(d.error || t("settings.security.failed"));
       resetSysPasswordForm();
-      setSysPasswordStatus({ type: "success", message: "Password updated. Use the new password next time you sign in or SSH." });
+      setSysPasswordStatus({ type: "success", message: t("settings.security.updateSuccess") });
     } catch (err) {
-      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
+      setSysPasswordStatus({ type: "error", message: err instanceof Error ? err.message : t("settings.security.failed") });
     } finally {
       setSysPasswordSaving(false);
     }
@@ -3027,28 +3027,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-2">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>key</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Password</label>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.security.passwordLabel")}</label>
               </div>
+              {/* Split around the font-mono span: markup can't live in a catalogue
+                  value, and `sudo` is a command name that must not be translated. */}
               <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-3 leading-relaxed">
-                Used for web sign-in, SSH, and <span className="font-mono">sudo</span>. Updating it here changes all three.
+                {t("settings.security.passwordHintPrefix")} <span className="font-mono">sudo</span>{t("settings.security.passwordHintSuffix")}
               </p>
               <div className="space-y-2">
                 <div className="flex items-stretch gap-2">
                   <div className="flex-1 flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                    <label htmlFor="sys-current-password" className="sr-only">Current password</label>
+                    <label htmlFor="sys-current-password" className="sr-only">{t("settings.security.currentPassword")}</label>
                     <input
                       id="sys-current-password"
                       type={sysPasswordShow ? "text" : "password"}
                       value={sysCurrentPassword}
                       onChange={e => { setSysCurrentPassword(e.target.value); if (sysCurrentVerified) setSysCurrentVerified(false); setSysPasswordStatus(null); }}
                       onKeyDown={e => { if (e.key === "Enter" && !sysCurrentVerified) { e.preventDefault(); void verifyCurrentPassword(); } }}
-                      placeholder="Current password"
+                      placeholder={t("settings.security.currentPassword")}
                       maxLength={128}
                       autoComplete="current-password"
                       disabled={sysCurrentVerified}
                       className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20 disabled:opacity-60"
                     />
-                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? "Hide current password" : "Show current password"}>
+                    <button type="button" onClick={() => setSysPasswordShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysPasswordShow ? t("settings.security.hideCurrentPassword") : t("settings.security.showCurrentPassword")}>
                       <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysPasswordShow ? "visibility_off" : "visibility"}</span>
                     </button>
                   </div>
@@ -3057,11 +3059,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       type="button"
                       onClick={resetSysPasswordForm}
                       className="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.12] text-xs text-[var(--text-primary)] rounded-lg cursor-pointer border-none transition-colors flex items-center gap-1"
-                      title="Clear and re-enter current password"
-                      aria-label="Clear and re-enter current password"
+                      title={t("settings.security.clearAndReenter")}
+                      aria-label={t("settings.security.clearAndReenter")}
                     >
                       <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }}>check_circle</span>
-                      Re-enter
+                      {t("settings.security.reenter")}
                     </button>
                   ) : (
                     <button
@@ -3070,7 +3072,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       disabled={sysVerifying || !sysCurrentPassword}
                       className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
                     >
-                      {sysVerifying ? "Checking…" : "Verify"}
+                      {sysVerifying ? t("settings.security.checking") : t("settings.security.verify")}
                     </button>
                   )}
                 </div>
@@ -3078,40 +3080,40 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {sysCurrentVerified && (
                   <>
                     <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-new-password" className="sr-only">New password</label>
+                      <label htmlFor="sys-new-password" className="sr-only">{t("settings.security.newPassword")}</label>
                       <input
                         id="sys-new-password"
                         type={sysNewShow ? "text" : "password"}
                         value={sysPassword}
                         onChange={e => { setSysPassword(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder="New password (8+ characters)"
+                        placeholder={t("settings.security.newPasswordPlaceholder")}
                         maxLength={128}
                         autoComplete="new-password"
                         autoFocus
                         className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
                       />
-                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? "Hide new password" : "Show new password"}>
+                      <button type="button" onClick={() => setSysNewShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysNewShow ? t("settings.security.hideNewPassword") : t("settings.security.showNewPassword")}>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysNewShow ? "visibility_off" : "visibility"}</span>
                       </button>
                     </div>
                     <div className="flex items-center bg-white/[0.04] border border-white/[0.08] rounded-lg overflow-hidden focus-within:border-orange-400/60">
-                      <label htmlFor="sys-confirm-password" className="sr-only">Confirm new password</label>
+                      <label htmlFor="sys-confirm-password" className="sr-only">{t("settings.security.confirmNewPassword")}</label>
                       <input
                         id="sys-confirm-password"
                         type={sysConfirmShow ? "text" : "password"}
                         value={sysPasswordConfirm}
                         onChange={e => { setSysPasswordConfirm(e.target.value); setSysPasswordStatus(null); }}
-                        placeholder="Confirm new password"
+                        placeholder={t("settings.security.confirmNewPassword")}
                         maxLength={128}
                         autoComplete="new-password"
                         className="flex-1 min-w-0 px-3 py-2 bg-transparent text-sm text-[var(--text-primary)] outline-none placeholder-white/20"
                       />
-                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? "Hide confirm password" : "Show confirm password"}>
+                      <button type="button" onClick={() => setSysConfirmShow(v => !v)} className="px-3 text-[var(--text-muted)] hover:text-[var(--text-primary)] bg-transparent border-none cursor-pointer" aria-label={sysConfirmShow ? t("settings.security.hideConfirmPassword") : t("settings.security.showConfirmPassword")}>
                         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>{sysConfirmShow ? "visibility_off" : "visibility"}</span>
                       </button>
                     </div>
                     {sysPassword.length > 0 && sysPasswordConfirm.length > 0 && sysPassword !== sysPasswordConfirm && (
-                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">Passwords don&apos;t match yet</div>
+                      <div role="alert" aria-live="polite" className="text-[11px] text-amber-300/90">{t("settings.security.passwordsDontMatchYet")}</div>
                     )}
                     <div className="flex justify-end">
                       <button
@@ -3119,7 +3121,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         disabled={sysPasswordSaving || sysPassword.length < 8 || sysPassword !== sysPasswordConfirm}
                         className="px-4 py-2 bg-[#fe6e00] hover:bg-[#ff8b1a] disabled:opacity-30 text-white rounded-lg text-sm font-semibold cursor-pointer border-none transition-all"
                       >
-                        {sysPasswordSaving ? "Saving…" : "Update password"}
+                        {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.updatePassword")}
                       </button>
                     </div>
                   </>
@@ -3751,17 +3753,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <div className="flex items-center gap-2 mb-3">
               <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
-              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">Write this password down</h3>
+              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">{t("settings.security.confirmTitle")}</h3>
             </div>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
-              This will change your password for <span className="text-[var(--text-primary)] font-medium">web sign-in, SSH, and sudo</span>. If you forget it, you may be locked out of the device entirely and need a factory reset to recover.
+              {t("settings.security.confirmBodyPrefix")} <span className="text-[var(--text-primary)] font-medium">{t("settings.security.confirmBodyScope")}</span>{t("settings.security.confirmBodySuffix")}
             </p>
             <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
               <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">New password</span>
-                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? "Hide password" : "Reveal password"}>
+                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">{t("settings.security.newPassword")}</span>
+                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? t("settings.security.hidePassword") : t("settings.security.revealPassword")}>
                   <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
-                  {sysPasswordConfirmReveal ? "Hide" : "Reveal"}
+                  {sysPasswordConfirmReveal ? t("settings.security.hide") : t("settings.security.reveal")}
                 </button>
               </div>
               <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
@@ -3771,7 +3773,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             <div className="flex gap-3">
               <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
               <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
-                {sysPasswordSaving ? "Saving…" : "I’ve written it down — change"}
+                {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.confirmChange")}
               </button>
             </div>
           </div>
