@@ -42,7 +42,15 @@ function hermesPayload(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const rowFor = (body: { providers: { id: string }[] }, id: string) =>
+interface Row {
+  id: string;
+  label: string;
+  state: string;
+  isDefault: boolean;
+  section: string;
+}
+
+const rowFor = (body: { providers: Row[] }, id: string): Row | undefined =>
   body.providers.find((p) => p.id === id);
 
 describe("GET /setup-api/providers/status — Hermes", () => {
