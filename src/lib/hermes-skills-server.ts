@@ -166,16 +166,13 @@ export function parseDisabledSkillList(raw: string): Set<string> {
 }
 
 export async function readDisabledSkillNames(): Promise<Set<string>> {
-  const [global, platform] = await Promise.all([
-    hermesConfigGet('skills.disabled'),
-    hermesConfigGet('skills.platform_disabled'),
-  ]);
-  const out = parseDisabledSkillList(global);
-  // The platform map is `{telegram: [...]}`; its VALUES are skill names too, and
-  // a skill disabled on any platform is not unconditionally enabled here. The
-  // tolerant parser picks the names out of whichever shape the CLI prints.
-  for (const name of parseDisabledSkillList(platform)) out.add(name);
-  return out;
+  // Only the GLOBAL list. `skills.platform_disabled` is a `{platform: [names]}`
+  // map, and a skill switched off for Telegram is still live for the chat this
+  // store belongs to — reporting it as disabled here would be a different
+  // untruth from the one being fixed. (It is also unparseable without knowing
+  // which keys are platform names and which are skills, and a guess there would
+  // mark a skill CALLED `telegram` disabled.)
+  return parseDisabledSkillList(await hermesConfigGet('skills.disabled'));
 }
 
 /**
@@ -523,11 +520,12 @@ function platformIncompatible(platforms: string[]): boolean {
  * (`agent-monitor`, `algorithmic-art`, … each with a count of 1).
  *
  * So: use the install path only when it actually names a parent directory,
- * fall back to the category the registry recorded in the lock's metadata, and
- * otherwise bucket the skill under `hub` with everything else that came from
- * the store.
+ * fall back to the category the registry recorded in the lock's metadata, then
+ * to the disk walk's directory when that names anything but the skill itself,
+ * and otherwise bucket the skill under `hub` with everything else that came
+ * from the store.
  */
-export function hubCategory(name: string, entry: HubLockEntry): string {
+export function hubCategory(name: string, entry: HubLockEntry, diskCategory?: string): string {
   const parts = (entry.install_path || '').split('/').filter(Boolean);
   if (parts.length > 1) return parts[0];
   const hermesMeta = entry.metadata?.hermes;
@@ -538,6 +536,10 @@ export function hubCategory(name: string, entry: HubLockEntry): string {
   if (typeof declared === 'string' && declared.trim() && declared.trim() !== name) {
     return declared.trim().slice(0, 64);
   }
+  // The disk walk's category is the TOP-LEVEL directory, which for a flat
+  // install is the skill's own slug — the value that minted the junk
+  // categories. It only counts when it names something other than the skill.
+  if (diskCategory && diskCategory !== name) return diskCategory;
   return 'hub';
 }
 
@@ -623,7 +625,7 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
     byName.set(name, {
       id: name,
       name: entry.name || existing?.name || name,
-      category: existing?.category || hubCategory(name, entry),
+      category: hubCategory(name, entry, existing?.category),
       description: existing?.description,
       source: entry.source || 'hub',
       identifier: entry.identifier,
