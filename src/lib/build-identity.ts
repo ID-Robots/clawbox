@@ -210,16 +210,30 @@ export function computeDrift(input: DriftInputs): DriftReport {
   };
 }
 
+/**
+ * Run git and return its trimmed output, or null if the command FAILED.
+ *
+ * Empty output is not failure. `git status --porcelain` answers with an empty
+ * string on a clean tree, and folding that into null made every healthy box
+ * report `dirty: null` — "we could not tell" — when the truth was "nothing is
+ * modified". Callers that cannot meaningfully receive an empty string
+ * normalise it themselves.
+ */
 async function git(projectDir: string, args: string): Promise<string | null> {
   try {
     const { stdout } = await execShell(
       `git -c safe.directory=${projectDir} -C ${projectDir} ${args}`,
       { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
     );
-    return stdout.trim() || null;
+    return stdout.trim();
   } catch {
     return null;
   }
+}
+
+/** git output where an empty answer is as useless as a failure (a SHA, a branch name). */
+async function gitValue(projectDir: string, args: string): Promise<string | null> {
+  return (await git(projectDir, args)) || null;
 }
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -284,7 +298,7 @@ async function readPin(projectDir: string): Promise<PinInfo> {
   // network round-trip there would make the page hang on an offline box. The
   // updater fetches before it acts; here we report the tested commit as far as
   // this device currently knows it.
-  const commit = branch ? await git(projectDir, `rev-parse --verify --quiet origin/${branch}`) : null;
+  const commit = branch ? await gitValue(projectDir, `rev-parse --verify --quiet origin/${branch}`) : null;
 
   return { branch, source, commit, pinned };
 }
@@ -299,10 +313,10 @@ export async function collectBuildIdentity(
     await Promise.all([
       readJson<BuildInfo>(path.join(buildDir, "build-info.json")),
       readFile(path.join(buildDir, "BUILD_ID"), "utf-8").then((s) => s.trim() || null).catch(() => null),
-      git(projectDir, "rev-parse HEAD"),
-      git(projectDir, "rev-parse --abbrev-ref HEAD"),
+      gitValue(projectDir, "rev-parse HEAD"),
+      gitValue(projectDir, "rev-parse --abbrev-ref HEAD"),
       git(projectDir, "status --porcelain"),
-      git(projectDir, "log -1 --format=%cI"),
+      gitValue(projectDir, "log -1 --format=%cI"),
       readPin(projectDir),
       fileExists(path.join(projectDir, "scripts", "write-build-info.mjs")),
     ]);

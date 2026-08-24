@@ -301,3 +301,41 @@ dg("collectBuildIdentity", () => {
     }
   });
 });
+
+// A clean tree must read as clean, not as "we could not tell": `git status
+// --porcelain` answers with an empty string, and folding empty output into
+// null once made every healthy box report dirty: null.
+describe("clean vs unknown", () => {
+  const HAS_GIT_HERE = (() => {
+    try {
+      execFileSync("git", ["--version"], { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  (HAS_GIT_HERE ? it : it.skip)("reports a clean checkout as dirty=false", async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-clean-"));
+    try {
+      execFileSync("git", ["init", "-q", "-b", "beta", repo]);
+      execFileSync("git", ["-C", repo, "config", "user.email", "t@example.com"]);
+      execFileSync("git", ["-C", repo, "config", "user.name", "T"]);
+      fs.writeFileSync(path.join(repo, ".gitignore"), ".next/\n");
+      fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+      execFileSync("git", ["-C", repo, "add", "-A"]);
+      execFileSync("git", ["-C", repo, "commit", "-qm", "one"]);
+
+      let id = await collectBuildIdentity(repo);
+      expect(id.checkout.dirty).toBe(false);
+      expect(id.drift.codes).not.toContain("checkout-dirty");
+
+      fs.writeFileSync(path.join(repo, "a.txt"), "b\n");
+      id = await collectBuildIdentity(repo);
+      expect(id.checkout.dirty).toBe(true);
+      expect(id.drift.codes).toContain("checkout-dirty");
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});

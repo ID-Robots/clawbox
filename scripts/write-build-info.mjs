@@ -31,16 +31,26 @@ import path from "node:path";
 const projectDir = process.env.CLAWBOX_ROOT || process.cwd();
 const nextDir = path.join(projectDir, ".next");
 
+/**
+ * git output, or null if the command FAILED. Empty output is not failure —
+ * `git status --porcelain` answers "" on a clean tree, and folding that into
+ * null recorded every healthy build as `dirty: null` ("could not tell").
+ */
 function git(...args) {
   try {
     return execFileSync("git", ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args], {
       encoding: "utf-8",
       timeout: 15_000,
       stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || null;
+    }).trim();
   } catch {
     return null;
   }
+}
+
+/** git output where an empty answer is as useless as a failure (a SHA, a branch name). */
+function gitValue(...args) {
+  return git(...args) || null;
 }
 
 function readFirstLine(file) {
@@ -65,7 +75,7 @@ function readHermesPin() {
   }
 }
 
-const commit = git("rev-parse", "HEAD");
+const commit = gitValue("rev-parse", "HEAD");
 // --porcelain, not --porcelain -uno: an untracked file under src/app/ becomes a
 // compiled route, so "untracked" and "modified" are the same class of problem
 // on an appliance. .gitignore'd paths (data/, .next/, node_modules/) are
@@ -75,9 +85,9 @@ const status = git("status", "--porcelain");
 const info = {
   commit,
   shortCommit: commit ? commit.slice(0, 7) : null,
-  branch: git("rev-parse", "--abbrev-ref", "HEAD"),
+  branch: gitValue("rev-parse", "--abbrev-ref", "HEAD"),
   dirty: status === null ? null : status.length > 0,
-  committedAt: git("log", "-1", "--format=%cI"),
+  committedAt: gitValue("log", "-1", "--format=%cI"),
   builtAt: new Date().toISOString(),
   buildId: readFirstLine(path.join(nextDir, "BUILD_ID")),
   node: process.version,
