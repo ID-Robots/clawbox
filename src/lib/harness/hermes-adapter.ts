@@ -351,6 +351,12 @@ export class HermesAdapter implements HarnessAdapter {
       const data = isEventStream(res)
         ? await readStreamedTurn(res, onEvent)
         : await readJsonBody(res);
+      // Reading the body is where a Stop most often lands — it is the long
+      // part of the turn on both paths. A failed parse and an abandoned stream
+      // both come back as an empty object, which would otherwise sail on and
+      // be returned as a successful turn with no text; the run has to end as
+      // the abort it was.
+      if (controller.signal.aborted) throw new HarnessError("aborted", "Stopped.");
       if (!res.ok) {
         throw new HarnessError(
           res.status === 409 || res.status === 400 ? "invalid-input" : "upstream",

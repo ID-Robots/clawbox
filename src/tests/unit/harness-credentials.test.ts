@@ -150,9 +150,19 @@ describe("the credential module stays on the server", () => {
     return out;
   }
 
+  /**
+   * Any reference that would pull the module in, not just a static `import`.
+   *
+   * A scan for `from "…"` alone sees one of the three ways in: a lazy
+   * `await import("…")` and a `require("…")` reach exactly the same code and
+   * would have gone unnoticed.
+   */
+  const REACHES_CREDENTIALS =
+    /(?:from\s*|import\s*\(\s*|require\s*\(\s*)["']@\/lib\/harness\/credentials["']/;
+
   it("is imported by no client component", () => {
     const offenders = filesUnder(join(process.cwd(), "src", "components")).filter((f) =>
-      /from\s+["']@\/lib\/harness\/credentials["']/.test(readFileSync(f, "utf8")),
+      REACHES_CREDENTIALS.test(readFileSync(f, "utf8")),
     );
     // A component is bundled for the browser. An import here would ship the
     // lookup — and on the wrong build, the value — to every page that loads it.
@@ -162,7 +172,7 @@ describe("the credential module stays on the server", () => {
   it("is imported only by route handlers on the server side of the app", () => {
     const appDir = join(process.cwd(), "src", "app");
     const importers = filesUnder(appDir).filter((f) =>
-      /from\s+["']@\/lib\/harness\/credentials["']/.test(readFileSync(f, "utf8")),
+      REACHES_CREDENTIALS.test(readFileSync(f, "utf8")),
     );
     expect(importers.length).toBeGreaterThan(0);
     for (const file of importers) {

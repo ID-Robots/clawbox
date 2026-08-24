@@ -1509,6 +1509,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
 
     const onClose = (event?: CloseEvent) => {
+      // Only the socket that is CURRENTLY installed may tear anything down. A
+      // close event from a socket this connect already replaced arrives late
+      // and describes a connection nobody is using — acting on it would null
+      // the live socket's reference, reject the requests waiting on IT, and
+      // schedule a reconnect on top of a healthy connection.
+      if (wsRef.current !== ws) return
       wsRef.current = null
       // The socket is gone; nothing that was waiting on it can still arrive.
       failPending('Not connected')
