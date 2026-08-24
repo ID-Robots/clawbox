@@ -100,7 +100,7 @@ describe("what the composer offers when the box cannot do it", () => {
     // The inverse is the point. Nothing about the edition changed here — only
     // whether this device holds a credential — and that is what decides. A gate
     // written against the harness would keep a working microphone hidden.
-    box.facts.box.facts.hasClawaiToken = true;
+    box.facts.hasClawaiToken = true;
     await mountHermesChat(box);
     await screen.findByTestId("voice-record");
   });
