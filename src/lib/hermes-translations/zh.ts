@@ -361,4 +361,20 @@ export const zh: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "无法更改该模型。",
   "localModels.error.unreachable": "无法连接到这台 ClawBox，因此无法更改该模型。",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "桌面与电源",
+  "systemProfile.desktopLabel": "桌面环境",
+  "systemProfile.desktopHelp": "在设备的 HDMI 输出和远程桌面上运行完整的 GNOME 桌面。关闭后设备以无头模式运行，可释放约 700 MB 内存——不会卸载任何组件，随时可以重新开启。",
+  "systemProfile.performanceLabel": "性能模式",
+  "systemProfile.performanceHelp": "将 CPU 和 GPU 锁定在最高频率，而不是让它们动态调节。首个 token 更快，但空闲功耗会升到约 7.2 W，持续本地推理实测为 74.8 °C，略高于 74 °C 的被动散热上限。除非要跑长任务且散热良好，否则请保持关闭。",
+  "systemProfile.rebootRequired": "重启设备以应用此更改。",
+  "systemProfile.unsupported": "此设备不支持。",
+  "systemProfile.powerState": "电源配置：{profile} · 频率：{clocks}",
+  "systemProfile.clocksPinned": "锁定",
+  "systemProfile.clocksDynamic": "动态",
+  "systemProfile.memoryGuards": "当前内存上限：本地 AI {ollama}，浏览器 {browser}，桌面 {desktop}。本地 AI 同时处理 {parallel} 个请求。",
+  "systemProfile.loadFailed": "无法读取桌面与电源设置。",
+  "systemProfile.desktopFailed": "无法更改桌面设置。",
+  "systemProfile.powerFailed": "无法更改电源配置。",
 };

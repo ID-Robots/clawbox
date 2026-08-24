@@ -352,4 +352,20 @@ export const ja: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "そのモデルを変更できませんでした。",
   "localModels.error.unreachable": "本体に接続できなかったため、そのモデルを変更できませんでした。",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "デスクトップと電力",
+  "systemProfile.desktopLabel": "デスクトップ環境",
+  "systemProfile.desktopHelp": "本体の HDMI 出力とリモートデスクトップで GNOME デスクトップをすべて実行します。オフにするとヘッドレスで動作し、約 700 MB のメモリが戻ります。何もアンインストールされないので、いつでも戻せます。",
+  "systemProfile.performanceLabel": "パフォーマンスモード",
+  "systemProfile.performanceHelp": "CPU と GPU の周波数を可変にせず最大値に固定します。最初のトークンまでは速くなりますが、待機時の消費電力は約 7.2 W になり、ローカル推論を連続実行したときの実測は 74.8 °C で、パッシブ冷却の上限 74 °C をわずかに超えます。長時間の処理を回し、風通しがある場合を除いてオフのままにしてください。",
+  "systemProfile.rebootRequired": "この変更を適用するには本体を再起動してください。",
+  "systemProfile.unsupported": "このデバイスでは利用できません。",
+  "systemProfile.powerState": "電力プロファイル: {profile} · クロック: {clocks}",
+  "systemProfile.clocksPinned": "固定",
+  "systemProfile.clocksDynamic": "可変",
+  "systemProfile.memoryGuards": "有効なメモリ上限: ローカル AI {ollama}、ブラウザ {browser}、デスクトップ {desktop}。ローカル AI は同時に {parallel} 件のリクエストを処理します。",
+  "systemProfile.loadFailed": "デスクトップと電力の設定を読み取れませんでした。",
+  "systemProfile.desktopFailed": "デスクトップの設定を変更できませんでした。",
+  "systemProfile.powerFailed": "電力プロファイルを変更できませんでした。",
 };
