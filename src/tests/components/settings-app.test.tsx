@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
+import { resetHarnessCache } from "@/lib/client-harness";
 
 // Every test in this file mounts the WHOLE settings app — every panel, every
 // status fetch, and now the pet picker as well. On a Jetson under full-suite
@@ -405,5 +406,102 @@ describe("SettingsApp desktop nav overflow contract", () => {
     expect(content.className).toContain("flex-1");
     expect(content.className).toContain("overflow-y-auto");
     expect(content.className).toContain("min-w-0");
+  });
+});
+
+/**
+ * TASK follow-up: the AI section's own "Status" card duplicated the new AI
+ * Providers hero on the Hermes edition — same provider, same model, same
+ * "connected", stacked directly above it. The owner's goal this round was to
+ * kill redundant provider sections, so the card is suppressed on hermes (the
+ * hero is the single source there) and kept verbatim on openclaw and dual,
+ * which have no hero.
+ */
+describe("SettingsApp — AI section Status card is not doubled on Hermes", () => {
+  function stubForEdition(edition: "hermes" | "openclaw") {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = input.toString();
+        if (url === "/setup-api/harness/active") {
+          return jsonResponse({ active: edition, edition });
+        }
+        if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+        if (url === "/setup-api/setup/status") {
+          return jsonResponse({ setup_complete: true, ai_model_configured: true });
+        }
+        if (url === "/setup-api/ai-models/status") {
+          return jsonResponse({
+            connected: true,
+            provider: edition === "hermes" ? "anthropic" : "clawai",
+            providerLabel: edition === "hermes" ? "Anthropic" : "ClawBox AI",
+            mode: null,
+            model: edition === "hermes" ? "claude-fable-5" : "deepseek-v4-flash",
+            clawaiTier: null,
+          });
+        }
+        if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
+        if (url === "/setup-api/providers/status") {
+          return jsonResponse({
+            harness: edition,
+            defaultProvider: edition === "hermes" ? "anthropic" : "clawai",
+            degraded: false,
+            providers: [
+              {
+                id: edition === "hermes" ? "anthropic" : "clawai",
+                label: edition === "hermes" ? "Anthropic" : "ClawBox AI",
+                state: "connected",
+                isDefault: true,
+                section: "ai",
+              },
+            ],
+          });
+        }
+        // HermesProviderConfig's own reads (only exercised on the hermes path).
+        if (url === "/setup-api/hermes/clawai") {
+          return jsonResponse({ hasToken: false, tier: "flash", tierStored: null, active: false, model: "" });
+        }
+        if (url === "/setup-api/hermes/oauth") return jsonResponse({ providers: [] });
+        if (url.startsWith("/setup-api/hermes/models")) {
+          return jsonResponse({ provider: "anthropic", current: "claude-fable-5", models: [] });
+        }
+        if (url === "/setup-api/llamacpp/status") return jsonResponse({ installed: false });
+        if (url === "/setup-api/ollama/status") return jsonResponse({ installed: false });
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    resetHarnessCache();
+    const pending = window as Window & { __clawboxPendingSettingsSection?: string };
+    pending.__clawboxPendingSettingsSection = "ai";
+  });
+
+  afterEach(() => {
+    resetHarnessCache();
+    vi.unstubAllGlobals();
+  });
+
+  it("hides the Status card on hermes — the hero carries it instead", async () => {
+    stubForEdition("hermes");
+    render(<SettingsApp ui={defaultUi} />);
+
+    // The hero is the single source of "what is running" on this edition.
+    expect(await screen.findByTestId("provider-default-hero")).toBeInTheDocument();
+    // And the old Status card, which named the same provider and model right
+    // above it, is gone.
+    await waitFor(() => {
+      expect(screen.queryByText("settings.status")).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps the Status card on openclaw — there is no hero there", async () => {
+    stubForEdition("openclaw");
+    render(<SettingsApp ui={defaultUi} />);
+
+    // OpenClaw renders the picker, not the hero, so its Status card must stay.
+    expect(await screen.findByText("settings.status")).toBeInTheDocument();
+    expect(screen.queryByTestId("provider-default-hero")).not.toBeInTheDocument();
   });
 });

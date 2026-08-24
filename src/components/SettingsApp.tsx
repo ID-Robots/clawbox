@@ -22,7 +22,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
-import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { cachedActiveHarness, cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
@@ -1234,6 +1234,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     });
     return () => { alive = false; };
   }, []);
+
+  // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
+  // tracks its own copy — seeded from the immutable cache, then confirmed once.
+  // It gates exactly one thing here: whether the AI section's own Status card is
+  // drawn. On the Hermes edition that card is the hero's twin (same provider,
+  // same model, same "connected"), so it is suppressed there and the hero is the
+  // single source. On openclaw and dual there is no hero — AIModelsStep renders
+  // the OpenClaw picker — so the card stays and is unchanged. Keyed on edition,
+  // not the active harness: a dual box's active harness can be hermes while its
+  // AI panel is still the OpenClaw picker, which needs the card.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  useEffect(() => {
+    if (edition !== null) return;
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive) setEdition(d?.edition || "openclaw");
+    });
+    return () => { alive = false; };
+  }, [edition]);
 
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
@@ -3206,7 +3225,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Provider status card */}
+            {/* Provider status card — suppressed on the Hermes edition, where the
+                AI Providers hero below already names the active provider, its
+                model and its connection. Kept verbatim on openclaw/dual, which
+                have no hero. */}
+            {edition !== "hermes" && (
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
@@ -3291,6 +3314,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
             </div>
+            )}
 
             <I18nProvider><AIModelsStep
               embedded
