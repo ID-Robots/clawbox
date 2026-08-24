@@ -39,7 +39,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 50+ Next.js Route Handlers namespaced under `/setup-api/` to avoid conflicts with the OpenClaw gateway's `/api/*`:
 
 - **WiFi**: `wifi/scan`, `wifi/connect`, `wifi/status`, `wifi/ethernet` — WiFi and Ethernet management
-- **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot` — system info, power control, password, hotspot config
+- **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot`, `system/desktop`, `system/power-profile` — system info, power control, password, hotspot config, desktop/headless toggle, Jetson power profile + memory guards
 - **AI Models**: `ai-models/configure`, `ai-models/status`, `ai-models/oauth/*` — API key config with OAuth flows (device auth + authorization code)
 - **Ollama**: `ollama/status`, `ollama/pull`, `ollama/search`, `ollama/delete` — local model management
 - **Apps**: `apps/store`, `apps/install`, `apps/uninstall`, `apps/icon/[appId]`, `apps/settings` — app store integration

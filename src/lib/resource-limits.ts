@@ -27,7 +27,7 @@ export const RESOURCE_LIMITS: ResourceLimits = {
   memTotalMiB: 7607,
   ollama: { memoryHigh: "5G", memoryMax: "5632M" },
   browser: { memoryHigh: "1200M", memoryMax: "1536M" },
-  desktop: { memoryHigh: "1200M", memoryMax: "1800M" },
+  desktop: { memoryHigh: "1400M", memoryMax: "2048M" },
   ollamaNumParallel: 2,
   ollamaContextLength: 4096,
 };

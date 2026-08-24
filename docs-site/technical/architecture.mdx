@@ -55,7 +55,7 @@ Everything runs under systemd. The two you will interact with most are **clawbox
 | `clawbox-browser` | Desktop Chromium with CDP for AI browsing (started on demand) | 18800 (CDP) | no |
 | `clawbox-heartbeat.timer` + `clawbox-heartbeat.service` | Every 5 min the timer runs the oneshot, which curls `/setup-api/portal/heartbeat-tick` on loopback. The web app then POSTs to the portal — but only when a ClawBox AI token *and* a tunnel URL both exist ([details](/technical/networking#portal-heartbeat)) | — | timer + oneshot |
 | `clawbox-tunnel` | Optional Cloudflare Quick Tunnel → port 80 | — | always |
-| `clawbox-performance` | Jetson max-performance mode (`nvpmodel` + `jetson_clocks`) | — | oneshot |
+| `clawbox-performance` | Applies the persisted Jetson power profile at boot (see [Power profile and memory guards](#power-profile-and-memory-guards)) | — | oneshot |
 | `clawbox-root-update@<step>` | Privileged installer steps, templated (`install.sh --step <step>`) | — | oneshot |
 | `ollama` | Local model runtime (system package) | 11434 | managed by Ollama |
 
@@ -64,6 +64,30 @@ Two more servers run as **children of the web app** (no systemd unit): the termi
 ### How the unprivileged web app does root things
 
 `clawbox-setup` runs as the `clawbox` user. Anything privileged (updates, password change, hostname, reboot) is delegated to the **`clawbox-root-update@<step>`** systemd template, which runs `install.sh --step <step>` as root. A polkit rule plus a narrow sudoers file allow the `clawbox` user to start exactly these units — the web app never runs arbitrary root commands.
+
+### Desktop or headless
+
+The GNOME desktop is **shipped and on by default**. Turning it off is a setting, not a different image — nothing is uninstalled, so it is one switch away from coming back.
+
+**Settings → System → Desktop environment** posts to `/setup-api/system/desktop`, which runs the root-owned `clawbox-desktop-mode.sh`. Off sets the boot target to `multi-user.target` and disables the display manager; on sets it back to `graphical.target`. **The change applies at the next reboot**, and the UI says so: tearing the graphical session down under a logged-in user would kill their Remote Desktop view and any Chromium the agent is driving. Running headless gives back roughly 700 MB.
+
+The automation browser is unaffected either way — `clawbox-browser.service` has no `[Install]` section, so it is only ever started on demand, never at boot.
+
+### Power profile and memory guards
+
+**Balanced is the default.** `clawbox-performance.service` applies whatever profile is persisted in the root-owned `/etc/clawbox/power-mode`, defaulting to a `nvpmodel` cap with `jetson_clocks` **off** and the cpuidle states on. Earlier releases ran `nvpmodel -m MAXN_SUPER && jetson_clocks` unconditionally at every boot, which pinned all six CPU cores to 1,728 MHz and the GPU to 1,020 MHz at 4% load — 7.2 W and ~58 °C doing nothing, and 74.8 °C median Tj under sustained 3B inference, just over the 74 °C passive-cooling trip.
+
+**Settings → System → Performance mode** (off by default) restores that pinned behaviour for owners who want it and have airflow. It applies immediately — no reboot.
+
+Three cgroup v2 memory guards ship as `50-clawbox-memory.conf` drop-ins, written by `clawbox-resource-limits.sh` from **`config/clawbox-resource-limits.env`** — the single place every one of these numbers is defined, with the measurement behind it:
+
+| Unit | `MemoryHigh` | `MemoryMax` |
+|---|---|---|
+| `ollama.service` | 5G | 5632M |
+| `clawbox-browser.service` | 1200M | 1536M |
+| `user@1000.service` (the GNOME session) | 1400M | 2048M |
+
+`MemoryHigh` throttles, `MemoryMax` kills, and every unit gets High well below Max on purpose: pressure should show up as slowness first and an OOM kill last. The same env file sets `OLLAMA_NUM_PARALLEL=2` — one slot serialised every caller, so the eighth concurrent turn waited 24.5 s; a second slot costs ~170 MB and cut 2–4-way concurrent latency by ~41%.
 
 ## Request routing (port 80)
 
