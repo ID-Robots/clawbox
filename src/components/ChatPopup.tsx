@@ -13,7 +13,7 @@ import {
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { describeChatFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
+import { FIX_ERROR_EVENT, buildFixErrorPrompt, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -195,7 +195,7 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // get mixed. The MODEL list is scoped by the same server contract the Hermes
 // settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
 // client-side filtering exists.
-import { HERMES_MODEL_STATE_EVENT, useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
 import {
   hermesProviderLabel,
   hermesProviderPillLabel,
@@ -1599,13 +1599,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     refreshChatModelState()
   }, [isOpen, refreshChatModelState])
 
+  // Re-read the provider/model list the moment anything reports a provider
+  // change, so a provider connected in Settings while this popup is open is
+  // offered here without a reload. Through the shared subscriber, which spans
+  // both harnesses' signal names and debounces the burst a single save emits.
   useEffect(() => {
     if (!isOpen) return
-    const handleModelStateChanged = () => {
-      refreshChatModelState()
-    }
-    window.addEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
-    return () => window.removeEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
+    return onProvidersChanged(() => { refreshChatModelState() })
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, auto-greet if empty
@@ -2694,11 +2694,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (harnessId !== 'hermes') return
     const controller = new AbortController()
-    const onChanged = () => { void seedHermesHeader(controller.signal) }
-    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
+    const unsubscribe = onProvidersChanged(() => { void seedHermesHeader(controller.signal) })
     return () => {
       controller.abort()
-      window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
+      unsubscribe()
     }
   }, [harnessId, seedHermesHeader])
 
