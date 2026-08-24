@@ -104,6 +104,15 @@ my %DECLARED_ARGV = (
     ['/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
     ['/usr/bin/systemctl', 'disable', '--now', 'ollama.service'],
   ],
+  # src/lib/local-ai-runtime.ts — systemctlOllama() is private to the module and
+  # every caller passes one of the three module-level const argv arrays declared
+  # right above it, each already a literal list. Enumerated here rather than
+  # resolved because the call spreads them (`["-n", ...argv]`).
+  'src/lib/local-ai-runtime.ts :: "-n", ...argv' => [
+    ['-n', '/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
+    ['-n', '/usr/bin/systemctl', 'start', 'ollama.service'],
+    ['-n', '/usr/bin/systemctl', 'stop', 'ollama.service'],
+  ],
   # src/app/setup-api/system/power/route.ts — POWER_ACTIONS maps the request
   # body to exactly these two; an unmapped action 400s before the call.
   'src/app/setup-api/system/power/route.ts :: "/usr/bin/systemctl", systemctlAction' => [

@@ -301,10 +301,48 @@ describe("install.sh wiring", () => {
     expect(fn("step_post_update")).toMatch(/step_systemd_services/);
   });
 
+  // Both managed drop-ins must be installed from step_systemd_services, the one
+  // step a fresh install and step_post_update both run unconditionally. The
+  // ollama grant used to live in step_performance_mode, which returns early
+  // under CLAWBOX_TEST_MODE — so on every box that took that return the device
+  // ended up with the narrowed allow-list and no ollama grant at all, and
+  // "save a local Ollama model" hit a password prompt nobody can answer.
   it("installs the ollama drop-in through the same validating helper", () => {
-    expect(fn("step_performance_mode")).toMatch(
+    expect(fn("step_systemd_services")).toMatch(
       /install_sudoers_dropin "\$PROJECT_DIR\/config\/sudoers-clawbox-ollama" clawbox-ollama/,
     );
+  });
+
+  it("installs every managed drop-in from the step that always runs", () => {
+    const body = fn("step_systemd_services");
+    for (const name of ["clawbox-sudoers", "sudoers-clawbox-ollama"]) {
+      expect(body, `${name} must be installed from step_systemd_services`).toContain(
+        `install_sudoers_dropin "$PROJECT_DIR/config/${name}"`,
+      );
+    }
+    // Nowhere else may call it — a drop-in installed from a conditional step is
+    // a grant that silently does not exist on some devices. Every call site
+    // must fall inside step_systemd_services' byte range.
+    const start = INSTALL_SH.indexOf("step_systemd_services() {");
+    const end = start + body.length;
+    for (const m of INSTALL_SH.matchAll(/^[ \t]*install_sudoers_dropin .*/gm)) {
+      expect(
+        m.index! >= start && m.index! < end,
+        `install_sudoers_dropin called outside step_systemd_services: ${m[0].trim()}`,
+      ).toBe(true);
+    }
+  });
+
+  // The quarantine hands the device's blanket root back. It must not be gated
+  // on a feature grant: a box that failed to install the ollama tuning grant
+  // still has to lose its passwordless-root drop-in.
+  it("gates the quarantine on the primary allow-list, not the ollama grant", () => {
+    const body = fn("step_systemd_services");
+    const quarantineAt = body.indexOf("quarantine_overbroad_sudoers");
+    const ollamaAt = body.indexOf("sudoers-clawbox-ollama");
+    expect(quarantineAt).toBeGreaterThan(-1);
+    expect(ollamaAt).toBeGreaterThan(-1);
+    expect(quarantineAt).toBeLessThan(ollamaAt);
   });
 });
 
@@ -340,10 +378,18 @@ describe("the root-owned helper scripts the grants point at", () => {
   // Running the repo copy here would let a broken install_root_libexec pass
   // unnoticed — the whole point is that the copy under sudo is the one that runs.
   it("runs the root-owned copy of optimize-ollama.sh, not the clawbox-writable one", () => {
-    const start = INSTALL_SH.indexOf("step_performance_mode() {");
-    const body = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start));
-    expect(body).toContain('"$ROOT_LIBEXEC_DIR/optimize-ollama.sh"');
-    expect(body).not.toContain('bash "$PROJECT_DIR/scripts/optimize-ollama.sh"');
+    for (const step of ["step_performance_mode", "step_ollama_install"]) {
+      const start = INSTALL_SH.indexOf(`${step}() {`);
+      expect(start, `${step} not found in install.sh`).toBeGreaterThan(-1);
+      const body = INSTALL_SH.slice(start, INSTALL_SH.indexOf("\n}", start));
+      expect(body, `${step} must run the root-owned copy`).toContain(
+        '"$ROOT_LIBEXEC_DIR/optimize-ollama.sh"',
+      );
+    }
+    // install.sh runs as root throughout, so the repo copy — which lives under
+    // clawbox-writable /home/clawbox/clawbox/scripts — must not be executed
+    // from anywhere in it.
+    expect(INSTALL_SH).not.toMatch(/^[ \t]*(bash |sh )?"?\$PROJECT_DIR\/scripts\/optimize-ollama\.sh"?/m);
   });
 
   it("never grants a path inside the clawbox-writable project tree", () => {

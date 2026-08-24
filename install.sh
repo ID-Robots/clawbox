@@ -2938,12 +2938,28 @@ step_systemd_services() {
   # order the device is never, even briefly, without the rules the web server
   # needs: if the drop-in fails to validate we keep the old one and skip the
   # quarantine entirely rather than strand the box with neither.
+  # The ollama optimiser grant is a SECOND drop-in and it belongs here, next to
+  # the first one — not in step_performance_mode where it used to live. That
+  # step returns early under CLAWBOX_TEST_MODE and is Jetson-only in spirit, so
+  # the grant silently never landed on any box that took the early return: the
+  # e2e-install container installed cleanly and still had no
+  # `optimize-ollama.sh` grant, which is the same "the narrowing is invisible on
+  # the device" shape TASK-445 exists to close. step_systemd_services is the one
+  # step both a fresh install and the in-app updater (step_post_update) always
+  # run, unconditionally. TASK-445.
   if install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox; then
     echo "  Sudoers rules installed"
+    # Gated on the PRIMARY allow-list only. That file is what keeps the box
+    # operable (wizard, updater, power, hotspot); the ollama grant is one
+    # feature's tuning. Letting a missing feature grant block the quarantine
+    # would leave a device on blanket passwordless root to protect a KV-cache
+    # setting — the wrong trade in the wrong direction.
     quarantine_overbroad_sudoers || true
   else
     echo "  Warning: sudoers rules NOT updated; leaving the existing grants alone" >&2
   fi
+  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
+    echo "  Warning: clawbox-ollama sudoers rules NOT updated; leaving the existing grant alone" >&2
   echo "  Services installed and enabled"
 }
 
@@ -3350,9 +3366,12 @@ step_performance_mode() {
   # /usr/local/libexec/clawbox/optimize-ollama.sh is missing is a device where
   # saving a local Ollama model silently skips the q8_0 KV-cache / flash-attention
   # tuning, which is exactly what the TASK-445 revalidation found. TASK-445.
+  #
+  # The grant that names this path is installed by step_systemd_services, not
+  # here: everything below this point is behind the is_test_mode early return
+  # above, so installing a sudoers drop-in here meant it never landed on a box
+  # that took that return. TASK-445.
   "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
-  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
-    echo "  Warning: clawbox-ollama sudoers rules NOT updated; leaving the existing grant alone" >&2
   # The cgroup memory guards. Deliberately AFTER the ollama optimiser, so the
   # unit it just restarted picks the limits up on the daemon-reload below.
   step_resource_limits
@@ -3419,8 +3438,12 @@ step_ollama_install() {
   # Ensure the service is enabled and running
   systemctl enable ollama 2>/dev/null || true
   systemctl start ollama 2>/dev/null || true
-  # Apply Jetson memory optimizations
-  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  # Apply Jetson memory optimizations. Root-owned copy again, same reason as in
+  # step_performance_mode: this runs as root, and /home/clawbox/clawbox/scripts
+  # is clawbox-writable, so sourcing the repo copy here would be a root path
+  # through a file the web server can rewrite. TASK-445.
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
   echo "  Ollama installed and running"
 
   # Local embedding model for semantic memory. OpenClaw's memory search

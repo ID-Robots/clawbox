@@ -38,8 +38,27 @@ test.describe("root escalation surface", () => {
 
     const listed = await sudoList();
     expect(listed).not.toMatch(/NOPASSWD:\s*ALL\s*$/m);
-    // `(ALL : ALL) ALL` is sudo's rendering of an unrestricted rule.
-    expect(listed).not.toMatch(/\(ALL\s*:\s*ALL\)\s+ALL\s*$/m);
+
+    // `(ALL : ALL) ALL` from the `sudo` GROUP is expected and is deliberately
+    // NOT what this task removes. install.sh's step_ensure_user puts clawbox in
+    // `sudo`, `video`, `audio`, `i2c`, `gpio` on every device, and the distro's
+    // `%sudo ALL=(ALL:ALL) ALL` demands a password — so it is the owner's own
+    // administrator account, not a path the web server can take. Stripping it
+    // would lock the only administrator out of an appliance that has no
+    // console, which is why quarantine_overbroad_sudoers only ever looks at
+    // `clawbox`/`%clawbox` NOPASSWD rules.
+    //
+    // So assert the BEHAVIOUR rather than the rendering: the web server only
+    // ever runs `sudo -n`, and under a blanket grant `sudo -n <anything>`
+    // succeeds. Each probe below is a command no line in the allow-list names,
+    // so a pass here means an unrestricted rule is reachable without a password.
+    for (const probe of ["id -u", "cat /etc/shadow", "install -m 0755 /bin/true /usr/local/bin/pwn"]) {
+      const out = await dockerExec(
+        ["bash", "-lc", `sudo -n ${probe} >/dev/null 2>&1 && echo ESCALATED || echo DENIED`],
+        { user: "clawbox" },
+      );
+      expect(out.trim(), `\`sudo -n ${probe}\` must not be permitted`).toBe("DENIED");
+    }
   });
 
   test("the removed drop-in is kept, root-only, where it can be explained", async () => {
