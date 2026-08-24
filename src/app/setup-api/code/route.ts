@@ -13,6 +13,7 @@ import {
   deleteFile,
   searchFiles,
   buildProject,
+  projectPath,
   validateProjectId,
   NotFoundError,
   ValidationError,
@@ -54,19 +55,24 @@ export async function POST(request: NextRequest) {
         if (!name) return err("Project name required");
         // Also checked in initProject, before anything is written.
         const meta = await initProject(projectId, name, { color, description, template });
-        return ok({ success: true, project: meta });
+        // `path` is ABSOLUTE on purpose: whoever edits these files next (the
+        // agent's own file tools, a terminal) has a different working directory
+        // than this route, so a relative path resolves somewhere else entirely.
+        return ok({ success: true, project: meta, path: projectPath(projectId) });
       }
 
       case "list-projects": {
         const projects = await listProjects();
-        return ok({ projects });
+        return ok({
+          projects: projects.map((p) => ({ ...p, path: projectPath(p.projectId) })),
+        });
       }
 
       case "get-project": {
         const { projectId } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
         const meta = await getProject(projectId);
-        return ok({ project: meta });
+        return ok({ project: meta, path: projectPath(projectId) });
       }
 
       case "delete-project": {
@@ -82,7 +88,7 @@ export async function POST(request: NextRequest) {
         const { projectId, directory } = body;
         if (!projectId || !validateProjectId(projectId)) return err("Invalid project ID");
         const files = await listFiles(projectId, directory);
-        return ok({ files });
+        return ok({ files, path: projectPath(projectId) });
       }
 
       case "file-read": {

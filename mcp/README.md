@@ -99,17 +99,34 @@ There is also no thinking/reasoning setter yet — see "Work owned by others".
 `reason`) · `disk_usage` · `disk_cleanup` · `update_check` (reports only, never
 installs) · `logs_tail` · `screen_capture` · `wifi_scan` · `wifi_status` ·
 `vnc_status` · `preferences_get` · `preferences_set` · `backup_status` ·
-`backup_list` · `backup_now` · `telegram_status`
+`backup_list`* · `backup_now`* · `telegram_status`  &nbsp;&nbsp;*(\* OpenClaw
+only)*
 
 `disk_usage`, `disk_cleanup`, `logs_tail` and `screen_capture` are
 **capability-probed at startup** — no `du`, no readable journal, or no screen
 grabber, and the tool is simply not offered.
+
+ClawKeep archives the OpenClaw agent through the `openclaw` CLI, so on Hermes
+the feature reports `supportedOnEdition:false` and Settings offers nothing to
+pair: `backup_list` and `backup_now` are not registered there, and
+`backup_status` answers "not available on this edition" rather than a status
+object the agent reads as "not paired yet".
+
+`screen_capture` resolves the display from `CLAWBOX_VNC_DISPLAY`, then
+`~/.cache/clawbox/vnc-display.env`, then `:0` — the harness spawns this server
+with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 
 ### Desktop, apps and building
 `ui_open_app` · `ui_list_apps` · `ui_notify` · `app_search`* · `app_install`* ·
 `app_uninstall` · `webapp_create` · `webapp_update` · `code_project_init` ·
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
+
+`code_project_init` and `code_project_list` report the project directory as an
+ABSOLUTE path. The agent edits those files with its harness's own file tools,
+and that process has a different working directory than the web tier — a
+relative path read nothing and wrote into a parallel tree the build never
+looks at.
 
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
