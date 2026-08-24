@@ -18,7 +18,22 @@ const APP_VERSION = (() => {
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  serverExternalPackages: ["better-sqlite3", "busboy"],
+  serverExternalPackages: ["better-sqlite3", "busboy", "sharp"],
+  // sharp's native addon dlopen()s libvips at runtime, so Next's file tracing
+  // — which follows `require`/`import` — never sees the shared object and
+  // leaves it out of `.next/standalone`. The addon itself IS traced, which is
+  // what makes the failure look so odd: the .node file is right there, and
+  // loading it dies on `libvips-cpp.so.8.18.3: cannot open shared object file`.
+  //
+  // Nothing imported sharp before, so nothing noticed. The pet thumbnail route
+  // does, so name the .so explicitly. Both libc variants are listed because the
+  // trace is resolved at build time and a musl image would need the other one.
+  outputFileTracingIncludes: {
+    "/setup-api/pets/thumb": [
+      "./node_modules/@img/sharp-libvips-linux*/lib/**",
+      "./node_modules/@img/sharp-linux*/lib/**",
+    ],
+  },
   allowedDevOrigins: ["http://clawbox.local"],
   devIndicators: false,
   compress: true,

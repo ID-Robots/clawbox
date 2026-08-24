@@ -188,8 +188,27 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
   };
 }
 
-/** Resident bytes of every process whose command line matches `pattern`. */
-export async function processMemoryBytes(pattern: string): Promise<number | null> {
+/**
+ * Resident bytes of every process whose command line matches `pattern`, minus
+ * any whose command line also matches `exclude`.
+ *
+ * `pgrep -f` matches the WHOLE command line, which is looser than it looks:
+ * Ollama ships its own binary literally named `llama-server`
+ * (`/usr/local/lib/ollama/llama-server`), so the pattern that finds llama.cpp
+ * finds Ollama's too. Without `exclude`, a box running both engines reported
+ * Ollama's memory twice — once on its own row and once added to the Local LLM
+ * row, which on an 8 GB box turned a real 5.3 GB into a claimed 7.6 GB
+ * (TASK-504, measured on the upgraded box; the clean-install box runs only one
+ * engine and never showed it).
+ *
+ * The filter is negative rather than a positive match on the binary path
+ * because `LlamaCppLaunchSpec.binPath` is configurable, so a path this file
+ * hard-coded could drift out from under it.
+ */
+export async function processMemoryBytes(
+  pattern: string,
+  exclude?: RegExp,
+): Promise<number | null> {
   const out = await run("/usr/bin/pgrep", ["-f", pattern]);
   const pids = (out ?? "").split("\n").map(s => s.trim()).filter(Boolean);
   if (!pids.length) return null;
@@ -198,6 +217,12 @@ export async function processMemoryBytes(pattern: string): Promise<number | null
   for (const pid of pids) {
     if (!/^\d+$/.test(pid)) continue;
     try {
+      if (exclude) {
+        // NUL-separated argv; the separators only matter for not gluing
+        // arguments together, so a space is enough to match against.
+        const cmdline = (await fs.readFile(`/proc/${pid}/cmdline`, "utf8")).replace(/\0/g, " ");
+        if (exclude.test(cmdline)) continue;
+      }
       const status = await fs.readFile(`/proc/${pid}/status`, "utf8");
       const m = status.match(/^VmRSS:\s+(\d+) kB$/m);
       if (m) {
@@ -210,6 +235,12 @@ export async function processMemoryBytes(pattern: string): Promise<number | null
   }
   return sawAny ? total : null;
 }
+
+/**
+ * Ollama's bundled inference server, which shares a file name with llama.cpp's.
+ * Anything running out of an `ollama` directory belongs on the Ollama row.
+ */
+export const OLLAMA_OWNED_PROCESS = /[/\\]ollama[/\\]/;
 
 async function ollamaModels(baseUrl: string): Promise<{ name: string; size: number }[] | null> {
   try {
@@ -355,7 +386,9 @@ interface LlamaCppProbe {
 }
 
 async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
-  const memoryBytes = probe.running ? await processMemoryBytes("llama-server") : null;
+  const memoryBytes = probe.running
+    ? await processMemoryBytes("llama-server", OLLAMA_OWNED_PROCESS)
+    : null;
   return {
     id: "llamacpp",
     name: probe.model ? `Local LLM (${probe.model})` : "Local LLM",

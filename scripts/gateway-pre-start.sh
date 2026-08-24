@@ -132,6 +132,12 @@ if [ -n "$CLAWBOX_EXTRA_ORIGINS" ]; then
 fi
 export CLAWBOX_EXTRA_ORIGINS
 
+# The device store the Next app writes (`data/config.json`), not openclaw.json.
+# The cloud-voice migration below needs the portal-confirmed plan stamp that
+# lives there, and only there. Exported rather than passed as a second argv so
+# the block keeps the single-argument shape every other python heredoc here has.
+export CLAWBOX_DEVICE_STORE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/config.json"
+
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile, secrets
 
@@ -557,6 +563,13 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
         agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
         changed = True
 
+# Set by the image-generation migration below, on the one path where it decides
+# the `openai` provider slot is ours to write. The speech-to-text migration
+# after it is gated on exactly that fact: it points channel audio at our proxy,
+# and that proxy is reached with whatever key sits on that provider.
+_clawai_openai_route_is_ours = False
+_clawai_proxy_base_url = ""
+
 # Migration: ClawBox AI image generation.
 #
 # OpenClaw only registers its `image_generate` tool when an image-generation
@@ -685,6 +698,8 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 
     if _key_is_ours and _foreign_route is None:
         models_providers["openai"] = openai_provider
+        _clawai_openai_route_is_ours = True
+        _clawai_proxy_base_url = _image_base_url
         if openai_provider.get("apiKey") != _clawai_token:
             openai_provider["apiKey"] = _clawai_token
             changed = True
@@ -744,6 +759,259 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
         if not _has_image_model:
             agents_defaults["imageGenerationModel"] = {"primary": CLAWBOX_IMAGE_MODEL_REF}
             changed = True
+
+# Migration: ClawBox AI speech to text.
+#
+# A voice note arriving over a chat channel — Telegram is the one v4 ships — is
+# transcribed through OpenClaw's media-understanding surface, and that surface
+# is not a models[] row and never reads one. It takes its endpoint from
+# `tools.media.audio.baseUrl` and its bearer from
+# `models.providers.openai.apiKey` — the same last-resort key walk described
+# above. So on a paired ClawBox that configures no audio at all, every voice
+# note ships the claw_ subscription token to OpenAI's default host and comes
+# back
+#   HTTP 401 Incorrect API key provided: claw_…
+# Reproduced on both loop boxes on beta 02249c1; see TASK-502. That broke two
+# things, not one: no channel voice note could ever be transcribed, and the
+# token the block above takes such care never to hand to a foreign route was
+# being handed to one on every attempt.
+#
+# Both fields written below are load-bearing, measured against the live proxy
+# on 2026-08-22:
+#   - the baseUrl alone still fails, because OpenClaw's default audio model for
+#     `openai` is gpt-4o-transcribe and the proxy answers 400 "Model not
+#     supported for transcription: gpt-4o-transcribe. Use
+#     gpt-4o-mini-transcribe."
+#   - the model pin alone still resolves to api.openai.com and still 401s
+#
+# The device chat microphone does not come through here — it posts to the proxy
+# itself from src/app/setup-api/chat/transcribe/route.ts — which is exactly why
+# this stayed invisible until a channel voice note was tried on real hardware.
+#
+# The model id is duplicated from TRANSCRIBE_MODEL in that route for the same
+# reason the image id is duplicated above: a shell migration cannot import a TS
+# constant. It must name a model production allows, because the proxy matches
+# the bare id and answers 400 on a miss.
+CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
+CLAWBOX_AUDIO_MODELS = [{"provider": "openai", "model": CLAWBOX_TRANSCRIBE_MODEL_ID}]
+
+
+def _same_endpoint(_a, _b):
+    """Do two configured endpoints name the same route?
+
+    The WHOLE endpoint, not just its host. An owner who pointed transcription
+    at https://clawbox.com/their-own-route chose that path deliberately, and a
+    host-only match would stamp over it while reporting success. One trailing
+    slash is the only difference that means nothing; stripping every slash
+    would also treat an owner's deliberate `.../api/ai//` route as ours and
+    stamp over it.
+
+    Module level rather than nested in the guard below because the cloud-voice
+    migration after it asks the same question of the same proxy and must give
+    the same answer. Two copies of this rule would be two rules.
+    """
+    def _without_one_trailing_slash(_value):
+        return _value[:-1] if _value.endswith("/") else _value
+
+    return _without_one_trailing_slash(_a) == _without_one_trailing_slash(_b)
+
+
+if _clawai_openai_route_is_ours:
+    # Anything already under tools.media.audio that is not what we would write
+    # is the owner's own transcription setup: a self-hosted Whisper, a Deepgram
+    # key, a different model on our own proxy. Leave all of it alone. A
+    # half-applied migration that keeps their endpoint and swaps their model is
+    # worse than none, and sending our token to their host is the failure this
+    # whole block exists to stop.
+    # A non-dict at any of these paths is config the gateway cannot read at
+    # all, so it is replaced rather than respected — the same call the `compat`
+    # migration below makes, for the same reason.
+    _tools = cfg.get("tools")
+    if not isinstance(_tools, dict):
+        _tools = {}
+    _media = _tools.get("media")
+    if not isinstance(_media, dict):
+        _media = {}
+    _audio = _media.get("audio")
+    if not isinstance(_audio, dict):
+        _audio = {}
+
+    _audio_base_url = _audio.get("baseUrl")
+    _audio_models = _audio.get("models")
+    _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
+    _audio_route_taken = bool(
+        (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
+        or (_audio_models is not None and _audio_models != CLAWBOX_AUDIO_MODELS)
+    )
+    if _audio_route_taken:
+        print(
+            "  Skipped ClawBox AI speech to text: tools.media.audio already names its own transcription route"
+        )
+    elif _audio_base_url != _clawai_proxy_base_url or _audio_models != CLAWBOX_AUDIO_MODELS:
+        _audio["baseUrl"] = _clawai_proxy_base_url
+        _audio["models"] = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
+        _media["audio"] = _audio
+        _tools["media"] = _media
+        cfg["tools"] = _tools
+        changed = True
+
+
+# Migration: ClawBox AI cloud voice (text to speech).
+#
+# The mirror image of the block above, and it went wrong the same way. Cloud
+# TTS shipped to production on 2026-08-22 (clawbox-website PR #523), so
+# ClawBox AI genuinely serves speech now — but nothing on the device was ever
+# told, and `messages.tts.providers` on a paired box carries only the local
+# CLI entry. So `cloudCredentialIsUnusable` (src/lib/voice-output.ts) read a
+# claw_ token with no speech endpoint behind it, correctly concluded it was
+# unusable, and every box printed "ClawBox AI does not serve the voice yet" —
+# a confident statement about the product that had stopped being true.
+# Reproduced on both loop boxes on beta ddd168e through the real Settings UI;
+# see TASK-490.
+#
+# All three fields are load-bearing, measured against the live proxy from .65
+# on 2026-08-22 (`openclaw capability tts convert`, 50,688 bytes of real MPEG
+# in 1.96 s against 27.7 s for the on-device voice):
+#   - `baseUrl`, or OpenClaw sends /audio/speech to api.openai.com and the
+#     claw_ token comes back 401. Same shape as the audio baseUrl above: the
+#     provider root, with OpenClaw appending /audio/speech.
+#   - `model`, or the request carries OpenClaw's own default and the proxy
+#     answers 400 — it serves exactly one speech model.
+#   - `apiKey`, because the documented fallback for the OpenAI TTS provider is
+#     the OPENAI_API_KEY environment variable, which a ClawBox does not set.
+#     `models.providers.openai.apiKey` is not consulted for speech.
+#
+# THE TIER GATE. Cloud speech is Max-only on the proxy (SPEECH_MODEL_TIERS),
+# which answers 403 to Free and Pro. Pointing a Pro box at it would be worse
+# than leaving it alone: the panel would call the cloud voice configured, Auto
+# would move the primary onto it, and every spoken reply would pay a failed
+# round trip before falling back to the voice the box already had. So the
+# stamp the status route persists from a live portal answer is the gate.
+# `clawai_tier` is a DEVICE tier, and "pro" is the device tier of the MAX
+# plan — the two names are off by one on purpose (see CLAWBOX_AI_MODEL_BY_TIER
+# in src/lib/clawbox-ai-models.ts). Anything else, including a missing stamp,
+# means we have not been told this box is entitled, and an unentitled box is
+# left exactly as it was. A customer who upgrades gets the cloud voice at the
+# next gateway start, once the status route has refreshed the stamp.
+#
+# The customer-facing "your plan speaks locally, Max speaks in the cloud" line
+# is TASK-486 and deliberately not written here.
+CLAWBOX_SPEECH_MODEL_ID = "gpt-4o-mini-tts"
+CLAWBOX_SPEECH_DEVICE_TIER = "pro"
+# Stamped on the entry we write, and the ONLY thing that authorises removing
+# one later. Ownership of `models.providers.openai` is decided upstream by the
+# image migration, but that says nothing about who wrote
+# `messages.tts.providers.openai`, and the downgrade path below is the one
+# irreversible action in this file. Matching on the proxy URL alone would let
+# it delete a hand-written entry that happens to point at the same host.
+# Verified harmless on a real box on 2026-08-22: an unknown key on a speech
+# provider entry survives `openclaw config set`, is not stripped, does not
+# upset `openclaw doctor`, and the entry still synthesises.
+CLAWBOX_SPEECH_MANAGED_KEY = "clawboxManaged"
+
+def _clawai_device_tier():
+    """The portal-confirmed plan stamp, or None when the store cannot be read.
+
+    Unreadable, absent and malformed all collapse to None on purpose: every one
+    of them means "nobody has told us this box is on Max", and the gate below
+    treats not-knowing exactly like not-entitled.
+    """
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return None
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except Exception:
+        return None
+    if not isinstance(_store, dict):
+        return None
+    _tier = _store.get("clawai_tier")
+    return _tier.strip() if isinstance(_tier, str) else None
+
+
+_clawai_speech_entitled = _clawai_device_tier() == CLAWBOX_SPEECH_DEVICE_TIER
+
+if _clawai_openai_route_is_ours and _clawai_speech_entitled:
+    _messages = cfg.get("messages")
+    if not isinstance(_messages, dict):
+        _messages = {}
+    _tts = _messages.get("tts")
+    if not isinstance(_tts, dict):
+        _tts = {}
+    _tts_providers = _tts.get("providers")
+    if not isinstance(_tts_providers, dict):
+        _tts_providers = {}
+    _speech = _tts_providers.get("openai")
+    if not isinstance(_speech, dict):
+        _speech = {}
+
+    # An entry pointing somewhere that is not our proxy is the owner's own
+    # OpenAI-compatible voice — a self-hosted Kokoro, an OpenAI key of their
+    # own, a different route on our host. Leave every field of it alone. The
+    # same one-trailing-slash rule the transcription migration uses, for the
+    # same reason: `.../api/ai//` is a deliberate route, not a typo to tidy.
+    _speech_base_url = _speech.get("baseUrl")
+    _speech_route_taken = bool(
+        isinstance(_speech_base_url, str)
+        and _speech_base_url.strip()
+        and not _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+    )
+    if _speech_route_taken:
+        print(
+            "  Skipped ClawBox AI cloud voice: messages.tts.providers.openai already names its own speech route"
+        )
+    else:
+        _speech_before = dict(_speech)
+        _speech["baseUrl"] = _clawai_proxy_base_url
+        _speech["model"] = CLAWBOX_SPEECH_MODEL_ID
+        _speech["apiKey"] = _clawai_token
+        # Adopt and normalise an unmarked entry that already points at us — a
+        # hand repair, or one written before this stamp existed — rather than
+        # leave a box with a half-configured voice. Writing is recoverable and
+        # deleting is not, which is why only the delete below insists on it.
+        _speech[CLAWBOX_SPEECH_MANAGED_KEY] = True
+        if _speech != _speech_before:
+            _tts_providers["openai"] = _speech
+            _tts["providers"] = _tts_providers
+            _messages["tts"] = _tts
+            cfg["messages"] = _messages
+            changed = True
+
+elif _clawai_openai_route_is_ours:
+    # The other direction, and it has to exist or this migration is one-way.
+    # A box that was Max and is not any more keeps an entry pointing at an
+    # endpoint that now answers 403, so every spoken reply buys a refused round
+    # trip before falling back — and the panel calls the cloud voice configured
+    # while it does it. Take back only what we wrote, and "what we wrote" means
+    # our own stamp plus our own proxy, not the proxy alone: an entry pointing
+    # at this host that we did not stamp is somebody's hand-written config, and
+    # this is the one place in the file that destroys configuration. An owner's
+    # own voice is theirs whatever their ClawBox AI plan says.
+    #
+    # `messages.tts.provider` is deliberately NOT touched here either. If the
+    # customer had explicitly chosen the cloud voice, the panel's job is to show
+    # them that their choice is no longer available and that the box is speaking
+    # locally instead — which is precisely what it does once the entry is gone.
+    # Silently rewriting their pick would hide the downgrade.
+    _messages = cfg.get("messages")
+    _tts = _messages.get("tts") if isinstance(_messages, dict) else None
+    _tts_providers = _tts.get("providers") if isinstance(_tts, dict) else None
+    _speech = _tts_providers.get("openai") if isinstance(_tts_providers, dict) else None
+    if isinstance(_speech, dict):
+        _speech_base_url = _speech.get("baseUrl")
+        if (
+            _speech.get(CLAWBOX_SPEECH_MANAGED_KEY) is True
+            and isinstance(_speech_base_url, str)
+            and _speech_base_url.strip()
+            and _same_endpoint(_speech_base_url, _clawai_proxy_base_url)
+        ):
+            del _tts_providers["openai"]
+            print(
+                "  Removed the ClawBox AI cloud voice: this box's plan no longer includes it"
+            )
+            changed = True
+
 
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]

@@ -22,7 +22,17 @@ const BRAND_ORANGE_LIGHT = "#ff8b1a";
 
 interface BrowserStatus {
   chromium: { installed: boolean; path?: string; version?: string };
-  browser: { running: boolean; pid?: number; cdpReady?: boolean };
+  browser: {
+    running: boolean;
+    pid?: number;
+    cdpReady?: boolean;
+    /**
+     * The agent's own headless browser owns the CDP port and no desktop
+     * browser window exists. A distinct state with its own words — the panel
+     * used to render this as "Chromium is running on the desktop" (TASK-515).
+     */
+    agentBrowsing?: boolean;
+  };
   enabled: boolean;
   /**
    * True when this edition has no integration switch because the link is
@@ -154,6 +164,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
 
   const chromiumInstalled = status?.chromium?.installed ?? false;
   const browserRunning = status?.browser?.running ?? false;
+  const agentBrowsing = !browserRunning && (status?.browser?.agentBrowsing ?? false);
   const isEnabled = status?.enabled ?? false;
   const alwaysOn = status?.alwaysOn ?? false;
   // Step 3 drives the Chromium that step 1 installs. Enabled-but-no-Chromium is
@@ -319,8 +330,16 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
               <p className="text-xs text-white/50 mt-1">
                 {browserRunning
                   ? t("browser.runningMessage", { harness: harnessLabel })
-                  : t("browser.launchMessage", { harness: harnessLabel })}
+                  : agentBrowsing
+                    ? t("browser.agentHeadlessMessage", { harness: harnessLabel })
+                    : t("browser.launchMessage", { harness: harnessLabel })}
               </p>
+              {!browserRunning && agentBrowsing && (
+                <div className="mt-2 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-amber-400" />
+                  <span className="text-xs text-white/40 font-mono">CDP :{status?.cdpPort ?? 18800}</span>
+                </div>
+              )}
               {browserRunning && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
                   <div className="flex items-center gap-1.5">
