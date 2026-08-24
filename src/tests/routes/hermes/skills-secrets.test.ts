@@ -126,6 +126,38 @@ describe("skill secrets (TASK-452)", () => {
     expect(status).toBe(400);
   });
 
+  // Removing a stored credential is destructive, so it has to be asked for
+  // explicitly. Coercing a missing or non-string value to "" would have let a
+  // typo in the caller silently delete a customer's API key.
+  it.each([
+    ["omits value entirely", { key: "BRAVE_API_KEY" }],
+    ["sends null", { key: "BRAVE_API_KEY", value: null }],
+    ["sends a number", { key: "BRAVE_API_KEY", value: 42 }],
+    ["sends an object", { key: "BRAVE_API_KEY", value: { toString: "x" } }],
+  ])("refuses a request that %s, and leaves a stored key alone", async (_label, payload) => {
+    await post({ key: "BRAVE_API_KEY", value: "brave" });
+
+    const { status } = await post(payload as Record<string, unknown>);
+    expect(status).toBe(400);
+    expect((await get("BRAVE_API_KEY")).body.secrets).toEqual({ BRAVE_API_KEY: true });
+  });
+
+  it.each([
+    ["null", "null"],
+    ["an array", '[{"key":"BRAVE_API_KEY","value":"x"}]'],
+    ["a bare string", '"BRAVE_API_KEY"'],
+  ])("answers 400 for a body that is %s rather than throwing", async (_label, raw) => {
+    const { POST } = await import("@/app/setup-api/hermes/skills/secrets/route");
+    const res = await POST(
+      new Request("http://localhost/setup-api/hermes/skills/secrets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: raw,
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
   // CodeQL js/http-to-file-access on the .env write (PR #465). The answer was
   // to state the whole accepted alphabet instead of blacklisting the three
   // characters that were known to hurt, so these pin the alphabet rather than

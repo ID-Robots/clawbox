@@ -41,8 +41,8 @@ export async function GET(request: Request) {
     .map((k) => k.trim())
     .filter(Boolean)
     .slice(0, MAX_KEYS);
-  // An unparseable key is not an error — it is a key that cannot be set, and
-  // reporting it as "not set" is both true and what the UI needs to render.
+  // A key that cannot name a Hermes environment variable is a caller bug, not a
+  // key that happens to be unset, so it is refused rather than reported false.
   const invalid = keys.filter((k) => !isValidEnvKey(k));
   if (invalid.length) {
     return NextResponse.json({ error: "Invalid secret name" }, { status: 400 });
@@ -58,27 +58,42 @@ export async function POST(request: Request) {
   const blocked = await hermesSkillsGuard();
   if (blocked) return blocked;
 
-  let body: { key?: unknown; value?: unknown };
+  let body: unknown;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
+  // `null`, an array and a bare string are all valid JSON, and reading .key off
+  // the first of them throws. Establish that this is an object before anything
+  // else looks at it.
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+  const { key: rawKey, value: rawValue } = body as { key?: unknown; value?: unknown };
 
-  const key = typeof body.key === "string" ? body.key.trim() : "";
-  // Not trimmed: a leading or trailing space can be part of a secret, and
-  // silently altering a credential is worse than storing an odd one.
-  const value = typeof body.value === "string" ? body.value : "";
-
+  const key = typeof rawKey === "string" ? rawKey.trim() : "";
   if (!isValidEnvKey(key)) {
     return NextResponse.json({ error: "Invalid secret name" }, { status: 400 });
   }
 
+  // Deleting a stored credential is destructive, so it has to be asked for. A
+  // request that omits `value`, or sends null or a number, is a malformed
+  // request and is refused — coercing it to "" would have made a typo in the
+  // caller silently remove the customer's API key. Only an explicit empty
+  // string means remove.
+  if (typeof rawValue !== "string") {
+    return NextResponse.json({ error: "Invalid value" }, { status: 400 });
+  }
+  // Not trimmed: a leading or trailing space can be part of a secret, and
+  // silently altering a credential is worse than storing an odd one.
+  const value = rawValue;
+
   try {
-    // An empty value is the "remove this key" request, not a secret to store,
+    // The empty string is the "remove this key" request, not a secret to store,
     // so it is answered before the value alphabet is checked — the alphabet
     // describes what a stored secret may contain, and nothing is being stored.
-    if (!value) {
+    if (value === "") {
       await clearHermesSecret(key);
       return NextResponse.json({ ok: true, key, set: false });
     }
