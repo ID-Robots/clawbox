@@ -10,7 +10,11 @@ const CONFIG_PATH = path.join(DATA_DIR, "config.json");
 const OPENCLAW_HOME = path.join(TEST_ROOT, ".openclaw");
 const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 
-type RouteGet = (request?: Request) => Promise<Response>;
+// The handler itself always takes a Request (it reads the session cookie off
+// it, TASK-446); the wrapper below is what lets the existing call sites keep
+// invoking it with no argument.
+type RouteGet = (request: Request) => Promise<Response>;
+type RouteGetOptional = (request?: Request) => Promise<Response>;
 
 const SESSION_SECRET = "status-test-secret-0123456789abcdef";
 
@@ -27,7 +31,7 @@ function authedRequest(): Request {
 let statusRoute: RouteGet;
 // The route trims its payload for unauthenticated callers (TASK-446), so the
 // existing assertions — which all cover the full shape — go through a session.
-const statusGet: RouteGet = (request) => statusRoute(request ?? authedRequest());
+const statusGet: RouteGetOptional = (request) => statusRoute(request ?? authedRequest());
 
 beforeAll(async () => {
   process.env.CLAWBOX_ROOT = TEST_ROOT;
