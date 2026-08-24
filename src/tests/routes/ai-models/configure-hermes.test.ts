@@ -328,7 +328,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     // — and put it in an outbound request body. `model` still names the model.
     const fsp = (await import("fs/promises")).default;
     vi.mocked(fsp.readFile).mockResolvedValue(
-      JSON.stringify({ access_token: "ya29.a-real-looking-token", createdAt: Date.now() }) as never,
+      JSON.stringify({ access_token: "handoff-access-token-placeholder", createdAt: Date.now() }) as never,
     );
 
     const res = await POST(jsonRequest({
@@ -340,7 +340,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
 
     expect(res.status).toBe(200);
     expect(probeMock).toHaveBeenCalledWith("qwen3:8b");
-    expect(probeMock).not.toHaveBeenCalledWith(expect.stringContaining("ya29."));
+    expect(probeMock).not.toHaveBeenCalledWith(expect.stringContaining("handoff-access-token"));
     expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
       expect.objectContaining({ model: "qwen3:8b" }),
     );
