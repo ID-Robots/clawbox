@@ -41,7 +41,7 @@ import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
-import { openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
+import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -419,6 +419,14 @@ async function settleTurn(
  *             route does not forward it, so the raw thinking cannot flash into
  *             the bubble mid-stream. That is a property of the transport, not a
  *             filter that has to stay correct.
+ *   `tool`  — a step the agent is taking RIGHT NOW, `phase` moving start →
+ *             result. Not the record: the authoritative tool list still comes
+ *             from the agent's database on `done`, and this is the live view
+ *             that keeps a tool-heavy turn from looking like a hang. A turn can
+ *             spend minutes inside one call emitting no text at all — measured
+ *             at 240 seconds on the box — and before this the customer's only
+ *             evidence that anything was happening was that nothing was.
+ *   `status`— the agent's spinner line. A heartbeat, never the monologue.
  *   `done`  — the settled turn, byte-identical in shape to what the non-
  *             streaming path returns, including the tool steps and the
  *             deduplicated reasoning that only the agent's database has.
@@ -435,9 +443,15 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
       const send = (event: string, data: unknown) => {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
+      const threaded = turn.sessionId || fallbackSessionId;
       try {
-        const final = await turn.run((chunk) => send("delta", { text: chunk }));
-        const threaded = turn.sessionId || fallbackSessionId;
+        const final = await turn.run(
+          (chunk) => send("delta", { text: chunk }),
+          (activity) => {
+            if (activity.kind === "tool") send("tool", activity);
+            else send("status", { text: activity.text });
+          },
+        );
         if (final.status === "error") {
           const detail = final.error || final.text || "Hermes chat failed";
           await appendTranscript({
@@ -460,6 +474,37 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Hermes chat failed";
+        // ── Silence is not failure: ask the agent before saying so ─────────
+        //
+        // A quiet stream means this socket stopped hearing. It does NOT mean
+        // the turn did not happen, and on the live box the difference was the
+        // whole bug. From the customer's own transcript: they asked a question
+        // at 20:10:44, the agent ran two tools and wrote its 582-character
+        // answer to `state.db` at 20:11:12, and its `message.complete` never
+        // reached us. This route waited out the idle window and wrote "Error:
+        // dashboard stream went quiet" into their transcript at 20:14:13 — a
+        // finished answer thrown away and replaced with a failure, three
+        // minutes after it was ready.
+        //
+        // So before reporting silence, read the record. `readHermesTurn` is
+        // the same source `settleTurn` already trusts for every turn's
+        // reasoning and tool steps, and it is self-guarding here: it slices
+        // from the LAST user row, which is this turn's question, and returns
+        // null unless an assistant answer follows it. A turn that really is
+        // still thinking has no such row and still reports the failure.
+        if (isQuietStreamError(err) && !isAbort(err)) {
+          const recovered = await readHermesTurn(threaded).catch(() => null);
+          if (recovered?.text) {
+            send(
+              "done",
+              await settleTurn(threaded, recovered.text, "", {
+                ...(turn.model ? { model: turn.model } : {}),
+                ...(turn.provider ? { provider: turn.provider } : {}),
+              }),
+            );
+            return;
+          }
+        }
         // A failure is recorded too — see the non-streaming path's note. The one
         // exception is a caller who hung up: the socket dies as a consequence of
         // their own Stop, and their unanswered question is already recorded.

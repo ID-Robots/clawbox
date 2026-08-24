@@ -157,6 +157,27 @@ async function readStreamedTurn(
       if (!chunk) return;
       answer += chunk;
       onEvent?.({ kind: "delta", text: answer });
+    } else if (name === "tool") {
+      // Live progress. Forwarded only when it names a tool and a phase the
+      // surface can act on — a malformed frame must not be able to draw a pill
+      // with no name, and the authoritative list still arrives on `done`.
+      const toolName = typeof payload.name === "string" ? payload.name : "";
+      const phase = payload.phase === "result" ? "result" : "start";
+      const id = typeof payload.id === "string" && payload.id ? payload.id : toolName;
+      if (!toolName) return;
+      const detail = typeof payload.detail === "string" ? payload.detail : "";
+      const status = payload.status === "error" ? "error" : payload.status === "ok" ? "ok" : undefined;
+      onEvent?.({
+        kind: "tool",
+        phase,
+        id,
+        name: toolName,
+        ...(detail ? { detail } : {}),
+        ...(status ? { status } : {}),
+      });
+    } else if (name === "status") {
+      const text = typeof payload.text === "string" ? payload.text : "";
+      if (text) onEvent?.({ kind: "status", text });
     } else if (name === "done") {
       settled = payload;
     } else if (name === "error") {

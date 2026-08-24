@@ -94,7 +94,14 @@ vi.mock("@/lib/hermes-dashboard-auth", () => ({
   DASHBOARD_WS_ORIGIN: "ws://127.0.0.2:9119",
 }));
 
-import { openDashboardTurn, hermesCanStreamTurns, resetHermesStreamProbe } from "@/lib/hermes-dashboard-turn";
+import {
+  DashboardStreamQuietError,
+  hermesCanStreamTurns,
+  isQuietStreamError,
+  openDashboardTurn,
+  resetHermesStreamProbe,
+  type DashboardActivity,
+} from "@/lib/hermes-dashboard-turn";
 
 /** The socket the module just made, after letting the constructor run. */
 async function latest(): Promise<FakeSocket> {
@@ -149,6 +156,9 @@ beforeEach(() => {
   resetHermesStreamProbe();
 });
 afterEach(() => {
+  // The liveness tests below drive the idle clock with fake timers; a suite
+  // that left them installed would hand the next file a frozen Date.
+  vi.useRealTimers();
   resetHermesStreamProbe();
 });
 
@@ -384,5 +394,194 @@ describe("asking whether this box can stream", () => {
     await hermesCanStreamTurns();
     await hermesCanStreamTurns();
     expect(ticketMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Let the turn loop come back round to waiting for the NEXT frame.
+ *
+ * The idle clock is a `setTimeout` armed inside `nextFrame`, so a test that
+ * advanced time immediately after delivering a frame would advance it while no
+ * clock was armed at all and prove nothing. A handful of microtask turns is
+ * what it takes for the loop to handle the frame and arm the next one.
+ */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+}
+
+/** Only the tool steps, narrowed so a test can read `id` off them. */
+function toolsOnly(seen: readonly DashboardActivity[]) {
+  return seen.filter((a): a is Extract<DashboardActivity, { kind: "tool" }> => a.kind === "tool");
+}
+
+describe("what counts as a turn still being alive", () => {
+  /**
+   * The measurement behind this whole block, captured on the live box: a
+   * `terminal` call that ran 240.3 seconds emitted `tool.start` at t+3.7s and
+   * `tool.complete` at t+244.0s with NOTHING turn-scoped in between. Under a
+   * 180-second idle window that gap is longer than the window, so whether the
+   * turn survives depends entirely on which frames restart the clock.
+   */
+  it("does not call a long tool call dead — tool frames are progress, not silence", async () => {
+    vi.useFakeTimers();
+    const { turn, socket } = await connect();
+    const running = turn!.run(() => {});
+    await settle();
+    socket.event("tool.start", { tool_id: "call_7", name: "terminal", context: "uname -r" });
+    await settle();
+    // Past the idle window measured from the LAST frame, twice over, with the
+    // tool phase as the only thing that arrived: 340s of wall clock, 0s of
+    // silence.
+    await vi.advanceTimersByTimeAsync(170_000);
+    socket.event("tool.complete", { tool_id: "call_7", name: "terminal", summary: "5.15.185-tegra" });
+    await settle();
+    await vi.advanceTimersByTimeAsync(170_000);
+    socket.event("message.complete", { text: "5.15.185-tegra", status: "complete" });
+    const final = await running;
+    expect(final.text).toBe("5.15.185-tegra");
+    expect(final.status).toBe("complete");
+  });
+
+  it("treats the spinner as the heartbeat it is", async () => {
+    // `thinking.delta` is the agent's animated status line, and while a model
+    // is thinking nothing else is guaranteed to arrive at all. It is kept out
+    // of the monologue on purpose; keeping it out of the LIVENESS accounting
+    // too would kill exactly the slow turns most worth waiting for.
+    vi.useFakeTimers();
+    const { turn, socket } = await connect();
+    const running = turn!.run(() => {});
+    await settle();
+    socket.event("thinking.delta", { text: "(⌐■_■) computing..." });
+    await settle();
+    await vi.advanceTimersByTimeAsync(170_000);
+    socket.event("thinking.delta", { text: "(◔_◔) musing..." });
+    await settle();
+    await vi.advanceTimersByTimeAsync(170_000);
+    socket.event("message.complete", { text: "one", status: "complete" });
+    expect((await running).text).toBe("one");
+  });
+
+  it("still calls TRUE silence dead, and says what it last heard", async () => {
+    // The other half of the same property. Counting tool frames as liveness is
+    // only safe while a socket that has genuinely stopped carrying anything is
+    // still given up on — otherwise a wedged turn holds the response open for
+    // as long as the customer is willing to stare at it.
+    vi.useFakeTimers();
+    const { turn, socket } = await connect();
+    const running = turn!.run(() => {});
+    const settled = running.catch((e: unknown) => e);
+    await settle();
+    socket.event("tool.start", { tool_id: "call_7", name: "terminal", context: "sleep 600" });
+    await settle();
+    await vi.advanceTimersByTimeAsync(180_000);
+    const err = await settled;
+    // NAMED, not merely thrown: the route branches on this to go and look for
+    // the answer in the agent's own database before writing a failure into the
+    // customer's transcript.
+    expect(err).toBeInstanceOf(DashboardStreamQuietError);
+    expect(isQuietStreamError(err)).toBe(true);
+    expect((err as DashboardStreamQuietError).lastEvent).toBe("tool.start");
+    expect((err as DashboardStreamQuietError).framesSeen).toBeGreaterThan(0);
+    expect(socket.closed).toBe(true);
+  });
+});
+
+describe("reporting what a turn is DOING while it does it", () => {
+  it("reports a tool call as ONE pill, start then result under the same id", async () => {
+    // A surface handed two ids for one call draws two pills, the second
+    // appearing only once the call is already over — the opposite of progress.
+    // A stable id is what lets "working: web_search" become "web_search: 3
+    // results" in place.
+    const { turn, socket } = await connect();
+    const seen: DashboardActivity[] = [];
+    const running = turn!.run(
+      () => {},
+      (activity) => seen.push(activity),
+    );
+    await Promise.resolve();
+    socket.event("tool.start", { tool_id: "call_7", name: "web_search", context: "clawbox docs" });
+    // A frame naming no tool draws nothing: a nameless pill is worse than none.
+    socket.event("tool.start", { tool_id: "call_8", context: "no name here" });
+    socket.event("tool.complete", { tool_id: "call_7", name: "web_search", summary: "3 results" });
+    socket.event("message.complete", { text: "Here they are.", status: "complete" });
+    await running;
+    expect(seen).toEqual([
+      { kind: "tool", phase: "start", id: "call_7", name: "web_search", detail: "clawbox docs" },
+      { kind: "tool", phase: "result", id: "call_7", name: "web_search", detail: "3 results", status: "ok" },
+    ]);
+    expect(new Set(toolsOnly(seen).map((tool) => tool.id)).size).toBe(1);
+  });
+
+  it("draws no pill for tool.generating, and still counts it as being alive", async () => {
+    // Two facts about the same frame, and both matter.
+    //
+    // It is not shown, because it carries no tool id and names the tool
+    // differently from the call that follows: captured on the box, one turn
+    // emitted `tool.generating name=mcp__web_search` and then `tool.start
+    // name=web_search id=toolu_01Nf…`. A pill drawn from the first would sit
+    // under a name the customer never sees again, with an id no `tool.complete`
+    // can close — a step stuck at "running" beside the one that finished.
+    //
+    // It is still LIVENESS. Arguments can take a while to write, and a turn
+    // must not be called dead while the only thing arriving is the agent
+    // composing its next call.
+    vi.useFakeTimers();
+    const { turn, socket } = await connect();
+    const seen: DashboardActivity[] = [];
+    const running = turn!.run(
+      () => {},
+      (activity) => seen.push(activity),
+    );
+    await settle();
+    socket.event("tool.generating", { name: "mcp__web_search" });
+    await settle();
+    await vi.advanceTimersByTimeAsync(170_000);
+    socket.event("tool.start", { tool_id: "toolu_01Nf", name: "web_search" });
+    await settle();
+    socket.event("message.complete", { text: "ok", status: "complete" });
+    expect((await running).text).toBe("ok");
+    // The only pill is the one that can be closed: the call with an id.
+    expect(seen).toEqual([{ kind: "tool", phase: "start", id: "toolu_01Nf", name: "web_search" }]);
+  });
+
+  it("hands the spinner over as STATUS, and never as reasoning", async () => {
+    // The regression guard for the kaomoji in the Reasoning disclosure. The
+    // frame IS forwarded — it is the heartbeat a customer can see — and it is
+    // forwarded on a channel nothing folds into the monologue. A turn on
+    // claude-fable-5 once showed `(⊙_⊙) musing...` as though the model had
+    // thought it; it had not, and this is the wire making that impossible.
+    const { turn, socket } = await connect();
+    const seen: DashboardActivity[] = [];
+    const running = turn!.run(
+      () => {},
+      (activity) => seen.push(activity),
+    );
+    await Promise.resolve();
+    socket.event("thinking.delta", { text: "(⌐■_■) computing..." });
+    socket.event("reasoning.delta", { text: "The user asked for one word." });
+    socket.event("message.complete", { text: "one", status: "complete" });
+    const final = await running;
+    expect(seen).toEqual([{ kind: "status", text: "(⌐■_■) computing..." }]);
+    expect(final.reasoning).toBe("The user asked for one word.");
+    expect(final.reasoning).not.toContain("computing");
+    expect(final.reasoning).not.toContain("(⌐■_■)");
+  });
+
+  it("runs exactly as it did for a caller that passes no onActivity", async () => {
+    // `onActivity` is optional and every caller written before it omits it. A
+    // turn that needed a second argument to survive its own tool frames would
+    // break the path it was added to improve.
+    const { turn, socket } = await connect();
+    const seen: string[] = [];
+    const running = turn!.run((chunk) => seen.push(chunk));
+    await Promise.resolve();
+    socket.event("tool.start", { tool_id: "call_7", name: "terminal", context: "uname -r" });
+    socket.event("thinking.delta", { text: "(◔_◔) musing..." });
+    socket.event("tool.complete", { tool_id: "call_7", name: "terminal", summary: "5.15.185-tegra" });
+    socket.event("message.delta", { text: "5.15.185-tegra" });
+    socket.event("message.complete", { text: "5.15.185-tegra", status: "complete" });
+    const final = await running;
+    expect(seen).toEqual(["5.15.185-tegra"]);
+    expect(final.text).toBe("5.15.185-tegra");
   });
 });

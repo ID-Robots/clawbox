@@ -71,6 +71,28 @@ const EVENT = {
    */
   thinkingDelta: "thinking.delta",
   /**
+   * A tool call is ABOUT to run, is running, or has finished.
+   *
+   * Measured on the live box rather than assumed (`tui_gateway/server.py`
+   * `_on_tool_start` :6019, `_on_tool_complete` :6066, `tool_gen_callback`
+   * :6322): a turn that reaches for a tool emits `tool.generating` while the
+   * arguments are still being written, then `tool.start`, then — only when the
+   * tool RETURNS — `tool.complete`. Nothing at all is emitted in between.
+   *
+   * That gap is the whole of the "went quiet" bug. A 240-second `terminal`
+   * call, captured live, produced `tool.start` at t+3.7s and `tool.complete`
+   * at t+244.0s with no turn-scoped frame between them; the only thing that
+   * arrived was unrelated `sessions.changed` housekeeping from OTHER sessions,
+   * which is luck, not liveness.
+   *
+   * Named here so the phase becomes something the customer can SEE ("working:
+   * web_search") instead of a blank bubble, and so the idle clock is restarted
+   * by a turn's own progress rather than by a neighbour's.
+   */
+  toolGenerating: "tool.generating",
+  toolStart: "tool.start",
+  toolComplete: "tool.complete",
+  /**
    * The agent is BLOCKED, asking a person whether a tool may run.
    *
    * This is the one thing the socket does that spawning `hermes chat -q` never
@@ -111,6 +133,65 @@ const APPROVAL_CHOICE = "once";
  * minutes before writing a word still counts as working.
  */
 const IDLE_TIMEOUT_MS = Number(process.env.HERMES_STREAM_IDLE_TIMEOUT_MS || 180_000);
+
+/**
+ * "Nothing arrived for the whole window" — raised, and NAMED, so the caller can
+ * tell it apart from a turn that genuinely failed.
+ *
+ * The distinction earns its keep because of what quiet turned out to mean on
+ * the live box. Captured from the customer's own transcript: a question asked
+ * at 20:10:44 whose answer the agent WROTE to `state.db` at 20:11:12 — 27
+ * seconds later, 582 characters, two tool calls — and whose `message.complete`
+ * frame never reached this socket. This reader, which can only end a turn on
+ * `message.complete`, waited the full idle window and reported failure at
+ * 20:14:13, exactly `IDLE_TIMEOUT_MS` after the last frame. The customer saw
+ * "Error: dashboard stream went quiet"; the answer had been sitting in the
+ * agent's database the entire time.
+ *
+ * So quiet is not proof of failure. It is proof only that THIS TRANSPORT
+ * stopped hearing, and the caller owes the customer a look at the record
+ * before it writes an error into their transcript.
+ */
+export class DashboardStreamQuietError extends Error {
+  /** Discriminator, so a caller never has to match on the message text. */
+  readonly quiet = true;
+  /** Frames seen on this turn before the silence — 0 means never started. */
+  readonly framesSeen: number;
+  /** The last event type that arrived, for a log line worth reading. */
+  readonly lastEvent: string;
+  constructor(framesSeen: number, lastEvent: string) {
+    super("dashboard stream went quiet");
+    this.name = "DashboardStreamQuietError";
+    this.framesSeen = framesSeen;
+    this.lastEvent = lastEvent;
+  }
+}
+
+/** Is this the "heard nothing" case, rather than a reported failure? */
+export function isQuietStreamError(err: unknown): err is DashboardStreamQuietError {
+  return err instanceof DashboardStreamQuietError;
+}
+
+/**
+ * Something the turn DID, reported while it is still doing it.
+ *
+ * Deliberately not the answer and deliberately not the reasoning: this is the
+ * progress channel, and its whole purpose is that a turn spending three
+ * minutes in `web_search` looks like work rather than like a hang.
+ */
+export type DashboardActivity =
+  /** A tool call, `phase` moving start → result. `id` is stable across both. */
+  | { kind: "tool"; phase: "start" | "result"; id: string; name: string; detail?: string; status?: "ok" | "error" }
+  /**
+   * The agent's animated status line — the kaomoji spinner.
+   *
+   * Forwarded as ACTIVITY and never as reasoning. It is a heartbeat that says
+   * the agent is alive, and it is the exact frame that once put `(⊙_⊙)
+   * musing...` in a customer's Reasoning disclosure on a model that had not
+   * reasoned at all. Both facts are true at once, and this type is how they
+   * stay true: liveness here, monologue nowhere near here.
+   */
+  | { kind: "status"; text: string };
 
 /** Bound on the handshake itself, which is local and answers in milliseconds. */
 const CONNECT_TIMEOUT_MS = 8_000;
@@ -218,8 +299,17 @@ export interface DashboardTurn {
    */
   readonly model: string;
   readonly provider: string;
-  /** Run the submitted turn, reporting each fragment of the answer as it lands. */
-  run(onDelta: (chunk: string) => void): Promise<DashboardTurnFinal>;
+  /**
+   * Run the submitted turn, reporting each fragment of the answer as it lands.
+   *
+   * `onActivity` is optional and separate on purpose: a caller that only wants
+   * text stays exactly as it was, while one that can render progress gets the
+   * tool steps and the status line as they happen instead of after the fact.
+   */
+  run(
+    onDelta: (chunk: string) => void,
+    onActivity?: (activity: DashboardActivity) => void,
+  ): Promise<DashboardTurnFinal>;
   /** Drop the socket. Safe to call twice, and safe to call after `run` settles. */
   close(): void;
 }
@@ -350,9 +440,39 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
     deadWaiter?.(dead);
   };
 
+  /**
+   * Liveness, counted where it actually happens.
+   *
+   * EVERY frame off this socket restarts the idle clock — the clock lives in
+   * `nextFrame`, and every frame resolves whichever `nextFrame` is waiting.
+   * That includes the ones no branch of the turn loop acts on: `tool.start`
+   * and `tool.complete`, the `thinking.delta` spinner, `session.info`,
+   * `session.usage`, housekeeping. A tool phase emits no text and no
+   * reasoning, and treating only those two as "alive" would call a working
+   * agent dead; nothing here does that, and these counters exist so a test can
+   * prove it rather than a comment claiming it.
+   *
+   * A frame that will not parse is still a frame — the socket is plainly
+   * carrying traffic — so it counts as liveness even though it is dropped.
+   */
+  let framesSeen = 0;
+  let lastEvent = "(none)";
+
   socket.on("message", (raw) => {
+    framesSeen += 1;
     const frame = parseFrame(raw);
-    if (!frame) return;
+    if (!frame) {
+      // Unparseable, but not silence. Wake the waiter so the idle clock
+      // restarts; the loop simply reads the next frame.
+      if (waiter) {
+        const resume = waiter;
+        waiter = null;
+        resume({});
+      }
+      return;
+    }
+    const type = frameType(frame);
+    if (type) lastEvent = type;
     if (waiter) {
       const resume = waiter;
       waiter = null;
@@ -379,7 +499,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       const timer = setTimeout(() => {
         waiter = null;
         deadWaiter = null;
-        reject(new Error("dashboard stream went quiet"));
+        reject(new DashboardStreamQuietError(framesSeen, lastEvent));
       }, timeoutMs);
       waiter = (frame) => {
         clearTimeout(timer);
@@ -562,7 +682,10 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       model: activeModel,
       provider: activeProvider,
       close,
-      async run(onDelta: (chunk: string) => void): Promise<DashboardTurnFinal> {
+      async run(
+        onDelta: (chunk: string) => void,
+        onActivity?: (activity: DashboardActivity) => void,
+      ): Promise<DashboardTurnFinal> {
         if (started) throw new Error("this turn has already run");
         started = true;
         // Name the abort BEFORE closing. Closing alone made `run` reject with
@@ -607,13 +730,61 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // authoritative copy is read from the agent's database at the end.
                 if (reasoning.length < MAX_TEXT_BYTES) reasoning += payloadText(frame);
                 break;
-              case EVENT.thinkingDelta:
-                // Dropped on purpose — see EVENT.thinkingDelta. This is the
-                // spinner's status line, not the model's reasoning, and a turn
-                // whose model reasons about nothing must end with NO reasoning
-                // rather than a kaomoji. Still counts as activity: arriving here
-                // has already restarted the idle clock.
+              case EVENT.thinkingDelta: {
+                // NEVER collected into `reasoning` — see EVENT.thinkingDelta.
+                // This is the spinner's status line, and a turn whose model
+                // reasons about nothing must end with NO reasoning rather than
+                // a kaomoji. It is still a heartbeat, and now it is a visible
+                // one: forwarded as ACTIVITY, which no path folds into the
+                // monologue. Arriving here has already restarted the idle
+                // clock, in `nextFrame`, for every frame alike.
+                const status = payloadText(frame);
+                if (status && onActivity) onActivity({ kind: "status", text: status });
                 break;
+              }
+              case EVENT.toolGenerating:
+                // Counted as liveness, deliberately NOT shown.
+                //
+                // It carries no tool id and it names the tool differently from
+                // the call that follows: captured on the box, one turn emitted
+                // `tool.generating name=mcp__web_search` and then `tool.start
+                // name=web_search id=toolu_01Nf…`. Forwarding it would draw a
+                // pill under a name the customer never sees again and an id
+                // no `tool.complete` can ever close, so the chat would end the
+                // turn with two steps stuck at "running" beside the two that
+                // actually finished. `tool.start` follows within a couple of
+                // seconds and carries both, so nothing is lost by waiting for
+                // it. Named in EVENT so it is a decision, not an unknown frame.
+                break;
+              case EVENT.toolStart: {
+                const payload = (frame.params?.payload || {}) as Record<string, unknown>;
+                const name = typeof payload.name === "string" ? payload.name : "";
+                if (!name) break;
+                const id = typeof payload.tool_id === "string" && payload.tool_id ? payload.tool_id : `start:${name}`;
+                const context = typeof payload.context === "string" ? payload.context : "";
+                if (onActivity) {
+                  onActivity({ kind: "tool", phase: "start", id, name, ...(context ? { detail: context } : {}) });
+                }
+                break;
+              }
+              case EVENT.toolComplete: {
+                const payload = (frame.params?.payload || {}) as Record<string, unknown>;
+                const name = typeof payload.name === "string" ? payload.name : "";
+                if (!name) break;
+                const id = typeof payload.tool_id === "string" && payload.tool_id ? payload.tool_id : `start:${name}`;
+                const summary = typeof payload.summary === "string" ? payload.summary : "";
+                if (onActivity) {
+                  onActivity({
+                    kind: "tool",
+                    phase: "result",
+                    id,
+                    name,
+                    ...(summary ? { detail: summary } : {}),
+                    status: "ok",
+                  });
+                }
+                break;
+              }
               case EVENT.approvalRequest: {
                 // Answer immediately. The agent thread is parked waiting for
                 // this and will not make another model call until it lands.

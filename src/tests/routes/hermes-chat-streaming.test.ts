@@ -23,7 +23,15 @@ const spawnMock = vi.hoisted(() => vi.fn());
 const appendMock = vi.hoisted(() => vi.fn());
 const readTurnMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/lib/hermes-dashboard-turn", () => ({ openDashboardTurn: openTurnMock }));
+// Only the OPENING is faked. The rest of the module — `isQuietStreamError` and
+// the error class it recognises — is the real thing, because the route's
+// recovery path turns on that predicate and a hand-written stand-in would let
+// the two drift: a mock that answered `true` for every failure would prove the
+// route recovers from errors it must still report.
+vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
+  openDashboardTurn: openTurnMock,
+}));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesTurn: readTurnMock }));
@@ -39,11 +47,14 @@ vi.mock("@/lib/hermes-model-options", () => ({
 }));
 
 import { POST } from "@/app/setup-api/hermes/chat/route";
+import { DashboardStreamQuietError, type DashboardActivity } from "@/lib/hermes-dashboard-turn";
 
 /** A turn handle that emits the given fragments and then settles. */
 function fakeTurn(opts: {
   sessionId?: string;
   deltas?: string[];
+  /** What the turn reports it is DOING, emitted before the answer text. */
+  activities?: DashboardActivity[];
   text?: string;
   reasoning?: string;
   status?: string;
@@ -60,8 +71,11 @@ function fakeTurn(opts: {
       // records it with the turn, so a switch that did not take is visible.
       model: opts.model ?? "",
       provider: opts.provider ?? "",
-      async run(onDelta: (chunk: string) => void) {
+      async run(onDelta: (chunk: string) => void, onActivity?: (activity: DashboardActivity) => void) {
         if (opts.fail) throw opts.fail;
+        // The order a real turn takes: the tool runs, and only then is there
+        // anything to say about it.
+        for (const activity of opts.activities ?? []) onActivity?.(activity);
         for (const chunk of opts.deltas ?? []) onDelta(chunk);
         return {
           text: opts.text ?? (opts.deltas ?? []).join(""),
@@ -337,5 +351,106 @@ describe("a turn whose model did no reasoning", () => {
     const events = await readEvents(await POST(post({ message: "Hey" })));
     const [, done] = events[events.length - 1];
     expect(done).toMatchObject({ reasoning: "The user asked for one word." });
+  });
+});
+
+describe("showing the work while the turn is still doing it", () => {
+  it("sends the tool step as its own event, before the turn is done", async () => {
+    // The blank-bubble bug, measured: a `terminal` call on the live box ran
+    // 240.3 seconds, emitting `tool.start` at t+3.7s and `tool.complete` at
+    // t+244.0s with nothing in between. For four minutes the customer had a
+    // reply that had not started and no reason given. These frames are that
+    // reason, and they have to reach the client while the turn is still
+    // running — a `done` frame that listed the same steps afterwards would be
+    // a receipt, not progress.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        activities: [
+          { kind: "tool", phase: "start", id: "call_7", name: "terminal", detail: "uname -r" },
+          { kind: "tool", phase: "result", id: "call_7", name: "terminal", detail: "5.15.185-tegra", status: "ok" },
+        ],
+        deltas: ["The kernel is 5.15.185-tegra."],
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "kernel?" })));
+    expect(events.map(([name]) => name)).toEqual(["tool", "tool", "delta", "done"]);
+    expect(events[0][1]).toMatchObject({ kind: "tool", phase: "start", id: "call_7", name: "terminal" });
+    // The same id on both, so a surface updates the pill it already drew.
+    expect(events[1][1]).toMatchObject({ kind: "tool", phase: "result", id: "call_7", name: "terminal" });
+    expect(events.findIndex(([name]) => name === "tool")).toBeLessThan(
+      events.findIndex(([name]) => name === "done"),
+    );
+  });
+
+  it("keeps the delta channel to answer text and nothing else", async () => {
+    // The delta channel paints the bubble. A status line or a tool name that
+    // leaked onto it would be typed out as though the agent had said it —
+    // which is how `(⊙_⊙) musing...` reached a customer once already.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        activities: [
+          { kind: "status", text: "(⌐■_■) computing..." },
+          { kind: "tool", phase: "start", id: "call_7", name: "web_search", detail: "clawbox docs" },
+        ],
+        deltas: ["Here ", "they are."],
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "find the docs" })));
+    const deltas = events.filter(([name]) => name === "delta");
+    expect(deltas).toHaveLength(2);
+    for (const [, payload] of deltas) {
+      expect(Object.keys(payload)).toEqual(["text"]);
+      expect(JSON.stringify(payload)).not.toContain("computing");
+      expect(JSON.stringify(payload)).not.toContain("web_search");
+    }
+    // And the spinner still reaches the client — on its own channel.
+    expect(events.some(([name, payload]) => name === "status" && payload.text === "(⌐■_■) computing...")).toBe(true);
+  });
+});
+
+describe("when the stream goes quiet on a turn that already finished", () => {
+  /**
+   * The customer's own transcript, timestamped: the question was asked at
+   * 20:10:44, the agent ran two tools and wrote its 582-character answer to
+   * `state.db` at 20:11:12, and the `message.complete` frame never reached this
+   * socket. The route waited out the idle window and wrote "Error: dashboard
+   * stream went quiet" into their transcript at 20:14:13 — a finished answer
+   * discarded and replaced with a failure, three minutes after it was ready.
+   */
+  it("reads the answer out of the record rather than writing an error over it", async () => {
+    readTurnMock.mockResolvedValue({
+      text: "The kernel is 5.15.185-tegra, and the box has 7.4 GB of RAM.",
+      toolCalls: [{ name: "terminal", detail: "uname -r", status: "ok" }],
+    });
+    openTurnMock.mockResolvedValue(
+      fakeTurn({ fail: new DashboardStreamQuietError(41, "tool.complete") }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "kernel and RAM?" })));
+    const [name, payload] = events[events.length - 1];
+    expect(name).toBe("done");
+    expect(payload).toMatchObject({ text: "The kernel is 5.15.185-tegra, and the box has 7.4 GB of RAM." });
+    expect(events.some(([event]) => event === "error")).toBe(false);
+    // Nothing may say the turn failed: the transcript is what a refresh shows,
+    // and an "Error:" row beside a perfectly good answer is the artefact the
+    // customer reported.
+    const rows = appendMock.mock.calls.map(([record]) => record as Record<string, unknown>);
+    expect(rows.some((row) => row.variant === "error")).toBe(false);
+    expect(rows.some((row) => typeof row.text === "string" && row.text.startsWith("Error:"))).toBe(false);
+    expect(rows.some((row) => row.role === "assistant")).toBe(true);
+  });
+
+  it("still reports the failure when the record has no answer either", async () => {
+    // The other side of the same branch, and the reason the recovery is safe:
+    // a turn that really did die leaves no assistant row after the question, so
+    // `readHermesTurn` returns null and the customer is told. Losing this would
+    // turn every dead turn into a silent one.
+    readTurnMock.mockResolvedValue(null);
+    openTurnMock.mockResolvedValue(fakeTurn({ fail: new DashboardStreamQuietError(2, "message.start") }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [name, payload] = events[events.length - 1];
+    expect(name).toBe("error");
+    expect(payload).toEqual({ error: "dashboard stream went quiet" });
+    const rows = appendMock.mock.calls.map(([record]) => record as Record<string, unknown>);
+    expect(rows.some((row) => row.variant === "error")).toBe(true);
   });
 });
