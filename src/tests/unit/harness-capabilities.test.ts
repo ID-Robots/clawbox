@@ -49,16 +49,21 @@ describe("capabilitiesFor", () => {
     expect(capabilitiesFor("openclaw", bare).canTranscribe).toBe(false);
   });
 
-  it("answers transcription and image generation alike — one credential, one answer", () => {
-    // Both features are reached through the ClawBox AI credential, so no fact
-    // combination may separate them on either edition. The asymmetry this
+  it("answers transcription and image generation alike where both exist", () => {
+    // On OpenClaw both features are reached through the one ClawBox AI
+    // credential, so no fact combination may separate them. The asymmetry this
     // replaces is what let the microphone be offered where pictures were not.
-    for (const harness of ["openclaw", "hermes"] as const) {
-      for (const facts of [linked, bare]) {
-        const caps = capabilitiesFor(harness, facts);
-        expect(caps.canTranscribe).toBe(caps.canGenerateImages);
-      }
+    for (const facts of [linked, bare]) {
+      const caps = capabilitiesFor("openclaw", facts);
+      expect(caps.canTranscribe).toBe(caps.canGenerateImages);
     }
+    // Hermes is deliberately NOT symmetrical, and for a reason that is not the
+    // credential: the proxy serves image generation to the same device token,
+    // but the agent has no tool to call it with yet. That is an absent ability,
+    // not an absent credential — so the microphone still follows the token
+    // while drawing stays off until the trigger lands.
+    expect(capabilitiesFor("hermes", linked).canTranscribe).toBe(true);
+    expect(capabilitiesFor("hermes", linked).canGenerateImages).toBe(false);
   });
 
   it("reports image generation from the credential where there is a tool to spend it on", () => {

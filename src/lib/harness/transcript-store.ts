@@ -335,8 +335,7 @@ async function trimIfOversized(file: string): Promise<void> {
 async function countRecords(file: string): Promise<number> {
   const raw = await fsp.readFile(file, "utf8").catch(() => null);
   if (raw === null) return 0;
-  return raw.split("
-").filter((line) => line.trim().length > 0).length;
+  return raw.split("\n").filter((line) => line.trim().length > 0).length;
 }
 
 /**
