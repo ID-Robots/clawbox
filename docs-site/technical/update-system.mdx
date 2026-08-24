@@ -50,8 +50,8 @@ Switch in **System Update → Advanced options** (Beta toggle / branch override)
 | Method | What it runs | When to use |
 |---|---|---|
 | **System Update app** (UI) | The full pipeline above | Normal case |
-| `sudo clawbox update` (SSH) | Full `install.sh` in place | Headless/remote maintenance |
-| `sudo bash install.sh` | Same as above | After manual git operations |
+| `sudo bash install.sh` (SSH) | Full `install.sh` in place | Headless/remote maintenance, and after manual git operations |
+| `bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts update` | Wrapper that re-runs `install.sh` with `sudo` | Same thing from the Terminal app. **OpenClaw/dual only** — refused on Hermes. There is no `clawbox` command on `PATH` |
 | `bash <(curl -fsSL …/scripts/force-update.sh)` | Standalone hard-sync + rebuild | When the updater itself is broken — see [Recovery](/support/recovery#c--safe-reinstall-1015-minutes-no-data-loss) |
 
 <Warning>
