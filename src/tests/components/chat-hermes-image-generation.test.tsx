@@ -168,26 +168,24 @@ describe("a text-to-picture turn", () => {
   });
 
   it("spends one generation on one intent, however fast the second click lands", async () => {
-    // Re-entry is decided from a ref rather than from render state, because a
-    // second click can land in the window before the state commit — and two
-    // generations is two charges against a daily allowance for one intent.
+    // Two guards stand behind this and both matter: the button disables while a
+    // wait is running, and the handler re-checks a REF rather than the render
+    // state, because a second click can land in the window before that commit.
+    // Either one catching it is the property being asserted — a double click is
+    // two charges against a daily allowance that is one picture on the Free
+    // plan, and the customer only asked once.
     boxThatCanDraw();
-    let release: (() => void) | null = null;
-    const held = new Promise<void>((resolve) => { release = resolve; });
-    const answer = box.imageReply;
-    box.imageReply = () => {
-      // Hold the first call open so the second click has something to race.
-      void held;
-      return answer();
-    };
     const textarea = await mountHermesChat(box);
     fireEvent.change(textarea, { target: { value: "a red maple leaf" } });
     const button = await screen.findByTestId(PICTURE_BUTTON);
     await waitFor(() => expect(button).not.toBeDisabled());
     fireEvent.click(button);
     fireEvent.click(button);
-    release?.();
 
-    await waitFor(() => expect(box.imagePrompts).toHaveLength(1));
+    await waitFor(() => expect(box.imagePrompts).toEqual(["a red maple leaf"]));
+    // …and it stays one after everything has settled, rather than a second
+    // request arriving a tick later.
+    await screen.findByRole("img");
+    expect(box.imagePrompts).toHaveLength(1);
   });
 });

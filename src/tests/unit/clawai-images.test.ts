@@ -115,7 +115,8 @@ describe("clawaiImageRouteReachable", () => {
   };
 
   it("says yes when the proxy serves the model this box would ask for", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({ ...discovery, models: [IMAGE_MODEL] }));
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) =>
+      jsonResponse({ ...discovery, models: [IMAGE_MODEL] }));
     await expect(clawaiImageRouteReachable(fetchImpl)).resolves.toBe(true);
     expect(fetchImpl).toHaveBeenCalledWith(
       CLAWBOX_AI_IMAGES_ENDPOINT,
@@ -176,20 +177,26 @@ describe("clawaiImageRouteReachable", () => {
     // (`hasClawaiToken`). Pinned because collapsing the two is the tempting
     // simplification, and it would put the button on an unlinked box.
     linkDevice(null);
-    const fetchImpl = vi.fn(async () => jsonResponse({ ...discovery, models: [IMAGE_MODEL] }));
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      // No Authorization header is sent, because none is needed or wanted.
+      expect(init?.headers).toBeUndefined();
+      return jsonResponse({ ...discovery, models: [IMAGE_MODEL] });
+    });
     await expect(clawaiImageRouteReachable(fetchImpl)).resolves.toBe(true);
-    // No Authorization header is sent, because none is needed or wanted.
-    const init = fetchImpl.mock.calls[0][1] as RequestInit | undefined;
-    expect(init?.headers).toBeUndefined();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("generateClawaiImage", () => {
   it("posts the observed request shape and writes the picture to disk", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse(imageResponse()));
+    const sent: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      sent.push({ url: String(url), init: init ?? {} });
+      return jsonResponse(imageResponse());
+    });
     const result = await generateClawaiImage("a red maple leaf", { fetchImpl });
 
-    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    const { url, init } = sent[0];
     expect(url).toBe(CLAWBOX_AI_IMAGES_ENDPOINT);
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
