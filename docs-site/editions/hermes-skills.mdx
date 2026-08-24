@@ -45,9 +45,31 @@ A few things are worth knowing before you install:
     address typed into a box is not a capability this device offers, and the
     store will refuse it.
   </Accordion>
-  <Accordion title="Scan verdicts are respected">
-    A skill whose install-time scan does not come back clean is not installed.
-    The store does not offer an override for it.
+  <Accordion title="A flagged skill is explained, then it is your call">
+    Every install is scanned. If the scan comes back anything other than clean,
+    the install stops and the store shows you what the skill would be able to do
+    on your device — run commands, read your files, reach the internet, read
+    your saved keys, drive the browser, change system settings, or rewrite the
+    instructions your assistant follows — along with the scanner's own findings.
+
+    Nothing is installed unless you tick *"I understand what this skill can do"*
+    and choose to continue. That decision is recorded on the device.
+
+    This applies to **every** publisher, including the skills Hermes itself
+    publishes. A trusted name is not a reason to skip the question.
+  </Accordion>
+  <Accordion title="An incomplete download is not an install">
+    A skill is its instructions plus the files those instructions point at. If
+    any of them could not be fetched, the device says which ones are missing and
+    installs nothing, rather than leaving you with a skill whose own
+    documentation refers to files that are not there.
+  </Accordion>
+  <Accordion title="A store skill cannot replace a built-in one">
+    If a skill in the catalogue has the same name as one that came with your
+    device, installing it is refused — otherwise it would quietly displace the
+    built-in one. Built-in skills are updated with the device, not from the
+    store. You can install the store version under a different name if you want
+    both.
   </Accordion>
   <Accordion title="Some skills are not for this platform">
     Skills declare which platforms they support. One that does not support Linux
@@ -83,9 +105,14 @@ translation for you; only direct CLI use needs to care.
 
 The agent has skill tools of its own on this edition, so you can simply ask:
 
-> *"Find a skill for reading PDFs and install it."*
+> *"Find a skill for something that reads my energy meter."*
 
-It can search, inspect, install, list and uninstall. These tools exist only on
+It can search, inspect, install, list and uninstall. It is held to the same
+rules you are: if the device flags a skill, the agent is told what the skill can
+do and instructed to put the question to you — it cannot confirm a flagged
+install on its own judgement. And because your box already ships a `pdf` skill,
+asking for "a skill for reading PDFs" gets you the answer that you already have
+one, not a one-file replacement for it. These tools exist only on
 the Hermes edition — on an OpenClaw device the agent gets the App Store tools
 instead. See [Agent Interface](/technical/agent-interface).
 
@@ -98,6 +125,11 @@ Under Hermes' own data directory, `~/.hermes/skills/`:
 | `~/.hermes/skills/<category>/<name>/SKILL.md` | The skill itself — instructions plus any supporting files |
 | `~/.hermes/skills/.hub/lock.json` | The record of everything installed from the store |
 | `~/.hermes/skills/.bundled_manifest` | What shipped with the device |
+| `~/.hermes/.env` | API keys you entered for skills that need one |
+
+Alongside those, ClawBox keeps its own record of any flagged skill you chose to
+install anyway, at `data/skill-install-audit.log` — one line per decision, with
+what the scan said and when you agreed to it.
 
 The store uses those three to tell apart the skills that came with your box,
 the ones you installed, and any the agent wrote for itself.
