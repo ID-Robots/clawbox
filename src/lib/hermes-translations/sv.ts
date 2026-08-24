@@ -68,10 +68,12 @@ export const sv: Record<string, string> = {
   "settings.security.wifiPasswordUpdated": "Lösenordet för {ssid} har uppdaterats",
 
   // === Panel chrome ===
-  "hermesProvider.title": "Hermes-modeller",
+  "hermesProvider.title": "AI-leverantörer",
   "hermesProvider.intro":
-    "Den här enheten körs på Hermes. Välj en inferensleverantör och en standardmodell — de byts direkt i Hermes, ingen kontrollpanel behövs.",
+    "Den här enheten körs på Hermes. Anslut leverantörer och välj standardvalet — status, inloggning och byte sker allt här.",
   "hermesProvider.radioGroupLabel": "AI-leverantör",
+  "hermesProvider.hero.nativeSwitch": "växlar nativt via Hermes",
+  "hermesProvider.hero.changeModel": "Byt modell",
   "hermesProvider.continue": "Fortsätt",
 
   // === Provider rows ===

@@ -33,6 +33,10 @@
 :root {
   /* Design tokens — matching clawbox.com dark sections */
   --bg-deep: #111827;
+  /* The inset colour at the alpha a gradient fades OUT to, so a tinted card can
+     dissolve into the page without hardcoding the hex twice. Re-pointed with
+     --bg-deep under the Hermes ground below. */
+  --bg-deep-veil: rgba(17, 24, 39, 0.4);
   --bg-surface: #172030;
   --bg-elevated: #1e2939;
   --coral-bright: #f97316;
@@ -107,6 +111,16 @@
   --coral-ring: rgba(249, 115, 22, 0.60);  /* focus outline                 */
   --cyan-wash: rgba(0, 229, 204, 0.10);
   --cyan-edge: rgba(0, 229, 204, 0.25);
+  /* The AI Providers section names its default provider twice — once in the
+     hero card at the top, once as the ticked row in the list below — and these
+     three alphas are what keep that from reading as a duplicate. The hero gets
+     an edge one step heavier than --cyan-edge over a fill that fades out to the
+     page; the row gets the lightest tint that still says "this is the one".
+     Both sit UNDER body text rather than behind a chip, which is why they are
+     lighter than --cyan-wash rather than reusing it. */
+  --cyan-rim: rgba(0, 229, 204, 0.35);     /* hero border                     */
+  --cyan-mist: rgba(0, 229, 204, 0.07);    /* hero fill, first gradient stop  */
+  --cyan-veil: rgba(0, 229, 204, 0.04);    /* the default row inside a list   */
   /* Ink for a glyph sitting ON a cyan fill — near-black with the hue in it,
      so a tick on a cyan disc doesn't read as pure black on colour. */
   --cyan-ink: #06202a;
@@ -864,6 +878,7 @@ h6 {
   --bg-surface: #132826;
   --bg-elevated: #182c2a;
   --bg-deep: #0e2423;
+  --bg-deep-veil: rgba(14, 36, 35, 0.4);
 
   /* 2. the agent tokens are ADDITIVE. --coral-bright and --cyan-bright are
      deliberately NOT redefined: coral means ACTION and cyan means DONE on

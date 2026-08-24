@@ -6,8 +6,6 @@ import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
-import ProviderStatusStrip from "./ProviderStatusStrip";
-import type { ProviderStatusRow } from "@/lib/provider-status";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
@@ -316,26 +314,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(null);
-
-  /**
-   * A chip in the connection strip was clicked: go to where that provider is
-   * actually configured.
-   *
-   * The local engines are configured in their own section, and sending someone
-   * to the AI Provider panel for one would land them on a panel that cannot
-   * change it — which is the failure the strip exists to end, reintroduced one
-   * click later.
-   */
-  const openProviderConfig = useCallback((row: ProviderStatusRow) => {
-    const target: Section = row.section === "localAi" ? "localAi" : "ai";
-    setSection(target);
-    setMobileSection(target);
-    if (target !== "ai") return;
-    setRequestedAiProviderId(row.id);
-    // A counter rather than a boolean, so clicking the SAME chip twice still
-    // re-selects it after the customer has clicked elsewhere in the panel.
-    setProviderSelectionRequest((current) => current + 1);
-  }, []);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -3227,9 +3205,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── AI Provider ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
-
-            {/* Connection overview — every provider, no clicking required. */}
-            <ProviderStatusStrip onOpenProvider={openProviderConfig} />
 
             {/* Provider status card */}
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
