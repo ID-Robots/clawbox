@@ -130,6 +130,22 @@ describe("computeDrift", () => {
     const d = computeDrift(inputs({ checkout: checkout({ dirty: true }) }));
     expect(d.buildVsCheckout).toBe("drift");
     expect(d.codes).toContain("checkout-dirty");
+    expect(d.detected).toBe(true);
+  });
+
+  // A dirty tree used to leave buildVsCheckout at "unknown" when the build
+  // carried no stamp: `reasons` named the problem, `detected` stayed false, so
+  // the updater warned and the UI banner never appeared.
+  it("still counts a dirty tree as drift when the build cannot be identified", () => {
+    const d = computeDrift(inputs({
+      build: null,
+      stamperInCheckout: false,
+      buildTimestampMs: null,
+      checkout: checkout({ dirty: true, committedAt: null }),
+    }));
+    expect(d.codes).toContain("checkout-dirty");
+    expect(d.buildVsCheckout).toBe("drift");
+    expect(d.detected).toBe(true);
   });
 
   it("flags a checkout that is not on the tested commit", () => {

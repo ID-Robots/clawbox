@@ -22,10 +22,18 @@ PROJECT_DIR=""
 EXPECT_SHA=""
 QUIET=0
 
+# `shift 2` on a single remaining argument FAILS and shifts nothing. With no
+# `set -e` that turns a trailing `--project-dir` into an infinite loop: the
+# script hangs instead of reporting a usage error, and it hangs inside an
+# update step. Require the value first.
+need_value() {
+  [ -n "${2:-}" ] || { echo "verify-build-identity: $1 needs a value" >&2; exit 2; }
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --project-dir) PROJECT_DIR="${2:-}"; shift 2 ;;
-    --expect-sha)  EXPECT_SHA="${2:-}"; shift 2 ;;
+    --project-dir) need_value "$1" "${2:-}"; PROJECT_DIR="$2"; shift 2 ;;
+    --expect-sha)  need_value "$1" "${2:-}"; EXPECT_SHA="$2"; shift 2 ;;
     --quiet)       QUIET=1; shift ;;
     -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "verify-build-identity: unknown argument '$1'" >&2; exit 2 ;;
@@ -67,6 +75,15 @@ CANDIDATES=(
   "$PROJECT_DIR/.next/build-info.json"
   "$PROJECT_DIR/.next/standalone/.next/build-info.json"
 )
+
+# A standalone tree that EXISTS but carries no stamp is the half-copied
+# postbuild this script is meant to catch — skipping it because the file is
+# absent would report OK while the tree the service actually runs from has no
+# identity at all.
+STANDALONE_NEXT="$PROJECT_DIR/.next/standalone/.next"
+if [ -f "$STANDALONE_NEXT/BUILD_ID" ] && [ ! -f "$STANDALONE_NEXT/build-info.json" ]; then
+  fail ".next/standalone/.next holds a deployed build but no build-info.json — the postbuild step did not copy the stamp"
+fi
 
 CHECKED=0
 for INFO in "${CANDIDATES[@]}"; do

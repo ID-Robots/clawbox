@@ -18,13 +18,13 @@
  * returns verdicts, so the interesting cases are unit-testable without a
  * device, a build, or a git repository.
  */
-import { exec as execCb } from "child_process";
+import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { readFile, stat } from "fs/promises";
 import path from "path";
 import { isSafeBranch } from "./update-branch";
 
-const execShell = promisify(execCb);
+const execFile = promisify(execFileCb);
 
 export const PROJECT_ROOT =
   process.env.CLAWBOX_ROOT
@@ -180,7 +180,11 @@ export function computeDrift(input: DriftInputs): DriftReport {
     reasons.push(
       "The code on disk has uncommitted changes, so it no longer matches any commit.",
     );
-    if (buildVsCheckout === "match") buildVsCheckout = "drift";
+    // Also from "unknown": a tree that matches no commit cannot have produced
+    // a reproducible build, whether or not we could read the build's stamp.
+    // Leaving it "unknown" reported the problem in `reasons` while `detected`
+    // stayed false, so the updater warned and the UI banner did not.
+    if (buildVsCheckout !== "drift") buildVsCheckout = "drift";
   }
 
   let checkoutVsPin: DriftState = "unknown";
@@ -213,16 +217,23 @@ export function computeDrift(input: DriftInputs): DriftReport {
 /**
  * Run git and return its trimmed output, or null if the command FAILED.
  *
+ * execFile with an argument array, never a shell string: `projectDir` comes
+ * from CLAWBOX_ROOT / cwd / a caller, and a path holding a space or a shell
+ * metacharacter would otherwise break the command or run a second one. Matches
+ * scripts/write-build-info.mjs, which already spawns the identical commands
+ * this way.
+ *
  * Empty output is not failure. `git status --porcelain` answers with an empty
  * string on a clean tree, and folding that into null made every healthy box
  * report `dirty: null` — "we could not tell" — when the truth was "nothing is
  * modified". Callers that cannot meaningfully receive an empty string
  * normalise it themselves.
  */
-async function git(projectDir: string, args: string): Promise<string | null> {
+async function git(projectDir: string, ...args: string[]): Promise<string | null> {
   try {
-    const { stdout } = await execShell(
-      `git -c safe.directory=${projectDir} -C ${projectDir} ${args}`,
+    const { stdout } = await execFile(
+      "git",
+      ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args],
       { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
     );
     return stdout.trim();
@@ -232,8 +243,8 @@ async function git(projectDir: string, args: string): Promise<string | null> {
 }
 
 /** git output where an empty answer is as useless as a failure (a SHA, a branch name). */
-async function gitValue(projectDir: string, args: string): Promise<string | null> {
-  return (await git(projectDir, args)) || null;
+async function gitValue(projectDir: string, ...args: string[]): Promise<string | null> {
+  return (await git(projectDir, ...args)) || null;
 }
 
 async function readJson<T>(file: string): Promise<T | null> {
@@ -284,7 +295,7 @@ async function readPin(projectDir: string): Promise<PinInfo> {
   }
 
   if (!branch) {
-    const current = await git(projectDir, "symbolic-ref --short HEAD");
+    const current = await gitValue(projectDir, "symbolic-ref", "--short", "HEAD");
     if (current && current !== "main" && isSafeBranch(current)) {
       branch = current;
       source = "checkout-branch";
@@ -298,7 +309,7 @@ async function readPin(projectDir: string): Promise<PinInfo> {
   // network round-trip there would make the page hang on an offline box. The
   // updater fetches before it acts; here we report the tested commit as far as
   // this device currently knows it.
-  const commit = branch ? await gitValue(projectDir, `rev-parse --verify --quiet origin/${branch}`) : null;
+  const commit = branch ? await gitValue(projectDir, "rev-parse", "--verify", "--quiet", `origin/${branch}`) : null;
 
   return { branch, source, commit, pinned };
 }
@@ -313,10 +324,10 @@ export async function collectBuildIdentity(
     await Promise.all([
       readJson<BuildInfo>(path.join(buildDir, "build-info.json")),
       readFile(path.join(buildDir, "BUILD_ID"), "utf-8").then((s) => s.trim() || null).catch(() => null),
-      gitValue(projectDir, "rev-parse HEAD"),
-      gitValue(projectDir, "rev-parse --abbrev-ref HEAD"),
-      git(projectDir, "status --porcelain"),
-      gitValue(projectDir, "log -1 --format=%cI"),
+      gitValue(projectDir, "rev-parse", "HEAD"),
+      gitValue(projectDir, "rev-parse", "--abbrev-ref", "HEAD"),
+      git(projectDir, "status", "--porcelain"),
+      gitValue(projectDir, "log", "-1", "--format=%cI"),
       readPin(projectDir),
       fileExists(path.join(projectDir, "scripts", "write-build-info.mjs")),
     ]);

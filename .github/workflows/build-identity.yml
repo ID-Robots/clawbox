@@ -5,6 +5,12 @@ on:
   push:
     branches: [main, beta]
 
+# A full `bun run build` per PR event adds up; a superseded run tells nobody
+# anything the newer one will not.
+concurrency:
+  group: build-identity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -23,6 +29,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          # Read-only job: it builds and reads git locally, and never pushes.
+          persist-credentials: false
 
       - uses: oven-sh/setup-bun@v2
         with:

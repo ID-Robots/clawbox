@@ -34,7 +34,7 @@ Started from the **System Update** app (or Settings). Steps, in order — each p
 Key properties:
 
 - **`git clean -fd` (no `-x`)** — gitignored paths are never touched, which is what preserves `data/`, `.env`, `node_modules`, and your state. See [what survives](/technical/filesystem#what-survives-what).
-- **The final step reboots the box.** Expect ~1–2 minutes of unreachability; the UI reconnects and resumes progress reporting afterwards.
+- **The `restart` step reboots the box.** Expect ~1–2 minutes of unreachability; the UI reconnects and resumes progress reporting afterwards, then runs the remaining steps.
 - After reboot, completion is only reported if the build fingerprint (`.next/BUILD_ID`) actually changed and the rebuild unit succeeded — a failed rebuild surfaces as a failed step, not a silent "complete".
 
 ## Build identity and drift

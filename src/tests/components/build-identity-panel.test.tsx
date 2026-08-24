@@ -177,6 +177,26 @@ describe("malformed responses", () => {
     ["an error envelope", { error: "boom" }],
     ["a string", "not json at all"],
     ["null", null],
+    // Passes the top-level shape check but would make React throw on an
+    // object child.
+    ["an object where a commit string belongs", {
+      drift: { codes: ["build-from-other-commit"], detected: true, reasons: ["x"] },
+      checkout: { shortCommit: {}, branch: "beta" },
+      pin: { branch: "beta", commit: null },
+      build: null,
+    }],
+    ["a non-string branch on the build", {
+      drift: { codes: [], detected: true, reasons: [] },
+      checkout: { shortCommit: "abc1234", branch: "beta" },
+      pin: { branch: "beta", commit: null },
+      build: { shortCommit: "abc1234", branch: ["beta"], builtAt: null },
+    }],
+    ["codes that are not strings", {
+      drift: { codes: [{}], detected: true, reasons: ["x"] },
+      checkout: { shortCommit: "abc1234", branch: "beta" },
+      pin: { branch: "beta", commit: null },
+      build: null,
+    }],
   ])("ignores %s instead of crashing", async (_label, body) => {
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => body })));
     const { container } = render(<Probe />);
