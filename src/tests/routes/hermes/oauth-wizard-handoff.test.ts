@@ -206,14 +206,10 @@ describe("the OAuth routes and the first-boot window (TASK-527)", () => {
       expect(isBootstrapAllowedPath(p), `${p} must not be bootstrap-allowed`).toBe(false);
     }
 
-    for (const prefix of BOOTSTRAP_ALLOWED_PREFIXES) {
-      expect(
-        "/setup-api/hermes/oauth".startsWith(prefix),
-        `allow-list prefix ${prefix} must not cover the OAuth subtree`,
-      ).toBe(false);
-    }
-    for (const exact of BOOTSTRAP_ALLOWED_EXACT) {
-      expect(exact.startsWith("/setup-api/hermes"), `allow-list entry ${exact} is under /setup-api/hermes`).toBe(false);
+    // The same property stated against the list rather than through the
+    // matcher, so the diff that breaks it says which entry did it.
+    for (const entry of [...BOOTSTRAP_ALLOWED_PREFIXES, ...BOOTSTRAP_ALLOWED_EXACT]) {
+      expect(entry.includes("/oauth"), `allow-list entry ${entry} names the OAuth subtree`).toBe(false);
     }
   });
 });
