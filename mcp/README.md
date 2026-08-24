@@ -206,7 +206,8 @@ and it drags server-only Next.js code into this stdio process.
 |---|---|
 | `CLAWBOX_API_BASE` | Device API origin. Default `http://127.0.0.1:80`. |
 | `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. |
-| `CLAWBOX_MCP_PROFILE` | `full` (default) or `core` — `core` registers only the handful of tools a 4–8B local model needs, for the on-device model bake-off. |
+| `CLAWBOX_MCP_PROFILE` | `full` (default) or `core` pins the tool set; `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
+| `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |
 
 ## Work owned by others
