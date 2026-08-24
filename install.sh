@@ -2652,6 +2652,192 @@ install_root_libexec() {
   fi
 }
 
+# ── sudoers ────────────────────────────────────────────────────────────────
+SUDOERS_DIR="/etc/sudoers.d"
+# Copies of drop-ins we removed, kept so a device can be forensically explained
+# (and a removal undone by hand) instead of the file simply vanishing. Root-only:
+# the clawbox user must not be able to read a rule back out and re-plant it.
+SUDOERS_QUARANTINE_DIR="/var/lib/clawbox/sudoers-quarantine"
+# Where a candidate drop-in is staged while it is validated. Root-owned and
+# NOT under /etc/sudoers.d — see install_sudoers_dropin().
+SUDOERS_STAGING_DIR="/var/lib/clawbox"
+# The drop-ins this installer owns. Nothing else in /etc/sudoers.d is ours, and
+# quarantine_overbroad_sudoers() below is the only code that touches the rest.
+CLAWBOX_SUDOERS_MANAGED=(clawbox clawbox-ollama)
+
+# Install a sudoers drop-in only if it VALIDATES FIRST.
+#
+# The old order was cp -> visudo -cf -> rm + exit 1 on failure, which turned a
+# typo in the repo into a device with no drop-in at all: every systemctl the web
+# server needs (updater, power, wifi hand-off, factory reset, desktop toggle)
+# then fails on a password prompt nobody can answer, on an appliance with no
+# console. So: validate a staged copy, install only if it parses, and on failure
+# leave whatever is already installed exactly where it is and say so. TASK-445.
+#
+# The staging copy deliberately does NOT live in /etc/sudoers.d — sudo parses
+# every file in that directory, so a candidate staged there is live the moment
+# it lands, valid or not.
+install_sudoers_dropin() {
+  local src="$1" name="$2"
+  local dest="$SUDOERS_DIR/$name"
+
+  if [ ! -f "$src" ]; then
+    echo "  Warning: $src is missing; leaving $dest as it is" >&2
+    return 1
+  fi
+
+  install -d -o root -g root -m 0755 "$SUDOERS_DIR"
+  install -d -o root -g root -m 0700 "$SUDOERS_STAGING_DIR"
+
+  local staged
+  staged="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-candidate.XXXXXX")" || return 1
+  cat "$src" > "$staged"
+  chown root:root "$staged"
+  chmod 0440 "$staged"
+
+  if ! visudo -cf "$staged" >/dev/null 2>&1; then
+    rm -f "$staged"
+    echo "Error: $src failed visudo validation; keeping the existing $dest" >&2
+    return 1
+  fi
+
+  # Byte-identical to what is already installed: nothing to do. Keeps repeat
+  # updates from opening a window where the file is momentarily replaced.
+  if [ -f "$dest" ] && cmp -s "$staged" "$dest"; then
+    rm -f "$staged"
+    return 0
+  fi
+
+  local backup=""
+  if [ -f "$dest" ]; then
+    backup="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-previous.XXXXXX")" || { rm -f "$staged"; return 1; }
+    cat "$dest" > "$backup"
+  fi
+
+  # install(1) writes to a temp file and renames, so sudo never sees a
+  # half-written drop-in.
+  install -o root -g root -m 0440 "$staged" "$dest"
+  rm -f "$staged"
+
+  # Re-check the WHOLE set: a fragment can be valid on its own and still collide
+  # with another drop-in (duplicate alias, bad include order).
+  if ! visudo -c >/dev/null 2>&1; then
+    if [ -n "$backup" ]; then
+      install -o root -g root -m 0440 "$backup" "$dest"
+      echo "Error: installing $name broke /etc/sudoers validation; rolled $dest back" >&2
+    else
+      rm -f "$dest"
+      echo "Error: installing $name broke /etc/sudoers validation; removed $dest" >&2
+    fi
+    rm -f "$backup"
+    return 1
+  fi
+
+  rm -f "$backup"
+  return 0
+}
+
+# Does this drop-in hand the clawbox service user unrestricted passwordless root?
+#
+# Deliberately narrow. Only a rule whose user spec is `clawbox` or `%clawbox`
+# AND whose Cmnd is a bare `ALL` under an active NOPASSWD tag counts. An
+# operator's own `%sudo`/`%admin` rule, and the distro default in /etc/sudoers,
+# are never inspected and never touched: removing those could lock the only
+# administrator out of a device that is 3000 km away.
+sudoers_grants_blanket_nopasswd() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    function check(l,   eq, rest, n, parts, i, item, tag, nopass) {
+      if (l !~ /^[ \t]*(clawbox|%clawbox)[ \t]/) return 0
+      eq = index(l, "=")
+      if (eq == 0) return 0
+      rest = substr(l, eq + 1)
+      nopass = 0
+      n = split(rest, parts, ",")
+      for (i = 1; i <= n; i++) {
+        item = parts[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", item)
+        sub(/^\([^)]*\)[ \t]*/, "", item)
+        while (match(item, /^(NOPASSWD|PASSWD|NOEXEC|EXEC|SETENV|NOSETENV|LOG_INPUT|NOLOG_INPUT|LOG_OUTPUT|NOLOG_OUTPUT|MAIL|NOMAIL|FOLLOW|NOFOLLOW|INTERCEPT|NOINTERCEPT):[ \t]*/)) {
+          tag = substr(item, 1, RLENGTH)
+          if (tag ~ /^NOPASSWD:/) nopass = 1
+          else if (tag ~ /^PASSWD:/) nopass = 0
+          item = substr(item, RLENGTH + 1)
+          gsub(/^[ \t]+|[ \t]+$/, "", item)
+        }
+        if (nopass && item == "ALL") return 1
+      }
+      return 0
+    }
+    {
+      line = $0
+      sub(/#.*$/, "", line)
+      if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); pending = pending line; next }
+      line = pending line
+      pending = ""
+      if (check(line)) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"
+}
+
+# Move any /etc/sudoers.d drop-in that hands clawbox unrestricted passwordless
+# root out of sudo's way.
+#
+# Why the installer has to do this rather than just shipping a narrow file: sudo
+# takes the UNION of every drop-in. QA and factory provisioning left
+# `/etc/sudoers.d/90-clawbox-nopasswd` containing `clawbox ALL=(ALL) NOPASSWD: ALL`
+# on shipped devices, and while that file exists every narrowing in
+# config/clawbox-sudoers is decorative — the revalidation of TASK-445 measured
+# exactly that on the QA box. Narrowing what we ship without removing what is
+# already there changes nothing on a device that has both. TASK-445 round 2.
+quarantine_overbroad_sudoers() {
+  [ -d "$SUDOERS_DIR" ] || return 0
+
+  local f base m managed
+  local -a moved_from=() moved_to=()
+  for f in "$SUDOERS_DIR"/*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    managed=0
+    for m in "${CLAWBOX_SUDOERS_MANAGED[@]}"; do
+      [ "$base" = "$m" ] && managed=1 && break
+    done
+    [ "$managed" = "1" ] && continue
+    sudoers_grants_blanket_nopasswd "$f" || continue
+
+    install -d -o root -g root -m 0700 "$SUDOERS_QUARANTINE_DIR"
+    local stamp dest
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dest="$SUDOERS_QUARANTINE_DIR/$base.$stamp"
+    if mv "$f" "$dest" 2>/dev/null; then
+      chown root:root "$dest"
+      chmod 0400 "$dest"
+      moved_from+=("$f")
+      moved_to+=("$dest")
+      echo "  Removed over-broad sudoers drop-in $base (clawbox had passwordless root on everything); copy kept at $dest"
+    else
+      echo "  Warning: could not remove over-broad sudoers drop-in $base" >&2
+    fi
+  done
+
+  [ "${#moved_to[@]}" -eq 0 ] && return 0
+
+  # Removing a file can still break the set — a quarantined drop-in may have
+  # defined an alias another one uses. Put everything back rather than leave a
+  # device where sudo refuses every command.
+  if ! visudo -c >/dev/null 2>&1; then
+    local i
+    for i in "${!moved_to[@]}"; do
+      mv "${moved_to[$i]}" "${moved_from[$i]}" 2>/dev/null || true
+    done
+    echo "Error: removing the over-broad sudoers drop-in(s) broke /etc/sudoers validation; restored them" >&2
+    return 1
+  fi
+  return 0
+}
+
 step_systemd_services() {
   local ALL_SERVICES=("${EXPECTED_ACTIVE_SERVICES[@]}" "${EXPECTED_INSTALLED_SERVICES[@]}")
   # The registry the drift guard checks against: this edition's install lists
@@ -2748,17 +2934,15 @@ step_systemd_services() {
   # Root-owned copies of everything root executes on clawbox's behalf. Must run
   # BEFORE the sudoers drop-in, which points at them.
   install_root_libexec
-  # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
-  if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
-    cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
-    chmod 0440 /etc/sudoers.d/clawbox
-    chown root:root /etc/sudoers.d/clawbox
-    if ! visudo -cf /etc/sudoers.d/clawbox >/dev/null; then
-      rm -f /etc/sudoers.d/clawbox
-      echo "Error: sudoers drop-in failed visudo validation; removed to keep sudo functional" >&2
-      exit 1
-    fi
+  # Install the narrow allow-list FIRST, then remove any blanket grant. In that
+  # order the device is never, even briefly, without the rules the web server
+  # needs: if the drop-in fails to validate we keep the old one and skip the
+  # quarantine entirely rather than strand the box with neither.
+  if install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox; then
     echo "  Sudoers rules installed"
+    quarantine_overbroad_sudoers || true
+  else
+    echo "  Warning: sudoers rules NOT updated; leaving the existing grants alone" >&2
   fi
   echo "  Services installed and enabled"
 }
@@ -3160,15 +3344,15 @@ step_performance_mode() {
   fi
   # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
-  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
-  cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
-  chmod 440 /etc/sudoers.d/clawbox-ollama
-  chown root:root /etc/sudoers.d/clawbox-ollama
-  if ! visudo -cf /etc/sudoers.d/clawbox-ollama >/dev/null; then
-    rm -f /etc/sudoers.d/clawbox-ollama
-    echo "Error: clawbox-ollama sudoers drop-in failed visudo validation; removed" >&2
-    exit 1
-  fi
+  # Run the ROOT-OWNED copy, not the one in the clawbox-writable project tree:
+  # it is the copy the sudoers grant points at, so running it here is also the
+  # check that install_root_libexec actually put it there. A device whose
+  # /usr/local/libexec/clawbox/optimize-ollama.sh is missing is a device where
+  # saving a local Ollama model silently skips the q8_0 KV-cache / flash-attention
+  # tuning, which is exactly what the TASK-445 revalidation found. TASK-445.
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
+  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
+    echo "  Warning: clawbox-ollama sudoers rules NOT updated; leaving the existing grant alone" >&2
   # The cgroup memory guards. Deliberately AFTER the ollama optimiser, so the
   # unit it just restarted picks the limits up on the daemon-reload below.
   step_resource_limits

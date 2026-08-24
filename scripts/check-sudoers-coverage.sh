@@ -59,6 +59,10 @@ use warnings;
 
 my ($root, $mode) = @ARGV;
 
+# Exit 1, never perl's errno-flavoured default: a malformed allow-list is the
+# same kind of build failure as an uncovered call, and callers key on the code.
+sub fatal { print STDERR "check-sudoers-coverage: $_[0]"; exit 1 }
+
 # ── The sudoers drop-ins we ship ────────────────────────────────────────────
 my @SUDOERS_FILES = (
   'config/clawbox-sudoers',
@@ -152,7 +156,7 @@ my %BIN_PATH = (
 my @grants;
 for my $rel (@SUDOERS_FILES) {
   my $path = "$root/$rel";
-  open(my $fh, '<', $path) or die "check-sudoers-coverage: cannot read $rel: $!\n";
+  open(my $fh, '<', $path) or fatal("cannot read $rel: $!\n");
   my $lineno = 0;
   my $pending = '';
   while (my $line = <$fh>) {
@@ -167,18 +171,18 @@ for my $rel (@SUDOERS_FILES) {
     if ($full =~ /^\s*clawbox\s+ALL\s*=\s*\(([^)]*)\)\s*NOPASSWD:\s*(.+?)\s*$/) {
       my ($runas, $cmd) = ($1, $2);
       $cmd =~ s/\s+/ /g;
-      die "check-sudoers-coverage: $rel:$lineno grants runas `$runas`; only (root) is allowed\n"
+      fatal("$rel:$lineno grants runas `$runas`; only (root) is allowed\n")
         unless $runas eq 'root';
-      die "check-sudoers-coverage: $rel:$lineno grants a bare ALL — that is the blanket "
-        . "rule this whole task removed\n" if $cmd eq 'ALL';
+      fatal("$rel:$lineno grants a bare ALL — that is the blanket rule this whole "
+        . "task removed\n") if $cmd eq 'ALL';
       push @grants, { file => $rel, line => $lineno, cmd => $cmd, used => 0 };
       next;
     }
-    die "check-sudoers-coverage: $rel:$lineno is not a `clawbox ALL=(root) NOPASSWD: <cmd>` rule:\n  $full\n";
+    fatal("$rel:$lineno is not a `clawbox ALL=(root) NOPASSWD: <cmd>` rule:\n  $full\n");
   }
   close $fh;
 }
-die "check-sudoers-coverage: no grants parsed\n" unless @grants;
+fatal("no grants parsed\n") unless @grants;
 
 # ── Collect the files to scan ───────────────────────────────────────────────
 my @files;
