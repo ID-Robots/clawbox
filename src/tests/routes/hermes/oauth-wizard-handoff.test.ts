@@ -77,6 +77,21 @@ vi.mock("@/lib/system-password", () => ({
 describe("the OAuth routes and the first-boot window (TASK-527)", () => {
   let tmpRoot: string;
 
+  // Restored rather than deleted in afterEach: a run that already had any of
+  // these set must not be handed a different value by this file.
+  const PREVIOUS_ENV = {
+    CLAWBOX_ROOT: process.env.CLAWBOX_ROOT,
+    SESSION_SECRET: process.env.SESSION_SECRET,
+    CLAWBOX_TEST_MODE: process.env.CLAWBOX_TEST_MODE,
+  };
+
+  function restoreEnv() {
+    for (const [key, value] of Object.entries(PREVIOUS_ENV)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+
   /** Device state on disk, as middleware reads it. */
   function writeConfig(fields: Record<string, unknown>) {
     const dataDir = path.join(tmpRoot, "data");
@@ -96,9 +111,7 @@ describe("the OAuth routes and the first-boot window (TASK-527)", () => {
   });
 
   afterEach(() => {
-    delete process.env.CLAWBOX_ROOT;
-    delete process.env.SESSION_SECRET;
-    delete process.env.CLAWBOX_TEST_MODE;
+    restoreEnv();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
