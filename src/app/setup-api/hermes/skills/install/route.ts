@@ -17,6 +17,7 @@ import {
   readShadowableSkillNames,
   resolveLockKey,
   scanReportFromLock,
+  updateLockFiles,
 } from "@/lib/hermes-skills-server";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
 import {
@@ -261,9 +262,12 @@ export async function POST(request: Request) {
     });
   }
 
-  // The repair wrote files the lock's `files[]` does not know about, and the
-  // installed walk sizes the directory itself — drop the cache again so the
-  // client's refresh sees the repaired tree.
+  // A repair wrote files the lock's `files[]` does not list, and every surface
+  // downstream repeats that array as the skill's contents. Correct it, then
+  // drop the cache so the client's refresh sees the repaired tree.
+  if (completeness && completeness.repaired.length > 0) {
+    await updateLockFiles(lockName, completeness.manifestFiles);
+  }
   invalidateInstalledCache();
 
   // Return the resolved lock key: it's the argument `uninstall` needs, and
@@ -334,6 +338,8 @@ async function rollback(lockName: string, entry: HubLockEntry | undefined): Prom
 
 interface VerifiedCompleteness extends CompletenessReport {
   repaired: string[];
+  /** Every path the resolved manifest expects — the corrected lock `files[]`. */
+  manifestFiles: string[];
 }
 
 /**
@@ -362,6 +368,7 @@ async function verifyAndRepair(
       expectedCount: 1,
       presentCount: 0,
       repaired: [],
+      manifestFiles: ["SKILL.md"],
     };
   }
 
@@ -378,7 +385,7 @@ async function verifyAndRepair(
     repaired = result.repaired;
     if (repaired.length > 0) diff = diffManifest(manifest, await listSkillFiles(installDir));
   }
-  return { ...diff, repaired };
+  return { ...diff, repaired, manifestFiles: manifest.files.map((f) => f.path) };
 }
 
 async function resolveManifest(

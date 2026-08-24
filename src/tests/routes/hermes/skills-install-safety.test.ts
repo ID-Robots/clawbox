@@ -425,6 +425,15 @@ describe("incomplete download is refused (TASK-452 crit9a)", () => {
     expect(
       await fs.readFile(path.join(skillsDir(), "algorithmic-art", "templates", "generator_template.js"), "utf8"),
     ).toBe(template);
+    // …and the lock no longer describes the truncated bundle as the whole
+    // skill. `files: ["SKILL.md", "templates/viewer.html"]` was the other half
+    // of the finding: the disk was wrong AND the record of it agreed.
+    expect((await readLock())["algorithmic-art"].files).toEqual([
+      "LICENSE.txt",
+      "SKILL.md",
+      "templates/generator_template.js",
+      "templates/viewer.html",
+    ]);
   });
 
   it("refuses and rolls back when the missing files cannot be obtained", async () => {

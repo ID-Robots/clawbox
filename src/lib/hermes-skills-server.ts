@@ -543,6 +543,38 @@ export function hubCategory(name: string, entry: HubLockEntry, diskCategory?: st
   return 'hub';
 }
 
+/**
+ * Rewrite one lock entry's `files[]` after the install route has completed a
+ * download the Hermes fetcher truncated.
+ *
+ * The lock is Hermes' file, and this is the one field ClawBox corrects in it:
+ * the finding was not only that two of four files were missing, but that
+ * lock.json recorded `files: ["SKILL.md", "templates/viewer.html"]` and every
+ * surface downstream — the store's file count, `skill_info` — repeated that as
+ * if it were the whole skill. Leaving the entry alone would fix the disk and
+ * keep the lie.
+ *
+ * Read-modify-write of the single entry, and a no-op if the entry is gone (an
+ * uninstall raced us) or the file cannot be parsed.
+ */
+export async function updateLockFiles(name: string, files: string[]): Promise<boolean> {
+  let doc: HubLock;
+  try {
+    doc = JSON.parse(await fs.readFile(HUB_LOCK_PATH, 'utf8')) as HubLock;
+  } catch {
+    return false;
+  }
+  const entry = doc?.installed?.[name];
+  if (!entry) return false;
+  entry.files = files.slice(0, 500).sort();
+  try {
+    await fs.writeFile(HUB_LOCK_PATH, JSON.stringify(doc, null, 1));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Absolute install directory of a hub lock entry, or null when unresolvable. */
 export function lockInstallDir(entry: HubLockEntry | undefined): string | null {
   if (!entry?.install_path) return null;
@@ -570,7 +602,14 @@ async function installedCacheKey(): Promise<string> {
       return '-';
     }
   };
-  return `${await stat(HUB_LOCK_PATH)}|${await stat(SKILLS_DIR)}`;
+  // config.yaml is in the key because `enabled` is read from `skills.disabled`
+  // there: without it, switching a skill off left the tab claiming it was live
+  // for the length of the TTL.
+  return [
+    await stat(HUB_LOCK_PATH),
+    await stat(SKILLS_DIR),
+    await stat(path.join(HERMES_HOME, 'config.yaml')),
+  ].join('|');
 }
 
 /**
