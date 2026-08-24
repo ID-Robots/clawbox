@@ -28,6 +28,7 @@ import type { Shape } from "../../../mcp/lib/schema";
 // Set BEFORE the module under test loads: guard.ts reads CLAWBOX_ROOT once, at
 // import time, into DEFAULT_CWD.
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mcp-paths-"));
+const PREVIOUS_ROOT = process.env.CLAWBOX_ROOT;
 process.env.CLAWBOX_ROOT = ROOT;
 
 interface Captured {
@@ -69,7 +70,10 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  delete process.env.CLAWBOX_ROOT;
+  // Restore rather than delete: a run that already had CLAWBOX_ROOT set must
+  // not be handed a different one by this file.
+  if (PREVIOUS_ROOT === undefined) delete process.env.CLAWBOX_ROOT;
+  else process.env.CLAWBOX_ROOT = PREVIOUS_ROOT;
   fs.rmSync(ROOT, { recursive: true, force: true });
 });
 

@@ -17,6 +17,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-uninstall-"));
+const PREVIOUS_ROOT = process.env.CLAWBOX_ROOT;
 process.env.CLAWBOX_ROOT = ROOT;
 
 const SKILLS_ROOT = path.join(ROOT, "openclaw-workspace");
@@ -59,7 +60,12 @@ beforeEach(() => {
   fs.rmSync(WEBAPPS, { recursive: true, force: true });
 });
 
-afterAll(() => fs.rmSync(ROOT, { recursive: true, force: true }));
+afterAll(() => {
+  // Restore rather than leak the temp root into anything that runs after.
+  if (PREVIOUS_ROOT === undefined) delete process.env.CLAWBOX_ROOT;
+  else process.env.CLAWBOX_ROOT = PREVIOUS_ROOT;
+  fs.rmSync(ROOT, { recursive: true, force: true });
+});
 
 describe("/setup-api/apps/uninstall — the deployed webapp goes with the app", () => {
   it("deletes data/webapps/<appId>/ so the URL stops serving", async () => {
