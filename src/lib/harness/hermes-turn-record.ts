@@ -73,6 +73,18 @@ export interface HermesTurnRecord {
   reasoning?: string;
   /** The tools it used, in call order. */
   toolCalls?: HermesToolCall[];
+  /**
+   * Absolute paths of pictures the agent DREW during this turn.
+   *
+   * Nothing else can find them. Hermes' image backends save into
+   * `$HERMES_HOME/cache/images/` and the tool answers the model with the path;
+   * the model then writes a reply ABOUT the file in prose, which is what the
+   * customer sees — a sentence naming a path the browser cannot open. There is
+   * no `MEDIA:` directive on this harness (that is an OpenClaw convention), so
+   * the only structured record of what was drawn is the tool result row, and
+   * this is where it is read out of.
+   */
+  generatedImages?: string[];
 }
 
 /**
@@ -95,6 +107,13 @@ function statePath(): string {
 const MAX_REASONING_CHARS = 32_000;
 const MAX_TOOL_CALLS = 24;
 const MAX_DETAIL_CHARS = 160;
+/**
+ * Pictures kept from one turn. An agent asked for "four variations" makes four;
+ * a runaway loop makes as many as it has time for, and every one of them is
+ * about to be COPIED into the chat media tree, so the cap is a disk bound as
+ * much as a display one.
+ */
+const MAX_GENERATED_IMAGES = 4;
 
 /** Columns we read. Anything missing degrades to "not available", never a throw. */
 interface MessageRow {
@@ -164,6 +183,43 @@ function resultStatus(content: string): "ok" | "error" {
 }
 
 /**
+ * The picture an image tool says it produced, or null.
+ *
+ * Read from the TOOL RESULT row rather than from the reply text, because the
+ * reply text is prose: the model paraphrases the path, wraps it in backticks,
+ * or mentions it twice. The result row is the tool's own JSON —
+ * `{"success": true, "image": "/home/clawbox/.hermes/cache/images/…png", …}`,
+ * captured verbatim from the live box (2026-08-24, session
+ * `20260824_212159_ecf214`, row 599).
+ *
+ * `success` must be literally true. A failed generation still writes a row, and
+ * its `image` is null — but a backend that reported an error and a path anyway
+ * would otherwise have that path adopted and rendered as a picture of nothing.
+ *
+ * Matched on the RESULT SHAPE and not on a tool-name allowlist: every Hermes
+ * image backend answers through the one `image_generate` tool, but a skill or a
+ * future tool that returns the same `{success, image}` contract is making a
+ * picture too, and hardcoding names here would drop it silently. The path is
+ * validated by the adopter before anything opens it.
+ */
+function generatedImagePath(content: string): string | null {
+  const source = content.trim();
+  // Cheap bail-out: the overwhelming majority of tool results are not images,
+  // and JSON.parse on a 100 KB terminal capture is not free on a Jetson.
+  if (!source.startsWith("{") || !source.includes('"image"')) return null;
+  try {
+    const parsed = JSON.parse(source);
+    if (!parsed || typeof parsed !== "object") return null;
+    const row = parsed as Record<string, unknown>;
+    if (row.success !== true) return null;
+    const image = typeof row.image === "string" ? row.image.trim() : "";
+    return image || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Turn the rows of ONE turn into the three fields the chat surface wants.
  *
  * Exported for its own test: the parsing is the part with rules in it, and a
@@ -190,10 +246,16 @@ export function buildTurnFromRows(rows: MessageRow[]): HermesTurnRecord | null {
   // A tool result is matched to its call by id, so a chip can say whether the
   // step worked without assuming the rows are adjacent.
   const statusByCallId = new Map<string, "ok" | "error">();
+  const generatedImages: string[] = [];
   for (const row of turn) {
     if (row?.role !== "tool") continue;
     const id = text(row.tool_call_id);
-    if (id) statusByCallId.set(id, resultStatus(text(row.content)));
+    const content = text(row.content);
+    if (id) statusByCallId.set(id, resultStatus(content));
+    const image = generatedImagePath(content);
+    // De-duplicated: a resumed session replays rows, and one file rendered
+    // twice in a bubble is a bug the customer sees.
+    if (image && !generatedImages.includes(image)) generatedImages.push(image);
   }
 
   const answers: string[] = [];
@@ -241,6 +303,12 @@ export function buildTurnFromRows(rows: MessageRow[]): HermesTurnRecord | null {
   const answer = answers.join("\n\n").trim();
   // No answer means this is not a turn we can speak for — the caller keeps the
   // console text rather than replacing a real reply with an empty one.
+  //
+  // A DRAWN PICTURE IS NOT AN EXCEPTION TO THAT, deliberately. Every image turn
+  // observed on the box ends with the model saying something about the file it
+  // just made, so an empty answer here means the record could not be read at
+  // all — and inventing a picture-only record from a half-read turn would put a
+  // bubble on screen that the console fallback then duplicates.
   if (!answer) return null;
 
   const reasoning = reasonings.join("\n\n").trim();
@@ -254,6 +322,9 @@ export function buildTurnFromRows(rows: MessageRow[]): HermesTurnRecord | null {
       }
       : {}),
     ...(toolCalls.length ? { toolCalls: toolCalls.slice(0, MAX_TOOL_CALLS) } : {}),
+    ...(generatedImages.length
+      ? { generatedImages: generatedImages.slice(0, MAX_GENERATED_IMAGES) }
+      : {}),
   };
 }
 

@@ -20,19 +20,19 @@ const HERMES_WITH_IMAGES = capabilitiesFor("hermes", {
   // it. Without the second the composer offers nothing — see the capability
   // table's own tests.
   hermesHasVisionRoute: true,
-  hermesStreamsTurns: false,
+  hermesStreamsTurns: false, hermesAgentDrawsImages: false
 });
 const HERMES_BARE = capabilitiesFor("hermes", {
   hasClawaiToken: false,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
+  hermesStreamsTurns: false, hermesAgentDrawsImages: false
 });
 const OPENCLAW = capabilitiesFor("openclaw", {
   hasClawaiToken: true,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
-  hermesStreamsTurns: false,
+  hermesStreamsTurns: false, hermesAgentDrawsImages: false
 });
 
 describe("partitionAttachments", () => {
