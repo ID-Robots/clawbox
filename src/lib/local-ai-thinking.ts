@@ -36,6 +36,13 @@
  * generic `api_mode: openai` provider, and it addresses the local model through
  * this proxy (`providers.clawlocal.base_url`). The proxy is the one place we
  * control the outgoing request body.
+ *
+ * THE OTHER BACKEND. Everything above is llama.cpp. Ollama is the opposite in
+ * every respect — it READS `reasoning_effort`, it knows the same eight words,
+ * and it rejects all but one of them outright on a model that cannot think.
+ * That path is applyOllamaThinkingToChatBody at the bottom of this file, with
+ * its own measurements; the two must not be merged, because the field is inert
+ * on one backend and load-bearing on the other.
  */
 
 import {
@@ -53,13 +60,13 @@ import {
  * thinking when the pill said it would not.
  *
  * `hermes --reasoning` can send any of eight words, so a level from the middle
- * of the scale still has to resolve: anything that is not the OFF end counts as
+ * of the scale still has to resolve: anything that is not an OFF end counts as
  * "think", which keeps the mapping monotonic — raising the level can never
- * reduce thinking. `none` is treated as off for the same reason `minimal` is.
+ * reduce thinking. `none` and `minimal` are both off (THINKING_OFF_LEVELS),
+ * because which of the two a picker sends depends on the backend.
  */
 export function thinkingEnabledForLevel(level: string): boolean {
   if (!isHermesReasoningLevel(level)) return false;
-  if (level === "none") return false;
   return isThinkingOnLevel(HERMES_LOCAL_REASONING_PROVIDER, level);
 }
 
@@ -67,11 +74,19 @@ export function thinkingEnabledForLevel(level: string): boolean {
  * Only chat completions carry a chat template, so only that path is rewritten.
  * Everything else (`/models`, embeddings, completions, the slots endpoints)
  * stays a straight stream — see proxyLocalAiRequest.
+ *
+ * A leading `v1` is accepted because the two proxy routes are mounted at
+ * different depths: llamacpp's is `/setup-api/local-ai/llamacpp/v1/[...path]`
+ * (the version segment is part of the ROUTE, so it never reaches here) while
+ * ollama's is `/setup-api/local-ai/ollama/[...path]` (the version segment is
+ * part of the PATH, so it does). Matching only the two-segment form silently
+ * skipped every ollama chat turn.
  */
 export function isChatCompletionsPath(pathSegments: readonly string[]): boolean {
-  return pathSegments.length === 2
-    && pathSegments[0] === "chat"
-    && pathSegments[1] === "completions";
+  const segments = pathSegments[0] === "v1" ? pathSegments.slice(1) : pathSegments;
+  return segments.length === 2
+    && segments[0] === "chat"
+    && segments[1] === "completions";
 }
 
 /**
@@ -142,5 +157,87 @@ export function applyThinkingToChatBody(bodyText: string): string {
   }
   body.chat_template_kwargs = kwargs;
 
+  return JSON.stringify(body);
+}
+
+/**
+ * The one `reasoning_effort` value Ollama accepts from a model that cannot
+ * think. See applyOllamaThinkingToChatBody below for the measurement.
+ */
+const OLLAMA_THINKING_OFF = "none";
+
+/**
+ * Read the model id out of a chat-completions body, or "" when it has none.
+ * Exported for the capability probe, which needs to know WHICH model the turn
+ * is for before it can say whether that model can think.
+ */
+export function chatBodyModelId(bodyText: string): string {
+  try {
+    const parsed: unknown = JSON.parse(bodyText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "";
+    const model = (parsed as Record<string, unknown>).model;
+    return typeof model === "string" ? model.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Rewrite a chat-completions body for the OLLAMA backend.
+ *
+ * WHY THIS EXISTS — the bug it fixes, measured on the device's own Ollama
+ * 0.32.15 with `qwen2.5:0.5b` (`/api/show` capabilities `["completion","tools"]`):
+ *
+ *   reasoning_effort=none            → HTTP 200
+ *   reasoning_effort=minimal         → HTTP 400 "…does not support thinking"
+ *   reasoning_effort=low|medium|high|max|ultra → HTTP 400, same message
+ *   (no reasoning_effort field)      → HTTP 200
+ *   reasoning_effort=banana-nonsense → HTTP 400 "invalid reasoning value: …"
+ *
+ * The last two lines are what make this a small, safe rewrite rather than a
+ * guess. The nonsense value gets a DIFFERENT error, so Ollama's vocabulary is
+ * the same eight words Hermes sends — the 400 on a real level is a CAPABILITY
+ * check. And omitting the field entirely is a 200. So:
+ *
+ *   canThink === false → drop the field. The turn runs. Nothing is lost: a
+ *                        model without the capability could not have thought.
+ *   canThink === true  → keep the level, but fold the OFF end onto Ollama's own
+ *                        `none`, so "Thinking off" really is off rather than
+ *                        "think, but minimally".
+ *   canThink === null  → unknown (the probe failed, i.e. Ollama is not
+ *                        answering). Forward untouched and let the backend
+ *                        judge; inventing a value from ignorance would be the
+ *                        one way to make a turn fail that would otherwise work.
+ *
+ * Unlike the llamacpp path this does NOT delete `reasoning_effort` when the
+ * model can think: on this backend the field is live, not inert.
+ */
+export function applyOllamaThinkingToChatBody(bodyText: string, canThink: boolean | null): string {
+  if (canThink === null) return bodyText;
+  // Same fast path as applyThinkingToChatBody: a chat body carries the whole
+  // conversation plus the tool schemas, and parsing one to discover there is
+  // no field to fix is the expensive way to learn nothing.
+  if (!bodyText.includes('"reasoning_effort"')) return bodyText;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return bodyText;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return bodyText;
+
+  const body = parsed as Record<string, unknown>;
+  const effort = typeof body.reasoning_effort === "string" ? body.reasoning_effort.trim() : "";
+  if (!effort) return bodyText;
+
+  if (!canThink) {
+    delete body.reasoning_effort;
+    return JSON.stringify(body);
+  }
+
+  const wanted = thinkingEnabledForLevel(effort) ? effort : OLLAMA_THINKING_OFF;
+  if (wanted === effort) return bodyText;
+  body.reasoning_effort = wanted;
   return JSON.stringify(body);
 }

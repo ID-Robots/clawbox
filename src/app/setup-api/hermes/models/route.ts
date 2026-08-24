@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { requireSession } from "@/lib/route-auth";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
   getModelOptions,
@@ -57,8 +58,22 @@ function unionModels(payload: ModelOptionsPayload): HermesModelOption[] {
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
-  const refresh = flag(url.searchParams.get("refresh"));
   const provider = (url.searchParams.get("provider") || "").trim();
+
+  // `?refresh=1` is not a read: it busts Hermes' per-provider disk cache and
+  // fans out into a live /v1/models call per provider. An unauthenticated
+  // caller could therefore drive real upstream traffic and — before the
+  // downgrade guard in hermes-model-options.ts — swap a healthy 47-provider
+  // catalogue for the 2-provider disk fallback by timing it against a slow
+  // dashboard. The plain GET stays reachable for the wizard; the cache bust
+  // needs a session. Degrading to a read (rather than 401ing) keeps the panel
+  // rendering for a caller whose session expired mid-page. TASK-446.
+  let refresh = flag(url.searchParams.get("refresh"));
+  let refreshDenied = false;
+  if (refresh && (await requireSession(request))) {
+    refresh = false;
+    refreshDenied = true;
+  }
 
   // A device whose local model was enabled before Hermes knew how to host it
   // repairs itself here — once per process, and a no-op on every other device.
@@ -90,6 +105,14 @@ export async function GET(request: Request) {
         id: row.id,
         name: row.name,
         authenticated: row.authenticated,
+        // Same value, honestly named. `authenticated` means Hermes found an API
+        // key or a user-defined endpoint — presence, never a working
+        // credential. `verified` is the one that would mean it works, and is
+        // null until something actually probes the provider. A consumer that
+        // reads `authenticated` as "this will answer" is the reason a bogus
+        // provider looked healthy right up until the first turn 403'd.
+        credentialPresent: row.authenticated,
+        verified: row.verified,
         isUserDefined: row.isUserDefined,
         source: row.source,
         total: row.total,
@@ -98,6 +121,8 @@ export async function GET(request: Request) {
       source: payload.source,
       stale: payload.stale,
       fetchedAt: payload.fetchedAt,
+      ...(payload.degraded ? { degraded: payload.degraded } : {}),
+      ...(refreshDenied ? { refreshDenied: true } : {}),
     });
   } catch {
     // Never surface the dashboard origin, its password, or the hermes binary

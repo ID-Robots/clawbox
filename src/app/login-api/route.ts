@@ -13,18 +13,32 @@ export const dynamic = "force-dynamic";
 
 const VALID_DURATIONS = new Set([1200, 21600, 43200, 86400]);
 
-// On a LAN device the request socket IP isn't easy to recover from a
-// Next.js Request, and any client can spoof X-Forwarded-For. CF-Connecting-IP
-// is the only header upstream rewrites cleanly when the device is fronted by
-// the cloudflared tunnel; fall back to a single "global" bucket so an
-// IP-rotating attacker still hits the cap.
-// A trusted per-client key gets the full escalating lockout; the shared LAN
-// fallback bucket is capped (see maxLockMs) so it can't be used to lock the
-// owner out. `maxLockMs` undefined = no cap.
-function rateLimitKey(req: Request): { key: string; maxLockMs?: number } {
+// Every attempt is counted against TWO buckets, and both must be clear for the
+// attempt to proceed.
+//
+//   global      — always. Capped at SHARED_BUCKET_MAX_LOCK_MS (5 min) so it can
+//                 never be driven to the 24h tier and used to lock the owner
+//                 out, but it does throttle everyone, including an attacker who
+//                 is rotating headers.
+//   cf:<ip>     — when CF-Connecting-IP is present. Full escalating schedule up
+//                 to 24h, because behind the cloudflared tunnel that header is
+//                 rewritten by the edge and is a real per-client identity.
+//
+// Why both: the box serves plain HTTP on port 80 with no reverse proxy, so on
+// the LAN CF-Connecting-IP is just a header the client picks. Keying only on it
+// meant every new value minted a fresh, empty, un-capped bucket — the escalating
+// lockout was one `-H 'CF-Connecting-IP: <random>'` away from irrelevant, which
+// is exactly what the live validation demonstrated. The global bucket is now
+// always in the path, so header rotation buys an attacker nothing beyond the
+// 5-minute shared cap. X-Forwarded-For is still deliberately never consulted.
+// TASK-444c.
+function rateLimitBuckets(req: Request): Array<{ key: string; maxLockMs?: number }> {
+  const buckets: Array<{ key: string; maxLockMs?: number }> = [
+    { key: "global", maxLockMs: SHARED_BUCKET_MAX_LOCK_MS },
+  ];
   const cf = req.headers.get("cf-connecting-ip")?.trim();
-  if (cf) return { key: `cf:${cf}` };
-  return { key: "global", maxLockMs: SHARED_BUCKET_MAX_LOCK_MS };
+  if (cf) buckets.unshift({ key: `cf:${cf}` });
+  return buckets;
 }
 
 // Cookies are marked Secure only when the request actually arrived over HTTPS
@@ -55,12 +69,14 @@ function lockoutResponse(retryAfterSeconds: number): NextResponse {
 
 export async function POST(request: Request) {
   const startedAt = Date.now();
-  const { key, maxLockMs } = rateLimitKey(request);
+  const buckets = rateLimitBuckets(request);
 
-  const lock = await checkLockout(key);
-  if (lock.locked) {
-    await padResponseTime(startedAt);
-    return lockoutResponse(lock.retryAfterSeconds);
+  for (const bucket of buckets) {
+    const lock = await checkLockout(bucket.key);
+    if (lock.locked) {
+      await padResponseTime(startedAt);
+      return lockoutResponse(lock.retryAfterSeconds);
+    }
   }
 
   // If password not configured, check if this is an upgrade from a pre-auth version
@@ -97,15 +113,23 @@ export async function POST(request: Request) {
 
   const valid = await verifyPassword(password);
   if (!valid) {
-    const after = await recordFailure(key, { maxLockMs });
+    // Record against every bucket, then report the longest lock in force so the
+    // client's Retry-After is honest about when it can actually try again.
+    let worstRetryAfter = 0;
+    for (const bucket of buckets) {
+      const after = await recordFailure(bucket.key, { maxLockMs: bucket.maxLockMs });
+      if (after.locked) worstRetryAfter = Math.max(worstRetryAfter, after.retryAfterSeconds);
+    }
     await padResponseTime(startedAt);
-    if (after.locked) {
-      return lockoutResponse(after.retryAfterSeconds);
+    if (worstRetryAfter > 0) {
+      return lockoutResponse(worstRetryAfter);
     }
     return NextResponse.json({ error: "Incorrect password" }, { status: 401 });
   }
 
-  await recordSuccess(key);
+  // A correct password clears both buckets, so the owner who fat-fingers it a
+  // few times and then gets it right is not left sitting behind the shared cap.
+  for (const bucket of buckets) await recordSuccess(bucket.key);
 
   const secret = await getSessionSigningSecret();
   const gen = await getSessionGeneration();

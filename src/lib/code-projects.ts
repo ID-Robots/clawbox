@@ -132,6 +132,21 @@ function projectDir(projectId: string): string {
   return path.join(PROJECTS_DIR, projectId);
 }
 
+/**
+ * The ABSOLUTE on-device directory a project's source files live in.
+ *
+ * Exported because the agent edits those files with its harness's own file
+ * tools, and those resolve a relative path against the HARNESS's working
+ * directory, not the web tier's. On a Hermes device the two differ
+ * (/home/clawbox vs /home/clawbox/clawbox), so handing out
+ * "data/code-projects/<id>/" made every read miss and every write land in a
+ * parallel tree that nothing ever builds. Only an absolute path is portable
+ * between the two processes.
+ */
+export function projectPath(projectId: string): string {
+  return projectDir(projectId);
+}
+
 function metaPath(projectId: string): string {
   return path.join(projectDir(projectId), "project.json");
 }

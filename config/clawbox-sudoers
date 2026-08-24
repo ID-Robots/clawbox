@@ -74,8 +74,13 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  --now ollama.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable --now ollama.service
 
 # Update / power / install paths.
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed *
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block *
+#
+# `reset-failed *` and `start --no-block *` used to take ANY unit name. Both are
+# only ever called with a clawbox-* unit (src/lib/updater.ts, the llamacpp
+# installer, the credentials chpasswd path, install/run-step), so scope them to
+# that prefix rather than handing over the whole unit namespace. TASK-445.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-*
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-*
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@*.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
@@ -91,3 +96,22 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/apt-get install -y -qq chromium
 # Allow the Browser-app installer to recover from interrupted dpkg state.
 clawbox ALL=(root) NOPASSWD: /usr/bin/dpkg --configure -a
 clawbox ALL=(root) NOPASSWD: /usr/bin/snap install chromium
+
+# Desktop / power toggles (TASK-455). Both targets are the ROOT-OWNED copies
+# under /usr/local/libexec/clawbox, never the clawbox-writable ones in
+# /home/clawbox/clawbox/scripts — same reason as the optimize-ollama.sh grant
+# in /etc/sudoers.d/clawbox-ollama.
+#
+# Exact-match Cmnd specs, one per action, with no wildcard: these scripts branch
+# entirely on argv[1], so a trailing `*` would be a grant on every mode they will
+# ever grow, including ones added by a future PR that never got reviewed as a
+# privilege boundary.
+#
+# The `--check` modes are deliberately ABSENT. They read systemctl/nvpmodel
+# state only and run fine unprivileged, so the status route calls them with no
+# sudo at all and the sudo surface stays limited to the four actions that
+# actually change something.
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-desktop-mode.sh --enable
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-desktop-mode.sh --disable
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-power-mode.sh --balanced
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-power-mode.sh --performance

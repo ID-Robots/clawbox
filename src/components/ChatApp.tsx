@@ -680,7 +680,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
                   ))}
                 </div>
               )}
-              {msg.role === 'user' ? msg.text : renderText(msg.text)}
+              {msg.role === 'user' ? msg.text : renderText(msg.text, t("chat.table"))}
             </div>
           </div>
         ))}
@@ -696,7 +696,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
               color: 'rgba(255,255,255,0.85)',
               fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
             }}>
-              {renderText(streaming)}
+              {renderText(streaming, t("chat.table"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
             </div>
           </div>

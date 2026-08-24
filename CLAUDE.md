@@ -39,7 +39,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 50+ Next.js Route Handlers namespaced under `/setup-api/` to avoid conflicts with the OpenClaw gateway's `/api/*`:
 
 - **WiFi**: `wifi/scan`, `wifi/connect`, `wifi/status`, `wifi/ethernet` — WiFi and Ethernet management
-- **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot` — system info, power control, password, hotspot config
+- **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot`, `system/desktop`, `system/power-profile` — system info, power control, password, hotspot config, desktop/headless toggle, Jetson power profile + memory guards
 - **AI Models**: `ai-models/configure`, `ai-models/status`, `ai-models/oauth/*` — API key config with OAuth flows (device auth + authorization code)
 - **Ollama**: `ollama/status`, `ollama/pull`, `ollama/search`, `ollama/delete` — local model management
 - **Apps**: `apps/store`, `apps/install`, `apps/uninstall`, `apps/icon/[appId]`, `apps/settings` — app store integration
@@ -48,6 +48,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Gateway**: `gateway/`, `gateway/health`, `gateway/ws-config` — gateway proxying with HTML injection
 - **Telegram**: `telegram/configure`, `telegram/status` — Telegram bot config
 - **Email**: `email/configure`, `email/status`, `email/test`, `email/send`, `email/messages`, `email/pending` — a mail account (any provider; Gmail app-password guide in the UI) with ONE of three modes: send only, read on demand (`email/messages` backs the `email_list`/`email_read` MCP tools over ClawBox's own IMAP client — no polling, EXAMINE + BODY.PEEK so reading never marks mail seen), or answer senders (Hermes' native adapter, allowlist-only). A separate "ask me before sending" gate turns `email/send` into a queued draft; `email/pending` approves or deletes it and is the one route that refuses the MCP bearer, because the agent is the party it gates.
+- **Discord**: `discord/configure`, `discord/status`, `discord/members` — Discord bot config (token validated live against the Discord API before it is saved), gateway connection state, and the guild-member allowlist picker
 - **Setup**: `setup/status`, `setup/complete`, `setup/reset` — setup flow state, factory reset
 - **Update**: `update/run`, `update/status` — git-based system updates
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
@@ -144,14 +145,14 @@ of them kept failing.
   `register`, `context`, `jobs`, `web`).
   - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
     `system_stats`, `system_info`, `system_power`, `disk_usage`, `disk_cleanup`,
-    `update_check`, `logs_tail`, `screen_capture`, `backup_*`,
+    `update_check`, `logs_tail`, `screen_capture`, `backup_status`,
     `telegram_status`, `email_send`, `wifi_scan`, `wifi_status`, `vnc_status`,
     `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`
   - **Hermes only**: `skill_search`, `skill_list`, `skill_info`, `skill_install`,
     `skill_uninstall`, `ai_list_models`, `ai_set_provider`, `ai_set_model`
-  - **OpenClaw only**: `app_search`, `app_install`,
+  - **OpenClaw only**: `app_search`, `app_install`, `backup_list`, `backup_now`,
     `browser_click/type/keypress/scroll`, and the coding family — `bash`,
     `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`,
     `list_directory`, `glob`, `grep`, `notebook_edit`, `web_fetch`, `web_search`

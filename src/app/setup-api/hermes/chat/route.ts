@@ -14,11 +14,20 @@ import {
 import {
   clampReasoningForProvider,
   hermesReasoningLevelsFor,
+  normalizeReasoningForWire,
+  HERMES_LOCAL_REASONING_PROVIDER,
   providerHasBinaryReasoning,
   providerHasReasoningControl,
   isHermesReasoningLevel,
   isReasoningLevelAllowedFor,
+  type HermesLocalBackend,
 } from "@/lib/hermes-reasoning";
+import { getConfiguredLocalAiBackend } from "@/lib/local-ai-backend";
+import {
+  isSmallLocalModel,
+  slimLocalProfileEnabled,
+  smallLocalModelToolsets,
+} from "@/lib/local-model-profile";
 import {
   getModelOptions,
   isAllowedProvider,
@@ -317,6 +326,15 @@ export async function POST(request: Request) {
   if (rawReasoning && !isHermesReasoningLevel(rawReasoning)) {
     return NextResponse.json({ error: "Invalid reasoning level" }, { status: 400 });
   }
+  // Fold a level the wire collapses onto the one it collapses to, BEFORE any
+  // provider check runs. Today that is `ultra` → `max`: Hermes' own
+  // clamp_effort does it for every OpenAI-compatible provider, so the two are
+  // the same turn — but clawai answers the word `ultra` with HTTP 400, which
+  // turned "a level with no effect" into "a level that fails". A client holding
+  // a saved `ultra` from before it left the picker must not hit that.
+  if (rawReasoning && isHermesReasoningLevel(rawReasoning)) {
+    rawReasoning = normalizeReasoningForWire(rawReasoning);
+  }
   // "auto" is ClawBox's pseudo-provider for "let Hermes decide", not a slug the
   // CLI knows — it maps to omitting the flag entirely, which is exactly what
   // hermes does without an override.
@@ -331,6 +349,10 @@ export async function POST(request: Request) {
   // we fall back to the static allowlist and let hermes itself judge the
   // pairing — a chat turn must not become impossible because the dashboard
   // blinked.
+  // The built-in toolsets this turn is narrowed to, or null for "all of them".
+  // Set only for a small on-device model — see the slim-profile block below.
+  let slimToolsets: readonly string[] | null = null;
+
   let payload: ModelOptionsPayload | null = null;
   if (wantsProvider || rawModel) {
     try {
@@ -354,6 +376,15 @@ export async function POST(request: Request) {
     // what hermes falls back to. `current` comes from `hermes config get`, so
     // it is accurate even when the model lists themselves are stale.
     const effectiveProvider = wantsProvider ? rawProvider : payload.current.provider;
+    // Which runtime hosts the on-device model, when that is what this turn runs
+    // on. It decides WHICH pair the two-state switch has: llama.cpp's off is
+    // `minimal`, Ollama's is `none`, and Ollama answers `minimal` with HTTP 400
+    // "does not support thinking" on a model without the capability — so
+    // clamping to the wrong pair is a guaranteed failed turn. Only read for the
+    // provider that needs it; every other turn skips the config-store hit.
+    const localBackend: HermesLocalBackend | null = providerHasBinaryReasoning(effectiveProvider)
+      ? await getConfiguredLocalAiBackend()
+      : null;
 
     // The CLI accepting a level does not mean the PROVIDER does — Hermes passes
     // it through as `reasoning_effort` and the upstream API can reject it.
@@ -378,19 +409,34 @@ export async function POST(request: Request) {
       && isHermesReasoningLevel(rawReasoning)
       && providerHasBinaryReasoning(effectiveProvider)
     ) {
-      rawReasoning = clampReasoningForProvider(effectiveProvider, rawReasoning);
+      rawReasoning = clampReasoningForProvider(effectiveProvider, rawReasoning, localBackend);
     } else if (
       rawReasoning
       && isHermesReasoningLevel(rawReasoning)
-      && !isReasoningLevelAllowedFor(effectiveProvider, rawReasoning)
+      && !isReasoningLevelAllowedFor(effectiveProvider, rawReasoning, localBackend)
     ) {
       return NextResponse.json(
         {
           error: `Provider "${effectiveProvider}" does not support the "${rawReasoning}" reasoning effort.`,
-          allowed: hermesReasoningLevelsFor(effectiveProvider),
+          allowed: hermesReasoningLevelsFor(effectiveProvider, localBackend),
         },
         { status: 400 },
       );
+    }
+
+    // The slim profile. On the on-device provider the fixed per-turn payload —
+    // ~30 KB of system text plus 61 tool schemas, ~113 KB in total, measured
+    // with `hermes prompt-size` and a live tools/list — is most of a small
+    // model's budget, and it answers with tool preamble instead of the answer.
+    // `-t` is a whitelist over the BUILT-IN toolsets only (verified against
+    // agent_init.py / model_tools.py); MCP tools are merged separately, so the
+    // ClawBox device tools survive it. See src/lib/local-model-profile.ts.
+    if (
+      effectiveProvider === HERMES_LOCAL_REASONING_PROVIDER
+      && slimLocalProfileEnabled()
+      && isSmallLocalModel({ modelId: rawModel || payload.current.model })
+    ) {
+      slimToolsets = smallLocalModelToolsets();
     }
 
     // Same pairing gate the config POST enforces: a provider must never run a
@@ -444,6 +490,9 @@ export async function POST(request: Request) {
   // model.provider=clawai only accepts BARE deepseek ids and answers a
   // vendor-prefixed one with HTTP 400 "Model not allowed".)
   if (rawModel) args.push("-m", rawModel);
+  // Names are charset-checked in smallLocalModelToolsets(), so this can never
+  // carry a leading "-" into argv.
+  if (slimToolsets) args.push("-t", slimToolsets.join(","));
   if (wantsProvider) args.push("--provider", rawProvider);
   if (rawReasoning) args.push("--reasoning", rawReasoning);
   // Continue the SAME conversation. Without this every turn is a fresh `-z`

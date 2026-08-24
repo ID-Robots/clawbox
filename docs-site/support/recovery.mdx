@@ -7,8 +7,14 @@ summary: "Recovery options ordered from least to most destructive — password r
 When something is badly wrong, work **top to bottom** — the options are roughly ordered from least to most drastic. Everything here runs over SSH (`ssh clawbox@YOUR_BOX_IP`) unless noted.
 
 <Warning>
-Before anything destructive, note what is safe: your **settings, AI keys, chats, and Telegram pairing** live in `data/` and `~/.openclaw` — they survive options A–C untouched. Only the factory reset (D) erases them.
+Before anything destructive, note what is safe: your **settings, AI keys, chats, and Telegram pairing** live in `data/` and in your edition's agent state — `~/.openclaw` on the OpenClaw edition, `~/.hermes` on [Hermes](/editions/hermes). They survive options A–C untouched. Only the factory reset (D) erases them.
 </Warning>
+
+<Info>
+**Which edition am I on?** `cat /etc/clawbox/edition.env` — it prints `CLAWBOX_EDITION=openclaw`,
+`hermes` or `dual`. Several commands below differ by edition, and running the OpenClaw ones on a
+Hermes box is at best a no-op.
+</Info>
 
 ## A — Reset the password (10 seconds, no data loss)
 
@@ -22,18 +28,28 @@ Type your current password once (for `sudo`), then the **new** password twice. B
 
 ## B — Restart the services (30 seconds, no data loss)
 
-For a box that's reachable over SSH but the web page or assistant is unresponsive:
+For a box that's reachable over SSH but the web page or assistant is unresponsive.
+
+**OpenClaw / dual edition:**
 
 ```bash
 sudo systemctl restart clawbox-setup clawbox-gateway
-```
-
-Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If it recurs, capture logs before the next restart:
-
-```bash
 journalctl -u clawbox-setup -n 50 --no-pager
 journalctl -u clawbox-gateway -n 50 --no-pager
 ```
+
+**Hermes edition** — there is no OpenClaw gateway here; its unit is masked on purpose and
+`systemctl restart clawbox-gateway` fails with `Unit clawbox-gateway.service is masked.` Restart the
+Hermes units instead:
+
+```bash
+sudo systemctl restart clawbox-setup clawbox-hermes-dashboard clawbox-hermes-dashboard-proxy
+journalctl -u clawbox-setup -n 50 --no-pager
+journalctl -u clawbox-hermes-dashboard -n 50 --no-pager
+```
+
+Wait ~30 seconds and reload `http://YOUR_BOX_IP`. If it recurs, capture the logs above before the
+next restart.
 
 ## C — Safe reinstall (10–15 minutes, no data loss)
 
@@ -41,43 +57,177 @@ The universal fix for a half-finished update, stale build, or mysteriously broke
 
 ```bash
 cd /home/clawbox/clawbox
+BRANCH=$(cat .update-branch 2>/dev/null || echo main)
 git fetch origin
-git checkout -f main
-git reset --hard origin/main
+git checkout -f "$BRANCH"
+git reset --hard "origin/$BRANCH"
 sudo bash install.sh
 sudo reboot
 ```
 
-Let `install.sh` finish completely (it prints numbered steps, `[1/23] … [23/23]`), then reboot. The box is back in ~2 minutes.
+<Warning>
+Use the box's own channel, not a hardcoded `main`. `.update-branch` is the update-channel pin — a
+device on `beta` that is hard-reset to `origin/main` is silently moved to a different release line.
+</Warning>
+
+Let `install.sh` finish completely (it prints numbered steps, `[1/26] … [26/26]`), then reboot. The box is back in ~2 minutes.
 
 <Info>
-Why this works when a normal update didn't: `install.sh` refreshes **everything** — the app build, the OpenClaw core (pinned version), the systemd service files, and system packages. Partial updates (a bare `git pull`, an interrupted updater) can leave those out of sync.
+Why this works when a normal update didn't: `install.sh` refreshes **everything** — the app build, your edition's agent core (the pinned OpenClaw version, or the Hermes edition steps), the systemd service files, and system packages. It reads `/etc/clawbox/edition.env` on every run and skips the steps that do not belong to your edition, so it cannot convert a Hermes box into an OpenClaw one. Partial updates (a bare `git pull`, an interrupted updater) can leave those out of sync.
 </Info>
 
 If the box is so broken the commands above fail, there is a standalone recovery script that performs the same hard-sync + rebuild:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ID-Robots/clawbox/main/scripts/force-update.sh)
+CLAWBOX_BRANCH=$(cat /home/clawbox/clawbox/.update-branch 2>/dev/null || echo main) \
+  bash <(curl -fsSL https://raw.githubusercontent.com/ID-Robots/clawbox/main/scripts/force-update.sh)
 ```
+
+The script defaults to `main`; `CLAWBOX_BRANCH` keeps a box on its own channel.
 
 ## D — Factory reset (wipes everything)
 
 <Warning>
-**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
+**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, shell history, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
 </Warning>
+
+<Info>
+**Three things deliberately survive**, because a reset box comes back up in hotspot mode with no
+internet and could not re-download them:
+
+- `data/network.env` and `data/llamacpp/models/` — the offline on-device model weights (several GB).
+- `~/.hermes/hermes-agent/` on the Hermes edition — the agent checkout and its Python venv. `~/.local/bin/hermes` is a shim that execs the interpreter inside it.
+- `~/.cache/huggingface` voice models (only the `token` / `stored_tokens` credential files are removed).
+
+The device's **portal identity is also not cleared**: the cached id in `data/cloudflared/device-id`
+is deleted, but it is re-derived from `/etc/machine-id`, so a reset box reappears in the ClawBox
+portal as the same device.
+</Info>
 
 ### From the UI (preferred)
 
-Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into the **ClawBox-Setup** hotspot.
+Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into the **ClawBox-Setup** hotspot. This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
 
 ### Over SSH (when you can't log in to the UI)
 
-```bash
-sudo systemctl stop clawbox-setup clawbox-gateway
-sudo rm -rf /home/clawbox/clawbox/data/* /home/clawbox/.openclaw/* /home/clawbox/.clawkeep/*
-echo "clawbox:clawbox" | sudo chpasswd
-sudo reboot
-```
+<Warning>
+Do **not** shortcut this with `rm -rf ~/.hermes` or `rm -rf data/*`. Both are actively destructive:
+
+- `rm -rf ~/.hermes` deletes `hermes-agent/`, leaving a `hermes` command whose interpreter no longer
+  exists (`~/.hermes/hermes-agent/venv/bin/python: No such file or directory`) and
+  `clawbox-hermes-dashboard.service` crash-looping on status 127. A reset box has no internet to
+  re-download it — that is a reflash.
+- `rm -rf data/*` deletes `network.env` and the offline model weights under `data/llamacpp/models/`,
+  so the box comes back with no on-device AI and no way to fetch it.
+
+Equally, a bare `rm -rf data/* ~/.openclaw/*` **under**-deletes: it leaves your SSH `authorized_keys`,
+shell history, browser profile, Ollama models, `~/.hermes` and saved Wi-Fi profiles in place. A box
+reset that way is not safe to hand on to anyone else.
+</Warning>
+
+Run the steps in order. Everything up to the last block is non-destructive to connectivity, so if a
+step fails you can stop and retry without stranding the box.
+
+<Steps>
+  <Step title="Stop whatever could write during the wipe">
+    On **Hermes**:
+
+    ```bash
+    sudo systemctl stop clawbox-setup clawbox-hermes-dashboard \
+                        clawbox-hermes-dashboard-proxy clawbox-tunnel
+    ```
+
+    On **OpenClaw / dual** — the gateway has `Restart=always`, so mask it first or systemd brings it
+    straight back mid-wipe. The `--runtime` mask lives in `/run` and disappears on the reboot at the
+    end:
+
+    ```bash
+    sudo systemctl --runtime mask clawbox-gateway.service
+    sudo systemctl stop clawbox-setup clawbox-gateway clawbox-tunnel
+    ```
+
+    <Warning>
+    Never unmask `clawbox-gateway` on a Hermes box. It is masked persistently by the installer, and
+    starting it puts an unauthenticated agent gateway on your LAN.
+    </Warning>
+  </Step>
+
+  <Step title="Wipe device state, keeping the two entries the UI reset keeps">
+    ```bash
+    cd /home/clawbox/clawbox/data
+    find . -maxdepth 1 -mindepth 1 ! -name network.env ! -name llamacpp -exec rm -rf {} +
+    find ./llamacpp -maxdepth 1 -mindepth 1 ! -name models -exec rm -rf {} + 2>/dev/null || true
+    ```
+  </Step>
+
+  <Step title="Wipe agent state">
+    ```bash
+    # OpenClaw state and ClawKeep backup pairing (both editions — harmless if empty).
+    find ~/.openclaw ~/.clawkeep -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
+
+    # Hermes edition only — everything except the agent install itself.
+    find ~/.hermes -maxdepth 1 -mindepth 1 ! -name hermes-agent -exec rm -rf {} +
+    ```
+
+    `~/.hermes` is where a Hermes box keeps its `config.yaml` (billing token, dashboard signing
+    secret, password hash), `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`,
+    `sessions/`, `skills/`, `pairing/` and its SQLite state. Skipping this step is what leaves a
+    resold box carrying the previous owner's credentials.
+  </Step>
+
+  <Step title="Wipe previous-owner state in the home directory">
+    ```bash
+    rm -rf ~/.ssh ~/.codex ~/.config/clawbox-browser \
+           ~/.bash_history ~/.zsh_history ~/.python_history ~/.node_repl_history \
+           ~/.lesshst ~/.viminfo ~/.wget-hsts ~/.gitconfig ~/.netrc ~/.npmrc \
+           ~/.cache/huggingface/token ~/.cache/huggingface/stored_tokens \
+           ~/.local/share/code-server
+    find ~/Documents ~/Downloads ~/Desktop -maxdepth 1 -mindepth 1 -exec rm -rf {} + 2>/dev/null || true
+    crontab -r 2>/dev/null || true
+    ```
+
+    `~/.ssh` matters most: without it, the previous owner's `authorized_keys` would still let them
+    back in after the password reset below.
+  </Step>
+
+  <Step title="Delete downloaded Ollama models">
+    Ollama's models live under `/usr/share/ollama`, outside the home wipe, and the service is often
+    stopped — start it so the deletes land:
+
+    ```bash
+    sudo systemctl start ollama
+    sleep 3
+    ollama list | awk 'NR>1 {print $1}' | xargs -r -n1 ollama rm
+    ```
+  </Step>
+
+  <Step title="Last: drop the network, reset the password, reboot">
+    <Warning>
+    Only run this block once every step above has completed cleanly. It removes the box's way back
+    onto your network, and the hotspot only returns after the reboot — so a half-finished wipe that
+    stops here leaves you with an offline box.
+    </Warning>
+
+    ```bash
+    # Every saved Wi-Fi profile, including the hotspot's own stored password.
+    nmcli -t -f NAME,TYPE connection show \
+      | sed -n 's/:\(wifi\|802-11-wireless\)$//p' \
+      | while IFS= read -r n; do nmcli connection delete "$n"; done
+    nmcli connection delete ClawBox-Setup 2>/dev/null || true
+
+    # Back to the shipping default; the wizard makes you change it on first boot.
+    echo "clawbox:clawbox" | sudo chpasswd
+
+    sudo reboot
+    ```
+  </Step>
+</Steps>
+
+<Note>
+The UI reset additionally re-seeds `~/.openclaw/openclaw.json` with a fresh random gateway token and
+resets the mDNS hostname to `clawbox`. Neither is needed for a safe wipe — the first-boot wizard
+regenerates both — so they are left out of the SSH path.
+</Note>
 
 ### After the reset
 

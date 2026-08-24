@@ -11,7 +11,7 @@
 // two tools with one behaviour is precisely the tie a small model breaks wrongly.
 
 import { apiPost } from "../lib/api";
-import { ToolError } from "../lib/errors";
+import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
 import { zEnumOf, zInt, zText } from "../lib/schema";
 
@@ -23,21 +23,52 @@ interface BrowserReply {
   error?: string;
 }
 
-const CDP_DOWN = () =>
+/**
+ * `opening` is browser_open itself. A `next` that names the tool that just
+ * failed is a guaranteed retry loop for a small model, so the advice has to
+ * differ depending on who is asking.
+ */
+const CDP_DOWN = (opening = false) =>
   new ToolError(
     "ENDPOINT_DOWN",
     "The desktop browser is not running, so it cannot be controlled.",
-    "Call browser_open first. If that fails too, tell the user to open the Browser app on the ClawBox desktop.",
+    opening
+      ? "Do not call browser_open again. Tell the user to open the Browser app on the ClawBox desktop themselves."
+      : "Call browser_open first. If that fails too, tell the user to open the Browser app on the ClawBox desktop.",
   );
+
+// The launch route refuses addresses on the device's own network BEFORE any
+// browser starts, with 400 "Blocked internal address". That is an argument
+// problem the agent can fix; reporting it as "the browser is not running" sent
+// it back to browser_open with the same url, forever.
+const LAUNCH_RULES: ErrorRule[] = [
+  {
+    status: 400,
+    match: /blocked internal address/i,
+    code: "BAD_ARGUMENT",
+    message: "That address is on the device's own private network, so the browser will not open it.",
+    next: "Do not retry that address. Ask the user for a public https:// address, or use ui_open_app to show them a ClawBox app instead.",
+  },
+  {
+    status: 400,
+    code: "BAD_ARGUMENT",
+    message: "The device refused that address.",
+    next: "Pass a full public address starting with https://, and do not retry the one that was refused.",
+  },
+];
 
 let sessionId: string | null = null;
 
-async function browserCall(action: string, params: Record<string, unknown> = {}): Promise<BrowserReply> {
-  return apiPost<BrowserReply>("/setup-api/browser", { action, ...params }, { timeoutMs: 45_000 });
+async function browserCall(
+  action: string,
+  params: Record<string, unknown> = {},
+  rules?: ErrorRule[],
+): Promise<BrowserReply> {
+  return apiPost<BrowserReply>("/setup-api/browser", { action, ...params }, { timeoutMs: 45_000, rules });
 }
 
 /** Attach to the live window, reusing the session when it is still alive. */
-async function ensureSession(url?: string): Promise<string> {
+async function ensureSession(url?: string, opening = false): Promise<string> {
   if (sessionId) {
     try {
       const alive = await browserCall("screenshot", { sessionId });
@@ -49,11 +80,14 @@ async function ensureSession(url?: string): Promise<string> {
   }
   let reply: BrowserReply;
   try {
-    reply = await browserCall("launch", { ...(url ? { url } : {}) });
-  } catch {
-    throw CDP_DOWN();
+    reply = await browserCall("launch", { ...(url ? { url } : {}) }, LAUNCH_RULES);
+  } catch (err) {
+    // A mapped refusal is the device's real answer and is the ONLY thing the
+    // agent can act on. Only a genuine "nothing answered" becomes CDP_DOWN.
+    if (err instanceof ToolError) throw err;
+    throw CDP_DOWN(opening);
   }
-  if (!reply.sessionId) throw CDP_DOWN();
+  if (!reply.sessionId) throw CDP_DOWN(opening);
   sessionId = reply.sessionId;
   return sessionId;
 }
@@ -91,7 +125,7 @@ export function registerBrowserTools(reg: Registrar): void {
         await browserCall("close", { sessionId }).catch(() => { /* already gone */ });
         sessionId = null;
       }
-      const id = await ensureSession(url);
+      const id = await ensureSession(url, true);
       const reply = await browserCall("screenshot", { sessionId: id });
       return withScreenshot(url ? `Opened ${url} in the browser on the desktop.` : "Opened the browser on the desktop.", reply);
     },

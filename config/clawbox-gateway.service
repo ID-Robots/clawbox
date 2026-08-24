@@ -53,6 +53,12 @@ Environment=BUN_ENV=production
 Environment=OPENAI_TTS_BASE_URL=http://localhost:8880/v1
 Environment=OPENCLAW_VERBOSE=1
 EnvironmentFile=-/home/clawbox/clawbox/data/network.env
+# Discord's channel config references its credential by env var
+# (channels.discord.token = {source:"env", id:"DISCORD_BOT_TOKEN"}) rather than
+# storing it inline, so the value has to reach the gateway PROCESS. ClawBox
+# writes this file at 0600 from the Discord section of Settings; the leading "-"
+# keeps the unit starting normally on a device where Discord was never set up.
+EnvironmentFile=-/home/clawbox/clawbox/data/discord.env
 
 [Install]
 WantedBy=multi-user.target

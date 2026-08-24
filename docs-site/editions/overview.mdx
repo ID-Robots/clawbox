@@ -117,8 +117,15 @@ sudo bash /home/clawbox/clawbox/install.sh --step edition_foreign_teardown
 Over SSH or in the Terminal app:
 
 ```bash
-clawbox edition          # prints: openclaw | hermes | dual
+cat /etc/clawbox/edition.env                                  # the authority, root-owned
+bun run /home/clawbox/clawbox/mcp/clawbox-cli.ts edition      # prints: openclaw | hermes | dual
 ```
+
+<Note>
+There is no `clawbox` command on `PATH` — the CLI wrapper lives in the checkout and is run
+through Bun. `bun` is on the interactive `PATH`, so this works in the Terminal app and in an
+interactive SSH session; scripts should use `/home/clawbox/.bun/bin/bun`.
+</Note>
 
 From anything that speaks to the device API, `GET /setup-api/harness/status`
 returns the edition alongside `locked` and the active harness.
@@ -130,8 +137,8 @@ OpenClaw device it is the other way round.
 ## What is the same on every edition
 
 Nearly everything else. The setup wizard, the desktop environment and its
-windows, Terminal, Files, VS Code, Remote Desktop, the browser automation,
-webapps and the code assistant, ClawKeep backups, updates, networking and
+windows, Terminal, Files, Coding, Remote Desktop, the browser automation,
+webapps and the code assistant, System Update, updates, networking and
 mDNS, and the login model are all edition-independent.
 
 ## What differs
@@ -141,3 +148,4 @@ mDNS, and the login model are all edition-independent.
 - **How AI providers are configured** — see [AI Providers on Hermes](/editions/hermes-providers).
 - **The agent's own tool set** — some [MCP tools](/technical/agent-interface) exist on one edition only.
 - **Telegram plumbing** — the messages and the pairing-approval flow work the same way for you; the process behind them is the harness's own.
+- **ClawKeep backups** — OpenClaw and dual only. ClawKeep archives the OpenClaw agent through the `openclaw` CLI, which a Hermes box does not ship, so the ClawKeep app there reports the feature as unavailable on this edition.

@@ -69,11 +69,26 @@ export async function loginSessionCookie(
   );
 }
 
-export interface SetupStatus {
+/**
+ * What /setup-api/setup/status tells a caller with NO session.
+ *
+ * This route is the one deliberately public /setup-api endpoint (the /login
+ * page and the desktop bootstrap both read it before a session exists) AND it
+ * is reachable through the cloudflared tunnel, so its unauthenticated payload
+ * is readable by anyone holding that URL. It therefore carries only the
+ * wizard's own progress — which AI provider the box is wired to, which local
+ * model it runs and whether Telegram is configured are session-only.
+ */
+export interface SetupStatusPublic {
   setup_complete: boolean;
   wifi_configured: boolean;
   update_completed: boolean;
   password_configured: boolean;
+  setup_progress_step: number | null;
+}
+
+/** The full payload, served only to a caller with a session. */
+export interface SetupStatus extends SetupStatusPublic {
   local_ai_configured: boolean;
   local_ai_provider?: string | null;
   local_ai_model?: string | null;
@@ -81,7 +96,19 @@ export interface SetupStatus {
   telegram_configured: boolean;
 }
 
-export const getStatus = () => request<SetupStatus>("/setup-api/setup/status");
+/** The trimmed payload an anonymous caller sees. */
+export const getStatus = () => request<SetupStatusPublic>("/setup-api/setup/status");
+
+/**
+ * The full payload, fetched the way the desktop actually fetches it — with a
+ * session. Use this for anything beyond the wizard's progress flags.
+ */
+export async function getStatusAuthed(
+  password: string = SETUP_PASSWORD,
+): Promise<SetupStatus> {
+  const cookie = await loginSessionCookie(password);
+  return request<SetupStatus>("/setup-api/setup/status", { headers: { cookie } });
+}
 
 export const scanWifi = () =>
   request<{ scanning: boolean; networks: Array<{ ssid: string }> | null }>("/setup-api/wifi/scan?live=1", {

@@ -1,2 +1,9 @@
-# Allow clawbox user to optimize Ollama service without password
-clawbox ALL=(root) NOPASSWD: /home/clawbox/clawbox/scripts/optimize-ollama.sh
+# Allow clawbox user to optimize Ollama service without password.
+#
+# The target MUST be the root-owned copy under /usr/local/libexec/clawbox, not
+# the one in the project tree. /home/clawbox/clawbox/scripts/ is clawbox-owned
+# and clawbox-writable (as is the script, and every directory above it), so
+# granting NOPASSWD root on it let anything with clawbox-level code execution
+# overwrite the file and run it — no wildcard, no injection, no race needed.
+# install.sh installs this copy root:root 0755. TASK-445.
+clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/optimize-ollama.sh
