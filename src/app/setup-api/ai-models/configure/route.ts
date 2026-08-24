@@ -1322,9 +1322,13 @@ export async function POST(request: Request) {
       // where the runtime starts Ollama on demand — "we could not ask" must
       // not brick that flow.
       const probe = await probeOllamaModel(modelName);
+      // The id came off the wire and both messages below quote it back. Bound
+      // and strip it the same way anything request-derived is bounded before it
+      // reaches a log line — an unbounded echo is a response the caller sized.
+      const quotedModel = logSafe(modelName, 120);
       if (probe.status === "not-installed") {
         return NextResponse.json(
-          { error: `Ollama does not have "${modelName}" on this device. Pull the model first, then save it.` },
+          { error: `Ollama does not have "${quotedModel}" on this device. Pull the model first, then save it.` },
           { status: 400 },
         );
       }
@@ -1337,7 +1341,7 @@ export async function POST(request: Request) {
         return NextResponse.json(
           {
             error:
-              `"${modelName}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window; `
+              `"${quotedModel}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window; `
               + `the assistant needs at least ${HERMES_MINIMUM_CONTEXT_TOKENS.toLocaleString("en-US")}. `
               + "Pick a larger model.",
           },
