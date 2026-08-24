@@ -20,8 +20,11 @@
 # `--runtime unmask` grant further down cannot undo a persistent /etc mask.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway
+# No `start` grant for clawbox-gateway, clawbox-setup or clawbox-tunnel. All three
+# are only ever brought up through the `restart` grants here — and restart starts a
+# stopped unit too — so `start` was a second spelling of a privilege nothing in the
+# tree exercised. clawbox-browser keeps its `start` because the Browser app really
+# does call it (src/app/setup-api/browser/route.ts). TASK-445 round 2.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway
 # Mask/unmask: factory reset masks the gateway before wiping ~/.openclaw
@@ -37,18 +40,14 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gatewa
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-ap.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-ap
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-ap.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-ap
+# clawbox-ap deliberately has NO grant. Settings -> Hotspot restarts the AP
+# through clawbox-root-update@restart_ap.service (covered by the template grant
+# below), scripts/stop-ap.sh runs unprivileged, and every other AP restart is
+# inside install.sh, which is already root.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-browser.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-browser
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-browser.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-browser
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-tunnel.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-tunnel.service
