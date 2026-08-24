@@ -17,6 +17,7 @@ import {
   sourceLabel,
   trustMeta,
 } from '@/lib/hermes-skills';
+import type { SkillDangerWarning } from '@/lib/hermes-skill-capabilities';
 import { useCopy } from './hermes-skills/copy';
 import {
   Alert,
@@ -27,6 +28,7 @@ import {
 } from './hermes-skills/primitives';
 import { CardSkeleton, SkillCard, SkillGrid } from './hermes-skills/SkillCard';
 import { ConfirmDialog } from './hermes-skills/ConfirmDialog';
+import { DangerConfirmDialog } from './hermes-skills/DangerConfirmDialog';
 import { SkillDetail } from './hermes-skills/SkillDetail';
 import { useSkillCatalog } from './hermes-skills/useSkillCatalog';
 import { useInstalledSkills } from './hermes-skills/useInstalledSkills';
@@ -64,6 +66,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const [progress, setProgress] = useState<Record<string, ProgressState>>({});
   const [confirmInstall, setConfirmInstall] = useState<HermesSkill | null>(null);
   const [confirmUninstall, setConfirmUninstall] = useState<UninstallTarget | null>(null);
+  // TASK-452: the install route answers 409 for a skill its scanner flagged.
+  // The dialog it opens is the ONLY way a `confirmDangerous: true` call is ever
+  // made — the flag is never sent on a first attempt.
+  const [danger, setDanger] = useState<{ skill: HermesSkill; warning: SkillDangerWarning } | null>(null);
   const [installedQuery, setInstalledQuery] = useState('');
   const [installedCategory, setInstalledCategory] = useState('all');
   const [live, setLive] = useState('');
@@ -147,8 +153,9 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   }, []);
 
   const doInstall = useCallback(
-    async (skill: HermesSkill) => {
+    async (skill: HermesSkill, confirmDangerous = false) => {
       setConfirmInstall(null);
+      setDanger(null);
       const key = skill.id;
       setProgress((p) => ({ ...p, [key]: { status: 'working' } }));
       setLive(COPY.liveInstalling(skill.name));
@@ -156,9 +163,29 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         const res = await fetch('/setup-api/hermes/skills/install', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: skill.id }),
+          // The confirmation flag is only ever present on the call the danger
+          // dialog makes; a plain install never carries it.
+          body: JSON.stringify(confirmDangerous ? { id: skill.id, confirmDangerous: true } : { id: skill.id }),
         });
         const data = await res.json().catch(() => ({}));
+        // 409 is not a failure to report — it is a question to ask. Clear the
+        // in-progress state so the card is not left spinning behind the dialog.
+        if (res.status === 409 && data?.code === 'dangerous_skill' && data.warning) {
+          setProgress((p) => {
+            const next = { ...p };
+            delete next[key];
+            return next;
+          });
+          setDanger({ skill, warning: data.warning as SkillDangerWarning });
+          setLive(COPY.dangerTitle(skill.name));
+          return;
+        }
+        if (res.status === 409 && data?.code === 'bundled_conflict') {
+          throw new Error(COPY.nameConflict(String(data.conflictsWith || skill.name)));
+        }
+        if (res.status === 502 && data?.code === 'incomplete_install') {
+          throw new Error(COPY.installIncomplete((data.missingFiles as string[]) || []));
+        }
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
         setProgressAutoClear(key, { status: 'success' }, 2000);
         // The detail answer changes completely once a skill is on disk (full
@@ -373,6 +400,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   // the user is tabbing (the detail fetch resolves under the open dialog).
   const closeInstallDialog = useCallback(() => setConfirmInstall(null), []);
   const closeUninstallDialog = useCallback(() => setConfirmUninstall(null), []);
+  const closeDangerDialog = useCallback(() => setDanger(null), []);
 
   // Grid ↔ detail navigation. Both the scroll offset and the focused card are
   // restored on Back: the grid unmounts, so without this a user who opened the
@@ -433,6 +461,14 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
     </ConfirmDialog>
   );
 
+  const dangerDialog = danger && (
+    <DangerConfirmDialog
+      warning={danger.warning}
+      onConfirm={() => doInstall(danger.skill, true)}
+      onCancel={closeDangerDialog}
+    />
+  );
+
   const uninstallDialog = confirmUninstall && (
     <ConfirmDialog
       title={COPY.uninstallTitle(confirmUninstall.name)}
@@ -477,6 +513,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       <div className="h-full" data-testid={testId || 'hermes-skills-store'}>
         {installDialog}
         {uninstallDialog}
+        {dangerDialog}
         {liveRegion}
         <SkillDetail
           skill={selected}
@@ -514,6 +551,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
     >
       {installDialog}
       {uninstallDialog}
+      {dangerDialog}
       {liveRegion}
 
       {/* Header */}

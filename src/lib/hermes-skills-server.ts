@@ -25,6 +25,8 @@ import { NextResponse } from 'next/server';
 import type { InstalledHermesSkill, ScanFinding, SkillOrigin } from '@/lib/hermes-skills';
 import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill-frontmatter';
 import { getActiveHarness } from '@/lib/harness';
+import { hermesConfigGet } from '@/lib/hermes-config-cache';
+import { isValidSkillName } from '@/lib/hermes-skills';
 
 /**
  * Defense-in-depth gate for the skills-store routes: the store is a Hermes
@@ -86,6 +88,23 @@ export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
   }
 }
 
+/**
+ * The lock entry stored under exactly `key`, or undefined.
+ *
+ * Every lookup into `installed` goes through here because the key is caller
+ * data: a plain `installed[key]` answers '__proto__', 'constructor' and
+ * 'toString' out of Object.prototype even for a lock that lists none of them,
+ * and an inherited member is not an installed skill.
+ */
+function ownEntry(
+  installed: Record<string, HubLockEntry>,
+  key: string,
+): HubLockEntry | undefined {
+  if (!Object.prototype.hasOwnProperty.call(installed, key)) return undefined;
+  const entry = new Map(Object.entries(installed)).get(key);
+  return entry && typeof entry === 'object' ? entry : undefined;
+}
+
 /** True when a skill matching `name` OR `identifier` is present in the lock. */
 export async function isInHubLock(name: string, identifier?: string): Promise<boolean> {
   const installed = await readHubLock();
@@ -123,6 +142,85 @@ export async function readBundledManifestNames(): Promise<Set<string>> {
     }
   } catch {
     /* no manifest → nothing is provably bundled */
+  }
+  return out;
+}
+
+/**
+ * Skill names Hermes has been told NOT to load, from `skills.disabled` (and the
+ * per-platform `skills.platform_disabled` map) in ~/.hermes/config.yaml. The
+ * agent honours these at load time — agent/skill_utils.py:437
+ * `get_disabled_skill_names()`, consumed by skill_commands.py:483 — so a skill
+ * on this list is installed but inert.
+ *
+ * Read through `hermes config get`, which is the same store the CLI writes and
+ * is memoised on config.yaml's mtime, rather than parsing the YAML here: an
+ * earlier attempt at ad-hoc YAML parsing in this repo was reverted for being
+ * order-dependent (see hermes-config-cache.ts).
+ *
+ * The CLI has no `--json`, so the printed form of a list value is not
+ * contractual. Parse tolerantly — JSON array, Python repr, or a separated list
+ * — and drop anything that is not a valid skill name, so a surprise format can
+ * only ever produce an EMPTY set (every skill reported enabled, which is the
+ * status quo) and never phantom names.
+ */
+export function parseDisabledSkillList(raw: string): Set<string> {
+  const out = new Set<string>();
+  const text = (raw || '').trim();
+  if (!text || /^config key not set/i.test(text) || text === 'null' || text === 'None') return out;
+  let tokens: string[];
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    tokens = Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+  } catch {
+    tokens = text.replace(/^[[(]|[\])]$/g, '').split(/[,\s]+/);
+  }
+  for (const token of tokens) {
+    const name = token.trim().replace(/^["']|["']$/g, '');
+    if (isValidSkillName(name)) out.add(name);
+  }
+  return out;
+}
+
+export async function readDisabledSkillNames(): Promise<Set<string>> {
+  // Only the GLOBAL list. `skills.platform_disabled` is a `{platform: [names]}`
+  // map, and a skill switched off for Telegram is still live for the chat this
+  // store belongs to — reporting it as disabled here would be a different
+  // untruth from the one being fixed. (It is also unparseable without knowing
+  // which keys are platform names and which are skills, and a guess there would
+  // mark a skill CALLED `telegram` disabled.)
+  return parseDisabledSkillList(await hermesConfigGet('skills.disabled'));
+}
+
+/**
+ * Every skill name that already exists on this device OUTSIDE the hub — the
+ * bundled set plus anything the agent wrote locally.
+ *
+ * This is the guard the installer does not have. Hermes' own collision check
+ * consults the hub lock (hermes_cli/skills_hub.py:673-681), which by
+ * construction contains only store installs: on a stock device the lock is
+ * `{"installed": {}}` while 82 bundled skills sit on disk, so the check is
+ * structurally blind to all of them. Meanwhile a non-`official` install lands
+ * FLAT at ~/.hermes/skills/<name>, which sorts before productivity/<name> in
+ * the agent's `sorted(matches)` dedup walk (agent/skill_utils.py:1226 +
+ * skill_commands.py:480-492) — so a one-file store stub silently displaces the
+ * 17-file bundled `pdf` skill and nothing anywhere says so.
+ */
+export async function readShadowableSkillNames(): Promise<Set<string>> {
+  const [bundled, disk, lock] = await Promise.all([
+    readBundledManifestNames(),
+    walkAllSkillDirs(),
+    readHubLock(),
+  ]);
+  const out = new Set(bundled);
+  for (const s of disk) {
+    // A hub-installed skill is replaceable through the store, so it is not a
+    // shadowing conflict — updating one is the normal path.
+    if (Object.prototype.hasOwnProperty.call(lock, s.name)) continue;
+    out.add(s.name);
+    // The directory name and the frontmatter name can differ; the agent dedups
+    // on the FRONTMATTER name, so that is the one a collision is measured on.
+    if (s.frontmatter.name) out.add(s.frontmatter.name);
   }
   return out;
 }
@@ -254,6 +352,17 @@ export async function enumerateOfficialSkills(): Promise<OfficialSkillOnDisk[]> 
     }
   }
   return out;
+}
+
+/**
+ * Absolute directory of an `official` skill inside the agent checkout, or null
+ * when the catalog's path escapes it. This is the device's OFFLINE copy of the
+ * authoritative file list for that skill — what a completeness check compares
+ * an `official` install against without needing the network.
+ */
+export function officialSkillDir(indexPath: string): string | null {
+  if (typeof indexPath !== 'string' || !indexPath || indexPath.length > 300) return null;
+  return resolveInside(AGENT_ROOT, indexPath);
 }
 
 export interface ScanReport {
@@ -415,6 +524,88 @@ function platformIncompatible(platforms: string[]): boolean {
   return platforms.length > 0 && !platforms.includes('linux');
 }
 
+/**
+ * Which category bucket a hub-installed skill belongs in.
+ *
+ * `install_path.split('/')[0]` was the whole rule, and it is right only when
+ * the skill landed inside a category directory. Hermes applies an automatic
+ * category to `official` installs ONLY (hermes_cli/skills_hub.py:668-672);
+ * every clawhub / github / skills.sh / browse-sh install lands FLAT, so the
+ * install path IS the skill slug and each such install minted its own
+ * one-item category. On a stock box with three genuine single-item categories,
+ * a handful of installs made the Installed filter mostly noise
+ * (`agent-monitor`, `algorithmic-art`, … each with a count of 1).
+ *
+ * So: use the install path only when it actually names a parent directory,
+ * fall back to the category the registry recorded in the lock's metadata, then
+ * to the disk walk's directory when that names anything but the skill itself,
+ * and otherwise bucket the skill under `hub` with everything else that came
+ * from the store.
+ */
+export function hubCategory(name: string, entry: HubLockEntry, diskCategory?: string): string {
+  const parts = (entry.install_path || '').split('/').filter(Boolean);
+  if (parts.length > 1) return parts[0];
+  const hermesMeta = entry.metadata?.hermes;
+  const declared =
+    hermesMeta && typeof hermesMeta === 'object'
+      ? (hermesMeta as Record<string, unknown>).category
+      : undefined;
+  if (typeof declared === 'string' && declared.trim() && declared.trim() !== name) {
+    return declared.trim().slice(0, 64);
+  }
+  // The disk walk's category is the TOP-LEVEL directory, which for a flat
+  // install is the skill's own slug — the value that minted the junk
+  // categories. It only counts when it names something other than the skill.
+  if (diskCategory && diskCategory !== name) return diskCategory;
+  return 'hub';
+}
+
+/**
+ * Rewrite one lock entry's `files[]` after the install route has completed a
+ * download the Hermes fetcher truncated.
+ *
+ * The lock is Hermes' file, and this is the one field ClawBox corrects in it:
+ * the finding was not only that two of four files were missing, but that
+ * lock.json recorded `files: ["SKILL.md", "templates/viewer.html"]` and every
+ * surface downstream — the store's file count, `skill_info` — repeated that as
+ * if it were the whole skill. Leaving the entry alone would fix the disk and
+ * keep the lie.
+ *
+ * Read-modify-write of the single entry, and a no-op if the entry is gone (an
+ * uninstall raced us) or the file cannot be parsed.
+ */
+export async function updateLockFiles(name: string, files: string[]): Promise<boolean> {
+  let doc: HubLock;
+  try {
+    doc = JSON.parse(await fs.readFile(HUB_LOCK_PATH, 'utf8')) as HubLock;
+  } catch {
+    return false;
+  }
+  const installed = doc?.installed;
+  if (!installed || typeof installed !== 'object') return false;
+  // `name` reaches here from the install request body, so the entry is looked
+  // up through an own-key map rather than by `installed[name]`. On a lock that
+  // has no such entry, `installed['__proto__']` is not undefined — it is
+  // Object.prototype, which is truthy, and the assignment below would then hang
+  // a `files` property off every object in the process. Object.entries() only
+  // ever yields own enumerable keys, so no inherited member can be selected.
+  const entry = ownEntry(installed, name);
+  if (!entry) return false;
+  entry.files = files.slice(0, 500).sort();
+  try {
+    await fs.writeFile(HUB_LOCK_PATH, JSON.stringify(doc, null, 1));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Absolute install directory of a hub lock entry, or null when unresolvable. */
+export function lockInstallDir(entry: HubLockEntry | undefined): string | null {
+  if (!entry?.install_path) return null;
+  return resolveInside(SKILLS_DIR, entry.install_path);
+}
+
 let installedCache: { key: string; value: InstalledHermesSkill[] } | null = null;
 const INSTALLED_TTL_MS = 10_000;
 let installedCacheAt = 0;
@@ -436,7 +627,14 @@ async function installedCacheKey(): Promise<string> {
       return '-';
     }
   };
-  return `${await stat(HUB_LOCK_PATH)}|${await stat(SKILLS_DIR)}`;
+  // config.yaml is in the key because `enabled` is read from `skills.disabled`
+  // there: without it, switching a skill off left the tab claiming it was live
+  // for the length of the TTL.
+  return [
+    await stat(HUB_LOCK_PATH),
+    await stat(SKILLS_DIR),
+    await stat(path.join(HERMES_HOME, 'config.yaml')),
+  ].join('|');
 }
 
 /**
@@ -454,10 +652,11 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
     return installedCache.value;
   }
 
-  const [disk, lock, bundled] = await Promise.all([
+  const [disk, lock, bundled, disabled] = await Promise.all([
     walkAllSkillDirs(),
     readHubLock(),
     readBundledManifestNames(),
+    readDisabledSkillNames(),
   ]);
 
   const byName = new Map<string, InstalledHermesSkill>();
@@ -480,18 +679,17 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
       platforms: fm.platforms.length ? fm.platforms : undefined,
       tags: fm.tags.length ? fm.tags.slice(0, 6) : undefined,
       incompatible: platformIncompatible(fm.platforms),
-      enabled: true,
+      enabled: !disabled.has(s.name) && !disabled.has(fm.name || s.name),
     });
   }
 
   for (const [name, entry] of Object.entries(lock)) {
     const existing = byName.get(name);
     const report = scanReportFromLock(entry);
-    const category = entry.install_path ? entry.install_path.split('/')[0] : existing?.category || 'hub';
     byName.set(name, {
       id: name,
       name: entry.name || existing?.name || name,
-      category: existing?.category || category,
+      category: hubCategory(name, entry, existing?.category),
       description: existing?.description,
       source: entry.source || 'hub',
       identifier: entry.identifier,
@@ -505,7 +703,7 @@ export async function enumerateInstalledSkills(): Promise<InstalledHermesSkill[]
       platforms: existing?.platforms,
       tags: existing?.tags,
       incompatible: existing?.incompatible,
-      enabled: true,
+      enabled: !disabled.has(name) && !disabled.has(entry.name || name),
     });
   }
 

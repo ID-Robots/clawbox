@@ -166,4 +166,51 @@ export const skillsEn: Record<string, string> = {
   "skills.relative.months.one": "{n} month ago",
   "skills.relative.months.other": "{n} months ago",
   "skills.relative.years": "{n} y ago",
+
+  // === TASK-452: flagged-skill warning + confirmation ===
+  // Krasi's ruling: warn and confirm, never block, at every trust tier.
+  "skills.dangerTitle": "Check {name} before installing",
+  "skills.dangerLead": "This device scanned the skill and flagged it as “{verdict}”. Installing it is your decision.",
+  "skills.dangerSeverity": "The scan raised {critical} critical and {high} high-severity findings.",
+  "skills.dangerCanDo": "What this skill can do on your device",
+  "skills.dangerNoCapabilities": "The scan did not say which part of the device the skill touches.",
+  "skills.dangerOther.one": "And {n} more finding the scan could not categorise.",
+  "skills.dangerOther.other": "And {n} more findings the scan could not categorise.",
+  "skills.dangerTrustNote": "The publisher’s reputation does not change this: every skill is scanned and every flagged skill is confirmed by you.",
+  "skills.dangerShowFindings": "Show the {n} scan findings",
+  "skills.dangerUnderstand": "I understand what this skill can do and want to install it anyway.",
+  "skills.dangerInstallAnyway": "Install anyway",
+  "skills.dangerCancel": "Don’t install",
+  "skills.capability.shell": "Run commands on your device",
+  "skills.capability.filesystem": "Read, change or delete your files",
+  "skills.capability.network": "Send and receive data over the internet",
+  "skills.capability.credentials": "Read your saved keys, tokens and passwords",
+  "skills.capability.browser": "Control the browser on your device",
+  "skills.capability.system": "Change system settings or install software",
+  "skills.capability.agentInstructions": "Change the instructions your assistant follows",
+  "skills.capability.other": "Something the scan flagged but could not name",
+
+  // === TASK-452: install refusals ===
+  "skills.installIncomplete": "The download was incomplete — missing: {files}",
+  "skills.installIncompleteHint": "Nothing was installed. Check your internet connection and try again.",
+  "skills.nameConflict": "“{name}” already came with this device.",
+  "skills.nameConflictHint": "Built-in skills are updated with the device, not from the store.",
+  "skills.installRepaired.one": "Completed the download: {n} file the installer had skipped.",
+  "skills.installRepaired.other": "Completed the download: {n} files the installer had skipped.",
+
+  // === TASK-452: enabled / disabled ===
+  "skills.skillDisabled": "Disabled",
+  "skills.skillDisabledHelp": "Installed, but switched off — your assistant will not use it.",
+  "skills.countDisabled": "{n} disabled",
+
+  // === TASK-452: API keys a skill needs ===
+  "skills.secretSaveLabel": "Enter {label}",
+  "skills.secretPlaceholder": "Paste the key here",
+  "skills.secretSave": "Save key",
+  "skills.secretSaving": "Saving…",
+  "skills.secretSaved": "Key saved",
+  "skills.secretStored": "Saved on this device",
+  "skills.secretClear": "Remove key",
+  "skills.secretFailed": "The key could not be saved.",
+  "skills.secretHelp": "The key is stored on this device only and is never shown again.",
 };
