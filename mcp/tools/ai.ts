@@ -49,6 +49,19 @@ const MODEL_LIMIT = 40;
 // count.
 const PROVIDER_LIMIT = 12;
 
+/**
+ * "unknown" for anything the route did not actually report.
+ *
+ * `??` was not enough: /setup-api/hermes/models answers with EMPTY STRINGS, not
+ * null, on a device where no provider or model has been chosen yet, so the
+ * fallback never fired and the tool returned `{"provider":"","model":""}`. A
+ * small model reading two blanks is far likelier to fill them in with a
+ * plausible-sounding model name than one reading "unknown".
+ */
+function reported(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value : "unknown";
+}
+
 const SET_RULES: ErrorRule[] = [
   {
     status: 409,
@@ -146,8 +159,8 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
               asked_about: provider,
               in_use: "not reported for a filtered query — call ai_list_models with no arguments to see what this device is using",
             }
-          : { in_use: { provider: body.provider ?? "unknown", model: body.current ?? "unknown" } }),
-        thinking: body.reasoning ?? "unknown",
+          : { in_use: { provider: reported(body.provider), model: reported(body.current) } }),
+        thinking: reported(body.reasoning),
         models,
         models_truncated: (body.models ?? []).length > MODEL_LIMIT,
         catalogue_stale: body.stale === true,
