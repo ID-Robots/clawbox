@@ -171,6 +171,14 @@ const PRE_AUTH_SENSITIVE_PREFIXES = [
   "/setup-api/hermes/skills",
   "/setup-api/harness/select",
   "/setup-api/harness/status",  // probes both harnesses; only the desktop picker calls it
+  // The aggregate provider strip. Neither leaf has an onboarding role — the
+  // strip is rendered only by the desktop Settings window, which is
+  // post-setup — and `/providers/default` REWRITES which provider the box
+  // answers with, so it belongs behind a session for the same reason
+  // /harness/select does. The GET leaf returns status strings only, but it
+  // enumerates every provider at once, which is a shape worth not handing to
+  // anyone in radio range of the open setup AP.
+  "/setup-api/providers",
 ];
 // Exact-match only: a bare `/setup-api/gateway` subtree deny would also catch
 // `/setup-api/gateway/health`, which the wizard's readiness check legitimately
