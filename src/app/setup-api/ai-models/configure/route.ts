@@ -1190,6 +1190,17 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    // A local provider borrows the `apiKey` slot to carry its MODEL id — there
+    // is no key for a service on this box. On the OAuth-handoff path, though,
+    // that same slot is filled from a token file on disk a few lines above,
+    // and the recorded provider only overwrites `body.provider` when it is
+    // present. A handoff whose provider field is missing, against a body that
+    // says `ollama`, would therefore make an access token the model id — and
+    // send it to the local model server in a request body. A local provider
+    // never has a handoff, so the slot is simply not read when one was
+    // consumed; `model` still names the model. (Found by CodeQL
+    // js/file-access-to-http, which was right about the flow.)
+    const localModelSlot = pendingHandoffTokensPath ? "" : normalizedApiKey;
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
@@ -1308,7 +1319,7 @@ export async function POST(request: Request) {
       // an API caller who wrote { model: "qwen2.5:3b" } used to have the field
       // silently ignored and llama3.2:3b saved in its place — a "success" that
       // configured a model this box does not have.
-      const modelName = normalizedApiKey || normalizedModel || "llama3.2:3b";
+      const modelName = localModelSlot || normalizedModel || "llama3.2:3b";
 
       // Ask Ollama about the id BEFORE anything is written. Both refusals below
       // used to be discovered by the customer one dead chat turn at a time: an
@@ -1351,7 +1362,7 @@ export async function POST(request: Request) {
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
       // Same two slots as the Ollama branch above, for the same reason.
-      const modelName = normalizedApiKey || normalizedModel || getDefaultLlamaCppModel();
+      const modelName = localModelSlot || normalizedModel || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];

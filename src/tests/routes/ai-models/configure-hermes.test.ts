@@ -320,6 +320,32 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expectNoOpenclawSpawn();
   });
 
+  it("never reads a handoff-filled apiKey slot as a local model id", async () => {
+    // The `apiKey` slot carries the MODEL id for a local provider, and on the
+    // OAuth-handoff path it is filled from a token file on disk. A handoff
+    // that records no provider leaves `body.provider` as the caller sent it,
+    // so a body saying `ollama` would have made the access token the model id
+    // — and put it in an outbound request body. `model` still names the model.
+    const fsp = (await import("fs/promises")).default;
+    vi.mocked(fsp.readFile).mockResolvedValue(
+      JSON.stringify({ access_token: "ya29.a-real-looking-token", createdAt: Date.now() }) as never,
+    );
+
+    const res = await POST(jsonRequest({
+      provider: "ollama",
+      scope: "local",
+      oauthHandoff: true,
+      model: "qwen3:8b",
+    }));
+
+    expect(res.status).toBe(200);
+    expect(probeMock).toHaveBeenCalledWith("qwen3:8b");
+    expect(probeMock).not.toHaveBeenCalledWith(expect.stringContaining("ya29."));
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "qwen3:8b" }),
+    );
+  });
+
   it("still saves when Ollama cannot be asked about the model", async () => {
     // Fail-open by design: on the primary-scope path the runtime starts Ollama
     // on demand, so "the probe could not connect" is not a verdict about the
