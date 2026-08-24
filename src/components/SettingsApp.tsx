@@ -16,6 +16,7 @@ import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
 import LocalModelsPanel from "./LocalModelsPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
+import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
@@ -2883,6 +2884,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="max-w-xl space-y-5">
 
             <HarnessPicker />
+
+            {/* Desktop environment + Performance mode. Above the read-only
+                stats cards on purpose: these are the two controls on this tab
+                that change what the box does, and the cards below are what
+                they change. TASK-455. */}
+            <SystemProfilePanel />
 
             {stats ? (
               <>

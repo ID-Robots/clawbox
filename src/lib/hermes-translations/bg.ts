@@ -336,4 +336,20 @@ export const bg: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Моделът не можа да бъде променен.",
   "localModels.error.unreachable": "Кутията не отговори, за да бъде променен моделът.",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "Работен плот и захранване",
+  "systemProfile.desktopLabel": "Работен плот",
+  "systemProfile.desktopHelp": "Пуска пълния работен плот GNOME на HDMI изхода на кутията и в Отдалечен работен плот. Изключете го, за да работи кутията без екран и да си върнете около 700 MB памет — нищо не се деинсталира, така че можете да го включите отново по всяко време.",
+  "systemProfile.performanceLabel": "Режим на производителност",
+  "systemProfile.performanceHelp": "Заковава честотите на процесора и графиката на максимум, вместо да ги оставя да се менят. По-бърз първи отговор, но платката тогава стои на около 7,2 W в покой, а при продължителна локална инференция измерихме 74,8 °C — точно над границата от 74 °C за пасивно охлаждане. Оставете го изключен, освен ако не пускате дълги задачи и нямате обдухване.",
+  "systemProfile.rebootRequired": "Рестартирайте кутията, за да влезе в сила промяната.",
+  "systemProfile.unsupported": "Не е налично на това устройство.",
+  "systemProfile.powerState": "Профил на захранване: {profile} · честоти: {clocks}",
+  "systemProfile.clocksPinned": "заковани",
+  "systemProfile.clocksDynamic": "динамични",
+  "systemProfile.memoryGuards": "Действащи лимити на паметта: локален AI {ollama}, браузър {browser}, работен плот {desktop}. Локалният AI обслужва {parallel} заявки едновременно.",
+  "systemProfile.loadFailed": "Настройките за работен плот и захранване не можаха да бъдат прочетени.",
+  "systemProfile.desktopFailed": "Настройката за работен плот не можа да бъде променена.",
+  "systemProfile.powerFailed": "Профилът на захранване не можа да бъде променен.",
 };

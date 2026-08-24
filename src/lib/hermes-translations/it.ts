@@ -360,4 +360,20 @@ export const it: Record<string, string> = {
   // === Errors ===
   "localModels.error.changeFailed": "Non è stato possibile modificare quel modello.",
   "localModels.error.unreachable": "Non è stato possibile raggiungere il box per modificare quel modello.",
+
+  // === Desktop & power (TASK-455) ===
+  "systemProfile.title": "Desktop e alimentazione",
+  "systemProfile.desktopLabel": "Ambiente desktop",
+  "systemProfile.desktopHelp": "Avvia il desktop GNOME completo sull'uscita HDMI della box e nel Desktop remoto. Disattivalo per lavorare senza schermo e recuperare circa 700 MB di memoria: non viene disinstallato nulla, puoi riattivarlo quando vuoi.",
+  "systemProfile.performanceLabel": "Modalità prestazioni",
+  "systemProfile.performanceHelp": "Blocca CPU e GPU alla frequenza massima invece di lasciarle variare. Il primo token arriva prima, ma la scheda resta a circa 7,2 W da ferma e l'inferenza locale prolungata è stata misurata a 74,8 °C, appena sopra il limite di 74 °C del raffreddamento passivo. Lasciala disattivata a meno che tu non esegua lavori lunghi con una buona ventilazione.",
+  "systemProfile.rebootRequired": "Riavvia la box per applicare la modifica.",
+  "systemProfile.unsupported": "Non disponibile su questo dispositivo.",
+  "systemProfile.powerState": "Profilo di alimentazione: {profile} · frequenze: {clocks}",
+  "systemProfile.clocksPinned": "bloccate",
+  "systemProfile.clocksDynamic": "dinamiche",
+  "systemProfile.memoryGuards": "Limiti di memoria attivi: AI locale {ollama}, browser {browser}, desktop {desktop}. L'AI locale serve {parallel} richieste per volta.",
+  "systemProfile.loadFailed": "Impossibile leggere le impostazioni di desktop e alimentazione.",
+  "systemProfile.desktopFailed": "Impossibile modificare l'impostazione del desktop.",
+  "systemProfile.powerFailed": "Impossibile modificare il profilo di alimentazione.",
 };
