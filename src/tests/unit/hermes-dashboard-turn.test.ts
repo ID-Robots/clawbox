@@ -314,14 +314,21 @@ describe("running a dashboard turn", () => {
     await expect(running).rejects.toThrow(/closed/);
   });
 
-  it("drops the socket when the caller aborts", async () => {
+  it("reports an abort AS an abort, not as a dropped socket", async () => {
     const controller = new AbortController();
     const { turn, socket } = await connect({ signal: controller.signal });
     const running = turn!.run(() => {});
     await Promise.resolve();
     controller.abort();
     socket.emit("close", 1000);
-    await expect(running).rejects.toThrow();
+    // `rejects.toThrow()` alone passes for any error, which is exactly what
+    // hid this: an abort and a dropped socket were indistinguishable to the
+    // caller, and the chat route branches on the difference. A Stop that
+    // arrives as `dashboard socket closed (1000)` is written into the
+    // customer's transcript as a failed turn.
+    const err = await running.catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DOMException);
+    expect((err as DOMException).name).toBe("AbortError");
     expect(socket.closed).toBe(true);
   });
 

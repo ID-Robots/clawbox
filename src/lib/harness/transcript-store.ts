@@ -69,6 +69,16 @@ const FILE_MODE = 0o600;
  * customer's disk to protect is a slow leak with no upper bound at all.
  */
 const MAX_RECORDS = 500;
+
+/**
+ * How many records each transcript this process has touched currently holds.
+ *
+ * Purely an optimisation: it saves re-reading the file on every append just to
+ * find out whether the record cap has been reached. Anything that removes a
+ * transcript drops its entry, and an entry this process never had is derived
+ * from disk on first use, so a stale value cannot outlive the file.
+ */
+const recordCounts = new Map<string, number>();
 const MAX_BYTES = 2 * 1024 * 1024;
 
 /** A transcript nobody has touched for this long is swept on the next boot. */
@@ -232,6 +242,8 @@ export async function appendTranscript(
     // `appendFile`'s mode applies only when it CREATES the file, so a file that
     // predates this (or a umask that widened it) keeps whatever it had.
     await fsp.chmod(file, FILE_MODE).catch(() => {});
+    const known = recordCounts.get(file);
+    if (known !== undefined) recordCounts.set(file, known + 1);
     await trimIfOversized(file);
     return true;
   } catch (err) {
@@ -283,7 +295,20 @@ async function healTruncatedTail(file: string): Promise<void> {
  */
 async function trimIfOversized(file: string): Promise<void> {
   const stat = await fsp.stat(file).catch(() => null);
-  if (!stat || stat.size <= MAX_BYTES) return;
+  if (!stat) return;
+  // The RECORD cap needs enforcing too, and the byte cap alone never reached
+  // it: 500 short turns is far under 2 MB, so a long conversation of small
+  // messages was never compacted — and because every append refreshes the
+  // file's mtime, the retention sweep never reached that older content either.
+  // Counting lines per append is the read the size trigger exists to avoid, so
+  // the count is carried in memory and only re-derived when this process has
+  // not seen the file before.
+  let records = recordCounts.get(file);
+  if (records === undefined) {
+    records = await countRecords(file);
+    recordCounts.set(file, records);
+  }
+  if (stat.size <= MAX_BYTES && records <= MAX_RECORDS) return;
   const raw = await fsp.readFile(file, "utf8").catch(() => null);
   if (raw === null) return;
   const lines = raw.split("\n").filter((line) => line.trim().length > 0);
@@ -303,6 +328,15 @@ async function trimIfOversized(file: string): Promise<void> {
   await fsp.writeFile(tmp, kept.length ? `${kept.join("\n")}\n` : "", { mode: FILE_MODE });
   await fsp.chmod(tmp, FILE_MODE).catch(() => {});
   await fsp.rename(tmp, file);
+  recordCounts.set(file, kept.length);
+}
+
+/** Records currently in a transcript, counted off the disk. */
+async function countRecords(file: string): Promise<number> {
+  const raw = await fsp.readFile(file, "utf8").catch(() => null);
+  if (raw === null) return 0;
+  return raw.split("
+").filter((line) => line.trim().length > 0).length;
 }
 
 /**
@@ -330,6 +364,10 @@ export async function readTranscript(
     if (record) records.push(record);
   }
   const capped = Math.max(0, Math.min(limit, MAX_RECORDS));
+  // `slice(-0)` is `slice(0)` — the whole array. A caller asking for zero
+  // records (or a negative count from arithmetic upstream) would have been
+  // handed the entire conversation instead of nothing.
+  if (capped === 0) return [];
   return records.slice(-capped);
 }
 
@@ -405,6 +443,8 @@ export async function clearTranscript(key: string = DESKTOP_TRANSCRIPT_KEY): Pro
   // The trim's temp file is the one thing that could survive a crash holding a
   // copy of what was just deleted.
   await fsp.rm(`${transcriptPath(key)}.tmp`, { force: true });
+  // The file is gone, so the remembered length describes nothing.
+  recordCounts.delete(transcriptPath(key));
 }
 
 /**
@@ -429,6 +469,7 @@ export async function sweepTranscripts(now = Date.now()): Promise<number> {
       const stat = await fsp.stat(file);
       if (now - stat.mtimeMs <= MAX_AGE_MS) continue;
       await fsp.rm(file, { force: true });
+      recordCounts.delete(file);
       removed += 1;
     } catch {
       // A file that vanished under us, or one we cannot stat. Either way there

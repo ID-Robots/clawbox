@@ -368,7 +368,15 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       async run(onDelta: (chunk: string) => void): Promise<DashboardTurnFinal> {
         if (started) throw new Error("this turn has already run");
         started = true;
-        const onAbort = () => close();
+        // Name the abort BEFORE closing. Closing alone made `run` reject with
+        // `dashboard socket closed (<code>)`, which the route's `isAbort` check
+        // cannot match — so a user pressing Stop was recorded in the customer's
+        // transcript as a failed turn. `isAbort` tests for a real DOMException,
+        // which is why this is not a plain Error with the name set.
+        const onAbort = () => {
+          fail(new DOMException("aborted", "AbortError") as unknown as Error);
+          close();
+        };
         req.signal?.addEventListener("abort", onAbort, { once: true });
         try {
           socket.send(

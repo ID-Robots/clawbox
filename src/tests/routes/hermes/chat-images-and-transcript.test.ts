@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 import { EventEmitter } from "events";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+/** Undo for the environment each case below rewrites. */
+let restoreEnv: () => void = () => {};
 
 /**
  * The Hermes chat turn, on the two things this branch added to it: an image can
@@ -87,6 +91,7 @@ describe("POST /setup-api/hermes/chat", () => {
     stderrBanner = "session_id: 20260810_221825_609d1e";
     harness = "hermes";
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-hermeschat-"));
+    restoreEnv = saveEnv("CLAWBOX_ROOT", "HOME", "OPENCLAW_HOME");
     process.env.CLAWBOX_ROOT = root;
     process.env.HOME = root;
     mediaRoot = path.join(root, "data", "chat-media");
@@ -97,7 +102,7 @@ describe("POST /setup-api/hermes/chat", () => {
   });
 
   afterEach(() => {
-    delete process.env.CLAWBOX_ROOT;
+    restoreEnv();
     fs.rmSync(root, { recursive: true, force: true });
     vi.clearAllMocks();
   });

@@ -141,14 +141,23 @@ function staged(): string[] {
  * continuously for `settleMs`, and any file appearing inside that window resets
  * it. Clean runs still finish in about the settle time rather than the timeout.
  */
-async function expectStagingDrains(timeoutMs = 5000, settleMs = 300): Promise<void> {
+async function expectStagingDrains(
+  // WHICH directory to watch, because there is more than one: a Hermes box
+  // stages under `data/chat-media`, not under the OpenClaw media tree. Watching
+  // the wrong one is not a weaker assertion, it is a vacuous one — that
+  // directory is empty from the first read in a Hermes case, so the window
+  // settles immediately and proves nothing about the file that was written.
+  list: () => string[] = staged,
+  timeoutMs = 5000,
+  settleMs = 300,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  let listed = staged();
+  let listed = list();
   let emptySince = listed.length ? null : Date.now();
   while (Date.now() < deadline) {
     if (emptySince !== null && Date.now() - emptySince >= settleMs) break;
     await new Promise((resolve) => setTimeout(resolve, 20));
-    listed = staged();
+    listed = list();
     // A file appearing after an empty read is exactly the leak under test:
     // restart the window rather than accept the earlier reading.
     emptySince = listed.length ? null : (emptySince ?? Date.now());
@@ -580,8 +589,9 @@ describe("/setup-api/chat/attachments", () => {
     const res = await POST(request(multipart("invoice.png", TEXT)));
     expect(res.status).toBe(415);
     // The bytes had to be written before they could be read, so the point here
-    // is that nothing is LEFT behind.
-    await expectStagingDrains();
-    expect(hermesStaged()).toEqual([]);
+    // is that nothing is LEFT behind — and the unlink is asynchronous, so this
+    // has to watch the Hermes staging directory settle rather than read it once
+    // and hope the unlink had already run.
+    await expectStagingDrains(hermesStaged);
   });
 });

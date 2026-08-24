@@ -44,13 +44,16 @@ const CHAT_ROUTE = "/setup-api/hermes/chat";
 const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
 
 /**
- * One row off the wire, or not a message at all.
+ * How long a transcript call may take before it is abandoned.
  *
- * The store is a file on a disk a shell can reach and the route re-validates
- * on the way out, but this is the last gate before a value becomes a rendered
- * bubble, and a `role` the UI has no branch for renders as nothing at all —
- * a silently missing message rather than a visible fault.
+ * The request never leaves the box, but the box is an embedded Jetson whose own
+ * HTTP server can stall under load — and neither of these calls carried a
+ * deadline, so a stall left the awaiting caller pending with nothing to report
+ * and nothing to retry. Both `catch` arms already treat a failure as non-fatal,
+ * so a timeout lands on a path that exists.
  */
+const TRANSCRIPT_TIMEOUT_MS = 10_000;
+
 /**
  * Tool steps off the wire, re-validated rather than trusted.
  *
@@ -73,6 +76,14 @@ function toToolSummaries(value: unknown): ChatToolSummary[] {
   return calls;
 }
 
+/**
+ * One row off the wire, or not a message at all.
+ *
+ * The store is a file on a disk a shell can reach and the route re-validates
+ * on the way out, but this is the last gate before a value becomes a rendered
+ * bubble, and a `role` the UI has no branch for renders as nothing at all —
+ * a silently missing message rather than a visible fault.
+ */
 function isHistoryMessage(row: unknown): row is HistoryMessage {
   if (!row || typeof row !== "object") return false;
   const value = row as Record<string, unknown>;
@@ -383,7 +394,10 @@ export class HermesAdapter implements HarnessAdapter {
     // would report a failed reset that in fact succeeded, and the (+) button is
     // double-clickable precisely so this stays idempotent.
     try {
-      const res = await this.fetchImpl(TRANSCRIPT_ROUTE, { method: "DELETE" });
+      const res = await this.fetchImpl(TRANSCRIPT_ROUTE, {
+        method: "DELETE",
+        signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
+      });
       if (!res.ok) {
         console.warn("[hermes-adapter] could not clear the stored transcript:", res.status);
       }
@@ -408,6 +422,7 @@ export class HermesAdapter implements HarnessAdapter {
         // served from a cache: a reset writes an empty store and a stale 200
         // would repaint the conversation the user just deleted.
         cache: "no-store",
+        signal: AbortSignal.timeout(TRANSCRIPT_TIMEOUT_MS),
       });
       if (!res.ok) {
         throw new HarnessError("upstream", "Could not read the stored transcript.");

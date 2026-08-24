@@ -106,9 +106,14 @@ export async function dashboardFetch(apiPath: string, init?: RequestInit): Promi
     fetch(`${DASH_ORIGIN}${apiPath}`, {
       ...init,
       redirect: REDIRECT_POLICY,
-      // Callers that don't bring their own deadline still get one — no request
-      // from this module may be able to hang indefinitely.
-      signal: init?.signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      // No request from this module may be able to hang indefinitely — and a
+      // caller that brings its own signal used to REPLACE that guarantee
+      // rather than add to it, so the one call that forwards a signal
+      // (`dashboardWsTicket`) was the one call with no deadline at all. Both
+      // now apply: whichever fires first ends the request.
+      signal: init?.signal
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
+        : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       headers: { ...(init?.headers || {}), cookie: cachedCookie || "" },
     });
   let res = await attempt();

@@ -210,6 +210,20 @@ describe("a Hermes turn that streams", () => {
     expect(cannotStream.requests[0].headers.Accept).toBeUndefined();
   });
 
+  it("reads a STREAMED answer even when the caller passed no listener", async () => {
+    // The mirror of the case above, and the one nothing covered: the adapter
+    // only ASKS for a stream when someone is listening, but the route is free
+    // to answer with one anyway — a proxy that upgrades the response, or a
+    // version skew between the two halves of an upgrade. With no `onEvent` to
+    // call, the body still has to be drained into a reply; the alternative is a
+    // turn that ran, cost the box a full agent invocation, and rendered blank.
+    const { adapter } = makeAdapter(
+      sseResponse([frame("done", { text: "streamed anyway", harness: "hermes" })]),
+    );
+    const result = await adapter.sendTurn(turn);
+    expect(result.text).toBe("streamed anyway");
+  });
+
   it("reads a JSON answer to a streaming request, because the route may fall back", async () => {
     // The route tries the dashboard and spawns the CLI when it cannot reach it,
     // so a turn that ASKED for a stream can still be answered with one body.

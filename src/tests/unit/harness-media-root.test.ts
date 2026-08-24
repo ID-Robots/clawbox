@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { saveEnv } from "@/tests/helpers/env";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+/** Undo for the environment each case below rewrites. */
+let restoreEnv: () => void = () => {};
 
 /**
  * Where chat's files live, per edition — and the guard that stands between a
@@ -27,14 +31,14 @@ async function load() {
 describe("chat media root", () => {
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mediaroot-"));
+    restoreEnv = saveEnv("CLAWBOX_ROOT", "HOME", "OPENCLAW_HOME");
     process.env.CLAWBOX_ROOT = root;
     process.env.HOME = root;
     process.env.OPENCLAW_HOME = path.join(root, ".openclaw");
   });
 
   afterEach(() => {
-    delete process.env.CLAWBOX_ROOT;
-    delete process.env.OPENCLAW_HOME;
+    restoreEnv();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -68,6 +72,7 @@ describe("resolveInMediaRoot", () => {
 
   beforeEach(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mediaguard-"));
+    restoreEnv = saveEnv("CLAWBOX_ROOT", "HOME", "OPENCLAW_HOME");
     process.env.CLAWBOX_ROOT = root;
     process.env.HOME = root;
     process.env.OPENCLAW_HOME = path.join(root, ".openclaw");
@@ -78,8 +83,7 @@ describe("resolveInMediaRoot", () => {
   });
 
   afterEach(() => {
-    delete process.env.CLAWBOX_ROOT;
-    delete process.env.OPENCLAW_HOME;
+    restoreEnv();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
