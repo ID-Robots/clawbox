@@ -673,6 +673,17 @@ describe("middleware", () => {
       "/setup-api/hermes/models",
       "/setup-api/hermes/clawai",
       "/setup-api/hermes/oauth",
+      // The four leaves of the provider sign-in flow, named one by one rather
+      // than inferred from the parent path above. They mint, advance and
+      // destroy a real provider-OAuth session against the owner's dashboard,
+      // and an allow-list of PREFIXES can gate the parent while opening every
+      // leaf — the mascot-lines pair in setup-api-gate.ts is exactly that
+      // shape. Wider coverage of this window, including the allow-list itself,
+      // is in src/tests/routes/hermes/oauth-wizard-handoff.test.ts. TASK-527.
+      "/setup-api/hermes/oauth/start",
+      "/setup-api/hermes/oauth/submit",
+      "/setup-api/hermes/oauth/poll",
+      "/setup-api/hermes/oauth/cancel",
       "/setup-api/hermes/provider-key",
       "/setup-api/ai-models/configure",
       "/setup-api/telegram/configure",

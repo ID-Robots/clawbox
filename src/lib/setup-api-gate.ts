@@ -30,6 +30,17 @@
  * that `system/credentials` mints on the initial password set, so those routes
  * are deliberately NOT here.
  *
+ * The whole `/setup-api/hermes/oauth` subtree (start / submit / poll / cancel)
+ * is part of that "after": AIModelsStep drives it on step 4, holding the cookie
+ * step 3 handed it. Under the old deny-list none of those four was ever named,
+ * which is how the provider sign-in flow — `start` opens a real OAuth session
+ * against the owner's dashboard, `submit` feeds it an authorization code —
+ * ended up answering an anonymous caller in radio range of the open
+ * `ClawBox-Setup` AP. The inversion above is what closed that, so their absence
+ * from this list is load-bearing rather than an oversight: adding any prefix
+ * that covers them reopens all four at once. Pinned in
+ * src/tests/routes/hermes/oauth-wizard-handoff.test.ts. TASK-527.
+ *
  * Prefix match on a path-segment boundary (`/a` matches `/a` and `/a/b`, never
  * `/ab`).
  */
