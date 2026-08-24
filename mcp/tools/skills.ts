@@ -45,6 +45,8 @@ interface InstalledSkill {
   category?: string;
   source?: string;
   origin?: string;
+  /** Store id the skill was installed from — only ever set for a store skill. */
+  identifier?: string;
   enabled?: boolean;
   incompatible?: boolean;
   description?: string;
@@ -115,6 +117,37 @@ async function installedSkills(): Promise<InstalledSkill[] | null> {
     timeoutMs: 15_000,
   }).catch(() => null);
   return body?.skills ?? null;
+}
+
+/**
+ * Is this row a skill the store put there, as opposed to one that shipped with
+ * the device? `origin` is "builtin" | "hub" | "local"; a row with no origin at
+ * all is treated as built in, exactly as the uninstall pre-condition does.
+ */
+function isStoreSkill(s: InstalledSkill): boolean {
+  return !!s.origin && s.origin !== "builtin";
+}
+
+/**
+ * Did the uninstall leave the STORE skill behind?
+ *
+ * A store skill may SHADOW a builtin of the same name — the README's own worked
+ * example (`skill_install official/pdf`, `skill_uninstall pdf`) is exactly that
+ * collision. Removing the store copy un-shadows the builtin, so the name is
+ * still in the installed list afterwards, now with origin "builtin". Matching
+ * the post-condition on the bare name read that as "the device refused" and
+ * answered CONFLICT after a removal that had in fact succeeded.
+ *
+ * Only a surviving row that is itself a store skill counts as a failure, and
+ * when we know which store id was removed, only that same id does.
+ */
+function stillInstalled(after: InstalledSkill[], name: string, removed?: InstalledSkill): boolean {
+  return after.some(
+    (sk) =>
+      sk.name === name
+      && isStoreSkill(sk)
+      && (!removed?.identifier || !sk.identifier || sk.identifier === removed.identifier),
+  );
 }
 
 function shortDescription(s: BrowseSkill): string | undefined {
@@ -438,8 +471,12 @@ export function registerSkillTools(reg: Registrar): void {
       // so the only honest answers to "is this removable" come from the
       // installed list, before and after.
       const before = await installedSkills();
+      let removing: InstalledSkill | undefined;
       if (before) {
-        const entry = before.find((sk) => sk.name === name);
+        // The store copy, not the builtin it may be shadowing: when both are
+        // listed under one name, the store one is the only removable row and
+        // its identifier is what the post-condition needs.
+        const entry = before.find((sk) => sk.name === name && isStoreSkill(sk)) ?? before.find((sk) => sk.name === name);
         if (!entry) {
           throw new ToolError(
             "NOT_FOUND",
@@ -447,28 +484,38 @@ export function registerSkillTools(reg: Registrar): void {
             "Call skill_list and pass the name field of a skill it actually lists. Do not retry this name.",
           );
         }
-        if (entry.origin === "builtin" || !entry.origin) {
+        if (!isStoreSkill(entry)) {
           throw new ToolError(
             "CONFLICT",
             `"${name}" came with the device, so it cannot be removed.`,
             "Only skills that skill_list marks \"from the store\" can be removed. Tell the user this one is built in.",
           );
         }
+        removing = entry;
       }
       // The route's field is `id`, but it means the lock NAME — the MCP
       // parameter is called `name` so the model cannot confuse it with the
       // store id that skill_install takes.
       await apiPost("/setup-api/hermes/skills/uninstall", { id: name }, { timeoutMs: 60_000, rules: UNINSTALL_RULES });
-      // POST-CONDITION. Still there means the CLI refused it quietly.
+      // POST-CONDITION. A STORE skill still there means the CLI refused it
+      // quietly; a builtin of the same name resurfacing means it worked.
       const after = await installedSkills();
-      if (after?.some((sk) => sk.name === name)) {
+      if (after && stillInstalled(after, name, removing)) {
         throw new ToolError(
           "CONFLICT",
           `The device did not remove "${name}" — it is still installed.`,
           "Do not retry. Tell the user the device refused to remove that skill.",
         );
       }
-      return text(`Removed the skill "${name}".`);
+      // The store copy was shadowing a builtin of the same name, and removing
+      // it brought the builtin back. Saying so stops the agent reading the
+      // still-present name off a later skill_list as a failed uninstall.
+      const unshadowed = after?.some((sk) => sk.name === name && !isStoreSkill(sk));
+      return text(
+        unshadowed
+          ? `Removed the store skill "${name}". The device's own built-in "${name}" was underneath it and is available again.`
+          : `Removed the skill "${name}".`,
+      );
     },
   );
 }

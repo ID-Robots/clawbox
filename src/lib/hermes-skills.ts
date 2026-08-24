@@ -376,6 +376,44 @@ export function checkInstallIdentifier(id: string): IdCheck {
   return { ok: true, isUrl: false };
 }
 
+/**
+ * ClawHub's slug shape, as its own resolver defines it
+ * (`tools/skills_hub.py` — `ClawHubSource._SLUG_RE`).
+ */
+const CLAWHUB_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The identifier `hermes skills install` must be given for a catalog id.
+ *
+ * ClawHub is the ONLY registry in the index whose identifiers carry no source
+ * prefix: all 69 150 of its rows are a bare slug with empty `repo`/`path`,
+ * while official/github/skills.sh/lobehub/browse-sh rows are all prefixed.
+ * `hermes skills install` sends a slash-less argument through
+ * `_resolve_short_name()`, which only accepts an exact match on the catalog
+ * NAME — and a ClawHub row's name is its display name ("QR Code Decode") while
+ * its identifier is the slug ("qrcode-decode"). So it never matched, the CLI
+ * printed a "did you mean…" table, exited 0 having installed nothing, and this
+ * route answered 502 "Skill could not be resolved" for an id that search had
+ * just handed out verbatim — a guaranteed retry loop for the agent and a dead
+ * Install button for three quarters of the store.
+ *
+ * `ClawHubSource._parse_identifier` accepts `clawhub/<slug>`, and the slash
+ * makes the CLI skip short-name resolution and go straight to the adapters.
+ * So a bare slug is sent as `clawhub/<slug>`.
+ *
+ * `source` is the catalog record's source when the index could be read. It is
+ * undefined on a device whose index has not been built yet (the browse route's
+ * degraded CLI path) — a bare slug is still mapped there, because ClawHub is
+ * the only place one can have come from and Hermes' own short-name fallback is
+ * a cross-registry fuzzy match its authors call provenance-unsafe.
+ */
+export function cliInstallIdentifier(id: string, source?: string): string {
+  const v = typeof id === 'string' ? id.trim() : '';
+  if (!v || v.includes('/')) return v;
+  if (source !== undefined && source !== 'clawhub') return v;
+  return CLAWHUB_SLUG_RE.test(v) ? `clawhub/${v}` : v;
+}
+
 // Skill NAME for `uninstall` — a single lock.json key, no slashes.
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
