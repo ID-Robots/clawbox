@@ -123,12 +123,14 @@ export function notifyProvidersChanged(): void {
  * second write's result would never be read. On this side each listener
  * coalesces only what it would itself have re-fetched.
  */
+export const PROVIDER_SIGNAL_DEBOUNCE_MS = 150;
+
 export function onProvidersChanged(
   listener: () => void,
   options: { debounceMs?: number } = {},
 ): () => void {
   if (typeof window === "undefined") return () => {};
-  const wait = options.debounceMs ?? 150;
+  const wait = options.debounceMs ?? PROVIDER_SIGNAL_DEBOUNCE_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const onSignal = () => {
     if (timer) clearTimeout(timer);
