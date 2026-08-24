@@ -432,14 +432,17 @@ export default function HermesProviderConfig({
   // ── The hero ───────────────────────────────────────────────────────────────
 
   /**
-   * ClawBox AI is the one provider whose model is not the device pairing: it is
-   * derived from the tier and deliberately kept out of the model catalogue (a
-   * vendor-prefixed slug gets a 400 from the proxy), so its own read is the
-   * authority for it.
+   * The DEVICE PAIRING wins, for every provider including ClawBox AI.
+   *
+   * Caught on the live box: ClawBox AI's own read derives its model from the
+   * stored tier, so a Pro account reported `deepseek-v4-pro` while the pairing
+   * a bare "make default" had just written said `deepseek-v4-flash`. Both are
+   * real values; only one of them is what the box will actually run, and the
+   * hero's whole claim is to name that one. ClawBox AI's report is kept as a
+   * FALLBACK, for the window before the pairing read has landed.
    */
-  const heroModel = defaultRow?.id === CLAWAI_PROVIDER
-    ? (clawai?.model || deviceModel)
-    : deviceModel;
+  const heroModel = deviceModel
+    || (defaultRow?.id === CLAWAI_PROVIDER ? (clawai?.model ?? "") : "");
 
   /** True when this panel has a row for the default — see `changeModel`. */
   const defaultHasRow = defaultRow !== null && (

@@ -77,6 +77,8 @@ const summary = (overrides: Partial<ProviderStatusSummary> = {}): ProviderStatus
 
 let statusBody: ProviderStatusSummary;
 let pairing: { provider: string; current: string };
+/** What ClawBox AI's own read reports, which the tier decides. */
+let clawaiModel: string;
 let defaultResponse: { ok: boolean; status: number; body: unknown };
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -103,7 +105,7 @@ function stubFetch() {
           tier: "flash",
           tierStored: "flash",
           active: true,
-          model: "deepseek-v4-flash",
+          model: clawaiModel,
         }),
       } as Response;
     }
@@ -136,6 +138,7 @@ beforeEach(() => {
   vi.unstubAllGlobals();
   statusBody = summary();
   pairing = { provider: "clawai", current: "deepseek-v4-flash" };
+  clawaiModel = "deepseek-v4-flash";
   defaultResponse = { ok: true, status: 200, body: { ok: true } };
   stubFetch();
 });
@@ -162,6 +165,23 @@ describe("the hero — what is answering right now", () => {
     // Once in the hero, and nowhere else — the ticked row carries a radio and a
     // tint, not a second copy of the word.
     expect(screen.getAllByText("Default")).toHaveLength(1);
+  });
+
+  it("names the model the BOX is paired with, not the one the tier implies", async () => {
+    // Caught on a live box. ClawBox AI derives its model from the stored tier,
+    // so a Pro account reports `deepseek-v4-pro` — while the pairing a bare
+    // "make default" had just written said `deepseek-v4-flash`. Both values are
+    // real; only the pairing is what the box will actually run, and naming that
+    // one is the hero's entire claim.
+    pairing = { provider: "clawai", current: "deepseek-v4-flash" };
+    clawaiModel = "deepseek-v4-pro";
+    render(<HermesProviderConfig embedded testId="hermes-ai" />);
+
+    const card = await screen.findByTestId("provider-default-hero");
+    await waitFor(() => {
+      expect(within(card).getByText("deepseek-v4-flash")).toBeInTheDocument();
+    });
+    expect(within(card).queryByText("deepseek-v4-pro")).toBeNull();
   });
 
   it("stays away entirely until the box has a default at all", async () => {
