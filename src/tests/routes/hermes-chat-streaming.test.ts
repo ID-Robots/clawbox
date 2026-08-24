@@ -49,11 +49,17 @@ function fakeTurn(opts: {
   status?: string;
   error?: string;
   fail?: Error;
+  model?: string;
+  provider?: string;
 }) {
   const closed = { value: false };
   return {
     handle: {
       sessionId: opts.sessionId ?? "20260823_190319_3e9e35",
+      // What the transport says this session will actually run. The route
+      // records it with the turn, so a switch that did not take is visible.
+      model: opts.model ?? "",
+      provider: opts.provider ?? "",
       async run(onDelta: (chunk: string) => void) {
         if (opts.fail) throw opts.fail;
         for (const chunk of opts.deltas ?? []) onDelta(chunk);
@@ -265,5 +271,71 @@ describe("when the box cannot stream", () => {
     const res = await POST(post({ message: "Hey" }, "application/json"));
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(res.headers.get("content-type")).toContain("application/json");
+  });
+});
+
+describe("saying which model actually answered", () => {
+  it("records the model the transport ran, not the one the pills asked for", async () => {
+    // The pills are a request. When a mid-conversation switch is refused the
+    // session keeps its old model, and the ONLY way that was ever noticed was
+    // by asking the model directly -- nothing in the reply said which had
+    // answered. Now the turn carries it.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({ deltas: ["ok"], model: "deepseek-v4-flash", provider: "clawai" }).handle,
+    );
+    const events = await readEvents(
+      await POST(post({ message: "Hey", model: "claude-fable-5", provider: "anthropic" })),
+    );
+    const [, done] = events[events.length - 1];
+    expect(done).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+    // ...and the same goes into the durable transcript, per record, because one
+    // conversation can be answered by several models.
+    const assistant = appendMock.mock.calls
+      .map(([record]) => record as Record<string, unknown>)
+      .find((record) => record.role === "assistant");
+    expect(assistant).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+  });
+
+  it("omits the field entirely when the transport named no model", async () => {
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["ok"] }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).not.toHaveProperty("model");
+    expect(done).not.toHaveProperty("provider");
+  });
+});
+
+describe("a turn whose model did no reasoning", () => {
+  it("ends with no reasoning field rather than an empty disclosure", async () => {
+    // Measured on the box: claude-fable-5 answered with real reasoning empty
+    // while the agent spinner still ticked, so the disclosure showed a kaomoji
+    // and nothing else. An absent field is what closes the disclosure.
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["one"], reasoning: "" }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).not.toHaveProperty("reasoning");
+  });
+
+  it("drops a status frame that reached reasoning by any other route", async () => {
+    // The transport drops `thinking.delta` at the source, so this stands for
+    // the paths with no channel to separate: an older record, or the CLI
+    // printing its spinner to stdout.
+    readTurnMock.mockResolvedValue({
+      text: "one",
+      // A face from the agent's own vocabulary (agent/display.py KAWAII_THINKING).
+      reasoning: "⊙_⊙ cogitating...",
+    });
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["one"] }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).not.toHaveProperty("reasoning");
+  });
+
+  it("keeps real reasoning untouched", async () => {
+    readTurnMock.mockResolvedValue({ text: "one", reasoning: "The user asked for one word." });
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["one"] }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).toMatchObject({ reasoning: "The user asked for one word." });
   });
 });

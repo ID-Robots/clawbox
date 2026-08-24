@@ -102,8 +102,20 @@ async function latest(): Promise<FakeSocket> {
   return socketsMock.made[socketsMock.made.length - 1];
 }
 
-/** Open a turn, answering the handshake and the session RPC as the box would. */
-async function connect(overrides: Record<string, unknown> = {}, storedId = "20260823_190319_3e9e35") {
+/**
+ * Open a turn, answering the handshake and the session RPC as the box would.
+ *
+ * `info` is part of the box's real answer and is defaulted to the model this
+ * helper asks for, so an ordinary turn needs no model switch. A test that wants
+ * the switch says so by passing an `info` naming a DIFFERENT model — which is
+ * exactly what a session opened on one model and re-pointed at another looks
+ * like from here.
+ */
+async function connect(
+  overrides: Record<string, unknown> = {},
+  storedId = "20260823_190319_3e9e35",
+  info: Record<string, unknown> | null = { model: "deepseek-v4-flash", provider: "custom" },
+) {
   const opening = openDashboardTurn({ text: "Hey", model: "deepseek-v4-flash", provider: "clawai", ...overrides });
   const socket = await latest();
   socket.open();
@@ -115,8 +127,18 @@ async function connect(overrides: Record<string, unknown> = {}, storedId = "2026
   socket.deliver({
     jsonrpc: "2.0",
     id: 1,
-    result: { session_id: "e0719549", stored_session_id: storedId },
+    result: { session_id: "e0719549", stored_session_id: storedId, ...(info ? { info } : {}) },
   });
+  // A mid-conversation switch, when this turn asked for one, is answered the
+  // way the dashboard answers it: an `output` line and no error.
+  for (let i = 0; i < 50; i++) {
+    await Promise.resolve();
+    const sw = socket.sent.find((f) => f.method === "slash.exec");
+    if (sw) {
+      socket.deliver({ jsonrpc: "2.0", id: sw.id, result: { output: "  ✓ Model switched" } });
+      break;
+    }
+  }
   return { turn: await opening, socket };
 }
 
