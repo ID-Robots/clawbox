@@ -9,6 +9,7 @@ import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
+import { notifyProvidersChanged } from "@/lib/ui-events";
 import {
   HERMES_PANEL_PROVIDERS,
   CLAWAI_PROVIDER,
@@ -83,6 +84,17 @@ interface Props {
   embedded?: boolean;
   onNext?: () => void;
   testId?: string;
+  /**
+   * Select this provider's row, so a click on the connection strip lands on
+   * the panel that configures it rather than merely on the section.
+   */
+  requestedProviderId?: string | null;
+  /**
+   * Bumped by the caller on every request. A counter rather than watching the
+   * id, so clicking the SAME chip again re-selects it after the customer has
+   * moved to another row in the meantime.
+   */
+  providerSelectionRequest?: number;
 }
 
 // The OpenClaw AI-models step advances the wizard ~900 ms after a successful
@@ -108,7 +120,13 @@ const PROVIDER_DESCRIPTION_KEYS: Record<string, string> = {
   nous: "hermesProvider.row.desc.nous",
 };
 
-export default function HermesProviderConfig({ embedded, onNext, testId }: Props) {
+export default function HermesProviderConfig({
+  embedded,
+  onNext,
+  testId,
+  requestedProviderId,
+  providerSelectionRequest = 0,
+}: Props) {
   const { t } = useT();
   const uid = useId();
 
@@ -168,7 +186,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   // login or through Hermes' own OAuth is exactly the case where the user
   // expects to switch straight to it in chat.
   const notifyChatHeader = useCallback(() => {
+    // Both names. The Hermes-specific one because listeners predating the
+    // shared signal still key on it, and the edition-neutral one so a listener
+    // written since — the connection strip, the capability probe — does not
+    // have to know which harness it happens to be mounted on.
     notifyHermesModelState();
+    notifyProvidersChanged();
   }, []);
 
   // ── Inline provider OAuth ──────────────────────────────────────────────────
@@ -310,6 +333,31 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     })();
     return () => { alive = false; };
   }, [fetchClawai, fetchDeviceProvider]);
+
+  // A chip in the connection strip was clicked. Treated exactly like a click on
+  // this panel's own radio row — including setting `userPickedProviderRef`, so
+  // the mount seed above (which may still be in flight) cannot bounce the
+  // selection back to the device's current provider a beat later.
+  //
+  // Keyed on the request counter alone: re-running when the id changes as well
+  // would re-apply a stale request after the customer had moved on.
+  useEffect(() => {
+    if (!providerSelectionRequest) return;
+    const requested = requestedProviderId?.trim();
+    if (!requested) return;
+    const known = requested === CLAWAI_PROVIDER
+      || HERMES_PANEL_PROVIDERS.some((p) => p.id === requested);
+    // A provider this panel has no row for cannot be selected in it. Silently
+    // ignored rather than written into state, which would leave the radio group
+    // with nothing checked and the scoped model list asking for a provider the
+    // customer cannot see.
+    if (!known) return;
+    userPickedProviderRef.current = true;
+    setSelectedProvider(requested);
+    // The remembered model belongs to whichever provider was selected before.
+    setPicked("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerSelectionRequest]);
 
   const loadOauth = useCallback(async (): Promise<void> => {
     try {
