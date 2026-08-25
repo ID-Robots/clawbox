@@ -184,6 +184,18 @@ describe("adopting a picture the agent drew", () => {
     expect(out.text).toBe(raw);
   });
 
+  it("stops after four pictures however many one turn names", async () => {
+    // Every copy is made AFTER the sweep that was meant to make room, so an
+    // unbounded batch is an unbounded overshoot of the retention budget — and
+    // the sweep that corrects it next turn pays for it with someone's older
+    // picture. The turn record already stops at four; the model's own mentions
+    // stopped at nothing.
+    const files = ["a", "b", "c", "d", "e", "f"].map((n) => writeCachedImage(`many_${n}.png`));
+    const { adoptHermesGeneratedImages } = await load();
+    const adopted = await adoptHermesGeneratedImages(files);
+    expect(adopted).toHaveLength(4);
+  });
+
   it("one generation, one card: the tool row and the model's mention name the same file, adopted once", async () => {
     const file = writeCachedImage("clawai_dup.png");
     const { adoptHermesGeneratedImages, reclaimImageMentions } = await load();

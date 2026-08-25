@@ -59,6 +59,20 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+/**
+ * The most pictures one turn may bring in.
+ *
+ * The turn record already stops at four rows; the model's own MENTIONS do not
+ * stop at anything, and every one of them is a copy made AFTER the sweep that
+ * was supposed to make room. Without a bound here a reply listing fifty cache
+ * paths would push the tree that far past `GENERATED_IMAGE_RETENTION.maxBytes`
+ * in one turn, and the next sweep would then throw away pictures older
+ * customers can still see in their transcript. Four matches the record's own
+ * cap, and a bubble showing more than four thumbnails is not a bubble anyone
+ * asked for.
+ */
+const MAX_ADOPTED_PER_TURN = 4;
+
 /** Where every Hermes image backend writes — `save_b64_image` in the plugin ABC. */
 export function hermesImageCacheDir(): string {
   return path.join(hermesHome(), "cache", "images");
@@ -99,6 +113,7 @@ export async function adoptHermesGeneratedImages(
   // two identical cards in one bubble.
   const seen = new Set<string>();
   for (const source of sources) {
+    if (adopted.length >= MAX_ADOPTED_PER_TURN) break;
     if (seen.has(source)) continue;
     seen.add(source);
     const copied = await adoptOne(source, cacheRoot);
