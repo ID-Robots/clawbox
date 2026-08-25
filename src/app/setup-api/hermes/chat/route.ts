@@ -40,6 +40,7 @@ import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
+import { adoptHermesGeneratedImages, reclaimImageMentions } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
 
@@ -445,7 +446,34 @@ async function settleTurn(
 ): Promise<TurnPayload> {
   const consoleReply = extractReasoningPanels(consoleText);
   const record = await readHermesTurn(threaded);
-  const answer = record?.text ?? consoleReply.text;
+  const spoken = record?.text ?? consoleReply.text;
+  // The model's own copy of the path comes OUT of the caption and INTO the
+  // adoption list. The backend tells the model where it saved the file and
+  // the model repeats it (a MEDIA: directive, an "[Image: ...]" aside);
+  // left in place, `splitAssistantMedia` below lifted that unservable cache
+  // path as a second image, and every generated picture rendered as a
+  // broken card beside the real one - one generation, two attachments, the
+  // first a 404.
+  const { text: caption, sources: mentioned } = reclaimImageMentions(spoken);
+  const drawn = await adoptHermesGeneratedImages([
+    ...(record?.generatedImages ?? []),
+    ...mentioned,
+  ]);
+  // A picture the AGENT drew, said the way every other picture in this chat is
+  // said. Hermes has no `MEDIA:` convention of its own — the backend saves the
+  // file and the model writes prose about the path — so the reply reaches the
+  // browser as a sentence naming a file it cannot open. Appending the directive
+  // here means the transcript, the adapter and the bubble all keep working
+  // exactly as they do for a generated OpenClaw picture: `splitAssistantMedia`
+  // a few lines down lifts these back out, and nothing downstream learns a new
+  // shape.
+  //
+  // Appended AFTER the answer rather than replacing it: the model's own
+  // sentence is the caption, and dropping it would leave a picture with no
+  // words in a conversation the customer is having.
+  const answer = [caption, ...drawn.map((file) => `MEDIA:${file}`)]
+    .filter(Boolean)
+    .join("\n");
   // The database first, the console parse next, and what the stream itself
   // carried as the floor — the last only matters when the turn ran but its row
   // could not be read back, which is the one case the other two are both empty.

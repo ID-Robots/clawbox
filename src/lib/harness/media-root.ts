@@ -44,6 +44,23 @@ export async function chatGeneratedImageDir(): Promise<string> {
 }
 
 /**
+ * How long a generated picture is kept, for whichever path drew it.
+ *
+ * ONE set of numbers because there is one directory: the composer writes its
+ * own generation into `chat-generated` and the agent path copies its own in
+ * beside it, so a retention that lived with only one of them would leave the
+ * tree unbounded the moment the other became the box's way of drawing.
+ *
+ * 30 days matches the transcript sweep, so a picture and the bubble naming it
+ * age out together instead of leaving a transcript full of broken thumbnails;
+ * 500 MB is roughly 350 pictures at the size the proxy returns.
+ */
+export const GENERATED_IMAGE_RETENTION: MediaRetention = {
+  maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+  maxBytes: 500 * 1024 * 1024,
+};
+
+/**
  * Nothing this young is ever removed, whatever the totals say.
  *
  * A file being written by a concurrent request is the newest thing in the

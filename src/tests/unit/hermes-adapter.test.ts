@@ -26,6 +26,7 @@ const caps = capabilitiesFor("hermes", {
   // A box that can draw: the credential plus a live image route. Both halves,
   // because `imageGenerationTrigger` is what `generateImage` checks first.
   hasClawaiImageRoute: true,
+  hermesAgentDrawsImages: false,
 });
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },
@@ -470,6 +471,7 @@ describe("HermesAdapter", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
+        hermesAgentDrawsImages: false,
       });
       const { adapter, calls } = drawing(() => ({ ok: true, status: 200, payload: {} }), cannot);
       await expect(adapter.generateImage("x")).rejects.toMatchObject({ code: "unsupported" });

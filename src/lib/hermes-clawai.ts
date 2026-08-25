@@ -1,8 +1,16 @@
 import { setMany } from "@/lib/config-store";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { setHermesEnvValues } from "@/lib/hermes-env";
+import {
+  HERMES_IMAGE_PLUGIN_NAME,
+  HERMES_IMAGE_TOKEN_ENV,
+  installHermesImagePlugin,
+  mergePluginsEnabled,
+} from "@/lib/hermes-image-plugin";
 import {
   CLAWBOX_AI_FLASH_MODEL_ID,
+  CLAWBOX_AI_IMAGE_MODEL_ID,
   CLAWBOX_AI_PRO_MODEL_ID,
   CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
@@ -133,6 +141,25 @@ export async function applyClawaiToHermes(
     }
   }
 
+  // ── Making a picture ───────────────────────────────────────────────────────
+  //
+  // FAIL-SOFT, and it is the one part of this function that is. Everything
+  // above decides whether the box can hold a conversation at all, so a failure
+  // there has to stop the link and say so. Drawing is an extra: a box whose
+  // image backend could not be installed still chats, still sees, still
+  // transcribes — and `hermesAgentDrawsImages` reads the config this writes, so
+  // the capability reports the failure honestly instead of the customer finding
+  // it by asking for a picture.
+  try {
+    await enableHermesImageGeneration(trimmed);
+  } catch (err) {
+    // Name the failure, never the token that was being written with it.
+    console.warn(
+      "[hermes/clawai] could not enable image generation:",
+      err instanceof Error ? err.message : "unknown error",
+    );
+  }
+
   // Keep the wizard's own status route consistent: without ai_model_configured
   // the setup flow can't advance past the AI step on a Hermes device.
   await setMany({
@@ -147,4 +174,73 @@ export async function applyClawaiToHermes(
   invalidateModelOptions();
 
   return { provider: CLAWAI_PROVIDER, model, tier };
+}
+
+/**
+ * Point Hermes' own `image_generate` tool at ClawBox AI.
+ *
+ * Four writes, in the order a reader needs them:
+ *
+ *   1. the backend itself, copied into `~/.hermes/plugins/image_gen/clawai/`;
+ *   2. its credential, under a name nothing else in Hermes reads — see
+ *      `HERMES_IMAGE_TOKEN_ENV` for why that matters;
+ *   3. `plugins.enabled`, MERGED with whatever is already there, because that
+ *      list gates every user plugin on the box and not just ours;
+ *   4. the model and the base URL, then LAST the selection — the key
+ *      `image_gen_registry` resolves at tool time, and the one the capability
+ *      probe reads, so it is only written once everything it depends on is.
+ *
+ * `base_url` is written explicitly rather than left to the plugin's default so
+ * a staging box pointed at another proxy through `CLAWBOX_AI_PROXY_URL` gets
+ * pictures from the same place it gets its answers.
+ *
+ * The MODEL is `gpt-image-1-mini` — the id the proxy serves on EVERY plan.
+ * `gpt-image-2` is Max-only (`modelTiers` on the live endpoint), and this
+ * function runs at link time, before anything here knows what the customer's
+ * plan is, so naming it would turn every Free and Pro box's first drawing
+ * request into a model-gate rejection.
+ */
+async function enableHermesImageGeneration(token: string): Promise<void> {
+  await installHermesImagePlugin();
+  await setHermesEnvValues({ [HERMES_IMAGE_TOKEN_ENV]: token });
+
+  // Read-modify-write, and the read has to be the RAW list: `hermes config set`
+  // replaces the value whole.
+  //
+  // AN UNSET KEY IS NOT A FAILED READ. `hermes config get` exits non-zero for
+  // both, and the two want opposite answers: a box that has never enabled a
+  // plugin wants the list initialised with ours, while a read that failed for
+  // any other reason (a locked config, a timeout) knows NOTHING about what is
+  // in that list — treating it as empty would write `["clawai"]` over the
+  // customer's own enabled plugins and silently unload every one of them. So
+  // only the "not set" wording proceeds; anything else stops here, and the
+  // capability probe reports a box that cannot draw through its agent, which
+  // is the truth.
+  const current = await runHermesCli(["config", "get", "plugins.enabled"], { timeoutMs: 15_000 });
+  const listing = `${current.stdout ?? ""}\n${current.stderr ?? ""}`;
+  if (current.code !== 0 && !/config key not set/i.test(listing)) {
+    throw new Error(current.stderr?.trim() || "hermes config get plugins.enabled failed");
+  }
+  const merged = mergePluginsEnabled(current.code === 0 ? current.stdout : "");
+  // `image_gen.provider` LAST, because it is the key `hermesAgentDrawsImages`
+  // reads and therefore the key that turns the agent's picture ability on. A
+  // provider written first and then a failed `base_url` would leave a box
+  // claiming it can draw through a backend that has nowhere to send the
+  // request; written last, a failure anywhere above means the claim was never
+  // made and the composer button stays.
+  const steps: string[][] = [
+    ...(merged ? [["config", "set", "plugins.enabled", JSON.stringify(merged)]] : []),
+    ["config", "set", "image_gen.model", CLAWBOX_AI_IMAGE_MODEL_ID],
+    ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.model`, CLAWBOX_AI_IMAGE_MODEL_ID],
+    ["config", "set", `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`, CLAWBOX_AI_PROXY_URL],
+    ["config", "set", "image_gen.provider", HERMES_IMAGE_PLUGIN_NAME],
+  ];
+  for (const args of steps) {
+    const r = await runHermesCli(args, { timeoutMs: 15_000 });
+    if (r.code !== 0) {
+      // Thrown, not swallowed: the caller logs it and the link still succeeds.
+      // Half-written image config is exactly what the capability probe is for.
+      throw new Error(r.stderr?.trim() || `hermes ${args.join(" ")} failed`);
+    }
+  }
 }

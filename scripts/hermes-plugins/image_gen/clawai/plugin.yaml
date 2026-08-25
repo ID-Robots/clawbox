@@ -1,0 +1,7 @@
+name: clawai
+version: 1.0.0
+description: "ClawBox AI image generation backend. Saves generated images under the Hermes cache."
+author: ID-Robots
+kind: backend
+requires_env:
+  - CLAWBOX_AI_TOKEN

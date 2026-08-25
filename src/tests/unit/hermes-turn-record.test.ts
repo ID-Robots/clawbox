@@ -306,3 +306,106 @@ describe("readHermesTurn against a real state.db", () => {
     await expect(readHermesTurn("s1")).resolves.toBeNull();
   });
 });
+
+/**
+ * The picture the agent drew, from the rows the live box actually stored.
+ *
+ * Captured on 2026-08-24 from a linked device running the ClawBox AI image
+ * backend, session `20260824_212159_ecf214`, rows 597-600, after:
+ *
+ *   hermes chat -q "Draw a picture of a blue robot crab waving, simple flat
+ *                   vector icon on a white background." -Q
+ *
+ * The shape is the point: the tool result carries the path as JSON, and the
+ * assistant's own reply carries it only as PROSE. Nothing but this row knows
+ * what was drawn in a form a program can use.
+ */
+const DREW_ROWS = [
+  { id: 597, role: "user", content: "Draw a picture of a blue robot crab waving, simple flat vector icon on a white background." },
+  {
+    id: 598,
+    role: "assistant",
+    content: "",
+    tool_calls: JSON.stringify([
+      {
+        id: "toolu_011GqvyDcduViT23k7scdgQt",
+        type: "function",
+        function: { name: "image_generate", arguments: '{"prompt":"a blue robot crab waving"}' },
+      },
+    ]),
+  },
+  {
+    id: 599,
+    role: "tool",
+    tool_name: "image_generate",
+    tool_call_id: "toolu_011GqvyDcduViT23k7scdgQt",
+    content: JSON.stringify({
+      success: true,
+      image: "/home/clawbox/.hermes/cache/images/clawai_20260824_212225_23c1c095.png",
+      model: "gpt-image-1-mini",
+      prompt: "a blue robot crab waving",
+      aspect_ratio: "square",
+      provider: "clawai",
+    }),
+  },
+  {
+    id: 600,
+    role: "assistant",
+    content:
+      "Done! Your blue robot crab is waving at you from:\n\n"
+      + "/home/clawbox/.hermes/cache/images/clawai_20260824_212225_23c1c095.png",
+  },
+];
+
+describe("a turn that drew something", () => {
+  it("reads the file out of the tool result, not out of the prose", () => {
+    const turn = buildTurnFromRows(DREW_ROWS);
+    expect(turn?.generatedImages).toEqual([
+      "/home/clawbox/.hermes/cache/images/clawai_20260824_212225_23c1c095.png",
+    ]);
+    // The caption survives — the model's sentence is what the bubble says
+    // above the picture.
+    expect(turn?.text).toContain("waving at you");
+    expect(turn?.toolCalls?.[0]?.name).toBe("image_generate");
+  });
+
+  it("ignores a result that reports failure, however it is shaped", () => {
+    // A failed generation still writes a row. A backend that reported an error
+    // and a path anyway would otherwise have that path rendered as a picture.
+    const failed = DREW_ROWS.map((row) =>
+      row.id === 599
+        ? {
+          ...row,
+          content: JSON.stringify({
+            success: false,
+            image: "/home/clawbox/.hermes/cache/images/half.png",
+            error: "quota",
+          }),
+        }
+        : row,
+    );
+    expect(buildTurnFromRows(failed)?.generatedImages).toBeUndefined();
+  });
+
+  it("says nothing about pictures for a turn that made none", () => {
+    // The field is absent rather than empty: the route spreads it into a
+    // payload, and an empty array there would read as "we looked and there
+    // were none" in a place that never looked.
+    expect(buildTurnFromRows(HEY_ROWS)?.generatedImages).toBeUndefined();
+  });
+
+  it("does not choke on a tool result that is not JSON", () => {
+    const noisy = DREW_ROWS.map((row) =>
+      row.id === 599 ? { ...row, content: '{"image": not json at all' } : row,
+    );
+    expect(buildTurnFromRows(noisy)?.generatedImages).toBeUndefined();
+    expect(buildTurnFromRows(noisy)?.text).toContain("waving at you");
+  });
+
+  it("lists one file once, however many rows replay it", () => {
+    // Resuming a session replays rows; a picture drawn once must not appear
+    // twice in the bubble.
+    const doubled = [...DREW_ROWS, { ...DREW_ROWS[2], id: 601 }];
+    expect(buildTurnFromRows(doubled)?.generatedImages).toHaveLength(1);
+  });
+});
