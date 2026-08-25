@@ -26,6 +26,7 @@ const caps = capabilitiesFor("hermes", {
   // A box that can draw: the credential plus a live image route. Both halves,
   // because `imageGenerationTrigger` is what `generateImage` checks first.
   hasClawaiImageRoute: true,
+  hermesAgentDrawsImages: false,
 });
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },

@@ -26,9 +26,10 @@ const FACTS = {
   hermesHasVisionRoute: false,
   hermesStreamsTurns: true,
   hasClawaiImageRoute: false,
+  hermesAgentDrawsImages: false,
 };
 const STREAMING_CAPS = capabilitiesFor("hermes", FACTS);
-const BLOCKING_CAPS = capabilitiesFor("hermes", { ...FACTS, hermesStreamsTurns: false });
+const BLOCKING_CAPS = capabilitiesFor("hermes", { ...FACTS, hermesStreamsTurns: false , hermesAgentDrawsImages: false});
 
 /** One SSE frame, framed the way the route frames it. */
 function frame(event: string, data: unknown): string {

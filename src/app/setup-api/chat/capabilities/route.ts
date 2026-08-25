@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import type { HarnessFacts } from "@/lib/harness/capabilities";
-import { hermesHasVisionRoute, hermesSupportsImages } from "@/lib/harness/hermes-features";
+import {
+  hermesAgentDrawsImages,
+  hermesHasVisionRoute,
+  hermesSupportsImages,
+} from "@/lib/harness/hermes-features";
 import { clawaiImageRouteReachable } from "@/lib/harness/clawai-images";
 import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
 
@@ -54,7 +58,7 @@ export async function GET() {
     hermesStreamsTurns: harness === "hermes" ? await hermesCanStreamTurns() : false,
     // Whether the ClawBox AI proxy is up and still serving the image model this
     // box would ask for. The one fact here that leaves the device, so it is
-    // asked only where the answer can matter — on Hermes, whose picture button
+    // asked only where the answer can matter -- on Hermes, whose picture button
     // is the thing it gates, and only once there is a credential to spend on a
     // picture at all. An unlinked box is already `canGenerateImages: false` and
     // would be spending a network round trip to stay that way.
@@ -64,6 +68,15 @@ export async function GET() {
     // started and no daily allowance is spent.
     hasClawaiImageRoute:
       harness === "hermes" && linked ? await clawaiImageRouteReachable() : false,
+    // Whether the agent has an image backend selected -- the Hermes spelling of
+    // "can this box draw". Read from `image_gen.provider` through the same
+    // mtime-keyed memo as the vision route, so it flips on the model-state
+    // event the moment ClawBox AI is linked rather than at the next restart.
+    //
+    // Not asked on an OpenClaw box: it makes pictures through its own bundled
+    // plugin and reads the credential instead, and `hermes` may not be
+    // installed there at all.
+    hermesAgentDrawsImages: harness === "hermes" ? await hermesAgentDrawsImages() : false,
   };
   return NextResponse.json({ harness, facts });
 }

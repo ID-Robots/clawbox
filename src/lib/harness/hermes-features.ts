@@ -132,3 +132,60 @@ export async function hermesHasVisionRoute(): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * The config key that names the backend a drawing request is serviced BY.
+ *
+ * `image_gen.provider` is what `agent/image_gen_registry.get_active_provider()`
+ * reads (v0.20.5, line 134) before it hands an `image_generate` call to a
+ * registered backend. Written by `applyClawaiToHermes`; unset on a box nobody
+ * has linked, where the tool has no backend at all.
+ */
+const IMAGE_PROVIDER_KEY = "image_gen.provider";
+
+/**
+ * Can the agent on this box actually draw?
+ *
+ * The Hermes shape of image generation is nothing like the ClawBox chat's: the
+ * customer ASKS, in words, in whatever channel they are in, and the agent
+ * reaches for its own `image_generate` tool. So the honest question is not
+ * "does a route exist" — it is "is a backend selected", which is a fact about
+ * this box's config and therefore a probe, exactly like `hermesHasVisionRoute`
+ * next door.
+ *
+ * WHY THE CONFIG AND NOT THE TOKEN. Same asymmetry the vision probe documents,
+ * and one more reason on top of it: linking is what WRITES this key, but the
+ * write is fail-soft (see `applyClawaiToHermes`) — a box can hold a perfectly
+ * good token and have no image backend because the plugin copy failed. Reading
+ * the token would report `true` there and put a promise in front of a customer
+ * that the next request cannot keep. A wrong `false` only hides an ability;
+ * a wrong `true` is an apology.
+ *
+ * WHY `image_gen.provider` AND NOT "the block exists". Verified on the live box
+ * (2026-08-24, before linking): `hermes config get image_gen` answers
+ * `Config key not set: image_gen` — the section has no schema defaults at all,
+ * unlike `auxiliary`, so on THIS key presence and configuration are the same
+ * thing. Reading `provider` rather than the section keeps it that way if
+ * upstream ever gives the block defaults.
+ *
+ * KNOWN AND ACCEPTED FALSE POSITIVE: a customer who selected some other backend
+ * by hand (`hermes tools` → Image Generation → FAL) and never gave it a key
+ * reads as `true` here and gets an error from the agent instead of a picture.
+ * That error comes from upstream's own dispatcher and NAMES the missing
+ * credential and the selection, which is a better outcome than this file
+ * second-guessing a choice the customer made deliberately.
+ *
+ * Not memoised in this module ON PURPOSE, for the same reason the vision probe
+ * is not: `hermesConfigGet` keys its cache on config.yaml's mtime, and linking
+ * rewrites that file — so the answer flips as soon as the customer links rather
+ * than at the next restart.
+ */
+export async function hermesAgentDrawsImages(): Promise<boolean> {
+  try {
+    return (await hermesConfigGet(IMAGE_PROVIDER_KEY)).trim().length > 0;
+  } catch {
+    // `hermesConfigGet` answers "" rather than throwing, so this is belt and
+    // braces — and it fails closed for the same reason the rest of this file does.
+    return false;
+  }
+}
