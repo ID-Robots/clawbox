@@ -2,9 +2,11 @@
  * App Store — real round trip to clawbox.com/api/store/apps, then
  * install one skill and verify it ends up registered locally.
  *
- * This test is network-dependent on clawbox.com — if that service
- * is down or region-restricted, the whole spec fails. We don't cache the
- * result because the point is catching regressions in the live integration.
+ * This test is network-dependent on clawbox.com. We don't cache the result
+ * because the point is catching regressions in the live integration — but a
+ * verdict that comes from ClawHub rather than from the device (Cloudflare 403
+ * on a CI runner's egress, a 429 rate limit, an upstream outage) skips the
+ * spec instead of failing it. A broken proxy on the box still fails.
  *
  * The test app is picked dynamically from the live catalog so the suite
  * doesn't rot when individual apps get delisted. Override with
@@ -12,7 +14,7 @@
  */
 import { test, expect } from "@playwright/test";
 import { dockerExec } from "./helpers/container";
-import { getPreferences, installApp, searchApps, uninstallApp } from "./helpers/setup-api";
+import { getPreferences, installApp, searchApps, searchAppsRaw, uninstallApp } from "./helpers/setup-api";
 
 const FORCED_APP_ID = process.env.CLAWBOX_E2E_STORE_APP_ID;
 // Capture target across tests. Populated by the first catalog-search test.
@@ -22,6 +24,10 @@ let TEST_APP_ID = "";
 // uninstall) skip gracefully in that case so rate-limit hiccups on the
 // public store don't flake the whole suite.
 let INSTALL_OK = false;
+// Set by the catalog test: false when ClawHub itself refused to serve this
+// network. Everything downstream needs a slug from the live catalog, so it
+// skips with the same reason rather than failing on an empty TEST_APP_ID.
+let STORE_REACHABLE = false;
 
 test.describe.configure({ mode: "serial" });
 
@@ -31,7 +37,24 @@ test.describe("app store happy path", () => {
   });
 
   test("catalog search returns apps", async () => {
-    const result = await searchApps();
+    const res = await searchAppsRaw();
+    // `"Store API error"` is the device's proxy relaying UPSTREAM's status
+    // verbatim (src/app/setup-api/apps/store/route.ts) — the box did its job
+    // and clawbox.com said no. It sits behind Cloudflare, which answers 403 to
+    // some datacenter egress (CI runners among them) and 429 when the store is
+    // rate-limiting; neither is a statement about this device. Skip, exactly
+    // as the install step below already does for a rate-limited ClawHub.
+    //
+    // Everything else still fails: a 502 (the proxy could not reach ClawHub at
+    // all), the edition guard's own 403 — which carries a different body — and
+    // any malformed catalog.
+    const upstreamRefused =
+      res.body.error === "Store API error" &&
+      (res.status === 403 || res.status === 429 || res.status >= 500);
+    test.skip(upstreamRefused, `ClawHub refused this network (upstream ${res.status})`);
+
+    expect(res.status, res.text).toBe(200);
+    const result = res.body as { total: number; apps: Array<{ slug: string; name: string; category: string }> };
     expect(result.total).toBeGreaterThan(0);
     expect(result.apps.length).toBeGreaterThan(0);
     // Every entry should have the fields the UI renders.
@@ -41,10 +64,12 @@ test.describe("app store happy path", () => {
       expect(app.category).toBeTruthy();
     }
     TEST_APP_ID = FORCED_APP_ID ?? result.apps[0].slug;
+    STORE_REACHABLE = true;
     console.log(`[app-store] using test app id '${TEST_APP_ID}'`);
   });
 
   test("search filter narrows results", async () => {
+    test.skip(!STORE_REACHABLE, "ClawHub refused this network; no catalog to filter");
     expect(TEST_APP_ID).toBeTruthy();
     // Query with the first word of the app's slug — that's the least
     // ambiguous prefix that should still match the entry we're looking for.
@@ -55,6 +80,7 @@ test.describe("app store happy path", () => {
 
   test("install selected app", async () => {
     test.setTimeout(120_000);
+    test.skip(!STORE_REACHABLE, "ClawHub refused this network; nothing to install");
     expect(TEST_APP_ID).toBeTruthy();
     const result = await installApp(TEST_APP_ID);
     INSTALL_OK = !!result.clawhub?.success;

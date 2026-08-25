@@ -65,7 +65,13 @@ describe("the internal token", () => {
 
     expect(verifyInternalToken(token)).toBe(true);
     expect(verifyInternalToken(` ${token} `)).toBe(true);
-    expect(verifyInternalToken(token.slice(0, -1) + "0")).toBe(false);
+    // One character off, same length. The replacement is chosen against the
+    // character it replaces: a freshly minted token ends in "0" once every
+    // sixteen runs, and appending a literal "0" then handed `verify` the real
+    // token back — the assertion below failed on exactly those runs.
+    const lastCharChanged = token.slice(0, -1) + (token.endsWith("0") ? "1" : "0");
+    expect(lastCharChanged).not.toBe(token);
+    expect(verifyInternalToken(lastCharChanged)).toBe(false);
     expect(verifyInternalToken(token + "x")).toBe(false);
     expect(verifyInternalToken("")).toBe(false);
     expect(verifyInternalToken(null)).toBe(false);
