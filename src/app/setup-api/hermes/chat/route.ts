@@ -40,7 +40,7 @@ import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
-import { adoptHermesGeneratedImages } from "@/lib/harness/hermes-generated-media";
+import { adoptHermesGeneratedImages, reclaimImageMentions } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
 
@@ -409,7 +409,19 @@ async function settleTurn(
 ): Promise<TurnPayload> {
   const consoleReply = extractReasoningPanels(consoleText);
   const record = await readHermesTurn(threaded);
-  const drawn = await adoptHermesGeneratedImages(record?.generatedImages ?? []);
+  const spoken = record?.text ?? consoleReply.text;
+  // The model's own copy of the path comes OUT of the caption and INTO the
+  // adoption list. The backend tells the model where it saved the file and
+  // the model repeats it (a MEDIA: directive, an "[Image: ...]" aside);
+  // left in place, `splitAssistantMedia` below lifted that unservable cache
+  // path as a second image, and every generated picture rendered as a
+  // broken card beside the real one - one generation, two attachments, the
+  // first a 404.
+  const { text: caption, sources: mentioned } = reclaimImageMentions(spoken);
+  const drawn = await adoptHermesGeneratedImages([
+    ...(record?.generatedImages ?? []),
+    ...mentioned,
+  ]);
   // A picture the AGENT drew, said the way every other picture in this chat is
   // said. Hermes has no `MEDIA:` convention of its own — the backend saves the
   // file and the model writes prose about the path — so the reply reaches the
@@ -422,7 +434,7 @@ async function settleTurn(
   // Appended AFTER the answer rather than replacing it: the model's own
   // sentence is the caption, and dropping it would leave a picture with no
   // words in a conversation the customer is having.
-  const answer = [record?.text ?? consoleReply.text, ...drawn.map((file) => `MEDIA:${file}`)]
+  const answer = [caption, ...drawn.map((file) => `MEDIA:${file}`)]
     .filter(Boolean)
     .join("\n");
   // The database first, the console parse next, and what the stream itself
