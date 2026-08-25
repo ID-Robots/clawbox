@@ -53,6 +53,22 @@ export interface HarnessFacts {
    */
   hermesStreamsTurns: boolean;
   /**
+   * The ClawBox AI proxy is up and serving image generation for the model this
+   * box would ask for.
+   *
+   * PROBED, and the SECOND half of the composer path's "can this box draw" --
+   * `hasClawaiToken` above is the first. Two facts because they have two causes
+   * and two failure stories: an unlinked box has no credential to spend, while
+   * a linked box on a dead uplink has a credential and nowhere to spend it.
+   * Either one alone makes the button dead, so the capability wants both.
+   *
+   * They cannot be collapsed the other way round either: the proxy's discovery
+   * endpoint is UNAUTHENTICATED, so it answers "is there an image service" and
+   * says nothing whatever about whether this device's token still works. See
+   * `clawaiImageRouteReachable`.
+   */
+  hasClawaiImageRoute: boolean;
+  /**
    * The agent on this box has an image backend to reach for
    * (`image_gen.provider` in `~/.hermes/config.yaml`).
    *
@@ -123,23 +139,41 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // AI proxy, which both editions can reach. What a Hermes box may lack is
       // the credential, so that is exactly what this asks about.
       canTranscribe: facts.hasClawaiToken,
-      // TRUE once the agent has a backend to reach for — which is the same
-      // shape image generation has on OpenClaw, and deliberately so.
+      // Two ways to draw, and this block wires BOTH. The agent path: the
+      // box's agent has an image backend selected (`hermesAgentDrawsImages`,
+      // read from `image_gen.provider`), so a customer asks for a picture in
+      // plain words and the agent draws it — the same shape as OpenClaw. The
+      // composer path: no backend yet, but a credential to spend
+      // (`hasClawaiToken`) AND somewhere to spend it (`hasClawaiImageRoute`,
+      // probed against the proxy's own discovery endpoint) put a picture
+      // button in the composer instead.
       //
-      // It used to be false because the premise was that Hermes had "no image
-      // plugin and no provider slot to put one in". The second half of that was
-      // wrong: Hermes has a whole plugin KIND for image backends
-      // (`~/.hermes/plugins/image_gen/<name>/`, resolved through
-      // `image_gen.provider`), and ClawBox now installs one that speaks to the
-      // ClawBox AI images endpoint with the device's own token. So a Hermes
-      // customer asks for a picture the way an OpenClaw customer does — in
-      // words, in any channel — and the agent draws it.
+      // This was FALSE outright until these two paths landed. On OpenClaw a
+      // picture is made by the AGENT reaching for its own image tool — the
+      // user just asks — and that tool is a bundled plugin configured through
+      // `agents.defaults.imageGenerationModel`. On Hermes the equivalent slot
+      // EXISTS (`image_gen.provider`, served by plugins discovered from
+      // `~/.hermes/plugins/image_gen/`) and shipped EMPTY. Linking ClawBox AI
+      // now installs a backend into that slot, and where the slot is still
+      // empty the box itself can be the caller through the composer button
+      // (see `clawai-images.ts`). Either path is a real ability; either alone
+      // makes this true.
+      canGenerateImages:
+        facts.hermesAgentDrawsImages ||
+        (facts.hasClawaiToken && facts.hasClawaiImageRoute),
+      // WHO draws. `'agent'` the moment the agent has a backend — the button
+      // disappears and asking in plain words works, exactly the transition the
+      // composer path promised. `'composer'` only while the slot is empty and
+      // the box would be the caller. Computed from the same facts as the flag
+      // above so the two can never disagree — a `'composer'` beside a false
+      // `canGenerateImages` would be a button over a route this box cannot
+      // reach.
       //
-      // Computed from the CONFIG rather than from the token, and
-      // `hermesAgentDrawsImages` carries the argument for that: linking is what
-      // writes the key, but the write is fail-soft, so a box can hold the
-      // credential and still have nothing to draw with.
-      canGenerateImages: facts.hermesAgentDrawsImages,
+      imageGenerationTrigger: facts.hermesAgentDrawsImages
+        ? "agent"
+        : facts.hasClawaiToken && facts.hasClawaiImageRoute
+          ? "composer"
+          : null,
       // Speaking replies is a gateway capability with no Hermes equivalent.
       // Genuinely absent, and note this is voice OUTPUT: voice INPUT is
       // `canTranscribe` above and is a different feature with a different
@@ -170,7 +204,20 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
     canTranscribe: facts.hasClawaiToken,
     // Honest on OpenClaw too: pictures are generated through the ClawBox AI
     // credential, and a box whose owner never linked one cannot make them.
+    //
+    // NOT gated on `hasClawaiImageRoute`, unlike Hermes, and the asymmetry is
+    // real rather than an oversight. Here the picture comes from the AGENT'S
+    // image provider, which is only ours by default: `ai-models/configure`
+    // leaves `agents.defaults.imageGenerationModel` alone when it already names
+    // one, so a customer who pointed it at their own provider draws pictures
+    // that never touch the ClawBox AI proxy. Probing our route and answering
+    // false would hide a button that works — the "wrong false" this table
+    // spends most of its comments avoiding.
     canGenerateImages: facts.hasClawaiToken,
+    // The customer just asks and the agent's own tool answers, so there is
+    // nothing for the composer to render. See the type's own note: this is the
+    // flag that keeps `generateImage` honest about rejecting here.
+    imageGenerationTrigger: facts.hasClawaiToken ? "agent" : null,
     canSpeakReplies: true,
     canAbortTurn: true,
     hasLiveConnection: true,
@@ -186,6 +233,10 @@ export const UNKNOWN_FACTS: HarnessFacts = {
   // back yet waits for the whole turn rather than showing a caret that may
   // never move.
   hermesStreamsTurns: false,
+  // And no picture button until the box has said there is somewhere to send a
+  // prompt. A button that appears and then vanishes when the facts land is
+  // worse than one that appears a beat late.
+  hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
 };
 

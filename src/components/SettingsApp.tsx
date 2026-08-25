@@ -10,7 +10,7 @@ import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT } from "@/lib/ui-events";
+import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -22,7 +22,7 @@ import { copyToClipboard } from "@/lib/clipboard";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
-import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { cachedActiveHarness, cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
@@ -300,6 +300,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
     window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
+    // And in the edition-neutral vocabulary, so that "every path that changes
+    // the providers emits `clawbox:providers-changed`" is literally true and a
+    // listener written against that one name alone is never left deaf.
+    notifyProvidersChanged();
   }, []);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
@@ -1207,7 +1211,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     // provider the ACTIVE harness is really set to, which is what separates
     // "the on-device model is installed" from "it is what answers".
     if (section !== "ai" && section !== "localAi" && !isMobile) return;
-    fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    const load = () => {
+      fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    };
+    load();
+    // And again whenever the providers change. This card names the ACTIVE
+    // provider and its model, so a default chosen from the strip directly above
+    // it made the two disagree on screen — the strip showing the new default
+    // while the card underneath still named the old one — until the section was
+    // left and re-entered. Seen on a live box, in the same window.
+    return onProvidersChanged(load);
   }, [section, isMobile]);
   // Which agent consumes the local model. Named the harness outright, and said
   // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
@@ -1221,6 +1234,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     });
     return () => { alive = false; };
   }, []);
+
+  // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
+  // tracks its own copy — seeded from the immutable cache, then confirmed once.
+  // It gates exactly one thing here: whether the AI section's own Status card is
+  // drawn. On the Hermes edition that card is the hero's twin (same provider,
+  // same model, same "connected"), so it is suppressed there and the hero is the
+  // single source. On openclaw and dual there is no hero — AIModelsStep renders
+  // the OpenClaw picker — so the card stays and is unchanged. Keyed on edition,
+  // not the active harness: a dual box's active harness can be hermes while its
+  // AI panel is still the OpenClaw picker, which needs the card.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  useEffect(() => {
+    if (edition !== null) return;
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive) setEdition(d?.edition || "openclaw");
+    });
+    return () => { alive = false; };
+  }, [edition]);
 
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
@@ -3193,7 +3225,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Provider status card */}
+            {/* Provider status card — suppressed on the Hermes edition, where the
+                AI Providers hero below already names the active provider, its
+                model and its connection. Kept verbatim on openclaw/dual, which
+                have no hero. */}
+            {edition !== "hermes" && (
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
@@ -3278,6 +3314,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
             </div>
+            )}
 
             <I18nProvider><AIModelsStep
               embedded

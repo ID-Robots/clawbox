@@ -33,8 +33,14 @@ import {
 
 export const CLAWAI_PROVIDER = "clawai";
 
-export const CLAWBOX_AI_PROXY_URL =
-  process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai";
+// Trailing slashes are stripped because every consumer appends its own path
+// segment (`/images/generations`, `/audio/transcriptions`, `/anthropic`); an
+// override written as ".../api/ai/" would otherwise produce a double slash the
+// proxy answers with a 404, which reads on the device as "images unavailable"
+// rather than as a malformed base URL.
+export const CLAWBOX_AI_PROXY_URL = (
+  process.env.CLAWBOX_AI_PROXY_URL?.trim() || "https://clawbox.com/api/ai"
+).replace(/\/+$/, "");
 
 /** BARE model id (no `deepseek/` vendor prefix) — the proxy returns
  *  "HTTP 400: Model not allowed" for a prefixed slug. */

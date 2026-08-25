@@ -34,6 +34,7 @@ function dataDir(): string {
 }
 
 interface ConfigFacts {
+  setupComplete: boolean;
   passwordConfigured: boolean;
   sessionGeneration: number;
 }
@@ -47,15 +48,40 @@ interface ConfigFacts {
 function readConfigFacts(): ConfigFacts {
   try {
     const raw = fs.readFileSync(path.join(dataDir(), "config.json"), "utf-8");
-    const parsed = JSON.parse(raw) as { password_configured?: unknown; session_generation?: unknown };
+    const parsed = JSON.parse(raw) as {
+      setup_complete?: unknown;
+      password_configured?: unknown;
+      session_generation?: unknown;
+    };
     const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;
-    return { passwordConfigured: parsed.password_configured === true, sessionGeneration: gen };
+    return {
+      setupComplete: parsed.setup_complete === true,
+      passwordConfigured: parsed.password_configured === true,
+      sessionGeneration: gen,
+    };
   } catch (err) {
     const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
-    return { passwordConfigured: !missing, sessionGeneration: 0 };
+    return { setupComplete: !missing, passwordConfigured: !missing, sessionGeneration: 0 };
   }
+}
+
+/**
+ * Fail-closed setup flags for the pre-auth /login ⇄ /setup handoff, mirroring
+ * middleware's readConfigCached failure semantics exactly: an ABSENT
+ * config.json is a first-boot box (both false, bootstrap window open); an
+ * unreadable/corrupt one is a provisioned box (both true, everything gated).
+ *
+ * setup/status must serve THESE rather than config-store's fail-OPEN read
+ * (which returns {} on a parse error): that told an unauthenticated /login
+ * page the wizard was open while middleware kept /setup shut, and the two
+ * redirects chased each other forever on a box with a damaged config — the
+ * same loop class as the password_configured bounce, one truncated file away.
+ */
+export function readSetupGateFacts(): { setupComplete: boolean; passwordConfigured: boolean } {
+  const { setupComplete, passwordConfigured } = readConfigFacts();
+  return { setupComplete, passwordConfigured };
 }
 
 function sessionSecret(): string | null {

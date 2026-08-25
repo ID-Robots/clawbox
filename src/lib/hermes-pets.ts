@@ -25,6 +25,7 @@ import path from "path";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
 import { PETDEX_ASSET_HOSTS, petdexSheetUrl } from "@/lib/petdex-manifest";
+import { curatedPet } from "@/lib/pet-curated";
 import {
   FRAME_H,
   FRAME_W,
@@ -392,6 +393,128 @@ function cliFailure(kind: PetCliOutcome["reason"], where: string, detail: string
   return { ok: false, reason: kind };
 }
 
+/** Direct-download ceiling: a curated sheet is ~2.0-2.4 MB; same cap as the
+ *  thumbnail path's remote fetch. */
+const MAX_DIRECT_SHEET_BYTES = 8 * 1024 * 1024;
+const DIRECT_SHEET_TIMEOUT_MS = 60_000;
+/** Redirect hops the direct download will follow — each hop is re-checked
+ *  against the sprite-host allow-list, so a redirect cannot leave it. */
+const MAX_SHEET_REDIRECTS = 3;
+
+/**
+ * Install a curated pet WITHOUT `hermes pets install`.
+ *
+ * The CLI resolves every install through `https://petdex.dev/api/manifest` and
+ * hard-fails when that endpoint is down — observed live on 2026-08-25: the
+ * manifest API answered 500 while `assets.petdex.dev` (where the sprites
+ * actually live) served fine. That outage turned every first-pet pick on a
+ * fresh box into a dead 502 — the egg could not hatch and the picker could not
+ * pick, over a third-party API ClawBox does not even need for curated pets.
+ *
+ * `petdexSheetUrl` already answers a curated slug without the manifest (its
+ * offline fallback is the pinned `assets.petdex.dev/curated/…` URL), so this
+ * writes the same install the CLI would have: the sheet plus a minimal
+ * `pet.json`, into `~/.hermes/pets/<slug>/`. `hermes pets select` accepts a
+ * directory installed this way — verified on the hardware box (select exits 0,
+ * `pets doctor` reports ready) — because upstream, like `loadPet` here, treats
+ * "directory with a usable spritesheet" as installed.
+ *
+ * Curated pets only: for anything else the manifest is the sole source of
+ * truth and there is nothing safe to fall back to. The sheet lands under a
+ * temp name and is renamed, so a torn download never counts as installed.
+ */
+async function installPetDirect(slug: string): Promise<boolean> {
+  const curated = curatedPet(slug);
+  if (!curated) return false;
+  let url: string | null = null;
+  try {
+    url = await petdexSheetUrl(slug);
+  } catch {
+    url = null;
+  }
+  if (!url) return false;
+  try {
+    if (!PETDEX_ASSET_HOSTS.has(new URL(url).hostname)) return false;
+  } catch {
+    return false;
+  }
+  const dir = path.join(PETS_DIR, slug);
+  const sheetName = /\.png(?:[?#]|$)/i.test(url) ? "spritesheet.png" : "spritesheet.webp";
+  const tmp = path.join(dir, `.${sheetName}.download`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DIRECT_SHEET_TIMEOUT_MS);
+  try {
+    // Redirects are followed by hand: every hop must stay on an allow-listed
+    // sprite host, otherwise a redirect could bounce the download to a host
+    // the allow-list never approved.
+    let target = url;
+    let res: Response;
+    for (let hop = 0; ; hop++) {
+      const hopRes = await fetch(target, { signal: controller.signal, redirect: "manual" });
+      const location = hopRes.headers.get("location");
+      if (hopRes.status >= 300 && hopRes.status < 400 && location) {
+        void hopRes.body?.cancel().catch(() => {});
+        if (hop >= MAX_SHEET_REDIRECTS) return false;
+        let next: URL;
+        try {
+          next = new URL(location, target);
+        } catch {
+          return false;
+        }
+        if (!PETDEX_ASSET_HOSTS.has(next.hostname)) return false;
+        target = next.toString();
+        continue;
+      }
+      res = hopRes;
+      break;
+    }
+    if (!res.ok) return false;
+    const declared = Number(res.headers.get("content-length") || 0);
+    if (declared > MAX_DIRECT_SHEET_BYTES) return false;
+    // Enforce the cap WHILE reading: a missing or lying content-length must
+    // not let a huge download sit in memory before the size check happens.
+    const reader = res.body?.getReader();
+    if (!reader) return false;
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_DIRECT_SHEET_BYTES) {
+        await reader.cancel().catch(() => {});
+        return false;
+      }
+      chunks.push(value);
+    }
+    if (received === 0) return false;
+    const body = Buffer.concat(chunks);
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(tmp, body);
+    await fsp.rename(tmp, path.join(dir, sheetName));
+    await fsp.writeFile(
+      path.join(dir, "pet.json"),
+      JSON.stringify(
+        {
+          id: slug,
+          displayName: curated.displayName,
+          spritesheetPath: sheetName,
+          createdBy: "clawbox-direct",
+        },
+        null,
+        2,
+      ),
+    );
+    return true;
+  } catch (err) {
+    console.warn(`[pets] direct install failed for ${slug}:`, err instanceof Error ? err.message : String(err));
+    await fsp.rm(tmp, { force: true }).catch(() => {});
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Install a pet if it is not already on disk, then make it active.
  *
@@ -405,20 +528,29 @@ export async function selectPet(slug: string): Promise<PetCliOutcome> {
   if (!safe) return { ok: false, reason: "not-installed" };
 
   if (!loadPet(safe)) {
+    let cliDetail = "";
     try {
       const r = await runHermesCli(["pets", "install", safe], { timeoutMs: INSTALL_TIMEOUT_MS });
-      if (r.code !== 0) return cliFailure("install-failed", `install ${safe}`, r.stderr || r.stdout);
+      if (r.code !== 0) cliDetail = r.stderr || r.stdout || `exit ${r.code}`;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      return cliFailure(
-        msg.includes("not installed on this device") ? "hermes-missing" : "install-failed",
-        `install ${safe}`,
-        msg,
-      );
+      // No hermes binary means `pets select` cannot work either; a direct
+      // download would land a pet nothing can activate, so stop here.
+      if (msg.includes("not installed on this device")) {
+        return cliFailure("hermes-missing", `install ${safe}`, msg);
+      }
+      cliDetail = msg;
     }
     // The download can time out mid-flight and leave a partial directory, so
-    // trust the store rather than the exit code.
-    if (!loadPet(safe)) return cliFailure("install-failed", `install ${safe}`, "no spritesheet after install");
+    // trust the store rather than the exit code — and when the CLI could not
+    // deliver at all (its manifest source can be down while the sprite CDN is
+    // fine), try the direct curated download before giving up.
+    if (!loadPet(safe) && (await installPetDirect(safe))) {
+      console.warn(`[pets] CLI install failed (${cliDetail || "no spritesheet"}); recovered ${safe} via direct download`);
+    }
+    if (!loadPet(safe)) {
+      return cliFailure("install-failed", `install ${safe}`, cliDetail || "no spritesheet after install");
+    }
   }
 
   try {

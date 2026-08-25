@@ -91,6 +91,23 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   const [enabled, setEnabled] = useState(true);
   const [toggling, setToggling] = useState(false);
 
+  // Installs made before the publisher was recorded in meta have none, and the
+  // slug alone cannot address a ClawHub page. Ask the store rather than linking
+  // somewhere that does not resolve; an unanswered lookup leaves this undefined
+  // and the link is simply not rendered.
+  const [resolvedDeveloper, setResolvedDeveloper] = useState<string | undefined>(storeApp.developer);
+
+  useEffect(() => {
+    setResolvedDeveloper(storeApp.developer);
+    if (storeApp.developer) return;
+    const controller = new AbortController();
+    fetch(`/setup-api/apps/store?slug=${encodeURIComponent(appId)}`, { signal: controller.signal })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => { if (typeof data?.developer === "string") setResolvedDeveloper(data.developer); })
+      .catch(() => { /* offline, or a skill the store does not list — no link. */ });
+    return () => controller.abort();
+  }, [appId, storeApp.developer]);
+
   useEffect(() => {
     fetch(`/setup-api/apps/skill-info?appId=${encodeURIComponent(appId)}`)
       .then((r) => r.ok ? r.json() : null)
@@ -110,6 +127,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   }, [SETTINGS_KEY, appId]);
 
   const appSettings = buildSettings(appId, skillInfo);
+  const hubUrl = clawhubSkillUrl(appId, resolvedDeveloper) || storeApp.url;
 
   const updateSetting = useCallback((key: string, value: string | boolean) => {
     setSettings(prev => {
@@ -322,15 +340,17 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
       {/* Footer */}
       <div className="shrink-0 px-6 py-4 border-t border-white/10 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <a
-            href={clawhubSkillUrl(appId, storeApp.developer) || storeApp.url || "https://clawhub.ai"}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }}>open_in_new</span>
-            ClawHub
-          </a>
+          {hubUrl && (
+            <a
+              href={hubUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>open_in_new</span>
+              ClawHub
+            </a>
+          )}
           <button
             onClick={() => onUninstall(appId)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer"

@@ -5,6 +5,7 @@ import StatusMessage from "./StatusMessage";
 import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import AIProviderIcon from "./AIProviderIcon";
+import { notifyProvidersChanged } from "@/lib/ui-events";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
 import {
@@ -37,11 +38,6 @@ import {
   resolveUiTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
-import {
-  readImageAllowance,
-  type ClawboxAiImageAllowance,
-} from "@/lib/clawbox-ai-models";
-import ClawboxAiImageAllowanceLine from "./ClawboxAiImageAllowanceLine";
 
 interface AIModelsStepProps {
   onNext?: () => void;
@@ -119,13 +115,12 @@ function getConnectButtonLabel(providerName?: string | null) {
 const CONFIGURING_STEP_DELAYS = [0, 2000, 5000, 12000, 22000];
 
 /**
- * How often the plan/allowance card re-asks the portal while mounted
- * (TASK-516). Slow on purpose: the number it protects moves at most twenty
- * times a day, and every tick is a portal round-trip. What it must beat is
- * "forever", which is what a mount-only read gave a Settings window the
- * desktop never unmounts.
+ * How often the plan card re-asks the portal while mounted (TASK-516). Slow on
+ * purpose: the tier it protects changes on an upgrade, not on a timer, and
+ * every tick is a portal round-trip. What it must beat is "forever", which is
+ * what a mount-only read gave a Settings window the desktop never unmounts.
  */
-const ALLOWANCE_REFRESH_MS = 30_000;
+const TIER_REFRESH_MS = 30_000;
 
 type ConfiguringKind = "generic" | "ollama" | "llamacpp";
 
@@ -628,13 +623,6 @@ export default function AIModelsStep({
   // portal-confirmed account as soon as an answer arrives. Local storage alone
   // is NOT the answer for a paired box — see TASK-468.
   const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => readStoredUiTier());
-  // The day's image allowance, as the portal reported it. Null until an answer
-  // arrives, and null again if the answer was not usable — never a placeholder.
-  // Whatever this is, it is what the panel renders; there is no fallback and
-  // there must not be one, because a default here is a guess at somebody's
-  // paid subscription. (TASK-469.)
-  const [imageAllowance, setImageAllowance] =
-    useState<ClawboxAiImageAllowance | null>(null);
   // Set the moment the user touches the plan picker. The reconcile below must
   // never yank the card out from under a pick that already happened — on the
   // wizard this picker is someone CHOOSING a plan they do not have yet.
@@ -749,16 +737,8 @@ export default function AIModelsStep({
           // stored device tier cannot tell Free from "we never asked" — guessing
           // from it is how a Free user got shown a paid plan in the first place.
           if (data.clawaiConfigured !== true || data.tierSource !== "portal") return;
-          // The allowance rides on the same live-portal gate as the tier badge,
-          // and for the same reason: `tierSource: "picker"` means nobody asked
-          // the portal this cycle, so any number attached to it is a leftover.
-          // Set unconditionally, including to null — an allowance that stays on
-          // screen after the portal stopped confirming it is a stale cap, and a
-          // stale cap is indistinguishable from a wrong one.
-          setImageAllowance(readImageAllowance(data.clawaiImages));
           // The tier guard sits at resolution time, not at fetch time: a pick
-          // made while this request was in flight must win over its answer —
-          // and the allowance above is real either way.
+          // made while this request was in flight must win over its answer.
           if (userPickedTierRef.current) return;
           setClawaiTier(resolveUiTier(true, data.clawaiAccountTier ?? null));
         })
@@ -773,7 +753,7 @@ export default function AIModelsStep({
     if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
     const interval = setInterval(() => {
       if (typeof document === "undefined" || document.visibilityState !== "hidden") refresh();
-    }, ALLOWANCE_REFRESH_MS);
+    }, TIER_REFRESH_MS);
     const onVisible = () => {
       if (document.visibilityState === "visible") refresh();
     };
@@ -851,6 +831,13 @@ export default function AIModelsStep({
     if (configureScope === "primary" && typeof window !== "undefined") {
       window.dispatchEvent(new Event("clawbox:primary-ai-configured"));
     }
+    // "The providers changed." Emitted HERE rather than from each host, because
+    // this is the one point every OpenClaw configure success passes through —
+    // pasted key, provider OAuth, and the ClawBox AI device login alike — and
+    // both the wizard and the embedded Settings panel reach it. A host-side
+    // emit would have to be repeated per host and would miss whichever one was
+    // added next.
+    notifyProvidersChanged();
     completeConfiguring();
   }, [completeConfiguring, configureScope, resetClawaiLogin]);
 
@@ -1825,7 +1812,13 @@ export default function AIModelsStep({
   // "Gemma 4" row with the whole cloud provider list (Anthropic, OpenAI,
   // DeepSeek, ClawBox AI…), which is not what "Local AI" means.
   if (edition === "hermes" && configureScope !== "local") {
-    return <HermesProviderConfig embedded={embedded} onNext={onNext} testId={testId} />;
+    return <HermesProviderConfig
+      embedded={embedded}
+      onNext={onNext}
+      testId={testId}
+      requestedProviderId={requestedProviderId}
+      providerSelectionRequest={providerSelectionRequest}
+    />;
   }
 
   return (
@@ -2069,13 +2062,6 @@ export default function AIModelsStep({
         {selected?.id === "clawai" && (
           <div className="mt-3 rounded-[var(--r-1)] border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4">
             <ClawboxAiPlanPicker tier={clawaiTier} onTierChange={persistClawaiTier} />
-            {/* Directly under the plan, because that is where somebody already
-                goes to find out what their plan is (TASK-469's decided
-                placement). Not on the chat surface: a counter beside every
-                message makes an assistant feel metered in a way that devalues
-                it — the number should be met when you go looking, or when it
-                starts to matter. */}
-            <ClawboxAiImageAllowanceLine allowance={imageAllowance} />
 
             {/* Subscription / API Key tabs — same shape as the OpenAI
                 provider, so users get one mental model for "device-flow

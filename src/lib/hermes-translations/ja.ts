@@ -74,10 +74,12 @@ export const ja: Record<string, string> = {
   "settings.security.wifiPasswordUpdated": "{ssid} のパスワードを変更しました",
 
   // === Panel chrome ===
-  "hermesProvider.title": "Hermes のモデル",
+  "hermesProvider.title": "AI プロバイダー",
   "hermesProvider.intro":
-    "このデバイスは Hermes で動作しています。推論プロバイダーと既定のモデルを選んでください — 切り替えは Hermes 側で行われ、ダッシュボードは必要ありません。",
+    "このデバイスは Hermes で動作します。プロバイダーを接続して既定を選んでください。状態の確認、サインイン、切り替えはすべてここで行えます。",
   "hermesProvider.radioGroupLabel": "AI プロバイダー",
+  "hermesProvider.hero.nativeSwitch": "Hermes を通じてネイティブに切り替わります",
+  "hermesProvider.hero.changeModel": "モデルを変更",
   "hermesProvider.continue": "次へ",
 
   // === Provider rows ===

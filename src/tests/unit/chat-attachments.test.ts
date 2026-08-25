@@ -127,6 +127,14 @@ describe("staging failure classification", () => {
 describe("safe error text", () => {
   it("drops paths, URLs, credentials and stack frames", () => {
     expect(sanitizeErrorMessage("wrote /home/clawbox/.openclaw/x")).toBeNull();
+    // QUOTED too, which is how a path actually arrives: every Node fs error
+    // wraps it in single quotes, and with only whitespace accepted as the
+    // boundary the whole string used to pass. Image generation is what put fs
+    // errors on a path that reaches a customer.
+    expect(
+      sanitizeErrorMessage("EACCES: permission denied, open '/home/clawbox/clawbox/data/x.png'"),
+    ).toBeNull();
+    expect(sanitizeErrorMessage('cannot read "/home/clawbox/.hermes/.env"')).toBeNull();
     expect(sanitizeErrorMessage("POST https://clawbox.com/api/ai failed")).toBeNull();
     expect(sanitizeErrorMessage("Bearer claw_abc123 rejected")).toBeNull();
     expect(sanitizeErrorMessage("TypeError\n    at handler (route.ts:12)")).toBeNull();

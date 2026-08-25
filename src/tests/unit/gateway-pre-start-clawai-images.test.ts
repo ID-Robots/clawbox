@@ -172,7 +172,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI image migration", 
   it("skips a raw (non claw_) deepseek key — that is the CI/e2e provisioning path", () => {
     // install.sh's CLAWBOX_AI_API_KEY branch writes a raw DeepSeek key pointed
     // at api.deepseek.com. There is no subscription behind it, so there is no
-    // image allowance to wire up and clawbox.com would 401 on every request.
+    // image provider to wire up and clawbox.com would 401 on every request.
     const { cfg, changed } = migrate({
       models: { providers: { deepseek: { apiKey: "sk-deepseek-raw", baseUrl: "https://api.deepseek.com" } } },
       agents: { defaults: {} },

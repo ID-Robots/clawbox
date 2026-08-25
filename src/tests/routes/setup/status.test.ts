@@ -97,6 +97,21 @@ describe("GET /setup-api/setup/status — unauthenticated payload", () => {
     expect(JSON.stringify(body)).not.toContain("12345:secret");
   });
 
+  // Middleware fails CLOSED on a config.json that exists but won't parse
+  // (provisioned box, damaged file — /setup stays session-gated). The status
+  // route must agree, or the /login page reads "wizard open", bounces to the
+  // gated /setup, and the two redirects loop forever with the form never
+  // rendered. The fail-open config-store read ({} on parse error) did exactly
+  // that; these flags now come from the fail-closed reader.
+  it("fails closed on a corrupt config.json so /login never bounces into a gated /setup", async () => {
+    await fs.writeFile(CONFIG_PATH, "{ definitely not json", "utf-8");
+
+    const body = await (await statusRoute(anonymousRequest())).json();
+
+    expect(body.setup_complete).toBe(true);
+    expect(body.password_configured).toBe(true);
+  });
+
   it("returns the full payload to a caller with a session", async () => {
     await fs.writeFile(CONFIG_PATH, JSON.stringify({
       setup_complete: true,

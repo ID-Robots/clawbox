@@ -24,10 +24,12 @@ const FACTS = {
   hasClawaiToken: true,
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
-  hermesStreamsTurns: true, hermesAgentDrawsImages: false
+  hermesStreamsTurns: true,
+  hasClawaiImageRoute: false,
+  hermesAgentDrawsImages: false,
 };
 const STREAMING_CAPS = capabilitiesFor("hermes", FACTS);
-const BLOCKING_CAPS = capabilitiesFor("hermes", { ...FACTS, hermesStreamsTurns: false , hermesAgentDrawsImages: false});
+const BLOCKING_CAPS = capabilitiesFor("hermes", { ...FACTS, hermesStreamsTurns: false });
 
 /** One SSE frame, framed the way the route frames it. */
 function frame(event: string, data: unknown): string {
@@ -237,5 +239,81 @@ describe("a Hermes turn that streams", () => {
     expect(result.text).toBe("spawned instead");
     expect(seen).toEqual([]);
     expect(adapter.threadedSessionId).toBe("20260823_190508_ce85d3");
+  });
+});
+
+describe("a Hermes turn that reports what it is doing", () => {
+  it("surfaces the tool steps as they arrive, in order, and still settles on done", async () => {
+    // The four minutes of nothing this exists to end: a `terminal` call on the
+    // live box ran 240.3s with `tool.start` at t+3.7s and `tool.complete` at
+    // t+244.0s. These are the only frames in that window, so a client that
+    // dropped them would show the same blank bubble as before while the box
+    // was plainly working.
+    const { adapter } = makeAdapter(
+      sseResponse([
+        frame("status", { text: "(⌐■_■) computing..." }),
+        frame("tool", { kind: "tool", phase: "start", id: "call_7", name: "terminal", detail: "uname -r" }),
+        frame("tool", {
+          kind: "tool",
+          phase: "result",
+          id: "call_7",
+          name: "terminal",
+          detail: "5.15.185-tegra",
+          status: "ok",
+        }),
+        frame("delta", { text: "The kernel is 5.15.185-tegra." }),
+        frame("done", {
+          text: "The kernel is 5.15.185-tegra.",
+          harness: "hermes",
+          sessionId: "20260823_190319_3e9e35",
+        }),
+      ]),
+    );
+    const seen: TurnEvent[] = [];
+    const result = await adapter.sendTurn(turn, (e) => seen.push(e));
+    expect(seen).toEqual([
+      { kind: "status", text: "(⌐■_■) computing..." },
+      { kind: "tool", phase: "start", id: "call_7", name: "terminal", detail: "uname -r" },
+      { kind: "tool", phase: "result", id: "call_7", name: "terminal", detail: "5.15.185-tegra", status: "ok" },
+      { kind: "delta", text: "The kernel is 5.15.185-tegra." },
+    ]);
+    // Progress is not record: the answer, and the thread, still come from the
+    // settled turn.
+    expect(result.text).toBe("The kernel is 5.15.185-tegra.");
+    expect(adapter.threadedSessionId).toBe("20260823_190319_3e9e35");
+  });
+
+  it("draws nothing for a tool frame that names no tool", async () => {
+    // A pill with no name tells the customer less than no pill at all, and it
+    // would sit there unclosable — nothing can match a `result` to it. The
+    // authoritative list still arrives on `done`, so dropping the frame costs
+    // the turn nothing.
+    const { adapter } = makeAdapter(
+      sseResponse([
+        frame("tool", { kind: "tool", phase: "start", id: "call_7", detail: "no name here" }),
+        frame("done", { text: "ok", harness: "hermes" }),
+      ]),
+    );
+    const seen: TurnEvent[] = [];
+    const result = await adapter.sendTurn(turn, (e) => seen.push(e));
+    expect(seen).toEqual([]);
+    expect(result.text).toBe("ok");
+  });
+
+  it("ignores an event name it does not know rather than failing the turn", async () => {
+    // The two halves of an upgrade do not land at the same instant, and a
+    // newer route may name a frame this client has never heard of. A turn the
+    // box has already paid for must not be lost to that.
+    const { adapter } = makeAdapter(
+      sseResponse([
+        frame("heartbeat", { at: 1_756_000_000 }),
+        frame("delta", { text: "still here" }),
+        frame("done", { text: "still here", harness: "hermes" }),
+      ]),
+    );
+    const seen: TurnEvent[] = [];
+    const result = await adapter.sendTurn(turn, (e) => seen.push(e));
+    expect(seen).toEqual([{ kind: "delta", text: "still here" }]);
+    expect(result.text).toBe("still here");
   });
 });

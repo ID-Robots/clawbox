@@ -61,7 +61,40 @@ export interface HarnessCapabilities {
   readonly maxAttachmentsPerTurn: number;
   /** The composer's microphone. */
   readonly canTranscribe: boolean;
+  /** A picture can be produced in this chat, by SOMETHING. */
   readonly canGenerateImages: boolean;
+  /**
+   * WHO makes that picture happen — the second half of `canGenerateImages`,
+   * and a separate flag because it has a separate answer per edition:
+   *
+   *   `'agent'`    the customer just asks, and the agent reaches for its own
+   *                image tool. OpenClaw, where the tool is a bundled plugin
+   *                wired up through `agents.defaults.imageGenerationModel`.
+   *                Nothing in the composer to render: the ordinary send path
+   *                already carries the request.
+   *   `'composer'` the BOX asks, because the agent has nothing REGISTERED to
+   *                reach for. Hermes, whose image-generation provider slot
+   *                exists and ships empty, so the picture is fetched from the
+   *                ClawBox AI images endpoint by `generateImage` below. This is
+   *                the value that puts a button in the composer.
+   *   `null`       no picture can be made here at all. Always the value when
+   *                `canGenerateImages` is false, and never a value when it is
+   *                true — the two are computed together for exactly that
+   *                reason.
+   *
+   * Recorded as a trigger rather than as a bare `showImageButton`, for the
+   * reason `reasoningScope` is a scope rather than `canSetReasoning`: the
+   * ability is present on both editions and only its ROUTE differs, and
+   * flattening that difference into a boolean about a control is how a UI ends
+   * up asking "is this Hermes?" again.
+   *
+   * It is also the seam where the OTHER half of this work merges. A Hermes box
+   * whose `image_gen` provider slot has been FILLED can be asked in plain words
+   * on every channel it answers on, not only in this chat — so such a box
+   * should report `'agent'`, the button should disappear, and the composer
+   * needs no edit at all for that to happen. One expression decides it.
+   */
+  readonly imageGenerationTrigger: "agent" | "composer" | null;
   /** Replies can be spoken back (TTS). */
   readonly canSpeakReplies: boolean;
   /** The Stop button. */
@@ -175,7 +208,24 @@ export type TurnEvent =
    */
   | { kind: "delta"; text: string }
   | { kind: "final"; text: string; media?: readonly string[] }
-  | { kind: "thinking"; on: boolean };
+  | { kind: "thinking"; on: boolean }
+  /**
+   * A step the agent is taking, WHILE it is taking it.
+   *
+   * `id` is stable from `start` to `result` so a surface can update the pill it
+   * already drew instead of adding a second one. This is progress, not record:
+   * the finished turn still carries its own `toolCalls`, and a surface that
+   * ignores this event is exactly as correct as it was before — it just shows a
+   * long tool call as silence, which is what this exists to end.
+   */
+  | { kind: "tool"; phase: "start" | "result"; id: string; name: string; detail?: string; status?: "ok" | "error" }
+  /**
+   * The agent's live status line — the spinner text.
+   *
+   * A heartbeat for the surface to show, and never the model's monologue.
+   * Thinking is reported only on the finished turn, in `reasoning`.
+   */
+  | { kind: "status"; text: string };
 
 export interface TurnResult {
   readonly text: string;
@@ -296,20 +346,36 @@ export interface HarnessAdapter {
    */
   patchSessionDefaults(patch: { thinkingLevel?: string | null }): Promise<void>;
 
+  /**
+   * Draw one picture and answer with what to render it from.
+   *
+   * Precondition: `capabilities.imageGenerationTrigger === 'composer'`. An
+   * adapter whose trigger is `'agent'` rejects with `HarnessError('unsupported')`
+   * and is right to — on that edition a picture is asked for by SENDING A TURN,
+   * and there is no second way to get one that this method could stand for.
+   * That is why the trigger is a capability of its own: without it, an OpenClaw
+   * box would report `canGenerateImages: true` beside a method that only
+   * throws, which is precisely the contradiction this table exists to prevent.
+   *
+   * The refs come back in the same `/setup-api/chat/media?path=…` form
+   * `TurnResult.media` uses, so one renderer draws a picture the agent made and
+   * one the box fetched, and both survive a refresh through the transcript.
+   *
+   * Rejects `HarnessError('aborted')` when `signal` fires — a customer who
+   * changed their mind is not a failure and must not become a red bubble.
+   */
+  generateImage(prompt: string, signal?: AbortSignal): Promise<{ media: readonly string[] }>;
+
   /*
    * RESERVED, and deliberately not declared yet:
    *
    *   stageAttachment(file: Blob, filename: string): Promise<StagedAttachment>
    *   transcribe(blob: Blob, filename: string, signal?: AbortSignal): Promise<string>
-   *   generateImage(prompt: string, signal?: AbortSignal): Promise<{ media: readonly string[] }>
    *
-   * All three go through routes that are already edition-neutral, so today the
+   * Both go through routes that are already edition-neutral, so today the
    * composer calls them directly and no adapter is in the way. They join this
-   * interface — with exactly the signatures above, so both adapters and the
-   * component agree on one shape — when the work that makes them differ per
-   * edition lands: Hermes attachments (`chat --image` plus the staging root),
-   * and Hermes image generation (the ClawBox AI images endpoint, since Hermes
-   * has no image-provider plugin slot to grow). Declaring them now would mean
-   * two adapters carrying bodies that only throw.
+   * interface when the work that makes them differ per edition lands — Hermes
+   * attachments (`chat --image` plus the staging root). Declaring them now would
+   * mean two adapters carrying bodies that only throw.
    */
 }

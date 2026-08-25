@@ -26,7 +26,20 @@ export function sanitizeErrorMessage(raw: unknown): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   // A POSIX-looking path segment: `/home/clawbox/…`, `…/.openclaw/media/…`.
-  if (/(^|\s)\/[\w.-]+\//.test(trimmed)) return null;
+  //
+  // Anchored on a boundary rather than matched anywhere, so an ordinary
+  // sentence with a slash in it ("2/3 of the file") is not mistaken for one.
+  // The boundary set has to include the QUOTE characters, and that is not a
+  // nicety: Node's own fs errors are the single most likely way a path reaches
+  // this function, and every one of them quotes it —
+  //
+  //   EACCES: permission denied, open '/home/clawbox/clawbox/data/…'
+  //
+  // With only whitespace accepted as the boundary, that string passed whole and
+  // the customer's home directory and our media layout went into a chat bubble.
+  // Found while wiring image generation, which writes files and so put fs
+  // errors on a path that reaches a customer for the first time.
+  if (/(^|[\s'"`(\[])\/[\w.-]+\//.test(trimmed)) return null;
   if (/https?:\/\//i.test(trimmed)) return null;
   if (/\b(claw_|sk-|Bearer\s)/i.test(trimmed)) return null;
   // `at fn (` — a V8 stack frame.

@@ -38,11 +38,11 @@ import {
 import { appendTranscript } from "@/lib/harness/transcript-store";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
-import { extractReasoningPanels } from "@/lib/hermes-reasoning-panel";
+import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
 import { adoptHermesGeneratedImages, reclaimImageMentions } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
-import { openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
+import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -357,6 +357,17 @@ interface TurnPayload {
   reasoning?: string;
   toolCalls?: readonly unknown[];
   sessionId?: string;
+  /**
+   * The model that actually served this turn, and its provider.
+   *
+   * Recorded because the alternative was proven to hide a real defect: with the
+   * pills showing one model and the session running another, nothing in the
+   * reply said which had answered, and the mismatch was only found by asking
+   * the model directly. Stored per turn, so a conversation that changed models
+   * halfway keeps an accurate account of which reply came from where.
+   */
+  model?: string;
+  provider?: string;
 }
 
 /** Did the caller ask to be streamed to, rather than handed a finished turn? */
@@ -394,6 +405,7 @@ async function settleTurn(
   threaded: string,
   consoleText: string,
   streamedReasoning: string,
+  served: { model?: string; provider?: string } = {},
 ): Promise<TurnPayload> {
   const consoleReply = extractReasoningPanels(consoleText);
   const record = await readHermesTurn(threaded);
@@ -428,7 +440,14 @@ async function settleTurn(
   // The database first, the console parse next, and what the stream itself
   // carried as the floor — the last only matters when the turn ran but its row
   // could not be read back, which is the one case the other two are both empty.
-  const settledReasoning = record?.reasoning || consoleReply.reasoning || streamedReasoning;
+  // The agent's spinner text is not reasoning — see `stripAgentStatusFrames`.
+  // Applied to whichever source won, because each can carry it for a different
+  // reason (an older record already stored one; the CLI can print one to
+  // stdout), and a turn left with nothing but status frames must end with NO
+  // reasoning at all: an empty disclosure reads worse than an absent one.
+  const settledReasoning = stripAgentStatusFrames(
+    record?.reasoning || consoleReply.reasoning || streamedReasoning,
+  );
   const toolCalls = record?.toolCalls;
   // The ANSWER, and only on success. Media is split here rather than stored raw
   // so that the record holds exactly what the bubble renders, and a refreshed
@@ -445,6 +464,13 @@ async function settleTurn(
     // collapse the monologue the same way the live turn did.
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
     ...(toolCalls?.length ? { toolCalls } : {}),
+    // Which model actually answered. `state.db`'s `messages` table has no model
+    // column, so the agent's turn record cannot supply this; the dashboard's
+    // own `info` for the session — read at the moment the turn was submitted,
+    // after any switch had been applied and acknowledged — is the authoritative
+    // answer available, and it is the one the transport hands back.
+    ...(served.model ? { model: served.model } : {}),
+    ...(served.provider ? { provider: served.provider } : {}),
   });
   return {
     text: answer,
@@ -452,6 +478,8 @@ async function settleTurn(
     ...(settledReasoning ? { reasoning: settledReasoning } : {}),
     ...(toolCalls?.length ? { toolCalls } : {}),
     ...(threaded ? { sessionId: threaded } : {}),
+    ...(served.model ? { model: served.model } : {}),
+    ...(served.provider ? { provider: served.provider } : {}),
   };
 }
 
@@ -466,6 +494,14 @@ async function settleTurn(
  *             route does not forward it, so the raw thinking cannot flash into
  *             the bubble mid-stream. That is a property of the transport, not a
  *             filter that has to stay correct.
+ *   `tool`  — a step the agent is taking RIGHT NOW, `phase` moving start →
+ *             result. Not the record: the authoritative tool list still comes
+ *             from the agent's database on `done`, and this is the live view
+ *             that keeps a tool-heavy turn from looking like a hang. A turn can
+ *             spend minutes inside one call emitting no text at all — measured
+ *             at 240 seconds on the box — and before this the customer's only
+ *             evidence that anything was happening was that nothing was.
+ *   `status`— the agent's spinner line. A heartbeat, never the monologue.
  *   `done`  — the settled turn, byte-identical in shape to what the non-
  *             streaming path returns, including the tool steps and the
  *             deduplicated reasoning that only the agent's database has.
@@ -482,9 +518,15 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
       const send = (event: string, data: unknown) => {
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`));
       };
+      const threaded = turn.sessionId || fallbackSessionId;
       try {
-        const final = await turn.run((chunk) => send("delta", { text: chunk }));
-        const threaded = turn.sessionId || fallbackSessionId;
+        const final = await turn.run(
+          (chunk) => send("delta", { text: chunk }),
+          (activity) => {
+            if (activity.kind === "tool") send("tool", activity);
+            else send("status", { text: activity.text });
+          },
+        );
         if (final.status === "error") {
           const detail = final.error || final.text || "Hermes chat failed";
           await appendTranscript({
@@ -495,10 +537,49 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
           });
           send("error", { error: detail });
         } else {
-          send("done", await settleTurn(threaded, final.text, final.reasoning));
+          send(
+            "done",
+            await settleTurn(threaded, final.text, final.reasoning, {
+              // What the transport says answered, preferring the turn's own
+              // report over the session's setting when it offers one.
+              ...(final.model || turn.model ? { model: final.model || turn.model } : {}),
+              ...(final.provider || turn.provider ? { provider: final.provider || turn.provider } : {}),
+            }),
+          );
         }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Hermes chat failed";
+        // ── Silence is not failure: ask the agent before saying so ─────────
+        //
+        // A quiet stream means this socket stopped hearing. It does NOT mean
+        // the turn did not happen, and on the live box the difference was the
+        // whole bug. From the customer's own transcript: they asked a question
+        // at 20:10:44, the agent ran two tools and wrote its 582-character
+        // answer to `state.db` at 20:11:12, and its `message.complete` never
+        // reached us. This route waited out the idle window and wrote "Error:
+        // dashboard stream went quiet" into their transcript at 20:14:13 — a
+        // finished answer thrown away and replaced with a failure, three
+        // minutes after it was ready.
+        //
+        // So before reporting silence, read the record. `readHermesTurn` is
+        // the same source `settleTurn` already trusts for every turn's
+        // reasoning and tool steps, and it is self-guarding here: it slices
+        // from the LAST user row, which is this turn's question, and returns
+        // null unless an assistant answer follows it. A turn that really is
+        // still thinking has no such row and still reports the failure.
+        if (isQuietStreamError(err) && !isAbort(err)) {
+          const recovered = await readHermesTurn(threaded).catch(() => null);
+          if (recovered?.text) {
+            send(
+              "done",
+              await settleTurn(threaded, recovered.text, "", {
+                ...(turn.model ? { model: turn.model } : {}),
+                ...(turn.provider ? { provider: turn.provider } : {}),
+              }),
+            );
+            return;
+          }
+        }
         // A failure is recorded too — see the non-streaming path's note. The one
         // exception is a caller who hung up: the socket dies as a consequence of
         // their own Stop, and their unanswered question is already recorded.
@@ -853,7 +934,14 @@ export async function POST(request: Request) {
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
-    const answered = await settleTurn(threaded, text, "");
+    // The CLI path runs exactly what argv asked for — `-m` and `--provider` are
+    // passed straight to the command, with no session to drift from — so the
+    // request IS the record here. When no model was named, the run used
+    // config.yaml's default and this route does not presume to name it.
+    const answered = await settleTurn(threaded, text, "", {
+      ...(rawModel ? { model: rawModel } : {}),
+      ...(wantsProvider ? { provider: rawProvider } : {}),
+    });
     return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {

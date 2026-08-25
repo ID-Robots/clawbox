@@ -390,4 +390,29 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
       throw gatewayError(err);
     }
   }
+
+  /**
+   * Never called, and correct to refuse.
+   *
+   * On this edition a picture is asked for by SENDING A TURN: the customer says
+   * what they want, the agent reaches for its own image tool, and the answer
+   * comes back with a `MEDIA:` line the ordinary reply path already renders. So
+   * `capabilities.imageGenerationTrigger` is `'agent'` here and nothing in the
+   * composer offers a second way to ask.
+   *
+   * `unsupported` and not a silent no-op, per this interface's own rule: a
+   * caller that reached this line ignored the trigger, and that is a bug worth
+   * failing a test over rather than a button that quietly does nothing.
+   *
+   * Note this does NOT contradict `canGenerateImages: true` next door. That
+   * flag says a picture can be made on this box; the trigger says who makes it,
+   * and only `'composer'` names this method. The pair exists precisely so this
+   * body can throw without the capability table telling a lie.
+   */
+  async generateImage(): Promise<{ media: readonly string[] }> {
+    throw new HarnessError(
+      "unsupported",
+      "On this box, just ask for the picture in the chat and the assistant will draw it.",
+    );
+  }
 }

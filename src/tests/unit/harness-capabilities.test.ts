@@ -22,6 +22,7 @@ const linked: HarnessFacts = {
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
 };
 const bare: HarnessFacts = {
@@ -29,6 +30,7 @@ const bare: HarnessFacts = {
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
 };
 /** The box the attach button is honest on: the flag AND somewhere to look. */
@@ -37,6 +39,7 @@ const seeing: HarnessFacts = {
   hermesSupportsImages: true,
   hermesHasVisionRoute: true,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
   hermesAgentDrawsImages: false,
 };
 /** A linked box whose agent has an image backend selected — it can draw. */
@@ -45,6 +48,7 @@ const drawing: HarnessFacts = {
   hermesSupportsImages: false,
   hermesHasVisionRoute: false,
   hermesStreamsTurns: false,
+  hasClawaiImageRoute: false,
   hermesAgentDrawsImages: true,
 };
 
@@ -68,10 +72,14 @@ describe("capabilitiesFor", () => {
       const caps = capabilitiesFor("openclaw", facts);
       expect(caps.canTranscribe).toBe(caps.canGenerateImages);
     }
-    // Hermes is deliberately NOT symmetrical, and for a reason that is not the
-    // credential: linking installs the image backend, but that write is
-    // fail-soft, so a box can hold the token and still have nothing to draw
-    // with. The microphone follows the token; drawing follows the config.
+    // Hermes is deliberately NOT symmetrical, and for two stacked reasons that
+    // are not the credential. Drawing follows the CONFIG first: linking
+    // installs the agent's image backend, but that write is fail-soft, so a
+    // box can hold the token and still have nothing to draw with. And the
+    // composer fallback needs a second thing transcription does not — the
+    // proxy must still be SERVING the image model this box asks for, which is
+    // a fact about the far side and is therefore probed. The microphone
+    // follows the token; drawing follows the config, then the probe.
     expect(capabilitiesFor("hermes", linked).canTranscribe).toBe(true);
     expect(capabilitiesFor("hermes", linked).canGenerateImages).toBe(false);
     expect(capabilitiesFor("hermes", drawing).canGenerateImages).toBe(true);
@@ -84,14 +92,67 @@ describe("capabilitiesFor", () => {
     expect(capabilitiesFor("openclaw", bare).canGenerateImages).toBe(false);
   });
 
-  it("promises pictures on Hermes only once the agent has a backend to reach for", () => {
+  it("needs a credential AND a live image route before Hermes offers the composer button", () => {
+    // The two halves, and neither is enough alone. This is the same shape as
+    // `canAttachImages` next door — a turn that CARRIES the file plus
+    // something that LOOKS at it — for the same reason: half an ability is a
+    // button that ends in an error bubble.
+    const composerDrawing = { ...linked, hasClawaiImageRoute: true };
+    expect(capabilitiesFor("hermes", composerDrawing).canGenerateImages).toBe(true);
+    expect(capabilitiesFor("hermes", composerDrawing).imageGenerationTrigger).toBe("composer");
+  });
+
+  it("promises pictures on Hermes once the agent has a backend to reach for", () => {
     // The config, not the credential, and the difference is a real box: a
     // device linked through a path that could not install the backend holds a
-    // perfectly good token and cannot draw. Reading the token there would put a
-    // promise in front of a customer that the next request cannot keep.
+    // perfectly good token and cannot draw through the agent. Reading the
+    // token alone would put a promise in front of a customer that the next
+    // request cannot keep.
     expect(capabilitiesFor("hermes", drawing).canGenerateImages).toBe(true);
+    expect(capabilitiesFor("hermes", drawing).imageGenerationTrigger).toBe("agent");
+    // Credential, no route, no backend: nothing to draw with.
     expect(capabilitiesFor("hermes", linked).canGenerateImages).toBe(false);
+    // Route, no credential: the service is up and this box cannot pay for it.
+    expect(
+      capabilitiesFor("hermes", { ...bare, hasClawaiImageRoute: true }).canGenerateImages,
+    ).toBe(false);
     expect(capabilitiesFor("hermes", bare).canGenerateImages).toBe(false);
+  });
+
+  it("says WHO draws, not merely that something can", () => {
+    // The trigger is what puts a button in the composer, and it exists so that
+    // `generateImage` can refuse on OpenClaw without the table contradicting
+    // itself: there, `canGenerateImages` is true and the method throws, because
+    // the customer asks for a picture by sending a turn.
+    expect(capabilitiesFor("openclaw", linked).imageGenerationTrigger).toBe("agent");
+    expect(
+      capabilitiesFor("hermes", { ...linked, hasClawaiImageRoute: true }).imageGenerationTrigger,
+    ).toBe("composer");
+    // And the agent wins the moment it has its own backend: the button yields
+    // to asking in plain words.
+    expect(capabilitiesFor("hermes", drawing).imageGenerationTrigger).toBe("agent");
+  });
+
+  it("never names a trigger for a picture that cannot be made", () => {
+    // The pair is computed from one expression precisely so this holds. A
+    // `'composer'` beside a false flag would be a button over a route the box
+    // cannot reach; a null beside a true flag would be an ability with no way
+    // to invoke it.
+    const every = [
+      linked,
+      bare,
+      seeing,
+      drawing,
+      { ...linked, hasClawaiImageRoute: true },
+      { ...bare, hasClawaiImageRoute: true },
+      { ...seeing, hasClawaiImageRoute: true },
+    ];
+    for (const id of ["hermes", "openclaw"] as const) {
+      for (const facts of every) {
+        const caps = capabilitiesFor(id, facts);
+        expect(caps.canGenerateImages).toBe(caps.imageGenerationTrigger !== null);
+      }
+    }
   });
 
   it("assumes a box cannot draw until it has said otherwise", () => {
@@ -124,8 +185,8 @@ describe("capabilitiesFor", () => {
     // And the box that can: the claim follows the probe, nothing else. Not the
     // credential, not the image flags — a linked box with no dashboard running
     // still cannot stream, and an unlinked one with a dashboard still can.
-    expect(capabilitiesFor("hermes", { ...bare, hermesStreamsTurns: true , hermesAgentDrawsImages: false}).streamsTurns).toBe(true);
-    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true , hermesAgentDrawsImages: false}).streamsTurns).toBe(true);
+    expect(capabilitiesFor("hermes", { ...bare, hermesStreamsTurns: true }).streamsTurns).toBe(true);
+    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true }).streamsTurns).toBe(true);
   });
 
   it("keeps the connection banner honest even when turns stream", () => {
@@ -135,11 +196,11 @@ describe("capabilitiesFor", () => {
     // answer lands; there is no connection for the surface to report on, and
     // three things read this flag: the queue-while-disconnected branch, the
     // replay-on-mount effect, and the transcript route's own ownership gate.
-    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true , hermesAgentDrawsImages: false}).hasLiveConnection).toBe(
+    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true }).hasLiveConnection).toBe(
       false,
     );
     // The transcript stays ours to serve, which is what that gate turns on.
-    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true , hermesAgentDrawsImages: false}).canListHistory).toBe(true);
+    expect(capabilitiesFor("hermes", { ...seeing, hermesStreamsTurns: true }).canListHistory).toBe(true);
   });
 
   it("never hides the attach button on the strength of a guess", () => {
@@ -159,7 +220,9 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: false,
         hermesSupportsImages: true,
         hermesHasVisionRoute: false,
-        hermesStreamsTurns: false, hermesAgentDrawsImages: false
+        hermesStreamsTurns: false,
+        hasClawaiImageRoute: false,
+        hermesAgentDrawsImages: false,
       }).canAttachImages,
     ).toBe(false);
     // And the mirror: a vision route on an agent whose turn cannot carry the
@@ -169,7 +232,9 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: true,
         hermesSupportsImages: false,
         hermesHasVisionRoute: true,
-        hermesStreamsTurns: false, hermesAgentDrawsImages: false
+        hermesStreamsTurns: false,
+        hasClawaiImageRoute: false,
+        hermesAgentDrawsImages: false,
       }).canAttachImages,
     ).toBe(false);
   });
@@ -186,7 +251,9 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: true,
         hermesSupportsImages: true,
         hermesHasVisionRoute: false,
-        hermesStreamsTurns: false, hermesAgentDrawsImages: false
+        hermesStreamsTurns: false,
+        hasClawaiImageRoute: false,
+        hermesAgentDrawsImages: false,
       }).canAttachImages,
     ).toBe(false);
     expect(
@@ -194,7 +261,9 @@ describe("capabilitiesFor", () => {
         hasClawaiToken: false,
         hermesSupportsImages: true,
         hermesHasVisionRoute: true,
-        hermesStreamsTurns: false, hermesAgentDrawsImages: false
+        hermesStreamsTurns: false,
+        hasClawaiImageRoute: false,
+        hermesAgentDrawsImages: false,
       }).canAttachImages,
     ).toBe(true);
   });
@@ -223,6 +292,11 @@ describe("capabilitiesFor", () => {
     // be able to move.
     expect(UNKNOWN_FACTS.hermesStreamsTurns).toBe(false);
     expect(capabilitiesFor("hermes", UNKNOWN_FACTS).streamsTurns).toBe(false);
+    // And no picture button before the box has said there is somewhere to send
+    // a prompt: a control that appears and then vanishes when the facts land is
+    // worse than one that appears a beat late.
+    expect(UNKNOWN_FACTS.hasClawaiImageRoute).toBe(false);
+    expect(capabilitiesFor("hermes", UNKNOWN_FACTS).imageGenerationTrigger).toBeNull();
   });
 });
 

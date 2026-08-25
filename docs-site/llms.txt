@@ -38,6 +38,7 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 
 - [Troubleshooting](https://docs.clawbox.com/support/troubleshooting): symptom-first diagnostic ladders — can't reach the box, browser rejects password (SSH works), updates stuck, provider 401s, gateway token mismatch, Telegram
 - [Recovery](https://docs.clawbox.com/support/recovery): ordered recovery options — password reset (sudo passwd clawbox), service restart, safe reinstall (hard-sync + install.sh), factory reset (password → clawbox, AP mode)
+- [Forgot the Password](https://docs.clawbox.com/support/password-recovery): recovery with no password and no SSH — the password is always one of two candidates (wizard-set, or factory `clawbox` after a COMPLETED reset; a reset that failed partway leaves the wizard-set password in place), factory reset needs only a live session (not the password), and the one state that genuinely needs SSH
 - [Updating ClawBox](https://docs.clawbox.com/support/updating): the supported update paths
 - [FAQ](https://docs.clawbox.com/support/faq)
 
