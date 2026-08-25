@@ -20,6 +20,8 @@ describe("/setup-api/tunnel/status", () => {
       running: true,
       tunnelUrl: "https://abc.trycloudflare.com",
       error: null,
+      service: "active",
+      managedBy: "systemd",
     });
     tunnelMock.isCloudflaredInstalled.mockResolvedValue(true);
 
@@ -32,8 +34,36 @@ describe("/setup-api/tunnel/status", () => {
       running: true,
       tunnelUrl: "https://abc.trycloudflare.com",
       error: null,
+      service: "active",
+      managedBy: "systemd",
       cloudflaredInstalled: true,
     });
+  });
+
+  /**
+   * TASK-453 round 2 (smoke). The route passes the unit state and the URL
+   * straight through, so support can tell "off" from "on, run by systemd" —
+   * the box that reported running:false while serving the public internet is
+   * exactly the shape below.
+   */
+  it("surfaces the systemd unit state and its published URL", async () => {
+    tunnelMock.getTunnelStatus.mockResolvedValue({
+      enabled: true,
+      running: true,
+      tunnelUrl: "https://stat-door-tournament-resorts.trycloudflare.com",
+      error: null,
+      service: "active",
+      managedBy: "systemd",
+    });
+    tunnelMock.isCloudflaredInstalled.mockResolvedValue(true);
+
+    const mod = await import("@/app/setup-api/tunnel/status/route");
+    const body = await (await mod.GET()).json();
+
+    expect(body.running).toBe(true);
+    expect(body.service).toBe("active");
+    expect(body.managedBy).toBe("systemd");
+    expect(body.tunnelUrl).toBe("https://stat-door-tournament-resorts.trycloudflare.com");
   });
 
   it("reports not-running with cloudflaredInstalled=false", async () => {
@@ -42,6 +72,8 @@ describe("/setup-api/tunnel/status", () => {
       running: false,
       tunnelUrl: null,
       error: null,
+      service: "inactive",
+      managedBy: null,
     });
     tunnelMock.isCloudflaredInstalled.mockResolvedValue(false);
 

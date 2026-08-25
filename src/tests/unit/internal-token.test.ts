@@ -65,7 +65,12 @@ describe("the internal token", () => {
 
     expect(verifyInternalToken(token)).toBe(true);
     expect(verifyInternalToken(` ${token} `)).toBe(true);
-    expect(verifyInternalToken(token.slice(0, -1) + "0")).toBe(false);
+    // One character off — and it has to BE off. The token is 64 random hex
+    // characters, so pinning the replacement to "0" produced the token itself
+    // once every sixteen mints; verify then correctly answered true and this
+    // line failed as "expected true to be false" on ~6% of CI runs.
+    const wrongTail = token.endsWith("0") ? "1" : "0";
+    expect(verifyInternalToken(token.slice(0, -1) + wrongTail)).toBe(false);
     expect(verifyInternalToken(token + "x")).toBe(false);
     expect(verifyInternalToken("")).toBe(false);
     expect(verifyInternalToken(null)).toBe(false);

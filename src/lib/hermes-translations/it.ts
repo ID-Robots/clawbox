@@ -83,10 +83,12 @@ export const it: Record<string, string> = {
   "settings.security.wifiPasswordUpdated": "Password aggiornata per {ssid}",
 
   // === Panel chrome ===
-  "hermesProvider.title": "Modelli Hermes",
+  "hermesProvider.title": "Provider IA",
   "hermesProvider.intro":
-    "Questo dispositivo funziona con Hermes. Scegli un provider di inferenza e un modello predefinito — Hermes li cambia in modo nativo, senza bisogno di dashboard.",
+    "Questo dispositivo funziona con Hermes. Collega i provider e scegli quello predefinito: stato, accesso e cambio sono tutti qui.",
   "hermesProvider.radioGroupLabel": "Provider IA",
+  "hermesProvider.hero.nativeSwitch": "cambia in modo nativo tramite Hermes",
+  "hermesProvider.hero.changeModel": "Cambia modello",
   "hermesProvider.continue": "Continua",
 
   // === Provider rows ===

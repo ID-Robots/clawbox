@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { HERMES_MODEL_STATE_EVENT } from "@/hooks/useHermesModelOptions";
+import { PROVIDER_SIGNAL_DEBOUNCE_MS } from "@/lib/ui-events";
 
 /**
  * The chat header re-seeds whenever a provider is configured, and there are now
@@ -35,6 +36,24 @@ function seedBody(provider: string, providers: string[]) {
 
 /** Queued responses for the unscoped seed route, resolved by hand. */
 const pending: Deferred[] = [];
+
+/**
+ * Fire the "providers changed" signal and let the shared subscriber's debounce
+ * elapse, so this really does start ONE seed.
+ *
+ * The two signals in these tests have to be spaced. `onProvidersChanged`
+ * coalesces a burst into a single refetch on purpose — one key save emits twice,
+ * once for the credential and once for the pairing — so two back-to-back
+ * dispatches produce one seed and there is no race left to test. Spacing them
+ * is also the truer model of what these tests describe: two configures a moment
+ * apart, the first one's response still in flight.
+ */
+async function dispatchSeedSignal() {
+  await act(async () => {
+    window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
+    await new Promise((resolve) => setTimeout(resolve, PROVIDER_SIGNAL_DEBOUNCE_MS + 50));
+  });
+}
 
 function installFetch() {
   vi.stubGlobal(
@@ -117,10 +136,9 @@ describe("overlapping Hermes header seeds", () => {
     await waitFor(() => expect(providerPill()).toHaveAccessibleName("Chat provider: OpenRouter"));
 
     // Two configures land back to back — two seeds now in flight.
-    await act(async () => {
-      window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
-      window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
-    });
+    await dispatchSeedSignal();
+    await waitFor(() => expect(pending.length).toBe(2));
+    await dispatchSeedSignal();
     await waitFor(() => expect(pending.length).toBe(3));
 
     // The SECOND (newest) answers first: the device moved to Anthropic.
@@ -144,10 +162,9 @@ describe("overlapping Hermes header seeds", () => {
     await settle(0, seedBody("openrouter", ["openrouter"]));
     await waitFor(() => expect(providerPill()).toBeTruthy());
 
-    await act(async () => {
-      window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
-      window.dispatchEvent(new Event(HERMES_MODEL_STATE_EVENT));
-    });
+    await dispatchSeedSignal();
+    await waitFor(() => expect(pending.length).toBe(2));
+    await dispatchSeedSignal();
     await waitFor(() => expect(pending.length).toBe(3));
 
     await settle(2, seedBody("anthropic", ["openrouter", "anthropic", "deepseek"]));

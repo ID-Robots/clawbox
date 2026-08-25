@@ -59,10 +59,12 @@ export const bg: Record<string, string> = {
   "settings.security.wifiPasswordUpdated": "Паролата за {ssid} е сменена",
 
   // === Panel chrome ===
-  "hermesProvider.title": "Модели на Hermes",
+  "hermesProvider.title": "AI доставчици",
   "hermesProvider.intro":
-    "Това устройство работи с Hermes. Изберете AI доставчик и модел по подразбиране — Hermes ги превключва сам, без нужда от табло.",
+    "Това устройство работи с Hermes. Свържете доставчици и изберете основния — състояние, вход и превключване са тук.",
   "hermesProvider.radioGroupLabel": "AI доставчик",
+  "hermesProvider.hero.nativeSwitch": "превключва се директно през Hermes",
+  "hermesProvider.hero.changeModel": "Смяна на модела",
   "hermesProvider.continue": "Продължи",
 
   // === Provider rows ===

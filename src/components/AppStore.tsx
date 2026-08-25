@@ -503,10 +503,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // and otherwise fall back to the list's bucketed "2800+" string. One value
     // feeds both the header and the Downloads stat so they can't disagree.
     const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString() : selectedApp.installs;
-    // The API's own `clawhubUrl` omits the publisher segment, so it points at
-    // a page ClawHub does not serve; build the canonical one and keep the API's
-    // links only as a fallback for listings with no publisher.
-    const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || detail?.clawhubUrl || selectedApp.url;
+    // Built from publisher + slug rather than taken from the API: its own
+    // `clawhubUrl` omits the publisher segment and lands on a page ClawHub does
+    // not serve, so it is not worth falling back to. See src/lib/clawhub-url.ts.
+    const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || selectedApp.url;
+
     return (
       <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
         {confirmModal}
@@ -610,10 +611,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             </div>
           )}
 
-          {/* Store link — prefer the canonical ClawHub page (full write-up).
-              Built from publisher + slug, not from the API's `clawhubUrl`:
-              that field omits the publisher segment and lands on a page that
-              does not exist. See src/lib/clawhub-url.ts. */}
+          {/* Store link — the canonical ClawHub page (full write-up). */}
           {hubUrl && (
             <a href={hubUrl} target="_blank" rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs transition-colors"
