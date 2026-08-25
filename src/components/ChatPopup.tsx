@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
+import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
@@ -485,6 +486,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const queuedSendsRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
   useEffect(() => { queuedSendsRef.current = queuedSends }, [queuedSends])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
+  // The questions the agent is currently parked on, newest last.
+  //
+  // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
+  // its pictures, its tool steps, its reasoning — is written into `ChatMessage`
+  // and comes back from `chat-history-cache` after a refresh, because it is a
+  // RECORD. A clarify is not: it is a control that only works while the agent
+  // is still parked on that `requestId`, and the moment the page reloads that
+  // wait is over. A card replayed from the cache would be an interactive-
+  // looking widget inviting an answer that no route could deliver, which is
+  // worse than no card at all. So it lives here, in transient state, and
+  // `chat-history-cache.ts` gains no field for it.
+  const [clarifies, setClarifies] = useState<ClarifyCardState[]>([])
+  const clearClarifies = useCallback(() => {
+    setClarifies(prev => (prev.length === 0 ? prev : []))
+  }, [])
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
@@ -1742,10 +1758,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // a live turn beats all three, which left the previous turn's pills sitting
     // under an empty conversation.
     clearToolCalls()
+    // And the same for a question the previous turn was parked on: the thread
+    // it belonged to is gone, so answering it now would push a reply into a
+    // conversation the agent has been told to forget.
+    clearClarifies()
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [clearToolCalls])
+  }, [clearToolCalls, clearClarifies])
 
   const resetSession = useCallback(async () => {
     await adapter.resetSession()
@@ -2272,6 +2292,46 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setVoice(IDLE_STATUS)
   }, [caps.canTranscribe, voice.state, abandonRecording])
 
+  // Deliver one clarify answer.
+  //
+  // The gateway unblocks the agent only once EVERY question in the request has
+  // been answered, so a batch is one POST per question rather than one POST
+  // carrying them all — and `questionId` is what tells the two apart.
+  const answerClarify = useCallback(async (requestId: string, qid: string, answer: string) => {
+    // Locked optimistically, so the question collapses at once and a second
+    // answer cannot be sent while the first is still in flight. The catch below
+    // puts it back: a control that looks answered but never reached the agent
+    // is the one failure a customer cannot see and cannot recover from.
+    setClarifies(prev => prev.map(card => (card.requestId === requestId
+      ? { ...card, answered: { ...card.answered, [qid]: answer }, failed: false }
+      : card)))
+    try {
+      const res = await fetch('/setup-api/hermes/chat/clarify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // `questionId` rides along only for a BATCH. A single clarify arrives
+        // with an empty qid and the route wants the field omitted, not empty.
+        body: JSON.stringify({ requestId, answer, ...(qid ? { questionId: qid } : {}) }),
+      })
+      if (!res.ok) throw new Error(`clarify answer refused with ${res.status}`)
+      const body = await res.json().catch(() => ({})) as { status?: unknown }
+      // Expiry is not a failure: the agent simply stopped waiting. The card
+      // says so and goes quiet, because a red "could not send" would invite a
+      // retry that can never succeed.
+      if (body.status === 'expired') setClarifies(prev => expireClarifyCard(prev, requestId))
+    } catch {
+      // Same polite `role="status"` treatment the attachment and voice rows
+      // use — the message renders inside the card, next to the control that
+      // came back.
+      setClarifies(prev => prev.map(card => {
+        if (card.requestId !== requestId) return card
+        const answered = { ...card.answered }
+        delete answered[qid]
+        return { ...card, answered, failed: true }
+      }))
+    }
+  }, [])
+
   // ONE send path.
   //
   // Which harness answers, whether the reply streams or lands whole, and
@@ -2320,6 +2380,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         else if (event.kind === 'tool' && runIdRef.current !== null) {
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
         }
+        // The agent has parked on a question. Held by `requestId`, so a
+        // reconnect's REPLAY of a prompt still being waited on folds into the
+        // card already on screen instead of drawing a second one beside it —
+        // and gated on the live run for the reason a delta is: a prompt that
+        // arrives after the turn ended belongs to nothing anyone can answer.
+        else if (event.kind === 'clarify' && runIdRef.current !== null) {
+          setClarifies(prev => upsertClarifyCard(prev, event))
+        }
+        // NOT gated on the run: an expiry is precisely the frame that can
+        // arrive once everything else has stopped, and a card left looking
+        // answerable after it would take an answer nothing could deliver.
+        else if (event.kind === 'clarifyExpire') {
+          setClarifies(prev => expireClarifyCard(prev, event.requestId))
+        }
       })
     } catch (err) {
       // Nothing is coming on either path, so the run ends here.
@@ -2327,6 +2401,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setSending(false)
       setStreaming('')
       clearToolCalls()
+      // The agent is no longer parked on anything, so neither is the customer.
+      // A card outliving its turn is a control with nowhere to post to.
+      clearClarifies()
       runIdRef.current = null
       // A user-initiated Stop shows nothing, not an error line.
       if (err instanceof HarnessError && err.code === 'aborted') return
@@ -2370,8 +2447,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // summary chips, so leaving the running ones up would show the same turn's
     // tools twice — once as a guess from the wire, once as the record.
     clearToolCalls()
+    // Same reason as the failure path: the turn is over, so any question it was
+    // parked on is over too.
+    clearClarifies()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, clearToolCalls])
+  }, [adapter, applyToolEvent, clearToolCalls, clearClarifies])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
@@ -3669,6 +3749,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         })}
 
         {!reloadingSkill && <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />}
+
+        {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
+            message: see the note on `clarifies` above for why this is the one
+            thing a turn produces that is deliberately not persisted. */}
+        {!reloadingSkill && clarifies.map(card => (
+          <ClarifyPrompt key={card.requestId} card={card} onAnswer={answerClarify} />
+        ))}
 
         {/* The picture outlives the turn that asked for it, so this banner is
             the only thing on screen during the 20-40s wait — the tool pill has

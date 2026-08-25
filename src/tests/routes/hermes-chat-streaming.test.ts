@@ -406,6 +406,48 @@ describe("showing the work while the turn is still doing it", () => {
     // And the spinner still reaches the client — on its own channel.
     expect(events.some(([name, payload]) => name === "status" && payload.text === "(⌐■_■) computing...")).toBe(true);
   });
+
+  it("sends a question the agent stopped to ask on its OWN event, never as a status", async () => {
+    // The forwarding used to be "tool, or else status", and a clarify took the
+    // `else`: the customer's question went out as `event: status` with
+    // `text: undefined` — a blank spinner caption where a form should have
+    // been, while the agent sat parked on the answer for its full hour.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        activities: [
+          {
+            kind: "clarify",
+            requestId: "9f2a1c04",
+            questions: [
+              { qid: "q1", question: "Which branch?", choices: ["beta", "main"], multiSelect: false },
+              { qid: "q2", question: "Which tests?", choices: ["unit", "routes"], multiSelect: true },
+            ],
+            answered: { q1: "beta" },
+          },
+          { kind: "clarifyExpire", requestId: "9f2a1c04" },
+        ],
+        deltas: ["Going with beta."],
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "ship it" })));
+    expect(events.map(([name]) => name)).toEqual(["clarify", "clarifyExpire", "delta", "done"]);
+    expect(events.some(([name]) => name === "status")).toBe(false);
+    // The request id is the whole of the answer's address — `clarify.respond`
+    // takes no session — so a client that never received it could not answer.
+    expect(events[0][1]).toMatchObject({
+      requestId: "9f2a1c04",
+      questions: [
+        { qid: "q1", question: "Which branch?", choices: ["beta", "main"], multiSelect: false },
+        { qid: "q2", question: "Which tests?", choices: ["unit", "routes"], multiSelect: true },
+      ],
+      // A half-finished batch comes back with what is already locked in, so a
+      // reconnecting surface restores the form instead of re-asking.
+      answered: { q1: "beta" },
+    });
+    // And the take-it-down frame, so nobody is left typing into a prompt that
+    // can no longer be answered.
+    expect(events[1][1]).toEqual({ requestId: "9f2a1c04" });
+  });
 });
 
 describe("when the stream goes quiet on a turn that already finished", () => {

@@ -170,6 +170,28 @@ export interface StagedAttachment {
   readonly type: string;
 }
 
+/**
+ * One question the agent is blocked on, mid-turn.
+ *
+ * Declared in the transport rather than beside the route that produces it
+ * because the renderer is a client component: importing the server module for
+ * a four-field shape would drag the parking table, its timers and `node:fs`
+ * into the browser bundle. The wire shape is small and stable enough that a
+ * second declaration here is cheaper than that coupling.
+ *
+ * `qid` is empty for a SINGLE question. That is not a missing value — it is
+ * how the answer route tells "the one question of this request" from "one of a
+ * batch", and a caller must post `questionId` only for the latter.
+ */
+export interface ClarifyQuestion {
+  readonly qid: string;
+  readonly question: string;
+  /** Offered answers. May be empty: a free-text question offers none. */
+  readonly choices: string[];
+  /** More than one choice may be picked; the answer is then a JSON array. */
+  readonly multiSelect: boolean;
+}
+
 export interface TurnRequest {
   readonly text: string;
   readonly attachments: readonly StagedAttachment[];
@@ -225,7 +247,33 @@ export type TurnEvent =
    * A heartbeat for the surface to show, and never the model's monologue.
    * Thinking is reported only on the finished turn, in `reasoning`.
    */
-  | { kind: "status"; text: string };
+  | { kind: "status"; text: string }
+  /**
+   * The agent has STOPPED and is waiting for the customer to answer.
+   *
+   * An event rather than a delta because it is not part of the answer: a delta
+   * is cumulative text destined for one bubble, and folding a question into
+   * that stream would make the prompt indistinguishable from the reply — it
+   * would be appended to, overwritten by the next delta, and persisted into the
+   * transcript as if the agent had said it. This is the opposite kind of thing:
+   * a control that is live for as long as the agent is parked and meaningless
+   * the moment it is not, which is why the surface renders it beside the turn
+   * and never inside the message.
+   *
+   * `requestId` is the identity, not the position: the same prompt is REPLAYED
+   * on a reconnect, so a surface must de-duplicate on it or draw the card
+   * twice. A replay of a partly answered batch carries `answered` — the qids
+   * already locked in, so the card comes back with those questions collapsed
+   * instead of inviting a second answer the gateway would accept and confuse
+   * the agent with.
+   */
+  | { kind: "clarify"; requestId: string; questions: ClarifyQuestion[]; answered?: Record<string, string> }
+  /**
+   * The agent gave up waiting. The card stays on screen — a question that
+   * silently vanished would read as an answer that was sent — but every
+   * control on it is dead, because nothing posted now can reach the turn.
+   */
+  | { kind: "clarifyExpire"; requestId: string };
 
 export interface TurnResult {
   readonly text: string;
