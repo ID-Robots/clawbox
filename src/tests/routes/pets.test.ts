@@ -19,10 +19,15 @@ vi.mock("@/lib/edition-source", () => ({
 
 const cliCalls: string[][] = [];
 let cliExit = 0;
+vi.mock("@/lib/petdex-manifest", () => ({
+  PETDEX_ASSET_HOSTS: new Set<string>(),
+  petdexSheetUrl: async () => null,
+}));
+
 vi.mock("@/lib/hermes-cli", () => ({
   runHermesCli: (args: string[]) => {
     cliCalls.push(args);
-    if (args[1] === "install") {
+    if (args[1] === "install" && cliExit === 0) {
       const dir = path.join(petsDir, args[2]);
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(path.join(dir, "pet.json"), JSON.stringify({ id: args[2], displayName: "Boba" }));
