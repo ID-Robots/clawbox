@@ -18,6 +18,10 @@ import ChatPopup from "@/components/ChatPopup";
  */
 export const HERMES_SESSION = "20260810_221825_609d1e";
 
+/** Where the box writes a picture it generated, as the real route reports it. */
+export const GENERATED_IMAGE_PATH =
+  "/home/clawbox/clawbox/data/chat-media/chat-generated/2b1f4a90-0c8d-4c2b-9f31-6b0a2f9d51ce.png";
+
 export interface HermesBox {
   /** Bodies POSTed to the Hermes chat route, in order. */
   chatPosts: Record<string, unknown>[];
@@ -31,6 +35,7 @@ export interface HermesBox {
     hermesSupportsImages: boolean;
     hermesHasVisionRoute: boolean;
     hermesStreamsTurns: boolean;
+    hasClawaiImageRoute: boolean;
   };
   /**
    * What the durable transcript holds.
@@ -43,6 +48,13 @@ export interface HermesBox {
   storedTranscript: Record<string, unknown>[];
   /** DELETEs of the stored transcript, so "new chat" can be shown to reach it. */
   transcriptDeletes: number;
+  /** Prompts POSTed to the images route, in order. */
+  imagePrompts: string[];
+  /**
+   * What that route answers next. A test that wants the failure path replaces
+   * this; the default draws one picture.
+   */
+  imageReply: () => { ok: boolean; status: number; payload: unknown };
 }
 
 /**
@@ -63,9 +75,18 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       hermesSupportsImages: false,
       hermesHasVisionRoute: false,
       hermesStreamsTurns: false,
+      // …and no live image route, so the picture button starts absent for the
+      // same reason the microphone does: nothing to spend, nowhere to spend it.
+      hasClawaiImageRoute: false,
     },
     storedTranscript: [{ role: "assistant", text: "Earlier in this chat.", timestamp: 1 }],
     transcriptDeletes: 0,
+    imagePrompts: [],
+    imageReply: () => ({
+      ok: true,
+      status: 200,
+      payload: { ok: true, media: [`/setup-api/chat/media?path=${encodeURIComponent(GENERATED_IMAGE_PATH)}`] },
+    }),
   };
 
   class ForbiddenWs {
@@ -114,6 +135,12 @@ export function installHermesBox(reply: (message: string) => string = () => "hel
       }
       if (url.includes("/setup-api/chat/spoken-history")) {
         return { ok: true, json: async () => ({ items: [] }) };
+      }
+      if (url.includes("/setup-api/chat/images")) {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { prompt?: unknown };
+        box.imagePrompts.push(String(body.prompt ?? ""));
+        const answer = box.imageReply();
+        return { ok: answer.ok, status: answer.status, json: async () => answer.payload };
       }
       if (url.includes("/setup-api/chat/history")) {
         if (init?.method === "DELETE") {
