@@ -68,6 +68,7 @@
               "support/updating",
               "support/troubleshooting",
               "support/recovery",
+              "support/password-recovery",
               "support/faq"
             ]
           }
@@ -103,7 +104,8 @@
             "group": "Support",
             "pages": [
               "support/troubleshooting",
-              "support/recovery"
+              "support/recovery",
+              "support/password-recovery"
             ]
           }
         ]
