@@ -100,6 +100,41 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("CLAWBOX_AI_IMAGES_ENDPOINT", () => {
+  /** Re-import the module with a specific proxy override in place. */
+  async function endpointFor(proxyUrl: string | undefined): Promise<string> {
+    const previous = process.env.CLAWBOX_AI_PROXY_URL;
+    if (proxyUrl === undefined) delete process.env.CLAWBOX_AI_PROXY_URL;
+    else process.env.CLAWBOX_AI_PROXY_URL = proxyUrl;
+    vi.resetModules();
+    try {
+      return (await import("@/lib/harness/clawai-images")).CLAWBOX_AI_IMAGES_ENDPOINT;
+    } finally {
+      if (previous === undefined) delete process.env.CLAWBOX_AI_PROXY_URL;
+      else process.env.CLAWBOX_AI_PROXY_URL = previous;
+    }
+  }
+
+  it("appends the path to the default proxy", async () => {
+    await expect(endpointFor(undefined)).resolves.toBe(
+      "https://clawbox.com/api/ai/images/generations",
+    );
+  });
+
+  it("does not produce a double slash when the override has a trailing one", async () => {
+    // A staging override copied out of a browser bar carries the slash. The
+    // proxy answers `//images/generations` with a 404, and because BOTH the
+    // discovery probe and the generation call are built from this constant,
+    // the box would report "no image service" rather than a bad URL.
+    await expect(endpointFor("https://staging.example/api/ai/")).resolves.toBe(
+      "https://staging.example/api/ai/images/generations",
+    );
+    await expect(endpointFor("  https://staging.example/api/ai//  ")).resolves.toBe(
+      "https://staging.example/api/ai/images/generations",
+    );
+  });
+});
+
 describe("clawaiImageRouteReachable", () => {
   /** The discovery body, as production answers it. */
   const discovery = {
