@@ -205,7 +205,17 @@ export default function EggMascot() {
 
   // The pet's arrival unmounts this component mid-sequence; stale timers must
   // not fire state updates after that.
-  useEffect(() => () => { timersRef.current.forEach(clearTimeout) }, [])
+  // The failure hint's clear timer lives apart from the choreography timers:
+  // a second failure inside ERROR_HINT_MS must replace the first timer, not
+  // race it, or the first timer hides the second hint early.
+  const failTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const clearFailTimer = () => {
+    if (failTimerRef.current !== null) {
+      clearTimeout(failTimerRef.current)
+      failTimerRef.current = null
+    }
+  }
+  useEffect(() => () => { timersRef.current.forEach(clearTimeout); clearFailTimer() }, [])
 
   const later = (fn: () => void, ms: number) => { timersRef.current.push(setTimeout(fn, ms)) }
 
@@ -233,6 +243,7 @@ export default function EggMascot() {
   // to suppress.
   const hatch = () => {
     if (phase !== 'idle') return
+    clearFailTimer()
     setFailed(false)
     const slug = CURATED_PETS[Math.floor(Math.random() * CURATED_PETS.length)].slug
     setPhase('hatching')
@@ -259,7 +270,11 @@ export default function EggMascot() {
         setPhase('idle')
         setBurstFrame(HATCH_FRAMES[0])
         setFailed(true)
-        later(() => setFailed(false), ERROR_HINT_MS)
+        clearFailTimer()
+        failTimerRef.current = setTimeout(() => {
+          setFailed(false)
+          failTimerRef.current = null
+        }, ERROR_HINT_MS)
       })
   }
 

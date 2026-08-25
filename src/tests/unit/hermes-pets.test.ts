@@ -359,6 +359,40 @@ describe("selectPet", () => {
     }
   });
 
+  it("refuses a direct-download redirect that leaves the allow-listed hosts", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.doMock("@/lib/hermes-cli", () => ({
+      runHermesCli: (args: string[]) =>
+        args[1] === "install"
+          ? Promise.resolve({ code: 1, stdout: "", stderr: "manifest 500" })
+          : Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    }));
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://not-petdex.example/curated/boba/sprite-v2.webp" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { selectPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+      // The disallowed redirect target was never requested.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fs.existsSync(path.join(petsDir, "boba", "spritesheet.webp"))).toBe(false);
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("aborts a direct download that exceeds the size cap mid-stream", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.doMock("@/lib/hermes-cli", () => ({

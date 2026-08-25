@@ -397,6 +397,9 @@ function cliFailure(kind: PetCliOutcome["reason"], where: string, detail: string
  *  thumbnail path's remote fetch. */
 const MAX_DIRECT_SHEET_BYTES = 8 * 1024 * 1024;
 const DIRECT_SHEET_TIMEOUT_MS = 60_000;
+/** Redirect hops the direct download will follow — each hop is re-checked
+ *  against the sprite-host allow-list, so a redirect cannot leave it. */
+const MAX_SHEET_REDIRECTS = 3;
 
 /**
  * Install a curated pet WITHOUT `hermes pets install`.
@@ -441,7 +444,30 @@ async function installPetDirect(slug: string): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DIRECT_SHEET_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: controller.signal, redirect: "follow" });
+    // Redirects are followed by hand: every hop must stay on an allow-listed
+    // sprite host, otherwise a redirect could bounce the download to a host
+    // the allow-list never approved.
+    let target = url;
+    let res: Response;
+    for (let hop = 0; ; hop++) {
+      const hopRes = await fetch(target, { signal: controller.signal, redirect: "manual" });
+      const location = hopRes.headers.get("location");
+      if (hopRes.status >= 300 && hopRes.status < 400 && location) {
+        void hopRes.body?.cancel().catch(() => {});
+        if (hop >= MAX_SHEET_REDIRECTS) return false;
+        let next: URL;
+        try {
+          next = new URL(location, target);
+        } catch {
+          return false;
+        }
+        if (!PETDEX_ASSET_HOSTS.has(next.hostname)) return false;
+        target = next.toString();
+        continue;
+      }
+      res = hopRes;
+      break;
+    }
     if (!res.ok) return false;
     const declared = Number(res.headers.get("content-length") || 0);
     if (declared > MAX_DIRECT_SHEET_BYTES) return false;
