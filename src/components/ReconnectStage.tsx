@@ -1,7 +1,7 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import Image from "next/image";
+import { CLAWBOX_CRAB_DATA_URI } from "@/lib/clawbox-crab-inline";
 
 export interface ReconnectStageProps {
   /** Ordered step labels shown as a checklist under the animation. */
@@ -102,13 +102,22 @@ export default function ReconnectStage({
               className="relative z-10 flex h-16 w-16 items-center justify-center rounded-full border border-[var(--border-subtle)] bg-[var(--bg-surface)] reconnect-fade-in"
               style={{ animation: "reconnect-bob 2.4s ease-in-out infinite" }}
             >
-              <Image
-                src="/clawbox-crab.png"
+              {/* Inline data URI, NOT `next/image` or `/clawbox-crab.png`.
+                  This overlay is on screen exactly while the box's server is
+                  restarting (update reboot, AP-to-LAN handoff), so any src
+                  pointing back at the server — most of all the
+                  `/_next/image?url=...` request `next/image` rewrites it to —
+                  fetches from a dead socket and leaves the browser's
+                  broken-image placeholder in the ring. See
+                  src/lib/clawbox-crab-inline.ts. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={CLAWBOX_CRAB_DATA_URI}
                 alt="ClawBox"
                 width={100}
                 height={100}
                 className="h-[100px] w-[100px] object-contain"
-                priority
+                data-testid="reconnect-logo"
               />
             </div>
           )}
