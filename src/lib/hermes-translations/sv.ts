@@ -75,6 +75,7 @@ export const sv: Record<string, string> = {
   "hermesProvider.hero.nativeSwitch": "växlar nativt via Hermes",
   "hermesProvider.hero.changeModel": "Byt modell",
   "hermesProvider.continue": "Fortsätt",
+  "hermesProvider.connected.affirmation": "Ansluten",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ modeller bakom en enda API-nyckel",

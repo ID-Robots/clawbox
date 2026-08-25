@@ -17,6 +17,7 @@ export const providerEn: Record<string, string> = {
   "hermesProvider.hero.nativeSwitch": "switches natively through Hermes",
   "hermesProvider.hero.changeModel": "Change model",
   "hermesProvider.continue": "Continue",
+  "hermesProvider.connected.affirmation": "Connected",
 
   // === Provider rows ===
   // The registry (hermes-providers.ts) is shared with server routes and cannot

@@ -85,6 +85,10 @@ export default function CredentialsHandoffOverlay({
       steps={[t("credentials.handoffApplying"), rejoinLabel, t("settings.backOnline")]}
       phaseIndex={phaseIndex}
       completed={completed}
+      // Step 3 lives inside the wizard, so its handoff success marks use the
+      // wizard's DONE colour (--cyan-bright) rather than the generic emerald the
+      // shared overlay defaults to on the desktop.
+      doneTone="cyan"
       title={completed ? t("settings.backOnline") : t("credentials.handoffTitle")}
       description={completed ? t("ai.almostReady") : t("credentials.handoffDesc")}
       instruction={completed || !hotspotSsid ? undefined : rejoinLabel}

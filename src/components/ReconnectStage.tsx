@@ -19,6 +19,14 @@ export interface ReconnectStageProps {
   secondaryInstruction?: string;
   /** Optional manual fallback link rendered as a button. */
   action?: { label: string; href: string };
+  /**
+   * Which "done" hue the completed check and step ticks use. The wizard's DONE
+   * colour is `--cyan-bright`; the setup steps that live inside it (the Step-3
+   * credentials handoff) pass "cyan" so their success marks match the rest of
+   * the wizard palette instead of the generic emerald these shared overlays
+   * default to elsewhere.
+   */
+  doneTone?: "emerald" | "cyan";
 }
 
 /**
@@ -37,10 +45,20 @@ export default function ReconnectStage({
   instruction,
   secondaryInstruction,
   action,
+  doneTone = "emerald",
 }: ReconnectStageProps) {
   // These overlays only render after a client-side interaction, so the portal
   // target is always present; guard against SSR where document is undefined.
   if (typeof document === "undefined") return null;
+
+  // Palette-token cyan for the wizard's own steps, generic emerald otherwise.
+  // `--cyan-bright` is the DONE colour every other wizard surface uses.
+  const cyan = doneTone === "cyan";
+  const checkStroke = cyan ? "var(--cyan-bright)" : "#22c55e";
+  const stepDoneBadge = cyan
+    ? "bg-[var(--cyan-bright)]/20 text-[var(--cyan-bright)]"
+    : "bg-emerald-500/20 text-emerald-400";
+  const stepDoneText = cyan ? "text-[var(--cyan-bright)]" : "text-emerald-400";
 
   return createPortal(
     <div
@@ -76,8 +94,8 @@ export default function ReconnectStage({
 
           {completed ? (
             <svg width="52" height="52" viewBox="0 0 56 56" fill="none" className="reconnect-fade-in">
-              <circle cx="28" cy="28" r="25" stroke="#22c55e" strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "reconnect-check-circle 0.6s ease-out 0.1s forwards" }} />
-              <path d="M17 28l7 7 15-15" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "reconnect-check-draw 0.4s ease-out 0.5s forwards" }} />
+              <circle cx="28" cy="28" r="25" stroke={checkStroke} strokeWidth="3" strokeDasharray="157" strokeDashoffset="157" style={{ animation: "reconnect-check-circle 0.6s ease-out 0.1s forwards" }} />
+              <path d="M17 28l7 7 15-15" stroke={checkStroke} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="35" strokeDashoffset="35" style={{ animation: "reconnect-check-draw 0.4s ease-out 0.5s forwards" }} />
             </svg>
           ) : (
             <div
@@ -122,7 +140,7 @@ export default function ReconnectStage({
               }`}
             >
               {completed || index < phaseIndex ? (
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 shrink-0">
+                <span className={`flex items-center justify-center w-5 h-5 rounded-full shrink-0 ${stepDoneBadge}`}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12l5 5L19 7" /></svg>
                 </span>
               ) : index === phaseIndex ? (
@@ -134,7 +152,7 @@ export default function ReconnectStage({
                   <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
                 </span>
               )}
-              <span className={completed || index <= phaseIndex ? (completed || index < phaseIndex ? "text-emerald-400" : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
+              <span className={completed || index <= phaseIndex ? (completed || index < phaseIndex ? stepDoneText : "text-[var(--text-primary)]") : "text-[var(--text-muted)]"}>
                 {step}
               </span>
             </div>

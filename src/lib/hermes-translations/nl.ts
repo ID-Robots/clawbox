@@ -79,6 +79,7 @@ export const nl: Record<string, string> = {
   "hermesProvider.hero.nativeSwitch": "schakelt native via Hermes",
   "hermesProvider.hero.changeModel": "Model wijzigen",
   "hermesProvider.continue": "Doorgaan",
+  "hermesProvider.connected.affirmation": "Verbonden",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ modellen met één API-sleutel",

@@ -99,13 +99,22 @@ export async function hermesGate(): Promise<NextResponse | null> {
  * FastAPI signals errors as `detail`; surface that as `error` so the panel's
  * existing error handling reads it.
  */
-export async function relayJson(res: Response, keys: readonly string[]): Promise<NextResponse> {
+export async function relayJson(
+  res: Response,
+  keys: readonly string[],
+  // Called with the parsed body and the HTTP-level ok BEFORE the whitelist is
+  // applied, so a route can react to a terminal dashboard result (e.g. an OAuth
+  // sign-in that just landed) without re-reading a body that can only be read
+  // once. Purely observational — it cannot change what is relayed.
+  onData?: (data: Record<string, unknown>, ok: boolean) => void,
+): Promise<NextResponse> {
   let data: Record<string, unknown> = {};
   try {
     data = (await res.json()) as Record<string, unknown>;
   } catch {
     // Non-JSON body (dashboard mid-restart); relay the status alone.
   }
+  onData?.(data, res.ok);
   const out: Record<string, unknown> = {};
   for (const key of keys) {
     if (data[key] !== undefined) out[key] = data[key];

@@ -128,12 +128,26 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     expect(rowFor(body, "clawai")!.isDefault).toBe(true);
   });
 
-  it("says unknown for ClawBox AI when neither source can tell", async () => {
+  it("says NOT CONNECTED for ClawBox AI when the dashboard answered and it is simply unlinked", async () => {
+    // The dashboard enumerated no clawai row and we hold no token — but the
+    // dashboard DID answer (payload not stale), and clawai's link state is fully
+    // knowable from our own stores, so a held-nothing box is "not connected",
+    // not "unknown". A mid-setup owner staring at their never-linked ClawBox AI
+    // row must not be told its state is a mystery.
     getModelOptions.mockResolvedValue(hermesPayload());
     hasClawaiToken.mockResolvedValue(false);
     const body = await (await GET()).json();
 
-    // Not "disconnected": nothing here is evidence the box is unlinked.
+    expect(rowFor(body, "clawai")!.state).toBe("disconnected");
+  });
+
+  it("keeps ClawBox AI 'unknown' ONLY when the probe itself failed", async () => {
+    // Unknown is now reserved for a genuine probe failure: the dashboard could
+    // not be asked (stale fallback), so we truly cannot tell.
+    getModelOptions.mockResolvedValue(hermesPayload({ stale: true }));
+    hasClawaiToken.mockResolvedValue(false);
+    const body = await (await GET()).json();
+
     expect(rowFor(body, "clawai")!.state).toBe("unknown");
   });
 

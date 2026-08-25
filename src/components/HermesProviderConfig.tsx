@@ -118,11 +118,13 @@ interface Props {
   providerSelectionRequest?: number;
 }
 
-// The OpenClaw AI-models step advances the wizard ~900 ms after a successful
-// configure (AIModelsStep's handleConfiguringDone), which is long enough for the
-// "connected" state to register and short enough not to feel stalled. This panel
-// is the SAME step on a Hermes device, so it advances the same way.
-const AUTO_ADVANCE_DELAY_MS = 900;
+// The OpenClaw AI-models step advances the wizard after a successful configure
+// (AIModelsStep's handleConfiguringDone), long enough for the "connected" state
+// to register and short enough not to feel stalled. This panel is the SAME step
+// on a Hermes device, so it advances the same way — and holds for one second so
+// the cyan "Connected" affirmation (see the wizard overlay below) draws and is
+// read as a deliberate beat rather than a jarring jump to the next step.
+const AUTO_ADVANCE_DELAY_MS = 1000;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
 // imports it), so it cannot call `t` — but a row's `description` is copy, not
@@ -544,6 +546,28 @@ export default function HermesProviderConfig({
     return () => window.removeEventListener("focus", onFocus);
   }, [loadOauth, refreshModels, notifyChatHeader]);
 
+  // In the WIZARD, a connected provider is all the step needs: pin it as the
+  // device's pairing with its OWN recommended default model (omit `model` → the
+  // server writes that provider's recommended id) so chat works out of the box,
+  // then let the auto-advance effect carry the wizard forward. Best-effort: the
+  // provider is already connected, so the step is DONE whether or not this
+  // pairing write lands — a slow catalogue must never strand the owner on a step
+  // they have finished. Settings never calls this: there the owner picks a
+  // default deliberately and there is nowhere to advance to.
+  const commitWizardDefault = useCallback(async (providerId: string) => {
+    try {
+      const res = await fetch("/setup-api/hermes/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      if (res.ok) notifyChatHeader();
+    } catch {
+      // Non-fatal — see above. Chat falls back to the provider's own default.
+    }
+    setConfigured(true);
+  }, [notifyChatHeader]);
+
   // A finished sign-in is a credential appearing server-side — the panel, the
   // model cache and the chat header all have to re-read, same as the old
   // return-from-dashboard-tab case. Flip the local flag first so Connected
@@ -556,7 +580,10 @@ export default function HermesProviderConfig({
     void loadOauth();
     refreshModels();
     notifyChatHeader();
-  }, [loadOauth, refreshModels, notifyChatHeader]);
+    // First-boot: connecting a provider completes the step. Auto-set its
+    // recommended default and advance — no model-picking or Save click required.
+    if (!embedded) void commitWizardDefault(providerId);
+  }, [loadOauth, refreshModels, notifyChatHeader, embedded, commitWizardDefault]);
 
   async function startOauth(providerId: string) {
     resetSignin();
@@ -946,9 +973,57 @@ export default function HermesProviderConfig({
   }
 
 
+  // The wizard's success beat: once a provider is connected (`configured`) a
+  // cyan check draws over the card for the auto-advance second, so the jump to
+  // the next step reads as a deliberate confirmation. Settings never advances,
+  // so it never shows this. `--cyan-bright` is the product's DONE colour.
+  const showConnectedAffirmation = !embedded && configured;
+
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-      <div className="card-surface rounded-2xl p-5 sm:p-8">
+      <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
+        {showConnectedAffirmation && (
+          <>
+            <style>{`
+              @keyframes hpc-connected-draw { to { stroke-dashoffset: 0 } }
+              @keyframes hpc-connected-fade { from { opacity: 0 } to { opacity: 1 } }
+              @keyframes hpc-connected-rise { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: translateY(0) } }
+              .hpc-connected-overlay { animation: hpc-connected-fade 0.2s ease-out both }
+              .hpc-connected-circle { animation: hpc-connected-draw 0.5s ease-out 0.05s forwards }
+              .hpc-connected-tick { animation: hpc-connected-draw 0.35s ease-out 0.45s forwards }
+              .hpc-connected-label { animation: hpc-connected-rise 0.3s ease-out 0.55s both }
+              @media (prefers-reduced-motion: reduce) {
+                .hpc-connected-overlay, .hpc-connected-label { animation: none }
+                .hpc-connected-circle, .hpc-connected-tick { animation: none; stroke-dashoffset: 0 }
+              }
+            `}</style>
+            <div
+              className="hpc-connected-overlay absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-deep)]/92 backdrop-blur-sm text-center px-6"
+              role="status"
+              aria-live="polite"
+              data-testid="hermes-connected-affirmation"
+            >
+              <svg width="72" height="72" viewBox="0 0 56 56" fill="none" aria-hidden="true">
+                <circle
+                  cx="28" cy="28" r="25"
+                  stroke="var(--cyan-bright)" strokeWidth="3"
+                  strokeDasharray="157" strokeDashoffset="157"
+                  className="hpc-connected-circle"
+                />
+                <path
+                  d="M17 28l7 7 15-15"
+                  stroke="var(--cyan-bright)" strokeWidth="3"
+                  strokeLinecap="round" strokeLinejoin="round"
+                  strokeDasharray="35" strokeDashoffset="35"
+                  className="hpc-connected-tick"
+                />
+              </svg>
+              <span className="hpc-connected-label text-[var(--cyan-bright)] font-semibold text-sm">
+                {t("hermesProvider.connected.affirmation")}
+              </span>
+            </div>
+          </>
+        )}
         <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">{t("hermesProvider.title")}</h1>
         <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
           {t("hermesProvider.intro")}
@@ -960,7 +1035,10 @@ export default function HermesProviderConfig({
           <ProviderDefaultHero
             row={defaultRow}
             model={heroModel}
-            onChangeModel={defaultHasRow ? changeModel : undefined}
+            // "Change model" scrolls to the model dropdown — which the wizard
+            // hides (default-model picking is a post-setup, Settings concern).
+            // Offer it only where that dropdown exists.
+            onChangeModel={embedded && defaultHasRow ? changeModel : undefined}
           />
         )}
 
@@ -1256,6 +1334,12 @@ export default function HermesProviderConfig({
                   </div>
                 );
               })()}
+              {/* Default-model dropdown — a post-setup, Settings concern. The
+                  wizard hides it: connecting a provider auto-pins that
+                  provider's recommended default (commitWizardDefault on OAuth,
+                  saveModelProvider on a key), so first-boot never asks the owner
+                  to choose a model. Shown only when embedded in Settings. */}
+              {embedded && (
               <div>
                 <label className={labelCls} htmlFor={`${uid}-model`}>{t("hermesProvider.model.label")}</label>
                 <select
@@ -1308,6 +1392,7 @@ export default function HermesProviderConfig({
                   </p>
                 )}
               </div>
+              )}
 
               {selectedDef?.keyProvider && (
                 <div>
