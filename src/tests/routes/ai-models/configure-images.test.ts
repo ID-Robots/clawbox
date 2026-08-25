@@ -270,7 +270,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     it("provisions images on the fallback path too", async () => {
       // configureClawboxAi also runs from ensureFallbackModel — i.e. the user
       // is configuring some other provider and ClawBox AI is only the fallback.
-      // The image allowance belongs to the token, not to the chat choice.
+      // Image generation belongs to the token, not to the chat choice.
       mockGetAll.mockResolvedValue({ clawai_token: CLAWAI_TOKEN });
 
       const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-key" }));

@@ -35,6 +35,19 @@ import type { PetDescriptor } from "@/lib/pet-client";
  *  the CLI and TUI too. */
 export const PET_BODY_PX = 104;
 
+/**
+ * The z-index a shelf-standing mascot body wears — the pet, and the fresh-box
+ * egg that stands in for it.
+ *
+ * Below the window layer (windows start at z 100) and above the desktop
+ * surface (z 1) and its icons. A body walking the shelf's top edge is exactly
+ * where a window dragged low ends up, so a higher z painted it over window
+ * content — over the Settings sidebar and over its own dock. The crab keeps
+ * its own 10001: it is ClawBox's own decoration on the open desktop, not a
+ * shelf-standing body. Shared so the egg and the pet it precedes can never
+ * drift onto different layers. */
+export const MASCOT_SHELF_Z_INDEX = 50;
+
 /** Everything the mascot needs to draw the pet in its current pose. */
 export interface PetLayout {
   /** Sheet row for the current mood. */

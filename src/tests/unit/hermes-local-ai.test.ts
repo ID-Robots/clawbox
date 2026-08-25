@@ -17,14 +17,26 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
 }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/local-ai-token", () => ({ getLocalAiToken: () => "local-token-xyz" }));
+// Mirrors the REAL url builders byte-for-byte — the previous mock answered a
+// /v1 Ollama URL the real builder never produced, so this suite asserted a
+// base_url no device ever wrote (TASK-448). The real builders' exact strings
+// are pinned, unmocked, in local-ai-openai-base-url.test.ts.
 vi.mock("@/lib/local-ai-runtime", () => ({
-  getLocalAiProxyBaseUrl: (p: string) => `http://127.0.0.1/setup-api/local-ai/${p}/v1`,
+  getLocalAiProxyRootUrl: () => "http://127.0.0.1",
+  getLocalAiOpenAiBaseUrl: (p: string) =>
+    p === "llamacpp"
+      ? "http://127.0.0.1/setup-api/local-ai/llamacpp/v1"
+      : "http://127.0.0.1/setup-api/local-ai/ollama/v1",
 }));
+const getConfigMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/config-store", () => ({ get: getConfigMock }));
 
 import {
   HERMES_LOCAL_PROVIDER,
   HermesLocalApplyError,
+  _resetLocalAiReconcileForTests,
   applyLocalAiToHermes,
+  reconcileLocalAiWithHermes,
   removeLocalAiFromHermes,
 } from "@/lib/hermes-local-ai";
 
@@ -137,5 +149,58 @@ describe("registering the local model with Hermes", () => {
     expect(result.wasDefault).toBe(false);
     expect(unsets()).not.toContain("model.provider");
     expect(unsets()).not.toContain("model.default");
+  });
+});
+
+describe("reconciling an already-configured device", () => {
+  // No mockReset ritual: vitest.config.ts already runs clearMocks/mockReset
+  // between tests — only the behaviour each test needs is established here.
+  beforeEach(() => {
+    _resetLocalAiReconcileForTests();
+    patchMock.mockResolvedValue({ mode: "merge", backupPath: null });
+    readMock.mockResolvedValue(null);
+    getConfigMock.mockImplementation(async (key: string) => {
+      if (key === "local_ai_configured") return true;
+      if (key === "local_ai_provider") return "ollama";
+      if (key === "local_ai_model") return "ollama/qwen3:8b";
+      return undefined;
+    });
+  });
+
+  /** What `hermes config get providers.clawlocal.base_url` answers. */
+  function registeredBaseUrl(value: string) {
+    cliMock.mockResolvedValue({ code: 0, stdout: `${value}\n`, stderr: "" });
+  }
+
+  it("re-registers a device that got the bare (pre-/v1) Ollama root", async () => {
+    // Every Ollama-configured Hermes box got this value before the fix, and
+    // reconcile's "already registered → done" check would have preserved the
+    // broken URL forever. It is a known-broken value, so it repairs like an
+    // absent registration.
+    registeredBaseUrl("http://127.0.0.1/setup-api/local-ai/ollama");
+    await reconcileLocalAiWithHermes();
+    expect(sets()).toContain(
+      `providers.${HERMES_LOCAL_PROVIDER}.base_url=http://127.0.0.1/setup-api/local-ai/ollama/v1`,
+    );
+  });
+
+  it("leaves a correctly registered device alone", async () => {
+    registeredBaseUrl("http://127.0.0.1/setup-api/local-ai/ollama/v1");
+    await reconcileLocalAiWithHermes();
+    expect(patchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves a deliberately customised base_url alone", async () => {
+    registeredBaseUrl("http://192.168.0.5:11434/v1");
+    await reconcileLocalAiWithHermes();
+    expect(patchMock).not.toHaveBeenCalled();
+  });
+
+  it("still registers a device with no registration at all", async () => {
+    registeredBaseUrl("");
+    await reconcileLocalAiWithHermes();
+    expect(sets()).toContain(
+      `providers.${HERMES_LOCAL_PROVIDER}.base_url=http://127.0.0.1/setup-api/local-ai/ollama/v1`,
+    );
   });
 });

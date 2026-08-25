@@ -5,9 +5,9 @@ import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import {
   dashboardUnreachable,
-  hermesGate,
   isValidProviderId,
   isValidSessionId,
+  ownerGate,
   readJsonBody,
   relayJson,
 } from "../shared";
@@ -25,7 +25,7 @@ const SUBMIT_KEYS = ["ok", "status", "message"] as const;
 const CODE_RE = /^[!-~]{4,2048}$/;
 
 export async function POST(request: Request) {
-  const gate = await hermesGate();
+  const gate = await ownerGate(request);
   if (gate) return gate;
 
   const body = await readJsonBody(request);
