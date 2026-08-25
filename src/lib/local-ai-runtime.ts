@@ -77,6 +77,30 @@ export function getLocalAiProxyBaseUrl(provider: LocalAiProvider): string {
   return `${getLocalAiProxyRootUrl()}/setup-api/local-ai/ollama`;
 }
 
+/**
+ * Where an OpenAI-compatible client must be pointed — NOT the same string as
+ * the proxy's mount point above.
+ *
+ * The two differ for Ollama alone, and deliberately. OpenClaw addresses it
+ * with `api: "ollama"`, i.e. the NATIVE surface (`/api/chat`, `/api/tags`),
+ * which Ollama serves from the root — so its provider entry gets the mount
+ * point unchanged. Hermes addresses it as a custom `api_mode: openai` provider
+ * and appends `/chat/completions` to whatever base_url it is given, and
+ * Ollama's OpenAI-compatible surface lives under `/v1`. Measured on the bench
+ * device (Ollama 0.32.9): `POST /chat/completions` → 404 "404 page not found",
+ * `POST /v1/chat/completions` → the OpenAI error shape; `GET /models` → 404,
+ * `GET /v1/models` → 200.
+ *
+ * The proxy forwards the path verbatim, so the version segment has to travel
+ * in the base URL the client is handed. llama.cpp needs no suffix here: its
+ * proxy route is mounted at `/llamacpp/v1/[...path]`, so the version segment
+ * is already part of the route.
+ */
+export function getLocalAiOpenAiBaseUrl(provider: LocalAiProvider): string {
+  const base = getLocalAiProxyBaseUrl(provider);
+  return provider === "llamacpp" ? base : `${base}/v1`;
+}
+
 export function getLocalAiIdleTimeoutMs(): number {
   const raw = Number(process.env.LOCAL_AI_IDLE_TIMEOUT_MS || DEFAULT_LOCAL_AI_IDLE_TIMEOUT_MS);
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : DEFAULT_LOCAL_AI_IDLE_TIMEOUT_MS;

@@ -17,8 +17,8 @@
 // tested without a model.
 
 import { beginLocalAiUse, endLocalAiUse, ensureLocalAiReady, getLocalAiRuntimeSnapshot } from "./local-ai-runtime";
-import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "./llamacpp";
-import { resolveConfiguredLlamaCppAlias } from "./llamacpp-server";
+import { getLlamaCppBaseUrl } from "./llamacpp";
+import { getLlamaCppProvisioningStatus, resolveConfiguredLlamaCppAlias } from "./llamacpp-server";
 import { PHRASE_CATEGORIES, type MascotPhraseSet } from "./mascot-phrases";
 
 /**
@@ -69,20 +69,6 @@ export function buildResponseSchema(): Record<string, unknown> {
     required: [...PHRASE_CATEGORIES],
     additionalProperties: false,
   };
-}
-
-/**
- * The model alias to ask for — the SAME resolution `ensureLocalAiReady` uses
- * to start the server. Hardcoding the default here meant a device configured
- * with a non-default alias (see `local-ai-runtime.ts`) started one model and
- * then requested another by name.
- */
-async function resolveModelAlias(): Promise<string> {
-  try {
-    return (await resolveConfiguredLlamaCppAlias()) || getDefaultLlamaCppModel();
-  } catch {
-    return getDefaultLlamaCppModel();
-  }
 }
 
 /**
@@ -197,6 +183,38 @@ export async function generatePhrasesLocally(
   // owns the runtime and the crab can wait.
   if (isBusy()) return { status: "deferred", reason: "busy" };
 
+  // A phrase refresh may only ever WAKE a model somebody chose and installed —
+  // never fetch one. This function is reached from a desktop page load
+  // (GET /setup-api/mascot-lines kicks the background regen), and
+  // `ensureLocalAiReady` hands the launcher an alias that the launcher will
+  // DOWNLOAD (~3 GB) when the GGUF is missing. On a box whose owner never
+  // enabled Local AI the alias resolution below answers null — but the wake
+  // path's own fallback used to substitute the default Gemma alias, so merely
+  // opening the desktop could arm an unattended multi-GB download. Consent to
+  // download lives in the enable path (`activateLocalAiProvider` keeps the
+  // same rule); a cosmetic refresh that cannot PROVE the weights are on disk —
+  // resolution errors included — reports "unavailable" and the mascot keeps
+  // its pack. No default alias is substituted here: that substitution is
+  // exactly what handed the launcher a model to fetch.
+  let configuredAlias: string | null = null;
+  let modelOnDisk = false;
+  try {
+    configuredAlias = await resolveConfiguredLlamaCppAlias();
+    if (configuredAlias) {
+      modelOnDisk = (await getLlamaCppProvisioningStatus(configuredAlias)).modelAvailable;
+    }
+  } catch {
+    // Cannot verify == not on disk; never launch a process that downloads.
+  }
+  if (!configuredAlias || !modelOnDisk) {
+    if (configuredAlias) {
+      console.warn(
+        `[mascot-generation] skipping for ${locale}: local model ${configuredAlias} is not on disk, and a background refresh never downloads one`,
+      );
+    }
+    return { status: "failed", failure: "unavailable" };
+  }
+
   try {
     await ensureLocalAiReady("llamacpp");
   } catch (err) {
@@ -216,7 +234,7 @@ export async function generatePhrasesLocally(
 
   beginLocalAiUse("llamacpp");
   try {
-    return await requestBatch(prompt, locale, timeoutMs);
+    return await requestBatch(prompt, locale, timeoutMs, configuredAlias);
   } finally {
     // Unconditional: an exception here would otherwise leave activeRequests
     // pinned above zero forever, which both blocks every future refresh (the
@@ -238,9 +256,9 @@ async function requestBatch(
   prompt: string,
   locale: string,
   timeoutMs: number,
+  model: string,
 ): Promise<LocalGenerationOutcome> {
   const url = `${getLlamaCppBaseUrl().replace(/\/+$/, "")}/chat/completions`;
-  const model = await resolveModelAlias();
   const controller = new AbortController();
   // `signal.reason` is not reliable across runtimes, so track our own abort:
   // a timeout and a socket reset both surface as an AbortError otherwise.

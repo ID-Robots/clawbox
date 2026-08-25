@@ -19,6 +19,14 @@ interface ClawboxAiProviderRowProps {
   /** Extra badge rendered after "Recommended". Hermes passes an "Active" pill;
    *  OpenClaw passes nothing, so React emits nothing and the DOM matches. */
   trailingBadge?: ReactNode;
+  /** Connection state, rendered hard right. Hermes' AI Providers section passes
+   *  one; OpenClaw passes nothing and the DOM is unchanged. */
+  statusSlot?: ReactNode;
+  /** True when this is the box's DEFAULT provider. Tints the row cyan, which
+   *  outranks the coral selection wash: the two are usually the same row, and
+   *  when they are not, "what is running" is the more useful of the two to
+   *  spot. OpenClaw never passes it. */
+  isDefault?: boolean;
 }
 
 export default function ClawboxAiProviderRow({
@@ -26,14 +34,18 @@ export default function ClawboxAiProviderRow({
   selected,
   onSelect,
   trailingBadge,
+  statusSlot,
+  isDefault = false,
 }: ClawboxAiProviderRowProps) {
   const { t } = useT();
   return (
     <label
       className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-        selected
-          ? "bg-orange-500/5"
-          : "hover:bg-[var(--surface-card)]"
+        isDefault
+          ? "bg-[var(--cyan-veil)]"
+          : selected
+            ? "bg-orange-500/5"
+            : "hover:bg-[var(--surface-card)]"
       }`}
     >
       <input
@@ -59,7 +71,7 @@ export default function ClawboxAiProviderRow({
       <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
         <AIProviderIcon provider="clawai" size={22} />
       </span>
-      <div className="flex-1">
+      <div className="flex-1 min-w-0">
         <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
           ClawBox AI
           <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-orange-500/15 text-orange-400 leading-none">
@@ -71,6 +83,7 @@ export default function ClawboxAiProviderRow({
           {CLAWBOX_AI_DESCRIPTION}
         </span>
       </div>
+      {statusSlot}
     </label>
   );
 }
