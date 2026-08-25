@@ -72,10 +72,12 @@ export const nl: Record<string, string> = {
   "settings.security.wifiPasswordUpdated": "Wachtwoord voor {ssid} gewijzigd",
 
   // === Panel chrome ===
-  "hermesProvider.title": "Hermes-modellen",
+  "hermesProvider.title": "AI-providers",
   "hermesProvider.intro":
-    "Dit apparaat draait op Hermes. Kies een inferentieprovider en een standaardmodel — je schakelt ze rechtstreeks via Hermes om, een dashboard is niet nodig.",
+    "Dit apparaat draait op Hermes. Verbind providers en kies de standaard — status, aanmelden en wisselen gebeuren allemaal hier.",
   "hermesProvider.radioGroupLabel": "AI-provider",
+  "hermesProvider.hero.nativeSwitch": "schakelt native via Hermes",
+  "hermesProvider.hero.changeModel": "Model wijzigen",
   "hermesProvider.continue": "Doorgaan",
 
   // === Provider rows ===
