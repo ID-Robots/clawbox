@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { CLAWBOX_AI_IMAGE_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { mediaUrl } from "@/lib/chat-media";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "./credentials";
-import { chatGeneratedImageDir, pruneMediaDir } from "./media-root";
+import { chatGeneratedImageDir, GENERATED_IMAGE_RETENTION, pruneMediaDir } from "./media-root";
 import type { FetchLike } from "./transport";
 
 /**
@@ -108,18 +108,12 @@ const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
 /** The JSON envelope around it: base64 is 4 bytes per 3, plus the wrapper. */
 const MAX_RESPONSE_BYTES = Math.ceil((MAX_IMAGE_BYTES * 4) / 3) + 64 * 1024;
 
-/**
- * Retention for pictures this box generated.
- *
- * Longer than the 7 days staged uploads get, because these are the OUTPUT of a
- * conversation rather than its input: an attachment still exists on the machine
- * it was uploaded from, and a generated picture exists only here. 30 days
- * matches the transcript sweep, so a picture and the bubble naming it age out
- * together instead of leaving a transcript full of broken thumbnails.
- */
-const RETENTION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-/** Roughly 350 pictures at the observed size. */
-const RETENTION_MAX_BYTES = 500 * 1024 * 1024;
+// Retention for pictures this box generated is longer than the 7 days staged
+// uploads get, because these are the OUTPUT of a conversation rather than its
+// input: an attachment still exists on the machine it was uploaded from, and a
+// generated picture exists only here. The numbers live in
+// `GENERATED_IMAGE_RETENTION` because the agent path copies its own pictures
+// into the same directory and has to sweep it by the same rule.
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -472,10 +466,7 @@ async function writeGeneratedImage(bytes: Buffer, extension: string): Promise<Cl
   // Swept BEFORE the write, because the point is to make room — a sweep that
   // ran afterwards would be measuring a directory it had just added to. Best
   // effort: a failed sweep must never turn a good generation into an error.
-  await pruneMediaDir(dir, {
-    maxAgeMs: RETENTION_MAX_AGE_MS,
-    maxBytes: RETENTION_MAX_BYTES,
-  }).catch(() => {});
+  await pruneMediaDir(dir, GENERATED_IMAGE_RETENTION).catch(() => {});
   const file = path.join(dir, `${randomUUID()}.${extension}`);
   await fsp.writeFile(file, bytes, { mode: FILE_MODE });
   await fsp.chmod(file, FILE_MODE).catch(() => {});

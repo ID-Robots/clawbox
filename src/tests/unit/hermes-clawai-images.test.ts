@@ -111,6 +111,53 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     expect(sets().some((s) => s.startsWith("plugins.enabled="))).toBe(false);
   });
 
+  it("initialises plugins.enabled on a box that has never enabled one", async () => {
+    // `hermes config get` exits NON-ZERO for an absent key, with this wording.
+    // It is not a failed read: there is genuinely nothing to preserve, so the
+    // list is created with ours in it.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "plugins.enabled"
+        ? { code: 1, stdout: "", stderr: "Config key not set: plugins.enabled" }
+        : { code: 0, stdout: "", stderr: "" },
+    );
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain(`plugins.enabled=${JSON.stringify([HERMES_IMAGE_PLUGIN_NAME])}`);
+  });
+
+  it("writes nothing when the plugins.enabled read fails for any other reason", async () => {
+    // A locked config or a timed-out CLI knows NOTHING about what is in that
+    // list. Reading that as "empty" and writing ours over it would unload every
+    // plugin the customer had enabled — the one destructive thing this whole
+    // function can do.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "plugins.enabled"
+        ? { code: 1, stdout: "", stderr: "could not acquire config lock" }
+        : { code: 0, stdout: "", stderr: "" },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets().some((s) => s.startsWith("plugins.enabled="))).toBe(false);
+    // And the box does not then claim it can draw.
+    expect(sets().some((s) => s.startsWith("image_gen."))).toBe(false);
+    warn.mockRestore();
+  });
+
+  it("never claims the agent can draw when a setting it depends on failed", async () => {
+    // `image_gen.provider` is the key the capability probe reads. Written
+    // before the base URL, a failed base URL would leave a box advertising a
+    // backend with nowhere to send the request: no composer button, and every
+    // request for a picture dying inside the agent.
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[2] === `image_gen.${HERMES_IMAGE_PLUGIN_NAME}.base_url`
+        ? { code: 1, stdout: "", stderr: "nope" }
+        : { code: 0, stdout: "", stderr: "" },
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).not.toContain(`image_gen.provider=${HERMES_IMAGE_PLUGIN_NAME}`);
+    warn.mockRestore();
+  });
+
   it("still links the box when the backend cannot be installed", async () => {
     // Drawing is an extra. Chat, vision and transcription are not, and a box
     // that could not copy a Python file must not be left unable to talk.

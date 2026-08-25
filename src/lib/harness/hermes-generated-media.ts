@@ -1,7 +1,12 @@
 import fsp from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
-import { chatGeneratedImageDir, resolveInMediaRoot } from "@/lib/harness/media-root";
+import {
+  chatGeneratedImageDir,
+  GENERATED_IMAGE_RETENTION,
+  pruneMediaDir,
+  resolveInMediaRoot,
+} from "@/lib/harness/media-root";
 import { hermesHome } from "@/lib/hermes-env";
 
 /**
@@ -78,6 +83,15 @@ export async function adoptHermesGeneratedImages(
     // can be inside it.
     return [];
   }
+
+  // Swept before anything is copied in, by the same rule and into the same
+  // directory the composer path sweeps — a box whose agent has a backend never
+  // takes the composer path again, so a sweep that lived only there would let
+  // this tree grow without a bound for the rest of the device's life. Best
+  // effort: a failed sweep must never cost the customer their picture.
+  await chatGeneratedImageDir()
+    .then((dir) => pruneMediaDir(dir, GENERATED_IMAGE_RETENTION))
+    .catch(() => {});
 
   const adopted: string[] = [];
   // One card per FILE: the same picture can arrive both from its tool row and
