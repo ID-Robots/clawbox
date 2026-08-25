@@ -338,9 +338,7 @@ d("register-mcp.sh — clarify cannot hang the dashboard", () => {
   }
 
   it("gives clawbox-chat an explicit toolset list without clarify", () => {
-    fs.writeFileSync(configPath, "model:
-  default: x
-");
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
     run();
     const chat = platformToolsets()["clawbox-chat"] as string[];
     expect(chat).toContain("terminal");
@@ -351,22 +349,14 @@ d("register-mcp.sh — clarify cannot hang the dashboard", () => {
   it("strips clarify from an existing clawbox-chat list, keeping the rest", () => {
     fs.writeFileSync(
       configPath,
-      "platform_toolsets:
-  clawbox-chat:
-    - clarify
-    - web
-    - my-plugin
-",
+      "platform_toolsets:\n  clawbox-chat:\n    - clarify\n    - web\n    - my-plugin\n",
     );
     run();
     expect(platformToolsets()["clawbox-chat"]).toEqual(["web", "my-plugin"]);
   });
 
   it("respects an owner's custom clawbox-chat list that already lacks clarify", () => {
-    fs.writeFileSync(configPath, "platform_toolsets:
-  clawbox-chat:
-    - web
-");
+    fs.writeFileSync(configPath, "platform_toolsets:\n  clawbox-chat:\n    - web\n");
     run();
     expect(platformToolsets()["clawbox-chat"]).toEqual(["web"]);
   });
@@ -374,27 +364,18 @@ d("register-mcp.sh — clarify cannot hang the dashboard", () => {
   it("strips clarify from an explicit cli list but never invents one", () => {
     fs.writeFileSync(
       configPath,
-      "platform_toolsets:
-  cli:
-    - clarify
-    - kanban
-    - web
-",
+      "platform_toolsets:\n  cli:\n    - clarify\n    - kanban\n    - web\n",
     );
     run();
     expect(platformToolsets()["cli"]).toEqual(["kanban", "web"]);
 
-    fs.writeFileSync(configPath, "model:
-  default: x
-");
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
     run();
     expect(platformToolsets()["cli"]).toBeUndefined();
   });
 
   it("stays idempotent alongside the other reconciles", () => {
-    fs.writeFileSync(configPath, "model:
-  default: x
-");
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
     run();
     const first = fs.readFileSync(configPath, "utf-8");
     const second = run();
