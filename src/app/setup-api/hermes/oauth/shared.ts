@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
+import { requireSession } from "@/lib/route-auth";
 
 // Shared plumbing for the wizard-driven Hermes provider-OAuth routes
 // (start / submit / poll / cancel). These exist so the browser NEVER has to
@@ -89,6 +90,39 @@ export async function hermesGate(): Promise<NextResponse | null> {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
   return null;
+}
+
+/**
+ * Edition gate plus the owner's session — what the three OAuth routes that
+ * CHANGE something (start / submit / cancel) run before anything else.
+ *
+ * Middleware is the primary gate and already refuses these paths without a
+ * session: the bootstrap allow-list in `@/lib/setup-api-gate` names only what
+ * wizard steps 1-3 call, and this flow belongs to step 4 — AIModelsStep runs
+ * after CredentialsStep has set the password and been handed a session cookie,
+ * so it is authenticated by the time it gets here. The wizard needs no
+ * carve-out and does not get one.
+ *
+ * This is the second line, on the same argument `@/lib/route-auth` makes for
+ * the destructive handlers: one gate maintained by hand in front of a ~100-route
+ * surface is one `startsWith` away from serving a route it meant to refuse, and
+ * these three are worth refusing twice. `start` opens a provider sign-in session
+ * against the owner's own dashboard, `submit` hands that session an
+ * authorization code, `cancel` destroys one — all while the device may still be
+ * broadcasting the open `ClawBox-Setup` AP. TASK-527.
+ *
+ * No `allowBootstrap`: nothing in this flow has a first-boot role, so it fails
+ * closed on a device with no password rather than opening a window.
+ *
+ * The edition check stays first deliberately. It answers from
+ * `getActiveHarness()`, which the wizard already reads pre-auth through the
+ * allow-listed `/setup-api/harness/active`, so ordering it ahead of the session
+ * check tells an anonymous caller nothing it could not already ask for.
+ */
+export async function ownerGate(request: Request): Promise<NextResponse | null> {
+  const wrongEdition = await hermesGate();
+  if (wrongEdition) return wrongEdition;
+  return requireSession(request);
 }
 
 /**

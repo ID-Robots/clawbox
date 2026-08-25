@@ -1,12 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { installSessionFixture, signSessionCookie, type SessionFixture } from "@/tests/helpers/session";
 
 // The wizard-driven provider-OAuth relay: start / submit / poll / cancel under
 // /setup-api/hermes/oauth/. These exist so the browser never has to reach the
 // Hermes dashboard's :8090 proxy (unreachable through tunnels) — the routes
 // forward to the dashboard API via the server-side dashboardFetch. This suite
-// pins the three properties every route must hold: the hermes harness gate,
-// input validation before anything touches a dashboard URL, and a whitelisted
-// passthrough that can never leak credential material.
+// pins the four properties every route must hold: the hermes harness gate, the
+// owner's session on the three that change something, input validation before
+// anything touches a dashboard URL, and a whitelisted passthrough that can
+// never leak credential material.
+//
+// `@/lib/route-auth` reads config.json and .session-secret off disk on purpose
+// (so a suite that mocks config-store cannot mock the guard away), which is why
+// the fixture below sets up a real temp CLAWBOX_ROOT rather than a vi.mock.
 
 vi.mock("@/lib/harness", () => ({
   getActiveHarness: vi.fn(),
@@ -18,11 +24,35 @@ vi.mock("@/lib/hermes-dashboard-auth", () => ({
 
 const SESSION_ID = "0f6c1c2e-1111-2222-3333-444455556666";
 
-function jsonRequest(path: string, method: string, body: unknown): Request {
+/** Cookie header for the current fixture; set in beforeEach. */
+let sessionCookie = "";
+
+/**
+ * A request the way AIModelsStep makes it — carrying the session the wizard was
+ * handed when it set the password on step 3. Pass `{ anonymous: true }` for the
+ * stranger-on-the-open-AP case.
+ */
+function jsonRequest(
+  path: string,
+  method: string,
+  body: unknown,
+  opts: { anonymous?: boolean } = {},
+): Request {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (!opts.anonymous) headers.Cookie = sessionCookie;
   return new Request(`http://localhost/setup-api/hermes/oauth/${path}`, {
     method,
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(body),
+  });
+}
+
+/** A well-formed start POST carrying an arbitrary Cookie header. */
+function startWithCookie(cookie: string): Request {
+  return new Request("http://localhost/setup-api/hermes/oauth/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: cookie },
+    body: JSON.stringify({ providerId: "anthropic" }),
   });
 }
 
@@ -41,9 +71,12 @@ describe("hermes provider-OAuth relay routes", () => {
   let cancelDELETE: (req: Request) => Promise<Response>;
   let mockGetActiveHarness: ReturnType<typeof vi.fn>;
   let mockDashboardFetch: ReturnType<typeof vi.fn>;
+  let session: SessionFixture;
 
   beforeEach(async () => {
     vi.resetModules();
+    session = installSessionFixture();
+    sessionCookie = session.cookie;
 
     const harness = await import("@/lib/harness");
     mockGetActiveHarness = vi.mocked(harness.getActiveHarness) as unknown as ReturnType<typeof vi.fn>;
@@ -59,6 +92,10 @@ describe("hermes provider-OAuth relay routes", () => {
     ({ DELETE: cancelDELETE } = await import("@/app/setup-api/hermes/oauth/cancel/route"));
   });
 
+  afterEach(() => {
+    session.cleanup();
+  });
+
   it("404s every route when the active harness is not hermes", async () => {
     mockGetActiveHarness.mockResolvedValue("openclaw");
 
@@ -72,6 +109,96 @@ describe("hermes provider-OAuth relay routes", () => {
 
     for (const res of responses) expect(res.status).toBe(404);
     expect(mockDashboardFetch).not.toHaveBeenCalled();
+  });
+
+  describe("the owner's session (TASK-527)", () => {
+    // Middleware refuses these paths without a session — they are not on the
+    // bootstrap allow-list, so they are 401 from the moment the box boots
+    // (asserted in src/tests/middleware/middleware.test.ts). These cases pin the
+    // SECOND line: the handlers themselves refuse, so a gate that is ever wrong
+    // in front of them does not hand a stranger on the open `ClawBox-Setup` AP a
+    // provider sign-in session on the owner's dashboard.
+    it("refuses an anonymous start", async () => {
+      const res = await startPOST(jsonRequest("start", "POST", { providerId: "anthropic" }, { anonymous: true }));
+
+      expect(res.status).toBe(401);
+      expect(await res.json()).toEqual({ error: "Authentication required" });
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
+    it("refuses an anonymous submit — before the pasted code reaches the dashboard", async () => {
+      const res = await submitPOST(jsonRequest("submit", "POST", {
+        providerId: "anthropic",
+        sessionId: SESSION_ID,
+        code: "authcode#state",
+      }, { anonymous: true }));
+
+      expect(res.status).toBe(401);
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
+    it("refuses an anonymous cancel", async () => {
+      const res = await cancelDELETE(jsonRequest("cancel", "DELETE", { sessionId: SESSION_ID }, { anonymous: true }));
+
+      expect(res.status).toBe(401);
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
+    it("refuses a cookie signed with the wrong secret", async () => {
+      const forged = `clawbox_session=${signSessionCookie({ secret: "not-the-box-secret" })}`;
+
+      expect((await startPOST(startWithCookie(forged))).status).toBe(401);
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
+    it("refuses an expired cookie", async () => {
+      const expired = `clawbox_session=${signSessionCookie({ expiresInSeconds: -60 })}`;
+
+      expect((await startPOST(startWithCookie(expired))).status).toBe(401);
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
+    it("refuses a cookie minted before the last password change", async () => {
+      // The box bumped its session generation, so cookies at the old generation
+      // are revoked. Same rule middleware applies, enforced independently here.
+      session.cleanup();
+      session = installSessionFixture({ sessionGeneration: 3 });
+      const stale = `clawbox_session=${signSessionCookie({ gen: 0 })}`;
+
+      expect((await startPOST(startWithCookie(stale))).status).toBe(401);
+      expect(mockDashboardFetch).not.toHaveBeenCalled();
+    });
+
+    it("lets the wizard's own session through to the dashboard", async () => {
+      // The positive half: AIModelsStep holds the cookie CredentialsStep was
+      // handed, so step 4 works with no pre-auth carve-out anywhere.
+      mockDashboardFetch.mockResolvedValue(dashboardResponse(200, {
+        session_id: SESSION_ID,
+        flow: "pkce",
+        auth_url: "https://claude.ai/oauth/authorize?x=1",
+      }));
+
+      const res = await startPOST(jsonRequest("start", "POST", { providerId: "anthropic" }));
+
+      expect(res.status).toBe(200);
+      expect(mockDashboardFetch).toHaveBeenCalled();
+    });
+
+    it("leaves poll on the middleware gate alone — it changes nothing", async () => {
+      // Documented asymmetry, asserted so it stays deliberate: poll is a status
+      // read whose four relayed fields carry no credential material, and naming
+      // a session id it can poll requires `start`, which is gated twice.
+      mockDashboardFetch.mockResolvedValue(dashboardResponse(200, {
+        session_id: SESSION_ID,
+        status: "pending",
+      }));
+
+      const res = await pollGET(new Request(
+        `http://localhost/setup-api/hermes/oauth/poll?providerId=anthropic&sessionId=${SESSION_ID}`,
+      ));
+
+      expect(res.status).toBe(200);
+    });
   });
 
   describe("catalog (GET /setup-api/hermes/oauth)", () => {
@@ -143,7 +270,11 @@ describe("hermes provider-OAuth relay routes", () => {
 
     it("rejects a non-JSON body", async () => {
       const res = await startPOST(
-        new Request("http://localhost/setup-api/hermes/oauth/start", { method: "POST", body: "nope" }),
+        new Request("http://localhost/setup-api/hermes/oauth/start", {
+          method: "POST",
+          headers: { Cookie: sessionCookie },
+          body: "nope",
+        }),
       );
       expect(res.status).toBe(400);
     });
