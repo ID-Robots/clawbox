@@ -82,6 +82,7 @@ function installFetch() {
               hermesSupportsImages: false,
               hermesHasVisionRoute: false,
               hermesStreamsTurns: true,
+              hasClawaiImageRoute: false,
             },
           }),
         };

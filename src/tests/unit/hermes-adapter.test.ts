@@ -23,6 +23,9 @@ const caps = capabilitiesFor("hermes", {
   hermesSupportsImages: true,
   hermesHasVisionRoute: true,
   hermesStreamsTurns: false,
+  // A box that can draw: the credential plus a live image route. Both halves,
+  // because `imageGenerationTrigger` is what `generateImage` checks first.
+  hasClawaiImageRoute: true,
 });
 const CONTEXT: HermesTurnContext = {
   devicePairing: { provider: "clawai", model: "deepseek" },
@@ -415,5 +418,112 @@ describe("HermesAdapter", () => {
     await expect(
       adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "a" }),
     ).rejects.toMatchObject({ code: "aborted" });
+  });
+  describe("generateImage", () => {
+    /** An adapter whose images route answers however the test says. */
+    function drawing(
+      respond: (prompt: string) => { ok: boolean; status: number; payload: unknown },
+      capabilities = caps,
+    ) {
+      const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+      const fetchImpl = vi.fn(async (url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        calls.push({ url: String(url), body });
+        const answer = respond(String(body.prompt ?? ""));
+        return {
+          ok: answer.ok,
+          status: answer.status,
+          json: async () => answer.payload,
+        } as unknown as Response;
+      });
+      const adapter = new HermesAdapter(
+        capabilities,
+        () => CONTEXT,
+        fetchImpl as unknown as typeof fetch,
+      );
+      return { adapter, calls };
+    }
+
+    it("posts the prompt to the box's images route and returns the media refs", async () => {
+      const { adapter, calls } = drawing(() => ({
+        ok: true,
+        status: 200,
+        payload: { ok: true, media: ["/setup-api/chat/media?path=%2Fa.png"] },
+      }));
+      await expect(adapter.generateImage("a red maple leaf")).resolves.toEqual({
+        media: ["/setup-api/chat/media?path=%2Fa.png"],
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("/setup-api/chat/images");
+      expect(calls[0].body).toEqual({ prompt: "a red maple leaf" });
+    });
+
+    it("refuses outright on a box whose trigger is not the composer", async () => {
+      // The precondition this interface states for every method: calling one
+      // whose capability is false is a BUG in the caller, and it fails loudly
+      // so a test catches it rather than a customer wondering why a button did
+      // nothing. Here the box has no image route probed, so there is nowhere
+      // for a prompt to go.
+      const cannot = capabilitiesFor("hermes", {
+        hasClawaiToken: true,
+        hermesSupportsImages: true,
+        hermesHasVisionRoute: true,
+        hermesStreamsTurns: false,
+        hasClawaiImageRoute: false,
+      });
+      const { adapter, calls } = drawing(() => ({ ok: true, status: 200, payload: {} }), cannot);
+      await expect(adapter.generateImage("x")).rejects.toMatchObject({ code: "unsupported" });
+      // And nothing left the browser.
+      expect(calls).toHaveLength(0);
+    });
+
+    it("maps the route's statuses onto the affordance each one wants", async () => {
+      // `not-configured` is "link this box" and gets a different retry
+      // affordance from `upstream`, which is "the far side had a bad day".
+      // Flattening them would send a customer with an unlinked box to press
+      // Retry forever.
+      const cases: Array<{ status: number; code: string }> = [
+        { status: 503, code: "not-configured" },
+        { status: 400, code: "invalid-input" },
+        { status: 429, code: "invalid-input" },
+        { status: 502, code: "upstream" },
+        { status: 500, code: "upstream" },
+      ];
+      for (const c of cases) {
+        const { adapter } = drawing(() => ({
+          ok: false,
+          status: c.status,
+          payload: { error: "the box said no" },
+        }));
+        await expect(adapter.generateImage("x")).rejects.toMatchObject({
+          code: c.code,
+          message: "the box said no",
+        });
+      }
+    });
+
+    it("reports a stop as a stop rather than as a failure", async () => {
+      // 499 is what the route answers a caller who hung up, and a customer who
+      // changed their mind must not be shown a red bubble for it.
+      const { adapter } = drawing(() => ({ ok: false, status: 499, payload: {} }));
+      await expect(adapter.generateImage("x")).rejects.toMatchObject({ code: "aborted" });
+    });
+
+    it("treats a 200 with no picture in it as a failure, not as an empty answer", async () => {
+      // Otherwise the wait ends with an empty bubble, which reads as "the box
+      // drew nothing" rather than as something having gone wrong.
+      for (const payload of [{ ok: true }, { ok: true, media: [] }, { ok: true, media: [""] }]) {
+        const { adapter } = drawing(() => ({ ok: true, status: 200, payload }));
+        await expect(adapter.generateImage("x")).rejects.toMatchObject({ code: "upstream" });
+      }
+    });
+
+    it("has its own sentence when the route answered nothing readable", async () => {
+      const { adapter } = drawing(() => ({ ok: false, status: 502, payload: null }));
+      await expect(adapter.generateImage("x")).rejects.toMatchObject({
+        code: "upstream",
+        message: "Could not generate the picture.",
+      });
+    });
   });
 });

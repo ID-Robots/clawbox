@@ -63,3 +63,27 @@ export function describeChatFailure(raw: unknown): string {
   // generic line would throw that away.
   return safe ? `Error: ${safe}` : GENERIC;
 }
+
+/** A picture could not be drawn, and we will not say why, because we cannot say it safely. */
+const IMAGE_GENERIC = "That picture could not be made. Try again — the details stayed in this box's log.";
+
+/**
+ * Customer-facing text for a failed image generation.
+ *
+ * Separate from `describeChatFailure` only for its fallback sentence. The
+ * shared one tells the customer to "send it again", which is the wrong remedy
+ * and the wrong noun for a request that was never a message — and getting the
+ * noun wrong here is how a support ticket starts with someone re-typing a
+ * prompt into a chat that already has it.
+ *
+ * The rule above it is the same one, and it matters MORE here rather than less:
+ * everything this path can report was written by us for a customer, but the
+ * layers underneath it are a proxy and a filesystem, and both quote what they
+ * were handed. So the sanitizer still decides.
+ */
+export function describeImageFailure(raw: unknown): string {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!text) return IMAGE_GENERIC;
+  const safe = sanitizeErrorMessage(text);
+  return safe ?? IMAGE_GENERIC;
+}
