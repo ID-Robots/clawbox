@@ -115,7 +115,9 @@ d("register-mcp.sh — registering on Hermes", () => {
     const cfg = readConfig();
     expect(cfg.model).toEqual({ default: "deepseek-v4-pro" });
     expect(cfg.providers).toEqual({ clawai: { api_key: "keep-me" } });
-    expect(cfg.skills).toEqual({ enabled: true });
+    // `skills` keeps what it had; the script only ADDS its disabled list
+    // (asserted in its own describe block below).
+    expect((cfg.skills as Record<string, unknown>).enabled).toBe(true);
   });
 
   it("leaves an MCP server someone else registered alone", () => {
@@ -269,5 +271,71 @@ d("register-mcp.sh — the entry Hermes will accept", () => {
 
   it("allows enough time for a cold start on a loaded device", () => {
     expect(Number(clawboxEntry().connect_timeout)).toBeGreaterThanOrEqual(15);
+  });
+});
+
+// Hermes seeds a bundled `email` skill category (himalaya CLI + inbox triage)
+// that teaches the agent to drive a mailbox from the terminal. On a ClawBox the
+// himalaya CLI is unconfigured and the device's email capability is the
+// ClawBox MCP email_* tools, so the script disables those two skills through
+// `skills.disabled` — the exact key agent/skill_utils.py reads. Observed live:
+// "read my last 5 emails" went himalaya → failing terminal calls → a clarify
+// question nothing could answer, with email_list sitting in the tool list.
+d("register-mcp.sh — bundled email-skill distractors", () => {
+  const DISTRACTORS = ["himalaya", "email-inbox-triage", "google-workspace"];
+
+  function disabledSkills(): unknown {
+    const skills = readConfig().skills as Record<string, unknown> | undefined;
+    return skills?.disabled;
+  }
+
+  it("disables the bundled email skills on a config that never mentioned skills", () => {
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    expect(disabledSkills()).toEqual(DISTRACTORS);
+  });
+
+  it("appends to the owner's own disabled list without duplicating", () => {
+    fs.writeFileSync(configPath, "skills:\n  disabled:\n    - my-own-skill\n    - himalaya\n");
+    run();
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage", "google-workspace"]);
+  });
+
+  it("parses the JSON-string list form `hermes config set` stores", () => {
+    // hermes' own parse_config_string_list treats '["a"]' as a list; writing
+    // our names next to it as plain strings must not lose the owner's entry.
+    fs.writeFileSync(configPath, `skills:\n  disabled: '["my-own-skill"]'\n`);
+    run();
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage", "google-workspace"]);
+  });
+
+  it("is part of the idempotence contract: a second run rewrites nothing", () => {
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+    run();
+    const first = fs.readFileSync(configPath, "utf-8");
+    const second = run();
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
+  });
+
+  it("leaves a skills.disabled it cannot read alone but still registers the MCP", () => {
+    // A mapping under `disabled` is not a shape this script understands, and
+    // the previous read of it as "nothing is disabled" would have written the
+    // three distractor names straight over the owner's value. Same rule as the
+    // non-mapping `skills` key below: leave it, say so, register anyway.
+    fs.writeFileSync(configPath, "skills:\n  disabled:\n    himalaya: true\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(disabledSkills()).toEqual({ himalaya: true });
+    expect(r.stderr).toContain("skills.disabled is not a list or a string");
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+
+  it("leaves a malformed skills value alone but still registers the MCP", () => {
+    fs.writeFileSync(configPath, "skills: broken\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(readConfig().skills).toBe("broken");
+    expect(clawboxEntry().enabled).toBe(true);
   });
 });

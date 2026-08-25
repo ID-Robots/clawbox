@@ -270,10 +270,13 @@ export const browserClose = (sessionId: string) =>
 
 // ── App store ─────────────────────────────────────────────────────────────
 
+export interface StoreCatalog {
+  total: number;
+  apps: Array<{ slug: string; name: string; category: string }>;
+}
+
 export const searchApps = (query = "") =>
-  request<{ total: number; apps: Array<{ slug: string; name: string; category: string }> }>(
-    `/setup-api/apps/store?q=${encodeURIComponent(query)}`,
-  );
+  request<StoreCatalog>(`/setup-api/apps/store?q=${encodeURIComponent(query)}`);
 
 export const installApp = (appId: string) =>
   request<{ clawhub?: { success: boolean; error?: string }; reload?: string }>(

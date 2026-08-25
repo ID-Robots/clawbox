@@ -7,6 +7,8 @@ import { useT } from "@/lib/i18n";
 
 interface CredentialsStepProps {
   onNext: () => void;
+  /** Hermes edition: the save/AP-handoff overlay takes the agent's palette. */
+  hermes?: boolean;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -76,7 +78,7 @@ function FieldLabel({ htmlFor, children }: { htmlFor: string; children: ReactNod
   );
 }
 
-export default function CredentialsStep({ onNext }: CredentialsStepProps) {
+export default function CredentialsStep({ onNext, hermes = false }: CredentialsStepProps) {
   const { t } = useT();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -375,6 +377,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
       {handoff && (
         <CredentialsHandoffOverlay
+          hermes={hermes}
           targetUrl={handoff.targetUrl}
           sameOrigin={handoff.sameOrigin}
           hotspotSsid={handoff.hotspotSsid}

@@ -150,6 +150,14 @@ async function readHermesStatus(): Promise<ProviderStatusSummary> {
   // answer is the same for every row that consults it.
   const clawaiLinked = await hasClawaiToken();
 
+  // Did the live dashboard actually answer? `stale` is set on every fallback
+  // path (dashboard down, disk-catalog cold start). It draws the line between
+  // "we asked and ClawBox AI is simply not linked" (disconnected) and "we could
+  // not ask at all" (unknown) — the ONLY case ClawBox AI is still allowed to be
+  // unknown, because its link state is otherwise fully knowable from our own
+  // stores.
+  const probeAnswered = !payload.stale;
+
   const providers = ids.map((id) => {
     const isDefault = id === defaultProvider;
     const reported = byId.get(id)?.authenticated ?? null;
@@ -165,8 +173,14 @@ async function readHermesStatus(): Promise<ProviderStatusSummary> {
     // Caught on a live linked device. The fallback is kept because it is the
     // honest direction: a held credential is evidence of a link, while the
     // absence of one is not evidence of its absence.
+    //
+    // BUT a linked-token-absent-AND-dashboard-silent ClawBox AI is not
+    // "unknown", it is simply NOT CONNECTED — provided the dashboard actually
+    // answered. Reporting "Unknown" over a box that has plainly never linked
+    // ClawBox AI (its own state a mid-setup owner is looking straight at) is
+    // the confusing lie this reserves for a genuine probe failure.
     const credentialed = id === CLAWAI_PROVIDER
-      ? (reported ?? (clawaiLinked ? true : null))
+      ? (reported ?? (clawaiLinked ? true : (probeAnswered ? false : null)))
       : reported;
     return {
       id,

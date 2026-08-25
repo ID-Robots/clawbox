@@ -773,7 +773,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
               <UpdateStep onNext={() => goToStep(3)} />
             )}
             {currentStep === 3 && (
-              <CredentialsStep onNext={() => goToStep(4)} />
+              <CredentialsStep onNext={() => goToStep(4)} hermes={isHermesEdition} />
             )}
             {currentStep === 4 && (
               <AIModelsStep

@@ -513,6 +513,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [state, setState] = useState<MascotState>('idle')
   const [frenzy, setFrenzy] = useState(false)
+  // Read by `doAction`, which is a stable callback and would otherwise close
+  // over a stale `frenzy`. See the bail-out there.
+  const frenzyRef = useRef(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; duration: number; emoji: string}[]>([])
   const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
@@ -1176,6 +1179,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const doAction = useCallback(() => {
     if (frozenRef.current) return // Don't start new actions while frozen
     if (isSleepingRef.current) return // No random actions while sleeping
+    // A frenzy owns the crab for its whole 60 s — its own rAF run, its quote
+    // cycle, its jumps. `handleNewOrder` cancels the pending `stateTimeout`,
+    // but not the mount's own first-action timer, so the ambient loop used to
+    // wake up mid-celebration: it cleared the frenzy's walk rAF (the crab
+    // stopped dead and strolled off) and dropped an idle/sleep line — "💤" —
+    // into the bubble between two frenzy quotes. Skipping without rescheduling
+    // is safe: the 60 s end-timer calls `doAction` again, and so does an
+    // unfreeze.
+    if (frenzyRef.current) return
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
     // The lane comes from live geometry — the bar, and the desktop icons that
@@ -1377,6 +1389,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
       // FRENZY MODE — 60 seconds of excited running + quotes + money
       setFrenzy(true)
+      frenzyRef.current = true
       setState('frenzy')
       setCrabOnBox(false)
       onBoxRef.current = false
@@ -1545,6 +1558,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     frenzyIntervalsRef.current = []
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current); walkInterval.current = null }
     setFrenzy(false)
+    frenzyRef.current = false
     setMoneyParticles([])
     setJumpY(0)
   }, [])
