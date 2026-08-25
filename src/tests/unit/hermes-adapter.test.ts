@@ -471,6 +471,7 @@ describe("HermesAdapter", () => {
         hermesHasVisionRoute: true,
         hermesStreamsTurns: false,
         hasClawaiImageRoute: false,
+        hermesAgentDrawsImages: false,
       });
       const { adapter, calls } = drawing(() => ({ ok: true, status: 200, payload: {} }), cannot);
       await expect(adapter.generateImage("x")).rejects.toMatchObject({ code: "unsupported" });
