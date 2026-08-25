@@ -80,7 +80,13 @@ export async function adoptHermesGeneratedImages(
   }
 
   const adopted: string[] = [];
+  // One card per FILE: the same picture can arrive both from its tool row and
+  // from the model's own mention of the path, and adopting it twice would put
+  // two identical cards in one bubble.
+  const seen = new Set<string>();
   for (const source of sources) {
+    if (seen.has(source)) continue;
+    seen.add(source);
     const copied = await adoptOne(source, cacheRoot);
     if (copied) adopted.push(copied);
   }
@@ -129,4 +135,96 @@ async function adoptOne(source: string, cacheRoot: string): Promise<string | nul
     // one picture is not adopted, and none of them may cost the reply.
     return null;
   }
+}
+
+// ── Image mentions the model itself wrote into the reply ────────────────────
+//
+// The image backend answers the model with the SAVED FILE'S ABSOLUTE PATH, and
+// models repeat it — observed on the hardware box (2026-08-25) both as a
+// "MEDIA:/home/clawbox/.hermes/cache/images/….png" directive and as an
+// "[Image: …]" aside. `settleTurn` appends its own MEDIA: directive for the
+// ADOPTED copy of that same file, so a mention left in the caption was lifted
+// by `splitAssistantMedia` as a SECOND image whose cache path `chat/media`
+// refuses by design: every generated picture rendered as a broken card beside
+// the real one. One generation must render exactly one card.
+//
+// A mention is therefore not just dropped — it is handed back as a SOURCE, so
+// a picture whose tool row never reached `generatedImages` is still adopted
+// off the model's own words. Only LOCAL ABSOLUTE paths with an image extension
+// are reclaimed; a remote URL in a MEDIA: line is left exactly where it was,
+// because nothing here can prove it broken, and audio directives are not image
+// business at all.
+
+const MEDIA_DIRECTIVE_RE = /^media:\s*(.+)$/i;
+const IMAGE_MENTION_RE = /\[image:\s*([^\]\n]+)\]/gi;
+const FENCE_RE = /^(?:```|~~~)/;
+
+/** Strips one layer of the quoting a model tends to wrap a path in. */
+function unquoted(value: string): string {
+  for (const quote of ["`", '"', "'"]) {
+    if (value.length >= 2 && value.startsWith(quote) && value.endsWith(quote)) {
+      return value.slice(1, -1).trim();
+    }
+  }
+  return value;
+}
+
+/** The local absolute image path a mention names, or null to leave it alone. */
+function reclaimable(raw: string): string | null {
+  const value = unquoted(raw.trim());
+  if (!path.isAbsolute(value)) return null;
+  if (!IMAGE_EXT.has(path.extname(value).toLowerCase())) return null;
+  return value;
+}
+
+/**
+ * Splits the model's own image-path mentions out of a reply.
+ *
+ * Returns the caption with those mentions removed, and the paths they named —
+ * in order, de-duplicated — for `adoptHermesGeneratedImages` to judge. The
+ * adoption path re-checks containment in the image cache, so nothing here has
+ * to decide what is safe to serve, only what is CLAIMED to be a local picture.
+ * Fenced code blocks are left untouched: a reply that explains the syntax is
+ * still allowed to show it.
+ */
+export function reclaimImageMentions(raw: string): { text: string; sources: string[] } {
+  if (!raw || (!/media:/i.test(raw) && !/\[image:/i.test(raw))) return { text: raw, sources: [] };
+  const sources: string[] = [];
+  const keep = (source: string) => {
+    if (!sources.includes(source)) sources.push(source);
+  };
+  const kept: string[] = [];
+  let inFence = false;
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (FENCE_RE.test(trimmed)) {
+      inFence = !inFence;
+      kept.push(line);
+      continue;
+    }
+    if (inFence) {
+      kept.push(line);
+      continue;
+    }
+    const directive = MEDIA_DIRECTIVE_RE.exec(trimmed);
+    if (directive) {
+      const source = reclaimable(directive[1]);
+      if (source) {
+        keep(source);
+        continue; // the whole line was machinery; nothing of it stays
+      }
+      kept.push(line);
+      continue;
+    }
+    // "[Image: /abs/path.png]" asides go; the sentence around them stays.
+    const scrubbed = line.replace(IMAGE_MENTION_RE, (whole, payload: string) => {
+      const source = reclaimable(payload);
+      if (!source) return whole;
+      keep(source);
+      return "";
+    });
+    kept.push(scrubbed === line ? line : scrubbed.replace(/ {2,}/g, " ").replace(/[ \t]+$/, ""));
+  }
+  const text = kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { text, sources };
 }

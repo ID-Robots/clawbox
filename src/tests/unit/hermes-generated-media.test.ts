@@ -134,4 +134,49 @@ describe("adopting a picture the agent drew", () => {
     const { adoptHermesGeneratedImages } = await load();
     expect(await adoptHermesGeneratedImages([])).toEqual([]);
   });
+
+  // ── The model's own mentions of what it drew ──
+  //
+  // One generation must render exactly one card: the mention comes out of the
+  // caption and into the adoption list, never onto the screen as a dead path.
+
+  it("lifts a MEDIA: cache path out of the caption and hands it back as a source", async () => {
+    const { reclaimImageMentions } = await load();
+    const out = reclaimImageMentions("Here you go!\nMEDIA:/home/clawbox/.hermes/cache/images/a.png");
+    expect(out.sources).toEqual(["/home/clawbox/.hermes/cache/images/a.png"]);
+    expect(out.text).toBe("Here you go!");
+  });
+
+  it("strips an [Image: …] aside but keeps the sentence around it", async () => {
+    const { reclaimImageMentions } = await load();
+    const out = reclaimImageMentions(
+      "Your red square: [Image: /home/clawbox/.hermes/cache/images/b.png] — enjoy!",
+    );
+    expect(out.sources).toEqual(["/home/clawbox/.hermes/cache/images/b.png"]);
+    expect(out.text).toBe("Your red square: — enjoy!");
+  });
+
+  it("leaves remote URLs and audio directives untouched", async () => {
+    const { reclaimImageMentions } = await load();
+    const raw = "MEDIA:https://cdn.example/pic.png\nMEDIA:/home/clawbox/voice.wav\nCaption.";
+    const out = reclaimImageMentions(raw);
+    expect(out.sources).toEqual([]);
+    expect(out.text).toBe(raw);
+  });
+
+  it("keeps fenced examples as text", async () => {
+    const { reclaimImageMentions } = await load();
+    const raw = "```\nMEDIA:/home/clawbox/.hermes/cache/images/example.png\n```";
+    const out = reclaimImageMentions(raw);
+    expect(out.sources).toEqual([]);
+    expect(out.text).toBe(raw);
+  });
+
+  it("one generation, one card: the tool row and the model's mention name the same file, adopted once", async () => {
+    const file = writeCachedImage("clawai_dup.png");
+    const { adoptHermesGeneratedImages, reclaimImageMentions } = await load();
+    const { sources } = reclaimImageMentions("Done!\nMEDIA:" + file);
+    const adopted = await adoptHermesGeneratedImages([file, ...sources]);
+    expect(adopted).toHaveLength(1);
+  });
 });
