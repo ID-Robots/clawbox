@@ -297,9 +297,157 @@ describe("selectPet", () => {
       // Exit code 0 but nothing on disk — a timed-out download looks like this.
       runHermesCli: () => Promise.resolve({ code: 0, stdout: "", stderr: "" }),
     }));
-    const { selectPet } = await loadModule();
-    expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
-    vi.doUnmock("@/lib/hermes-cli");
+    // The direct fallback has nothing to offer either (and must never reach
+    // the real network from a test).
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set<string>(),
+      petdexSheetUrl: async () => null,
+    }));
+    try {
+      const { selectPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+    }
+  });
+
+  it("falls back to a direct curated download when the CLI install fails", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const calls: string[][] = [];
+    vi.doMock("@/lib/hermes-cli", () => ({
+      runHermesCli: (args: string[]) => {
+        calls.push(args);
+        if (args[1] === "install") {
+          // The live failure this guards: petdex.dev/api/manifest answering 500
+          // while assets.petdex.dev (the sprite host) serves fine.
+          return Promise.resolve({ code: 1, stdout: "", stderr: "could not fetch petdex manifest: 500" });
+        }
+        return Promise.resolve({ code: 0, stdout: "", stderr: "" });
+      },
+    }));
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev", "petdex.dev"]),
+      petdexSheetUrl: async (slug: string) => `https://assets.petdex.dev/curated/${slug}/sprite-v2.webp`,
+    }));
+    const bytes = Buffer.from("RIFFwebp");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(new Uint8Array(bytes), {
+            headers: { "content-length": String(bytes.length) },
+          }),
+        ),
+      ),
+    );
+    try {
+      const { selectPet, loadPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: true });
+      // The CLI was still tried first, and select still goes THROUGH the CLI.
+      expect(calls).toEqual([
+        ["pets", "install", "boba"],
+        ["pets", "select", "boba"],
+      ]);
+      expect(fs.existsSync(path.join(petsDir, "boba", "spritesheet.webp"))).toBe(true);
+      // The store agrees this is a real pet, wearing the curated display name.
+      expect(loadPet("boba")?.displayName).toBe("Boba");
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("refuses a direct-download redirect that leaves the allow-listed hosts", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.doMock("@/lib/hermes-cli", () => ({
+      runHermesCli: (args: string[]) =>
+        args[1] === "install"
+          ? Promise.resolve({ code: 1, stdout: "", stderr: "manifest 500" })
+          : Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    }));
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://not-petdex.example/curated/boba/sprite-v2.webp" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const { selectPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+      // The disallowed redirect target was never requested.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fs.existsSync(path.join(petsDir, "boba", "spritesheet.webp"))).toBe(false);
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("aborts a direct download that exceeds the size cap mid-stream", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.doMock("@/lib/hermes-cli", () => ({
+      runHermesCli: (args: string[]) =>
+        args[1] === "install"
+          ? Promise.resolve({ code: 1, stdout: "", stderr: "manifest 500" })
+          : Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    }));
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    // No content-length header, and the stream keeps going past the 8 MB cap.
+    const chunk = new Uint8Array(1024 * 1024);
+    let served = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (served >= 9) {
+          controller.close();
+          return;
+        }
+        served += 1;
+        controller.enqueue(chunk);
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(stream))));
+    try {
+      const { selectPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+      expect(fs.existsSync(path.join(petsDir, "boba", "spritesheet.webp"))).toBe(false);
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports install-failed when the CLI and the direct download both fail", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.doMock("@/lib/hermes-cli", () => ({
+      runHermesCli: () => Promise.resolve({ code: 1, stdout: "", stderr: "manifest 500" }),
+    }));
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("network down"))));
+    try {
+      const { selectPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+      vi.unstubAllGlobals();
+    }
   });
 
   it("never reaches the CLI with an unsafe slug", async () => {
