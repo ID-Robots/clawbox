@@ -2,9 +2,15 @@
  * App Store — real round trip to clawbox.com/api/store/apps, then
  * install one skill and verify it ends up registered locally.
  *
- * This test is network-dependent on clawbox.com — if that service
- * is down or region-restricted, the whole spec fails. We don't cache the
- * result because the point is catching regressions in the live integration.
+ * This test is network-dependent on clawbox.com. A regression in ClawBox's
+ * own store proxy still fails the suite; the PUBLIC STORE refusing or failing
+ * the runner (WAF/bot rules blocking CI's datacenter IPs, rate limits, an
+ * outage) skips it instead — the same policy the INSTALL_OK flag below has
+ * long applied to install-time hiccups. That distinction became load-bearing
+ * on 2026-08-25, when clawbox.com started answering 403 to GitHub Actions
+ * while serving residential IPs fine, and every open PR went red on this one
+ * spec. We still don't cache the catalog — when the store is reachable, the
+ * point is catching regressions in the live integration.
  *
  * The test app is picked dynamically from the live catalog so the suite
  * doesn't rot when individual apps get delisted. Override with
@@ -22,6 +28,23 @@ let TEST_APP_ID = "";
 // uninstall) skip gracefully in that case so rate-limit hiccups on the
 // public store don't flake the whole suite.
 let INSTALL_OK = false;
+// False when the catalog search itself was refused by the public store
+// (403/429/5xx through the proxy) — the whole store suite skips, because
+// nothing downstream can pick a test app.
+let STORE_OK = true;
+
+// The store proxy (src/app/setup-api/apps/store/route.ts) forwards the
+// UPSTREAM status with body {"error":"Store API error"}, and turns its own
+// fetch failures into 502 {"error":"Failed to fetch store"}. Both shapes are
+// clawbox.com refusing or failing the RUNNER, not a ClawBox regression.
+// ClawBox-side statuses (400 validation, 401 auth, the Hermes guard) match
+// neither and still fail the suite.
+function storeRefusedRunner(message: string): boolean {
+  return (
+    /→ (403|429|5\d\d)\b.*Store API error/.test(message)
+    || /→ 502\b.*Failed to fetch store/.test(message)
+  );
+}
 
 test.describe.configure({ mode: "serial" });
 
@@ -31,7 +54,18 @@ test.describe("app store happy path", () => {
   });
 
   test("catalog search returns apps", async () => {
-    const result = await searchApps();
+    let result: Awaited<ReturnType<typeof searchApps>>;
+    try {
+      result = await searchApps();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (storeRefusedRunner(message)) {
+        STORE_OK = false;
+        console.warn(`[app-store] public store refused the runner — skipping store suite: ${message}`);
+        test.skip(true, "public store refused the runner (WAF / rate limit / outage)");
+      }
+      throw err;
+    }
     expect(result.total).toBeGreaterThan(0);
     expect(result.apps.length).toBeGreaterThan(0);
     // Every entry should have the fields the UI renders.
@@ -45,6 +79,7 @@ test.describe("app store happy path", () => {
   });
 
   test("search filter narrows results", async () => {
+    test.skip(!STORE_OK, "public store refused the runner; no test app selected");
     expect(TEST_APP_ID).toBeTruthy();
     // Query with the first word of the app's slug — that's the least
     // ambiguous prefix that should still match the entry we're looking for.
@@ -54,6 +89,7 @@ test.describe("app store happy path", () => {
   });
 
   test("install selected app", async () => {
+    test.skip(!STORE_OK, "public store refused the runner; no test app selected");
     test.setTimeout(120_000);
     expect(TEST_APP_ID).toBeTruthy();
     const result = await installApp(TEST_APP_ID);

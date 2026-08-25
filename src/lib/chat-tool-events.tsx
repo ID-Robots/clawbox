@@ -141,18 +141,46 @@ function ToolChip(
   );
 }
 
+/**
+ * Collapse CONSECUTIVE runs of the same-looking chip into one group — seven
+ * `gateway` calls in a row render as one `gateway (7)` chip, not a column of
+ * seven identical pills. Only adjacent repeats collapse: a different tool
+ * between two `gateway` calls keeps them apart, so the row still reads as the
+ * order the steps ran in. Keyed on what the chip DISPLAYS (pretty name, and
+ * for summaries the tone too), because two entries that render identically
+ * are the ones that read as duplication.
+ */
+export function groupConsecutiveBy<T>(items: T[], key: (item: T) => string): T[][] {
+  const groups: T[][] = [];
+  for (const item of items) {
+    const last = groups[groups.length - 1];
+    if (last && key(last[0]) === key(item)) last.push(item);
+    else groups.push([item]);
+  }
+  return groups;
+}
+
+function countedLabel(label: string, count: number): string {
+  return count > 1 ? `${label} (${count})` : label;
+}
+
 export function ToolCallPills({ toolCalls, runningLabel }: { toolCalls: ChatToolCall[]; runningLabel: string }) {
   if (toolCalls.length === 0) return null;
+  const groups = groupConsecutiveBy(toolCalls, (tc) => tc.prettyName);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
-      {toolCalls.map((tc) => {
-        const done = tc.phase === "done";
+      {groups.map((group) => {
+        // The running call is always the group's newest member; a group with
+        // one still in flight shows as running so the count keeps ticking up
+        // on the same pill instead of spawning a second one.
+        const running = group.some((tc) => tc.phase !== "done");
         return (
           <ToolChip
-            key={tc.id}
-            tone={done ? "done" : "running"}
-            label={tc.prettyName}
-            {...(done ? {} : { suffix: runningLabel })}
+            // First member's id: stable while the group grows.
+            key={group[0].id}
+            tone={running ? "running" : "done"}
+            label={countedLabel(group[0].prettyName, group.length)}
+            {...(running ? { suffix: runningLabel } : {})}
           />
         );
       })}
@@ -188,12 +216,18 @@ export function ToolCallSummaryChips(
         marginTop: 8,
       }}
     >
-      {toolCalls.map((call, index) => (
+      {groupConsecutiveBy(
+        toolCalls,
+        // Tone is part of the key: a failed call must never disappear into a
+        // collapsed run of successes.
+        (call) => `${prettifyToolName(call.name)} ${call.status === "error" ? "error" : "ok"}`,
+      ).map((group, index) => (
         <ToolChip
-          key={`${call.name}-${index}`}
-          tone={call.status === "error" ? "failed" : "done"}
-          label={prettifyToolName(call.name)}
-          {...(call.detail ? { title: `${call.name}: ${call.detail}` } : { title: call.name })}
+          key={`${group[0].name}-${index}`}
+          tone={group[0].status === "error" ? "failed" : "done"}
+          label={countedLabel(prettifyToolName(group[0].name), group.length)}
+          // Every collapsed call keeps its argument summary — one per line.
+          title={group.map((call) => (call.detail ? `${call.name}: ${call.detail}` : call.name)).join("\n")}
         />
       ))}
     </div>
