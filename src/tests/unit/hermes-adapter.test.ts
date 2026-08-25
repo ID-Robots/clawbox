@@ -98,33 +98,52 @@ describe("HermesAdapter", () => {
     expect(adapter.threadedSessionId).toBe("");
   });
 
-  it("announces a mid-conversation switch, and only a real one", async () => {
+  it("sends the customer's message and nothing else, switch or no switch", async () => {
+    // This used to prepend a "[System note: this conversation has just been
+    // switched to model X]" paragraph to the customer's own message whenever
+    // the pills changed mid-conversation. It was never true: the resume call
+    // dropped the override, so nothing had been switched, and the note asked
+    // the model to announce a change that had not happened. The model saw
+    // straight through it -- "that 'system note' arrived inside your chat
+    // message, not from my actual harness" -- and contradicted it.
+    //
+    // Configuration is not message content. The switch is now made for real on
+    // the transport (`/model ... --session` before the prompt is submitted), and
+    // the message body is exactly what was typed.
     const { adapter, calls } = makeAdapter(ok({ text: "ok", sessionId: "sess-1" }));
     await adapter.sendTurn({
       text: "first", attachments: [], idempotencyKey: "a", provider: "clawai", model: "deepseek",
     });
-    // Same pairing: nothing to announce, so the turn carries no extra text.
     await adapter.sendTurn({
       text: "second", attachments: [], idempotencyKey: "b", provider: "clawai", model: "deepseek",
     });
     expect(calls[1].body.message).toBe("second");
-    // Changed pairing on a RESUMED session: the agent still holds the old
-    // system prompt and would answer "what model are you?" with the old one.
+    // The turn that changes the pairing on a RESUMED session -- the one that
+    // used to carry the note.
     await adapter.sendTurn({
       text: "third", attachments: [], idempotencyKey: "c", provider: "openai", model: "gpt-5",
     });
-    expect(String(calls[2].body.message)).toContain("System note");
-    expect(String(calls[2].body.message)).toContain("third");
+    expect(calls[2].body.message).toBe("third");
+    expect(String(calls[2].body.message)).not.toContain("System note");
+    // The pills still travel -- they are what the route hands the transport.
+    expect(calls[2].body.provider).toBe("openai");
+    expect(calls[2].body.model).toBe("gpt-5");
   });
 
-  it("does not announce a switch on the first turn of a fresh session", async () => {
+  it("sends no displayText, because the message is never rewritten", async () => {
+    // `displayText` existed only to keep the injected note out of the
+    // transcript. With nothing injected there are no longer two versions of the
+    // message to keep apart.
     const { adapter, calls } = makeAdapter(ok({ text: "ok", sessionId: "sess-1" }));
     await adapter.sendTurn({
       text: "first", attachments: [], idempotencyKey: "a", provider: "openai", model: "gpt-5",
     });
-    // A fresh session already gets a correct system prompt; announcing would be
-    // telling the agent about a change that never happened to it.
+    await adapter.sendTurn({
+      text: "second", attachments: [], idempotencyKey: "b", provider: "anthropic", model: "claude-fable-5",
+    });
     expect(calls[0].body.message).toBe("first");
+    expect(calls[0].body).not.toHaveProperty("displayText");
+    expect(calls[1].body).not.toHaveProperty("displayText");
   });
 
   it("refuses a provider it cannot name a model for, before burning a turn", async () => {
@@ -350,14 +369,14 @@ describe("HermesAdapter", () => {
     expect(calls[0].body).not.toHaveProperty("displayText");
   });
 
-  it("records the user's own words, not the switch note written for the agent", async () => {
+  it("records the user's own words on a model change, with nothing added", async () => {
     const { adapter, calls } = makeAdapter(ok({ text: "ok", sessionId: "s1" }));
     await adapter.sendTurn({ text: "one", attachments: [], idempotencyKey: "a", provider: "clawai", model: "m1" });
     await adapter.sendTurn({ text: "two", attachments: [], idempotencyKey: "b", provider: "clawai", model: "m2" });
-    // The agent has to read the note; the transcript must not replay it as
-    // something the customer typed.
-    expect(String(calls[1].body.message)).toContain("[System note:");
-    expect(calls[1].body.displayText).toBe("two");
+    // What the customer typed is what is sent and what is stored -- one version
+    // of the message, not an agent-facing one and a display one.
+    expect(calls[1].body.message).toBe("two");
+    expect(calls[1].body).not.toHaveProperty("displayText");
   });
 
   it("refuses the calls its capabilities say it cannot make", async () => {

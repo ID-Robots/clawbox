@@ -83,10 +83,12 @@ export const zh: Record<string, string> = {
   "settings.security.wifiPasswordUpdated": "{ssid} 的密码已更新",
 
   // === Panel chrome ===
-  "hermesProvider.title": "Hermes 模型",
+  "hermesProvider.title": "AI 提供商",
   "hermesProvider.intro":
-    "此设备基于 Hermes 运行。请选择推理服务商和默认模型 — Hermes 会原生完成切换，无需任何控制台。",
+    "本设备运行在 Hermes 上。连接提供商并选择默认项——状态、登录与切换都在这里完成。",
   "hermesProvider.radioGroupLabel": "AI 服务商",
+  "hermesProvider.hero.nativeSwitch": "通过 Hermes 原生切换",
+  "hermesProvider.hero.changeModel": "更换模型",
   "hermesProvider.continue": "继续",
 
   // === Provider rows ===
