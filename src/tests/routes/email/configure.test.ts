@@ -23,13 +23,15 @@ vi.mock("@/lib/hermes-email", async () => {
     stopHermesEmailPolling: vi.fn(),
   };
 });
+vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: vi.fn() }));
 vi.mock("@/lib/smtp-client", async () => {
   const actual = await vi.importActual<typeof import("@/lib/smtp-client")>("@/lib/smtp-client");
   return { ...actual, verifySmtp: vi.fn() };
 });
 
-import { setMany } from "@/lib/config-store";
+import { get, setMany } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
+import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 import {
   applyHermesEmail,
   clearHermesEmail,
@@ -40,6 +42,8 @@ import { ImapError, verifyImap } from "@/lib/imap-client";
 import { SmtpError, verifySmtp } from "@/lib/smtp-client";
 
 const mockSetMany = vi.mocked(setMany);
+const mockGet = vi.mocked(get);
+const mockDashboardRpc = vi.mocked(dashboardRpc);
 const mockHarness = vi.mocked(getActiveHarness);
 const mockVerify = vi.mocked(verifySmtp);
 const mockVerifyImap = vi.mocked(verifyImap);
@@ -70,6 +74,7 @@ beforeEach(async () => {
   mockApplyHermes.mockResolvedValue({ inbound: false });
   mockRestart.mockResolvedValue(true);
   mockStopPolling.mockResolvedValue("none-running");
+  mockDashboardRpc.mockResolvedValue({ status: "ok" });
   const mod = await import("@/app/setup-api/email/configure/route");
   POST = mod.POST;
   DELETE = mod.DELETE;
@@ -310,5 +315,91 @@ describe("POST /setup-api/email/configure — read modes", () => {
     const res = await POST(request(READ_BODY));
     expect(res.status).toBe(200);
     expect(setMany).toHaveBeenCalledWith(expect.objectContaining({ email_mode: "read" }));
+  });
+});
+
+// ── Keeping the agent's email tools in step with the mode ────────────────────
+//
+// `email_list`/`email_read` are registered only when the MCP server's startup
+// probe says the mailbox is readable, and that server is a long-lived child of
+// Hermes. Without a nudge, a mailbox connected under a running server stays
+// invisible to the agent: on the owner's device 8 of 29 server starts logged
+// `41 tools` instead of `43`, and the two missing ones were exactly these.
+//
+// The nudge costs a prompt cache, so what is pinned here is as much when it does
+// NOT fire as when it does.
+
+/** Put a configured account in the store, in the given mode. */
+function storedAccount(mode: string): void {
+  mockGet.mockImplementation(async (key: string) => {
+    switch (key) {
+      case "email_address":
+        return "box@example.com";
+      case "email_password":
+        return PASSWORD;
+      case "email_smtp_host":
+        return "smtp.gmail.com";
+      case "email_smtp_port":
+        return 587;
+      case "email_mode":
+        return mode;
+      default:
+        return undefined;
+    }
+  });
+}
+
+describe("email/configure — MCP tool refresh", () => {
+  const BODY = { address: "box@example.com", password: PASSWORD };
+
+  it("reloads Hermes' MCP servers when the mode gains reading", async () => {
+    storedAccount("send");
+    const res = await POST(request({ ...BODY, mode: "read" }));
+    expect(res.status).toBe(200);
+    // `confirm` is not decoration: without it the dashboard answers
+    // `confirm_required` and does nothing, which looks exactly like success.
+    expect(mockDashboardRpc).toHaveBeenCalledWith("reload.mcp", { confirm: true });
+  });
+
+  it("does NOT reload when an unrelated field changes", async () => {
+    // The account could already read, and still can. Nothing about the tool list
+    // is different, so nothing may be respawned and no prompt cache thrown away.
+    storedAccount("read");
+    const res = await POST(request({ ...BODY, mode: "read", fromName: "ClawBox" }));
+    expect(res.status).toBe(200);
+    expect(mockDashboardRpc).not.toHaveBeenCalled();
+  });
+
+  it("does NOT reload when a send-only account is re-saved", async () => {
+    storedAccount("send");
+    await POST(request({ ...BODY, mode: "send" }));
+    expect(mockDashboardRpc).not.toHaveBeenCalled();
+  });
+
+  it("saves successfully even when the dashboard cannot be reached", async () => {
+    // A box whose dashboard is down — or an OpenClaw box that never had one —
+    // must not have its email settings save turned into an error by a
+    // best-effort refresh.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    storedAccount("send");
+    mockDashboardRpc.mockRejectedValue(new Error("dashboard is down"));
+    const res = await POST(request({ ...BODY, mode: "read" }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ email_mode: "read" }));
+    errorSpy.mockRestore();
+  });
+
+  it("reloads on disconnect, so tools that can only 409 stop being offered", async () => {
+    storedAccount("read");
+    const res = await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    expect(res.status).toBe(200);
+    expect(mockDashboardRpc).toHaveBeenCalledWith("reload.mcp", { confirm: true });
+  });
+
+  it("does NOT reload when disconnecting a box that had no account", async () => {
+    const res = await DELETE(new Request("http://localhost/setup-api/email/configure", { method: "DELETE" }));
+    expect(res.status).toBe(200);
+    expect(mockDashboardRpc).not.toHaveBeenCalled();
   });
 });
