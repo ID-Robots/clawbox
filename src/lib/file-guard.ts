@@ -78,7 +78,7 @@ const PROTECTED_FILE_RES: RegExp[] = [
 // file — may only import modules whose whole graph is relative paths and node
 // builtins. Read the import rule at the top of mcp/lib/guard.ts before changing
 // this: an import here breaks the MCP server at startup, not at build time.
-const DATA_DIR_PUBLIC_SUBTREES = new Set([
+export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "webapps",       // built desktop webapps, also served by the webapps route
   "icons",         // installed-app icons, also served by the icon route
   "catalog-cache", // cached copies of the providers' public model catalogues

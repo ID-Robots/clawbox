@@ -61,6 +61,20 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 ---
 
+## Coding agent (delegate a whole task)
+
+When the owner has switched it on in Settings → System → Coding agent, three more tools exist:
+
+| Tool | Purpose |
+|---|---|
+| `coding_agent_run` | Hand a task to a separate Claude Code session that works in the background inside one folder (a `code_project_*` project, usually) on the box's ClawBox AI plan. Returns a run id at once. |
+| `coding_agent_status` | Follow a run; `wait_seconds` blocks up to two minutes instead of polling. When finished it carries the summary to relay to the user. |
+| `coding_agent_stop` | End a run early. Its files stay. |
+
+Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered the owner has not switched it on — say so; you cannot enable it yourself.
+
+---
+
 ## File-system and network
 
 - The ClawBox project dir is `/home/clawbox/clawbox/`. User data is in `data/`. Skills are in the OpenClaw workspace (see Skills above).

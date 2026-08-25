@@ -23,6 +23,7 @@ import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup from "@/components/ChatPopup";
+import ToastHost from "@/components/ToastHost";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -1793,6 +1794,10 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
+      {/* Renders the `clawbox:toast` events the pending-action poll above and
+          the pairing flow dispatch. Without it ui_notify, `clawbox notify`
+          and every server-side owner notice were fired and never shown. */}
+      <ToastHost />
       {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}

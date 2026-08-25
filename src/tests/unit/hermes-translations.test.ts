@@ -6,6 +6,7 @@ import { providerEn } from "@/lib/hermes-translations/en-provider";
 import { skillsEn } from "@/lib/hermes-translations/en-skills";
 import { localModelsEn } from "@/lib/hermes-translations/en-local-models";
 import { systemProfileEn } from "@/lib/hermes-translations/en-system-profile";
+import { codingAgentEn } from "@/lib/hermes-translations/en-coding-agent";
 import { bg } from "@/lib/hermes-translations/bg";
 import { de } from "@/lib/hermes-translations/de";
 import { es } from "@/lib/hermes-translations/es";
@@ -47,6 +48,8 @@ const NAMESPACES: { name: string; matches: (key: string) => boolean }[] = [
   // Desktop & power card (TASK-455). Held to exactly the same bar as the
   // TASK-458 four: every locale carries its own copy, not an English fallback.
   { name: "Desktop & power card", matches: (k) => k.startsWith("systemProfile.") },
+  // Coding agent card: the owner's switch for delegated Claude Code runs.
+  { name: "Coding agent card", matches: (k) => k.startsWith("codingAgent.") },
 ];
 
 /**
@@ -64,6 +67,7 @@ const BRAND_ONLY = new Set([
   "OAuth", "API", "SSH", "sudo", "CLI", "LAN", "WiFi",
   "Pro", "Max", "Free", "ClawBox AI", "Hermes CLI", "macOS", "Windows", "Linux",
   "Linux/macOS", "SKILL.md", "Disk", "Memory",
+  "Claude Code", "claude-ds",
 ]);
 
 function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {
@@ -84,6 +88,7 @@ describe("hermes-translations (TASK-458)", () => {
       ["skillsEn", skillsEn, (k) => k.startsWith("skills.")],
       ["localModelsEn", localModelsEn, (k) => k.startsWith("localModels.")],
       ["systemProfileEn", systemProfileEn, (k) => k.startsWith("systemProfile.")],
+      ["codingAgentEn", codingAgentEn, (k) => k.startsWith("codingAgent.")],
     ];
 
     for (const [name, table, prefixed] of surfaces) {

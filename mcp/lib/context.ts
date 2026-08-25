@@ -30,6 +30,7 @@ const COMMON_APPS: DesktopApp[] = [
   { id: "files", name: "Files", description: "File manager" },
   { id: "browser", name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
   { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
+  { id: "coding", name: "Coding Agent", description: "Interactive Claude Code terminal (claude-ds) for the person at the desk" },
 ];
 
 export function builtInApps(edition: Ed): DesktopApp[] {
@@ -70,6 +71,13 @@ export interface McpContext {
    * needs nothing from Hermes.
    */
   emailCanRead: boolean;
+  /**
+   * Whether the owner switched the coding agent on AND the harness behind it
+   * (Claude Code + claude-ds + ClawBox AI) is ready. Same gating rule as
+   * emailCanRead, for the same circuit-breaker reason: the coding_agent_*
+   * tools exist only when a run could actually start.
+   */
+  codingAgent: boolean;
 }
 
 const SCREEN_GRABBERS = ["scrot", "gnome-screenshot", "spectacle", "import"];
@@ -108,6 +116,21 @@ async function probeEmailRead(): Promise<boolean> {
   return status.canRead === true;
 }
 
+interface CodingAgentStatusPayload {
+  enabled?: boolean;
+  /** enabled AND installed AND connected — the device's own verdict. */
+  ready?: boolean;
+}
+
+/**
+ * Same shape as the email probe: an unreachable or older device answers null
+ * and the family stays unregistered.
+ */
+async function probeCodingAgent(): Promise<boolean> {
+  const status = await apiTry<CodingAgentStatusPayload>("/setup-api/coding-agent/status", { timeoutMs: 3_000 });
+  return status?.enabled === true && status.ready === true;
+}
+
 export async function buildContext(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual",
@@ -126,7 +149,7 @@ export async function buildContext(
     hasBinary("du"),
   ]);
 
-  const emailCanRead = await probeEmailRead();
+  const [emailCanRead, codingAgent] = await Promise.all([probeEmailRead(), probeCodingAgent()]);
 
   let providers: string[] = [];
   if (edition === "hermes") {
@@ -152,5 +175,6 @@ export async function buildContext(
     capabilities: { screenGrabber, imageConvert, journal, du },
     providers,
     emailCanRead,
+    codingAgent,
   };
 }
