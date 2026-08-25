@@ -1,8 +1,6 @@
 import {
   normalizeClawboxAiTier,
-  normalizeClawboxAiPlan,
   type ClawboxAiTier,
-  type ClawboxAiPlan,
 } from "@/lib/clawbox-ai-models";
 
 /**
@@ -56,68 +54,17 @@ const PORTAL_UNREACHABLE_TTL_MS = 30_000;
 export interface DeviceInfoResponse {
   tier?: string;
   deviceTier?: string | null;
-  /** Live non-token allowances (TASK-469). Absent on an older portal. */
-  meters?: Record<string, unknown> | null;
-}
-
-/**
- * The image meter as the portal reported it this cycle.
- *
- * `used` is the ONLY live usage number the device can honestly show: the
- * gateway calls the image proxy directly, so the `X-ClawBox-Images-*` response
- * headers never reach this process, and until TASK-469 there was no read path
- * at all. This one comes from the same Redis counter the reservation path
- * enforces against, so the panel and the refusal cannot disagree.
- */
-export interface PortalImageMeter {
-  used: number;
-  limit: number;
 }
 
 export type PortalLookup =
   | {
       source: "portal";
       tier: ClawboxAiTier | null;
-      plan: ClawboxAiPlan | null;
-      imageMeter: PortalImageMeter | null;
     }
   | { source: "unreachable" };
 
-/**
- * Pull `meters.images` out of a device-info body, or null.
- *
- * Rejects rather than defaults, like everything else on this path: a portal
- * that predates TASK-469 sends no `meters` at all, and reading that absence as
- * "0 used" would put a confident, wrong "0 of 20 today" in front of an owner
- * who had already spent the day's allowance.
- */
-export function readPortalImageMeter(body: DeviceInfoResponse): PortalImageMeter | null {
-  const meters = body.meters;
-  if (!meters || typeof meters !== "object") return null;
-  const images = (meters as Record<string, unknown>).images;
-  if (!images || typeof images !== "object") return null;
-  const { used, limit } = images as Record<string, unknown>;
-  // Safe integers at this boundary too, not just at the render one: a count
-  // that cannot be represented exactly is not a count, and letting it past here
-  // means the cache holds it for two minutes before anything notices.
-  if (typeof used !== "number" || !Number.isSafeInteger(used) || used < 0) return null;
-  if (typeof limit !== "number" || !Number.isSafeInteger(limit) || limit <= 0) return null;
-  return { used, limit };
-}
-
 interface PortalCacheEntry {
   tier: ClawboxAiTier | null;
-  // Subscription plan behind the tier. Kept alongside `tier` because the two
-  // are not interchangeable: `tier` collapses Free and "portal said something
-  // we don't recognise" into the same `null`, and the image allowance has to
-  // tell those apart (Free has a real 5-image allowance to show).
-  plan: ClawboxAiPlan | null;
-  // Cached with the tier, on the same 120s TTL. Usage is the one field here
-  // that genuinely moves inside that window, so the panel can lag a picture or
-  // two behind a burst — acceptable for a ceiling readout, and far better than
-  // a second uncached round trip on the render path of the Settings card. It
-  // is never used to decide a REFUSAL; the cloud does that, live.
-  imageMeter: PortalImageMeter | null;
   expiresAt: number;
 }
 
@@ -136,15 +83,12 @@ const inFlightPortalLookups = new Map<string, Promise<PortalLookup>>();
  *
  * @param token Portal token (`claw_*`) used as the cache key.
  * @param tier Resolved tier (or `null` for Free / no entitlement).
- * @param plan Resolved subscription plan (or `null` when unrecognised).
  * @param now Current epoch ms; used both for expiry comparison and to
  *   set the new entry's `expiresAt`.
  */
 function rememberTier(
   token: string,
   tier: ClawboxAiTier | null,
-  plan: ClawboxAiPlan | null,
-  imageMeter: PortalImageMeter | null,
   now: number,
 ) {
   for (const [key, entry] of portalTierCache) {
@@ -157,8 +101,6 @@ function rememberTier(
   }
   portalTierCache.set(token, {
     tier,
-    plan,
-    imageMeter,
     expiresAt: now + PORTAL_TIER_CACHE_TTL_MS,
   });
 }
@@ -213,8 +155,6 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
     return {
       source: "portal",
       tier: cached.tier,
-      plan: cached.plan,
-      imageMeter: cached.imageMeter,
     };
   }
 
@@ -239,11 +179,9 @@ export async function fetchPortalTier(token: string): Promise<PortalLookup> {
       if (res.ok) {
         const body = await res.json() as DeviceInfoResponse;
         const tier = mapPortalTier(body);
-        const plan = normalizeClawboxAiPlan(body.tier);
-        const imageMeter = readPortalImageMeter(body);
-        rememberTier(token, tier, plan, imageMeter, now);
+        rememberTier(token, tier, now);
         portalUnreachableCache.delete(token);
-        return { source: "portal", tier, plan, imageMeter };
+        return { source: "portal", tier };
       }
       // 401/403 is ambiguous: it can mean genuinely Free OR token
       // revoked / migrated / corrupted on a still-paid account. We

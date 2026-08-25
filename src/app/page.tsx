@@ -1022,7 +1022,7 @@ function ChromeDesktopInner() {
   // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
     setInstalledApps((prev) => prev.includes(app.id) ? prev : [...prev, app.id]);
-    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl } }));
+    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl, developer: app.developer } }));
     setHiddenInstalledApps((prev) => prev.filter((id) => id !== app.id));
     setRecentlyInstalled(app.id);
     setTimeout(() => setRecentlyInstalled(null), 1000);
@@ -1074,7 +1074,7 @@ function ChromeDesktopInner() {
       // or any openApp(id) path either, not just the desktop grid.
       if (meta && isInstalledAppVisible(meta, activeHarness)) {
         const isWebapp = !!meta.webappUrl;
-        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
+        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl, developer: meta.developer };
         installedAppDefs.push({
           id: `installed-${appId}`,
           name: meta.name,

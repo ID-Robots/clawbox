@@ -43,7 +43,6 @@ type StatusStub = {
   clawaiConfigured?: boolean;
   tierSource?: "portal" | "picker";
   clawaiAccountTier?: "flash" | "pro" | null;
-  clawaiImages?: Record<string, unknown>;
 };
 
 function mockStatus(status: StatusStub | null) {
@@ -129,97 +128,11 @@ describe("AIModelsStep — the plan card follows the account, not local storage"
     expect(await findByText("Max plan · €49/month")).toBeInTheDocument();
   });
 
-  it("renders the day's image allowance under the plan it belongs to", async () => {
-    // TASK-469's decided placement: Settings -> AI Provider, beside the plan.
-    // The panel is asserted here rather than only the component, because the
-    // failure this fixes was never a rendering bug — the route produced the
-    // block and no component anywhere consumed it.
-    mockStatus({
-      clawaiConfigured: true,
-      tierSource: "portal",
-      clawaiAccountTier: "pro",
-      clawaiImages: {
-        supported: true, model: "gpt-image-1-mini",
-        plan: "max", planLabel: "Max", dailyLimit: 20, used: 3,
-      },
-    });
-    const { findByTestId } = renderPanel();
-    // i18n is stubbed to echo keys in this file, so the assertion is that the
-    // right key reached the right surface; the copy itself is covered in
-    // clawai-image-allowance-line.test.tsx against the real string packs.
-    expect((await findByTestId("clawai-image-allowance")).textContent)
-      .toContain("ai.imagesUsedToday");
-  });
-
-  it("shows nothing about images when the portal did not answer this cycle", async () => {
-    // Same gate as the tier badge. An allowance left on screen after the portal
-    // stopped confirming it is a stale cap, and a stale cap is indistinguishable
-    // from a wrong one.
-    mockStatus({ clawaiConfigured: true, tierSource: "picker", clawaiAccountTier: "flash" });
-    const { findByText, queryByTestId } = renderPanel();
-    await findByText("Pro plan · €9/month");
-    expect(queryByTestId("clawai-image-allowance")).toBeNull();
-  });
-
-  it("shows nothing about images when the route sent no allowance block", async () => {
-    mockStatus({ clawaiConfigured: true, tierSource: "portal", clawaiAccountTier: "pro" });
-    const { findByText, queryByTestId } = renderPanel();
-    await findByText("Max plan · €49/month");
-    expect(queryByTestId("clawai-image-allowance")).toBeNull();
-  });
-
   it("survives a status route that fails outright", async () => {
     mockStatus(null);
     const { findByText } = renderPanel();
     // No answer, so the stored default stands and nothing blows up.
     expect(await findByText("Pro plan · €9/month")).toBeInTheDocument();
-  });
-
-  it("moves the allowance while the panel stays mounted, without a reload", async () => {
-    // TASK-516. The desktop never unmounts the Settings window, so a
-    // mount-only read froze this line at whatever the page load saw: an owner
-    // who had just been refused at 20 of 20 opened Settings and was told
-    // "1 of 20 images today" by the very surface built to explain the
-    // refusal. The acceptance is the card's own: with the session left open,
-    // spend an image and watch the number move.
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const status: StatusStub = {
-        clawaiConfigured: true,
-        tierSource: "portal",
-        clawaiAccountTier: "pro",
-        clawaiImages: {
-          supported: true, model: "gpt-image-1-mini",
-          plan: "max", planLabel: "Max", dailyLimit: 20, used: 1,
-        },
-      };
-      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
-        if (url.includes("/setup-api/ai-models/oauth/providers")) {
-          return { ok: true, json: async () => ({ providers: [] }) };
-        }
-        if (url.includes("/setup-api/ai-models/status")) {
-          return { ok: true, json: async () => ({ ...status, clawaiImages: { ...status.clawaiImages } }) };
-        }
-        return { ok: true, json: async () => ({}) };
-      }));
-
-      const { findByTestId } = renderPanel();
-      const line = await findByTestId("clawai-image-allowance");
-      await waitFor(() => expect(line.textContent).toContain("ai.imagesUsedToday"));
-
-      // The day moves on the backend — the chat spent the allowance.
-      (status.clawaiImages as Record<string, unknown>).used = 20;
-      await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
-
-      // The line follows without any remount or reload, and flips to the
-      // exhausted state (the reset-tomorrow suffix only renders at the wall).
-      await waitFor(() =>
-        expect((line.textContent ?? "")).toContain("ai.imagesResetTomorrow"),
-      );
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it("never overrides a plan the user picked in this session", async () => {

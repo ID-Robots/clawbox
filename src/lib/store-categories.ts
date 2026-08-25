@@ -28,4 +28,10 @@ export interface InstalledMeta {
   // in meta so the desktop can route clicks to an <iframe> instead of the
   // skills path. Left undefined for regular skills.
   webappUrl?: string;
+  // ClawHub publisher. Recorded at install because ClawHub namespaces every
+  // skill under its publisher, so the slug alone cannot address the page.
+  // Undefined for installs made before this was kept, and for webapps, which
+  // have no ClawHub page at all — InstalledAppSettings resolves the gap from
+  // the store rather than linking somewhere that does not exist.
+  developer?: string;
 }
