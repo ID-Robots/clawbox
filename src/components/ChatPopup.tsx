@@ -13,7 +13,7 @@ import {
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
+import { FIX_ERROR_EVENT, buildFixErrorPrompt, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -195,7 +195,7 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // get mixed. The MODEL list is scoped by the same server contract the Hermes
 // settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
 // client-side filtering exists.
-import { HERMES_MODEL_STATE_EVENT, useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
 import {
   hermesProviderLabel,
   hermesProviderPillLabel,
@@ -1627,13 +1627,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     refreshChatModelState()
   }, [isOpen, refreshChatModelState])
 
+  // Re-read the provider/model list the moment anything reports a provider
+  // change, so a provider connected in Settings while this popup is open is
+  // offered here without a reload. Through the shared subscriber, which spans
+  // both harnesses' signal names and debounces the burst a single save emits.
   useEffect(() => {
     if (!isOpen) return
-    const handleModelStateChanged = () => {
-      refreshChatModelState()
-    }
-    window.addEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
-    return () => window.removeEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
+    return onProvidersChanged(() => { refreshChatModelState() })
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, auto-greet if empty
@@ -2311,12 +2311,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // must not reopen the caret, so a delta is only painted while this run
         // is still the live one.
         if (event.kind === 'delta' && runIdRef.current !== null) setStreaming(event.text)
+        // Live tool steps, through the SAME pills the gateway harness already
+        // feeds. A hermes turn used to reach this callback with nothing but
+        // text, so a turn that spent its time in `web_search` — measured at up
+        // to four minutes on the box — showed an empty bubble and no reason to
+        // believe anything was happening. `applyToolEvent` reads `toolCallId`,
+        // so the transport's stable `id` is handed over under that name.
+        else if (event.kind === 'tool' && runIdRef.current !== null) {
+          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+        }
       })
     } catch (err) {
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
       setStreaming('')
+      clearToolCalls()
       runIdRef.current = null
       // A user-initiated Stop shows nothing, not an error line.
       if (err instanceof HarnessError && err.code === 'aborted') return
@@ -2355,8 +2365,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     sendingRef.current = false
     setSending(false)
     setStreaming('')
+    // The live pills have done their job. The finished message carries the
+    // agent's OWN record of the steps (`result.toolCalls`) and renders it as
+    // summary chips, so leaving the running ones up would show the same turn's
+    // tools twice — once as a guess from the wire, once as the record.
+    clearToolCalls()
     runIdRef.current = null
-  }, [adapter])
+  }, [adapter, applyToolEvent, clearToolCalls])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
@@ -2783,11 +2798,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (harnessId !== 'hermes') return
     const controller = new AbortController()
-    const onChanged = () => { void seedHermesHeader(controller.signal) }
-    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
+    const unsubscribe = onProvidersChanged(() => { void seedHermesHeader(controller.signal) })
     return () => {
       controller.abort()
-      window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
+      unsubscribe()
     }
   }, [harnessId, seedHermesHeader])
 

@@ -208,7 +208,24 @@ export type TurnEvent =
    */
   | { kind: "delta"; text: string }
   | { kind: "final"; text: string; media?: readonly string[] }
-  | { kind: "thinking"; on: boolean };
+  | { kind: "thinking"; on: boolean }
+  /**
+   * A step the agent is taking, WHILE it is taking it.
+   *
+   * `id` is stable from `start` to `result` so a surface can update the pill it
+   * already drew instead of adding a second one. This is progress, not record:
+   * the finished turn still carries its own `toolCalls`, and a surface that
+   * ignores this event is exactly as correct as it was before — it just shows a
+   * long tool call as silence, which is what this exists to end.
+   */
+  | { kind: "tool"; phase: "start" | "result"; id: string; name: string; detail?: string; status?: "ok" | "error" }
+  /**
+   * The agent's live status line — the spinner text.
+   *
+   * A heartbeat for the surface to show, and never the model's monologue.
+   * Thinking is reported only on the finished turn, in `reasoning`.
+   */
+  | { kind: "status"; text: string };
 
 export interface TurnResult {
   readonly text: string;

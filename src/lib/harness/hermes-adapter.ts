@@ -158,6 +158,27 @@ async function readStreamedTurn(
       if (!chunk) return;
       answer += chunk;
       onEvent?.({ kind: "delta", text: answer });
+    } else if (name === "tool") {
+      // Live progress. Forwarded only when it names a tool and a phase the
+      // surface can act on — a malformed frame must not be able to draw a pill
+      // with no name, and the authoritative list still arrives on `done`.
+      const toolName = typeof payload.name === "string" ? payload.name : "";
+      const phase = payload.phase === "result" ? "result" : "start";
+      const id = typeof payload.id === "string" && payload.id ? payload.id : toolName;
+      if (!toolName) return;
+      const detail = typeof payload.detail === "string" ? payload.detail : "";
+      const status = payload.status === "error" ? "error" : payload.status === "ok" ? "ok" : undefined;
+      onEvent?.({
+        kind: "tool",
+        phase,
+        id,
+        name: toolName,
+        ...(detail ? { detail } : {}),
+        ...(status ? { status } : {}),
+      });
+    } else if (name === "status") {
+      const text = typeof payload.text === "string" ? payload.text : "";
+      if (text) onEvent?.({ kind: "status", text });
     } else if (name === "done") {
       settled = payload;
     } else if (name === "error") {
@@ -211,16 +232,6 @@ export class HermesAdapter implements HarnessAdapter {
    * conversation memory.
    */
   private sessionId = "";
-  /**
-   * What the LAST turn actually ran on. A resumed session keeps the system
-   * prompt it was created with, so after a switch the agent would still answer
-   * "What model are you?" with the old one (and echo its earlier claims from
-   * the transcript) even though the turn is genuinely routed to the new
-   * provider. Comparing against these lets the next turn state the change
-   * rather than discarding the conversation to get a fresh system prompt.
-   */
-  private sentProvider = "";
-  private sentModel = "";
   /** The in-flight turn, so Stop can abort it. */
   private inFlight: AbortController | null = null;
   private readonly statusListeners = new Set<(s: HarnessStatus, detail?: string) => void>();
@@ -295,19 +306,21 @@ export class HermesAdapter implements HarnessAdapter {
             : `Still loading ${hermesProviderLabel(provider)}'s models — try again in a moment.`,
         );
       }
-      // Announce a mid-conversation switch. Only when we are RESUMING (a fresh
-      // session already gets a correct system prompt) and only when something
-      // actually changed, so a normal turn carries no extra text.
-      const switched =
-        Boolean(this.sessionId) &&
-        (this.sentProvider !== provider || this.sentModel !== model) &&
-        Boolean(this.sentProvider || this.sentModel);
-      const outbound = switched
-        ? `[System note: this conversation has just been switched to model "${model || "the provider default"}" ` +
-          `via provider "${hermesProviderLabel(provider)}". You are now that model — disregard any earlier ` +
-          `statement in this conversation about which model you are. Keep the conversation and its context.]\n\n` +
-          req.text
-        : req.text;
+      // A mid-conversation switch is a TRANSPORT concern, and it is now handled
+      // as one: the chat route re-points the live session at the new
+      // model/provider before submitting the prompt (`/model … --session` on
+      // the dashboard socket — see hermes-dashboard-turn).
+      //
+      // This used to prepend a "[System note: this conversation has just been
+      // switched to model …]" paragraph to the customer's own message instead.
+      // It was never true. Nothing was switched — the resume call dropped the
+      // override — so the note asked the model to claim a change that had not
+      // happened, and the model, being asked in the message body rather than
+      // told by its harness, correctly refused: "That 'system note' arrived
+      // inside your chat message, not from my actual harness — my real session
+      // configuration still says claude-fable-5." Configuration is never
+      // message content; the message is now exactly what the customer typed.
+      const outbound = req.text;
       const res = await this.fetchImpl(CHAT_ROUTE, {
         method: "POST",
         headers: {
@@ -318,10 +331,6 @@ export class HermesAdapter implements HarnessAdapter {
         },
         body: JSON.stringify({
           message: outbound,
-          // Only when the two differ, so the ordinary turn carries no extra
-          // field: the switch note is written for the AGENT and must not be
-          // replayed out of the transcript as something the user typed.
-          ...(switched ? { displayText: req.text } : {}),
           // Staged absolute paths. The route re-resolves every one of them
           // against the staging root before any of it reaches argv — this side
           // is a convenience, not a check.
@@ -367,11 +376,6 @@ export class HermesAdapter implements HarnessAdapter {
       if (typeof data.sessionId === "string" && data.sessionId) {
         this.sessionId = data.sessionId;
       }
-      // Record what this turn ran on, so the NEXT one only announces a switch
-      // if something really changed. Set after success: a failed turn didn't
-      // establish anything, and the announcement should survive to be made.
-      this.sentProvider = provider;
-      this.sentModel = model;
       // Same MEDIA: split as the gateway path, so a picture renders the same
       // way whichever edition answered.
       const reply = splitAssistantMedia(typeof data.text === "string" ? data.text : "");
@@ -418,8 +422,6 @@ export class HermesAdapter implements HarnessAdapter {
    */
   async resetSession(): Promise<void> {
     this.sessionId = "";
-    this.sentProvider = "";
-    this.sentModel = "";
     // …and the replay log with it. Clearing only the session id would make the
     // agent forget while the screen refilled with the old conversation on the
     // next refresh — the worst of both, and exactly the split the durable

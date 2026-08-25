@@ -50,6 +50,49 @@ interface ShowPayload {
   capabilities?: unknown;
 }
 
+export type OllamaShowResult =
+  /** Ollama answered for this model. `payload` is the parsed body, or null
+   *  when the 200 was not JSON — which still proves the model exists. */
+  | { status: "ok"; payload: unknown }
+  /** Ollama answered, and it does not have this model. */
+  | { status: "not-installed" }
+  /** Ollama could not be asked. Never a verdict about the model. */
+  | { status: "unreachable" };
+
+/**
+ * The one `/api/show` transport. Both askers — the thinking-capability probe
+ * below and the save-time model check in ollama-model-context.ts — go through
+ * here, so how this box addresses Ollama is decided in exactly one place.
+ * Measured shape (Ollama 0.32.9, bench device): a missing model answers
+ * HTTP 404 `{"error":"model '<id>' not found"}`; an installed one answers 200.
+ */
+export async function fetchOllamaShow(model: string, timeoutMs: number): Promise<OllamaShowResult> {
+  const id = model.trim();
+  if (!id) return { status: "not-installed" };
+
+  let response: Response;
+  try {
+    response = await fetch(`${getOllamaBaseUrl()}/api/show`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: id }),
+      cache: "no-store",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    return { status: "unreachable" };
+  }
+
+  if (response.status === 404) return { status: "not-installed" };
+  if (!response.ok) return { status: "unreachable" };
+
+  try {
+    return { status: "ok", payload: await response.json() };
+  } catch {
+    return { status: "ok", payload: null };
+  }
+}
+
 /**
  * True/false when Ollama answered, null when it did not.
  *
@@ -63,24 +106,14 @@ export async function ollamaModelCanThink(model: string): Promise<boolean | null
   const hit = cache.get(id);
   if (hit && Date.now() - hit.at < OLLAMA_CAPABILITY_TTL_MS) return hit.canThink;
 
-  try {
-    const res = await fetch(`${getOllamaBaseUrl()}/api/show`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ model: id }),
-      cache: "no-store",
-      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-    });
-    if (!res.ok) return null;
-    const payload = (await res.json()) as ShowPayload;
-    // An answer without a capabilities array is an Ollama too old to report
-    // them. That is genuinely unknown, not "no" — an older build also predates
-    // the capability CHECK that this probe exists to avoid tripping.
-    if (!Array.isArray(payload.capabilities)) return null;
-    const canThink = payload.capabilities.includes(THINKING_CAPABILITY);
-    cache.set(id, { canThink, at: Date.now() });
-    return canThink;
-  } catch {
-    return null;
-  }
+  const result = await fetchOllamaShow(id, PROBE_TIMEOUT_MS);
+  if (result.status !== "ok") return null;
+  const payload = result.payload as ShowPayload | null;
+  // An answer without a capabilities array is an Ollama too old to report
+  // them. That is genuinely unknown, not "no" — an older build also predates
+  // the capability CHECK that this probe exists to avoid tripping.
+  if (!payload || !Array.isArray(payload.capabilities)) return null;
+  const canThink = payload.capabilities.includes(THINKING_CAPABILITY);
+  cache.set(id, { canThink, at: Date.now() });
+  return canThink;
 }

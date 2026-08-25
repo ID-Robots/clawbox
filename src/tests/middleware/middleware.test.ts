@@ -673,6 +673,18 @@ describe("middleware", () => {
       "/setup-api/hermes/models",
       "/setup-api/hermes/clawai",
       "/setup-api/hermes/oauth",
+      // The four leaves of the provider sign-in flow, named one by one rather
+      // than inferred from the parent path above. They mint, advance and destroy
+      // a real provider-OAuth session, and the parent's assertion does not cover
+      // them: a single entry in BOOTSTRAP_ALLOWED_EXACT for one leaf opens that
+      // leaf while `/setup-api/hermes/oauth` itself keeps answering 401, so the
+      // line above would still pass. That exact-vs-prefix distinction is live in
+      // the allow-list already — it is what holds `mascot-lines` open while the
+      // `/regenerate` leaf beside it stays shut. TASK-527.
+      "/setup-api/hermes/oauth/start",
+      "/setup-api/hermes/oauth/submit",
+      "/setup-api/hermes/oauth/poll",
+      "/setup-api/hermes/oauth/cancel",
       "/setup-api/hermes/provider-key",
       "/setup-api/ai-models/configure",
       "/setup-api/telegram/configure",

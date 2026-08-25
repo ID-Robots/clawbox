@@ -26,12 +26,18 @@ function LoginForm() {
     return () => clearInterval(id);
   }, []);
 
-  // Incomplete setups should always resume on the dedicated setup route.
+  // Incomplete setups resume on the dedicated setup route — but only while the
+  // device has no owner password. Once `password_configured` is set, /setup is
+  // behind the session gate (middleware's WIZARD_PAGE_PREFIX), so bouncing an
+  // unauthenticated browser there just 307s straight back to
+  // /login?redirect=%2Fsetup and the two redirects chase each other forever —
+  // the form never renders and the owner can never log in. Show the form
+  // instead; the post-login redirect lands back on the wizard.
   useEffect(() => {
     fetch("/setup-api/setup/status")
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
-        if (data && !data.setup_complete) {
+        if (data && !data.setup_complete && !data.password_configured) {
           window.location.replace("/setup");
           return;
         }

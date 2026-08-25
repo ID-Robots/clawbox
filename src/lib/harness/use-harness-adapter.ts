@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CHAT_MODEL_STATE_EVENT } from "@/lib/ui-events";
+import { onProvidersChanged } from "@/lib/ui-events";
 import { fetchHarness } from "@/lib/client-harness";
-import { HERMES_MODEL_STATE_EVENT } from "@/hooks/useHermesModelOptions";
 import { capabilitiesFor, UNKNOWN_FACTS, type HarnessFacts } from "./capabilities";
 import { HermesAdapter, type HermesTurnContext } from "./hermes-adapter";
 import { OpenClawGatewayAdapter, type GatewayLink } from "./openclaw-gateway-adapter";
@@ -101,14 +100,10 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
       if (probed) setFacts((prev) => (sameFacts(prev, probed) ? prev : probed));
     })();
   }, []);
-  useEffect(() => {
-    window.addEventListener(HERMES_MODEL_STATE_EVENT, reprobe);
-    window.addEventListener(CHAT_MODEL_STATE_EVENT, reprobe);
-    return () => {
-      window.removeEventListener(HERMES_MODEL_STATE_EVENT, reprobe);
-      window.removeEventListener(CHAT_MODEL_STATE_EVENT, reprobe);
-    };
-  }, [reprobe]);
+  // One subscription over every name that means "providers changed", so a
+  // capability computed from a credential cannot stay stale merely because the
+  // component that connected the provider spoke the other harness's dialect.
+  useEffect(() => onProvidersChanged(reprobe), [reprobe]);
 
   const capabilities = useMemo(() => capabilitiesFor(harnessId, facts), [harnessId, facts]);
 
