@@ -20,6 +20,16 @@ export interface ReconnectStageProps {
   /** Optional manual fallback link rendered as a button. */
   action?: { label: string; href: string };
   /**
+   * Hermes edition: the ambient accent (pulse rings, orbit dots, spinner)
+   * takes the agent's sanctioned green (`--agent-live`) instead of coral, and
+   * the portal root carries `data-agent="hermes"` so the Hermes token layer in
+   * globals.css re-grounds the overlay (the portal mounts on document.body,
+   * OUTSIDE `.setup-shell`, so it never inherits that scope by ancestry).
+   * Coral stays on the manual-action button: coral means ACTION on every
+   * edition; only the ambient identity of the wait screen changes.
+   */
+  hermes?: boolean;
+  /**
    * Which "done" hue the completed check and step ticks use. The wizard's DONE
    * colour is `--cyan-bright`; the setup steps that live inside it (the Step-3
    * credentials handoff) pass "cyan" so their success marks match the rest of
@@ -45,6 +55,7 @@ export default function ReconnectStage({
   instruction,
   secondaryInstruction,
   action,
+  hermes = false,
   doneTone = "emerald",
 }: ReconnectStageProps) {
   // These overlays only render after a client-side interaction, so the portal
@@ -60,10 +71,31 @@ export default function ReconnectStage({
     : "bg-emerald-500/20 text-emerald-400";
   const stepDoneText = cyan ? "text-[var(--cyan-bright)]" : "text-emerald-400";
 
+  // Ambient accent: Hermes waits in the agent's green, OpenClaw in coral.
+  // Full literal class strings on both branches so Tailwind's scanner sees
+  // them; the #4ade80 fallback mirrors --agent-live for safety only.
+  const ringOuter = hermes
+    ? "border-[var(--agent-live,#4ade80)]/20"
+    : "border-[var(--coral-bright)]/20";
+  const ringInner = hermes
+    ? "border-[var(--agent-live,#4ade80)]/10"
+    : "border-[var(--coral-bright)]/10";
+  const orbitDot = hermes
+    ? "bg-[var(--agent-live,#4ade80)]"
+    : "bg-[var(--coral-bright)]";
+  const spinnerRing = hermes
+    ? "border-[var(--agent-live,#4ade80)]"
+    : "border-[var(--coral-bright)]";
+
   return createPortal(
     <div
-      className="fixed inset-0 flex items-center justify-center px-6 overflow-y-auto py-8"
-      style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
+      className="reconnect-stage fixed inset-0 flex items-center justify-center px-6 overflow-y-auto py-8"
+      data-agent={hermes ? "hermes" : undefined}
+      // The wizard's own ground token, not a hardcoded near-black: #0d1117
+      // matched nothing in the palette. --ground is the page ground the rest
+      // of setup paints (#0a0f1a), and on Hermes the token layer keyed on
+      // data-agent above re-points it to the Hermes ground (#041c1c).
+      style={{ zIndex: 2147483647, background: "var(--ground)" }}
       role="status"
       aria-live="polite"
     >
@@ -79,8 +111,8 @@ export default function ReconnectStage({
 
       <div className="flex flex-col items-center gap-7 max-w-md w-full text-center my-auto">
         <div className="relative w-28 h-28 flex items-center justify-center">
-          <div className="absolute inset-0 rounded-full border-2 border-[var(--coral-bright)]/20" style={{ animation: "reconnect-pulse-ring 2s ease-in-out infinite" }} />
-          <div className="absolute inset-2 rounded-full border border-[var(--coral-bright)]/10" style={{ animation: "reconnect-pulse-ring 2s ease-in-out infinite 0.45s" }} />
+          <div className={`absolute inset-0 rounded-full border-2 ${ringOuter}`} style={{ animation: "reconnect-pulse-ring 2s ease-in-out infinite" }} />
+          <div className={`absolute inset-2 rounded-full border ${ringInner}`} style={{ animation: "reconnect-pulse-ring 2s ease-in-out infinite 0.45s" }} />
 
           {!completed && [0, 1, 2].map((i) => (
             <div
@@ -88,7 +120,7 @@ export default function ReconnectStage({
               className="absolute inset-0 flex items-center justify-center"
               style={{ animation: `reconnect-orbit ${3 + i * 0.45}s linear infinite`, animationDelay: `${i * 0.35}s` }}
             >
-              <div className="w-2 h-2 rounded-full bg-[var(--coral-bright)]" style={{ opacity: 0.35 + i * 0.2 }} />
+              <div className={`w-2 h-2 rounded-full ${orbitDot}`} style={{ opacity: 0.35 + i * 0.2 }} />
             </div>
           ))}
 
@@ -154,7 +186,7 @@ export default function ReconnectStage({
                 </span>
               ) : index === phaseIndex ? (
                 <span className="flex items-center justify-center w-5 h-5 shrink-0">
-                  <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
+                  <span className={`w-3.5 h-3.5 rounded-full border-2 ${spinnerRing} border-t-transparent animate-spin`} data-testid="reconnect-step-spinner" />
                 </span>
               ) : (
                 <span className="flex items-center justify-center w-5 h-5 rounded-full bg-gray-700/50 shrink-0">

@@ -22,6 +22,8 @@ interface CredentialsHandoffOverlayProps {
   hotspotSsid: string | null;
   /** Advance to the next step once the box is reachable again (same-origin only). */
   onContinue: () => void;
+  /** Hermes edition: the overlay waits in the agent's green, not coral. */
+  hermes?: boolean;
   /** Grace period before probing — the AP needs a moment to actually drop. */
   graceMs?: number;
 }
@@ -39,6 +41,7 @@ export default function CredentialsHandoffOverlay({
   sameOrigin,
   hotspotSsid,
   onContinue,
+  hermes = false,
   graceMs = 4000,
 }: CredentialsHandoffOverlayProps) {
   const { t } = useT();
@@ -82,6 +85,7 @@ export default function CredentialsHandoffOverlay({
 
   return (
     <ReconnectStage
+      hermes={hermes}
       steps={[t("credentials.handoffApplying"), rejoinLabel, t("settings.backOnline")]}
       phaseIndex={phaseIndex}
       completed={completed}
