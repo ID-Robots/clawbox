@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { promisify } from "util";
 import { execFile as execFileCb } from "child_process";
-import { setMany } from "@/lib/config-store";
+import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, findOpenclawBin, restartGateway, openclawIsAbsent } from "@/lib/openclaw-config";
 import { getActiveHarness } from "@/lib/harness";
@@ -36,8 +36,18 @@ export async function POST(request: Request) {
     const config = await readOpenClawConfig();
     const inferredLocal = inferConfiguredLocalModel(config);
 
-    if (inferredLocal?.provider === "llamacpp" || inferredLocal?.provider === "ollama") {
-      await stopLocalAiProvider(inferredLocal.provider);
+    // Which runtime is actually up. The OpenClaw config answers on an OpenClaw
+    // box; on a Hermes one it is empty of models by definition, so this used to
+    // resolve to nothing and "turn Local AI off" left the model RESIDENT — up
+    // to 3.2 GB of an 8 GB box, and for Ollama a unit that also stays enabled
+    // across reboots (the enable path persists it). Our own config store knows
+    // what we started, so it is the fallback. Read before the clear below.
+    const stored = await get("local_ai_provider");
+    const runningProvider = inferredLocal?.provider
+      ?? (stored === "llamacpp" || stored === "ollama" ? stored : null);
+
+    if (runningProvider === "llamacpp" || runningProvider === "ollama") {
+      await stopLocalAiProvider(runningProvider);
     }
 
     await setMany({

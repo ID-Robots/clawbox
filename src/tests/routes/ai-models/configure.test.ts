@@ -113,6 +113,10 @@ vi.mock("@/lib/local-ai-runtime", () => ({
       ? LLAMACPP_PROXY_BASE_URL
       : `http://127.0.0.1/setup-api/local-ai/${provider}`,
   ),
+  // The save-time model probe (ollama-model-context) builds its /api/show URL
+  // from this; without it the probe throws before fetching and every save
+  // fails open as "unreachable", so the refusal tests would test nothing.
+  getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({
@@ -442,6 +446,58 @@ describe("POST /setup-api/ai-models/configure", () => {
     // model runs.
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 8192");
+  });
+
+  it("honours the model FIELD for Ollama when the apiKey slot is empty", async () => {
+    // The wizard sends the id through `apiKey`; every cloud provider sends its
+    // pick through `model`. An API caller who wrote { model: "qwen3:8b" } used
+    // to have the field silently ignored and llama3.2:3b saved in its place —
+    // a "success" that configured a model the box does not have (TASK-448).
+    const res = await configurePost(jsonRequest({
+      provider: "ollama",
+      model: "qwen3:8b",
+    }));
+
+    expect(res.status).toBe(200);
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.ollama");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
+    expect(providerDef?.models?.[0]?.id).toBe("qwen3:8b");
+  });
+
+  it("refuses an Ollama id the device does not have", async () => {
+    // Save-time honesty: Ollama is up and says the model is absent, so the
+    // route must say it NOW instead of letting the first chat turn 404.
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ error: "model 'ghost:7b' not found" }), { status: 404 }),
+    ));
+
+    const res = await configurePost(jsonRequest({
+      provider: "ollama",
+      apiKey: "ghost:7b",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(String(body.error)).toContain('"ghost:7b"');
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.ollama");
+    expect(providerCall).toBeUndefined();
+  });
+
+  it("accepts a 32K Ollama model on OpenClaw — the 64K floor is Hermes' alone", async () => {
+    // OpenClaw deliberately caps the registered window at 32K for RAM (see
+    // OLLAMA_CONTEXT_WINDOW); a 32K model is a fine citizen here.
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ model_info: { "qwen2.context_length": 32768 } }), { status: 200 }),
+    ));
+
+    const res = await configurePost(jsonRequest({
+      provider: "ollama",
+      apiKey: "qwen2.5:3b",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
   });
 
   it("configures llama.cpp without apiKey", async () => {

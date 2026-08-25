@@ -33,6 +33,7 @@ import {
   getLlamaCppProxyBaseUrl,
 } from "@/lib/llamacpp";
 import { activateLocalAiProvider, getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
+import { HERMES_MINIMUM_CONTEXT_TOKENS, probeOllamaModel } from "@/lib/ollama-model-context";
 import { unpairLocal as unpairClawKeep } from "@/lib/clawkeep";
 import { getLocalAiToken, markLocalAiTokenMigrated } from "@/lib/local-ai-token";
 import { getOrGenerateGatewayToken } from "@/lib/gateway-proxy";
@@ -1121,6 +1122,10 @@ export async function POST(request: Request) {
     requestScope = scope;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
+    // Normalized once, like the key above: this handler reads the `model`
+    // field in four branches, and inlining the same ternary in each let the
+    // copies drift.
+    const normalizedModel = typeof bodyModel === "string" ? bodyModel.trim() : "";
     const isOllama = provider === "ollama";
     const isLlamaCpp = provider === "llamacpp";
     const isClawAI = provider === "clawai";
@@ -1185,6 +1190,17 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
+    // A local provider borrows the `apiKey` slot to carry its MODEL id — there
+    // is no key for a service on this box. On the OAuth-handoff path, though,
+    // that same slot is filled from a token file on disk a few lines above,
+    // and the recorded provider only overwrites `body.provider` when it is
+    // present. A handoff whose provider field is missing, against a body that
+    // says `ollama`, would therefore make an access token the model id — and
+    // send it to the local model server in a request body. A local provider
+    // never has a handoff, so the slot is simply not read when one was
+    // consumed; `model` still names the model. (Found by CodeQL
+    // js/file-access-to-http, which was right about the flow.)
+    const localModelSlot = pendingHandoffTokensPath ? "" : normalizedApiKey;
     const llamaCppContextWindow = getLlamaCppContextWindow();
     const llamaCppMaxTokens = getLlamaCppMaxTokens();
     const ocProvider = config.profileKey.split(":")[0];
@@ -1299,17 +1315,61 @@ export async function POST(request: Request) {
     // For Ollama the front-end supplies the model name (e.g. "llama3.2:3b")
     // via the `apiKey` field — there is no real API key for a local provider.
     if (isOllama) {
-      const modelName = normalizedApiKey || "llama3.2:3b";
+      // `model` is honoured too: every cloud provider sends its pick there, so
+      // an API caller who wrote { model: "qwen2.5:3b" } used to have the field
+      // silently ignored and llama3.2:3b saved in its place — a "success" that
+      // configured a model this box does not have.
+      const modelName = localModelSlot || normalizedModel || "llama3.2:3b";
+
+      // Ask Ollama about the id BEFORE anything is written. Both refusals below
+      // used to be discovered by the customer one dead chat turn at a time: an
+      // id that names nothing on this machine, and — on Hermes — a model whose
+      // window is under the agent's floor (qwen2.5:3b reports 32K against
+      // Hermes' 64K minimum, so every turn 502s while Settings says
+      // "configured", and no config override can widen a model's trained
+      // window). An unreachable Ollama keeps the old behaviour and saves: on
+      // the local-scope path the service was already started (and 503'd above
+      // when it could not be), so a dead probe here is the primary-scope case
+      // where the runtime starts Ollama on demand — "we could not ask" must
+      // not brick that flow.
+      const probe = await probeOllamaModel(modelName);
+      // The id came off the wire and both messages below quote it back. Bound
+      // and strip it the same way anything request-derived is bounded before it
+      // reaches a log line — an unbounded echo is a response the caller sized.
+      const quotedModel = logSafe(modelName, 120);
+      if (probe.status === "not-installed") {
+        return NextResponse.json(
+          { error: `Ollama does not have "${quotedModel}" on this device. Pull the model first, then save it.` },
+          { status: 400 },
+        );
+      }
+      if (
+        probe.status === "ok"
+        && probe.contextLength !== null
+        && probe.contextLength < HERMES_MINIMUM_CONTEXT_TOKENS
+        && (await getActiveHarness()) === "hermes"
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              `"${quotedModel}" offers a ${probe.contextLength.toLocaleString("en-US")}-token context window; `
+              + `the assistant needs at least ${HERMES_MINIMUM_CONTEXT_TOKENS.toLocaleString("en-US")}. `
+              + "Pick a larger model.",
+          },
+          { status: 400 },
+        );
+      }
       config.defaultModel = `ollama/${modelName}`;
     } else if (isLlamaCpp) {
-      const modelName = normalizedApiKey || getDefaultLlamaCppModel();
+      // Same two slots as the Ollama branch above, for the same reason.
+      const modelName = localModelSlot || normalizedModel || getDefaultLlamaCppModel();
       config.defaultModel = `llamacpp/${modelName}`;
     } else if (isClawAI && resolvedClawboxTier) {
       config.defaultModel = CLAWBOX_AI_MODEL_BY_TIER[resolvedClawboxTier];
     } else if (
       authMode === "subscription"
       && ocProvider === "codex"
-      && !(typeof bodyModel === "string" && bodyModel.trim())
+      && !normalizedModel
     ) {
       // ChatGPT sign-in with no explicit pick. The hardcoded default is
       // gpt-5.5, so a Pro account used to land a generation behind and had
@@ -1334,7 +1394,7 @@ export async function POST(request: Request) {
         // Never let model selection break sign-in.
         console.warn("[configure] codex entitlement probe failed:", err);
       }
-    } else if (typeof bodyModel === "string" && bodyModel.trim()) {
+    } else if (normalizedModel) {
       // User picked a specific model in the wizard (curated list or
       // custom ID). Validate shape to stop empty strings / obvious typos
       // from silently saving a broken primary. We don't check against
@@ -1349,7 +1409,7 @@ export async function POST(request: Request) {
       // `config.defaultModel` was already set to the correct namespace
       // above by applying subscriptionOverride, so we derive the
       // target provider from the existing default instead of `provider`.
-      const requestedModel = bodyModel.trim();
+      const requestedModel = normalizedModel;
       const targetProvider = config.defaultModel.split("/", 1)[0];
       const supportedProviders = new Set([
         "openrouter",
