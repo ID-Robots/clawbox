@@ -318,6 +318,19 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
     expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
   });
 
+  it("leaves a skills.disabled it cannot read alone but still registers the MCP", () => {
+    // A mapping under `disabled` is not a shape this script understands, and
+    // the previous read of it as "nothing is disabled" would have written the
+    // three distractor names straight over the owner's value. Same rule as the
+    // non-mapping `skills` key below: leave it, say so, register anyway.
+    fs.writeFileSync(configPath, "skills:\n  disabled:\n    himalaya: true\n");
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(disabledSkills()).toEqual({ himalaya: true });
+    expect(r.stderr).toContain("skills.disabled is not a list or a string");
+    expect(clawboxEntry().enabled).toBe(true);
+  });
+
   it("leaves a malformed skills value alone but still registers the MCP", () => {
     fs.writeFileSync(configPath, "skills: broken\n");
     const r = run();

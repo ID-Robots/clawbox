@@ -278,25 +278,6 @@ export interface StoreCatalog {
 export const searchApps = (query = "") =>
   request<StoreCatalog>(`/setup-api/apps/store?q=${encodeURIComponent(query)}`);
 
-/**
- * `searchApps` without the throw-on-error: returns the status and body so a
- * caller can tell the two failure modes apart. The catalog reaches the device
- * through a proxy to clawbox.com, and "the device's proxy is broken" (a
- * regression) has to be distinguished from "ClawHub refused this network" (an
- * upstream verdict the proxy is faithfully relaying).
- */
-export async function searchAppsRaw(query = ""): Promise<{
-  status: number;
-  text: string;
-  body: Partial<StoreCatalog> & { error?: string };
-}> {
-  const res = await fetch(`${BASE_URL}/setup-api/apps/store?q=${encodeURIComponent(query)}`);
-  const text = await res.text();
-  let body: Partial<StoreCatalog> & { error?: string } = {};
-  try { body = text ? JSON.parse(text) : {}; } catch { body = {}; }
-  return { status: res.status, text, body };
-}
-
 export const installApp = (appId: string) =>
   request<{ clawhub?: { success: boolean; error?: string }; reload?: string }>(
     "/setup-api/apps/install",

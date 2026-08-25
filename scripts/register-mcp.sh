@@ -268,9 +268,18 @@ if isinstance(skills_cfg, dict):
             names = [raw_disabled] if raw_disabled else []
     elif isinstance(raw_disabled, (list, tuple)):
         names = [str(item) for item in raw_disabled]
-    else:
+    elif raw_disabled is None:
         names = []
-    missing = [name for name in DISTRACTOR_SKILLS if name not in names]
+    else:
+        # A mapping, a bool, a number: a shape this script does not understand,
+        # left alone for the same reason a non-mapping `skills` key is. Reading
+        # it as "nothing is disabled" and writing the distractors over it would
+        # discard whatever the owner meant by it, and the MCP registration
+        # above still has to land.
+        names = None
+        print("[register-mcp] WARNING: skills.disabled is not a list or a string; "
+              "leaving the bundled email skills enabled.", file=sys.stderr)
+    missing = [] if names is None else [n for n in DISTRACTOR_SKILLS if n not in names]
     if missing:
         skills_cfg["disabled"] = names + missing
         changed = True
