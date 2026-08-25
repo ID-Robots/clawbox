@@ -115,9 +115,37 @@ function stubFetch() {
     if (url === "/setup-api/hermes/models" && method === "GET") {
       return { ok: true, json: async () => pairing } as Response;
     }
+    // Wizard connect flows: the pairing write, the API-key save, and the inline
+    // provider-OAuth start/submit. All succeed by default.
+    if (url === "/setup-api/hermes/models" && method === "POST") {
+      return { ok: true, json: async () => ({ ok: true }) } as Response;
+    }
+    if (url === "/setup-api/hermes/provider-key") {
+      return { ok: true, json: async () => ({ ok: true, provider: "openrouter" }) } as Response;
+    }
+    if (url === "/setup-api/hermes/oauth/start") {
+      return {
+        ok: true,
+        json: async () => ({
+          flow: "pkce",
+          session_id: "sess-abcdefgh",
+          auth_url: "https://console.anthropic.com/oauth/authorize",
+        }),
+      } as Response;
+    }
+    if (url === "/setup-api/hermes/oauth/submit") {
+      return { ok: true, json: async () => ({ ok: true }) } as Response;
+    }
     return { ok: true, json: async () => ({}) } as Response;
   });
   vi.stubGlobal("fetch", fetchMock);
+}
+
+/** The pairing-write POSTs this section made, as bodies. */
+function modelsPostCalls(): unknown[] {
+  return fetchMock.mock.calls
+    .filter(([url, init]) => String(url) === "/setup-api/hermes/models" && (init as RequestInit | undefined)?.method === "POST")
+    .map(([, init]) => JSON.parse((init as RequestInit).body as string));
 }
 
 /** The radio row carrying this provider, once it has rendered. */
@@ -324,5 +352,80 @@ describe("staying live", () => {
     await new Promise((r) => setTimeout(r, 250));
     expect(within(hero()).getByText("ClawBox AI")).toBeInTheDocument();
     expect(screen.getAllByText("Connected").length).toBeGreaterThan(0);
+  });
+});
+
+describe("in the setup wizard (not embedded)", () => {
+  // The wizard passes an onNext and NO `embedded`; Settings passes `embedded`
+  // and no onNext. That one prop is the whole surface distinction.
+  it("hides the default-model dropdown that Settings shows for the same provider", async () => {
+    const { unmount } = render(<HermesProviderConfig testId="hermes-wizard" onNext={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    // Give the row's scoped controls a beat to render.
+    await new Promise((r) => setTimeout(r, 50));
+    // Choosing a default model is a post-setup concern — not in the wizard.
+    expect(screen.queryByLabelText(/Default model/i)).toBeNull();
+    unmount();
+
+    render(<HermesProviderConfig embedded testId="hermes-settings" onNext={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    // …but Settings still owns it.
+    expect(await screen.findByLabelText(/Default model/i)).toBeInTheDocument();
+  });
+
+  it("auto-advances with a Connected affirmation once a provider signs in via OAuth", async () => {
+    // The reported first-boot flow: Anthropic connects via OAuth, and the step
+    // is done — no model-picking, no Save click.
+    const openSpy = vi.fn();
+    vi.stubGlobal("open", openSpy);
+    const onNext = vi.fn();
+    render(<HermesProviderConfig testId="hermes-wizard" onNext={onNext} />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /Anthropic/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+
+    const codeInput = await screen.findByPlaceholderText(/Paste the code/i);
+    fireEvent.change(codeInput, { target: { value: "auth-code-abc123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Submit code" }));
+
+    // The success beat draws before the jump.
+    expect(await screen.findByTestId("hermes-connected-affirmation")).toBeInTheDocument();
+    // The just-connected provider is pinned as the device default with its OWN
+    // recommended model (no `model` field → the server picks it), so chat works.
+    await waitFor(() => expect(modelsPostCalls()).toContainEqual({ provider: "anthropic" }));
+    // …and the wizard advances after the affirmation.
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  });
+
+  it("also finishes the step when a provider is connected with an API key", async () => {
+    const onNext = vi.fn();
+    render(<HermesProviderConfig testId="hermes-wizard" onNext={onNext} />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /OpenRouter/ }));
+    fireEvent.change(
+      await screen.findByLabelText(/OpenRouter API key/i),
+      { target: { value: "sk-or-abcdefgh12345678" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save model & provider" }));
+
+    expect(await screen.findByTestId("hermes-connected-affirmation")).toBeInTheDocument();
+    await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2500 });
+  });
+
+  it("does NOT auto-advance in Settings — there is nowhere to go", async () => {
+    const onNext = vi.fn();
+    // Settings embeds the same panel; a connect there must not navigate.
+    render(<HermesProviderConfig embedded testId="hermes-settings" onNext={onNext} />);
+
+    fireEvent.click(await screen.findByRole("radio", { name: /OpenRouter/ }));
+    fireEvent.change(
+      await screen.findByLabelText(/OpenRouter API key/i),
+      { target: { value: "sk-or-abcdefgh12345678" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save model & provider" }));
+
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(onNext).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("hermes-connected-affirmation")).toBeNull();
   });
 });

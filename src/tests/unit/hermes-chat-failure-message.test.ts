@@ -207,3 +207,62 @@ describe("the message shown for an interrupted Hermes turn", () => {
       .not.toMatch(/timed out/i);
   });
 });
+
+/**
+ * A failed turn on a RESUMED session surfaced the resume banner as the error.
+ *
+ * Captured verbatim from the owner's box (2026-08-25, session
+ * 20260825_165225_be089e): `hermes chat -q … --resume` exited 1 with the real
+ * cause on stdout and only bookkeeping on stderr. `errorFromStderr` saw a
+ * non-empty stderr line and returned it, so the chat bubble read
+ * "Error: ↻ Resumed session …" — a status line dressed as a failure — and
+ * the actual `HTTP 403` was discarded without ever being read.
+ */
+describe("a failed turn on a resumed session", () => {
+  // The exact stderr bytes observed on the device.
+  const RESUMED_STDERR = [
+    "",
+    '↻ Resumed session 20260825_165225_be089e "What model are you and what is this machine?" (2 user messages, 7 total messages)',
+    "Model restored from session: claude-fable-5 (anthropic)",
+    "",
+    "session_id: 20260825_165225_be089e",
+    "",
+  ].join("\n");
+
+  it("never reports the resume banner as the error", () => {
+    const msg = hermesFailureMessage("HTTP 403 — Just a moment...", RESUMED_STDERR);
+    expect(msg).not.toMatch(/Resumed session/);
+    expect(msg).toBe("HTTP 403 — Just a moment...");
+  });
+
+  it("treats a resume with nothing else said as silence, so the exit falls back to its code", () => {
+    expect(hermesFailureMessage("", RESUMED_STDERR)).toBe("");
+    expect(hermesExitMessage(1, "", RESUMED_STDERR)).toBe("hermes exited with code 1");
+  });
+
+  it("drops the model-restored line as bookkeeping too", () => {
+    expect(hermesFailureMessage("", "Model restored from session: claude-fable-5 (anthropic)")).toBe("");
+  });
+
+  it("still lets a genuine stderr cause win on a resumed run", () => {
+    const msg = hermesFailureMessage(
+      "partial answer text",
+      `${RESUMED_STDERR}\nHTTP 401: invalid api key`,
+    );
+    expect(msg).toBe("HTTP 401: invalid api key");
+  });
+
+  it("keeps prose that merely mentions a resumed session", () => {
+    // Only a line-leading banner is bookkeeping; an answer ABOUT sessions is not.
+    const stdout = "The error came from a Resumed session banner in your logs.";
+    expect(hermesFailureMessage(stdout, "")).toBe(stdout);
+  });
+
+  it("drops the banner even without its ↻ prefix", () => {
+    const msg = hermesFailureMessage(
+      "HTTP 403 — Just a moment...",
+      'Resumed session 20260825_165225_be089e "t" (1 user message, 5 total messages)',
+    );
+    expect(msg).toBe("HTTP 403 — Just a moment...");
+  });
+});

@@ -241,12 +241,44 @@ function unwrap(lines: string[]): string[] {
 /** The cap is per MESSAGE, not per line — a bubble is not a log viewer. */
 const MAX_MESSAGE_CHARS = 400;
 
+/**
+ * Lines `chat -q` prints as STATUS, not as causes.
+ *
+ * `--resume` announces itself on stderr before the turn says anything, and on
+ * EVERY resumed run — success or failure alike. Captured verbatim from the
+ * live box (exit 1, the real cause sitting on stdout as "HTTP 403 — Just a
+ * moment..."):
+ *
+ *   ↻ Resumed session 20260825_165225_be089e "What model are you and what is
+ *   this machine?" (2 user messages, 7 total messages)
+ *   Model restored from session: claude-fable-5 (anthropic)
+ *   session_id: 20260825_165225_be089e
+ *
+ * Because only the `session_id:` line was being stripped, `errorFromStderr`
+ * found the resume banner, decided stderr "said something", and the customer's
+ * bubble read "Error: ↻ Resumed session …" while the actual failure was never
+ * looked at. A banner is bookkeeping exactly like the session id under it.
+ *
+ * Matching on text is the only classifier available HERE: the CLI's streams
+ * carry no framing to gate on. The streamed transport does not have this
+ * problem to begin with — the dashboard socket reports the same resume as a
+ * typed `session.resume` RESULT frame (captured live: `{"resumed":
+ * "20260825_165225_be089e", …}`), never as an event the turn loop could
+ * mistake for output.
+ */
+function isBookkeepingLine(line: string): boolean {
+  return /^session_id:/i.test(line)
+    || /^(?:↻\s*)?Resumed session\b/.test(line)
+    || /^Model restored from session\b/.test(line)
+    || /^\s*(?:Traceback|File ")/.test(line);
+}
+
 /** Bookkeeping and stack noise, dropped before we look for a cause. */
 function usefulLines(stream: string): string[] {
   const lines = stream
     .split(/\r?\n/)
     .map((l) => l.trim())
-    .filter((l) => l && !/^session_id:/i.test(l) && !/^\s*(?:Traceback|File ")/.test(l));
+    .filter((l) => l && !isBookkeepingLine(l));
   // Unwrap FIRST: the filter below keeps lines that themselves name a failure,
   // and the continuation lines of a wrapped message read as prose. That is how
   // the remedy half of every multi-line Hermes error was being dropped.
@@ -320,6 +352,11 @@ function interruptedTurnMessage(): string {
  * said and falling back to a named cause instead of a raw exit code.
  */
 function hermesExitMessage(code: number | null, stdout: string, stderr: string): string {
+  // Named in the journal so a failed resumed turn can be checked from the
+  // outside: the banner WAS received, and it was classified as bookkeeping.
+  if (/^(?:↻\s*)?Resumed session\b/m.test(stderr)) {
+    console.log("[hermes] resume banner on stderr ignored as bookkeeping, not an error");
+  }
   const reported = hermesFailureMessage(stdout, stderr);
   if (reported) return reported;
   if (code === HERMES_INTERRUPTED_EXIT_CODE) return interruptedTurnMessage();

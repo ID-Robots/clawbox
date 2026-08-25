@@ -90,6 +90,7 @@ export const zh: Record<string, string> = {
   "hermesProvider.hero.nativeSwitch": "通过 Hermes 原生切换",
   "hermesProvider.hero.changeModel": "更换模型",
   "hermesProvider.continue": "继续",
+  "hermesProvider.connected.affirmation": "已连接",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "一个 API 密钥，300+ 个模型",
