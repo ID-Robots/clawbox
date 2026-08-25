@@ -81,6 +81,7 @@ export const ja: Record<string, string> = {
   "hermesProvider.hero.nativeSwitch": "Hermes を通じてネイティブに切り替わります",
   "hermesProvider.hero.changeModel": "モデルを変更",
   "hermesProvider.continue": "次へ",
+  "hermesProvider.connected.affirmation": "接続しました",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "API キー 1 つで 300 以上のモデル",

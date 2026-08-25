@@ -66,6 +66,7 @@ export const bg: Record<string, string> = {
   "hermesProvider.hero.nativeSwitch": "превключва се директно през Hermes",
   "hermesProvider.hero.changeModel": "Смяна на модела",
   "hermesProvider.continue": "Продължи",
+  "hermesProvider.connected.affirmation": "Свързано",
 
   // === Provider rows ===
   "hermesProvider.row.desc.openrouter": "300+ модела с един API ключ",
