@@ -67,6 +67,13 @@ function request(body: unknown): Request {
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
+  // Belt and braces on the stored-config reader. `vitest.config.ts` sets
+  // `mockReset: true` globally, so implementations are already cleared between
+  // tests and the suite passes without this — but `storedAccount()` installs an
+  // implementation rather than a return value, and the no-account cases assert
+  // on its ABSENCE. Resetting explicitly means those assertions keep meaning
+  // what they say even if the global config is ever relaxed.
+  mockGet.mockReset();
   vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 500 })));
   mockHarness.mockResolvedValue("openclaw");
   mockVerify.mockResolvedValue(undefined);
