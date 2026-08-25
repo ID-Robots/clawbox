@@ -221,6 +221,7 @@ types passwords.
 `list_directory` · `glob` · `grep` · `notebook_edit` · `web_fetch` · `web_search`
 
 ### Coding agent (both editions, only while the owner's switch is on)
+
 `coding_agent_run` · `coding_agent_status` · `coding_agent_stop`
 
 A different thing from the coding family above. Instead of editing files

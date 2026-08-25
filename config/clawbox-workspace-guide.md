@@ -63,7 +63,7 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 ## Coding agent (delegate a whole task)
 
-When the owner has switched it on in Settings → System → Coding agent, three more tools exist:
+When the owner has switched it on in Settings → System → Coding agent AND that card reports the harness ready (Claude Code, `claude-ds` and ClawBox AI all present), three more tools exist:
 
 | Tool | Purpose |
 |---|---|
@@ -71,7 +71,7 @@ When the owner has switched it on in Settings → System → Coding agent, three
 | `coding_agent_status` | Follow a run; `wait_seconds` blocks up to two minutes instead of polling. When finished it carries the summary to relay to the user. |
 | `coding_agent_stop` | End a run early. Its files stay. |
 
-Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered the owner has not switched it on — say so; you cannot enable it yourself.
+Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch is off or the harness is not ready — say so and point the owner at that Settings card, which shows which; you cannot enable or install anything yourself.
 
 ---
 

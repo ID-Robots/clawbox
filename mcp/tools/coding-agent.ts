@@ -78,6 +78,17 @@ const STATUS_RULES: ErrorRule[] = [
   },
 ];
 
+const STOP_RULES: ErrorRule[] = [
+  ...STATUS_RULES,
+  // Without this a 403 reads as "the device token was rejected, restart".
+  {
+    status: 403,
+    code: "CONFLICT",
+    message: "That run was started by the owner from Settings, so only they can stop it.",
+    next: "Do not retry. Tell the user the run is theirs to stop in Settings -> System -> Coding agent.",
+  },
+];
+
 interface RunPayload {
   id: string;
   task: string;
@@ -240,7 +251,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       if (before.run && before.run.status !== "running") {
         return text(`Run ${run_id} already finished (${before.run.status}). Call coding_agent_status for its summary.`);
       }
-      await apiPost("/setup-api/coding-agent/stop", { id: run_id }, { timeoutMs: 15_000, rules: STATUS_RULES });
+      await apiPost("/setup-api/coding-agent/stop", { id: run_id }, { timeoutMs: 15_000, rules: STOP_RULES });
       // A 200 is a request acknowledged, not a process gone: give it the grace
       // period the server uses, then read back the truth.
       const after = await apiGet<{ run?: RunPayload }>("/setup-api/coding-agent/runs", {

@@ -434,7 +434,9 @@ describe("after a restart", () => {
     }]));
     vi.resetModules();
     lib = await import("@/lib/coding-agent");
-    expect(lib.reconcileAfterRestart()).toBe(0);
+    // The count is the operator's only signal that a restart killed work.
+    expect(lib.reconcileAfterRestart()).toBe(1);
+    expect(lib.reconcileAfterRestart()).toBe(1);
     const run = lib.getRun("run-lostrun1");
     expect(run?.status).toBe("failed");
     expect(run?.error).toMatch(/restarted/);

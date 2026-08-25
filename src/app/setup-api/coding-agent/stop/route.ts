@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { CodingAgentError, stopRun } from "@/lib/coding-agent";
+import { hasOwnerSession } from "@/lib/owner-session";
+import { CodingAgentError, getRun, stopRun } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -8,9 +9,11 @@ export const dynamic = "force-dynamic";
  * POST { id } → ask a running coding run to stop; answers the run record.
  * Idempotent: a run that already finished is returned as it is.
  *
- * Agent-callable with the in-handler gate every state-changing route carries.
- * Stopping is not owner-only: the agent started the run, the agent may end
- * it, and an owner in Settings holds a cookie that passes the same check.
+ * Agent-callable with the in-handler gate every state-changing route carries:
+ * the agent started its runs, the agent may end them. A run the OWNER started
+ * from Settings is the owner's, though — the agent's bearer gets a 403 for
+ * it, so a prompt-injected "stop that" cannot cut short work the person at
+ * the desk asked for. An owner's cookie passes both checks.
  */
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
@@ -26,6 +29,16 @@ export async function POST(request: Request) {
   if (!id) return NextResponse.json({ error: "A run id is required." }, { status: 400 });
 
   try {
+    const run = getRun(id);
+    if (!run) {
+      return NextResponse.json({ error: "There is no coding run with that id.", kind: "not_found" }, { status: 404 });
+    }
+    if (run.source === "owner" && run.status === "running" && !(await hasOwnerSession(request))) {
+      return NextResponse.json(
+        { error: "That run was started by the owner; only they can stop it.", kind: "owner_only" },
+        { status: 403 },
+      );
+    }
     return NextResponse.json({ run: stopRun(id) });
   } catch (err) {
     if (err instanceof CodingAgentError && err.kind === "not_found") {

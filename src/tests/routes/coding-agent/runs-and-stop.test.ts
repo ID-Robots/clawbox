@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installSessionFixture, type SessionFixture } from "@/tests/helpers/session";
+import { saveEnv } from "@/tests/helpers/env";
 
 const getRun = vi.hoisted(() => vi.fn());
 const listRuns = vi.hoisted(() => vi.fn());
@@ -19,15 +20,19 @@ vi.mock("@/lib/coding-agent", async () => {
   return { ...actual, getRun, listRuns, waitForRun, stopRun };
 });
 
-const RUN = { id: "run-k3x9q2ab", status: "completed", summary: "done" };
+const RUN = { id: "run-k3x9q2ab", status: "completed", summary: "done", source: "agent" };
+const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
 let GET: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let MAX_WAIT_MS: number;
 let CodingAgentError: typeof import("@/lib/coding-agent").CodingAgentError;
 let session: SessionFixture;
+let restore: () => void;
 
 beforeEach(async () => {
+  restore = saveEnv("CLAWBOX_MCP_TOKEN");
+  process.env.CLAWBOX_MCP_TOKEN = MCP_TOKEN;
   session = installSessionFixture();
   vi.resetModules();
   vi.clearAllMocks();
@@ -42,7 +47,10 @@ beforeEach(async () => {
   POST = (await import("@/app/setup-api/coding-agent/stop/route")).POST;
 });
 
-afterEach(() => session.cleanup());
+afterEach(() => {
+  session.cleanup();
+  restore();
+});
 
 describe("GET runs", () => {
   it("lists recent runs with a bounded limit", async () => {
@@ -77,16 +85,37 @@ describe("GET runs", () => {
 });
 
 describe("POST stop", () => {
-  const stop = (body: unknown, auth = true) =>
-    POST(new Request("http://localhost/setup-api/coding-agent/stop", {
-      method: "POST",
-      headers: auth ? { "Content-Type": "application/json", Cookie: session.cookie } : { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }));
+  const stop = (body: unknown, auth: "cookie" | "bearer" | "none" = "cookie") => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (auth === "cookie") headers.Cookie = session.cookie;
+    if (auth === "bearer") headers.Authorization = `Bearer ${MCP_TOKEN}`;
+    return POST(new Request("http://localhost/setup-api/coding-agent/stop", { method: "POST", headers, body: JSON.stringify(body) }));
+  };
 
   it("is 401 without a session, and stops nothing", async () => {
-    expect((await stop({ id: "run-k3x9q2ab" }, false)).status).toBe(401);
+    expect((await stop({ id: "run-k3x9q2ab" }, "none")).status).toBe(401);
     expect(stopRun).not.toHaveBeenCalled();
+  });
+
+  it("lets the agent stop a run the agent started", async () => {
+    getRun.mockReturnValue({ ...RUN, status: "running", source: "agent" });
+    const res = await stop({ id: "run-k3x9q2ab" }, "bearer");
+    expect(res.status).toBe(200);
+    expect(stopRun).toHaveBeenCalledWith("run-k3x9q2ab");
+  });
+
+  it("refuses the agent's bearer for a run the owner started — that one is the owner's to stop", async () => {
+    getRun.mockReturnValue({ ...RUN, status: "running", source: "owner" });
+    const res = await stop({ id: "run-k3x9q2ab" }, "bearer");
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(stopRun).not.toHaveBeenCalled();
+  });
+
+  it("lets the owner's browser session stop either kind of run", async () => {
+    getRun.mockReturnValue({ ...RUN, status: "running", source: "owner" });
+    expect((await stop({ id: "run-k3x9q2ab" }, "cookie")).status).toBe(200);
+    expect(stopRun).toHaveBeenCalledWith("run-k3x9q2ab");
   });
 
   it("needs an id", async () => {
@@ -102,9 +131,16 @@ describe("POST stop", () => {
   });
 
   it("answers a JSON 404 for an unknown run", async () => {
-    stopRun.mockImplementation(() => { throw new CodingAgentError("not_found", "no such run"); });
+    getRun.mockReturnValue(null);
     const res = await stop({ id: "run-nope0000" });
     expect(res.status).toBe(404);
-    expect((await res.json()).error).toBe("no such run");
+    expect(typeof (await res.json()).error).toBe("string");
+    expect(stopRun).not.toHaveBeenCalled();
+
+    getRun.mockReturnValue({ ...RUN, status: "running" });
+    stopRun.mockImplementation(() => { throw new CodingAgentError("not_found", "no such run"); });
+    const raced = await stop({ id: "run-k3x9q2ab" });
+    expect(raced.status).toBe(404);
+    expect((await raced.json()).error).toBe("no such run");
   });
 });

@@ -58,7 +58,7 @@ import path from "path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
-import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath } from "@/lib/file-guard";
+import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { projectPath, validateProjectId } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 
@@ -130,14 +130,12 @@ export const BASH_DENYLIST: readonly string[] = [
 
 /**
  * Folders (relative to the home directory) whose contents Claude Code's own
- * file tools must not open. Mirrors PROTECTED_DIR_RES in src/lib/file-guard.ts
- * — the same list the ClawBox file tools enforce — plus the wrapper's own state
- * and this checkout's data/, which holds the ClawBox AI token the run is using.
+ * file tools must not open: the credential stores file-guard protects for the
+ * ClawBox file tools — the SAME list, imported, so the two cannot drift — plus
+ * Claude Code's own state directories (transcripts of every run and of the
+ * owner's interactive sessions).
  */
-const DENIED_HOME_SUBTREES: readonly string[] = [
-  ".ssh", ".openclaw", ".hermes", ".codex", ".clawkeep", ".gnupg", ".aws", ".kube", ".docker",
-  ".config/gcloud", ".config/gh", ".config/rclone", ".claude", ".claude-ds",
-];
+const DENIED_HOME_SUBTREES: readonly string[] = [...PROTECTED_HOME_DIRS, ".claude", ".claude-ds"];
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -395,6 +393,8 @@ const waiters = new Map<string, Set<() => void>>();
 let flushTimer: NodeJS.Timeout | null = null;
 let dirty = false;
 let exitHookInstalled = false;
+/** Records loadRuns() settled as failed because the previous server died with them. */
+let repairedAtLoad = 0;
 
 /**
  * Load the store, and settle anything the previous web server left behind.
@@ -405,16 +405,16 @@ let exitHookInstalled = false;
 function loadRuns(): CodingRun[] {
   if (runs) return runs;
   runs = readAll();
-  let repaired = false;
+  repairedAtLoad = 0;
   for (const run of runs) {
     if (run.status === "running" && !live.has(run.id)) {
       run.status = "failed";
       run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
       run.completedAt = Date.now();
-      repaired = true;
+      repairedAtLoad += 1;
     }
   }
-  if (repaired) {
+  if (repairedAtLoad > 0) {
     try {
       writeAll(runs);
     } catch (err) {
@@ -424,10 +424,14 @@ function loadRuns(): CodingRun[] {
   return runs;
 }
 
-/** Called from the boot hook so a stale "running" run is settled before anyone asks. */
+/**
+ * Called from the boot hook so a stale "running" run is settled before anyone
+ * asks. Returns how many were settled — the one signal an operator gets that
+ * a restart killed work in progress.
+ */
 export function reconcileAfterRestart(): number {
-  const list = loadRuns();
-  return list.filter((r) => r.status === "running").length;
+  loadRuns();
+  return repairedAtLoad;
 }
 
 function persist(immediate = false): void {
@@ -1149,5 +1153,6 @@ export function _resetCodingAgentStateForTests(): void {
     flushTimer = null;
   }
   dirty = false;
+  repairedAtLoad = 0;
   runs = null;
 }

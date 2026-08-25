@@ -238,6 +238,17 @@ describe("coding_agent_stop", () => {
     expect(apiPost).not.toHaveBeenCalled();
   });
 
+  it("explains an owner-started run instead of reporting a rejected token", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "running", source: "owner" } });
+    apiPost.mockRejectedValue(new ApiError(403, JSON.stringify({ error: "owner's run", kind: "owner_only" })));
+    const out = await harness().call("coding_agent_stop", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/Do not retry/);
+    expect(out.error.next).toMatch(/Settings/);
+  });
+
   it("is honest when the process has not exited yet", async () => {
     apiGet.mockResolvedValue({ run: { ...RUN, status: "running" } });
     apiPost.mockResolvedValue({ run: { ...RUN, status: "running" } });

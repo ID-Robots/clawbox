@@ -120,9 +120,12 @@ export default function CodingAgentPanel() {
 
   // `load` must not re-run because a translation function was re-created: a
   // refetch on every render would overwrite a freshly toggled switch with the
-  // stale status it read a moment earlier. Read `t` through a ref instead.
+  // stale status it read a moment earlier. Read `t` through a ref instead,
+  // synchronised after commit so a discarded render never leaks into it.
   const tRef = useRef(t);
-  tRef.current = t;
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
 
   const load = useCallback(async () => {
     try {
