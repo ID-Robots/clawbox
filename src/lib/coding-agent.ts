@@ -571,16 +571,25 @@ export async function resolveWorkingDirectory(input: {
   const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim() : null;
   const directory = typeof input.directory === "string" && input.directory.trim() ? input.directory.trim() : null;
 
+  // Both roots as normalised absolute paths. Every filesystem call below is
+  // made on a path that has been `path.resolve`d and checked to start with
+  // one of these — the shape a static analyser recognises as contained — on
+  // top of the realpath re-check that catches symlinks.
+  const projectsRoot = path.resolve(CONFIG_ROOT, "data", "code-projects");
+  const home = path.resolve(homeDir());
+
   if (projectId) {
     if (!validateProjectId(projectId)) throw new CodingAgentError("invalid", "Invalid project id.");
-    const dir = projectPath(projectId);
+    const dir = path.resolve(projectPath(projectId));
+    if (!dir.startsWith(projectsRoot + path.sep)) throw new CodingAgentError("invalid", "Invalid project id.");
+    let stat: fs.Stats;
     try {
-      const stat = await fs.promises.stat(dir);
-      if (!stat.isDirectory()) throw new Error("not a directory");
+      stat = await fs.promises.stat(dir);
     } catch {
       throw new CodingAgentError("not_found", "There is no code project with that id on this ClawBox.");
     }
-    return { directory: await realDirectory(dir), projectId };
+    if (!stat.isDirectory()) throw new CodingAgentError("not_found", "There is no code project with that id on this ClawBox.");
+    return { directory: await projectFolder(dir, projectsRoot, projectId), projectId };
   }
 
   if (!directory) {
@@ -592,34 +601,44 @@ export async function resolveWorkingDirectory(input: {
   if (!path.isAbsolute(directory)) {
     throw new CodingAgentError("invalid", "The folder must be an absolute path.");
   }
-  const real = await realDirectory(path.resolve(directory));
+  const normalized = path.resolve(directory);
 
   // A code project's folder is always fine, wherever the checkout lives (a
   // dev box keeps it under the working directory, not the home). Spelling it
   // as a path rather than an id still records which project it was.
-  const checkout = await fs.promises.realpath(CONFIG_ROOT).catch(() => CONFIG_ROOT);
-  const projects = path.join(checkout, "data", "code-projects");
-  if (isInside(real, projects) && real !== projects) {
-    const id = path.relative(projects, real).split(path.sep)[0];
-    return { directory: real, projectId: validateProjectId(id) ? id : null };
+  if (normalized.startsWith(projectsRoot + path.sep)) {
+    const id = path.relative(projectsRoot, normalized).split(path.sep)[0];
+    return { directory: await projectFolder(normalized, projectsRoot, id), projectId: validateProjectId(id) ? id : null };
   }
 
-  const home = await fs.promises.realpath(homeDir()).catch(() => homeDir());
-  if (!isInside(real, home)) {
+  if (!normalized.startsWith(home + path.sep)) {
+    throw new CodingAgentError("invalid", "The working folder must be inside the ClawBox home directory.");
+  }
+  const real = await realDirectory(normalized);
+  const realHome = await fs.promises.realpath(home).catch(() => home);
+  // A symlink may lead anywhere; the folder it leads to has to pass the same test.
+  if (!isInside(real, realHome)) {
     throw new CodingAgentError("invalid", "The working folder must be inside the ClawBox home directory.");
   }
   // Not the home itself: `acceptEdits` auto-approves every edit UNDER the
   // working folder, and under the home that includes ~/.bashrc and friends.
-  if (real === home) {
+  if (real === realHome) {
     throw new CodingAgentError("invalid", "Use a folder inside the home directory, not the home directory itself.");
   }
   if (isProtectedFilePath(real)) {
     throw new CodingAgentError("invalid", "That folder holds credentials or ClawBox's own state and cannot be a working folder.");
   }
   for (const sub of DENIED_HOME_SUBTREES) {
-    if (isInside(real, path.join(home, sub))) {
+    if (isInside(real, path.join(realHome, sub))) {
       throw new CodingAgentError("invalid", "That folder holds credentials or ClawBox's own state and cannot be a working folder.");
     }
+  }
+  const checkout = await fs.promises.realpath(CONFIG_ROOT).catch(() => path.resolve(CONFIG_ROOT));
+  const realProjects = path.join(checkout, "data", "code-projects");
+  if (isInside(real, realProjects) && real !== realProjects) {
+    // A symlink into the projects folder: a project after all.
+    const id = path.relative(realProjects, real).split(path.sep)[0];
+    return { directory: real, projectId: validateProjectId(id) ? id : null };
   }
   if (isInside(real, checkout)) {
     throw new CodingAgentError(
@@ -628,6 +647,16 @@ export async function resolveWorkingDirectory(input: {
     );
   }
   return { directory: real, projectId: null };
+}
+
+/** The real path of a folder under the projects root; a symlink that leads out of it is refused. */
+async function projectFolder(dir: string, projectsRoot: string, id: string): Promise<string> {
+  const real = await realDirectory(dir);
+  const realRoot = await fs.promises.realpath(projectsRoot).catch(() => projectsRoot);
+  if (!isInside(real, realRoot) || real === realRoot) {
+    throw new CodingAgentError("invalid", `The folder of project "${id}" leads outside the projects directory and cannot be used.`);
+  }
+  return real;
 }
 
 // ─── Spawning ────────────────────────────────────────────────────────────────
