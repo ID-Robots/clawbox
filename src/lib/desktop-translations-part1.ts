@@ -280,7 +280,7 @@ export const bg: Record<string, string> = {
   "settings.mascot.petInstallFailed": "Този любимец не можа да бъде настроен. Проверете връзката и опитайте отново.",
   "settings.mascot.petAttribution": "Изображенията идват от общността Petdex и остават с автор своите създатели. Спрайтовете се изтеглят на това устройство, когато изберете любимец.",
   "settings.mascot.petBrowseAll": "Разгледайте цялата галерия",
-  "settings.mascot.eggHatch": "Излюпете своя спътник",
+  "settings.mascot.eggHatch": "Цъкни, за да се излюпи любимец",
   "settings.status": "Състояние",
   "settings.connected": "Свързан",
   "settings.noWifiConnection": "Няма WiFi връзка",

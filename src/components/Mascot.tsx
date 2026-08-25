@@ -221,7 +221,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // A fresh Hermes box has no pet installed (upstream installs none, and the
   // first one is a ~2.2 MB download), so `supported && !active` wears the
   // fresh-box egg (`EggMascot`) instead — a placeholder that sits on the shelf
-  // and opens Settings → Appearance when clicked. Still no crab: that is
+  // and hatches a random curated pet when clicked (the picker still changes it). Still no crab: that is
   // ClawBox's own brand, not a stand-in on someone else's harness. The body
   // choice itself is the guard ladder just above the render (search
   // `EggMascot`).
