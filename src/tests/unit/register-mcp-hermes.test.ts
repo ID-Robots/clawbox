@@ -282,7 +282,7 @@ d("register-mcp.sh — the entry Hermes will accept", () => {
 // "read my last 5 emails" went himalaya → failing terminal calls → a clarify
 // question nothing could answer, with email_list sitting in the tool list.
 d("register-mcp.sh — bundled email-skill distractors", () => {
-  const DISTRACTORS = ["himalaya", "email-inbox-triage"];
+  const DISTRACTORS = ["himalaya", "email-inbox-triage", "google-workspace"];
 
   function disabledSkills(): unknown {
     const skills = readConfig().skills as Record<string, unknown> | undefined;
@@ -298,7 +298,7 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
   it("appends to the owner's own disabled list without duplicating", () => {
     fs.writeFileSync(configPath, "skills:\n  disabled:\n    - my-own-skill\n    - himalaya\n");
     run();
-    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage"]);
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage", "google-workspace"]);
   });
 
   it("parses the JSON-string list form `hermes config set` stores", () => {
@@ -306,7 +306,7 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
     // our names next to it as plain strings must not lose the owner's entry.
     fs.writeFileSync(configPath, `skills:\n  disabled: '["my-own-skill"]'\n`);
     run();
-    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage"]);
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage", "google-workspace"]);
   });
 
   it("is part of the idempotence contract: a second run rewrites nothing", () => {
@@ -324,5 +324,81 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
     expect(r.status).toBe(0);
     expect(readConfig().skills).toBe("broken");
     expect(clawboxEntry().enabled).toBe(true);
+  });
+});
+
+// hermes' clarify tool parks a turn until a human answers — the dashboard
+// transport cannot deliver one, so a clarify call is a guaranteed hang there
+// (observed live: 3600 s tool timeouts). The script gives the dashboard
+// platform an explicit toolset list without clarify, and strips clarify from
+// an existing explicit cli list (the web app's non-streaming fallback).
+d("register-mcp.sh — clarify cannot hang the dashboard", () => {
+  function platformToolsets(): Record<string, unknown> {
+    return (readConfig().platform_toolsets ?? {}) as Record<string, unknown>;
+  }
+
+  it("gives clawbox-chat an explicit toolset list without clarify", () => {
+    fs.writeFileSync(configPath, "model:
+  default: x
+");
+    run();
+    const chat = platformToolsets()["clawbox-chat"] as string[];
+    expect(chat).toContain("terminal");
+    expect(chat).toContain("web");
+    expect(chat).not.toContain("clarify");
+  });
+
+  it("strips clarify from an existing clawbox-chat list, keeping the rest", () => {
+    fs.writeFileSync(
+      configPath,
+      "platform_toolsets:
+  clawbox-chat:
+    - clarify
+    - web
+    - my-plugin
+",
+    );
+    run();
+    expect(platformToolsets()["clawbox-chat"]).toEqual(["web", "my-plugin"]);
+  });
+
+  it("respects an owner's custom clawbox-chat list that already lacks clarify", () => {
+    fs.writeFileSync(configPath, "platform_toolsets:
+  clawbox-chat:
+    - web
+");
+    run();
+    expect(platformToolsets()["clawbox-chat"]).toEqual(["web"]);
+  });
+
+  it("strips clarify from an explicit cli list but never invents one", () => {
+    fs.writeFileSync(
+      configPath,
+      "platform_toolsets:
+  cli:
+    - clarify
+    - kanban
+    - web
+",
+    );
+    run();
+    expect(platformToolsets()["cli"]).toEqual(["kanban", "web"]);
+
+    fs.writeFileSync(configPath, "model:
+  default: x
+");
+    run();
+    expect(platformToolsets()["cli"]).toBeUndefined();
+  });
+
+  it("stays idempotent alongside the other reconciles", () => {
+    fs.writeFileSync(configPath, "model:
+  default: x
+");
+    run();
+    const first = fs.readFileSync(configPath, "utf-8");
+    const second = run();
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
   });
 });
