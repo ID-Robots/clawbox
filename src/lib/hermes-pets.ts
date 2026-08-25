@@ -445,8 +445,24 @@ async function installPetDirect(slug: string): Promise<boolean> {
     if (!res.ok) return false;
     const declared = Number(res.headers.get("content-length") || 0);
     if (declared > MAX_DIRECT_SHEET_BYTES) return false;
-    const body = Buffer.from(await res.arrayBuffer());
-    if (body.byteLength === 0 || body.byteLength > MAX_DIRECT_SHEET_BYTES) return false;
+    // Enforce the cap WHILE reading: a missing or lying content-length must
+    // not let a huge download sit in memory before the size check happens.
+    const reader = res.body?.getReader();
+    if (!reader) return false;
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.byteLength;
+      if (received > MAX_DIRECT_SHEET_BYTES) {
+        await reader.cancel().catch(() => {});
+        return false;
+      }
+      chunks.push(value);
+    }
+    if (received === 0) return false;
+    const body = Buffer.concat(chunks);
     await fsp.mkdir(dir, { recursive: true });
     await fsp.writeFile(tmp, body);
     await fsp.rename(tmp, path.join(dir, sheetName));

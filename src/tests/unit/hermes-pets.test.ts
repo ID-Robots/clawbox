@@ -334,12 +334,11 @@ describe("selectPet", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(() =>
-        Promise.resolve({
-          ok: true,
-          headers: new Headers({ "content-length": String(bytes.length) }),
-          arrayBuffer: () =>
-            Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)),
-        } as unknown as Response),
+        Promise.resolve(
+          new Response(new Uint8Array(bytes), {
+            headers: { "content-length": String(bytes.length) },
+          }),
+        ),
       ),
     );
     try {
@@ -353,6 +352,43 @@ describe("selectPet", () => {
       expect(fs.existsSync(path.join(petsDir, "boba", "spritesheet.webp"))).toBe(true);
       // The store agrees this is a real pet, wearing the curated display name.
       expect(loadPet("boba")?.displayName).toBe("Boba");
+    } finally {
+      vi.doUnmock("@/lib/hermes-cli");
+      vi.doUnmock("@/lib/petdex-manifest");
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("aborts a direct download that exceeds the size cap mid-stream", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.doMock("@/lib/hermes-cli", () => ({
+      runHermesCli: (args: string[]) =>
+        args[1] === "install"
+          ? Promise.resolve({ code: 1, stdout: "", stderr: "manifest 500" })
+          : Promise.resolve({ code: 0, stdout: "", stderr: "" }),
+    }));
+    vi.doMock("@/lib/petdex-manifest", () => ({
+      PETDEX_ASSET_HOSTS: new Set(["assets.petdex.dev"]),
+      petdexSheetUrl: async () => "https://assets.petdex.dev/curated/boba/sprite-v2.webp",
+    }));
+    // No content-length header, and the stream keeps going past the 8 MB cap.
+    const chunk = new Uint8Array(1024 * 1024);
+    let served = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (served >= 9) {
+          controller.close();
+          return;
+        }
+        served += 1;
+        controller.enqueue(chunk);
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(stream))));
+    try {
+      const { selectPet } = await loadModule();
+      expect(await selectPet("boba")).toEqual({ ok: false, reason: "install-failed" });
+      expect(fs.existsSync(path.join(petsDir, "boba", "spritesheet.webp"))).toBe(false);
     } finally {
       vi.doUnmock("@/lib/hermes-cli");
       vi.doUnmock("@/lib/petdex-manifest");
