@@ -150,10 +150,17 @@ async function adoptOne(source: string, cacheRoot: string): Promise<string | nul
 //
 // A mention is therefore not just dropped — it is handed back as a SOURCE, so
 // a picture whose tool row never reached `generatedImages` is still adopted
-// off the model's own words. Only LOCAL ABSOLUTE paths with an image extension
-// are reclaimed; a remote URL in a MEDIA: line is left exactly where it was,
-// because nothing here can prove it broken, and audio directives are not image
-// business at all.
+// off the model's own words.
+//
+// Only paths INSIDE THE IMAGE CACHE are reclaimed, and the bound is not a
+// preference: `adoptOne` refuses everything else, so a mention taken out of
+// the caption and then refused by adoption is information destroyed for
+// nothing — the reply loses a picture the chat could have served. A path the
+// chat media root already holds (a file the customer attached, echoed back by
+// the model) is exactly that case, and it stays where it is for
+// `splitAssistantMedia` to lift, the way it did before any of this landed.
+// A remote URL in a MEDIA: line is likewise left alone, because nothing here
+// can prove it broken, and audio directives are not image business at all.
 
 const MEDIA_DIRECTIVE_RE = /^media:\s*(.+)$/i;
 const IMAGE_MENTION_RE = /\[image:\s*([^\]\n]+)\]/gi;
@@ -170,10 +177,15 @@ function unquoted(value: string): string {
 }
 
 /** The local absolute image path a mention names, or null to leave it alone. */
-function reclaimable(raw: string): string | null {
+function reclaimable(raw: string, cacheDir: string): string | null {
   const value = unquoted(raw.trim());
   if (!path.isAbsolute(value)) return null;
   if (!IMAGE_EXT.has(path.extname(value).toLowerCase())) return null;
+  // Lexical only: this decides what to take OUT of a caption, and the
+  // filesystem checks that decide what may be COPIED live in `adoptOne`,
+  // which re-resolves symlinks against the same root.
+  const rel = path.relative(cacheDir, path.resolve(value));
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
   return value;
 }
 
@@ -181,14 +193,17 @@ function reclaimable(raw: string): string | null {
  * Splits the model's own image-path mentions out of a reply.
  *
  * Returns the caption with those mentions removed, and the paths they named —
- * in order, de-duplicated — for `adoptHermesGeneratedImages` to judge. The
- * adoption path re-checks containment in the image cache, so nothing here has
- * to decide what is safe to serve, only what is CLAIMED to be a local picture.
- * Fenced code blocks are left untouched: a reply that explains the syntax is
- * still allowed to show it.
+ * in order, de-duplicated — for `adoptHermesGeneratedImages` to judge. Only
+ * paths lexically inside the Hermes image cache are taken, which is the set
+ * adoption can accept at all; the adoption path then re-checks that same
+ * containment through `realpath`, so nothing here has to decide what is safe
+ * to READ, only what is worth taking out of a sentence. Fenced code blocks are
+ * left untouched: a reply that explains the syntax is still allowed to show
+ * it.
  */
 export function reclaimImageMentions(raw: string): { text: string; sources: string[] } {
   if (!raw || (!/media:/i.test(raw) && !/\[image:/i.test(raw))) return { text: raw, sources: [] };
+  const cacheDir = hermesImageCacheDir();
   const sources: string[] = [];
   const keep = (source: string) => {
     if (!sources.includes(source)) sources.push(source);
@@ -208,7 +223,7 @@ export function reclaimImageMentions(raw: string): { text: string; sources: stri
     }
     const directive = MEDIA_DIRECTIVE_RE.exec(trimmed);
     if (directive) {
-      const source = reclaimable(directive[1]);
+      const source = reclaimable(directive[1], cacheDir);
       if (source) {
         keep(source);
         continue; // the whole line was machinery; nothing of it stays
@@ -218,7 +233,7 @@ export function reclaimImageMentions(raw: string): { text: string; sources: stri
     }
     // "[Image: /abs/path.png]" asides go; the sentence around them stays.
     const scrubbed = line.replace(IMAGE_MENTION_RE, (whole, payload: string) => {
-      const source = reclaimable(payload);
+      const source = reclaimable(payload, cacheDir);
       if (!source) return whole;
       keep(source);
       return "";

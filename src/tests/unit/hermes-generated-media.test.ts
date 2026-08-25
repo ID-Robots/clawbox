@@ -142,18 +142,30 @@ describe("adopting a picture the agent drew", () => {
 
   it("lifts a MEDIA: cache path out of the caption and hands it back as a source", async () => {
     const { reclaimImageMentions } = await load();
-    const out = reclaimImageMentions("Here you go!\nMEDIA:/home/clawbox/.hermes/cache/images/a.png");
-    expect(out.sources).toEqual(["/home/clawbox/.hermes/cache/images/a.png"]);
+    const drawn = path.join(cacheDir(), "a.png");
+    const out = reclaimImageMentions(`Here you go!\nMEDIA:${drawn}`);
+    expect(out.sources).toEqual([drawn]);
     expect(out.text).toBe("Here you go!");
   });
 
   it("strips an [Image: …] aside but keeps the sentence around it", async () => {
     const { reclaimImageMentions } = await load();
-    const out = reclaimImageMentions(
-      "Your red square: [Image: /home/clawbox/.hermes/cache/images/b.png] — enjoy!",
-    );
-    expect(out.sources).toEqual(["/home/clawbox/.hermes/cache/images/b.png"]);
+    const drawn = path.join(cacheDir(), "b.png");
+    const out = reclaimImageMentions(`Your red square: [Image: ${drawn}] — enjoy!`);
+    expect(out.sources).toEqual([drawn]);
     expect(out.text).toBe("Your red square: — enjoy!");
+  });
+
+  it("leaves a path the chat can already serve exactly where the model put it", async () => {
+    // The customer's own attachment, echoed back. `chat/media` serves that
+    // tree, so lifting it into the adoption list — which refuses everything
+    // outside the image cache — would drop a picture that worked before.
+    const { reclaimImageMentions } = await load();
+    const attached = path.join(home, "data", "chat-media", "chat-attachments", "one.png");
+    const raw = `Got it.\nMEDIA:${attached}`;
+    const out = reclaimImageMentions(raw);
+    expect(out.sources).toEqual([]);
+    expect(out.text).toBe(raw);
   });
 
   it("leaves remote URLs and audio directives untouched", async () => {
@@ -166,7 +178,7 @@ describe("adopting a picture the agent drew", () => {
 
   it("keeps fenced examples as text", async () => {
     const { reclaimImageMentions } = await load();
-    const raw = "```\nMEDIA:/home/clawbox/.hermes/cache/images/example.png\n```";
+    const raw = "```\nMEDIA:" + path.join(cacheDir(), "example.png") + "\n```";
     const out = reclaimImageMentions(raw);
     expect(out.sources).toEqual([]);
     expect(out.text).toBe(raw);
