@@ -104,7 +104,13 @@ function post(body: unknown): Request {
  */
 async function nextSocket(seen: number): Promise<FakeSocket> {
   for (let i = 0; i < 50 && socketsMock.made.length <= seen; i++) await Promise.resolve();
-  return socketsMock.made[socketsMock.made.length - 1];
+  // The socket AT the baseline, not the newest one — those differ the moment a
+  // test answers twice, and returning the newest is the very swap this helper
+  // exists to prevent. Throwing when it never arrives keeps a route that failed
+  // to connect from surfacing as a confusing assertion on a stale socket.
+  const socket = socketsMock.made[seen];
+  if (!socket) throw new Error(`the route opened no socket after baseline ${seen}`);
+  return socket;
 }
 
 /**

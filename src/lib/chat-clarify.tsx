@@ -150,7 +150,7 @@ export interface ClarifyPromptProps {
    * tells the caller to omit `questionId` — see ClarifyQuestion in transport.
    * An empty `answer` is a skip, and counts as answered.
    */
-  onAnswer: (requestId: string, qid: string, answer: string) => void;
+  onAnswer: (requestId: string, qid: string, answer: string) => void | Promise<void>;
 }
 
 export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
@@ -208,12 +208,15 @@ export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
 
   const submit = useCallback(
     (qid: string, answer: string) => {
-      onAnswer(requestId, qid, answer);
+      const delivered = onAnswer(requestId, qid, answer);
       // The draft has left the building. Clearing it now means a failed post
       // hands back an EMPTY control rather than a pre-filled one the customer
       // might send twice without noticing.
       setDrafts((prev) => ({ ...prev, [qid]: "" }));
       setTicked((prev) => ({ ...prev, [qid]: [] }));
+      // Handed back so `confirmAll` can wait for one answer before sending the
+      // next. A single submit ignores it, exactly as before.
+      return delivered;
     },
     [onAnswer, requestId],
   );
@@ -231,8 +234,16 @@ export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
    * Only offered for a batch; a single question already has its own submit and
    * its own skip, and a third control saying the same thing is noise.
    */
-  const confirmAll = useCallback(() => {
-    for (const question of outstanding) submit(question.qid, draftAnswerFor(question) ?? "");
+  const confirmAll = useCallback(async () => {
+    // ONE AT A TIME, and on this hardware that is the point. Every answer mints
+    // its own ticket and opens its own short-lived dashboard socket, so firing a
+    // three-question batch in parallel would open three authenticated sockets at
+    // once on a Jetson and leave the unblocking order to the gateway. Sequential
+    // costs a few hundred milliseconds on a gesture the customer made once, and
+    // the last answer is the one that releases the agent either way.
+    for (const question of outstanding) {
+      await submit(question.qid, draftAnswerFor(question) ?? "");
+    }
   }, [outstanding, submit, draftAnswerFor]);
 
   if (questions.length === 0) return null;
@@ -476,7 +487,7 @@ export function ClarifyPrompt({ card, onAnswer }: ClarifyPromptProps) {
         <button
           type="button"
           data-testid="chat-clarify-confirm"
-          onClick={confirmAll}
+          onClick={() => void confirmAll()}
           style={{
             alignSelf: "flex-start",
             padding: "5px 12px",

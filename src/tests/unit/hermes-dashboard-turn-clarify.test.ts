@@ -430,10 +430,21 @@ describe("the idle watchdog while a person is being waited on", () => {
     // clarify would hold the customer's response open for an hour.
     vi.useFakeTimers();
     const { turn, socket } = await connect();
-    const running = turn!.run(() => {});
+    // `onActivity` is REQUIRED for this test to mean anything: the long window
+    // is armed only when the prompt reached a surface, so without a callback
+    // the turn would sit on the ordinary 180s clock the whole way through and
+    // this assertion would still pass with the TURN_PROGRESS reset deleted.
+    const running = turn!.run(
+      () => {},
+      () => {},
+    );
     const settled = running.catch((e: unknown) => e);
     await settle();
     socket.event("clarify.request", { question: "Which file?", choices: ["a"], request_id: "wd334455" });
+    await settle();
+    // Proof the long window really is armed first: three minutes of silence
+    // while the prompt is outstanding must NOT settle the turn.
+    await vi.advanceTimersByTimeAsync(180_000);
     await settle();
     // Answered elsewhere; the agent picks the turn back up.
     socket.event("message.delta", { text: "Right — " });

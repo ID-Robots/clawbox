@@ -561,14 +561,19 @@ function clarifyQuestions(payload: Record<string, unknown>): ClarifyQuestion[] {
     for (const entry of batch) {
       if (!entry || typeof entry !== "object") continue;
       const row = entry as Record<string, unknown>;
-      const question = typeof row.question === "string" ? row.question : "";
+      // Trimmed before the check, so a whitespace-only question is treated as
+      // the absence it is. `"   "` is truthy, and letting it through would arm
+      // the hour-long window on a card with nothing written on it. The adapter
+      // trims the same field, and two normalisers that disagree about the same
+      // payload is a bug waiting to be found the hard way.
+      const question = typeof row.question === "string" ? row.question.trim() : "";
       const qid = typeof row.qid === "string" ? row.qid : "";
       if (!question || !qid) continue;
       out.push({ qid, question, choices: clarifyChoices(row.choices), multiSelect: row.multi_select === true });
     }
     return out;
   }
-  const question = typeof payload.question === "string" ? payload.question : "";
+  const question = typeof payload.question === "string" ? payload.question.trim() : "";
   if (!question) return [];
   // The single case, given the empty qid that means "answer this with no
   // `question_id`" — the one value the gateway accepts for a non-batch reply.
