@@ -1,8 +1,9 @@
 'use client'
 
-import { useLayoutEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useT } from '@/lib/i18n'
-import { dispatchOpenSettingsSection } from '@/lib/ui-events'
+import { announcePetChanged } from '@/lib/pet-client'
+import { CURATED_PETS } from '@/lib/pet-curated'
 import { MASCOT_SHELF_Z_INDEX } from '@/lib/pet-layout'
 
 // ── The fresh-box egg ──
@@ -79,11 +80,29 @@ const CREME_FILTER = 'brightness(1.14) sepia(0.38) saturate(1.25) contrast(1.05)
  * rule in `globals.css` (as `PetSprite` also relies on), which collapses the
  * loop to its frame-0 rest pose.
  */
+/** The hatch: crack, crack wider, burst — the back half of the sheet the idle
+ *  loop must never reach on its own. Stepped by JS state, not by a keyframe,
+ *  so the "no cracked shell at rest" invariant stays checkable in the CSS. */
+const HATCH_FRAMES = [9, 10, 11]
+const HATCH_FRAME_MS = 280
+/** The pause on the burst frame before the pet takes the shelf. */
+const HATCH_SETTLE_MS = 340
+/** What reduced motion gets instead of a cracking shell: a plain fade-swap. */
+const FADE_SWAP_MS = 240
+const ERROR_HINT_MS = 4000
+
+const WOBBLE_KEYFRAME = 'clawbox-egg-wobble'
+const HATCHING_CLASS = 'clawbox-egg-hatching'
+
+type HatchPhase = 'idle' | 'hatching' | 'burst' | 'fading'
+
 const idleCss = (() => {
   const at = (frame: number) => `background-position-y:${-frame * EGG_PX}px`
   return `@keyframes ${IDLE_KEYFRAME}{` +
     `0%,84%{${at(0)}}85%{${at(1)}}87%{${at(2)}}89%{${at(3)}}91%{${at(4)}}93%{${at(5)}}95%,100%{${at(0)}}` +
-    `}.${SPRITE_CLASS}{animation:${IDLE_KEYFRAME} ${IDLE_CYCLE_MS}ms step-end infinite}`
+    `}.${SPRITE_CLASS}{animation:${IDLE_KEYFRAME} ${IDLE_CYCLE_MS}ms step-end infinite}` +
+    `@keyframes ${WOBBLE_KEYFRAME}{0%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}100%{transform:rotate(-8deg)}}` +
+    `.${HATCHING_CLASS}{animation:${WOBBLE_KEYFRAME} 340ms ease-in-out infinite;transform-origin:50% 92%}`
 })()
 
 /**
@@ -179,12 +198,79 @@ export default function EggMascot() {
   const { t } = useT()
   const ground = useShelfGround()
   const [hinting, setHinting] = useState(false)
+  const [phase, setPhase] = useState<HatchPhase>('idle')
+  const [burstFrame, setBurstFrame] = useState(HATCH_FRAMES[0])
+  const [failed, setFailed] = useState(false)
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  // The pet's arrival unmounts this component mid-sequence; stale timers must
+  // not fire state updates after that.
+  useEffect(() => () => { timersRef.current.forEach(clearTimeout) }, [])
+
+  const later = (fn: () => void, ms: number) => { timersRef.current.push(setTimeout(fn, ms)) }
+
+  const reducedMotion = (): boolean => {
+    // Wrapped like every other decoration probe: a runtime without matchMedia
+    // loses the fancy hatch, never the hatch itself.
+    try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches } catch { return false }
+  }
+
+  // ── The hatch ──
+  //
+  // Clicking the egg no longer opens the picker — it HATCHES: a random pet off
+  // the curated shortlist, equal odds, and "no pet" is a Settings decision that
+  // is never a hatch outcome. The pick persists through the SAME route the
+  // Settings picker writes (`hermes pets install` + `select` behind
+  // /setup-api/pets/select), so a hatched pet survives a reload exactly the way
+  // a picked one does — and the picker stays the way to change it later.
+  //
+  // The sequence: wobble while the box downloads (~2.2 MB, so the wobble is the
+  // honest wait state), then crack → burst (frames 9-11, the sheet's real hatch
+  // cells), then the pet takes the shelf via `announcePetChanged` — the same
+  // signal a Settings pick fires. Reduced motion gets a short fade-swap
+  // instead: the global reduced-motion rule already freezes the CSS loops, and
+  // stepping crack frames by hand would repaint exactly what that rule exists
+  // to suppress.
+  const hatch = () => {
+    if (phase !== 'idle') return
+    setFailed(false)
+    const slug = CURATED_PETS[Math.floor(Math.random() * CURATED_PETS.length)].slug
+    setPhase('hatching')
+    fetch('/setup-api/pets/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug }),
+    })
+      .then((res) => {
+        if (!res.ok) throw new Error(`select answered ${res.status}`)
+        if (reducedMotion()) {
+          setPhase('fading')
+          later(() => announcePetChanged(), FADE_SWAP_MS)
+          return
+        }
+        setPhase('burst')
+        HATCH_FRAMES.forEach((frame, i) => later(() => setBurstFrame(frame), i * HATCH_FRAME_MS))
+        later(() => setPhase('fading'), HATCH_FRAMES.length * HATCH_FRAME_MS)
+        later(() => announcePetChanged(), HATCH_FRAMES.length * HATCH_FRAME_MS + HATCH_SETTLE_MS)
+      })
+      .catch(() => {
+        // Back to waiting, and say why — the same string the picker shows for
+        // the same failure. The egg is still there; nothing was lost.
+        setPhase('idle')
+        setBurstFrame(HATCH_FRAMES[0])
+        setFailed(true)
+        later(() => setFailed(false), ERROR_HINT_MS)
+      })
+  }
+
 
   const label = t('settings.mascot.eggHatch')
+  const hintText = failed ? t('settings.mascot.petInstallFailed') : label
 
   return (
     <div
       data-mascot="egg"
+      data-egg-phase={phase}
       style={{
         position: 'fixed',
         left: '50%',
@@ -197,7 +283,7 @@ export default function EggMascot() {
       }}
     >
       <style>{idleCss}</style>
-      {hinting && (
+      {(hinting || failed) && (
         <div
           data-egg-hint
           aria-hidden="true"
@@ -219,14 +305,17 @@ export default function EggMascot() {
             pointerEvents: 'none',
           }}
         >
-          {label}
+          {hintText}
         </div>
       )}
       <button
         type="button"
         data-egg-hatch
         aria-label={label}
-        onClick={() => dispatchOpenSettingsSection('appearance')}
+        onClick={hatch}
+        disabled={phase !== 'idle'}
+        aria-busy={phase !== 'idle'}
+        className={phase === 'hatching' ? HATCHING_CLASS : undefined}
         onMouseEnter={() => setHinting(true)}
         onMouseLeave={() => setHinting(false)}
         onFocus={() => setHinting(true)}
@@ -238,13 +327,13 @@ export default function EggMascot() {
           padding: 0,
           border: 'none',
           background: 'transparent',
-          cursor: 'pointer',
+          cursor: phase === 'idle' ? 'pointer' : 'default',
           pointerEvents: 'auto',
         }}
       >
         <span
           data-egg-sprite
-          className={SPRITE_CLASS}
+          className={phase === 'burst' ? undefined : SPRITE_CLASS}
           aria-hidden="true"
           style={{
             display: 'block',
@@ -256,7 +345,9 @@ export default function EggMascot() {
             backgroundSize: `${EGG_PX}px ${EGG_PX * SHEET_FRAMES}px`,
             // The resting frame. Left stated so the reduced-motion pose (the
             // global rule leaves the specified value in place) reads as frame 0.
-            backgroundPositionY: 0,
+            backgroundPositionY: phase === 'burst' ? -burstFrame * EGG_PX : 0,
+            opacity: phase === 'fading' ? 0 : 1,
+            transition: phase === 'fading' ? `opacity ${FADE_SWAP_MS}ms ease-out` : undefined,
             // Pixel art. Smoothing a 32px cell blown up to 56px turns it to mush.
             imageRendering: 'pixelated',
             filter: CREME_FILTER,
