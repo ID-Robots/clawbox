@@ -280,56 +280,6 @@ else:
     print("[register-mcp] WARNING: skills is not a mapping; "
           "leaving the bundled email skills enabled.", file=sys.stderr)
 
-# ── Retire the clarify tool where nobody can answer it. ───────────────────────
-# hermes' clarify tool parks the turn until a human answers the question — on
-# this device that answer can never arrive on the dashboard transport, so a
-# clarify call is a guaranteed hang (observed live: two turns pinned for the
-# tool's full 3600 s timeout). Without the tool the model asks its question as
-# PLAIN TEXT in the reply and ends the turn, which streams fine and the owner
-# answers in the next message.
-#
-# platform_toolsets.<platform> is the supported per-platform surface
-# (hermes_cli/tools_config.py _get_platform_tools): an explicit list of
-# configurable toolset keys enables exactly those built-ins for that platform.
-# Verified on-device that the list below resolves to the platform's current
-# toolsets minus clarify — browser stays retired (§4), and MCP servers are
-# merged separately, so the ClawBox device tools are untouched.
-#
-# The dashboard platform gets an explicit list; an owner who later edits it is
-# respected as long as clarify stays out. The web app's non-streaming fallback
-# runs on platform "cli": there only an EXISTING explicit list is edited —
-# without one the platform default applies, and the interactive terminal,
-# where a human really can answer a prompt, keeps its clarify.
-CHAT_PLATFORM = "clawbox-chat"
-CHAT_TOOLSETS = [
-    "web", "terminal", "file", "code_execution", "vision", "image_gen",
-    "bfl", "tts", "skills", "todo", "memory", "session_search",
-    "delegation", "cronjob", "computer_use",
-]
-pts = cfg.get("platform_toolsets")
-if pts is None:
-    pts = {}
-    cfg["platform_toolsets"] = pts
-if isinstance(pts, dict):
-    chat = pts.get(CHAT_PLATFORM)
-    if not isinstance(chat, list):
-        pts[CHAT_PLATFORM] = list(CHAT_TOOLSETS)
-        changed = True
-        print(f"[register-mcp] set {CHAT_PLATFORM} toolsets without clarify — "
-              "dashboard turns cannot answer interactive prompts")
-    elif "clarify" in chat:
-        pts[CHAT_PLATFORM] = [ts for ts in chat if str(ts) != "clarify"]
-        changed = True
-        print(f"[register-mcp] removed clarify from {CHAT_PLATFORM} toolsets")
-    cli_ts = pts.get("cli")
-    if isinstance(cli_ts, list) and "clarify" in cli_ts:
-        pts["cli"] = [ts for ts in cli_ts if str(ts) != "clarify"]
-        changed = True
-        print("[register-mcp] removed clarify from the explicit cli toolset list")
-else:
-    print("[register-mcp] WARNING: platform_toolsets is not a mapping; "
-          "leaving clarify as it is.", file=sys.stderr)
-
 if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
     sys.exit(0)
