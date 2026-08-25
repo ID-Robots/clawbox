@@ -4,6 +4,7 @@
 
 export const OPEN_APP_EVENT = "clawbox:open-app";
 export const FIX_ERROR_EVENT = "clawbox:fix-error";
+export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
 /**
  * "The chat's model or provider selection changed."
@@ -19,6 +20,23 @@ export const CHAT_MODEL_STATE_EVENT = "clawbox:chat-model-state-changed";
 export function dispatchOpenApp(appId: string): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(OPEN_APP_EVENT, { detail: { appId } }));
+}
+
+/**
+ * Open Settings on a given section, whether or not the window is already up.
+ *
+ * Two handoffs, both load-bearing: the `window` property is read by
+ * `SettingsApp` on mount and so survives a COLD open (its listener mounts
+ * after this fires); the event reaches an already-open Settings window. This
+ * is the sequence `page.tsx` open-a-section helpers also perform — named here
+ * so the event string and the `__clawboxPendingSettingsSection` handoff live
+ * in one place instead of drifting across each dispatch site.
+ */
+export function dispatchOpenSettingsSection(section: string): void {
+  if (typeof window === "undefined") return;
+  (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section } }));
+  dispatchOpenApp("settings");
 }
 
 export interface FixErrorContext {
