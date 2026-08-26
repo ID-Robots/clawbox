@@ -137,8 +137,14 @@ my %EXEMPT_CALLS = (
     'runHermesCli({sudo:true}) execs HERMES_BIN under /home/clawbox/.local/bin, which '
     . 'the clawbox user owns and can rewrite. Deliberately ungranted: `sudo -n` fails '
     . 'closed in milliseconds rather than blocking a route handler on a prompt, and the '
-    . 'alternative is passwordless root on a clawbox-writable file. The only caller '
-    . '(hermes-telegram.ts installGatewayService) treats the failure as non-fatal.',
+    . 'alternative is passwordless root on a clawbox-writable file. Exactly ONE caller '
+    . 'is left — the first-time `gateway install --system`, which '
+    . 'writes a unit into /etc/systemd/system and has no safe Cmnd spelling. It is '
+    . 'genuinely install-time-only, and its failure is now REPORTED (the `applied` flag) '
+    . 'rather than swallowed. The RESTART branch used to be exempted under this same '
+    . 'entry on the claim that it was install-time-only too; it was not — every '
+    . 'Telegram/WhatsApp/Discord/Email config save hits it — so it moved to '
+    . '`systemctl restart hermes-gateway.service`, which is granted.',
   'scripts/force-update.sh :: sudo -u %STR% bash -c %STR%' =>
     'Operator recovery script, run by hand from the Terminal app or over SSH. Dropping '
     . 'to the clawbox user is interactive by design — the owner types the password.',
