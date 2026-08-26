@@ -40,6 +40,7 @@ import { registerCodingAgentTools } from "../../../mcp/tools/coding-agent";
 import { ApiError } from "../../../mcp/lib/errors";
 import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
+import { capText } from "../../../mcp/lib/guard";
 
 const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop"];
 
@@ -224,22 +225,29 @@ describe("coding_agent_status", () => {
     );
   });
 
-  it("puts the summary above the activity log, which is what the output cap would eat first", async () => {
-    // Sixty progress lines of 160 characters is what the runner keeps, and the
-    // registrar caps this tool's text. With the summary last, a large `tail`
-    // pushed the one thing the tool exists to deliver past the cut.
+  it("keeps the summary when the output cap bites — the activity log is what gets cut", async () => {
+    // A real worst case, not a token one: the runner keeps 60 progress lines
+    // of up to MAX_PROGRESS_LINE_CHARS (160) and caps a summary at 6 000, so a
+    // chatty run asked for with tail=60 is ~9 600 chars of activity plus a
+    // long summary — comfortably past this tool's 12 000-char declared cap.
+    // captureRegistrar does not apply that cap, so the test applies it the way
+    // the real registrar does, and asserts which end survives.
+    const STATUS_OUTPUT_CHARS = 12_000; // mirrors the tool's declared maxChars
     const progress = Array.from({ length: 60 }, (_, i) => `line ${i} ${"x".repeat(150)}`);
-    apiGet.mockResolvedValue({ run: { ...RUN, progress, error: "something went wrong" } });
+    const summary = `THE-SUMMARY-STARTS-HERE ${"s".repeat(5_900)} THE-SUMMARY-ENDS-HERE`;
+    apiGet.mockResolvedValue({ run: { ...RUN, progress, summary, error: "something went wrong" } });
+
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab", tail: 60 });
     expect(out.isError).toBe(false);
     if (out.isError) return;
-    const summaryAt = out.text.indexOf("[summary from the coding agent");
-    const errorAt = out.text.indexOf("[error]");
-    const activityAt = out.text.indexOf("[recent activity]");
-    expect(summaryAt).toBeGreaterThan(-1);
-    expect(errorAt).toBeGreaterThan(-1);
-    expect(activityAt).toBeGreaterThan(summaryAt);
-    expect(summaryAt).toBeGreaterThan(errorAt);
+    expect(out.text.length).toBeGreaterThan(STATUS_OUTPUT_CHARS); // the cap really would bite
+
+    const capped = capText(out.text, STATUS_OUTPUT_CHARS);
+    expect(capped).toContain("THE-SUMMARY-STARTS-HERE");
+    expect(capped).toContain("[error]\nsomething went wrong");
+    // The activity log is the long, low-value part, so it is what the cut eats.
+    expect(capped).toContain("…[truncated");
+    expect(capped.indexOf("[summary from the coding agent")).toBeLessThan(capped.indexOf("[recent activity]"));
   });
 
   it("tells the agent to keep waiting while a run is still working", async () => {
