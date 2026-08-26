@@ -161,6 +161,33 @@ describe("coding_agent_run", () => {
     expect(out.error.next).toMatch(/code_project_list/);
   });
 
+  it("tells a stale resume_run_id from a missing project — they are different 404s", async () => {
+    apiPost.mockRejectedValue(new ApiError(404, JSON.stringify({ error: "There is no coding run with that id to resume.", kind: "not_found" })));
+    const out = await harness().call("coding_agent_run", { task: "x", resume_run_id: "run-gone0000" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_FOUND");
+    expect(out.error.message).toMatch(/resume/i);
+    expect(out.error.next).toMatch(/coding_agent_status/);
+    // The old catch-all sent this to code_project_list, an id that was never wrong.
+    expect(out.error.next).not.toMatch(/code_project_init/);
+  });
+
+  it("carries the route's own reason for refusing a working folder", async () => {
+    // The generic 400 mapping is "the device rejected one of the arguments",
+    // which the agent cannot act on. The route knows exactly which rule broke.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({
+      error: "The ClawBox OS checkout itself is off limits. Use a code project or another folder in the home directory.",
+      kind: "invalid",
+    })));
+    const out = await harness().call("coding_agent_run", { task: "x", directory: "/home/clawbox/clawbox" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/off limits/);
+    expect(out.error.next).toMatch(/code_project_list/);
+  });
+
   it("does not report a run the device did not start", async () => {
     apiPost.mockResolvedValue({ started: false });
     const out = await harness().call("coding_agent_run", { task: "x", project_id: "site" });
@@ -195,6 +222,24 @@ describe("coding_agent_status", () => {
       "/setup-api/coding-agent/runs",
       expect.objectContaining({ query: { id: "run-k3x9q2ab", wait: 30 }, timeoutMs: 45_000 }),
     );
+  });
+
+  it("puts the summary above the activity log, which is what the output cap would eat first", async () => {
+    // Sixty progress lines of 160 characters is what the runner keeps, and the
+    // registrar caps this tool's text. With the summary last, a large `tail`
+    // pushed the one thing the tool exists to deliver past the cut.
+    const progress = Array.from({ length: 60 }, (_, i) => `line ${i} ${"x".repeat(150)}`);
+    apiGet.mockResolvedValue({ run: { ...RUN, progress, error: "something went wrong" } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab", tail: 60 });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const summaryAt = out.text.indexOf("[summary from the coding agent");
+    const errorAt = out.text.indexOf("[error]");
+    const activityAt = out.text.indexOf("[recent activity]");
+    expect(summaryAt).toBeGreaterThan(-1);
+    expect(errorAt).toBeGreaterThan(-1);
+    expect(activityAt).toBeGreaterThan(summaryAt);
+    expect(summaryAt).toBeGreaterThan(errorAt);
   });
 
   it("tells the agent to keep waiting while a run is still working", async () => {

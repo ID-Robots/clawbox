@@ -114,7 +114,12 @@ beforeEach(async () => {
   restore = saveEnv("HOME", "CLAWBOX_ROOT", "USER", "LOGNAME", "SESSION_SECRET", "CLAWBOX_MCP_TOKEN");
   base = fs.mkdtempSync(path.join(os.tmpdir(), "coding-agent-"));
   home = path.join(base, "home");
-  root = path.join(base, "clawbox");
+  // The checkout lives INSIDE the home, as it does on a real box
+  // (/home/clawbox/clawbox). With the two as siblings, every path under the
+  // checkout was refused by the "must be inside the home" rule and the
+  // checkout guard below it was never reached — so its test passed without
+  // ever running the code it names.
+  root = path.join(home, "clawbox");
   binDir = path.join(home, ".local", "bin");
   fs.mkdirSync(binDir, { recursive: true });
   fs.mkdirSync(path.join(root, "data"), { recursive: true });
@@ -215,9 +220,13 @@ describe("where a run may work", () => {
   });
 
   it("refuses the ClawBox OS checkout itself but allows a project folder under it", async () => {
-    await expect(lib.resolveWorkingDirectory({ directory: root })).rejects.toMatchObject({ kind: "invalid" });
+    // The message matters as much as the refusal: it is what tells the agent
+    // this folder is off limits by rule, not missing.
+    await expect(lib.resolveWorkingDirectory({ directory: root }))
+      .rejects.toThrow(/checkout itself is off limits/);
     fs.mkdirSync(path.join(root, "src"), { recursive: true });
-    await expect(lib.resolveWorkingDirectory({ directory: path.join(root, "src") })).rejects.toMatchObject({ kind: "invalid" });
+    await expect(lib.resolveWorkingDirectory({ directory: path.join(root, "src") }))
+      .rejects.toThrow(/checkout itself is off limits/);
     const dir = makeProject("p1");
     await expect(lib.resolveWorkingDirectory({ directory: dir })).resolves.toEqual({ directory: fs.realpathSync(dir), projectId: "p1" });
     // The projects folder itself is not a project.
