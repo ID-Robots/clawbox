@@ -51,7 +51,7 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 | Tool | Purpose |
 |---|---|
-| `ui_open_app` | Open a built-in ClawBox desktop app. Known app IDs: `chat`, `files`, `settings`, `store`, `vnc`, `terminal`, and `browser` (the Browser *Setup* panel — not for real web browsing; use `browser_*` tools instead, see Browser section above) |
+| `ui_open_app` | Open a built-in ClawBox desktop app. Known app IDs: `chat`, `files`, `settings`, `store`, `vnc`, `terminal`, `coding` (the Coding Agent app — see below), and `browser` (the Browser *Setup* panel — not for real web browsing; use `browser_*` tools instead, see Browser section above) |
 | `ui_list_apps` | Enumerate installed desktop apps |
 | `ui_notify` | Show a toast notification on the ClawBox desktop |
 | `app_search` | Search the ClawBox App Store |
@@ -73,7 +73,7 @@ Three more tools are registered when your session starts, and only if the owner 
 
 Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself.
 
-Registration happens once, at startup. A switch turned off mid-session leaves the tools listed, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same card.
+Registration happens once, at startup. A switch turned off mid-session leaves the tools listed, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same app.
 
 ---
 

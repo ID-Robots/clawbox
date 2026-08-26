@@ -8,8 +8,9 @@
 // plan) and comes back for the result. Both editions have that harness, so
 // both editions get the tools.
 //
-// Registered only when the device says so. The owner has a switch in Settings
-// and the harness must actually be installed and connected; a family that
+// Registered only when the device says so. The owner has a switch in the
+// Coding Agent desktop app and the harness must actually be installed and
+// connected; a family that
 // could only ever answer 409 would trip Hermes' per-server circuit breaker
 // and take every ClawBox tool offline. The route enforces the same switch
 // independently, because the owner can flip it while this process is alive.
@@ -108,7 +109,7 @@ const STOP_RULES: ErrorRule[] = [
   {
     status: 403,
     code: "CONFLICT",
-    message: "That run was started by the owner from Settings, so only they can stop it.",
+    message: "That run was started by the owner, so only they can stop it.",
     next: "Do not retry. Tell the user the run is theirs to stop in the Coding Agent app on the ClawBox.",
   },
 ];
