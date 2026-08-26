@@ -188,6 +188,16 @@ describe("what a run is told about the shell", () => {
     }
   });
 
+  it("tells the run to fix obviously garbled copy rather than ship it", async () => {
+    // Seen on a real run: the brief carried scraped artifacts — a step timed
+    // "260 sec" and one labelled "3 instant" — and the run reproduced them
+    // verbatim onto a marketing page. Faithful, and wrong: nobody wants
+    // nonsense strings shipped because the task had a paste error.
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.HEADLESS_BRIEF).toMatch(/copy-paste artifacts/i);
+    expect(lib.HEADLESS_BRIEF).toMatch(/note it in your final report/i);
+  });
+
   it("allows the read-only git queries a real run reached for", async () => {
     const lib = await import("@/lib/coding-agent");
     for (const rule of ["Bash(git rev-parse:*)", "Bash(git check-ignore:*)"]) {
