@@ -124,7 +124,7 @@ Handles two concerns:
 - **`AppStore.tsx`** — discover and install apps from clawbox.com
 - **`SettingsApp.tsx`** — appearance, WiFi, AI provider, Telegram, Email, system settings
 - **`OllamaModelPanel.tsx`** — local model pull, search, delete
-- **`CodingAgentPanel.tsx`** — Settings → System: the owner's switch for delegated Claude Code runs, harness readiness, recent runs with summaries
+- **`CodingAgentApp.tsx`** — the Coding Agent desktop app: the owner's switch for delegated Claude Code runs, harness readiness, recent runs (this icon used to open an interactive `claude-ds` terminal) with summaries
 - **`ToastHost.tsx`** — the desktop's toast surface; the only listener for the `clawbox:toast` event every server-side owner notice ends in
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper
 

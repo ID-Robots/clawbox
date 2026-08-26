@@ -44,7 +44,7 @@ function routeReason(err: ApiError): string | null {
 }
 
 const SWITCH_NEXT =
-  "Do not retry. Tell the user the coding agent is switched off and that they can turn it on in Settings -> System -> Coding agent on the ClawBox.";
+  "Do not retry. Tell the user the coding agent is switched off and that they can turn it on in the Coding Agent app on the ClawBox desktop.";
 
 const RUN_RULES: ErrorRule[] = [
   {
@@ -59,7 +59,7 @@ const RUN_RULES: ErrorRule[] = [
     match: /"kind":\s*"not_ready"/,
     code: "CONFLICT",
     message: "The coding harness on this ClawBox is not ready: Claude Code or ClawBox AI is missing.",
-    next: "Do not retry. Tell the user to open Settings -> System -> Coding agent on the ClawBox, which lists what is missing.",
+    next: "Do not retry. Tell the user to open the Coding Agent app on the ClawBox, which lists what is missing.",
   },
   {
     status: 409,
@@ -109,7 +109,7 @@ const STOP_RULES: ErrorRule[] = [
     status: 403,
     code: "CONFLICT",
     message: "That run was started by the owner from Settings, so only they can stop it.",
-    next: "Do not retry. Tell the user the run is theirs to stop in Settings -> System -> Coding agent.",
+    next: "Do not retry. Tell the user the run is theirs to stop in the Coding Agent app on the ClawBox.",
   },
 ];
 

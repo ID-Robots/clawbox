@@ -1087,7 +1087,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task);
 
   if (!(await isCodingAgentEnabled())) {
-    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in Settings → System → Coding agent.");
+    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
   const readiness = await checkReadiness();
   if (!readiness.ready) {

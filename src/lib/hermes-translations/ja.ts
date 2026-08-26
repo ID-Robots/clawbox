@@ -412,10 +412,11 @@ export const ja: Record<string, string> = {
   "skills.secretFailed": "キーを保存できませんでした。",
   "skills.secretHelp": "キーはこの本体にのみ保存され、再表示されることはありません。",
 
-  // Settings → System → Coding agent (the assistant's delegated Claude Code runs).
+  // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "コーディングエージェント",
+  "codingAgent.terminalHint": "アシスタントに委任されたコーディング実行の一覧です。対話的に操作するには、ターミナルアプリを開いて claude-ds を実行してください。",
   "codingAgent.switchLabel": "アシスタントにコーディング作業の委任を許可する",
-  "codingAgent.switchHelp": "オンにすると、アシスタントはコーディング作業を Claude Code に引き渡せます。Claude Code は ClawBox AI プランを使ってプロジェクトフォルダー内でバックグラウンドで作業し、結果を報告します。既定ではオフです。デスクトップのコーディングエージェントアプリには影響しません。",
+  "codingAgent.switchHelp": "オンにすると、アシスタントはコーディング作業を Claude Code に引き渡せます。Claude Code は ClawBox AI プランを使ってプロジェクトフォルダー内でバックグラウンドで作業し、結果を報告します。既定ではオフです。",
   "codingAgent.readiness": "実行に必要なもの",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",

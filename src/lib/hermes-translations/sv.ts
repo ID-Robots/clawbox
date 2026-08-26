@@ -406,10 +406,11 @@ export const sv: Record<string, string> = {
   "skills.secretFailed": "Nyckeln kunde inte sparas.",
   "skills.secretHelp": "Nyckeln lagras bara på den här enheten och visas aldrig igen.",
 
-  // Settings → System → Coding agent (the assistant's delegated Claude Code runs).
+  // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "Kodagent",
+  "codingAgent.terminalHint": "Din assistents delegerade programmeringskörningar. För en interaktiv session, öppna Terminal-appen och kör claude-ds.",
   "codingAgent.switchLabel": "Låt assistenten delegera programmeringsarbete",
-  "codingAgent.switchHelp": "När detta är på kan din assistent lämna över en programmeringsuppgift till Claude Code, som arbetar i bakgrunden i en projektmapp via din ClawBox AI-plan och rapporterar tillbaka. Av som standard. Kodagent-appen på skrivbordet påverkas inte.",
+  "codingAgent.switchHelp": "När detta är på kan din assistent lämna över en programmeringsuppgift till Claude Code, som arbetar i bakgrunden i en projektmapp via din ClawBox AI-plan och rapporterar tillbaka. Av som standard.",
   "codingAgent.readiness": "Vad en körning behöver",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",

@@ -5,7 +5,7 @@ import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 
 /**
- * Settings → System → Coding agent.
+ * The Coding Agent app — opened from the desktop icon of the same name.
  *
  * The owner's switch for letting the assistant delegate coding work to a
  * headless Claude Code run (src/lib/coding-agent.ts), what such a run needs
@@ -16,8 +16,10 @@ import StatusMessage from "./StatusMessage";
  * src/app/setup-api/coding-agent/enable/route.ts. Like SystemProfilePanel the
  * switch is not optimistic: it renders the state the route answers with.
  *
- * This is not the "Coding Agent" desktop app (the interactive terminal); the
- * copy says so, because both carry the same name.
+ * This icon used to open a terminal already running `claude-ds`. It opens this
+ * instead, so the app and the thing it configures are finally the same thing —
+ * and the header says where the interactive session went, because an owner who
+ * relied on it should not have to go looking.
  */
 
 interface Readiness {
@@ -113,7 +115,7 @@ const STATUS_CLASS: Record<Run["status"], string> = {
   stopped: "text-[var(--text-muted)] border-white/20",
 };
 
-export default function CodingAgentPanel() {
+export default function CodingAgentApp() {
   const { t } = useT();
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -205,7 +207,9 @@ export default function CodingAgentPanel() {
     }
   };
 
-  if (loading) return null;
+  // A window, not a card: keep the app's own background on screen while the
+  // first fetch lands, rather than flashing whatever is behind it.
+  if (loading) return <div className="h-full bg-[#0f1219]" data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
   const checks: { label: string; ok: boolean; okText: string; badText: string }[] = readiness
@@ -219,29 +223,35 @@ export default function CodingAgentPanel() {
   const statusLabel = (s: Run["status"]) => t(`codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
 
   return (
-    <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="coding-agent-panel">
-      <div className="flex items-center gap-2 mb-4">
-        <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
-          {t("codingAgent.title")}
-        </label>
-      </div>
-
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <p className="text-sm text-[var(--text-primary)]">{t("codingAgent.switchLabel")}</p>
-          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-            {t("codingAgent.switchHelp")}
-          </p>
+    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto" data-testid="coding-agent-panel">
+      <div className="mx-auto w-full max-w-3xl p-6">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }}>smart_toy</span>
+          <h1 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
         </div>
-        <Switch
-          checked={status?.enabled ?? false}
-          busy={busy === "switch"}
-          disabled={!status}
-          label={t("codingAgent.switchLabel")}
-          onChange={toggle}
-        />
-      </div>
+        {/* Where the interactive session went. This icon used to open a
+            terminal already running the harness; it now opens this, so the
+            owner is told once, here, rather than left hunting for it. */}
+        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-5 leading-relaxed">
+          {t("codingAgent.terminalHint")}
+        </p>
+
+        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <p className="text-sm text-[var(--text-primary)]">{t("codingAgent.switchLabel")}</p>
+              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
+                {t("codingAgent.switchHelp")}
+              </p>
+            </div>
+            <Switch
+              checked={status?.enabled ?? false}
+              busy={busy === "switch"}
+              disabled={!status}
+              label={t("codingAgent.switchLabel")}
+              onChange={toggle}
+            />
+          </div>
 
       {readiness && (
         <div className="mt-4 rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3">
@@ -270,9 +280,9 @@ export default function CodingAgentPanel() {
           )}
         </div>
       )}
+        </div>
 
-      <div className="h-px bg-white/[0.06] my-4" />
-
+        <div className="mt-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
       <div className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
         {t("codingAgent.recentRuns")}
       </div>
@@ -340,7 +350,10 @@ export default function CodingAgentPanel() {
         </ul>
       )}
 
-      {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
+        </div>
+
+        {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
+      </div>
     </div>
   );
 }

@@ -248,7 +248,7 @@ running forever.
 
 **Registered only when `GET /setup-api/coding-agent/status` answers
 `enabled && ready` at startup** (`mcp/lib/context.ts`): the owner's switch in
-Settings → System → Coding agent is on AND Claude Code, the wrapper and a
+the Coding Agent desktop app is on AND Claude Code, the wrapper and a
 ClawBox AI token are all present. Same rule as `email_list`, for the same
 circuit-breaker reason. The run route enforces the switch again — 409, which
 the tool maps to CONFLICT / do-not-retry — because the owner can flip it under

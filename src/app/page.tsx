@@ -19,6 +19,7 @@ import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
+import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
@@ -30,7 +31,6 @@ import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
-import { CODING_HARNESS_COMMAND } from "@/lib/coding-harness";
 import {
   layoutIcons,
   layoutsEqual,
@@ -67,11 +67,13 @@ const apps: AppDef[] = [
   // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
   { id: "hermes-skills", name: "Skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
-  // The coding harness (TASK-378): a terminal that opens straight into
-  // `claude-ds`, Claude Code driven by this box's own ClawBox AI plan. Pinned
-  // like OpenClaw because it is a headline capability, not a power-user
-  // shortcut, and it is shown on both harnesses — the wrapper needs only the
-  // portal token and the CLI, both of which every edition installs.
+  // The coding agent: the owner's switch for letting the assistant delegate a
+  // whole task to a headless `claude-ds` run, what such a run needs, and the
+  // recent runs. Pinned like OpenClaw because it is a headline capability, not
+  // a power-user shortcut, and shown on both harnesses — the harness needs only
+  // the portal token and the CLI, both of which every edition installs. (It
+  // used to open an interactive terminal running the harness; that is still a
+  // `claude-ds` away in the Terminal app.)
   { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
@@ -1565,7 +1567,7 @@ function ChromeDesktopInner() {
       case "terminal":
         return <TerminalApp />;
       case "coding":
-        return <TerminalApp initialCommand={CODING_HARNESS_COMMAND} />;
+        return <CodingAgentApp />;
       case "store":
         return (
           <AppStore

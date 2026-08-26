@@ -409,10 +409,11 @@ export const de: Record<string, string> = {
   "skills.secretFailed": "Der Schlüssel konnte nicht gespeichert werden.",
   "skills.secretHelp": "Der Schlüssel wird nur auf diesem Gerät gespeichert und nie wieder angezeigt.",
 
-  // Settings → System → Coding agent (the assistant's delegated Claude Code runs).
+  // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "Coding-Agent",
+  "codingAgent.terminalHint": "Die delegierten Programmierläufe Ihres Assistenten. Für eine interaktive Sitzung öffnen Sie die Terminal-App und starten claude-ds.",
   "codingAgent.switchLabel": "Dem Assistenten erlauben, Programmierarbeit zu delegieren",
-  "codingAgent.switchHelp": "Wenn aktiv, kann Ihr Assistent eine Programmieraufgabe an Claude Code übergeben, das im Hintergrund in einem Projektordner über Ihren ClawBox-AI-Plan arbeitet und Bericht erstattet. Standardmäßig aus. Die Coding-Agent-App auf dem Desktop ist davon nicht betroffen.",
+  "codingAgent.switchHelp": "Wenn aktiv, kann Ihr Assistent eine Programmieraufgabe an Claude Code übergeben, das im Hintergrund in einem Projektordner über Ihren ClawBox-AI-Plan arbeitet und Bericht erstattet. Standardmäßig aus.",
   "codingAgent.readiness": "Was ein Lauf braucht",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",

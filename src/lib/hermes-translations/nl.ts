@@ -410,10 +410,11 @@ export const nl: Record<string, string> = {
   "skills.secretFailed": "De sleutel kon niet worden opgeslagen.",
   "skills.secretHelp": "De sleutel wordt alleen op dit apparaat bewaard en wordt nooit meer getoond.",
 
-  // Settings → System → Coding agent (the assistant's delegated Claude Code runs).
+  // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "Codeeragent",
+  "codingAgent.terminalHint": "De programmeertaken die je assistent delegeert. Voor een interactieve sessie open je de Terminal-app en voer je claude-ds uit.",
   "codingAgent.switchLabel": "De assistent programmeerwerk laten delegeren",
-  "codingAgent.switchHelp": "Als dit aanstaat, kan je assistent een programmeertaak overdragen aan Claude Code, dat op de achtergrond in een projectmap werkt via je ClawBox AI-abonnement en verslag uitbrengt. Standaard uit. De Codeeragent-app op het bureaublad wordt hierdoor niet beïnvloed.",
+  "codingAgent.switchHelp": "Als dit aanstaat, kan je assistent een programmeertaak overdragen aan Claude Code, dat op de achtergrond in een projectmap werkt via je ClawBox AI-abonnement en verslag uitbrengt. Standaard uit.",
   "codingAgent.readiness": "Wat een run nodig heeft",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",

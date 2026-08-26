@@ -66,11 +66,11 @@ export function buildAnnouncement(run: CodingRun): string {
     case "completed":
       return `Coding agent finished ${run.id} in ${where} (${counts}).`
         + (run.permissionDenials > 0 ? ` ${run.permissionDenials} action${run.permissionDenials === 1 ? " was" : "s were"} not allowed.` : "")
-        + " Ask your assistant for the summary, or open Settings → System → Coding agent.";
+        + " Ask your assistant for the summary, or open the Coding Agent app.";
     case "stopped":
       return `Coding agent run ${run.id} in ${where} was stopped (${counts}).`;
     default:
-      return `Coding agent run ${run.id} in ${where} did not finish (${counts}). Open Settings → System → Coding agent for the reason.`;
+      return `Coding agent run ${run.id} in ${where} did not finish (${counts}). Open the Coding Agent app for the reason.`;
   }
 }
 

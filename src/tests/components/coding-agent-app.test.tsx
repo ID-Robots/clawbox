@@ -1,5 +1,6 @@
 /**
- * Settings → System → Coding agent (src/components/CodingAgentPanel.tsx).
+ * The Coding Agent app (src/components/CodingAgentApp.tsx), opened from the
+ * desktop icon of the same name.
  *
  * The switch renders what the route answers — never what was clicked — and
  * the panel shows the owner what a run needs and what recent runs did, using
@@ -8,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import CodingAgentPanel from "@/components/CodingAgentPanel";
+import CodingAgentApp from "@/components/CodingAgentApp";
 
 // One stable `t`, as the real hook provides (it is memoised on the locale
 // table) — a fresh function per render would be a different contract.
@@ -79,10 +80,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("CodingAgentPanel", () => {
+describe("CodingAgentApp", () => {
   it("renders the switch off and turns it on only after the route says so", async () => {
     stubFetch({ enabled: false, readiness: READY });
-    render(<CodingAgentPanel />);
+    render(<CodingAgentApp />);
     const toggle = await screen.findByRole("switch", { name: translations.en["codingAgent.switchLabel"] });
     expect(toggle).toHaveAttribute("aria-checked", "false");
 
@@ -91,15 +92,15 @@ describe("CodingAgentPanel", () => {
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
   });
 
-  it("names the desktop app so the owner does not think the switch disables it", async () => {
+  it("says where the interactive terminal went — this icon used to open one", async () => {
     stubFetch({ enabled: false, readiness: READY });
-    render(<CodingAgentPanel />);
-    expect(await screen.findByText(/Coding Agent app on the desktop is not affected/)).toBeInTheDocument();
+    render(<CodingAgentApp />);
+    expect(await screen.findByText(/open the Terminal app and run claude-ds/)).toBeInTheDocument();
   });
 
   it("lists what a run needs and says what is missing", async () => {
     stubFetch({ enabled: true, readiness: NOT_READY });
-    render(<CodingAgentPanel />);
+    render(<CodingAgentApp />);
     expect(await screen.findByText(translations.en["codingAgent.readiness"])).toBeInTheDocument();
     expect(screen.getByRole("alert").textContent).toMatch(/Claude Code is not installed/);
     expect(screen.getByText("Claude Code").parentElement?.textContent).toMatch(/missing/);
@@ -108,7 +109,7 @@ describe("CodingAgentPanel", () => {
 
   it("shows recent runs with their outcome, and the summary on demand", async () => {
     stubFetch({ enabled: true, readiness: READY }, [RUN]);
-    render(<CodingAgentPanel />);
+    render(<CodingAgentApp />);
     expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
     expect(screen.getByText(translations.en["codingAgent.statusCompleted"])).toBeInTheDocument();
     expect(screen.getByText(/4 turns · 1 files changed/)).toBeInTheDocument();
@@ -121,7 +122,7 @@ describe("CodingAgentPanel", () => {
 
   it("offers Stop only for a running run and posts its id", async () => {
     stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null, summary: null }]);
-    render(<CodingAgentPanel />);
+    render(<CodingAgentApp />);
     const stop = await screen.findByRole("button", { name: translations.en["codingAgent.stop"] });
     fireEvent.click(stop);
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { id: "run-k3x9q2ab" } }));
@@ -129,7 +130,7 @@ describe("CodingAgentPanel", () => {
 
   it("says when there is nothing to show yet", async () => {
     stubFetch({ enabled: true, readiness: READY }, []);
-    render(<CodingAgentPanel />);
+    render(<CodingAgentApp />);
     expect(await screen.findByText(translations.en["codingAgent.noRuns"])).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: translations.en["codingAgent.stop"] })).not.toBeInTheDocument();
   });

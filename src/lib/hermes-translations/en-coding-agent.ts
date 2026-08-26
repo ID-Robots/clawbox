@@ -1,18 +1,20 @@
 /**
- * Settings → System → Coding agent: the owner's switch for letting the
- * assistant delegate coding work to a headless Claude Code run, what a run
- * needs, and the recent runs.
+ * The Coding Agent app: the owner's switch for letting the assistant delegate
+ * coding work to a headless Claude Code run, what a run needs, and the recent
+ * runs.
  *
- * The switch copy names the desktop app on purpose: both things are called
- * "Coding Agent", and an owner who reads "off" here must not conclude the
- * terminal app stopped working.
+ * `terminalHint` exists because this icon used to open a terminal already
+ * running the harness. An owner who relied on that should be told where it
+ * went, once, at the top of the window that replaced it.
  */
 export const codingAgentEn: Record<string, string> = {
   "codingAgent.title": "Coding agent",
+  "codingAgent.terminalHint":
+    "Your assistant's delegated coding runs. For a hands-on session, open the Terminal app and run claude-ds.",
 
   "codingAgent.switchLabel": "Let the assistant delegate coding work",
   "codingAgent.switchHelp":
-    "When on, your assistant can hand a coding task to Claude Code, which works in the background inside a project folder on your ClawBox AI plan and reports back. Off by default. The Coding Agent app on the desktop is not affected.",
+    "When on, your assistant can hand a coding task to Claude Code, which works in the background inside a project folder on your ClawBox AI plan and reports back. Off by default.",
 
   "codingAgent.readiness": "What a run needs",
   "codingAgent.claudeCode": "Claude Code",

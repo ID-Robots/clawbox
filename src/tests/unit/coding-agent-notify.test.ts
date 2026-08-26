@@ -90,7 +90,7 @@ describe("the text", () => {
   });
 
   it("says where to look for the details", () => {
-    expect(buildAnnouncement(run({ status: "completed" }))).toMatch(/Settings → System → Coding agent/);
+    expect(buildAnnouncement(run({ status: "completed" }))).toMatch(/open the Coding Agent app/);
     expect(buildAnnouncement(run({ status: "failed" }))).toMatch(/did not finish/);
     expect(buildAnnouncement(run({ status: "stopped" }))).toMatch(/was stopped/);
   });

@@ -397,10 +397,11 @@ export const bg: Record<string, string> = {
   "skills.secretFailed": "Ключът не можа да бъде запазен.",
   "skills.secretHelp": "Ключът се съхранява само на това устройство и повече не се показва.",
 
-  // Settings → System → Coding agent (the assistant's delegated Claude Code runs).
+  // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "Кодиращ агент",
+  "codingAgent.terminalHint": "Делегираните задачи за програмиране на вашия асистент. За работа на живо отворете приложението Терминал и стартирайте claude-ds.",
   "codingAgent.switchLabel": "Позволи на асистента да делегира програмиране",
-  "codingAgent.switchHelp": "Когато е включено, асистентът може да предаде задача за програмиране на Claude Code, който работи във фонов режим в папка на проект през вашия план ClawBox AI и докладва резултата. По подразбиране е изключено. Приложението Кодиращ агент на работния плот не се засяга.",
+  "codingAgent.switchHelp": "Когато е включено, асистентът може да предаде задача за програмиране на Claude Code, който работи във фонов режим в папка на проект през вашия план ClawBox AI и докладва резултата. По подразбиране е изключено.",
   "codingAgent.readiness": "Какво е нужно за изпълнение",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",

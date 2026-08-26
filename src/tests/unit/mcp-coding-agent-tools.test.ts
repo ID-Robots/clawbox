@@ -141,7 +141,7 @@ describe("coding_agent_run", () => {
     if (!out.isError) return;
     expect(out.error.code).toBe("CONFLICT");
     expect(out.error.next).toMatch(/Do not retry/);
-    expect(out.error.next).toMatch(/Settings/);
+    expect(out.error.next).toMatch(/Coding Agent app/);
   });
 
   it("turns 'busy' into CONFLICT pointing at the running run", async () => {
@@ -299,7 +299,7 @@ describe("coding_agent_stop", () => {
     if (!out.isError) return;
     expect(out.error.code).toBe("CONFLICT");
     expect(out.error.next).toMatch(/Do not retry/);
-    expect(out.error.next).toMatch(/Settings/);
+    expect(out.error.next).toMatch(/Coding Agent app/);
   });
 
   it("is honest when the process has not exited yet", async () => {
