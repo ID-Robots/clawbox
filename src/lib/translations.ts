@@ -136,6 +136,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot passwords do not match",
     "credentials.failedSetPassword": "Failed to set system password",
     "credentials.failedSaveHotspot": "Failed to save hotspot settings",
+    "credentials.writeDownTitle": "This is your only key",
+    "credentials.writeDownSubline": "Lose it and the box must be factory-reset",
+    "credentials.writeDownSystem": "System / sudo password",
+    "credentials.writeDownHotspot": "Hotspot",
+    "credentials.writeDownAck": "I've stored these somewhere safe",
+    "credentials.writeDownContinue": "I've saved them — continue",
 
     // === AIModelsStep ===
     "ai.title": "Connect AI Model",
@@ -780,6 +786,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Паролите на точката за достъп не съвпадат",
     "credentials.failedSetPassword": "Неуспешно задаване на системната парола",
     "credentials.failedSaveHotspot": "Неуспешно запазване на настройките на точката за достъп",
+    "credentials.writeDownTitle": "Това е единственият ви ключ",
+    "credentials.writeDownSubline": "Ако я загубите, кутията трябва да се нулира фабрично",
+    "credentials.writeDownSystem": "Системна / sudo парола",
+    "credentials.writeDownHotspot": "Точка за достъп",
+    "credentials.writeDownAck": "Записах ги на сигурно място",
+    "credentials.writeDownContinue": "Записах ги — продължи",
 
     // === AIModelsStep ===
     "ai.title": "Свързване на AI модел",
@@ -1419,6 +1431,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot-Passwörter stimmen nicht überein",
     "credentials.failedSetPassword": "Systempasswort konnte nicht gesetzt werden",
     "credentials.failedSaveHotspot": "Hotspot-Einstellungen konnten nicht gespeichert werden",
+    "credentials.writeDownTitle": "Das ist Ihr einziger Schlüssel",
+    "credentials.writeDownSubline": "Geht er verloren, hilft nur noch das Zurücksetzen auf Werkseinstellungen",
+    "credentials.writeDownSystem": "System- / sudo-Passwort",
+    "credentials.writeDownHotspot": "Hotspot",
+    "credentials.writeDownAck": "Ich habe sie sicher notiert",
+    "credentials.writeDownContinue": "Notiert — weiter",
 
     // === AIModelsStep ===
     "ai.title": "KI-Modell verbinden",
@@ -2058,6 +2076,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Las contraseñas del punto de acceso no coinciden",
     "credentials.failedSetPassword": "No se pudo establecer la contraseña del sistema",
     "credentials.failedSaveHotspot": "No se pudo guardar la configuración del punto de acceso",
+    "credentials.writeDownTitle": "Esta es tu única llave",
+    "credentials.writeDownSubline": "Si la pierdes, habrá que restablecer el dispositivo de fábrica",
+    "credentials.writeDownSystem": "Contraseña del sistema / sudo",
+    "credentials.writeDownHotspot": "Punto de acceso",
+    "credentials.writeDownAck": "Las he guardado en un lugar seguro",
+    "credentials.writeDownContinue": "Ya las guardé, continuar",
 
     // === AIModelsStep ===
     "ai.title": "Conectar modelo de IA",
@@ -2697,6 +2721,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Les mots de passe du point d'accès ne correspondent pas",
     "credentials.failedSetPassword": "Impossible de définir le mot de passe système",
     "credentials.failedSaveHotspot": "Impossible d'enregistrer les paramètres du point d'accès",
+    "credentials.writeDownTitle": "C'est votre seule clé",
+    "credentials.writeDownSubline": "Perdue, elle n'est récupérable que par une remise aux réglages d'usine",
+    "credentials.writeDownSystem": "Mot de passe système / sudo",
+    "credentials.writeDownHotspot": "Point d'accès",
+    "credentials.writeDownAck": "Je les ai notés en lieu sûr",
+    "credentials.writeDownContinue": "C'est noté — continuer",
 
     // === AIModelsStep ===
     "ai.title": "Connecter un modèle d'IA",
@@ -3336,6 +3366,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Le password dell'hotspot non corrispondono",
     "credentials.failedSetPassword": "Impossibile impostare la password di sistema",
     "credentials.failedSaveHotspot": "Impossibile salvare le impostazioni dell'hotspot",
+    "credentials.writeDownTitle": "Questa è la tua unica chiave",
+    "credentials.writeDownSubline": "Se la perdi, resta solo il ripristino di fabbrica",
+    "credentials.writeDownSystem": "Password di sistema / sudo",
+    "credentials.writeDownHotspot": "Hotspot",
+    "credentials.writeDownAck": "Le ho messe al sicuro",
+    "credentials.writeDownContinue": "Le ho salvate, continua",
 
     // === AIModelsStep ===
     "ai.title": "Connetti modello IA",
@@ -3975,6 +4011,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "ホットスポットのパスワードが一致しません",
     "credentials.failedSetPassword": "システムパスワードの設定に失敗しました",
     "credentials.failedSaveHotspot": "ホットスポット設定の保存に失敗しました",
+    "credentials.writeDownTitle": "これが唯一の鍵です",
+    "credentials.writeDownSubline": "忘れると、工場出荷時リセット以外に戻る方法はありません",
+    "credentials.writeDownSystem": "システム / sudo パスワード",
+    "credentials.writeDownHotspot": "ホットスポット",
+    "credentials.writeDownAck": "安全な場所に控えました",
+    "credentials.writeDownContinue": "控えました — 続ける",
 
     // === AIModelsStep ===
     "ai.title": "AIモデルを接続",
@@ -4614,6 +4656,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot-wachtwoorden komen niet overeen",
     "credentials.failedSetPassword": "Kan systeemwachtwoord niet instellen",
     "credentials.failedSaveHotspot": "Kan hotspot-instellingen niet opslaan",
+    "credentials.writeDownTitle": "Dit is uw enige sleutel",
+    "credentials.writeDownSubline": "Kwijt betekent: het apparaat terug naar fabrieksinstellingen",
+    "credentials.writeDownSystem": "Systeem- / sudo-wachtwoord",
+    "credentials.writeDownHotspot": "Hotspot",
+    "credentials.writeDownAck": "Ik heb ze veilig genoteerd",
+    "credentials.writeDownContinue": "Genoteerd — doorgaan",
 
     // === AIModelsStep ===
     "ai.title": "AI-model verbinden",
@@ -5253,6 +5301,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot-lösenorden matchar inte",
     "credentials.failedSetPassword": "Kunde inte ange systemlösenordet",
     "credentials.failedSaveHotspot": "Kunde inte spara hotspot-inställningar",
+    "credentials.writeDownTitle": "Det här är din enda nyckel",
+    "credentials.writeDownSubline": "Tappar du bort den måste enheten fabriksåterställas",
+    "credentials.writeDownSystem": "System- / sudo-lösenord",
+    "credentials.writeDownHotspot": "Surfzon",
+    "credentials.writeDownAck": "Jag har sparat dem på ett säkert ställe",
+    "credentials.writeDownContinue": "Sparade — fortsätt",
 
     // === AIModelsStep ===
     "ai.title": "Anslut AI-modell",
@@ -5892,6 +5946,12 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "两次输入的热点密码不一致",
     "credentials.failedSetPassword": "系统密码设置失败",
     "credentials.failedSaveHotspot": "热点设置保存失败",
+    "credentials.writeDownTitle": "这是你唯一的钥匙",
+    "credentials.writeDownSubline": "一旦丢失，只能恢复出厂设置",
+    "credentials.writeDownSystem": "系统 / sudo 密码",
+    "credentials.writeDownHotspot": "热点",
+    "credentials.writeDownAck": "我已妥善保存",
+    "credentials.writeDownContinue": "已保存，继续",
 
     // === AIModelsStep ===
     "ai.title": "连接 AI 模型",
