@@ -599,6 +599,18 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
               case "clarifyExpire":
                 send("clarifyExpire", { requestId: activity.requestId });
                 break;
+              default: {
+                // The line that makes the promise above TRUE rather than
+                // aspirational. A switch with no `default` over a callback
+                // returning `void` compiles perfectly happily when a fifth
+                // DashboardActivity member appears — it just drops it on the
+                // floor at runtime, which is the exact failure this switch
+                // replaced. Assigning the narrowed value to `never` turns that
+                // into a build error naming the kind nobody handled.
+                const unhandled: never = activity;
+                void unhandled;
+                break;
+              }
             }
           },
         );
