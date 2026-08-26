@@ -12,6 +12,31 @@ interface CredentialsStepProps {
   hermes?: boolean;
 }
 
+/**
+ * One submit, frozen at the moment it validated.
+ *
+ * The step's fields are not the only writers of its state: the mount-time reads
+ * of `/setup-api/system/hotspot` and `/setup-api/system/hostname` also set the
+ * device name, the hotspot's name and whether the hotspot is on at all. The
+ * write-down confirmation puts a human-length pause between "these are your
+ * passwords" and the request that applies them, and a late read landing inside
+ * that pause could otherwise change the SSID — or switch the hotspot off —
+ * between the values the customer wrote down and the values actually saved.
+ *
+ * So the submit carries its own values. What was validated is what is shown,
+ * and what is shown is what is sent.
+ */
+interface CredentialsSubmission {
+  /** Normalized, without the `.local` suffix. */
+  hostname: string;
+  password: string;
+  hotspotEnabled: boolean;
+  /** Trimmed. Falls back to the product default when the hotspot is off. */
+  hotspotName: string;
+  /** Empty when the hotspot is off — nothing to set. */
+  hotspotPassword: string;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────
    Shared surfaces for this card, expressed in the ladders.
 
@@ -98,7 +123,9 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // can read either back, and a customer who forgets one is locked out of sudo
   // and SSH with only a factory reset to recover. So the save is interposed —
   // the values are read back in full and acknowledged before anything is sent.
-  const [writeDownOpen, setWriteDownOpen] = useState(false);
+  // Non-null means the confirmation is up, and holds the exact values it is
+  // showing, which are the exact values Continue will send.
+  const [pending, setPending] = useState<CredentialsSubmission | null>(null);
   // Purely presentational disclosure state. Both fields behind them already
   // carry a working default read back from the device, so the screen opens on
   // what the customer must supply and keeps what they may rename one tap away.
@@ -155,62 +182,69 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
    * request: an invalid form still fails where it always did, at the field,
    * with no dialog in the way.
    */
-  const validate = (): boolean => {
+  const validate = (): CredentialsSubmission | null => {
     setTouched(true);
     // Validate hostname
     const normalized = hostname.trim().toLowerCase().replace(/\.local$/, "");
     if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalized)) {
       setStatus({ type: "error", message: t("credentials.hostnameInvalid") });
-      return false;
+      return null;
     }
     // Validate system password (required)
     if (!password) {
       setStatus({ type: "error", message: t("credentials.passwordRequired") });
-      return false;
+      return null;
     }
     if (password.length < 8) {
       setStatus({
         type: "error",
         message: t("credentials.passwordMinLength"),
       });
-      return false;
+      return null;
     }
     if (password !== confirmPassword) {
       setStatus({ type: "error", message: t("credentials.passwordsDontMatch") });
-      return false;
+      return null;
     }
 
     // Validate hotspot fields (only when enabled)
     if (hotspotEnabled) {
       if (!hotspotName.trim()) {
         setStatus({ type: "error", message: t("credentials.hotspotNameRequired") });
-        return false;
+        return null;
       }
       if (!hotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordRequired") });
-        return false;
+        return null;
       }
       if (hotspotPassword.length < 8) {
         setStatus({
           type: "error",
           message: t("credentials.hotspotPasswordMinLength"),
         });
-        return false;
+        return null;
       }
       if (hotspotPassword !== confirmHotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordsDontMatch") });
-        return false;
+        return null;
       }
     }
-    return true;
+    return {
+      hostname: normalized,
+      password,
+      hotspotEnabled,
+      hotspotName: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
+      hotspotPassword: hotspotEnabled ? hotspotPassword : "",
+    };
   };
 
   /** The button's (and Enter's) action: validate, then ask before saving. */
   const requestSave = () => {
-    if (saving || writeDownOpen) return;
-    if (!validate()) return;
+    if (saving || pending) return;
+    const submission = validate();
+    if (!submission) return;
     setStatus(null);
-    setWriteDownOpen(true);
+    setPending(submission);
   };
 
   /**
@@ -218,11 +252,13 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
    *
    * Unchanged by the write-down confirmation — it still sends exactly these
    * three requests, in this order, and still hands off to the reconnect
-   * overlay when the save takes the connection down with it. Only its trigger
-   * moved: `requestSave` now stands in front of it.
+   * overlay when the save takes the connection down with it. What moved is
+   * where its values come from: the confirmed submission, not the live fields,
+   * so a late device read cannot change them out from under the customer
+   * between the acknowledgement and the request.
    */
-  const save = async () => {
-    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
+  const save = async (submission: CredentialsSubmission) => {
+    const normalizedHostname = submission.hostname;
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -256,11 +292,11 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       if (controller.signal.aborted) return;
 
       // Save system password if provided
-      if (password) {
+      if (submission.password) {
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ password: submission.password }),
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
@@ -279,9 +315,9 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ssid: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
-          password: hotspotEnabled ? (hotspotPassword || undefined) : undefined,
-          enabled: hotspotEnabled,
+          ssid: submission.hotspotName,
+          password: submission.hotspotPassword || undefined,
+          enabled: submission.hotspotEnabled,
         }),
         signal: controller.signal,
       });
@@ -312,7 +348,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
             ? newSetupUrl.toString()
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
-          hotspotSsid: apRestarted && hotspotEnabled ? hotspotName.trim() : null,
+          hotspotSsid: apRestarted && submission.hotspotEnabled ? submission.hotspotName : null,
         });
         return;
       }
@@ -339,7 +375,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
             ? newSetupUrl.toString()
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
-          hotspotSsid: hotspotEnabled ? hotspotName.trim() : null,
+          hotspotSsid: submission.hotspotEnabled ? submission.hotspotName : null,
         });
         return;
       }
@@ -416,16 +452,17 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
           onContinue={onNext}
         />
       )}
-      {writeDownOpen && !handoff && (
+      {pending && !handoff && (
         <CredentialsWriteDownDialog
           hermes={hermes}
-          systemPassword={password}
-          hotspotPassword={hotspotEnabled ? hotspotPassword : null}
-          hotspotSsid={hotspotName.trim() || "ClawBox-Setup"}
-          onCancel={() => setWriteDownOpen(false)}
+          systemPassword={pending.password}
+          hotspotPassword={pending.hotspotEnabled ? pending.hotspotPassword : null}
+          hotspotSsid={pending.hotspotName}
+          onCancel={() => setPending(null)}
           onConfirm={() => {
-            setWriteDownOpen(false);
-            void save();
+            const submission = pending;
+            setPending(null);
+            void save(submission);
           }}
         />
       )}

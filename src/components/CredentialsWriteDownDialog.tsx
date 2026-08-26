@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
@@ -14,10 +14,14 @@ export interface CredentialsWriteDownDialogProps {
    *  name next to it is half an instruction. */
   hotspotSsid: string;
   /**
-   * Hermes edition: the ambient accent takes the agent's green
-   * (`--agent-live`) instead of coral, exactly as the Step-3 handoff overlay
-   * does. Coral stays on the primary button: coral means ACTION on every
-   * edition, and only the ambient identity of a screen changes with it.
+   * Hermes edition: the ACCENT — copy buttons, the acknowledgement box, the
+   * primary button, the hover edges — takes the agent's green instead of
+   * coral, exactly as the Step-3 handoff overlay does.
+   *
+   * The warning band above them stays red on BOTH editions. Red here is the
+   * semantic danger colour, not the brand accent: a band that changed hue with
+   * the SKU would be reading as decoration, and the one thing this screen must
+   * not be read as is decoration.
    */
   hermes?: boolean;
   /** Acknowledged — run the save that was interposed. */
@@ -25,6 +29,51 @@ export interface CredentialsWriteDownDialogProps {
   /** Escape or Back — return to the form with nothing saved. */
   onCancel: () => void;
 }
+
+/* ── The danger band's palette ──────────────────────────────────────────────
+   Written out rather than tokenised because there is no danger rung in the
+   wizard's ladders — CredentialsStep says as much where its invalid borders
+   keep the product's shipped red. These are that same red family. */
+const DANGER_TINT = "rgba(255, 95, 82, 0.20)";
+const DANGER_FADE = "rgba(255, 95, 82, 0.04)";
+const DANGER_EDGE = "rgba(255, 95, 82, 0.28)";
+const DANGER_BADGE_FILL = "rgba(255, 95, 82, 0.18)";
+const DANGER_BADGE_EDGE = "rgba(255, 95, 82, 0.30)";
+const DANGER_INK = "#ffd9d5";
+const DANGER_INK_2 = "rgba(255, 180, 172, 0.85)";
+
+interface Accent {
+  /** Solid fill — a copy button that is hot, or has just fired. */
+  solid: string;
+  /** The gradient the primary action and the checked box carry. */
+  gradient: string;
+  /** Quiet fill behind an accent control at rest. */
+  dim: string;
+  /** Edge an interactive surface takes on hover. */
+  edge: string;
+  /** The glow under the primary action. */
+  glow: string;
+  /** Text that sits ON the solid accent. */
+  on: string;
+}
+
+const HERMES_ACCENT: Accent = {
+  solid: "#12d6a4",
+  gradient: "linear-gradient(135deg, #3ef08b 0%, #12d6a4 100%)",
+  dim: "rgba(62, 240, 139, 0.14)",
+  edge: "rgba(62, 240, 139, 0.45)",
+  glow: "0 6px 24px rgba(18, 214, 164, 0.30)",
+  on: "#04231c",
+};
+
+const OPENCLAW_ACCENT: Accent = {
+  solid: "var(--coral-bright)",
+  gradient: "linear-gradient(135deg, var(--coral-bright) 0%, var(--coral-dark) 100%)",
+  dim: "var(--coral-tint)",
+  edge: "var(--coral-edge)",
+  glow: "0 6px 24px var(--shadow-coral-mid)",
+  on: "#ffffff",
+};
 
 /**
  * The last thing between a customer and a password they can never be shown
@@ -36,11 +85,11 @@ export interface CredentialsWriteDownDialogProps {
  * simply forgets what they chose, has no route back except a factory reset —
  * which erases the setup they are in the middle of doing.
  *
- * So the save does not fire straight off the button. This dialog reads the
- * values back in full, plainly, one per plate, and asks for a deliberate
- * acknowledgement before it lets the save proceed. The passwords shown here
- * are the customer's own input echoed on their own screen — nothing is
- * transmitted, stored or logged by this component.
+ * So the save does not fire straight off the button. This dialog opens under a
+ * red band that names the stake, reads the values back in full, one card each,
+ * and asks for a deliberate acknowledgement before it lets the save proceed.
+ * The passwords shown here are the customer's own input echoed on their own
+ * screen — nothing is transmitted, stored or logged by this component.
  */
 export default function CredentialsWriteDownDialog({
   systemPassword,
@@ -53,22 +102,10 @@ export default function CredentialsWriteDownDialog({
   const { t } = useT();
   const [acknowledged, setAcknowledged] = useState(false);
   const titleId = useId();
-  const leadId = useId();
+  const sublineId = useId();
   const panelRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
-  // The ambient accent, written as full literal class strings on both branches
-  // so Tailwind's scanner sees them — the same shape ReconnectStage uses. The
-  // colour rides in the unambiguous arbitrary-property form (`[color:…]`)
-  // rather than `text-[…]`, which is ambiguous between colour and size.
-  const accentEdge = hermes
-    ? "border-[var(--agent-live,#4ade80)]"
-    : "border-[var(--coral-bright)]";
-  const accentInk = hermes
-    ? "[color:var(--agent-live,#4ade80)]"
-    : "[color:var(--coral-bright)]";
-  const accentControl = hermes
-    ? "[accent-color:var(--agent-live,#4ade80)]"
-    : "[accent-color:var(--coral-bright)]";
+  const accent = hermes ? HERMES_ACCENT : OPENCLAW_ACCENT;
 
   return (
     <div
@@ -80,132 +117,171 @@ export default function CredentialsWriteDownDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        aria-describedby={leadId}
+        aria-describedby={sublineId}
         data-agent={hermes ? "hermes" : undefined}
         data-testid="credentials-writedown-dialog"
-        className="my-auto w-full max-w-[520px] rounded-[var(--r-3)] border p-[var(--s-5)] sm:p-[var(--s-6)]"
+        className="my-auto w-full max-w-[480px] overflow-hidden rounded-[var(--r-3)] border"
         style={{
-          // Opaque, not the translucent card surface: text a customer is being
-          // asked to transcribe character by character must not have the page
-          // showing through it.
+          // Opaque, not the translucent card surface: characters a customer is
+          // being asked to transcribe must not have the page showing through.
           background: "var(--bg-elevated)",
           borderColor: "var(--border-subtle)",
           boxShadow: "0 24px 64px rgba(0, 0, 0, 0.55)",
         }}
       >
-        <div className="mb-[var(--s-3)] flex items-start gap-[var(--s-3)]">
-          <span
-            aria-hidden="true"
-            className="material-symbols-rounded grid h-10 w-10 shrink-0 place-items-center rounded-[var(--r-1)]"
-            style={{
-              fontSize: 22,
-              color: "var(--amber-ink)",
-              background: "var(--amber-wash)",
-              border: "1px solid var(--amber-edge)",
-            }}
-          >
-            edit_note
-          </span>
-          <h2
-            id={titleId}
-            className="font-display min-w-0 font-bold text-[var(--text-primary)]"
-            style={{ fontSize: "var(--t-5)", lineHeight: 1.25 }}
-          >
-            {t("credentials.writeDownTitle")}
-          </h2>
-        </div>
-
-        <p
-          id={leadId}
-          className="mb-[var(--s-5)] text-[var(--text-secondary)]"
-          style={{ fontSize: "var(--t-3)", lineHeight: 1.6 }}
-        >
-          {t("credentials.writeDownLead")}
-        </p>
-
-        <PasswordPlate
-          edgeClass={accentEdge}
-          inkClass={accentInk}
-          label={t("credentials.writeDownSystem")}
-          value={systemPassword}
-          testId="writedown-system"
-        />
-
-        {hotspotPassword !== null && (
-          <PasswordPlate
-            edgeClass={accentEdge}
-            inkClass={accentInk}
-            label={t("credentials.writeDownHotspot")}
-            caption={t("credentials.writeDownNetwork", { ssid: hotspotSsid })}
-            value={hotspotPassword}
-            testId="writedown-hotspot"
-          />
-        )}
-
-        <p
-          className="mt-[var(--s-4)] rounded-[var(--r-1)] px-[var(--s-3)] py-[var(--s-3)]"
+        {/* ── The stake ──
+            Full-bleed and red on every edition. The panel clips it, so the band
+            reaches both edges without a corner of the card showing past it. */}
+        <div
+          data-testid="writedown-danger-band"
+          className="flex items-start gap-[var(--s-3)] px-[var(--s-5)] py-[var(--s-4)]"
           style={{
-            fontSize: "var(--t-2)",
-            lineHeight: 1.6,
-            color: "var(--amber-ink)",
-            background: "var(--amber-wash)",
-            border: "1px solid var(--amber-edge)",
+            background: `linear-gradient(180deg, ${DANGER_TINT} 0%, ${DANGER_FADE} 100%)`,
+            borderBottom: `1px solid ${DANGER_EDGE}`,
           }}
         >
-          {t("credentials.writeDownWhy")}
-        </p>
-
-        <label
-          className="mt-[var(--s-5)] flex cursor-pointer items-start gap-[var(--s-3)] rounded-[var(--r-1)] border border-[var(--hair-2)] bg-[var(--fill-1)] px-[var(--s-3)] py-[var(--s-3)]"
-          style={{ transition: "border-color var(--d-2) var(--ease-standard)" }}
-        >
-          <input
-            type="checkbox"
-            data-testid="writedown-ack"
-            checked={acknowledged}
-            onChange={(e) => setAcknowledged(e.target.checked)}
-            className={`mt-[2px] h-5 w-5 shrink-0 cursor-pointer ${accentControl}`}
-          />
           <span
-            className="min-w-0 text-[var(--text-primary)]"
-            style={{ fontSize: "var(--t-3)", lineHeight: 1.5 }}
-          >
-            {t("credentials.writeDownAck")}
-          </span>
-        </label>
-
-        <div className="mt-[var(--s-5)] flex flex-col-reverse gap-[var(--s-3)] sm:flex-row">
-          <button
-            type="button"
-            data-testid="writedown-cancel"
-            onClick={onCancel}
-            className="inline-flex min-h-[var(--h-control)] flex-1 cursor-pointer items-center justify-center rounded-[var(--r-1)] border border-[var(--hair-2)] bg-[var(--fill-2)] px-[var(--s-5)] text-[var(--text-secondary)] hover:bg-[var(--fill-3)]"
+            aria-hidden="true"
+            className="material-symbols-rounded grid shrink-0 place-items-center rounded-[10px]"
             style={{
-              fontSize: "var(--t-4)",
-              fontWeight: "var(--w-label)",
-              transition: "background-color var(--d-2) var(--ease-standard)",
+              width: "2.3rem",
+              height: "2.3rem",
+              fontSize: 20,
+              color: DANGER_INK,
+              background: DANGER_BADGE_FILL,
+              border: `1px solid ${DANGER_BADGE_EDGE}`,
             }}
           >
-            {t("back")}
-          </button>
+            lock
+          </span>
+          <div className="min-w-0">
+            <h2
+              id={titleId}
+              className="font-display font-bold"
+              style={{ fontSize: "1rem", lineHeight: 1.25, color: DANGER_INK }}
+            >
+              {t("credentials.writeDownTitle")}
+            </h2>
+            <p
+              id={sublineId}
+              className="mt-[var(--s-0)]"
+              style={{ fontSize: "0.76rem", lineHeight: 1.45, color: DANGER_INK_2 }}
+            >
+              {t("credentials.writeDownSubline")}
+            </p>
+          </div>
+        </div>
+
+        <div style={{ padding: "1.25rem" }}>
+          <div className="flex flex-col" style={{ gap: "0.65rem" }}>
+            <CredentialCard
+              accent={accent}
+              label={t("credentials.writeDownSystem")}
+              value={systemPassword}
+              testId="writedown-system"
+            />
+            {hotspotPassword !== null && (
+              <CredentialCard
+                accent={accent}
+                label={`${t("credentials.writeDownHotspot")} · ${hotspotSsid}`}
+                value={hotspotPassword}
+                testId="writedown-hotspot"
+              />
+            )}
+          </div>
+
+          {/* ── The acknowledgement ──
+              A real checkbox, visually replaced. The input keeps the semantics,
+              the label and the tab stop; the square beside it is what the
+              customer sees, and its focus ring is `peer`-driven so the keyboard
+              state stays declarative rather than mirrored into React state. */}
+          <label
+            className="flex cursor-pointer items-start gap-[var(--s-3)]"
+            style={{ marginTop: "0.9rem" }}
+          >
+            <input
+              type="checkbox"
+              data-testid="writedown-ack"
+              checked={acknowledged}
+              onChange={(e) => setAcknowledged(e.target.checked)}
+              className="peer sr-only"
+            />
+            <span
+              aria-hidden="true"
+              data-testid="writedown-ack-box"
+              className="mt-[2px] grid shrink-0 place-items-center peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2"
+              style={{
+                width: "1.15rem",
+                height: "1.15rem",
+                borderRadius: "6px",
+                border: acknowledged ? "2px solid transparent" : "2px solid var(--hair-2)",
+                background: acknowledged ? accent.gradient : "transparent",
+                boxShadow: acknowledged ? `0 0 0 4px ${accent.dim}` : "none",
+                color: accent.on,
+                outlineColor: accent.solid,
+                transition:
+                  "background var(--d-2) var(--ease-standard), border-color var(--d-2) var(--ease-standard), box-shadow var(--d-2) var(--ease-standard)",
+              }}
+            >
+              {acknowledged && (
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>
+                  check
+                </span>
+              )}
+            </span>
+            <span
+              className="min-w-0 text-[var(--text-primary)]"
+              style={{ fontSize: "0.86rem", lineHeight: 1.5 }}
+            >
+              {t("credentials.writeDownAck")}
+            </span>
+          </label>
+
           <button
             type="button"
             data-testid="writedown-continue"
             onClick={onConfirm}
             disabled={!acknowledged}
-            className={`inline-flex min-h-[var(--h-control)] flex-1 items-center justify-center rounded-[var(--r-1)] px-[var(--s-5)] ${
-              acknowledged
-                ? "btn-gradient cursor-pointer text-white"
-                : "cursor-not-allowed border border-[var(--hair-2)] bg-[var(--fill-2)] text-[var(--text-muted)]"
-            }`}
+            className="font-display mt-[var(--s-5)] w-full font-bold"
             style={{
-              fontSize: "var(--t-4)",
-              fontWeight: "var(--w-label)",
+              padding: "0.8rem",
+              borderRadius: "11px",
+              border: "none",
+              fontSize: "0.92rem",
+              background: accent.gradient,
+              color: accent.on,
+              boxShadow: acknowledged ? accent.glow : "none",
+              opacity: acknowledged ? 1 : 0.32,
+              filter: acknowledged ? "none" : "saturate(0.45)",
+              cursor: acknowledged ? "pointer" : "not-allowed",
               transition:
-                "background-color var(--d-2) var(--ease-standard), color var(--d-2) var(--ease-standard)",
+                "transform var(--d-2) var(--ease-standard), box-shadow var(--d-2) var(--ease-standard), opacity var(--d-2) var(--ease-standard)",
+            }}
+            onMouseEnter={(e) => {
+              if (acknowledged) e.currentTarget.style.transform = "translateY(-2px)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = "translateY(0)";
             }}
           >
-            {t("continue")}
+            {t("credentials.writeDownContinue")}
+          </button>
+
+          <button
+            type="button"
+            data-testid="writedown-cancel"
+            onClick={onCancel}
+            className="mt-[var(--s-2)] w-full cursor-pointer bg-transparent text-[var(--text-muted)] hover:text-[var(--text-secondary)]"
+            style={{
+              padding: "0.6rem",
+              borderRadius: "11px",
+              border: "1px solid var(--hair-2)",
+              fontSize: "0.82rem",
+              fontWeight: "var(--w-label)",
+              transition: "color var(--d-2) var(--ease-standard)",
+            }}
+          >
+            {t("back")}
           </button>
         </div>
       </div>
@@ -214,28 +290,24 @@ export default function CredentialsWriteDownDialog({
 }
 
 /**
- * One password, read back in full: the label, the network it belongs to when
- * there is one, the literal characters in mono at a size that survives being
- * copied onto paper, and a copy button for the customer who keeps a password
- * manager instead.
+ * One credential, read back in full: a micro-label naming what it opens, the
+ * literal characters in mono at a size that survives being copied onto paper,
+ * and a copy button for the customer who keeps a password manager instead.
  */
-function PasswordPlate({
-  edgeClass,
-  inkClass,
+function CredentialCard({
+  accent,
   label,
-  caption,
   value,
   testId,
 }: {
-  edgeClass: string;
-  inkClass: string;
+  accent: Accent;
   label: string;
-  caption?: ReactNode;
   value: string;
   testId: string;
 }) {
   const { t } = useT();
   const [copied, setCopied] = useState(false);
+  const [hot, setHot] = useState(false);
   const copiedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const labelId = useId();
 
@@ -254,25 +326,31 @@ function PasswordPlate({
     copiedTimer.current = setTimeout(() => setCopied(false), 1800);
   };
 
+  const filled = copied || hot;
+
   return (
-    // `role="group"` + the label's id is what ties the characters below to
-    // the name of the thing they are: a bare <p> carries no name, and screen
-    // readers would announce a password with nothing to say which one it is.
+    // `role="group"` + the label's id is what ties the characters below to the
+    // name of the thing they are: a bare <p> carries no name, and a screen
+    // reader would announce a password with nothing to say which one it is.
     <div
       role="group"
       aria-labelledby={labelId}
       data-testid={`${testId}-plate`}
-      className={`mb-[var(--s-3)] rounded-[var(--r-2)] border bg-[var(--fill-1)] px-[var(--s-4)] py-[var(--s-3)] ${edgeClass}`}
+      onMouseEnter={() => setHot(true)}
+      onMouseLeave={() => setHot(false)}
+      style={{
+        background: "rgba(0, 0, 0, 0.35)",
+        border: `1px solid ${hot ? accent.edge : "var(--border-subtle)"}`,
+        borderRadius: "10px",
+        padding: "0.8rem",
+        transition: "border-color var(--d-2) var(--ease-standard)",
+      }}
     >
-      <div className="flex items-center gap-[var(--s-2)]">
+      <div className="flex items-start gap-[var(--s-2)]">
         <span
           id={labelId}
-          className={`min-w-0 flex-1 uppercase ${inkClass}`}
-          style={{
-            fontSize: "var(--t-1)",
-            fontWeight: "var(--w-label)",
-            letterSpacing: "0.14em",
-          }}
+          className="min-w-0 flex-1 uppercase text-[var(--text-muted)]"
+          style={{ fontSize: "0.66rem", fontWeight: "var(--w-label)", letterSpacing: "0.13em" }}
         >
           {label}
         </span>
@@ -281,35 +359,32 @@ function PasswordPlate({
           data-testid={`${testId}-copy`}
           onClick={copy}
           aria-label={`${t("copy")}: ${label}`}
-          className="inline-flex shrink-0 cursor-pointer items-center gap-[var(--s-1)] rounded-[var(--r-1)] border border-[var(--hair-2)] bg-transparent px-[var(--s-2)] py-[var(--s-1)] text-[var(--text-muted)] hover:bg-[var(--fill-3)] hover:text-[var(--text-primary)]"
-          style={{ fontSize: "var(--t-1)", fontWeight: "var(--w-label)" }}
+          className="shrink-0 cursor-pointer font-mono uppercase"
+          style={{
+            fontSize: "0.64rem",
+            letterSpacing: "0.08em",
+            padding: "0.22rem 0.5rem",
+            borderRadius: "6px",
+            border: "none",
+            background: filled ? accent.solid : accent.dim,
+            color: filled ? accent.on : accent.solid,
+            transition:
+              "background var(--d-2) var(--ease-standard), color var(--d-2) var(--ease-standard)",
+          }}
         >
-          <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 14 }}>
-            {copied ? "check" : "content_copy"}
-          </span>
           {copied ? t("copied") : t("copy")}
         </button>
       </div>
 
-      {/* The value itself. `select-all` so one tap on a phone grabs the whole
-          string, and `break-all` so a long password wraps instead of pushing
-          the plate off screen. */}
+      {/* `select-all` so one tap on a phone grabs the whole string, `break-all`
+          so a long password wraps instead of pushing the card off screen. */}
       <p
         data-testid={`${testId}-value`}
-        className="mt-[var(--s-2)] text-[length:var(--t-6)] font-mono break-all text-[var(--text-primary)] select-all"
-        style={{ lineHeight: 1.3 }}
+        className="mt-[var(--s-2)] font-mono break-all text-[var(--text-primary)] select-all"
+        style={{ fontSize: "1.04rem", lineHeight: 1.35 }}
       >
         {value}
       </p>
-
-      {caption && (
-        <p
-          className="mt-[var(--s-1)] text-[var(--text-muted)]"
-          style={{ fontSize: "var(--t-2)", lineHeight: 1.5 }}
-        >
-          {caption}
-        </p>
-      )}
     </div>
   );
 }

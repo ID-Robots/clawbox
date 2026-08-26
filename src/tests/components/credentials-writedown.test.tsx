@@ -12,7 +12,7 @@
 // the same requests the button used to fire directly, Escape cancels, and the
 // accent follows the edition.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import CredentialsStep from "@/components/CredentialsStep";
 
 const STRINGS: Record<string, string> = {
@@ -26,13 +26,12 @@ const STRINGS: Record<string, string> = {
   "credentials.confirmHotspotPassword": "Confirm Hotspot Password",
   "credentials.minChars": "Minimum 8 characters",
   "credentials.passwordsDontMatch": "System passwords do not match",
-  "credentials.writeDownTitle": "Write these down before you continue",
-  "credentials.writeDownLead": "ClawBox shows these in full once — right here.",
-  "credentials.writeDownSystem": "System password (sudo & SSH)",
-  "credentials.writeDownHotspot": "Hotspot password",
-  "credentials.writeDownNetwork": "Network: {ssid}",
-  "credentials.writeDownWhy": "Forget it and only a factory reset gets you back in.",
-  "credentials.writeDownAck": "I have written these passwords down somewhere safe",
+  "credentials.writeDownTitle": "This is your only key",
+  "credentials.writeDownSubline": "Lose it and the box must be factory-reset",
+  "credentials.writeDownSystem": "System / sudo password",
+  "credentials.writeDownHotspot": "Hotspot",
+  "credentials.writeDownAck": "I've stored these somewhere safe",
+  "credentials.writeDownContinue": "I've saved them — continue",
   "settings.connect": "Connect",
   back: "Back",
   continue: "Continue",
@@ -154,8 +153,11 @@ describe("CredentialsStep write-down confirmation", () => {
 
     expect(screen.getByTestId("writedown-system-value").textContent).toBe(SYSTEM_PASSWORD);
     expect(screen.getByTestId("writedown-hotspot-value").textContent).toBe(HOTSPOT_PASSWORD);
-    // The hotspot password is meaningless without the network it opens.
-    expect(screen.getByText("Network: ClawBox-Setup")).toBeInTheDocument();
+    // The hotspot password is meaningless without the network it opens, so the
+    // SSID rides on the card's own label.
+    expect(screen.getByTestId("writedown-hotspot-plate")).toHaveTextContent(
+      "Hotspot · ClawBox-Setup",
+    );
   });
 
   it("shows the hotspot password only while the hotspot is enabled", async () => {
@@ -238,22 +240,86 @@ describe("CredentialsStep write-down confirmation", () => {
     expect(dialog()).toBeNull();
   });
 
+  it("saves what was acknowledged, not a device read that lands mid-dialog", async () => {
+    // The step reads the box's real hotspot settings on mount. That read is the
+    // one writer of this state the customer does not control, and the dialog
+    // puts a human-length pause in front of the save — so a slow read could
+    // land between "here is your hotspot password for ClawBox-Setup" and the
+    // request, and rename the network or switch the hotspot off entirely.
+    let landDeviceRead!: (value: unknown) => void;
+    const deviceRead = new Promise((resolve) => {
+      landDeviceRead = resolve;
+    });
+    fetchMock.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (init?.method === "POST") return { ok: true, json: async () => ({}) } as Response;
+      if (url === "/setup-api/system/hotspot") {
+        return { ok: true, json: () => deviceRead } as unknown as Response;
+      }
+      if (url === "/setup-api/system/hostname") {
+        return { ok: true, json: async () => ({ hostname: "clawbox" }) } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}) } as Response;
+    });
+
+    const { container } = await mountStep();
+    fillForm(container);
+    fireEvent.click(connect());
+    expect(screen.getByTestId("writedown-hotspot-plate")).toHaveTextContent(
+      "Hotspot · ClawBox-Setup",
+    );
+
+    // The read lands while the customer is still writing things down.
+    await act(async () => {
+      landDeviceRead({ ssid: "Renamed-AP", enabled: false });
+    });
+
+    fireEvent.click(screen.getByTestId("writedown-ack"));
+    fireEvent.click(screen.getByTestId("writedown-continue"));
+
+    await waitFor(() => {
+      expect(postBody("/setup-api/system/hotspot")).toEqual({
+        ssid: "ClawBox-Setup",
+        password: HOTSPOT_PASSWORD,
+        enabled: true,
+      });
+    });
+  });
+
   it("wears coral on OpenClaw and the agent's green on Hermes", async () => {
     const openclaw = await mountStep(false);
     fillForm(openclaw.container);
     fireEvent.click(connect());
-    let plate = screen.getByTestId("writedown-system-plate");
-    expect(plate.className).toContain("--coral-bright");
-    expect(plate.className).not.toContain("--agent-live");
     expect(dialog()?.hasAttribute("data-agent")).toBe(false);
+    let proceed = screen.getByTestId("writedown-continue");
+    expect(proceed.getAttribute("style")).toContain("--coral-bright");
+    expect(proceed.getAttribute("style")).not.toContain("rgb(18, 214, 164)");
     openclaw.unmount();
 
     const hermes = await mountStep(true);
     fillForm(hermes.container);
     fireEvent.click(connect());
-    plate = screen.getByTestId("writedown-system-plate");
-    expect(plate.className).toContain("--agent-live");
-    expect(plate.className).not.toContain("--coral-bright");
     expect(dialog()?.getAttribute("data-agent")).toBe("hermes");
+    proceed = screen.getByTestId("writedown-continue");
+    expect(proceed.getAttribute("style")).toContain("rgb(18, 214, 164)");
+    expect(proceed.getAttribute("style")).not.toContain("--coral-bright");
+  });
+
+  it("keeps the danger band red on both editions — it is not the brand accent", async () => {
+    // The band names the stake. Repainting it in the SKU's colour would make it
+    // read as decoration, which is the one thing this screen must not be.
+    const openclaw = await mountStep(false);
+    fillForm(openclaw.container);
+    fireEvent.click(connect());
+    const coralBand = screen.getByTestId("writedown-danger-band").getAttribute("style") ?? "";
+    expect(coralBand).toContain("255, 95, 82");
+    openclaw.unmount();
+
+    const hermes = await mountStep(true);
+    fillForm(hermes.container);
+    fireEvent.click(connect());
+    const hermesBand = screen.getByTestId("writedown-danger-band").getAttribute("style") ?? "";
+    expect(hermesBand).toContain("255, 95, 82");
+    expect(hermesBand).not.toContain("rgb(18, 214, 164)");
   });
 });
