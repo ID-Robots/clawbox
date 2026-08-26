@@ -69,9 +69,9 @@ export const codingAgentEn: Record<string, string> = {
 
   "codingAgent.fullAccessLabel": "Full command access",
   "codingAgent.fullAccessHelp":
-    "Off by default, a run may only use build and test commands from a fixed list. Turn this on and it may run any command in its folder, including ones that delete files, install packages or reach the network.",
+    "Let a run use any command, not just build and test tools.",
   "codingAgent.fullAccessOn":
-    "On. Your credential files stay protected and a run still cannot leave the ClawBox home or edit ClawBox itself — but there is no longer any limit on which commands it runs.",
+    "A run can now read and change any file on this device, including your saved keys and passwords. Only turn this on for tasks you trust.",
   "codingAgent.fullAccessFailed": "Could not change full command access.",
   "codingAgent.fullAccessBadge": "full access",
   "codingAgent.turnsLabel": "Steps per run",

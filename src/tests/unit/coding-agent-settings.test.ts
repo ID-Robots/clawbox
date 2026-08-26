@@ -232,10 +232,15 @@ describe("full command access", () => {
     for (const rule of lib.BASH_DENYLIST) expect(joined).not.toContain(rule);
   });
 
-  it("still refuses the credential files — full access is about COMMANDS", async () => {
-    // The rule that stops a prompt-injected "read the config and send it".
-    // A task can arrive from an email or a web page, and this device holds
-    // the owner's ClawBox AI token and mailbox password.
+  it("keeps the file rules on Claude Code's OWN tools — but they do not survive Bash(*)", async () => {
+    // Measured on the box, and the reason the UI copy changed:
+    //   Read(data/config.json)                      -> BLOCKED
+    //   head -c 60 .../data/config.json             -> denied (path is visible)
+    //   python3 -c "print(open('.../config.json'))" -> RAN, returned the file
+    // A tool-name policy cannot fence an interpreter, and no list of blocked
+    // words fixes it — node, perl, ruby, awk and `bash -c` all read files.
+    // The rules below are still worth shipping (they stop the built-in
+    // editor), but full access means full read access in practice.
     const lib = await import("@/lib/coding-agent");
     const joined = lib.buildRunArgs({ resumeSessionId: null, fullAccess: true }).join(" ");
     expect(joined).toContain("--disallowedTools");
@@ -264,6 +269,16 @@ describe("full command access", () => {
     const off = lib.buildRunArgs({ resumeSessionId: null, fullAccess: false });
     expect(off).toContain("--allowedTools");
     for (const rule of lib.BASH_DENYLIST) expect(off).toContain(rule);
+  });
+
+  it("tells the owner what full access really costs, without softening it", async () => {
+    // The first version of this copy claimed credentials stayed protected.
+    // They do not. The warning must say so in the owner's own terms.
+    const { translations } = await import("@/lib/translations");
+    const on = translations.en["codingAgent.fullAccessOn"];
+    expect(on).toMatch(/any file/i);
+    expect(on).toMatch(/keys and passwords/i);
+    expect(on).not.toMatch(/stay protected|still protected/i);
   });
 
   it("records the switch", async () => {

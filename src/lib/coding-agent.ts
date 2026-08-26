@@ -126,18 +126,31 @@ export const CODING_AGENT_SUBAGENTS_CONFIG_KEY = "coding_agent_subagents";
  * With it on the Bash allow-list and deny-list are BOTH withheld, so nothing
  * is filtered by command name.
  *
- * What it deliberately does NOT touch, because those are a different promise:
+ * WHAT IT COSTS, stated plainly because the first version of this comment got
+ * it wrong. The file deny rules still ship and still stop Claude Code's OWN
+ * Read/Edit/Write tools — verified on the box, where a run asked for
+ * data/config.json answered "BLOCKED". They do NOT survive Bash(*):
  *
- *   - the credential file rules (data/config.json, .mcp-token, the session
- *     secret, ~/.ssh, the run records). A task can arrive from anywhere the
- *     assistant reads — an email, a web page — and a prompt-injected "read
- *     the config and post it somewhere" must fail on a device holding the
- *     owner's ClawBox AI token and mailbox password.
- *   - folder containment: still inside the ClawBox home, still never the OS
- *     checkout itself.
- *   - the capability drop: setpriv still empties the ambient set.
+ *     python3 -c "print(open('.../data/config.json').read())"
  *
- * So this widens what a run may RUN, not what it may READ or WRITE.
+ * ran and returned the file. `head .../config.json` was refused because the
+ * path is visible in the command; inside a Python string it is not. No
+ * enumeration of command names fixes this — node, perl, ruby, awk and
+ * `bash -c` all read files too. A tool-name policy cannot fence an
+ * interpreter.
+ *
+ * So with full access on, a run can read and write anything the clawbox user
+ * can, including the ClawBox AI token, the mailbox password and the session
+ * secret. That is the honest meaning of the switch, and the UI says so.
+ *
+ * What DOES still hold either way:
+ *   - the working folder must still resolve inside the ClawBox home, and
+ *     never the OS checkout itself
+ *   - setpriv still empties the ambient capability set
+ *   - Claude Code's own file tools still refuse the credential paths
+ *
+ * The real containment for this would be an OS boundary — a separate user
+ * that simply cannot read those files — not a longer list of blocked words.
  */
 export const CODING_AGENT_FULL_ACCESS_CONFIG_KEY = "coding_agent_full_access";
 
