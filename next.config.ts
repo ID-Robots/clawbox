@@ -40,7 +40,11 @@ const nextConfig: NextConfig = {
   // an absolute path at runtime, so a copy inside .next/standalone would be a
   // stale duplicate even when the copy succeeded.
   outputFileTracingExcludes: {
-    "*": ["./data/**"],
+    // No "./" prefix: Next matches these globs relative to the tracing root,
+    // and "./data/**" silently matched nothing — the build kept dying on
+    // data/webapps/<app>/index.html whenever a webapp was created or removed
+    // while it ran.
+    "*": ["data/**", "**/data/webapps/**", "**/data/code-projects/**"],
   },
   outputFileTracingIncludes: {
     "/setup-api/pets/thumb": [
