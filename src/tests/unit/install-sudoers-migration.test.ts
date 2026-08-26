@@ -76,9 +76,27 @@ beforeEach(() => {
   fs.mkdirSync(path.join(tmp, "bin"));
   fs.mkdirSync(path.join(tmp, "sudoers.d"));
   fs.mkdirSync(path.join(tmp, "staging"));
+  // The fake `install` also knows how to FAIL, because that is the case the
+  // helper could not previously see: `visudo -c` re-reads whatever is on disk,
+  // so an install that never wrote anything still validates and answers 0.
+  //   INSTALL_FAIL_DEST     — refuse outright (read-only /etc, EPERM)
+  //   INSTALL_TRUNCATE_DEST — exit 0 having written only a PREFIX of the file,
+  //                           which is what ENOSPC part-way down the allow-list
+  //                           looks like, and which still parses under visudo
   fs.writeFileSync(
     path.join(tmp, "bin/install"),
-    "#!/usr/bin/env bash\nargs=(); while [ $# -gt 0 ]; do case \"$1\" in -o|-g) shift 2;; *) args+=(\"$1\"); shift;; esac; done\nexec /usr/bin/install \"${args[@]}\"\n",
+    [
+      "#!/usr/bin/env bash",
+      'args=(); while [ $# -gt 0 ]; do case "$1" in -o|-g) shift 2;; *) args+=("$1"); shift;; esac; done',
+      'dest="${args[${#args[@]}-1]}"',
+      'src="${args[${#args[@]}-2]}"',
+      'if [ -n "${INSTALL_FAIL_DEST:-}" ] && [ "$dest" = "$INSTALL_FAIL_DEST" ]; then exit 1; fi',
+      'if [ -n "${INSTALL_TRUNCATE_DEST:-}" ] && [ "$dest" = "$INSTALL_TRUNCATE_DEST" ]; then',
+      '  head -c 40 "$src" > "$dest"; exit 0',
+      "fi",
+      'exec /usr/bin/install "${args[@]}"',
+      "",
+    ].join("\n"),
     { mode: 0o755 },
   );
   fs.writeFileSync(path.join(tmp, "bin/chown"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
@@ -196,6 +214,123 @@ d("install_sudoers_dropin", () => {
   });
 });
 
+/**
+ * The blocker this file exists to close.
+ *
+ * `install_sudoers_dropin` used to report success after an `install` that never
+ * wrote anything. Both its call sites run it in a CONDITION context, which
+ * suspends `set -e` for the whole function body, and the trailing `visudo -c`
+ * validates whatever is STILL on disk — so a failed install produced exit 0.
+ * The caller then quarantined the blanket drop-in, and a device whose only
+ * grant was the blanket one ended up with NEITHER: no working sudo at all, on
+ * an appliance with no console.
+ */
+d("install_sudoers_dropin — a failed install must not read as success", () => {
+  const dest = () => path.join(tmp, "sudoers.d/clawbox");
+
+  it("fails when install(1) refuses, and keeps the previous grants", () => {
+    fs.writeFileSync(path.join(tmp, "prev"), "clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot\n");
+    expect(runShell(`install_sudoers_dropin "${tmp}/prev" clawbox`).status).toBe(0);
+
+    const r = runShell(`install_sudoers_dropin "$REPO/config/clawbox-sudoers" clawbox`, {
+      INSTALL_FAIL_DEST: dest(),
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/could not install clawbox into/);
+    expect(fs.readFileSync(dest(), "utf-8")).toContain("systemctl reboot");
+  });
+
+  it("fails when install(1) exits 0 having written only part of the file", () => {
+    // ENOSPC half-way down the allow-list. The prefix still PARSES — sudoers is
+    // line-oriented — so visudo cannot catch it and only a byte comparison can.
+    const r = runShell(`install_sudoers_dropin "$REPO/config/clawbox-sudoers" clawbox`, {
+      INSTALL_TRUNCATE_DEST: dest(),
+    });
+    expect(r.status).toBe(1);
+    expect(fs.existsSync(dest())).toBe(false);
+  });
+
+  it("leaves no staged candidate behind when the install fails", () => {
+    runShell(`install_sudoers_dropin "$REPO/config/clawbox-sudoers" clawbox`, {
+      INSTALL_FAIL_DEST: dest(),
+    });
+    expect(fs.readdirSync(path.join(tmp, "staging"))).toEqual([]);
+  });
+
+});
+
+/**
+ * The gate itself, run as install.sh really runs it.
+ *
+ * These lift the actual bytes out of step_systemd_services rather than
+ * re-implementing them, so the test cannot drift away from the shipped code.
+ */
+d("step_systemd_services' sudoers gate", () => {
+  /** The real gate: `local sudoers_status=0` through the end of its if/else. */
+  function gateBlock(): string {
+    const start = INSTALL_SH.indexOf("  local sudoers_status=0");
+    const end = INSTALL_SH.indexOf(
+      '  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama"',
+    );
+    if (start < 0 || end < 0) throw new Error("sudoers gate markers not found in install.sh");
+    return INSTALL_SH.slice(start, end);
+  }
+
+  /** Run the extracted gate with PROJECT_DIR pointed at the real repo. */
+  function runGate(env: Record<string, string> = {}) {
+    return runShell(
+      `PROJECT_DIR="$REPO"\nrun_gate() {\n${gateBlock()}\n}\nrun_gate`,
+      env,
+    );
+  }
+
+  /** A device as it ships today: blanket grant, no narrow drop-in yet. */
+  function seedBlanketOnlyDevice() {
+    fs.writeFileSync(
+      path.join(tmp, "sudoers.d/90-clawbox-nopasswd"),
+      "clawbox ALL=(ALL) NOPASSWD: ALL\n",
+    );
+  }
+
+  it("quarantines the blanket grant once the allow-list really landed", () => {
+    seedBlanketOnlyDevice();
+    const r = runGate();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Sudoers rules installed");
+    expect(fs.existsSync(path.join(tmp, "sudoers.d/90-clawbox-nopasswd"))).toBe(false);
+    expect(fs.readFileSync(path.join(tmp, "sudoers.d/clawbox"), "utf-8")).toBe(
+      fs.readFileSync(path.join(REPO, "config/clawbox-sudoers"), "utf-8"),
+    );
+  });
+
+  // THE REGRESSION. Before the fix this left the device with no sudoers at all.
+  it("does NOT quarantine the blanket grant when the install failed", () => {
+    seedBlanketOnlyDevice();
+    const r = runGate({ INSTALL_FAIL_DEST: path.join(tmp, "sudoers.d/clawbox") });
+    expect(r.stderr).toMatch(/sudoers rules NOT updated/);
+    expect(
+      fs.existsSync(path.join(tmp, "sudoers.d/90-clawbox-nopasswd")),
+      "the blanket drop-in must survive a failed narrow install — removing it "
+      + "here leaves the device with no working sudo at all",
+    ).toBe(true);
+    expect(fs.existsSync(path.join(tmp, "sudoers.d/clawbox"))).toBe(false);
+  });
+
+  it("does NOT quarantine the blanket grant on a silently truncated install", () => {
+    seedBlanketOnlyDevice();
+    const r = runGate({ INSTALL_TRUNCATE_DEST: path.join(tmp, "sudoers.d/clawbox") });
+    expect(r.stderr).toMatch(/sudoers rules NOT updated/);
+    expect(fs.existsSync(path.join(tmp, "sudoers.d/90-clawbox-nopasswd"))).toBe(true);
+  });
+
+  it("does NOT quarantine the blanket grant when the candidate fails visudo", () => {
+    seedBlanketOnlyDevice();
+    const r = runGate({ VISUDO_C_STATUS: "1" });
+    expect(r.stderr).toMatch(/sudoers rules NOT updated/);
+    expect(fs.existsSync(path.join(tmp, "sudoers.d/90-clawbox-nopasswd"))).toBe(true);
+  });
+});
+
 d("quarantine_overbroad_sudoers", () => {
   const seed = () => {
     fs.writeFileSync(path.join(tmp, "sudoers.d/90-clawbox-nopasswd"), "clawbox ALL=(ALL) NOPASSWD: ALL\n");
@@ -282,7 +417,27 @@ describe("install.sh wiring", () => {
   // with neither.
   it("skips the quarantine when the allow-list failed to install", () => {
     expect(fn("step_systemd_services")).toMatch(
-      /if install_sudoers_dropin "\$PROJECT_DIR\/config\/clawbox-sudoers" clawbox; then[\s\S]*?quarantine_overbroad_sudoers[\s\S]*?else[\s\S]*?Warning: sudoers rules NOT updated/,
+      /sudoers_status=\$\?[\s\S]*?quarantine_overbroad_sudoers[\s\S]*?else[\s\S]*?Warning: sudoers rules NOT updated/,
+    );
+  });
+
+  // Bash suspends `set -e` for the whole dynamic extent of a command run in a
+  // condition context, so `if install_sudoers_dropin …; then` disarmed every
+  // unchecked command inside the function body too. The status has to come back
+  // through an explicit variable, not through the test of an `if`.
+  it("does not call install_sudoers_dropin from a condition context", () => {
+    const body = fn("step_systemd_services");
+    expect(body).not.toMatch(/if\s+install_sudoers_dropin/);
+    expect(body).toMatch(/^\s*install_sudoers_dropin "\$PROJECT_DIR\/config\/clawbox-sudoers" clawbox$/m);
+    expect(body).toMatch(/^\s*sudoers_status=\$\?$/m);
+  });
+
+  // The gate that actually protects the device is a fact about the DEVICE, not
+  // a return code: the bytes in /etc/sudoers.d/clawbox have to equal the
+  // allow-list we shipped before the blanket grant is taken away.
+  it("proves the allow-list landed byte-for-byte before quarantining", () => {
+    expect(fn("step_systemd_services")).toMatch(
+      /cmp -s "\$PROJECT_DIR\/config\/clawbox-sudoers" "\$SUDOERS_DIR\/clawbox"[\s\S]*?quarantine_overbroad_sudoers/,
     );
   });
 
