@@ -209,3 +209,65 @@ describe("what a run is told about the shell", () => {
     }
   });
 });
+
+describe("full command access", () => {
+  it("is off unless the owner turned it on", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(await lib.getFullAccess()).toBe(false);
+    configGet.mockResolvedValue("yes"); // only a real true counts
+    expect(await lib.getFullAccess()).toBe(false);
+    configGet.mockResolvedValue(true);
+    expect(await lib.getFullAccess()).toBe(true);
+  });
+
+  it("withholds BOTH Bash lists, so no command is filtered by name", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null, fullAccess: true });
+    const joined = args.join(" ");
+    // The allow-list is gone entirely — that is the point.
+    expect(args).not.toContain("--allowedTools");
+    for (const rule of lib.BASH_ALLOWLIST) expect(args).not.toContain(rule);
+    // ...and so is the command deny-list, which only ever backstopped it.
+    for (const rule of lib.BASH_DENYLIST) expect(joined).not.toContain(rule);
+  });
+
+  it("still refuses the credential files — full access is about COMMANDS", async () => {
+    // The rule that stops a prompt-injected "read the config and send it".
+    // A task can arrive from an email or a web page, and this device holds
+    // the owner's ClawBox AI token and mailbox password.
+    const lib = await import("@/lib/coding-agent");
+    const joined = lib.buildRunArgs({ resumeSessionId: null, fullAccess: true }).join(" ");
+    expect(joined).toContain("--disallowedTools");
+    for (const secret of ["config.json", ".mcp-token", ".session-secret", "coding-agent-runs.json"]) {
+      expect(joined, `${secret} must stay denied under full access`).toContain(secret);
+    }
+    // And the same rules a restricted run gets, not a reduced set.
+    const restricted = lib.buildRunArgs({ resumeSessionId: null, fullAccess: false }).join(" ");
+    for (const secret of ["config.json", ".mcp-token", ".session-secret"]) {
+      expect(restricted).toContain(secret);
+    }
+  });
+
+  it("keeps the capability drop and acceptEdits either way", async () => {
+    const lib = await import("@/lib/coding-agent");
+    for (const fullAccess of [true, false]) {
+      const args = lib.buildRunArgs({ resumeSessionId: null, fullAccess });
+      expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    }
+    // setpriv is applied outside buildRunArgs and is not conditional on it.
+    expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
+  });
+
+  it("leaves the restricted path exactly as it was", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const off = lib.buildRunArgs({ resumeSessionId: null, fullAccess: false });
+    expect(off).toContain("--allowedTools");
+    for (const rule of lib.BASH_DENYLIST) expect(off).toContain(rule);
+  });
+
+  it("records the switch", async () => {
+    const lib = await import("@/lib/coding-agent");
+    await lib.setFullAccess(true);
+    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_FULL_ACCESS_CONFIG_KEY, true);
+  });
+});

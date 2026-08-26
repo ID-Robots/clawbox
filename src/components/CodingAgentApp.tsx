@@ -46,6 +46,7 @@ interface AgentStatus {
   effort: Effort;
   effortLevels: Effort[];
   subagents: boolean;
+  fullAccess: boolean;
   maxTurns: number;
   minMaxTurns: number;
   maxMaxTurns: number;
@@ -74,6 +75,7 @@ interface Run {
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
   subagentsTotal?: number;
+  fullAccess?: boolean;
   thinkingTokens?: number;
   tokensUsed?: number;
   sessionId?: string | null;
@@ -481,6 +483,34 @@ export default function CodingAgentApp() {
           />
         </div>
 
+        {/* Full command access. Its own block with a warning, because it is
+            the one switch here that removes a safety rule rather than tuning
+            one. */}
+        <div className={`mt-4 rounded-xl border p-3 ${status?.fullAccess ? "border-amber-400/40 bg-amber-400/[0.06]" : "border-white/[0.08]"}`}>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h2 className="text-xs font-medium text-[var(--text-secondary)]">
+                {t("codingAgent.fullAccessLabel")}
+              </h2>
+              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
+                {t("codingAgent.fullAccessHelp")}
+              </p>
+            </div>
+            <Switch
+              checked={status?.fullAccess === true}
+              busy={busy === "fullAccess"}
+              disabled={!status}
+              label={t("codingAgent.fullAccessLabel")}
+              onChange={(v) => void saveSetting({ fullAccess: v }, "fullAccess", t("codingAgent.fullAccessFailed"))}
+            />
+          </div>
+          {status?.fullAccess && (
+            <p className="text-[11px] text-amber-400/90 mt-2 leading-relaxed" data-testid="coding-agent-full-access-warning">
+              {t("codingAgent.fullAccessOn")}
+            </p>
+          )}
+        </div>
+
         {/* The ceilings a run stops at — both the owner's to set. There is no
             time limit and no price limit: a run ends when it finishes, runs
             out of steps, hits a token ceiling if one is set, or goes quiet. */}
@@ -606,6 +636,15 @@ export default function CodingAgentApp() {
                                 className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
                               >
                                 {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
+                              </span>
+                            )}
+                            {run.fullAccess && (
+                              <span
+                                data-testid="coding-agent-run-full-access"
+                                title={t("codingAgent.fullAccessLabel")}
+                                className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40"
+                              >
+                                {t("codingAgent.fullAccessBadge")}
                               </span>
                             )}
                             {(run.subagentsActive ?? 0) > 0 && (

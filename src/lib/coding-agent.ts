@@ -118,6 +118,29 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
  */
 export const CODING_AGENT_SUBAGENTS_CONFIG_KEY = "coding_agent_subagents";
 
+/**
+ * Full access: every command runs without asking.
+ *
+ * OFF by default and owner-only, because it is the consent for an unattended
+ * shell with no command policy at all — sudo, rm, curl, systemctl, git push.
+ * With it on the Bash allow-list and deny-list are BOTH withheld, so nothing
+ * is filtered by command name.
+ *
+ * What it deliberately does NOT touch, because those are a different promise:
+ *
+ *   - the credential file rules (data/config.json, .mcp-token, the session
+ *     secret, ~/.ssh, the run records). A task can arrive from anywhere the
+ *     assistant reads — an email, a web page — and a prompt-injected "read
+ *     the config and post it somewhere" must fail on a device holding the
+ *     owner's ClawBox AI token and mailbox password.
+ *   - folder containment: still inside the ClawBox home, still never the OS
+ *     checkout itself.
+ *   - the capability drop: setpriv still empties the ambient set.
+ *
+ * So this widens what a run may RUN, not what it may READ or WRITE.
+ */
+export const CODING_AGENT_FULL_ACCESS_CONFIG_KEY = "coding_agent_full_access";
+
 /** Wall-clock ceiling for one run. Claude Code's own retries can stall for
  *  minutes against an unreachable ClawBox AI, so this is the real backstop. */
 /**
@@ -294,6 +317,10 @@ export interface CodingRun {
   subagentsTotal: number;
   /** Whether sub-agents were available to this run at all. */
   subagentsAllowed: boolean;
+  /** Whether this run had full command access. Recorded per run: the owner
+   *  can flip the switch while it works, and the record must say what was
+   *  actually in force. */
+  fullAccess: boolean;
   /** The step ceiling this run started with. */
   maxTurns: number;
   /** Tokens spent so far, summed the way a bill is — see the config key. */
@@ -362,6 +389,8 @@ export interface CodingAgentStatus {
   effortLevels: readonly CodingEffort[];
   /** Whether a run may fan out into sub-agents. */
   subagents: boolean;
+  /** Whether a run may execute any command. */
+  fullAccess: boolean;
   /** The ceilings a run stops at, so the app can show them without guessing. */
   /** Agent steps a run gets, and the range the owner may choose from. */
   maxTurns: number;
@@ -458,6 +487,15 @@ export async function setEffort(effort: string): Promise<CodingEffort> {
   }
   await configSet(CODING_AGENT_EFFORT_CONFIG_KEY, effort);
   return effort;
+}
+
+/** Whether a run may execute any command. Off unless the owner turned it on. */
+export async function getFullAccess(): Promise<boolean> {
+  return (await configGet(CODING_AGENT_FULL_ACCESS_CONFIG_KEY)) === true;
+}
+
+export async function setFullAccess(enabled: boolean): Promise<void> {
+  await configSet(CODING_AGENT_FULL_ACCESS_CONFIG_KEY, enabled === true);
 }
 
 /** The owner's turn ceiling, clamped to something the CLI will accept. */
@@ -594,7 +632,7 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness, defaultDirectory, effort, subagents, maxTurns, tokenLimit] = await Promise.all([
+  const [enabled, readiness, defaultDirectory, effort, subagents, maxTurns, tokenLimit, fullAccess] = await Promise.all([
     isCodingAgentEnabled(),
     checkReadiness(),
     getDefaultDirectory(),
@@ -602,6 +640,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     getSubagentsEnabled(),
     getMaxTurns(),
     getTokenLimit(),
+    getFullAccess(),
   ]);
   return {
     enabled,
@@ -614,6 +653,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     effort,
     effortLevels: EFFORT_LEVELS,
     subagents,
+    fullAccess,
     maxTurns,
     minMaxTurns: MIN_MAX_TURNS,
     maxMaxTurns: MAX_MAX_TURNS,
@@ -674,6 +714,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsActive: 0,
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     subagentsAllowed: raw.subagentsAllowed === true,
+    fullAccess: raw.fullAccess === true,
     maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
     tokensUsed: typeof raw.tokensUsed === "number" ? raw.tokensUsed : 0,
     tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
@@ -750,7 +791,7 @@ interface LiveRun {
   /** Resolved once at start, so a retry does not need an async lookup. */
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
-  settings: { effort: CodingEffort; subagents: boolean; maxTurns: number };
+  settings: { effort: CodingEffort; subagents: boolean; maxTurns: number; fullAccess: boolean };
   /** A shell command ran whose effects cannot be proven read-only. */
   commandMayHaveSideEffects: boolean;
 }
@@ -1082,7 +1123,7 @@ export const HEADLESS_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
   "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
-  "Run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
+  "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
   "Verify your work where you can (run the build or the tests you have).",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
@@ -1145,7 +1186,7 @@ export function denyRulesCover(rules: readonly string[], directory: string): boo
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?: boolean; maxTurns?: number }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?: boolean; maxTurns?: number; fullAccess?: boolean }): string[] {
   const args = [
     "-p",
     "--verbose",
@@ -1159,8 +1200,15 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
   args.push("--tools", toolsFor(opts.subagents === true));
-  args.push("--allowedTools", ...BASH_ALLOWLIST);
-  args.push("--disallowedTools", ...BASH_DENYLIST, ...fileDenyRules());
+  if (opts.fullAccess) {
+    // No command policy at all — but the FILE rules still ship, so the
+    // credential stores stay closed and the deny rules keep outranking
+    // acceptEdits. Full access is about commands, not secrets.
+    args.push("--disallowedTools", ...fileDenyRules());
+  } else {
+    args.push("--allowedTools", ...BASH_ALLOWLIST);
+    args.push("--disallowedTools", ...BASH_DENYLIST, ...fileDenyRules());
+  }
   return args;
 }
 
@@ -1574,9 +1622,14 @@ function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
   setprivPath: string,
-  settings: { effort: CodingEffort; subagents: boolean; maxTurns: number },
+  settings: { effort: CodingEffort; subagents: boolean; maxTurns: number; fullAccess: boolean },
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, subagents: settings.subagents, maxTurns: settings.maxTurns }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({
+    resumeSessionId,
+    subagents: settings.subagents,
+    maxTurns: settings.maxTurns,
+    fullAccess: settings.fullAccess,
+  }));
   const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
@@ -1733,8 +1786,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
 
   // Read once, here: a run keeps the settings it started with even if the
   // owner changes them while it works.
-  const [effort, subagents, maxTurns, tokenLimit] = await Promise.all([
-    getEffort(), getSubagentsEnabled(), getMaxTurns(), getTokenLimit(),
+  const [effort, subagents, maxTurns, tokenLimit, fullAccess] = await Promise.all([
+    getEffort(), getSubagentsEnabled(), getMaxTurns(), getTokenLimit(), getFullAccess(),
   ]);
 
   const run: CodingRun = {
@@ -1760,6 +1813,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     subagentsActive: 0,
     subagentsTotal: 0,
     subagentsAllowed: subagents,
+    fullAccess,
     maxTurns,
     tokensUsed: 0,
     tokenLimit,
@@ -1783,7 +1837,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
   try {
-    spawnRun(run, resumeSessionId, setprivPath, { effort, subagents, maxTurns });
+    spawnRun(run, resumeSessionId, setprivPath, { effort, subagents, maxTurns, fullAccess });
   } catch (err) {
     // The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
     // — a cwd that vanished between the check and here, a setpriv that is not

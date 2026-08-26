@@ -67,6 +67,13 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.subagentsActive": "{n} sub-agents working",
   "codingAgent.subagentsUsed": "{n} sub-agents",
 
+  "codingAgent.fullAccessLabel": "Full command access",
+  "codingAgent.fullAccessHelp":
+    "Off by default, a run may only use build and test commands from a fixed list. Turn this on and it may run any command in its folder, including ones that delete files, install packages or reach the network.",
+  "codingAgent.fullAccessOn":
+    "On. Your credential files stay protected and a run still cannot leave the ClawBox home or edit ClawBox itself — but there is no longer any limit on which commands it runs.",
+  "codingAgent.fullAccessFailed": "Could not change full command access.",
+  "codingAgent.fullAccessBadge": "full access",
   "codingAgent.turnsLabel": "Steps per run",
   "codingAgent.turnsFailed": "Could not change the step limit.",
   "codingAgent.tokensLabel": "Token limit (optional)",
