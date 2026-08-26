@@ -459,6 +459,7 @@ export const zh: Record<string, string> = {
   "codingAgent.subagentsLabel": "允许使用子代理",
   "codingAgent.subagentsHelp": "运行可以把范围较广的工作分给并行搜索或编辑的辅助代理。每个都是一次完整对话，因此花费更多、占用更多内存。默认关闭；适合跨多个文件的工作。",
   "codingAgent.subagentsFailed": "无法更改子代理设置。",
+  "codingAgent.thinking": "思考中 · {n} 个词元",
   "codingAgent.subagentsActive": "{n} 个子代理正在工作",
   "codingAgent.subagentsUsed": "{n} 个子代理",
   "codingAgent.limits": "运行会在 {turns} 步或 ${budget} 的模型用量后自行停止。",

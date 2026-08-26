@@ -443,6 +443,7 @@ export const es: Record<string, string> = {
   "codingAgent.subagentsLabel": "Permitir subagentes",
   "codingAgent.subagentsHelp": "Una ejecución puede repartir el trabajo amplio entre agentes auxiliares que buscan o editan en paralelo. Cada uno es una conversación entera, así que cuesta más y usa más memoria. Desactivado por defecto; útil para trabajo en muchos archivos.",
   "codingAgent.subagentsFailed": "No se pudo cambiar el ajuste de subagentes.",
+  "codingAgent.thinking": "pensando · {n} tokens",
   "codingAgent.subagentsActive": "{n} subagentes trabajando",
   "codingAgent.subagentsUsed": "{n} subagentes",
   "codingAgent.limits": "Una ejecución se detiene sola tras {turns} pasos o ${budget} de uso del modelo.",

@@ -450,6 +450,7 @@ export const ja: Record<string, string> = {
   "codingAgent.subagentsLabel": "サブエージェントを許可",
   "codingAgent.subagentsHelp": "実行時に広い作業を補助エージェントへ分担し、並行して検索や編集ができます。それぞれが独立した会話なので、費用とメモリを多く使います。既定はオフ。多数のファイルにまたがる作業に向いています。",
   "codingAgent.subagentsFailed": "サブエージェントの設定を変更できませんでした。",
+  "codingAgent.thinking": "思考中 · {n} トークン",
   "codingAgent.subagentsActive": "{n} 個のサブエージェントが作業中",
   "codingAgent.subagentsUsed": "{n} 個のサブエージェント",
   "codingAgent.limits": "実行は {turns} ステップまたはモデル利用 ${budget} で自動的に停止します。",

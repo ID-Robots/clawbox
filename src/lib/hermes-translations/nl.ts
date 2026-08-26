@@ -448,6 +448,7 @@ export const nl: Record<string, string> = {
   "codingAgent.subagentsLabel": "Subagenten toestaan",
   "codingAgent.subagentsHelp": "Een run kan breed werk verdelen over hulpagenten die parallel zoeken of bewerken. Elk is een volledig gesprek, dus dit kost meer en gebruikt meer geheugen. Standaard uit; nuttig bij werk over veel bestanden.",
   "codingAgent.subagentsFailed": "De subagent-instelling kon niet worden gewijzigd.",
+  "codingAgent.thinking": "denkt na · {n} tokens",
   "codingAgent.subagentsActive": "{n} subagenten aan het werk",
   "codingAgent.subagentsUsed": "{n} subagenten",
   "codingAgent.limits": "Een run stopt vanzelf na {turns} stappen of ${budget} aan modelgebruik.",

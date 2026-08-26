@@ -261,6 +261,18 @@ export interface CodingRun {
   /** Whether sub-agents were available to this run at all. */
   subagentsAllowed: boolean;
   /**
+   * Reasoning tokens Claude Code reports so far.
+   *
+   * Without this a run on `effort: max` looks identical to a hung one: the
+   * first turn of a big task can spend minutes thinking before it emits a
+   * single word, and `numTurns` only arrives with the final result event. On
+   * a real box that cost a healthy run — the assistant read "0 turns, no
+   * progress" and called coding_agent_stop at 295 seconds.
+   */
+  thinkingTokens: number;
+  /** When the run last showed ANY sign of life. The answer to "is it stuck?". */
+  lastActivityAt: number;
+  /**
    * Automatic restarts after a transient upstream failure. At most one, and
    * only for a run that had done no work — see TRANSIENT_FAILURE_RE.
    */
@@ -554,6 +566,8 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsActive: 0,
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     subagentsAllowed: raw.subagentsAllowed === true,
+    thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
+    lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
     retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
@@ -593,6 +607,8 @@ interface LiveRun {
   stopRequested: boolean;
   timedOut: boolean;
   sawResult: boolean;
+  /** Whether "Thinking…" has already been said once. */
+  sawThinking: boolean;
   stderr: string;
   /**
    * tool_use ids of sub-agents that have started and not yet reported back.
@@ -1096,6 +1112,8 @@ export function isReadOnlyInspectionCommand(command: unknown): boolean {
 interface StreamEvent {
   type?: string;
   subtype?: string;
+  /** system/thinking_tokens: reasoning tokens so far. */
+  estimated_tokens?: number;
   /** `user` events carry tool_result blocks; that is how a sub-agent reports back. */
   session_id?: string;
   model?: string;
@@ -1134,6 +1152,24 @@ export const describeDenialForTests = describeDenial;
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
+
+  // ANY event is a sign of life, whatever it is.
+  run.lastActivityAt = Date.now();
+
+  // Claude Code reports reasoning progress before it has anything to say. It
+  // is the only signal that separates "thinking hard" from "hung", and a run
+  // on `effort: max` can sit here for minutes on the first turn.
+  if (event.type === "system" && event.subtype === "thinking_tokens") {
+    const total = typeof event.estimated_tokens === "number" ? event.estimated_tokens : 0;
+    if (total > run.thinkingTokens) run.thinkingTokens = total;
+    // One line, not one per event: these arrive continuously and would drown
+    // the progress feed. The live count is on the record for anyone watching.
+    if (!state.sawThinking) {
+      state.sawThinking = true;
+      pushProgress(run, "Thinking…");
+    }
+    return;
+  }
 
   if (event.type === "system" && event.subtype === "init") {
     if (typeof event.model === "string" && event.model) run.model = event.model;
@@ -1390,6 +1426,7 @@ function spawnRun(
   const state: LiveRun = {
     child,
     openSubagents: new Set<string>(),
+    sawThinking: false,
     setprivPath,
     settings,
     commandMayHaveSideEffects: false,
@@ -1551,6 +1588,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     subagentsActive: 0,
     subagentsTotal: 0,
     subagentsAllowed: subagents,
+    thinkingTokens: 0,
+    lastActivityAt: Date.now(),
     retries: 0,
     resumable: false,
     progress: [],

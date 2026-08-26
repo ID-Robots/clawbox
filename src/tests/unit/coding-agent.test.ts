@@ -644,6 +644,56 @@ describe("retrying a transient upstream failure", () => {
   });
 });
 
+describe("showing that a quiet run is alive", () => {
+  beforeEach(() => readyDevice());
+
+  /** The event Claude Code emits while reasoning, before it has any output. */
+  const THINK = (n: number) => JSON.stringify({
+    type: "system", subtype: "thinking_tokens", estimated_tokens: n, estimated_tokens_delta: 2,
+  });
+
+  it("records reasoning progress, so silence is not mistaken for a hang", async () => {
+    // A real run on this box spent 295s on its first turn at effort "max" with
+    // nothing in the feed. The assistant read that as stuck and stopped it.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${THINK(43)}'`,
+      `echo '${THINK(120)}'`,
+      `echo '${THINK(870)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "big one", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.thinkingTokens).toBe(870);
+    // Said ONCE, not once per event — these arrive continuously.
+    const said = run.progress.filter((p) => p === "Thinking…");
+    expect(said).toHaveLength(1);
+  });
+
+  it("never lets the count go backwards on an out-of-order event", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${THINK(500)}'`,
+      `echo '${THINK(12)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.thinkingTokens).toBe(500);
+  });
+
+  it("stamps a last-sign-of-life the status can answer 'is it stuck?' with", async () => {
+    makeProject("site");
+    const before = Date.now();
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.lastActivityAt).toBeGreaterThanOrEqual(before);
+  });
+});
+
 describe("counting sub-agents", () => {
   beforeEach(() => readyDevice());
 

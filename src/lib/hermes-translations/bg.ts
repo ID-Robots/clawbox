@@ -435,6 +435,7 @@ export const bg: Record<string, string> = {
   "codingAgent.subagentsLabel": "Разреши помощни агенти",
   "codingAgent.subagentsHelp": "Изпълнението може да раздели широка задача между помощни агенти, които търсят или редактират паралелно. Всеки е отделен разговор, така че струва повече и използва повече памет. Изключено по подразбиране; полезно за задачи в много файлове.",
   "codingAgent.subagentsFailed": "Настройката за помощни агенти не можа да бъде променена.",
+  "codingAgent.thinking": "мисли · {n} токена",
   "codingAgent.subagentsActive": "{n} работещи помощни агенти",
   "codingAgent.subagentsUsed": "{n} помощни агенти",
   "codingAgent.limits": "Изпълнението спира само след {turns} стъпки или ${budget} използване на модела.",

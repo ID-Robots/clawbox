@@ -448,6 +448,7 @@ export const fr: Record<string, string> = {
   "codingAgent.subagentsLabel": "Autoriser les sous-agents",
   "codingAgent.subagentsHelp": "Une exécution peut répartir un travail large entre des agents auxiliaires qui cherchent ou modifient en parallèle. Chacun est une conversation entière, donc cela coûte plus cher et utilise plus de mémoire. Désactivé par défaut ; utile pour un travail sur de nombreux fichiers.",
   "codingAgent.subagentsFailed": "Impossible de modifier le réglage des sous-agents.",
+  "codingAgent.thinking": "réfléchit · {n} jetons",
   "codingAgent.subagentsActive": "{n} sous-agents au travail",
   "codingAgent.subagentsUsed": "{n} sous-agents",
   "codingAgent.limits": "Une exécution s'arrête d'elle-même après {turns} étapes ou ${budget} d'utilisation du modèle.",

@@ -447,6 +447,7 @@ export const de: Record<string, string> = {
   "codingAgent.subagentsLabel": "Unteragenten erlauben",
   "codingAgent.subagentsHelp": "Ein Lauf kann umfangreiche Arbeit auf Hilfsagenten verteilen, die parallel suchen oder bearbeiten. Jeder ist ein eigenes Gespräch, kostet also mehr und braucht mehr Speicher. Standardmäßig aus; lohnt sich bei Arbeit über viele Dateien.",
   "codingAgent.subagentsFailed": "Die Unteragenten-Einstellung konnte nicht geändert werden.",
+  "codingAgent.thinking": "denkt · {n} Token",
   "codingAgent.subagentsActive": "{n} Unteragenten aktiv",
   "codingAgent.subagentsUsed": "{n} Unteragenten",
   "codingAgent.limits": "Ein Lauf stoppt von selbst nach {turns} Schritten oder ${budget} Modellnutzung.",

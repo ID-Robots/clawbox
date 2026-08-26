@@ -71,6 +71,7 @@ interface Run {
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
   subagentsTotal?: number;
+  thinkingTokens?: number;
 }
 
 const RECENT_RUNS = 5;
@@ -516,6 +517,17 @@ export default function CodingAgentApp() {
                             </span>
                             {/* Only while they are actually out: a count that
                                 lingers at 0 is noise on every finished run. */}
+                            {/* A run at high effort can be silent for minutes
+                                on its first turn. Show that it is thinking, so
+                                quiet never reads as stuck. */}
+                            {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
+                              <span
+                                data-testid="coding-agent-thinking"
+                                className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40"
+                              >
+                                {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
+                              </span>
+                            )}
                             {(run.subagentsActive ?? 0) > 0 && (
                               <span
                                 data-testid="coding-agent-subagents-active"

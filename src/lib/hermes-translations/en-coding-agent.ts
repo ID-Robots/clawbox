@@ -63,6 +63,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.subagentsHelp":
     "A run can split wide work across helper agents that search or edit in parallel. Each one is a whole extra conversation, so this costs more and uses more memory. Off by default; worth it for work spanning many files.",
   "codingAgent.subagentsFailed": "Could not change the sub-agent setting.",
+  "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.subagentsActive": "{n} sub-agents working",
   "codingAgent.subagentsUsed": "{n} sub-agents",
   "codingAgent.limits": "A run stops on its own after {turns} steps or ${budget} of model usage.",

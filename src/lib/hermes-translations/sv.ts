@@ -444,6 +444,7 @@ export const sv: Record<string, string> = {
   "codingAgent.subagentsLabel": "Tillåt underagenter",
   "codingAgent.subagentsHelp": "En körning kan dela upp brett arbete på hjälpagenter som söker eller redigerar parallellt. Var och en är ett helt samtal, så det kostar mer och använder mer minne. Av som standard; värt det för arbete över många filer.",
   "codingAgent.subagentsFailed": "Inställningen för underagenter kunde inte ändras.",
+  "codingAgent.thinking": "tänker · {n} tokens",
   "codingAgent.subagentsActive": "{n} underagenter arbetar",
   "codingAgent.subagentsUsed": "{n} underagenter",
   "codingAgent.limits": "En körning stannar av sig själv efter {turns} steg eller ${budget} i modellanvändning.",
