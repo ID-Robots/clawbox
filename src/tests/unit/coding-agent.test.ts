@@ -498,6 +498,42 @@ describe("the capabilities a run starts with", () => {
   });
 });
 
+describe("clearing the history", () => {
+  beforeEach(() => readyDevice());
+
+  it("forgets the finished runs", async () => {
+    makeProject("site");
+    await finished((await lib.startRun({ task: "one", projectId: "site", source: "agent" })).id);
+    await finished((await lib.startRun({ task: "two", projectId: "site", source: "agent" })).id);
+    expect(lib.listRuns()).toHaveLength(2);
+
+    expect(lib.clearFinishedRuns()).toBe(2);
+    expect(lib.listRuns()).toEqual([]);
+    // On disk too, not just in memory.
+    expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))).toEqual([]);
+    // Nothing left to clear says so honestly.
+    expect(lib.clearFinishedRuns()).toBe(0);
+  });
+
+  it("keeps a run that is still in flight — it is the only handle on the process", async () => {
+    installFakeWrapper(`echo '${INIT}'\nsleep 30\nexit 0`);
+    makeProject("site");
+    const live = await lib.startRun({ task: "slow one", projectId: "site", source: "agent" });
+    expect(lib.runningCount()).toBe(1);
+
+    expect(lib.clearFinishedRuns()).toBe(0);
+    expect(lib.listRuns().map((r) => r.id)).toEqual([live.id]);
+    // Still stoppable, which is the point of keeping it.
+    lib.stopRun(live.id);
+    const done = await finished(live.id);
+    expect(done.status).toBe("stopped");
+
+    // Once settled it is history like any other.
+    expect(lib.clearFinishedRuns()).toBe(1);
+    expect(lib.listRuns()).toEqual([]);
+  });
+});
+
 describe("after a restart", () => {
   it("settles a run the previous server left running", async () => {
     fs.writeFileSync(runsFile(), JSON.stringify([{

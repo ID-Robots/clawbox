@@ -129,6 +129,9 @@ export default function CodingAgentApp() {
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
   const [showRuns, setShowRuns] = useState(false);
+  // Clearing is two clicks, not a browser confirm(): the second click is the
+  // confirmation, and collapsing the list takes the offer back.
+  const [confirmClear, setConfirmClear] = useState(false);
   // The folder field is a DRAFT until saved, so typing does not fight the
   // status the route keeps returning.
   const [dirDraft, setDirDraft] = useState<string | null>(null);
@@ -218,6 +221,22 @@ export default function CodingAgentApp() {
       setDirDraft(next.defaultDirectory ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.folderFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const clearRuns = async () => {
+    setBusy("clear");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/runs", { method: "DELETE" });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
+      setConfirmClear(false);
+      setExpanded(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.clearFailed"));
     } finally {
       setBusy(null);
     }
@@ -348,7 +367,7 @@ export default function CodingAgentApp() {
         <div className="mt-4">
           <button
             type="button"
-            onClick={() => setShowRuns((v) => !v)}
+            onClick={() => { setShowRuns((v) => !v); setConfirmClear(false); }}
             aria-expanded={showRuns}
             data-testid="coding-agent-runs-toggle"
             className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
@@ -367,6 +386,24 @@ export default function CodingAgentApp() {
               {showRuns ? "expand_less" : "expand_more"}
             </span>
           </button>
+
+          {showRuns && runs.length > 0 && (
+            <div className="flex justify-end mt-2">
+              <button
+                type="button"
+                onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
+                disabled={busy === "clear"}
+                data-testid="coding-agent-clear"
+                className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
+                  confirmClear
+                    ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
+                    : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+                }`}
+              >
+                {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
+              </button>
+            </div>
+          )}
 
           {showRuns && (
             runs.length === 0 ? (

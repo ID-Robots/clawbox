@@ -572,6 +572,32 @@ export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
   return loadRuns().slice(0, Math.max(0, limit)).map(cloneRun);
 }
 
+/**
+ * Forget the finished runs. Returns how many were removed.
+ *
+ * A run still in flight is KEPT, whatever the caller asked for: it is the only
+ * handle on a live process — the record the stop route looks up, and the one
+ * the boot sweep settles if the server dies. Dropping it would leave a coding
+ * agent working in a folder with nothing on the device that knows about it.
+ *
+ * Owner-only at the route, for the same reason the switch is: these records
+ * are the account of what the assistant did with a delegated shell, and the
+ * party they describe is not the party who should be able to erase them.
+ */
+export function clearFinishedRuns(): number {
+  const list = loadRuns();
+  const keep = list.filter((r) => r.status === "running");
+  const removed = list.length - keep.length;
+  if (removed === 0) return 0;
+  // Mutate the array the module hands out rather than replacing the binding,
+  // so every existing reader sees the same list.
+  list.length = 0;
+  list.push(...keep);
+  persist(true);
+  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request`);
+  return removed;
+}
+
 export function runningCount(): number {
   return loadRuns().filter((r) => r.status === "running").length;
 }

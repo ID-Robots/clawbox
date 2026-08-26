@@ -33,7 +33,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.readyLine": "Claude Code, claude-ds and ClawBox AI are all ready.",
 
   "codingAgent.folderLabel": "Default project folder",
-  "codingAgent.folderPlaceholder": "/home/clawbox/projects",
+  "codingAgent.folderPlaceholder": "/home/clawbox/Projects",
   "codingAgent.folderHelp":
     "Where a run works when your assistant does not name a code project. Must be a folder inside the ClawBox home — not the ClawBox OS folder itself, and not one holding credentials. Leave empty to require a project every time.",
   "codingAgent.folderSave": "Save",
@@ -47,6 +47,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.notConnected": "not connected",
 
   "codingAgent.recentRuns": "Recent runs",
+  "codingAgent.clearRuns": "Clear history",
+  "codingAgent.clearConfirm": "Clear — tap again",
+  "codingAgent.clearFailed": "Could not clear the run history.",
   "codingAgent.noRuns": "No runs yet. Ask your assistant to build or change something in a code project.",
   "codingAgent.statusRunning": "Running",
   "codingAgent.statusCompleted": "Finished",

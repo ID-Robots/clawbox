@@ -12,18 +12,20 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 import { saveEnv } from "@/tests/helpers/env";
 
 const getRun = vi.hoisted(() => vi.fn());
+const clearFinishedRuns = vi.hoisted(() => vi.fn());
 const listRuns = vi.hoisted(() => vi.fn());
 const waitForRun = vi.hoisted(() => vi.fn());
 const stopRun = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, getRun, listRuns, waitForRun, stopRun };
+  return { ...actual, getRun, listRuns, waitForRun, stopRun, clearFinishedRuns };
 });
 
 const RUN = { id: "run-k3x9q2ab", status: "completed", summary: "done", source: "agent" };
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
 let GET: (req: Request) => Promise<Response>;
+let DELETE: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let MAX_WAIT_MS: number;
 let CodingAgentError: typeof import("@/lib/coding-agent").CodingAgentError;
@@ -43,7 +45,10 @@ beforeEach(async () => {
   const lib = await import("@/lib/coding-agent");
   MAX_WAIT_MS = lib.MAX_WAIT_MS;
   CodingAgentError = lib.CodingAgentError;
-  GET = (await import("@/app/setup-api/coding-agent/runs/route")).GET;
+  clearFinishedRuns.mockReturnValue(2);
+  const runsRoute = await import("@/app/setup-api/coding-agent/runs/route");
+  GET = runsRoute.GET;
+  DELETE = runsRoute.DELETE;
   POST = (await import("@/app/setup-api/coding-agent/stop/route")).POST;
 });
 
@@ -81,6 +86,37 @@ describe("GET runs", () => {
     const body = await res.json();
     expect(typeof body.error).toBe("string");
     expect(body.kind).toBe("not_found");
+  });
+});
+
+describe("DELETE runs — clearing the history", () => {
+  const del = (auth: "cookie" | "bearer" | "none") => {
+    const headers: Record<string, string> = {};
+    if (auth === "cookie") headers.Cookie = session.cookie;
+    if (auth === "bearer") headers.Authorization = `Bearer ${MCP_TOKEN}`;
+    return DELETE(new Request("http://localhost/setup-api/coding-agent/runs", { method: "DELETE", headers }));
+  };
+
+  it("refuses the agent's bearer — these records are the account of what it did", async () => {
+    const res = await del("bearer");
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(clearFinishedRuns).not.toHaveBeenCalled();
+  });
+
+  it("refuses a caller with no credential, identically", async () => {
+    const bearer = await del("bearer");
+    const bare = await del("none");
+    expect(bare.status).toBe(403);
+    expect(await bare.json()).toEqual(await bearer.json());
+    expect(clearFinishedRuns).not.toHaveBeenCalled();
+  });
+
+  it("clears for the owner and says how many went", async () => {
+    const res = await del("cookie");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ cleared: 2 });
+    expect(clearFinishedRuns).toHaveBeenCalledTimes(1);
   });
 });
 

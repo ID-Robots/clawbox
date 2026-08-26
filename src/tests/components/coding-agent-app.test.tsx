@@ -60,9 +60,10 @@ let posts: { url: string; body: unknown }[];
  */
 function stubFetch(
   status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; defaultDirectory?: string | null },
-  runs: unknown[] = [],
+  runsArg: unknown[] = [],
   opts: { resolveTo?: string; rejectDir?: string } = {},
 ) {
+  let runs = runsArg;
   posts = [];
   let stored: string | null = status.defaultDirectory ?? null;
   const payload = () => ({
@@ -77,6 +78,13 @@ function stubFetch(
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     if (url.startsWith("/setup-api/coding-agent/status")) return json(payload());
+    if (url.startsWith("/setup-api/coding-agent/runs") && init?.method === "DELETE") {
+      posts.push({ url: "/setup-api/coding-agent/runs", body: "DELETE" });
+      const before = runs.length;
+      // The device keeps a run still in flight, whatever was asked.
+      runs = runs.filter((r) => (r as { status?: string }).status === "running");
+      return json({ cleared: before - runs.length });
+    }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });
     if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
       const body = JSON.parse(String(init.body));
@@ -231,6 +239,44 @@ describe("CodingAgentApp", () => {
       const stop = await screen.findByRole("button", { name: translations.en["codingAgent.stop"] });
       fireEvent.click(stop);
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { id: "run-k3x9q2ab" } }));
+    });
+
+    it("clears the history, but only after a second click", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [RUN]);
+      render(<CodingAgentApp />);
+      await openRuns();
+      const clear = await screen.findByTestId("coding-agent-clear");
+      expect(clear.textContent).toBe(translations.en["codingAgent.clearRuns"]);
+
+      // First click only arms it — history is not something to lose to a
+      // mis-tap.
+      fireEvent.click(clear);
+      expect(clear.textContent).toBe(translations.en["codingAgent.clearConfirm"]);
+      expect(posts).toEqual([]);
+
+      fireEvent.click(clear);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/runs", body: "DELETE" }));
+      await waitFor(() => expect(screen.getByText(translations.en["codingAgent.noRuns"])).toBeInTheDocument());
+    });
+
+    it("takes the offer back when the list is collapsed", async () => {
+      stubFetch({ enabled: true, readiness: READY }, [RUN]);
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-clear"));
+      expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearConfirm"]);
+
+      await openRuns(); // collapse
+      await openRuns(); // and open again
+      expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearRuns"]);
+      expect(posts).toEqual([]);
+    });
+
+    it("offers nothing to clear when there is no history", async () => {
+      stubFetch({ enabled: true, readiness: READY }, []);
+      render(<CodingAgentApp />);
+      await openRuns();
+      expect(screen.queryByTestId("coding-agent-clear")).not.toBeInTheDocument();
     });
 
     it("says when there is nothing to show yet", async () => {
