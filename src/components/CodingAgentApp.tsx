@@ -36,6 +36,13 @@ interface Readiness {
 
 type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
+interface GitHubState {
+  installed: boolean;
+  connected: boolean;
+  login: string | null;
+  loginCommand: string;
+}
+
 interface AgentStatus {
   enabled: boolean;
   ready: boolean;
@@ -78,6 +85,8 @@ interface Run {
   modelsUsed?: string[];
   lastActivityAt?: number;
   activeSubagents?: { type: string; description: string; startedAt: number }[];
+  /** The commit this run's work was recorded as — what a backup would push. */
+  commit?: string | null;
   thinkingTokens?: number;
   tokensUsed?: number;
   sessionId?: string | null;
@@ -184,6 +193,7 @@ export default function CodingAgentApp() {
   // the switch is already on.
   const [showRuns, setShowRuns] = useState(true);
   const [runsShown, setRunsShown] = useState(RUNS_PAGE);
+  const [github, setGithub] = useState<GitHubState | null>(null);
   // Clearing is two clicks, not a browser confirm(): the second click is the
   // confirmation, and collapsing the list takes the offer back.
   const [confirmClear, setConfirmClear] = useState(false);
@@ -202,9 +212,10 @@ export default function CodingAgentApp() {
 
   const load = useCallback(async () => {
     try {
-      const [s, r] = await Promise.all([
+      const [s, r, g] = await Promise.all([
         fetch("/setup-api/coding-agent/status", { cache: "no-store" }),
         fetch(`/setup-api/coding-agent/runs?limit=30`, { cache: "no-store" }),
+        fetch("/setup-api/coding-agent/git", { cache: "no-store" }),
       ]);
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
@@ -214,6 +225,7 @@ export default function CodingAgentApp() {
         const data = await r.json() as { runs?: Run[] };
         setRuns(Array.isArray(data.runs) ? data.runs : []);
       }
+      if (g.ok) setGithub(await g.json() as GitHubState);
     } catch {
       setError(tRef.current("codingAgent.loadFailed"));
     } finally {
@@ -318,6 +330,37 @@ export default function CodingAgentApp() {
       command = `cd ${quoted(run.directory)}`;
     }
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
+  };
+
+  /** Open a terminal on `gh auth login`. gh prints the device code; the owner
+   *  enters it on github.com from any device. No token is typed on the box. */
+  const connectGithub = () => {
+    const cmd = github?.loginCommand ?? "gh auth login --hostname github.com --git-protocol https";
+    window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command: cmd } }));
+  };
+
+  /** Push a run's folder to GitHub, private, creating the repo if needed. */
+  const backup = async (run: Run) => {
+    setBusy(`backup-${run.id}`);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/git", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(run.projectId ? { projectId: run.projectId } : { directory: run.directory }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.backupFailed")));
+      const out = await res.json() as { repo?: string; created?: boolean };
+      setError(null);
+      window.dispatchEvent(new CustomEvent("clawbox:toast", {
+        detail: { message: t("codingAgent.backupDone", { repo: out.repo ?? "GitHub" }) },
+      }));
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.backupFailed"));
+    } finally {
+      setBusy(null);
+    }
   };
 
   const clearRuns = async () => {
@@ -479,6 +522,33 @@ export default function CodingAgentApp() {
             time limit and no price limit: a run ends when it finishes, runs
             out of steps, hits a token ceiling if one is set, or goes quiet. */}
 
+        {/* GitHub. Read-only here: connecting happens in a terminal running
+            gh, which prints a device code for github.com. ClawBox never
+            handles the token — gh keeps it and lends it to git. */}
+        {github?.installed && (
+          <div className="flex items-center justify-between gap-3 mt-4 rounded-xl border border-white/[0.08] px-3 py-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">cloud_upload</span>
+              <span className="text-xs text-[var(--text-secondary)]">GitHub</span>
+              {github.connected ? (
+                <span className="text-[11px] text-emerald-400 truncate" data-testid="coding-agent-github-login">
+                  {github.login}
+                </span>
+              ) : (
+                <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.githubOff")}</span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={connectGithub}
+              data-testid="coding-agent-github-connect"
+              className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
+            >
+              {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
+            </button>
+          </div>
+        )}
+
         {/* Runs behind a button. Opening the window is usually about the
             switch; the history is one click away when it is wanted. */}
         <div className="mt-4">
@@ -613,6 +683,17 @@ export default function CodingAgentApp() {
                           )}
                           {/* Straight into the session: a live tail while it
                               works, or --resume once it has finished. */}
+                          {github?.connected && run.commit && (
+                            <button
+                              type="button"
+                              onClick={() => void backup(run)}
+                              disabled={busy === `backup-${run.id}`}
+                              data-testid={`coding-agent-backup-${run.id}`}
+                              className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
+                            >
+                              {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => openInTerminal(run)}
