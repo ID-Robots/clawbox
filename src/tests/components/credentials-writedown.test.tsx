@@ -11,7 +11,7 @@
 // Continue is unavailable until the acknowledgement is given, confirming fires
 // the same requests the button used to fire directly, Escape cancels, and the
 // accent follows the edition.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import CredentialsStep from "@/components/CredentialsStep";
 
@@ -87,6 +87,13 @@ beforeEach(() => {
     return { ok: false, status: 404, json: async () => ({}) } as Response;
   });
   vi.stubGlobal("fetch", fetchMock);
+});
+
+// `restoreMocks` does not reach globals put in place by `vi.stubGlobal`, and
+// `unstubGlobals` is off, so anything stubbed here would outlive its test —
+// the clipboard case below replaces `navigator` wholesale.
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 /** Render Step 3 and wait out the two reads it does on mount. */
