@@ -220,14 +220,15 @@ describe("full command access", () => {
     expect(await lib.getFullAccess()).toBe(true);
   });
 
-  it("withholds BOTH Bash lists, so no command is filtered by name", async () => {
+  it("allows EVERY command via Bash(*) — withholding the list grants nothing", async () => {
+    // First version withheld both lists; on the box curl was STILL denied,
+    // because in headless mode the allow-list is what approves a command.
     const lib = await import("@/lib/coding-agent");
     const args = lib.buildRunArgs({ resumeSessionId: null, fullAccess: true });
     const joined = args.join(" ");
-    // The allow-list is gone entirely — that is the point.
-    expect(args).not.toContain("--allowedTools");
+    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
     for (const rule of lib.BASH_ALLOWLIST) expect(args).not.toContain(rule);
-    // ...and so is the command deny-list, which only ever backstopped it.
+    // The command deny-list is gone — that is the point of the switch.
     for (const rule of lib.BASH_DENYLIST) expect(joined).not.toContain(rule);
   });
 

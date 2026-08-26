@@ -1201,9 +1201,14 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?
   // which is why the task travels on stdin and these come last.
   args.push("--tools", toolsFor(opts.subagents === true));
   if (opts.fullAccess) {
-    // No command policy at all — but the FILE rules still ship, so the
-    // credential stores stay closed and the deny rules keep outranking
-    // acceptEdits. Full access is about commands, not secrets.
+    // "Bash(*)" — allow EVERY command — rather than withholding the lists.
+    // Withholding grants nothing: in headless -p mode the allow-list is what
+    // approves a command, and with no list at all every Bash call just waits
+    // for an approval nobody is there to give (verified on the box: curl was
+    // still denied with the lists absent). The FILE rules still ship, and a
+    // deny rule outranks any allow, so the credential stores stay closed.
+    // Full access is about commands, not secrets.
+    args.push("--allowedTools", "Bash(*)");
     args.push("--disallowedTools", ...fileDenyRules());
   } else {
     args.push("--allowedTools", ...BASH_ALLOWLIST);
