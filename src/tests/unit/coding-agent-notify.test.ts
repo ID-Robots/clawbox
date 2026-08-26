@@ -124,6 +124,37 @@ describe("the Telegram leg", () => {
     expect(notifyHermesTelegramUser).not.toHaveBeenCalled();
   });
 
+  it("refuses a token that could reshape the request path", async () => {
+    // The token lands in the URL. CodeQL flags it as file data reaching an
+    // outbound request, and it is right to: a config value carrying "/" or "?"
+    // would change which path is called. The host is a literal, so this is not
+    // an SSRF, but the value still has to be proved before it is used.
+    configGet.mockImplementation(async (key: string) =>
+      key === "telegram_bot_token" ? "123:abc/../../evil?x=" : undefined);
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends the token exactly as issued — the colon must not be percent-encoded", async () => {
+    // Encoding the token looks like the safe thing to do and silently breaks
+    // every notice: Telegram wants the literal "<id>:<secret>" and rejects %3A.
+    configGet.mockImplementation(async (key: string) => (key === "telegram_bot_token" ? "123:abc" : undefined));
+    readTelegramAllowFrom.mockResolvedValue(["1001"]);
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await announceCodingAgent(run());
+
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(url).toContain("/bot123:abc/");
+    expect(url).not.toContain("%3A");
+  });
+
   it("on OpenClaw messages the approved senders through the Bot API, as plain text", async () => {
     configGet.mockImplementation(async (key: string) => (key === "telegram_bot_token" ? "123:abc" : undefined));
     readTelegramAllowFrom.mockResolvedValue(["1001", "not-a-chat-id", "1002"]);

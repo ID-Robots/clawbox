@@ -39,6 +39,15 @@ const MAX_TELEGRAM_CHARS = 1_000;
 const MAX_TELEGRAM_RECIPIENTS = 5;
 const TELEGRAM_TIMEOUT_MS = 8_000;
 const CHAT_ID_RE = /^-?\d{1,20}$/;
+// The bot token is interpolated into the request path, so constrain it to the
+// shape Telegram issues (`<bot_id>:<secret>`) before it is ever used. The
+// charset is the part that matters: no "/", "?", "#" or "@" means a config
+// value cannot reshape the path or the request, and the host is a literal
+// either way. No length floor — that would only reject valid tokens if Telegram
+// changes format, and adds nothing the charset does not already give.
+// This is also the check CodeQL wants for its "file data in outbound network
+// request" alerts.
+const BOT_TOKEN_RE = /^\d{1,20}:[A-Za-z0-9_-]{1,200}$/;
 
 function duration(run: CodingRun): string {
   const ms = (run.completedAt ?? Date.now()) - run.startedAt;
@@ -78,6 +87,10 @@ function notifyDesktop(message: string): void {
 
 async function sendTelegramDirect(token: string, chatId: string, text: string): Promise<boolean> {
   try {
+    // Interpolated raw, not encoded: Telegram wants the literal "<id>:<secret>",
+    // and encodeURIComponent turns the colon into %3A, which the API rejects.
+    // BOT_TOKEN_RE is what makes this safe — the caller has already proved the
+    // value holds nothing that could reshape the URL.
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -94,7 +107,12 @@ async function sendTelegramDirect(token: string, chatId: string, text: string): 
 
 async function notifyTelegram(message: string): Promise<void> {
   const token = await configGet("telegram_bot_token");
-  if (typeof token !== "string" || !token.trim()) return;
+  if (typeof token !== "string") return;
+  const botToken = token.trim();
+  if (!BOT_TOKEN_RE.test(botToken)) {
+    if (botToken) console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
+    return;
+  }
   const text = message.slice(0, MAX_TELEGRAM_CHARS);
 
   const harness = await getActiveHarness();
@@ -111,7 +129,7 @@ async function notifyTelegram(message: string): Promise<void> {
     .filter((id) => CHAT_ID_RE.test(id))
     .slice(0, MAX_TELEGRAM_RECIPIENTS);
   for (const id of ids) {
-    const ok = await sendTelegramDirect(token.trim(), id, text);
+    const ok = await sendTelegramDirect(botToken, id, text);
     if (!ok) console.error(`[coding-agent] telegram notice to ${id} was not delivered`);
   }
 }
