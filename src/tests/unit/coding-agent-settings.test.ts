@@ -264,3 +264,32 @@ describe("what every run now gets, permanently", () => {
     expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
   });
 });
+
+describe("working in a folder the owner already has", () => {
+  it("resolves a bare name against the default project folder", async () => {
+    // Before this, a folder the owner made in ~/Projects could only be
+    // reached by typing its whole absolute path, and nothing told the
+    // assistant it existed.
+    configGet.mockImplementation(async (k: string) =>
+      k === "coding_agent_default_directory" ? "/home/clawbox/Projects" : undefined);
+    const lib = await import("@/lib/coding-agent");
+    const r = await lib.resolveWorkingDirectory({ directory: "my-existing-app" });
+    expect(r.directory).toBe("/home/clawbox/Projects/my-existing-app");
+  });
+
+  it("refuses a bare name that tries to climb out", async () => {
+    configGet.mockImplementation(async (k: string) =>
+      k === "coding_agent_default_directory" ? "/home/clawbox/Projects" : undefined);
+    const lib = await import("@/lib/coding-agent");
+    for (const bad of ["..", ".", "../secrets", "a/b", "..\\\\x"]) {
+      await expect(lib.resolveWorkingDirectory({ directory: bad })).rejects.toBeInstanceOf(lib.CodingAgentError);
+    }
+  });
+
+  it("says so plainly when there is no default to resolve against", async () => {
+    configGet.mockResolvedValue(undefined);
+    const lib = await import("@/lib/coding-agent");
+    await expect(lib.resolveWorkingDirectory({ directory: "some-folder" }))
+      .rejects.toThrow(/absolute path, or a folder name/i);
+  });
+});

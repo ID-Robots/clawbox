@@ -149,6 +149,16 @@ function firstLine(s: string, max = 120): string {
 }
 
 /** Everything a model needs to relay a run, redacted like logs_tail's output. */
+/** Folders in the owner's project directory, for "where can I work?". */
+async function listFolders(): Promise<string[]> {
+  try {
+    const s = await apiGet<{ projectFolders?: unknown }>("/setup-api/coding-agent/status", { timeoutMs: 8_000 });
+    return Array.isArray(s.projectFolders) ? s.projectFolders.filter((f): f is string => typeof f === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 function describeRun(run: RunPayload, tail: number): string {
   const parts: string[] = [];
   parts.push(`Run ${run.id}: ${run.status} after ${elapsed(run)}`);
@@ -209,7 +219,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list (the usual case) or an absolute directory inside the ClawBox home. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task. Set resume_run_id to continue a finished run in the same session, e.g. to fix what it missed.",
+    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list, or a folder name from the list coding_agent_status shows — a bare name works as `directory`. Prefer a folder the owner already has over scaffolding a new project. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -282,7 +292,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           timeoutMs: 15_000,
         });
         const runs = data.runs ?? [];
-        if (!runs.length) return text("There are no coding runs on this ClawBox yet. Start one with coding_agent_run.");
+        if (!runs.length) {
+          const folders = await listFolders();
+          return text(
+            "There are no coding runs on this ClawBox yet. Start one with coding_agent_run."
+            + (folders.length ? `\nFolders you can work in: ${folders.join(", ")}` : ""),
+          );
+        }
         return json(runs.map((r) => ({
           run_id: r.id,
           status: r.status,

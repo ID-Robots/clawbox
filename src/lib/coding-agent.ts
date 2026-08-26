@@ -467,6 +467,8 @@ export interface CodingAgentStatus {
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
   effortLevels: readonly CodingEffort[];
+  /** Folders in the default project folder the assistant may work in. */
+  projectFolders: string[];
   /** The ceilings a run stops at, so the app can show them without guessing. */
   /** Agent steps a run gets, and the range the owner may choose from. */
   maxTurns: number;
@@ -608,6 +610,29 @@ export async function setTokenLimit(limit: number | null): Promise<number | null
 }
 
 
+  /**
+ * Folder names directly inside the owner's default project folder.
+ *
+ * The assistant could only ever see code projects — the 15 under
+ * data/code-projects — so a folder the owner made themselves in ~/Projects
+ * was invisible and could only be reached by typing its absolute path.
+ * Names only: this is a picker, not a file listing.
+ */
+export async function listProjectFolders(): Promise<string[]> {
+  const base = await getDefaultDirectory();
+  if (!base) return [];
+  try {
+    const entries = await fs.promises.readdir(base, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => e.name)
+      .sort()
+      .slice(0, 100);
+  } catch {
+    return [];
+  }
+}
+
 // ─── Readiness ───────────────────────────────────────────────────────────────
 
 function homeDir(): string {
@@ -692,13 +717,14 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness, defaultDirectory, effort, maxTurns, tokenLimit] = await Promise.all([
+  const [enabled, readiness, defaultDirectory, effort, maxTurns, tokenLimit, projectFolders] = await Promise.all([
     isCodingAgentEnabled(),
     checkReadiness(),
     getDefaultDirectory(),
     getEffort(),
     getMaxTurns(),
     getTokenLimit(),
+    listProjectFolders(),
   ]);
   return {
     enabled,
@@ -715,6 +741,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     effortLevels: OFFERED_EFFORT_LEVELS.includes(effort)
       ? OFFERED_EFFORT_LEVELS
       : (EFFORT_LEVELS.filter((l) => OFFERED_EFFORT_LEVELS.includes(l) || l === effort) as readonly CodingEffort[]),
+    projectFolders,
     maxTurns,
     minMaxTurns: MIN_MAX_TURNS,
     maxMaxTurns: MAX_MAX_TURNS,
@@ -1120,7 +1147,18 @@ export async function resolveWorkingDirectory(input: {
     throw new CodingAgentError("invalid", "The folder path is too long.");
   }
   if (!path.isAbsolute(directory)) {
-    throw new CodingAgentError("invalid", "The folder must be an absolute path.");
+    // A bare name means a folder in the owner's default directory. Without
+    // this, working on a folder they already have — ~/Projects/my-app —
+    // required the assistant to know and type the whole absolute path, and
+    // nothing told it the folder existed.
+    const base = await getDefaultDirectory();
+    if (!base) {
+      throw new CodingAgentError("invalid", "The folder must be an absolute path, or a folder name inside your default project folder.");
+    }
+    if (directory.includes("/") || directory.includes("\\") || directory === "." || directory === "..") {
+      throw new CodingAgentError("invalid", "Give a single folder name, or an absolute path.");
+    }
+    return resolveWorkingDirectory({ directory: path.join(base, directory) });
   }
   const normalized = path.resolve(directory);
 
