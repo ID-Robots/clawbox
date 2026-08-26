@@ -1161,7 +1161,23 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   }
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
-  spawnRun(run, resumeSessionId, setprivPath);
+  try {
+    spawnRun(run, resumeSessionId, setprivPath);
+  } catch (err) {
+    // The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
+    // — a cwd that vanished between the check and here, a setpriv that is not
+    // executable — nothing would ever settle it: `live` has no entry, so the
+    // boot sweep is the only thing that would, and until the next restart the
+    // one-run-at-a-time rule answers every later run with "busy". Settle it
+    // here, then report the failure to the caller.
+    run.status = "failed";
+    run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+    run.completedAt = Date.now();
+    persist(true);
+    wakeWaiters(run.id);
+    console.error(`[coding-agent] ${run.id} failed to spawn:`, err instanceof Error ? err.message : err);
+    throw new CodingAgentError("not_ready", run.error);
+  }
   return cloneRun(run);
 }
 

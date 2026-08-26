@@ -40,6 +40,7 @@ import { registerCodingAgentTools } from "../../../mcp/tools/coding-agent";
 import { ApiError } from "../../../mcp/lib/errors";
 import { BANNED_DESCRIPTION_RE, MAX_DESCRIPTION_CHARS } from "../../../mcp/lib/register";
 import { PARAM_NAME_RE, TOOL_NAME_RE } from "../../../mcp/lib/schema";
+import { capText } from "../../../mcp/lib/guard";
 
 const NAMES = ["coding_agent_run", "coding_agent_status", "coding_agent_stop"];
 
@@ -161,6 +162,33 @@ describe("coding_agent_run", () => {
     expect(out.error.next).toMatch(/code_project_list/);
   });
 
+  it("tells a stale resume_run_id from a missing project — they are different 404s", async () => {
+    apiPost.mockRejectedValue(new ApiError(404, JSON.stringify({ error: "There is no coding run with that id to resume.", kind: "not_found" })));
+    const out = await harness().call("coding_agent_run", { task: "x", resume_run_id: "run-gone0000" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("NOT_FOUND");
+    expect(out.error.message).toMatch(/resume/i);
+    expect(out.error.next).toMatch(/coding_agent_status/);
+    // The old catch-all sent this to code_project_list, an id that was never wrong.
+    expect(out.error.next).not.toMatch(/code_project_init/);
+  });
+
+  it("carries the route's own reason for refusing a working folder", async () => {
+    // The generic 400 mapping is "the device rejected one of the arguments",
+    // which the agent cannot act on. The route knows exactly which rule broke.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({
+      error: "The ClawBox OS checkout itself is off limits. Use a code project or another folder in the home directory.",
+      kind: "invalid",
+    })));
+    const out = await harness().call("coding_agent_run", { task: "x", directory: "/home/clawbox/clawbox" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/off limits/);
+    expect(out.error.next).toMatch(/code_project_list/);
+  });
+
   it("does not report a run the device did not start", async () => {
     apiPost.mockResolvedValue({ started: false });
     const out = await harness().call("coding_agent_run", { task: "x", project_id: "site" });
@@ -195,6 +223,31 @@ describe("coding_agent_status", () => {
       "/setup-api/coding-agent/runs",
       expect.objectContaining({ query: { id: "run-k3x9q2ab", wait: 30 }, timeoutMs: 45_000 }),
     );
+  });
+
+  it("keeps the summary when the output cap bites — the activity log is what gets cut", async () => {
+    // A real worst case, not a token one: the runner keeps 60 progress lines
+    // of up to MAX_PROGRESS_LINE_CHARS (160) and caps a summary at 6 000, so a
+    // chatty run asked for with tail=60 is ~9 600 chars of activity plus a
+    // long summary — comfortably past this tool's 12 000-char declared cap.
+    // captureRegistrar does not apply that cap, so the test applies it the way
+    // the real registrar does, and asserts which end survives.
+    const STATUS_OUTPUT_CHARS = 12_000; // mirrors the tool's declared maxChars
+    const progress = Array.from({ length: 60 }, (_, i) => `line ${i} ${"x".repeat(150)}`);
+    const summary = `THE-SUMMARY-STARTS-HERE ${"s".repeat(5_900)} THE-SUMMARY-ENDS-HERE`;
+    apiGet.mockResolvedValue({ run: { ...RUN, progress, summary, error: "something went wrong" } });
+
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab", tail: 60 });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text.length).toBeGreaterThan(STATUS_OUTPUT_CHARS); // the cap really would bite
+
+    const capped = capText(out.text, STATUS_OUTPUT_CHARS);
+    expect(capped).toContain("THE-SUMMARY-STARTS-HERE");
+    expect(capped).toContain("[error]\nsomething went wrong");
+    // The activity log is the long, low-value part, so it is what the cut eats.
+    expect(capped).toContain("…[truncated");
+    expect(capped.indexOf("[summary from the coding agent")).toBeLessThan(capped.indexOf("[recent activity]"));
   });
 
   it("tells the agent to keep waiting while a run is still working", async () => {
