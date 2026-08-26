@@ -19,6 +19,7 @@ import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
+import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
@@ -2416,25 +2417,84 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
-
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetTyped, setResetTyped] = useState("");
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
 
   const [resetPhase, setResetPhase] = useState<"waiting" | "reconnecting" | "done" | null>(null);
   const [resetDots, setResetDots] = useState(0);
   const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const resetSetup = async () => {
-    setResetting(true);
+  const factoryResetCancelRef = useRef<HTMLButtonElement | null>(null);
+
+  const closeResetConfirm = () => {
     setResetConfirm(false);
+    setResetPassword("");
+    setResetTyped("");
+    setResetError(null);
+  };
+
+  // Same treatment the password-change dialog already gets: land on Cancel,
+  // leave on Escape, hand focus back where it came from. It matters more here —
+  // this dialog is the one standing in front of the wipe.
+  useEffect(() => {
+    if (!resetConfirm || resetting) return;
+    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+    factoryResetCancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || resetSubmitting) return;
+      setResetConfirm(false);
+      setResetPassword("");
+      setResetTyped("");
+      setResetError(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus?.();
+    };
+  }, [resetConfirm, resetting, resetSubmitting]);
+
+  const resetSetup = async () => {
+    if (resetSubmitting) return;
+    setResetSubmitting(true);
+    setResetError(null);
+
+    // The wipe only starts once the box has accepted the password and the typed
+    // word. Until then this stays a plain dialog: the old flow fired the request
+    // and went straight to the "erasing…" overlay without ever reading the
+    // response, so a refusal looked exactly like a reset in progress.
+    let accepted = false;
+    try {
+      const res = await fetch("/setup-api/setup/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: resetPassword, confirm: resetTyped }),
+      });
+      accepted = res.ok;
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setResetError(detail.error || t("settings.factoryResetRefused"));
+      }
+    } catch {
+      // The box wipes and reboots mid-request, so a dropped connection is the
+      // normal success path, not a failure.
+      accepted = true;
+    } finally {
+      setResetSubmitting(false);
+    }
+
+    if (!accepted) return;
+
+    setResetting(true);
+    closeResetConfirm();
     setResetPhase("waiting");
     setResetDots(0);
 
     // Animate dots
     resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
-
-    try {
-      await fetch("/setup-api/setup/reset", { method: "POST" });
-    } catch { /* device reboots, connection drops */ }
 
     // Wait for device to go down, then poll for reconnect
     setTimeout(() => {
@@ -2570,6 +2630,70 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         document.body
       )
     : null;
+
+  // One dialog, rendered from both the mobile and the desktop tree below. It
+  // used to be copy-pasted into each, which is how the two could have drifted.
+  const factoryResetDialog = resetConfirm && !resetting && (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="factory-reset-title"
+        className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]"
+      >
+        <h3 id="factory-reset-title" className="text-lg font-bold text-[var(--text-primary)] mb-2">
+          {t("settings.factoryResetTitle")}
+        </h3>
+        <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
+
+        <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-password">
+          {t("settings.security.currentPassword")}
+        </label>
+        <input
+          id="factory-reset-password"
+          type="password"
+          autoComplete="current-password"
+          value={resetPassword}
+          onChange={e => { setResetPassword(e.target.value); setResetError(null); }}
+          className="w-full mb-4 px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+        />
+
+        <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-confirm">
+          {t("settings.factoryResetTypeToConfirm", { word: FACTORY_RESET_CONFIRMATION })}
+        </label>
+        <input
+          id="factory-reset-confirm"
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          value={resetTyped}
+          onChange={e => { setResetTyped(e.target.value); setResetError(null); }}
+          placeholder={FACTORY_RESET_CONFIRMATION}
+          className="w-full px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+        />
+
+        {resetError && <p className="mt-3 text-xs text-red-400" role="alert">{resetError}</p>}
+
+        <div className="flex gap-3 mt-5">
+          <button
+            ref={factoryResetCancelRef}
+            onClick={closeResetConfirm}
+            disabled={resetSubmitting}
+            className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-40"
+          >
+            {t("cancel")}
+          </button>
+          <button
+            onClick={resetSetup}
+            disabled={resetSubmitting || !resetPassword || !isFactoryResetConfirmed(resetTyped)}
+            className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors disabled:opacity-40 disabled:hover:bg-red-500 disabled:cursor-not-allowed"
+          >
+            {resetSubmitting ? `${t("settings.resetting")}…` : t("settings.reset")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   const renderContent = () => (
     <>
@@ -5586,22 +5710,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {/* Factory Reset confirmation modal */}
-      {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                {t("cancel")}
-              </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                {t("settings.reset")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {factoryResetDialog}
 
       {/* Hotspot enable confirmation — single-radio collision warning */}
       {hotspotConfirmEnable && (
@@ -5778,22 +5887,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {/* Factory Reset confirmation modal */}
-      {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                {t("cancel")}
-              </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                {t("settings.reset")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {factoryResetDialog}
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (
