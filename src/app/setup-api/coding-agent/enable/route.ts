@@ -47,7 +47,14 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const fields = (body ?? {}) as {
+  // A JSON body may legally be a string, a number or a boolean, and `in`
+  // throws a TypeError on those — which surfaced as a 500 where the caller
+  // should have been told 400. Measured: `"a string"`, `42` and `true` all
+  // returned 500 before this guard.
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const fields = body as {
     enabled?: unknown;
     defaultDirectory?: unknown;
     effort?: unknown;

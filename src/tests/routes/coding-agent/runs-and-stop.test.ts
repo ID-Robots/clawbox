@@ -182,3 +182,21 @@ describe("POST stop", () => {
     expect((await raced.json()).error).toBe("no such run");
   });
 });
+
+describe("malformed request bodies", () => {
+  // A JSON body may legally be a string, a number or a boolean. Reading
+  // fields off one with `in` throws a TypeError, which reached the caller as
+  // a 500. Measured on the box before the fix: "a string", 42 and true all
+  // returned 500.
+  it("answers 400, never 500, for JSON that is not an object", async () => {
+    const enable = (await import("@/app/setup-api/coding-agent/enable/route")).POST;
+    for (const body of ['"a string"', "42", "true", "null", "[1,2]"]) {
+      const res = await enable(new Request("http://localhost/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: session.cookie },
+        body,
+      }));
+      expect(res.status, `body ${body}`).toBe(400);
+    }
+  });
+});

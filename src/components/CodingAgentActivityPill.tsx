@@ -64,6 +64,10 @@ export default function CodingAgentActivityPill(
       data-testid="coding-agent-activity"
       data-status={run.status}
       role="status"
+      // The elapsed time re-renders every second. Inside a polite live region
+      // that makes a screen reader announce the whole pill on every tick for
+      // as long as the run lasts. The status text is what is worth announcing;
+      // the clock is marked aria-hidden below.
       aria-live={live ? "polite" : "off"}
       style={{
         display: "inline-flex",
@@ -82,7 +86,10 @@ export default function CodingAgentActivityPill(
       <span aria-hidden="true">{tone.glyph}</span>
       <span>{label}</span>
       {run.projectId ? <span style={{ opacity: 0.7 }}>· {run.projectId}</span> : null}
-      <span style={{ opacity: 0.7 }}>· {took}</span>
+      {/* aria-hidden: it changes every second, and a live region would
+          announce the whole pill on every tick. Sighted users get the clock;
+          screen readers get the status, which is what actually changed. */}
+      <span aria-hidden="true" style={{ opacity: 0.7 }}>· {took}</span>
       {onOpen ? (
         <button
           type="button"

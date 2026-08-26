@@ -432,7 +432,9 @@ export default function CodingAgentApp() {
   const statusLabel = (s: Run["status"]) => t(`codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
 
   return (
-    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto" data-testid="coding-agent-panel">
+    // @container so the panel sizes to its WINDOW, not the viewport — this is
+    // a desktop window the owner can resize independently of the screen.
+    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
 
         {/* One row: what this is, and whether it is on. The switch is the
@@ -494,7 +496,10 @@ export default function CodingAgentApp() {
               placeholder={t("codingAgent.folderPlaceholder")}
               spellCheck={false}
               data-testid="coding-agent-folder"
-              className="flex-1 min-w-0 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+              // text-base on a phone: an input under 16px makes iOS Safari
+              // zoom the page on focus, which on this panel scrolls the rest
+              // of the settings out of view.
+              className="flex-1 min-w-0 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-base @sm:text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
             />
             <button
               type="button"

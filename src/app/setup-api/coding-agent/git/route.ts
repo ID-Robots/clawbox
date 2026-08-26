@@ -65,7 +65,12 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const fields = (body ?? {}) as { projectId?: unknown; directory?: unknown };
+  // Same guard as the enable route: a JSON string or number is valid JSON
+  // and reading fields off it must answer 400, not crash into a 500.
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+  const fields = body as { projectId?: unknown; directory?: unknown };
 
   try {
     // The same resolver a run uses, so a backup cannot reach a folder a run
