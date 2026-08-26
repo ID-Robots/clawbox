@@ -357,4 +357,25 @@ describe("CredentialsStep write-down confirmation", () => {
     expect(hermesBand).toContain("255, 95, 82");
     expect(hermesBand).not.toContain("rgb(18, 214, 164)");
   });
+
+  it("centres the lock in its badge instead of letting the font class flatten it", async () => {
+    // `globals.css` sets `.material-symbols-rounded { display: inline-block }`
+    // outside any cascade layer, and Tailwind's `.grid` sits in
+    // `@layer utilities` — unlayered beats layered regardless of source order.
+    // A badge wearing the font class itself therefore stays inline-block, and
+    // `place-items-center` centres nothing: the glyph lands top-left. jsdom
+    // computes no layout, so what is held here is the STRUCTURE that made the
+    // difference — the centring box and the glyph are separate elements.
+    const { container } = await mountStep(false);
+    fillForm(container);
+    fireEvent.click(connect());
+
+    const badge = screen.getByTestId("writedown-danger-badge");
+    expect(badge.className).toContain("grid");
+    expect(badge.className).toContain("place-items-center");
+    expect(badge.className).not.toContain("material-symbols-rounded");
+
+    const glyph = badge.querySelector(".material-symbols-rounded");
+    expect(glyph?.textContent?.trim()).toBe("lock");
+  });
 });

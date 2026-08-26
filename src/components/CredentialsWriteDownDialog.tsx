@@ -140,19 +140,31 @@ export default function CredentialsWriteDownDialog({
             borderBottom: `1px solid ${DANGER_EDGE}`,
           }}
         >
+          {/* The badge and the glyph are two elements on purpose. `globals.css`
+              declares `.material-symbols-rounded { display: inline-block }`
+              UNLAYERED, and Tailwind's `.grid` lives inside `@layer utilities`
+              — unlayered always wins the cascade over layered, whatever the
+              source order. So a badge that wore the font class ITSELF stayed
+              inline-block, `place-items-center` had no grid to act on, and the
+              lock sat against the top-left corner of the 2.3rem square. Kept
+              apart, the badge is a real grid box and centres its child on both
+              axes — the same shape the acknowledgement box below uses, and the
+              icon badges in UpdateStep. */}
           <span
             aria-hidden="true"
-            className="material-symbols-rounded grid shrink-0 place-items-center rounded-[10px]"
+            data-testid="writedown-danger-badge"
+            className="grid shrink-0 place-items-center rounded-[10px]"
             style={{
               width: "2.3rem",
               height: "2.3rem",
-              fontSize: 20,
               color: DANGER_INK,
               background: DANGER_BADGE_FILL,
               border: `1px solid ${DANGER_BADGE_EDGE}`,
             }}
           >
-            lock
+            <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+              lock
+            </span>
           </span>
           <div className="min-w-0">
             <h2
