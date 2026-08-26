@@ -47,7 +47,10 @@ interface AgentStatus {
   effortLevels: Effort[];
   subagents: boolean;
   maxTurns: number;
-  maxBudgetUsd: number;
+  minMaxTurns: number;
+  maxMaxTurns: number;
+  tokenLimit: number | null;
+  minTokenLimit: number;
 }
 
 interface Run {
@@ -72,6 +75,7 @@ interface Run {
   subagentsActive?: number;
   subagentsTotal?: number;
   thinkingTokens?: number;
+  tokensUsed?: number;
   sessionId?: string | null;
   /** Where Claude Code keeps this run's transcript, for the live preview. */
   transcriptPath?: string | null;
@@ -154,6 +158,8 @@ export default function CodingAgentApp() {
   // The folder field is a DRAFT until saved, so typing does not fight the
   // status the route keeps returning.
   const [dirDraft, setDirDraft] = useState<string | null>(null);
+  const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
+  const [tokensDraft, setTokensDraft] = useState<string | null>(null);
 
   // `load` must not re-run because a translation function was re-created: a
   // refetch on every render would overwrite a freshly toggled switch with the
@@ -174,6 +180,8 @@ export default function CodingAgentApp() {
       const next = await s.json() as AgentStatus;
       setStatus(next);
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
+      setTurnsDraft(prev => (prev === null ? String(next.maxTurns) : prev));
+      setTokensDraft(prev => (prev === null ? (next.tokenLimit === null ? "" : String(next.tokenLimit)) : prev));
       if (r.ok) {
         const data = await r.json() as { runs?: Run[] };
         setRuns(Array.isArray(data.runs) ? data.runs : []);
@@ -238,6 +246,8 @@ export default function CodingAgentApp() {
       const next = await res.json() as AgentStatus;
       setStatus(next);
       setDirDraft(next.defaultDirectory ?? "");
+      setTurnsDraft(String(next.maxTurns));
+      setTokensDraft(next.tokenLimit === null ? "" : String(next.tokenLimit));
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.folderFailed"));
     } finally {
@@ -471,15 +481,60 @@ export default function CodingAgentApp() {
           />
         </div>
 
-        {/* The ceilings a run stops at. Read-only: they are the device's
-            limits, not a preference. */}
-        {status && (
-          <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-2.5 leading-relaxed">
-            {t("codingAgent.limits")
-              .replace("{turns}", String(status.maxTurns))
-              .replace("{budget}", String(status.maxBudgetUsd))}
-          </p>
-        )}
+        {/* The ceilings a run stops at — both the owner's to set. There is no
+            time limit and no price limit: a run ends when it finishes, runs
+            out of steps, hits a token ceiling if one is set, or goes quiet. */}
+        <div className="grid grid-cols-2 gap-3 mt-4">
+          <div>
+            <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.turnsLabel")}
+            </label>
+            <input
+              id="coding-agent-turns"
+              type="number"
+              inputMode="numeric"
+              min={status?.minMaxTurns ?? 10}
+              max={status?.maxMaxTurns ?? 2000}
+              value={turnsDraft ?? ""}
+              onChange={(e) => setTurnsDraft(e.target.value)}
+              onBlur={() => {
+                const n = Number(turnsDraft);
+                if (Number.isFinite(n) && n !== status?.maxTurns) {
+                  void saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
+                }
+              }}
+              data-testid="coding-agent-turns"
+              className="w-full mt-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+            />
+          </div>
+          <div>
+            <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.tokensLabel")}
+            </label>
+            <input
+              id="coding-agent-tokens"
+              type="number"
+              inputMode="numeric"
+              min={status?.minTokenLimit ?? 10000}
+              placeholder={t("codingAgent.tokensPlaceholder")}
+              value={tokensDraft ?? ""}
+              onChange={(e) => setTokensDraft(e.target.value)}
+              onBlur={() => {
+                const raw = (tokensDraft ?? "").trim();
+                const next = raw === "" ? null : Number(raw);
+                if (next !== null && !Number.isFinite(next)) return;
+                if (next !== (status?.tokenLimit ?? null)) {
+                  void saveSetting({ tokenLimit: next }, "tokens", t("codingAgent.tokensFailed"));
+                }
+              }}
+              data-testid="coding-agent-tokens"
+              className="w-full mt-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+            />
+          </div>
+        </div>
+        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1.5 leading-relaxed">
+          {t("codingAgent.limitsHelp")}
+        </p>
 
         {/* Runs behind a button. Opening the window is usually about the
             switch; the history is one click away when it is wanted. */}

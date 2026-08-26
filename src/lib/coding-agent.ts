@@ -131,17 +131,33 @@ export const CODING_AGENT_SUBAGENTS_CONFIG_KEY = "coding_agent_subagents";
  * So the question is no longer "how long has it been alive" but "is it doing
  * anything". Every stream event stamps lastActivityAt, and only silence
  * counts against a run. Runaway cost is bounded separately and properly, by
- * MAX_TURNS and MAX_BUDGET_USD; this is only here so a wedged process cannot
+ * the owner's step and token ceilings; this is only here so a wedged process cannot
  * hold the one-run-at-a-time slot forever.
  */
 export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** How often the idle check runs. */
 const IDLE_CHECK_MS = 60_000;
 /** Agent turns before Claude Code stops on its own (`error_max_turns`). */
-export const MAX_TURNS = 60;
-/** Claude Code's internal cost estimate cap. Informational for an unknown
- *  model name — ClawBox AI bills by plan — but it stops a runaway loop. */
-export const MAX_BUDGET_USD = 3;
+/** Default agent turns before Claude Code stops itself. The owner can change
+ *  it; a long project needs more than a short one. */
+export const DEFAULT_MAX_TURNS = 60;
+export const MIN_MAX_TURNS = 10;
+export const MAX_MAX_TURNS = 2_000;
+export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
+
+/**
+ * Optional ceiling on the tokens one run may spend. Null means no ceiling.
+ *
+ * Claude Code has no flag for this — only --max-budget-usd, which prices an
+ * unknown model name and so meant nothing here — so the device enforces it
+ * from the usage the stream already reports, and stops the run itself.
+ *
+ * Counted the way a bill is: every request pays for the input it carries, so
+ * input is summed per turn even though the conversation repeats. Cache reads
+ * are cheaper than fresh input but are not free, so they count too.
+ */
+export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
+export const MIN_TOKEN_LIMIT = 10_000;
 export const MAX_TASK_CHARS = 4_000;
 export const MAX_DIRECTORY_CHARS = 512;
 /** Runs at once. A Jetson has one coding agent's worth of memory to spare,
@@ -276,6 +292,12 @@ export interface CodingRun {
   subagentsTotal: number;
   /** Whether sub-agents were available to this run at all. */
   subagentsAllowed: boolean;
+  /** The step ceiling this run started with. */
+  maxTurns: number;
+  /** Tokens spent so far, summed the way a bill is — see the config key. */
+  tokensUsed: number;
+  /** The ceiling that applied, or null when the run was uncapped. */
+  tokenLimit: number | null;
   /**
    * Reasoning tokens Claude Code reports so far.
    *
@@ -339,8 +361,13 @@ export interface CodingAgentStatus {
   /** Whether a run may fan out into sub-agents. */
   subagents: boolean;
   /** The ceilings a run stops at, so the app can show them without guessing. */
+  /** Agent steps a run gets, and the range the owner may choose from. */
   maxTurns: number;
-  maxBudgetUsd: number;
+  minMaxTurns: number;
+  maxMaxTurns: number;
+  /** Token ceiling the device enforces, or null for none. */
+  tokenLimit: number | null;
+  minTokenLimit: number;
   /** Silence, not total time, is what ends a run. */
   runIdleTimeoutMs: number;
 }
@@ -429,6 +456,47 @@ export async function setEffort(effort: string): Promise<CodingEffort> {
   }
   await configSet(CODING_AGENT_EFFORT_CONFIG_KEY, effort);
   return effort;
+}
+
+/** The owner's turn ceiling, clamped to something the CLI will accept. */
+export async function getMaxTurns(): Promise<number> {
+  const raw = await configGet(CODING_AGENT_TURNS_CONFIG_KEY);
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_TURNS;
+  return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
+}
+
+export async function setMaxTurns(turns: unknown): Promise<number> {
+  if (typeof turns !== "number" || !Number.isFinite(turns)) {
+    throw new CodingAgentError("invalid", "Steps must be a number.");
+  }
+  const n = Math.round(turns);
+  if (n < MIN_MAX_TURNS || n > MAX_MAX_TURNS) {
+    throw new CodingAgentError("invalid", `Steps must be between ${MIN_MAX_TURNS} and ${MAX_MAX_TURNS}.`);
+  }
+  await configSet(CODING_AGENT_TURNS_CONFIG_KEY, n);
+  return n;
+}
+
+/** The owner's token ceiling, or null when they have not set one. */
+export async function getTokenLimit(): Promise<number | null> {
+  const raw = await configGet(CODING_AGENT_TOKENS_CONFIG_KEY);
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
+}
+
+export async function setTokenLimit(limit: number | null): Promise<number | null> {
+  if (limit === null) {
+    await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
+    return null;
+  }
+  if (typeof limit !== "number" || !Number.isFinite(limit)) {
+    throw new CodingAgentError("invalid", "The token limit must be a number, or empty for no limit.");
+  }
+  const n = Math.round(limit);
+  if (n < MIN_TOKEN_LIMIT) {
+    throw new CodingAgentError("invalid", `A token limit below ${MIN_TOKEN_LIMIT.toLocaleString("en-US")} would stop almost every run before it started.`);
+  }
+  await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, n);
+  return n;
 }
 
 /** Whether runs may spawn sub-agents. Off unless the owner turned it on. */
@@ -524,12 +592,14 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness, defaultDirectory, effort, subagents] = await Promise.all([
+  const [enabled, readiness, defaultDirectory, effort, subagents, maxTurns, tokenLimit] = await Promise.all([
     isCodingAgentEnabled(),
     checkReadiness(),
     getDefaultDirectory(),
     getEffort(),
     getSubagentsEnabled(),
+    getMaxTurns(),
+    getTokenLimit(),
   ]);
   return {
     enabled,
@@ -542,8 +612,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     effort,
     effortLevels: EFFORT_LEVELS,
     subagents,
-    maxTurns: MAX_TURNS,
-    maxBudgetUsd: MAX_BUDGET_USD,
+    maxTurns,
+    minMaxTurns: MIN_MAX_TURNS,
+    maxMaxTurns: MAX_MAX_TURNS,
+    tokenLimit,
+    minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
   };
 }
@@ -599,6 +672,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsActive: 0,
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     subagentsAllowed: raw.subagentsAllowed === true,
+    maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
+    tokensUsed: typeof raw.tokensUsed === "number" ? raw.tokensUsed : 0,
+    tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
     thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
     retries: typeof raw.retries === "number" ? raw.retries : 0,
@@ -653,7 +729,7 @@ interface LiveRun {
   /** Resolved once at start, so a retry does not need an async lookup. */
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
-  settings: { effort: CodingEffort; subagents: boolean };
+  settings: { effort: CodingEffort; subagents: boolean; maxTurns: number };
   /** A shell command ran whose effects cannot be proven read-only. */
   commandMayHaveSideEffects: boolean;
 }
@@ -1046,15 +1122,14 @@ export function denyRulesCover(rules: readonly string[], directory: string): boo
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?: boolean }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?: boolean; maxTurns?: number }): string[] {
   const args = [
     "-p",
     "--verbose",
     "--output-format", "stream-json",
     "--permission-mode", "acceptEdits",
     "--setting-sources", "user",
-    "--max-turns", String(MAX_TURNS),
-    "--max-budget-usd", String(MAX_BUDGET_USD),
+    "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", HEADLESS_BRIEF,
   ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
@@ -1151,7 +1226,7 @@ interface StreamEvent {
   /** `user` events carry tool_result blocks; that is how a sub-agent reports back. */
   session_id?: string;
   model?: string;
-  message?: { content?: unknown };
+  message?: { content?: unknown; usage?: unknown };
   result?: unknown;
   is_error?: boolean;
   num_turns?: number;
@@ -1212,6 +1287,29 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   }
 
   if (event.type === "assistant") {
+    // Every request pays for the input it carries, so input is summed per turn
+    // even though the conversation repeats — that is what a bill counts.
+    const usage = event.message?.usage;
+    if (usage && typeof usage === "object") {
+      const u = usage as Record<string, unknown>;
+      const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
+      run.tokensUsed += n("input_tokens") + n("output_tokens")
+        + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+      if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && !state.stopRequested) {
+        // The CLI has no flag for this, so the device stops the run itself.
+        // Marked resumable: the work is real, it simply ran out of room —
+        // the same shape as a step ceiling.
+        state.stopRequested = true;
+        run.resumable = true;
+        run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
+        pushProgress(run, "Token limit reached");
+        console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
+        killTree(state.child, "SIGTERM");
+        state.killTimer = setTimeout(() => killTree(state.child, "SIGKILL"), STOP_GRACE_MS);
+        state.killTimer.unref();
+        return;
+      }
+    }
     const raw = event.message?.content;
     const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
     for (const block of content) {
@@ -1292,7 +1390,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       case "error_max_turns":
         run.status = "failed";
         run.resumable = true;
-        run.error = `Stopped after ${run.numTurns || MAX_TURNS} turns without finishing. Resume it with a narrower task, or split the work.`;
+        run.error = `Stopped after ${run.numTurns || run.maxTurns} steps without finishing. Resume it with a narrower task, raise the step limit, or split the work.`;
         break;
       case "error_max_budget_usd":
         run.status = "failed";
@@ -1444,9 +1542,9 @@ function spawnRun(
   run: CodingRun,
   resumeSessionId: string | null,
   setprivPath: string,
-  settings: { effort: CodingEffort; subagents: boolean },
+  settings: { effort: CodingEffort; subagents: boolean; maxTurns: number },
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, subagents: settings.subagents }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, subagents: settings.subagents, maxTurns: settings.maxTurns }));
   const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
@@ -1601,7 +1699,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
 
   // Read once, here: a run keeps the settings it started with even if the
   // owner changes them while it works.
-  const [effort, subagents] = await Promise.all([getEffort(), getSubagentsEnabled()]);
+  const [effort, subagents, maxTurns, tokenLimit] = await Promise.all([
+    getEffort(), getSubagentsEnabled(), getMaxTurns(), getTokenLimit(),
+  ]);
 
   const run: CodingRun = {
     id: newRunId(),
@@ -1626,6 +1726,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     subagentsActive: 0,
     subagentsTotal: 0,
     subagentsAllowed: subagents,
+    maxTurns,
+    tokensUsed: 0,
+    tokenLimit,
     thinkingTokens: 0,
     lastActivityAt: Date.now(),
     retries: 0,
@@ -1646,7 +1749,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
   try {
-    spawnRun(run, resumeSessionId, setprivPath, { effort, subagents });
+    spawnRun(run, resumeSessionId, setprivPath, { effort, subagents, maxTurns });
   } catch (err) {
     // The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
     // — a cwd that vanished between the check and here, a setpriv that is not

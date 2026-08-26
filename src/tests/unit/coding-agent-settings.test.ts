@@ -129,3 +129,48 @@ describe("sub-agents", () => {
     expect(configSet).toHaveBeenCalledWith(CODING_AGENT_SUBAGENTS_CONFIG_KEY, true);
   });
 });
+
+describe("steps and tokens", () => {
+  it("defaults to the shipped step count and accepts a new one", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(await lib.getMaxTurns()).toBe(lib.DEFAULT_MAX_TURNS);
+    expect(await lib.setMaxTurns(500)).toBe(500);
+    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_TURNS_CONFIG_KEY, 500);
+  });
+
+  it("refuses a step count outside the range the CLI can use", async () => {
+    const lib = await import("@/lib/coding-agent");
+    await expect(lib.setMaxTurns(1)).rejects.toBeInstanceOf(lib.CodingAgentError);
+    await expect(lib.setMaxTurns(999_999)).rejects.toBeInstanceOf(lib.CodingAgentError);
+    await expect(lib.setMaxTurns("many" as unknown as number)).rejects.toBeInstanceOf(lib.CodingAgentError);
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
+  it("clamps a stored value rather than handing the CLI something it rejects", async () => {
+    const lib = await import("@/lib/coding-agent");
+    configGet.mockResolvedValue(50_000);
+    expect(await lib.getMaxTurns()).toBe(lib.MAX_MAX_TURNS);
+    configGet.mockResolvedValue(1);
+    expect(await lib.getMaxTurns()).toBe(lib.MIN_MAX_TURNS);
+  });
+
+  it("has no token ceiling unless the owner sets one", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(await lib.getTokenLimit()).toBeNull();
+    expect(await lib.setTokenLimit(250_000)).toBe(250_000);
+    expect(await lib.setTokenLimit(null)).toBeNull();
+    expect(configSet).toHaveBeenLastCalledWith(lib.CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
+  });
+
+  it("refuses a ceiling so low every run would die on its first turn", async () => {
+    const lib = await import("@/lib/coding-agent");
+    await expect(lib.setTokenLimit(100)).rejects.toBeInstanceOf(lib.CodingAgentError);
+  });
+
+  it("puts the owner's step count on the command line, and no price flag", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null, maxTurns: 400 });
+    expect(args[args.indexOf("--max-turns") + 1]).toBe("400");
+    expect(args).not.toContain("--max-budget-usd");
+  });
+});

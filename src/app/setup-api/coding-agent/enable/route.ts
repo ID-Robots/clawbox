@@ -7,7 +7,9 @@ import {
   setCodingAgentEnabled,
   setDefaultDirectory,
   setEffort,
+  setMaxTurns,
   setSubagentsEnabled,
+  setTokenLimit,
 } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
@@ -18,6 +20,8 @@ export const dynamic = "force-dynamic";
  * works in when the assistant names neither a project nor a directory.
  * POST { effort: "low"|"medium"|"high"|"xhigh"|"max" } → how hard a run thinks.
  * POST { subagents: boolean } → whether a run may fan out into sub-agents.
+ * POST { maxTurns: number } → how many steps a run gets.
+ * POST { tokenLimit: number | null } → token ceiling, or null for none.
  * Either way the answer is the same payload as GET
  * /setup-api/coding-agent/status, re-read after the change.
  *
@@ -50,20 +54,27 @@ export async function POST(request: Request) {
     defaultDirectory?: unknown;
     effort?: unknown;
     subagents?: unknown;
+    maxTurns?: unknown;
+    tokenLimit?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasEffort = typeof fields.effort === "string";
   const hasSubagents = typeof fields.subagents === "boolean";
+  const hasTurns = typeof fields.maxTurns === "number";
+  // null is meaningful — it CLEARS the ceiling — so presence decides.
+  const hasTokens = "tokenLimit" in fields
+    && (typeof fields.tokenLimit === "number" || fields.tokenLimit === null);
   // `null` is meaningful here — it CLEARS the default — so presence is what
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasSubagents) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasSubagents && !hasTurns && !hasTokens) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string } or { subagents: boolean }.",
+          + "{ effort: string }, { subagents: boolean }, { maxTurns: number } "
+          + "or { tokenLimit: number | null }.",
       },
       { status: 400 },
     );
@@ -86,6 +97,14 @@ export async function POST(request: Request) {
       // become several model conversations at once.
       await setSubagentsEnabled(fields.subagents as boolean);
       console.error(`[coding-agent] sub-agents ${fields.subagents ? "allowed" : "disallowed"} by the owner`);
+    }
+    if (hasTurns) {
+      const saved = await setMaxTurns(fields.maxTurns);
+      console.error(`[coding-agent] step limit set to ${saved} by the owner`);
+    }
+    if (hasTokens) {
+      const saved = await setTokenLimit(fields.tokenLimit as number | null);
+      console.error(`[coding-agent] token limit ${saved === null ? "cleared" : `set to ${saved}`} by the owner`);
     }
     if (hasEnabled) {
       await setCodingAgentEnabled(fields.enabled as boolean);

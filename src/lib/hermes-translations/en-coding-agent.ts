@@ -66,8 +66,14 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.subagentsActive": "{n} sub-agents working",
   "codingAgent.subagentsUsed": "{n} sub-agents",
-  "codingAgent.limits": "A run stops on its own after {turns} steps or ${budget} of model usage. There is no time limit — it only stops if it goes quiet for a long stretch.",
 
+  "codingAgent.turnsLabel": "Steps per run",
+  "codingAgent.turnsFailed": "Could not change the step limit.",
+  "codingAgent.tokensLabel": "Token limit (optional)",
+  "codingAgent.tokensPlaceholder": "no limit",
+  "codingAgent.tokensFailed": "Could not change the token limit.",
+  "codingAgent.limitsHelp":
+    "A run ends when it finishes, runs out of steps, or reaches the token limit if you set one. There is no time limit and no cost limit — a long project may work for hours, and only stops on its own if it goes quiet for a long stretch.",
   "codingAgent.recentRuns": "Recent runs",
   "codingAgent.clearRuns": "Clear history",
   "codingAgent.clearConfirm": "Clear — tap again",

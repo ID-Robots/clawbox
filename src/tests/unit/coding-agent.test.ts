@@ -292,8 +292,11 @@ describe("a run", () => {
     expect(joined).toContain("--output-format stream-json");
     expect(joined).toContain("--permission-mode acceptEdits");
     expect(joined).toContain("--setting-sources user");
-    expect(joined).toContain(`--max-turns ${lib.MAX_TURNS}`);
-    expect(joined).toContain(`--max-budget-usd ${lib.MAX_BUDGET_USD}`);
+
+    // No price ceiling: --max-budget-usd priced an unknown model name, so it
+    // never meant anything here. Steps and (optionally) tokens bound a run now.
+    expect(joined).not.toContain("--max-budget-usd");
+    expect(joined).toContain(`--max-turns ${lib.DEFAULT_MAX_TURNS}`);
     expect(joined).toContain(`--tools ${lib.CLAUDE_TOOLS}`);
     expect(argv).toContain("--allowedTools");
     for (const rule of lib.BASH_ALLOWLIST) expect(argv).toContain(rule);
@@ -401,7 +404,8 @@ describe("a run", () => {
     makeProject("site");
     const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
     expect(first.status).toBe("failed");
-    expect(first.error).toMatch(/60 turns/);
+    // "steps" in the owner's words; the number is the run's own ceiling.
+    expect(first.error).toMatch(/60 steps/);
     expect(first.sessionId).toBe("sess-abc-123");
 
     installFakeWrapper(HAPPY_BODY);
