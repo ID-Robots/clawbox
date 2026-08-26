@@ -1,8 +1,18 @@
 // /setup-api/email/pending — the owner's approval queue for outgoing mail.
 //
-//   GET                        list what is waiting
-//   POST { action: "approve" } send it now, through the normal SMTP path
-//   POST { action: "reject" }  delete it
+//   GET                             list what is waiting
+//   POST { action: "approve" }      send one draft now, through the normal SMTP path
+//   POST { action: "reject" }       delete one draft
+//   POST { action: "approve_batch" } send a NAMED SET of drafts on one consent
+//
+// WHY THE BATCH ACTION EXISTS. One draft, one click was correct and unusable:
+// an agent asked to mail eight people produced eight separate approvals, and a
+// person clicking eight times in a row is a person who has stopped reading. The
+// chat surface now collects everything waiting into a single card that shows
+// every recipient, subject and BODY in full, and asks once. The reading is the
+// safety mechanism — it is what lets a human catch an injected instruction — so
+// the card never degrades to "send 8 emails?" and this route never grew a "send
+// everything queued" shortcut that would have made such a card optional.
 //
 // AUTHORIZATION IS STRICTER HERE THAN ANYWHERE ELSE IN THIS SUBTREE, and that
 // is the entire point of the route. src/middleware.ts admits a caller to
@@ -23,7 +33,14 @@
 
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
-import { claimPending, listPending, removePending } from "@/lib/email-pending";
+import {
+  claimPending,
+  claimPendingIfUnchanged,
+  listPending,
+  MAX_PENDING,
+  removePending,
+  type PendingEmail,
+} from "@/lib/email-pending";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
@@ -56,7 +73,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) return forbidden();
 
-  let body: { action?: unknown; id?: unknown };
+  let body: { action?: unknown; id?: unknown; drafts?: unknown };
   try {
     body = await request.json();
   } catch {
@@ -64,6 +81,9 @@ export async function POST(request: Request) {
   }
 
   const action = typeof body.action === "string" ? body.action : "";
+
+  if (action === "approve_batch") return approveBatch(request, body.drafts);
+
   const id = typeof body.id === "string" ? body.id : "";
   if (!id) return NextResponse.json({ error: "A draft id is required" }, { status: 400 });
 
@@ -122,4 +142,171 @@ export async function POST(request: Request) {
       { status: 502 },
     );
   }
+}
+
+// ── One consent, a named set of drafts ───────────────────────────────────────
+
+/** One entry of the frozen set: which draft, and what it said when it was read. */
+interface BatchEntry {
+  id: string;
+  fingerprint: string;
+}
+
+/**
+ * What happened to one draft. Reported per draft and never summed into a
+ * verdict, because the summing is where the lie gets in: this codebase has
+ * already shipped one `{ restarted: true }` for a restart that failed, and a
+ * batch that reports "sent" while two messages never left is the same bug with
+ * more at stake — the owner believes eight people heard from him.
+ */
+type BatchOutcome =
+  | { id: string; ok: true; recipients: number; messageId?: string }
+  | {
+      id: string;
+      ok: false;
+      reason: "gone" | "changed" | "send_failed" | "not_attempted";
+      error: string;
+      kind?: string;
+      /** Returned for a draft that was claimed and then failed — see below. */
+      draft?: { to: string[]; subject: string; body: string };
+    };
+
+/**
+ * The set the owner actually read, or a 400 saying why it is not one.
+ *
+ * Every rule here is about the card being a faithful record of a decision: a duplicate
+ * id would send one message twice off one tick, an entry with no fingerprint
+ * could not be checked against what was on screen, and a list longer than the
+ * queue can hold did not come from a queue.
+ */
+function parseBatch(raw: unknown): { ok: true; entries: BatchEntry[] } | { ok: false; error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return { ok: false, error: "A batch needs at least one draft" };
+  }
+  if (raw.length > MAX_PENDING) {
+    return { ok: false, error: `At most ${MAX_PENDING} drafts may be approved at once` };
+  }
+  const entries: BatchEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) return { ok: false, error: "Invalid draft entry" };
+    const row = item as Record<string, unknown>;
+    const id = typeof row.id === "string" ? row.id : "";
+    const fingerprint = typeof row.fingerprint === "string" ? row.fingerprint : "";
+    if (!id || !fingerprint) return { ok: false, error: "Each draft needs an id and a fingerprint" };
+    if (seen.has(id)) return { ok: false, error: "The same draft appears twice in the batch" };
+    seen.add(id);
+    entries.push({ id, fingerprint });
+  }
+  return { ok: true, entries };
+}
+
+/** Whatever an SMTP failure turns out to be, said in the two fields the card renders. */
+function describeSendFailure(err: unknown): { error: string; kind: string } {
+  if (err instanceof SmtpError) return { error: err.message, kind: err.kind };
+  return { error: "Could not send the message.", kind: "network" };
+}
+
+/**
+ * Send exactly the drafts named, and say what became of each one.
+ *
+ * FROZEN, NOT "EVERYTHING WAITING". The card lists ids and fingerprints and
+ * this function sends nothing that is not in that list. A draft the agent
+ * queued while the owner was reading is therefore still queued afterwards —
+ * which is the property the whole design turns on, because the alternative is
+ * mailing text that was never on a screen.
+ *
+ * SEQUENTIAL, not `Promise.all`. Every send opens its own SMTP connection, and
+ * twenty at once on a Jetson against a provider that rate-limits connections is
+ * a way to turn a working batch into a partial one. The owner made one gesture;
+ * a few seconds spent honouring it in order costs nothing.
+ *
+ * CLAIM BEFORE SEND, per draft, exactly as the single-draft path does: a draft
+ * is read-and-removed and only then handed to the SMTP client, so a retry or a
+ * double click cannot put the same message on the wire twice. The cost is the
+ * same one documented there — a draft whose send fails is out of the queue — so
+ * the failure carries the whole message back, and nothing the owner approved is
+ * lost to a transient error.
+ */
+async function approveBatch(request: Request, raw: unknown): Promise<NextResponse> {
+  const parsed = parseBatch(raw);
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
+
+  const settings = await getEmailCredentials();
+  if (!settings) {
+    return NextResponse.json(
+      { error: "This device has no email account connected.", kind: "unconfigured" },
+      { status: 409 },
+    );
+  }
+  const smtp = toSmtpConfig(settings);
+  const results: BatchOutcome[] = [];
+
+  for (const entry of parsed.entries) {
+    // The owner's browser went away mid-batch. Stop rather than keep mailing on
+    // behalf of a tab that is gone: what is left is still queued, and unsent is
+    // the recoverable direction.
+    if (request.signal.aborted) {
+      results.push({
+        id: entry.id,
+        ok: false,
+        reason: "not_attempted",
+        error: "The approval was interrupted before this message was sent.",
+      });
+      continue;
+    }
+
+    const claim = claimPendingIfUnchanged(entry.id, entry.fingerprint);
+    if (!claim.ok) {
+      results.push({
+        id: entry.id,
+        ok: false,
+        reason: claim.reason,
+        error:
+          claim.reason === "gone"
+            ? "That draft is no longer waiting."
+            : "That draft changed after it was shown, so it was not sent.",
+      });
+      continue;
+    }
+
+    const draft: PendingEmail = claim.draft;
+    try {
+      const { messageId } = await sendMail(
+        smtp,
+        {
+          from: settings.address,
+          fromName: settings.fromName || "ClawBox",
+          to: draft.to,
+          subject: draft.subject,
+          text: draft.body,
+        },
+        { signal: request.signal },
+      );
+      results.push({ id: draft.id, ok: true, recipients: draft.to.length, ...(messageId ? { messageId } : {}) });
+    } catch (err) {
+      const { error, kind } = describeSendFailure(err);
+      // Never the recipient, never the subject, never a line of the body: this
+      // log is the one part of an approved send that outlives the request.
+      console.error(`[email/pending] batch send failed: kind=${kind} host=${settings.smtpHost}`);
+      results.push({
+        id: draft.id,
+        ok: false,
+        reason: "send_failed",
+        error,
+        kind,
+        draft: { to: draft.to, subject: draft.subject, body: draft.body },
+      });
+    }
+  }
+
+  const sent = results.filter((r) => r.ok).length;
+  const failed = results.length - sent;
+  // 207 for anything short of everything. A caller that reads only the status
+  // line must not be able to mistake "six of eight" for success — which is
+  // precisely the reading a 200 invites.
+  return NextResponse.json(
+    { success: failed === 0, approved: true, sent, failed, results },
+    { status: failed === 0 ? 200 : 207 },
+  );
 }

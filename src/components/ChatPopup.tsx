@@ -15,6 +15,16 @@ import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agen
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
+import {
+  EmailBatchCard,
+  batchFromPending,
+  shownDraftIds,
+  updateBatchCard,
+  type EmailBatchApproval,
+  type EmailBatchCardState,
+  type EmailBatchDraft,
+  type EmailBatchOutcome,
+} from '@/lib/chat-email-batch'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
@@ -411,6 +421,21 @@ const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 // narrower instead of smashing the pills.
 const MIN_CHAT_WIDTH = 340
 
+/**
+ * Is this tool call the one that queues outgoing mail?
+ *
+ * Matched on the SUFFIX rather than on equality because the name that reaches
+ * this surface is the host's, not ours: the MCP tool is registered as
+ * `email_send`, and a gateway is free to hand it over namespaced
+ * (`clawbox_email_send`, `mcp__clawbox__email_send`). Anchored at the end and
+ * fenced by a separator so a future `email_send_bulk` does not silently inherit
+ * this behaviour — and getting it wrong is cheap in one direction only: a miss
+ * means the owner approves in Settings → Email exactly as before.
+ */
+export function isEmailSendTool(name: string): boolean {
+  return /(?:^|[^A-Za-z0-9])email_send$/.test(name)
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -507,6 +532,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const clearClarifies = useCallback(() => {
     setClarifies(prev => (prev.length === 0 ? prev : []))
   }, [])
+  // Outgoing mail the agent has queued and the owner has not agreed to yet.
+  //
+  // ONE CARD, however many drafts — see chat-email-batch.tsx for why the
+  // reading is the safety mechanism and the click is only the gesture.
+  //
+  // NOT cleared when the turn ends, and that is the difference from
+  // `clarifies` above: a clarify is a question the agent is PARKED on, so it
+  // dies with the turn, while this card appears precisely BECAUSE the turn
+  // finished and left mail waiting. Nothing here is lost if it goes anyway —
+  // every draft is on disk and Settings → Email lists all of them.
+  const [emailBatches, setEmailBatches] = useState<EmailBatchCardState[]>([])
+  // Did this turn ask to send mail? Set from the tool stream and read once the
+  // turn is over, so the approval queue is only consulted when there is a
+  // reason to think something landed in it — rather than on every turn the box
+  // ever answers.
+  const emailSendSeenRef = useRef(false)
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
@@ -903,6 +944,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const dispatchTurnRef = useRef<(text: string, attachments: ChatAttachment[], key: string) => Promise<void>>(
     async () => {},
   )
+  /**
+   * `settleEmailDrafts`, reachable from the gateway socket handler.
+   *
+   * A ref for the same reason `dispatchTurnRef` is one: `connect` is a
+   * `useCallback([])` on purpose, and adding a dependency to it would tear the
+   * socket down and rebuild it every time this callback's identity changed.
+   */
+  const settleEmailDraftsRef = useRef<() => void>(() => {})
   // Timer for the ack-only `chat.history` refetch — single-flight so a
   // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
   // cancellable on unmount.
@@ -1361,6 +1410,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // running. Cheaper and more certain than polling on a timer: the
             // one event that means "a run may have just started" is right here.
             if (typeof toolData?.name === 'string' && isCodingAgentTool(toolData.name)) nudgeCodingAgent()
+            // The gateway's own tool stream is where an OpenClaw-edition turn
+            // reports `email_send`; the adapter callback never sees it,
+            // because that harness only ACKs the turn.
+            if (typeof toolData?.name === 'string' && isEmailSendTool(toolData.name)) {
+              emailSendSeenRef.current = true
+            }
             // ONLY `start` opens a wait. `image_generate` reports `result`
             // ~200ms later (the job is merely queued), and that event can be
             // delivered after the picture has already landed and closed the
@@ -1524,6 +1579,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
+            // The turn is over on this harness too, so mail it queued is now
+            // waiting and gets its one card.
+            settleEmailDraftsRef.current()
             // OpenClaw can ack a turn with "Sent." (delivery-mirror persona
             // pipeline / internal-source-reply) while the real reply is
             // generated server-side a moment later — persisted but never
@@ -1550,6 +1608,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
+            // Same as the failing adapter path: a turn that died may still
+            // have left a draft on disk before it did.
+            settleEmailDraftsRef.current()
             if (state === 'error') {
               // Never render the gateway's own error text. It is written for
               // an operator reading a log and has carried an absolute device
@@ -1772,6 +1833,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // it belonged to is gone, so answering it now would push a reply into a
     // conversation the agent has been told to forget.
     clearClarifies()
+    // And the approval card, for a narrower reason: nothing is lost by taking
+    // it away — every draft is still on disk and Settings → Email lists them —
+    // but a card left under a blanked conversation refers to a turn that is no
+    // longer on screen, which is a consent form with its context deleted.
+    setEmailBatches([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
@@ -2342,6 +2408,113 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
   }, [])
 
+  // ── Outgoing mail, approved once for the whole batch ──────────────────────
+
+  /**
+   * Read the approval queue and put anything new on screen as ONE card.
+   *
+   * Called at the end of a turn that used `email_send`, not on a timer: the
+   * drafts are written by that tool and by nothing else this surface can see,
+   * so polling would be asking a question whose answer only changes for a
+   * reason we already know about.
+   *
+   * Drafts already inside a live card are left alone (`shownDraftIds`). That is
+   * what stops a second turn's mail from being folded into a card the owner is
+   * part-way through reading — it gets its own card, with its own consent.
+   */
+  const collectEmailBatch = useCallback(async () => {
+    try {
+      const res = await fetch('/setup-api/email/pending', { headers: { Accept: 'application/json' } })
+      // 403 is the ordinary answer on a surface with no owner session, and 409
+      // on a box with no mail account. Neither is worth a line in the
+      // transcript: the customer did not ask for this, the agent did.
+      if (!res.ok) return
+      const body = await res.json().catch(() => ({})) as { pending?: unknown }
+      if (!Array.isArray(body.pending)) return
+      const drafts: EmailBatchDraft[] = body.pending.flatMap((row): EmailBatchDraft[] => {
+        if (typeof row !== 'object' || row === null) return []
+        const d = row as Record<string, unknown>
+        // A draft with no fingerprint could not be checked against what was on
+        // screen, so it is not offered for one-click approval at all — it stays
+        // in Settings → Email where each one is approved on its own.
+        if (typeof d.id !== 'string' || typeof d.fingerprint !== 'string') return []
+        if (typeof d.subject !== 'string' || typeof d.body !== 'string') return []
+        if (!Array.isArray(d.to)) return []
+        return [{
+          id: d.id,
+          to: d.to.filter((r): r is string => typeof r === 'string'),
+          subject: d.subject,
+          body: d.body,
+          createdAt: typeof d.createdAt === 'number' ? d.createdAt : 0,
+          fingerprint: d.fingerprint,
+        }]
+      })
+      if (drafts.length === 0) return
+      setEmailBatches(prev => {
+        const card = batchFromPending(drafts, shownDraftIds(prev))
+        return card ? [...prev, card] : prev
+      })
+    } catch {
+      // The queue could not be read. Nothing is waiting as far as this surface
+      // is concerned, and Settings → Email is unaffected.
+    }
+  }, [])
+
+  /** Check-and-clear, so a turn that queued mail collects it exactly once. */
+  const settleEmailDrafts = useCallback(() => {
+    if (!emailSendSeenRef.current) return
+    emailSendSeenRef.current = false
+    void collectEmailBatch()
+  }, [collectEmailBatch])
+  useEffect(() => { settleEmailDraftsRef.current = settleEmailDrafts }, [settleEmailDrafts])
+
+  /**
+   * Send the drafts the owner ticked — one request, whatever N is.
+   *
+   * `approval.entries` comes off the CARD's own frozen state, so what is posted
+   * is the set that was read. The route re-checks each fingerprint before it
+   * claims a draft, so the guarantee does not depend on this component being
+   * the only caller.
+   */
+  const approveEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
+    const { batchId, entries } = approval
+    if (entries.length === 0) return
+    setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'sending', requestError: '' }))
+    try {
+      const res = await fetch('/setup-api/email/pending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'approve_batch', drafts: entries }),
+      })
+      const body = await res.json().catch(() => ({})) as { results?: unknown }
+      // A 200 and a 207 both carry per-draft results and both are read the same
+      // way. Anything with no results at all is a failure of the REQUEST, and
+      // is reported as one rather than as an empty success.
+      if (!Array.isArray(body.results)) throw new Error(`batch approval refused with ${res.status}`)
+      const outcomes: EmailBatchOutcome[] = body.results.flatMap((row): EmailBatchOutcome[] => {
+        if (typeof row !== 'object' || row === null) return []
+        const r = row as Record<string, unknown>
+        if (typeof r.id !== 'string') return []
+        return [{ id: r.id, ok: r.ok === true, ...(typeof r.error === 'string' ? { error: r.error } : {}) }]
+      })
+      setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'settled', outcomes }))
+    } catch {
+      // Back to `waiting`, with the reason next to the button: the drafts were
+      // either never claimed or are reported in a response we could not read,
+      // and either way telling the owner "sent" here would be the false success
+      // this whole card exists to avoid.
+      setEmailBatches(prev => updateBatchCard(prev, batchId, {
+        status: 'waiting',
+        requestError: t('chat.emailBatch.requestFailed'),
+      }))
+    }
+  }, [t])
+
+  /** Send nothing. The drafts stay queued — Settings → Email still lists them. */
+  const cancelEmailBatch = useCallback((batchId: string) => {
+    setEmailBatches(prev => prev.filter(card => card.batchId !== batchId))
+  }, [])
+
   // ONE send path.
   //
   // Which harness answers, whether the reply streams or lands whole, and
@@ -2390,6 +2563,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         else if (event.kind === 'tool' && runIdRef.current !== null) {
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
           if (isCodingAgentTool(event.name)) nudgeCodingAgent()
+          // Remember that this turn asked to send mail. Noted on `start` as
+          // well as on `result` because a tool that never reported a result —
+          // a wedged turn, a dropped socket — may still have reached the route
+          // and left a draft on disk, and a draft nobody is shown is exactly
+          // the state this card exists to end.
+          if (isEmailSendTool(event.name)) emailSendSeenRef.current = true
         }
         // The agent has parked on a question. Held by `requestId`, so a
         // reconnect's REPLAY of a prompt still being waited on folds into the
@@ -2415,6 +2594,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // The agent is no longer parked on anything, so neither is the customer.
       // A card outliving its turn is a control with nowhere to post to.
       clearClarifies()
+      // A turn that failed may still have queued mail before it did. The
+      // drafts are on disk either way, so the card is offered on this path too
+      // rather than only on the happy one.
+      settleEmailDrafts()
       runIdRef.current = null
       // A user-initiated Stop shows nothing, not an error line.
       if (err instanceof HarnessError && err.code === 'aborted') return
@@ -2461,8 +2644,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // Same reason as the failure path: the turn is over, so any question it was
     // parked on is over too.
     clearClarifies()
+    // The turn is done and anything it wanted to post is now waiting. This is
+    // where the batch card appears.
+    settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
@@ -3788,6 +3974,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             thing a turn produces that is deliberately not persisted. */}
         {!reloadingSkill && clarifies.map(card => (
           <ClarifyPrompt key={card.requestId} card={card} onAnswer={answerClarify} />
+        ))}
+
+        {/* Outgoing mail, one card per batch. Below the clarifies and above the
+            image banner, i.e. at the bottom of the transcript where the turn
+            that produced it just ended — this is a decision about what the
+            agent has ALREADY done, so it belongs after the answer rather than
+            beside the composer. */}
+        {!reloadingSkill && emailBatches.map(card => (
+          <EmailBatchCard
+            key={card.batchId}
+            card={card}
+            hermes={harnessId === 'hermes'}
+            onApprove={approveEmailBatch}
+            onCancel={cancelEmailBatch}
+          />
         ))}
 
         {/* The picture outlives the turn that asked for it, so this banner is

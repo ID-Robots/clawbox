@@ -23,15 +23,20 @@ vi.mock("@/lib/smtp-client", async () => {
   const actual = await vi.importActual<typeof import("@/lib/smtp-client")>("@/lib/smtp-client");
   return { ...actual, sendMail: vi.fn() };
 });
-vi.mock("@/lib/email-pending", () => ({
+vi.mock("@/lib/email-pending", async (importOriginal) => ({
+  // The fingerprint helper is pure and is what the route compares against, so
+  // it stays REAL: a mocked one would let a freeze test pass while the check it
+  // is testing did nothing.
+  ...(await importOriginal<typeof import("@/lib/email-pending")>()),
   listPending: vi.fn(),
   claimPending: vi.fn(),
+  claimPendingIfUnchanged: vi.fn(),
   removePending: vi.fn(),
 }));
 
 import { createSessionCookie } from "@/lib/auth";
 import { get } from "@/lib/config-store";
-import { claimPending, listPending, removePending } from "@/lib/email-pending";
+import { claimPending, draftFingerprint, listPending, removePending } from "@/lib/email-pending";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
 const mockGet = vi.mocked(get);
@@ -85,7 +90,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   process.env.SESSION_SECRET = SESSION_SECRET;
   storeWith(CONFIGURED);
-  mockList.mockReturnValue([{ ...DRAFT, preview: "The message body." }]);
+  mockList.mockReturnValue([{ ...DRAFT, preview: "The message body.", fingerprint: draftFingerprint(DRAFT) }]);
   mockClaim.mockReturnValue(DRAFT);
   mockRemove.mockReturnValue(true);
   mockSend.mockResolvedValue({ messageId: "sent@example.com" });
