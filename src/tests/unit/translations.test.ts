@@ -127,6 +127,7 @@ describe("translations", () => {
         "skills",
         "localModels",
         "systemProfile",
+        "codingAgent",
       ]);
 
       for (const key of Object.keys(translations.en)) {

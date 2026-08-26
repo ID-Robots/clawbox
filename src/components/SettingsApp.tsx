@@ -17,6 +17,7 @@ import RemoteControlPanel from "./RemoteControlPanel";
 import LocalModelsPanel from "./LocalModelsPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
+import CodingAgentPanel from "./CodingAgentPanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
@@ -5072,6 +5073,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 that change what the box does, and the cards below are what
                 they change. TASK-455. */}
             <SystemProfilePanel />
+
+            {/* The owner's switch for letting the assistant delegate coding
+                work to a headless Claude Code run, plus the recent runs. Next
+                to the other capability switches, because that is what it is. */}
+            <CodingAgentPanel />
 
             {stats ? (
               <>

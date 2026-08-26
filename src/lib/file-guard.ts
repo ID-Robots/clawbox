@@ -15,24 +15,38 @@ import { DATA_DIR } from "./config-store";
 // Two shapes of rule: named credential stores elsewhere in the home directory
 // are listed below, and the ClawBox data directory is covered by containment.
 
-const PROTECTED_DIR_RES: RegExp[] = [
-  /(^|\/)\.ssh(\/|$)/,
-  /(^|\/)\.openclaw(\/|$)/,
+/**
+ * Credential stores in the home directory, as folder names relative to it.
+ * Exported so the coding agent (src/lib/coding-agent.ts) denies exactly these
+ * folders to Claude Code's own file tools — one list, so a store added here
+ * can never be silently left open there.
+ */
+export const PROTECTED_HOME_DIRS: readonly string[] = [
+  ".ssh",
+  ".openclaw",
   // Hermes edition: ~/.hermes holds config.yaml (the ClawBox AI billing token,
   // the dashboard signing secret and its scrypt password hash), .env (provider
   // keys) and auth.json (OAuth tokens) — the Hermes equivalent of ~/.openclaw.
-  /(^|\/)\.hermes(\/|$)/,
-  /(^|\/)\.codex(\/|$)/,
+  ".hermes",
+  ".codex",
   // ClawKeep keeps its portal token and the device's backup-encryption
   // passphrase in ~/.clawkeep. Its API route is already classed as sensitive
   // in middleware.ts; this is the same rule applied to the store behind it.
-  /(^|\/)\.clawkeep(\/|$)/,
-  /(^|\/)\.gnupg(\/|$)/,
-  /(^|\/)\.aws(\/|$)/,
-  /(^|\/)\.kube(\/|$)/,
-  /(^|\/)\.docker(\/|$)/,
-  /(^|\/)\.config\/(gcloud|gh|rclone)(\/|$)/,
+  ".clawkeep",
+  ".gnupg",
+  ".aws",
+  ".kube",
+  ".docker",
+  ".config/gcloud",
+  ".config/gh",
+  ".config/rclone",
 ];
+
+// Each folder matched as a whole path segment (or segments), anywhere in the
+// path — the same shape the hand-written patterns had.
+const PROTECTED_DIR_RES: RegExp[] = PROTECTED_HOME_DIRS.map(
+  (dir) => new RegExp(`(^|\\/)${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(\\/|$)`),
+);
 
 // Credential files matched by basename anywhere under the browse root — common
 // on a dev box (git/npm/pip/postgres tokens). Blocking the whole file is fine:
@@ -78,7 +92,7 @@ const PROTECTED_FILE_RES: RegExp[] = [
 // file — may only import modules whose whole graph is relative paths and node
 // builtins. Read the import rule at the top of mcp/lib/guard.ts before changing
 // this: an import here breaks the MCP server at startup, not at build time.
-const DATA_DIR_PUBLIC_SUBTREES = new Set([
+export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "webapps",       // built desktop webapps, also served by the webapps route
   "icons",         // installed-app icons, also served by the icon route
   "catalog-cache", // cached copies of the providers' public model catalogues
