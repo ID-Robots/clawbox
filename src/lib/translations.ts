@@ -136,6 +136,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot passwords do not match",
     "credentials.failedSetPassword": "Failed to set system password",
     "credentials.failedSaveHotspot": "Failed to save hotspot settings",
+    "credentials.writeDownTitle": "Write these down before you continue",
+    "credentials.writeDownLead": "ClawBox shows these in full once — right here. After you continue, nothing on the box can read either one back.",
+    "credentials.writeDownSystem": "System password (sudo & SSH)",
+    "credentials.writeDownHotspot": "Hotspot password",
+    "credentials.writeDownNetwork": "Network: {ssid}",
+    "credentials.writeDownWhy": "Forget the system password and you lose sudo and SSH on this box for good — the only way back in is a factory reset, which erases everything you set up.",
+    "credentials.writeDownAck": "I have written these passwords down somewhere safe",
 
     // === AIModelsStep ===
     "ai.title": "Connect AI Model",
@@ -780,6 +787,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Паролите на точката за достъп не съвпадат",
     "credentials.failedSetPassword": "Неуспешно задаване на системната парола",
     "credentials.failedSaveHotspot": "Неуспешно запазване на настройките на точката за достъп",
+    "credentials.writeDownTitle": "Запишете си паролите, преди да продължите",
+    "credentials.writeDownLead": "ClawBox ги показва изцяло само веднъж — точно тук. След като продължите, нищо на устройството не може да ги прочете отново.",
+    "credentials.writeDownSystem": "Системна парола (sudo и SSH)",
+    "credentials.writeDownHotspot": "Парола на точката за достъп",
+    "credentials.writeDownNetwork": "Мрежа: {ssid}",
+    "credentials.writeDownWhy": "Ако забравите системната парола, губите sudo и SSH достъпа до устройството завинаги — връщане има само през фабрично нулиране, което изтрива всичко, което сте настроили.",
+    "credentials.writeDownAck": "Записах си паролите на сигурно място",
 
     // === AIModelsStep ===
     "ai.title": "Свързване на AI модел",
@@ -1419,6 +1433,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot-Passwörter stimmen nicht überein",
     "credentials.failedSetPassword": "Systempasswort konnte nicht gesetzt werden",
     "credentials.failedSaveHotspot": "Hotspot-Einstellungen konnten nicht gespeichert werden",
+    "credentials.writeDownTitle": "Schreiben Sie diese auf, bevor Sie fortfahren",
+    "credentials.writeDownLead": "ClawBox zeigt sie genau einmal vollständig an — hier. Nach dem Fortfahren kann nichts auf der Box sie wieder auslesen.",
+    "credentials.writeDownSystem": "Systempasswort (sudo und SSH)",
+    "credentials.writeDownHotspot": "Hotspot-Passwort",
+    "credentials.writeDownNetwork": "Netzwerk: {ssid}",
+    "credentials.writeDownWhy": "Wer das Systempasswort vergisst, verliert sudo und SSH auf dieser Box endgültig — zurück führt nur ein Zurücksetzen auf Werkseinstellungen, das alles Eingerichtete löscht.",
+    "credentials.writeDownAck": "Ich habe diese Passwörter an einem sicheren Ort notiert",
 
     // === AIModelsStep ===
     "ai.title": "KI-Modell verbinden",
@@ -2058,6 +2079,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Las contraseñas del punto de acceso no coinciden",
     "credentials.failedSetPassword": "No se pudo establecer la contraseña del sistema",
     "credentials.failedSaveHotspot": "No se pudo guardar la configuración del punto de acceso",
+    "credentials.writeDownTitle": "Anota estas contraseñas antes de continuar",
+    "credentials.writeDownLead": "ClawBox las muestra completas una sola vez: aquí. Después de continuar, nada en el dispositivo puede volver a leerlas.",
+    "credentials.writeDownSystem": "Contraseña del sistema (sudo y SSH)",
+    "credentials.writeDownHotspot": "Contraseña del punto de acceso",
+    "credentials.writeDownNetwork": "Red: {ssid}",
+    "credentials.writeDownWhy": "Si olvidas la contraseña del sistema, pierdes sudo y SSH en este dispositivo para siempre; la única vuelta atrás es un restablecimiento de fábrica, que borra todo lo que has configurado.",
+    "credentials.writeDownAck": "He anotado estas contraseñas en un lugar seguro",
 
     // === AIModelsStep ===
     "ai.title": "Conectar modelo de IA",
@@ -2697,6 +2725,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Les mots de passe du point d'accès ne correspondent pas",
     "credentials.failedSetPassword": "Impossible de définir le mot de passe système",
     "credentials.failedSaveHotspot": "Impossible d'enregistrer les paramètres du point d'accès",
+    "credentials.writeDownTitle": "Notez ces mots de passe avant de continuer",
+    "credentials.writeDownLead": "ClawBox ne les affiche en entier qu'une seule fois — ici. Une fois que vous continuez, rien sur la box ne peut les relire.",
+    "credentials.writeDownSystem": "Mot de passe système (sudo et SSH)",
+    "credentials.writeDownHotspot": "Mot de passe du point d'accès",
+    "credentials.writeDownNetwork": "Réseau : {ssid}",
+    "credentials.writeDownWhy": "Oublier le mot de passe système, c'est perdre sudo et SSH sur cette box définitivement — seul un retour aux réglages d'usine permet d'y revenir, et il efface tout ce que vous avez configuré.",
+    "credentials.writeDownAck": "J'ai noté ces mots de passe en lieu sûr",
 
     // === AIModelsStep ===
     "ai.title": "Connecter un modèle d'IA",
@@ -3336,6 +3371,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Le password dell'hotspot non corrispondono",
     "credentials.failedSetPassword": "Impossibile impostare la password di sistema",
     "credentials.failedSaveHotspot": "Impossibile salvare le impostazioni dell'hotspot",
+    "credentials.writeDownTitle": "Annota queste password prima di continuare",
+    "credentials.writeDownLead": "ClawBox le mostra per intero una sola volta: qui. Dopo aver continuato, nulla sul dispositivo può rileggerle.",
+    "credentials.writeDownSystem": "Password di sistema (sudo e SSH)",
+    "credentials.writeDownHotspot": "Password dell'hotspot",
+    "credentials.writeDownNetwork": "Rete: {ssid}",
+    "credentials.writeDownWhy": "Se dimentichi la password di sistema perdi per sempre sudo e SSH su questo dispositivo: l'unico modo per rientrare è un ripristino di fabbrica, che cancella tutto ciò che hai configurato.",
+    "credentials.writeDownAck": "Ho annotato queste password in un posto sicuro",
 
     // === AIModelsStep ===
     "ai.title": "Connetti modello IA",
@@ -3975,6 +4017,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "ホットスポットのパスワードが一致しません",
     "credentials.failedSetPassword": "システムパスワードの設定に失敗しました",
     "credentials.failedSaveHotspot": "ホットスポット設定の保存に失敗しました",
+    "credentials.writeDownTitle": "続ける前に必ず書き留めてください",
+    "credentials.writeDownLead": "ClawBox がこれらを完全な形で表示するのはここだけです。続行すると、本体からはどちらも読み出せなくなります。",
+    "credentials.writeDownSystem": "システムパスワード（sudo・SSH）",
+    "credentials.writeDownHotspot": "ホットスポットのパスワード",
+    "credentials.writeDownNetwork": "ネットワーク: {ssid}",
+    "credentials.writeDownWhy": "システムパスワードを忘れると、この本体の sudo と SSH に二度と入れません。戻る方法は工場出荷時リセットだけで、設定した内容はすべて消えます。",
+    "credentials.writeDownAck": "これらのパスワードを安全な場所に書き留めました",
 
     // === AIModelsStep ===
     "ai.title": "AIモデルを接続",
@@ -4614,6 +4663,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot-wachtwoorden komen niet overeen",
     "credentials.failedSetPassword": "Kan systeemwachtwoord niet instellen",
     "credentials.failedSaveHotspot": "Kan hotspot-instellingen niet opslaan",
+    "credentials.writeDownTitle": "Schrijf deze wachtwoorden op voordat u doorgaat",
+    "credentials.writeDownLead": "ClawBox toont ze hier één keer volledig. Zodra u doorgaat, kan niets op het apparaat ze nog teruglezen.",
+    "credentials.writeDownSystem": "Systeemwachtwoord (sudo en SSH)",
+    "credentials.writeDownHotspot": "Hotspot-wachtwoord",
+    "credentials.writeDownNetwork": "Netwerk: {ssid}",
+    "credentials.writeDownWhy": "Vergeet u het systeemwachtwoord, dan bent u sudo en SSH op dit apparaat definitief kwijt — alleen een fabrieksreset brengt u terug, en die wist alles wat u hebt ingesteld.",
+    "credentials.writeDownAck": "Ik heb deze wachtwoorden op een veilige plek genoteerd",
 
     // === AIModelsStep ===
     "ai.title": "AI-model verbinden",
@@ -5253,6 +5309,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "Hotspot-lösenorden matchar inte",
     "credentials.failedSetPassword": "Kunde inte ange systemlösenordet",
     "credentials.failedSaveHotspot": "Kunde inte spara hotspot-inställningar",
+    "credentials.writeDownTitle": "Skriv ner lösenorden innan du fortsätter",
+    "credentials.writeDownLead": "ClawBox visar dem i sin helhet en enda gång — här. När du fortsätter kan ingenting på enheten läsa tillbaka dem.",
+    "credentials.writeDownSystem": "Systemlösenord (sudo och SSH)",
+    "credentials.writeDownHotspot": "Lösenord för surfzonen",
+    "credentials.writeDownNetwork": "Nätverk: {ssid}",
+    "credentials.writeDownWhy": "Glömmer du systemlösenordet förlorar du sudo och SSH på den här enheten för gott — enda vägen tillbaka är en fabriksåterställning, som raderar allt du ställt in.",
+    "credentials.writeDownAck": "Jag har skrivit ner lösenorden på ett säkert ställe",
 
     // === AIModelsStep ===
     "ai.title": "Anslut AI-modell",
@@ -5892,6 +5955,13 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     "credentials.hotspotPasswordsDontMatch": "两次输入的热点密码不一致",
     "credentials.failedSetPassword": "系统密码设置失败",
     "credentials.failedSaveHotspot": "热点设置保存失败",
+    "credentials.writeDownTitle": "继续之前请先把密码抄下来",
+    "credentials.writeDownLead": "ClawBox 只在这里完整显示一次。继续之后，设备上没有任何方式能再读出它们。",
+    "credentials.writeDownSystem": "系统密码（sudo 与 SSH）",
+    "credentials.writeDownHotspot": "热点密码",
+    "credentials.writeDownNetwork": "网络：{ssid}",
+    "credentials.writeDownWhy": "一旦忘记系统密码，你将永久失去这台设备的 sudo 和 SSH 权限——唯一的办法是恢复出厂设置，而那会抹掉你已经配置好的一切。",
+    "credentials.writeDownAck": "我已把这些密码抄写到安全的地方",
 
     // === AIModelsStep ===
     "ai.title": "连接 AI 模型",

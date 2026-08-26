@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import StatusMessage from "./StatusMessage";
 import CredentialsHandoffOverlay from "./CredentialsHandoffOverlay";
+import CredentialsWriteDownDialog from "./CredentialsWriteDownDialog";
 import { useT } from "@/lib/i18n";
 
 interface CredentialsStepProps {
@@ -93,6 +94,11 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   const [hotspotEnabled, setHotspotEnabled] = useState(true);
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Both passwords on this screen are write-only once saved: nothing on the box
+  // can read either back, and a customer who forgets one is locked out of sudo
+  // and SSH with only a factory reset to recover. So the save is interposed —
+  // the values are read back in full and acknowledged before anything is sent.
+  const [writeDownOpen, setWriteDownOpen] = useState(false);
   // Purely presentational disclosure state. Both fields behind them already
   // carry a working default read back from the device, so the screen opens on
   // what the customer must supply and keeps what they may rename one tap away.
@@ -143,54 +149,72 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
     };
   }, []);
 
-  const save = async () => {
+  /**
+   * Everything the save used to check before it sent anything. Split out so the
+   * write-down confirmation can stand between a VALID form and the first
+   * request: an invalid form still fails where it always did, at the field,
+   * with no dialog in the way.
+   */
+  const validate = (): boolean => {
     setTouched(true);
     // Validate hostname
-    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
-    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedHostname)) {
+    const normalized = hostname.trim().toLowerCase().replace(/\.local$/, "");
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalized)) {
       setStatus({ type: "error", message: t("credentials.hostnameInvalid") });
-      return;
+      return false;
     }
     // Validate system password (required)
     if (!password) {
       setStatus({ type: "error", message: t("credentials.passwordRequired") });
-      return;
+      return false;
     }
     if (password.length < 8) {
       setStatus({
         type: "error",
         message: t("credentials.passwordMinLength"),
       });
-      return;
+      return false;
     }
     if (password !== confirmPassword) {
       setStatus({ type: "error", message: t("credentials.passwordsDontMatch") });
-      return;
+      return false;
     }
 
     // Validate hotspot fields (only when enabled)
     if (hotspotEnabled) {
       if (!hotspotName.trim()) {
         setStatus({ type: "error", message: t("credentials.hotspotNameRequired") });
-        return;
+        return false;
       }
       if (!hotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordRequired") });
-        return;
+        return false;
       }
       if (hotspotPassword.length < 8) {
         setStatus({
           type: "error",
           message: t("credentials.hotspotPasswordMinLength"),
         });
-        return;
+        return false;
       }
       if (hotspotPassword !== confirmHotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordsDontMatch") });
-        return;
+        return false;
       }
     }
+    return true;
+  };
 
+  /** The button's (and Enter's) action: validate, then ask before saving. */
+  const requestSave = () => {
+    if (saving || writeDownOpen) return;
+    if (!validate()) return;
+    setStatus(null);
+    setWriteDownOpen(true);
+  };
+
+  const save = async () => {
+    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -384,6 +408,19 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
           onContinue={onNext}
         />
       )}
+      {writeDownOpen && !handoff && (
+        <CredentialsWriteDownDialog
+          hermes={hermes}
+          systemPassword={password}
+          hotspotPassword={hotspotEnabled ? hotspotPassword : null}
+          hotspotSsid={hotspotName.trim() || "ClawBox-Setup"}
+          onCancel={() => setWriteDownOpen(false)}
+          onConfirm={() => {
+            setWriteDownOpen(false);
+            void save();
+          }}
+        />
+      )}
       <div className="card-surface rounded-[var(--r-3)] p-[var(--s-5)] sm:p-[var(--s-7)]">
         <h1
           className="font-bold font-display mb-[var(--s-2)]"
@@ -450,7 +487,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                   type="text"
                   value={hostname}
                   onChange={(e) => setHostname(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") requestSave(); }}
                   maxLength={63}
                   placeholder="clawbox"
                   autoComplete="off"
@@ -487,7 +524,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") save();
+                if (e.key === "Enter") requestSave();
               }}
               placeholder={t("credentials.minChars")}
               autoComplete="new-password"
@@ -514,7 +551,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") save();
+                if (e.key === "Enter") requestSave();
               }}
               placeholder={t("credentials.reenterPassword")}
               autoComplete="new-password"
@@ -610,7 +647,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                 value={hotspotName}
                 onChange={(e) => setHotspotName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") save();
+                  if (e.key === "Enter") requestSave();
                 }}
                 maxLength={32}
                 className={`${FIELD} ${FIELD_PAD} ${inputBorder(touched && !hotspotName.trim())}`}
@@ -691,7 +728,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                   value={hotspotPassword}
                   onChange={(e) => setHotspotPassword(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") save();
+                    if (e.key === "Enter") requestSave();
                   }}
                   placeholder={t("credentials.minChars")}
                   className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
@@ -718,7 +755,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                     value={confirmHotspotPassword}
                     onChange={(e) => setConfirmHotspotPassword(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") save();
+                      if (e.key === "Enter") requestSave();
                     }}
                     placeholder={t("credentials.reenterHotspot")}
                     className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
@@ -748,7 +785,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
         <div className="mt-[var(--s-6)]">
           <button
             type="button"
-            onClick={save}
+            onClick={requestSave}
             disabled={blocked}
             className={`w-full sm:w-auto inline-flex items-center justify-center gap-[var(--s-2)] min-h-[48px] px-[var(--s-6)] rounded-[var(--r-1)] ${
               incomplete
