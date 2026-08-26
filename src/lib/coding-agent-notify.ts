@@ -47,7 +47,7 @@ const CHAT_ID_RE = /^-?\d{1,20}$/;
 // changes format, and adds nothing the charset does not already give.
 // This is also the check CodeQL wants for its "file data in outbound network
 // request" alerts.
-const BOT_TOKEN_RE = /^\d{1,20}:[A-Za-z0-9_-]{1,200}$/;
+const BOT_TOKEN_RE = /^(\d{1,20}):([A-Za-z0-9_-]{1,200})$/;
 
 function duration(run: CodingRun): string {
   const ms = (run.completedAt ?? Date.now()) - run.startedAt;
@@ -108,11 +108,16 @@ async function sendTelegramDirect(token: string, chatId: string, text: string): 
 async function notifyTelegram(message: string): Promise<void> {
   const token = await configGet("telegram_bot_token");
   if (typeof token !== "string") return;
-  const botToken = token.trim();
-  if (!BOT_TOKEN_RE.test(botToken)) {
-    if (botToken) console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
+  // Rebuild the token from the match rather than testing and reusing the
+  // original. Same value either way, but the one that reaches the URL is now
+  // constructed here out of characters the pattern allows, which is what lets
+  // CodeQL see the check as a sanitizer instead of an unrelated branch.
+  const matched = BOT_TOKEN_RE.exec(token.trim());
+  if (!matched) {
+    if (token.trim()) console.error("[coding-agent] telegram bot token is not a valid token; notice not sent");
     return;
   }
+  const botToken = `${matched[1]}:${matched[2]}`;
   const text = message.slice(0, MAX_TELEGRAM_CHARS);
 
   const harness = await getActiveHarness();

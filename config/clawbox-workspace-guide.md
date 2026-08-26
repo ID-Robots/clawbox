@@ -73,7 +73,7 @@ Three more tools are registered when your session starts, and only if the owner 
 
 Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at that Settings card, which shows which; you cannot enable or install anything yourself.
 
-Registration happens once, at startup. A switch turned off mid-session leaves the tools listed, and each request rechecks the state, so a run started afterwards comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same card.
+Registration happens once, at startup. A switch turned off mid-session leaves the tools listed, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same card.
 
 ---
 
