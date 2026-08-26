@@ -132,6 +132,32 @@ describe("routing to ClawBox AI", () => {
     expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
   });
 
+  it("also moves Claude Code's NON-inference base, so nothing falls back to Anthropic", () => {
+    // ANTHROPIC_BASE_URL covers /v1/messages and nothing else. Claude Code
+    // keeps a second base for its account/entitlement calls
+    // (api.anthropic.com/api/oauth/claude_cli/*, /api/web/domain_info). On a
+    // box whose plan is ClawBox AI those can only fail, and Claude Code words
+    // that failure as "Failed to authenticate" — which reads like a bad token
+    // when the token is fine.
+    expect(runWrapper().status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
+  it("moves both bases together when the proxy URL is overridden", () => {
+    runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai" });
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+  });
+
+  it("lets the non-inference base be aimed somewhere else on purpose", () => {
+    runWrapper({ CLAUDE_DS_API_BASE_URL: "https://elsewhere.example/api" });
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe("https://elsewhere.example/api");
+    // ...without dragging the messages API along with it.
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
   it("honours CLAWBOX_AI_PROXY_URL — the same variable the device's provider config uses", () => {
     runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai" });
     expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
