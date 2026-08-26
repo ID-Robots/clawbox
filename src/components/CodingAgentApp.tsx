@@ -46,7 +46,6 @@ interface AgentStatus {
   effort: Effort;
   effortLevels: Effort[];
   subagents: boolean;
-  fullAccess: boolean;
   maxTurns: number;
   minMaxTurns: number;
   maxMaxTurns: number;
@@ -75,8 +74,10 @@ interface Run {
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
   subagentsTotal?: number;
+  subagentsByType?: Record<string, number>;
+  modelsUsed?: string[];
+  lastActivityAt?: number;
   activeSubagents?: { type: string; description: string; startedAt: number }[];
-  fullAccess?: boolean;
   thinkingTokens?: number;
   tokensUsed?: number;
   sessionId?: string | null;
@@ -127,11 +128,33 @@ function Switch({
   );
 }
 
+/** Elapsed time, readable at every scale a run can reach — seconds to days. */
 function duration(run: Run): string {
-  const s = Math.max(0, Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${s - m * 60}s`;
+  const total = Math.max(0, Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000));
+  if (total < 60) return `${total}s`;
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${total % 60}s`;
+}
+
+/** Compact token counts: 1.3M reads better than 1,317,787 in a list row. */
+function tokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+/** "just now" / "4m ago" / "2h ago" — how fresh the record is. */
+function since(ms: number | undefined): string | null {
+  if (!ms) return null;
+  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (s < 45) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
 }
 
 function firstLine(text: string, max = 100): string {
@@ -368,17 +391,12 @@ export default function CodingAgentApp() {
           />
         </div>
 
-        {/* Readiness collapses to one green line when everything is there.
-            The three-row checklist only earns its space when something is
-            missing — which is exactly when the owner needs to read it. */}
-        {readiness && (
+        {/* Nothing at all when the harness is fine. A row that always says
+            "Ready" is a row that never tells the owner anything; the checklist
+            appears only when something is actually missing. */}
+        {readiness && !readiness.ready && (
           <div className="mt-3 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
-            {readiness.ready ? (
-              <div className="flex items-center gap-2 text-xs">
-                <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">check_circle</span>
-                <span className="text-[var(--text-muted)]">{t("codingAgent.readyLine")}</span>
-              </div>
-            ) : (
+            {readiness.ready ? null : (
               <>
                 <ul className="space-y-1">
                   {checks.filter((c) => !c.ok).map((c) => (
@@ -457,49 +475,6 @@ export default function CodingAgentApp() {
           </div>
         </div>
 
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0">
-            <h2 className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.subagentsLabel")}
-            </h2>
-          </div>
-          <Switch
-            checked={status?.subagents === true}
-            busy={busy === "subagents"}
-            disabled={!status}
-            label={t("codingAgent.subagentsLabel")}
-            onChange={(v) => void saveSetting({ subagents: v }, "subagents", t("codingAgent.subagentsFailed"))}
-          />
-        </div>
-
-        {/* Full command access. Its own block with a warning, because it is
-            the one switch here that removes a safety rule rather than tuning
-            one. */}
-        <div className={`mt-4 rounded-xl border p-3 ${status?.fullAccess ? "border-amber-400/40 bg-amber-400/[0.06]" : "border-white/[0.08]"}`}>
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <h2 className="text-xs font-medium text-[var(--text-secondary)]">
-                {t("codingAgent.fullAccessLabel")}
-              </h2>
-              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-                {t("codingAgent.fullAccessHelp")}
-              </p>
-            </div>
-            <Switch
-              checked={status?.fullAccess === true}
-              busy={busy === "fullAccess"}
-              disabled={!status}
-              label={t("codingAgent.fullAccessLabel")}
-              onChange={(v) => void saveSetting({ fullAccess: v }, "fullAccess", t("codingAgent.fullAccessFailed"))}
-            />
-          </div>
-          {status?.fullAccess && (
-            <p className="text-[11px] text-amber-400/90 mt-2 leading-relaxed" data-testid="coding-agent-full-access-warning">
-              {t("codingAgent.fullAccessOn")}
-            </p>
-          )}
-        </div>
-
         {/* The ceilings a run stops at — both the owner's to set. There is no
             time limit and no price limit: a run ends when it finishes, runs
             out of steps, hits a token ceiling if one is set, or goes quiet. */}
@@ -576,21 +551,28 @@ export default function CodingAgentApp() {
                                 {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
                               </span>
                             )}
-                            {run.fullAccess && (
+                            {/* One green dot per sub-agent, so the fan-out is
+                                visible at a glance rather than read as a
+                                number. Filled while working, hollow once done. */}
+                            {(run.subagentsTotal ?? 0) > 0 && (
                               <span
-                                data-testid="coding-agent-run-full-access"
-                                title={t("codingAgent.fullAccessLabel")}
-                                className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40"
+                                className="flex items-center gap-1"
+                                data-testid="coding-agent-subagent-dots"
+                                title={Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}
                               >
-                                {t("codingAgent.fullAccessBadge")}
-                              </span>
-                            )}
-                            {(run.subagentsActive ?? 0) > 0 && (
-                              <span
-                                data-testid="coding-agent-subagents-active"
-                                className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-sky-400 border-sky-400/40"
-                              >
-                                {t("codingAgent.subagentsActive", { n: run.subagentsActive ?? 0 })}
+                                {Array.from({ length: Math.min(run.subagentsTotal ?? 0, 12) }).map((_, i) => (
+                                  <span
+                                    key={i}
+                                    className={`inline-block h-2 w-2 rounded-full ${
+                                      i < (run.subagentsActive ?? 0)
+                                        ? "bg-emerald-400 animate-pulse"
+                                        : "bg-emerald-400/35"
+                                    }`}
+                                  />
+                                ))}
+                                <span className="text-[10px] font-semibold text-emerald-400 ml-0.5">
+                                  {run.subagentsTotal}
+                                </span>
                               </span>
                             )}
                             {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
@@ -602,12 +584,21 @@ export default function CodingAgentApp() {
                             {" · "}
                             {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
                             {run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
+                            {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
                             {(run.subagentsTotal ?? 0) > 0
-                              && ` · ${t("codingAgent.subagentsUsed", { n: run.subagentsTotal ?? 0 })}`}
+                              && ` · ${Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}`}
                             {run.permissionDenials > 0 && (
                               <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
                             )}
                           </p>
+                          {/* Which models did the work, and how fresh this is. */}
+                          {((run.modelsUsed?.length ?? 0) > 0 || run.lastActivityAt) && (
+                            <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
+                              {(run.modelsUsed?.length ?? 0) > 0 && run.modelsUsed?.join(" + ")}
+                              {(run.modelsUsed?.length ?? 0) > 0 && run.lastActivityAt ? " · " : ""}
+                              {run.lastActivityAt && `${t("codingAgent.updated")} ${since(run.lastActivityAt)}`}
+                            </p>
+                          )}
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
                           {run.status === "running" && (

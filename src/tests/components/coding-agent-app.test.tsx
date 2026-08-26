@@ -149,12 +149,14 @@ describe("CodingAgentApp", () => {
     expect(screen.queryByText(/works in the background inside a project folder/)).not.toBeInTheDocument();
   });
 
-  it("collapses readiness to one line when everything is there", async () => {
-    // The checklist is worth its space only when it has something to report.
+  it("says nothing at all about readiness when the harness is fine", async () => {
+    // A row that always reads "Ready" never tells the owner anything. The
+    // checklist earns its space only when something is actually missing.
     stubFetch({ enabled: true, readiness: READY });
     render(<CodingAgentApp />);
-    expect(await screen.findByText(translations.en["codingAgent.readyLine"])).toBeInTheDocument();
+    await screen.findByText(translations.en["codingAgent.switchLabel"]);
     expect(screen.queryByText(translations.en["codingAgent.claudeCode"])).not.toBeInTheDocument();
+    expect(screen.queryByText(/ready/i)).not.toBeInTheDocument();
   });
 
   it("names only what is missing, and how to fix it", async () => {

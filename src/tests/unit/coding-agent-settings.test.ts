@@ -88,57 +88,6 @@ describe("effort", () => {
   });
 });
 
-describe("sub-agents", () => {
-  it("are off unless the owner turned them on", async () => {
-    expect(await getSubagentsEnabled()).toBe(false);
-    configGet.mockResolvedValue("yes"); // only a real true counts
-    expect(await getSubagentsEnabled()).toBe(false);
-    configGet.mockResolvedValue(true);
-    expect(await getSubagentsEnabled()).toBe(true);
-  });
-
-  it("names the sub-agent tool the way the CLI actually emits it", async () => {
-    // "Task" for the name here meant every run reported 0 sub-agents while
-    // its transcript showed real delegation — the parser counted a tool the
-    // CLI never calls. Confirmed against a live transcript: name "Agent",
-    // input carries subagent_type.
-    const lib = await import("@/lib/coding-agent");
-    expect(lib.SUBAGENT_TOOL).toBe("Agent");
-    expect(lib.toolsFor(true).split(",")).toContain("Agent");
-  });
-
-  it("is a capability, not a hint: Task is absent from --tools when off", () => {
-    expect(CLAUDE_TOOLS).not.toContain(SUBAGENT_TOOL);
-    expect(toolsFor(false)).toBe(CLAUDE_TOOLS);
-    expect(toolsFor(true).split(",")).toContain(SUBAGENT_TOOL);
-
-    const off = buildRunArgs({ resumeSessionId: null, subagents: false });
-    expect(off[off.indexOf("--tools") + 1]).toBe(CLAUDE_TOOLS);
-
-    const on = buildRunArgs({ resumeSessionId: null, subagents: true });
-    expect(on[on.indexOf("--tools") + 1].split(",")).toContain(SUBAGENT_TOOL);
-  });
-
-  it("defaults to off when the caller says nothing", () => {
-    const args = buildRunArgs({ resumeSessionId: null });
-    expect(args[args.indexOf("--tools") + 1]).not.toContain(SUBAGENT_TOOL);
-  });
-
-  it("does not widen what a run may reach — only that it may fan out", () => {
-    const on = buildRunArgs({ resumeSessionId: null, subagents: true });
-    const off = buildRunArgs({ resumeSessionId: null, subagents: false });
-    const rules = (a: string[]) => a.slice(a.indexOf("--allowedTools"));
-    // Same Bash allow/deny lists and file deny rules either way.
-    expect(rules(on)).toEqual(rules(off));
-    expect(on).toContain("--permission-mode");
-    expect(on[on.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
-  });
-
-  it("records the switch", async () => {
-    await setSubagentsEnabled(true);
-    expect(configSet).toHaveBeenCalledWith(CODING_AGENT_SUBAGENTS_CONFIG_KEY, true);
-  });
-});
 
 describe("steps and tokens", () => {
   it("defaults to the shipped step count and accepts a new one", async () => {
@@ -220,83 +169,6 @@ describe("what a run is told about the shell", () => {
   });
 });
 
-describe("full command access", () => {
-  it("is off unless the owner turned it on", async () => {
-    const lib = await import("@/lib/coding-agent");
-    expect(await lib.getFullAccess()).toBe(false);
-    configGet.mockResolvedValue("yes"); // only a real true counts
-    expect(await lib.getFullAccess()).toBe(false);
-    configGet.mockResolvedValue(true);
-    expect(await lib.getFullAccess()).toBe(true);
-  });
-
-  it("allows EVERY command via Bash(*) — withholding the list grants nothing", async () => {
-    // First version withheld both lists; on the box curl was STILL denied,
-    // because in headless mode the allow-list is what approves a command.
-    const lib = await import("@/lib/coding-agent");
-    const args = lib.buildRunArgs({ resumeSessionId: null, fullAccess: true });
-    const joined = args.join(" ");
-    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
-    for (const rule of lib.BASH_ALLOWLIST) expect(args).not.toContain(rule);
-    // The command deny-list is gone — that is the point of the switch.
-    for (const rule of lib.BASH_DENYLIST) expect(joined).not.toContain(rule);
-  });
-
-  it("keeps the file rules on Claude Code's OWN tools — but they do not survive Bash(*)", async () => {
-    // Measured on the box, and the reason the UI copy changed:
-    //   Read(data/config.json)                      -> BLOCKED
-    //   head -c 60 .../data/config.json             -> denied (path is visible)
-    //   python3 -c "print(open('.../config.json'))" -> RAN, returned the file
-    // A tool-name policy cannot fence an interpreter, and no list of blocked
-    // words fixes it — node, perl, ruby, awk and `bash -c` all read files.
-    // The rules below are still worth shipping (they stop the built-in
-    // editor), but full access means full read access in practice.
-    const lib = await import("@/lib/coding-agent");
-    const joined = lib.buildRunArgs({ resumeSessionId: null, fullAccess: true }).join(" ");
-    expect(joined).toContain("--disallowedTools");
-    for (const secret of ["config.json", ".mcp-token", ".session-secret", "coding-agent-runs.json"]) {
-      expect(joined, `${secret} must stay denied under full access`).toContain(secret);
-    }
-    // And the same rules a restricted run gets, not a reduced set.
-    const restricted = lib.buildRunArgs({ resumeSessionId: null, fullAccess: false }).join(" ");
-    for (const secret of ["config.json", ".mcp-token", ".session-secret"]) {
-      expect(restricted).toContain(secret);
-    }
-  });
-
-  it("keeps the capability drop and acceptEdits either way", async () => {
-    const lib = await import("@/lib/coding-agent");
-    for (const fullAccess of [true, false]) {
-      const args = lib.buildRunArgs({ resumeSessionId: null, fullAccess });
-      expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
-    }
-    // setpriv is applied outside buildRunArgs and is not conditional on it.
-    expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
-  });
-
-  it("leaves the restricted path exactly as it was", async () => {
-    const lib = await import("@/lib/coding-agent");
-    const off = lib.buildRunArgs({ resumeSessionId: null, fullAccess: false });
-    expect(off).toContain("--allowedTools");
-    for (const rule of lib.BASH_DENYLIST) expect(off).toContain(rule);
-  });
-
-  it("tells the owner what full access really costs, without softening it", async () => {
-    // The first version of this copy claimed credentials stayed protected.
-    // They do not. The warning must say so in the owner's own terms.
-    const { translations } = await import("@/lib/translations");
-    const on = translations.en["codingAgent.fullAccessOn"];
-    expect(on).toMatch(/any file/i);
-    expect(on).toMatch(/keys and passwords/i);
-    expect(on).not.toMatch(/stay protected|still protected/i);
-  });
-
-  it("records the switch", async () => {
-    const lib = await import("@/lib/coding-agent");
-    await lib.setFullAccess(true);
-    expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_FULL_ACCESS_CONFIG_KEY, true);
-  });
-});
 
 describe("the effort picker", () => {
   it("offers only the levels that measurably differ on this backend", async () => {
@@ -353,8 +225,42 @@ describe("sub-agent definitions", () => {
     }
   });
 
-  it("passes no agents when sub-agents are switched off", async () => {
+});
+
+describe("what every run now gets, permanently", () => {
+  // The owner removed both switches: full command access and sub-agents are
+  // always on. These pin what that means so it cannot drift back silently.
+
+  it("allows every command — no allow-list, no command deny-list", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect(lib.buildRunArgs({ resumeSessionId: null, subagents: false })).not.toContain("--agents");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
+    for (const rule of lib.BASH_DENYLIST) expect(args.join(" ")).not.toContain(rule);
+  });
+
+  it("still ships the credential file rules, because they cost nothing", async () => {
+    // They bind Claude Code's own Read/Edit/Write and NOT Bash — an
+    // interpreter reads the file either way, measured on the box. Worth
+    // keeping, not worth trusting.
+    const lib = await import("@/lib/coding-agent");
+    const joined = lib.buildRunArgs({ resumeSessionId: null }).join(" ");
+    for (const secret of ["config.json", ".mcp-token", ".session-secret"]) {
+      expect(joined).toContain(secret);
+    }
+  });
+
+  it("always offers the Agent tool and the three definitions", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
+    const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
+    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
+  });
+
+  it("keeps acceptEdits and the capability drop", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
   });
 });

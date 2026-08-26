@@ -24,7 +24,6 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.noticeDismiss": "Dismiss",
 
   "codingAgent.switchLabel": "Let the assistant delegate coding work",
-  "codingAgent.readyLine": "Ready",
 
   "codingAgent.folderLabel": "Project folder",
   "codingAgent.folderPlaceholder": "/home/clawbox/Projects",
@@ -44,20 +43,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.effort.xhigh": "Very high",
   "codingAgent.effort.max": "Max",
   "codingAgent.effortFailed": "Could not change the thinking effort.",
-
-  "codingAgent.subagentsLabel": "Sub-agents",
-  "codingAgent.subagentsFailed": "Could not change the sub-agent setting.",
   "codingAgent.thinking": "thinking · {n} tokens",
-  "codingAgent.subagentsActive": "{n} sub-agents working",
-  "codingAgent.subagentsUsed": "{n} sub-agents",
-
-  "codingAgent.fullAccessLabel": "Full command access",
-  "codingAgent.fullAccessHelp":
-    "Let a run use any command, not just build and test tools.",
-  "codingAgent.fullAccessOn":
-    "A run can now read and change any file on this device, including your saved keys and passwords. Only turn this on for tasks you trust.",
-  "codingAgent.fullAccessFailed": "Could not change full command access.",
-  "codingAgent.fullAccessBadge": "full access",
+  "codingAgent.tokensWord": "tokens",
+  "codingAgent.updated": "updated",
   "codingAgent.recentRuns": "Recent runs",
   "codingAgent.more": "Show more",
   "codingAgent.clearRuns": "Clear history",

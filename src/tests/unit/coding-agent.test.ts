@@ -309,11 +309,13 @@ describe("a run", () => {
     // never meant anything here. Steps and (optionally) tokens bound a run now.
     expect(joined).not.toContain("--max-budget-usd");
     expect(joined).toContain(`--max-turns ${lib.DEFAULT_MAX_TURNS}`);
-    expect(joined).toContain(`--tools ${lib.CLAUDE_TOOLS}`);
-    expect(argv).toContain("--allowedTools");
-    for (const rule of lib.BASH_ALLOWLIST) expect(argv).toContain(rule);
+    // Full command access is permanent now, so the allow-list is Bash(*) and
+    // the command deny-list is gone. The FILE rules below still ship.
+    expect(joined).toContain(`--tools ${lib.toolsFor(true)}`);
+    expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
+    for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
-    for (const rule of lib.BASH_DENYLIST) expect(argv).toContain(rule);
+    expect(argv).toContain("--agents");
     // The credential folders and this checkout's secrets are denied to
     // Read/Edit/Write — but never the run's own folder under data/, because a
     // deny rule outranks acceptEdits and the run could not edit anything.

@@ -7,9 +7,7 @@ import {
   setCodingAgentEnabled,
   setDefaultDirectory,
   setEffort,
-  setFullAccess,
   setMaxTurns,
-  setSubagentsEnabled,
   setTokenLimit,
 } from "@/lib/coding-agent";
 
@@ -20,8 +18,6 @@ export const dynamic = "force-dynamic";
  * POST { defaultDirectory: string | null } → set (or clear) the folder a run
  * works in when the assistant names neither a project nor a directory.
  * POST { effort: "low"|"medium"|"high"|"xhigh"|"max" } → how hard a run thinks.
- * POST { subagents: boolean } → whether a run may fan out into sub-agents.
- * POST { fullAccess: boolean } → whether a run may execute any command.
  * POST { maxTurns: number } → how many steps a run gets.
  * POST { tokenLimit: number | null } → token ceiling, or null for none.
  * Either way the answer is the same payload as GET
@@ -55,15 +51,11 @@ export async function POST(request: Request) {
     enabled?: unknown;
     defaultDirectory?: unknown;
     effort?: unknown;
-    subagents?: unknown;
-    fullAccess?: unknown;
     maxTurns?: unknown;
     tokenLimit?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasEffort = typeof fields.effort === "string";
-  const hasSubagents = typeof fields.subagents === "boolean";
-  const hasFullAccess = typeof fields.fullAccess === "boolean";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
   const hasTokens = "tokenLimit" in fields
@@ -72,12 +64,12 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasSubagents && !hasFullAccess && !hasTurns && !hasTokens) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string }, { subagents: boolean }, { maxTurns: number } "
+          + "{ effort: string }, { maxTurns: number } "
           + "or { tokenLimit: number | null }.",
       },
       { status: 400 },
@@ -95,18 +87,6 @@ export async function POST(request: Request) {
     if (hasEffort) {
       const saved = await setEffort(fields.effort as string);
       console.error(`[coding-agent] effort set to ${saved} by the owner`);
-    }
-    if (hasSubagents) {
-      // Worth a log line of its own: this is the switch that lets one run
-      // become several model conversations at once.
-      await setSubagentsEnabled(fields.subagents as boolean);
-      console.error(`[coding-agent] sub-agents ${fields.subagents ? "allowed" : "disallowed"} by the owner`);
-    }
-    if (hasFullAccess) {
-      // Logged loudly and on its own line: this is the consent for an
-      // unattended shell with no command policy.
-      await setFullAccess(fields.fullAccess as boolean);
-      console.error(`[coding-agent] FULL ACCESS ${fields.fullAccess ? "GRANTED" : "revoked"} by the owner`);
     }
     if (hasTurns) {
       const saved = await setMaxTurns(fields.maxTurns);
