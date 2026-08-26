@@ -61,13 +61,15 @@ describe("GET runs", () => {
   it("lists recent runs with a bounded limit", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=999"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ runs: [RUN] });
+    // The route decorates each run with where its transcript lives, so the
+    // app can offer a live preview without knowing Claude Code's layout.
+    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null }] });
     expect(listRuns).toHaveBeenCalledWith(30);
   });
 
   it("returns one run by id without waiting when wait is absent", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab"));
-    expect(await res.json()).toEqual({ run: RUN });
+    expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null } });
     expect(waitForRun).not.toHaveBeenCalled();
   });
 

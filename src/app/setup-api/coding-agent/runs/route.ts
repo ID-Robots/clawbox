@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { clearFinishedRuns, getRun, listRuns, MAX_WAIT_MS, waitForRun } from "@/lib/coding-agent";
+import { clearFinishedRuns, getRun, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { hasOwnerSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -45,6 +45,12 @@ export async function DELETE(request: Request) {
   }
 }
 
+/** The app needs the transcript path to offer a live preview; the device is
+ *  the only side that knows where Claude Code put it. */
+function withTranscript<T extends { sessionId: string | null; directory: string }>(run: T) {
+  return { ...run, transcriptPath: transcriptPath(run) };
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const id = url.searchParams.get("id");
@@ -57,11 +63,11 @@ export async function GET(request: Request) {
       if (!run) {
         return NextResponse.json({ error: "There is no coding run with that id.", kind: "not_found" }, { status: 404 });
       }
-      return NextResponse.json({ run });
+      return NextResponse.json({ run: withTranscript(run) });
     }
     const limitRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT)) : DEFAULT_LIMIT;
-    return NextResponse.json({ runs: listRuns(limit) });
+    return NextResponse.json({ runs: listRuns(limit).map(withTranscript) });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not read the coding runs" },

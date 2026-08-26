@@ -66,7 +66,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.subagentsActive": "{n} sub-agents working",
   "codingAgent.subagentsUsed": "{n} sub-agents",
-  "codingAgent.limits": "A run stops on its own after {turns} steps or ${budget} of model usage.",
+  "codingAgent.limits": "A run stops on its own after {turns} steps or ${budget} of model usage. There is no time limit — it only stops if it goes quiet for a long stretch.",
 
   "codingAgent.recentRuns": "Recent runs",
   "codingAgent.clearRuns": "Clear history",
@@ -85,6 +85,8 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
   "codingAgent.stop": "Stop",
+  "codingAgent.openLive": "Watch live",
+  "codingAgent.openResume": "Open in terminal",
   "codingAgent.showDetails": "Show details",
   "codingAgent.hideDetails": "Hide details",
 

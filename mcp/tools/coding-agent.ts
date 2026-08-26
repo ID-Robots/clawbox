@@ -184,7 +184,9 @@ function describeRun(run: RunPayload, tail: number): string {
       `Still working. ${alive} A long first turn is NORMAL — at high effort it can think for several minutes before`
       + " its first word, and turns only count once it finishes, so 0 turns does not mean stuck."
       + " Do NOT stop it for being quiet; only stop it if the user asks."
-      + " Call coding_agent_status again with this run_id (wait_seconds up to 120 lets you block instead of polling).",
+      + " Do not sit here polling: say it is still working and go back to being available for other questions."
+      + " The user sees live progress on the desktop and is told when it finishes, so check again only when they ask"
+      + " or the next time they speak to you.",
     );
   } else if (run.status === "completed") {
     parts.push("Finished. Relay the summary to the user; if it was a code project, call code_project_build to install the result on the desktop.");
@@ -207,7 +209,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list (the usual case) or an absolute directory inside the ClawBox home. The task must be self-contained: the run cannot ask questions. Returns a run id at once; the work continues on the device and can take many minutes, so tell the user it is running and follow it with coding_agent_status. Do not start a second run for the same task. Set resume_run_id to continue a finished run in the same session, e.g. to fix what it missed.",
+    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list (the usual case) or an absolute directory inside the ClawBox home. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task. Set resume_run_id to continue a finished run in the same session, e.g. to fix what it missed.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -266,7 +268,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_status",
-    "Check a coding run started by coding_agent_run: whether it is still working, what it has done so far, and — once finished — its summary of what changed and how to verify it. Pass wait_seconds to block until the run finishes or the time is up, instead of polling every few seconds. Without run_id it lists the recent runs and their ids. Run ids stay valid across sessions; the runs are kept on the device.",
+    "Check a coding run started by coding_agent_run: whether it is still working, what it has done so far, and — once finished — its summary of what changed and how to verify it. Answers immediately by default, which is what you normally want. wait_seconds blocks until the run finishes or the time is up — use it ONLY when the user has asked you to wait for the result and is content to wait with you, because while it blocks you cannot answer anything else. Never use it just after starting a run. Without run_id it lists the recent runs and their ids. Run ids stay valid across sessions; the runs are kept on the device.",
     {
       run_id: zOptText(40, "The run id, e.g. \"run-k3x9q2ab\". Leave it out to list recent runs."),
       wait_seconds: zInt(0, MAX_WAIT_SECONDS, 0, "How long to wait for the run to finish before answering. 0 answers at once."),

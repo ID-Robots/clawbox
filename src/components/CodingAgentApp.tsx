@@ -72,9 +72,14 @@ interface Run {
   subagentsActive?: number;
   subagentsTotal?: number;
   thinkingTokens?: number;
+  sessionId?: string | null;
+  /** Where Claude Code keeps this run's transcript, for the live preview. */
+  transcriptPath?: string | null;
 }
 
 const RECENT_RUNS = 5;
+/** Where the preview script lives on the device. */
+const CLAWBOX_ROOT = "/home/clawbox/clawbox";
 const POLL_MS = 5_000;
 
 function Switch({
@@ -257,6 +262,26 @@ export default function CodingAgentApp() {
     } finally {
       setBusy(null);
     }
+  };
+
+  /**
+   * Open the run in the Terminal app.
+   *
+   * A run that is still working gets a live, readable tail of its transcript —
+   * the file grows while it works. A finished one gets `claude-ds --resume`,
+   * which drops the owner into that exact session to carry on by hand.
+   */
+  const openInTerminal = (run: Run) => {
+    const quoted = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
+    let command: string;
+    if (run.status === "running" && run.transcriptPath) {
+      command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
+    } else if (run.sessionId) {
+      command = `cd ${quoted(run.directory)} && claude-ds --resume ${run.sessionId}`;
+    } else {
+      command = `cd ${quoted(run.directory)}`;
+    }
+    window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
   };
 
   const clearRuns = async () => {
@@ -563,6 +588,17 @@ export default function CodingAgentApp() {
                               {t("codingAgent.stop")}
                             </button>
                           )}
+                          {/* Straight into the session: a live tail while it
+                              works, or --resume once it has finished. */}
+                          <button
+                            type="button"
+                            onClick={() => openInTerminal(run)}
+                            data-testid={`coding-agent-terminal-${run.id}`}
+                            title={run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
+                            className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                          >
+                            {run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
+                          </button>
                           {details && (
                             <button
                               type="button"

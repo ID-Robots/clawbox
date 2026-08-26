@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Readable live view of a coding run's Claude Code transcript.
+#
+# The raw file is one JSON object per line and is unreadable as a tail. This
+# renders the parts an owner cares about — what it said, which tool it used,
+# what it was refused — and follows the file while the run works.
+#
+# Usage: coding-run-preview <transcript.jsonl>
+set -uo pipefail
+FILE="${1:-}"
+[ -n "$FILE" ] || { echo "usage: coding-run-preview <transcript.jsonl>" >&2; exit 2; }
+if [ ! -f "$FILE" ]; then
+  echo "No transcript yet at $FILE" >&2
+  echo "The run may not have written anything so far. Retry in a moment." >&2
+  exit 1
+fi
+echo "── following $(basename "$FILE") — Ctrl-C to stop ──"
+tail -n 200 -f "$FILE" | python3 -u -c '
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    msg = d.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        print(content); continue
+    if not isinstance(content, list):
+        continue
+    for b in content:
+        if not isinstance(b, dict):
+            continue
+        t = b.get("type")
+        if t == "text" and b.get("text", "").strip():
+            print(b["text"].strip())
+        elif t == "thinking":
+            print("  · thinking…")
+        elif t == "tool_use":
+            i = b.get("input") or {}
+            arg = i.get("command") or i.get("file_path") or i.get("pattern") or ""
+            name = b.get("name") or "tool"
+            print("  \u2192 " + name + " " + str(arg)[:120])
+        elif t == "tool_result" and b.get("is_error"):
+            print("  \u2717 " + str(b.get("content"))[:160])
+'

@@ -120,7 +120,23 @@ export const CODING_AGENT_SUBAGENTS_CONFIG_KEY = "coding_agent_subagents";
 
 /** Wall-clock ceiling for one run. Claude Code's own retries can stall for
  *  minutes against an unreachable ClawBox AI, so this is the real backstop. */
-export const RUN_TIMEOUT_MS = 20 * 60_000;
+/**
+ * How long a run may go with NO sign of life before the device calls it stuck.
+ *
+ * This used to be a wall-clock ceiling — twenty minutes from spawn, whatever
+ * the run was doing — which quietly made a long project impossible: a build
+ * that was working perfectly well was killed mid-flight for the crime of
+ * taking a while. Real projects run for hours.
+ *
+ * So the question is no longer "how long has it been alive" but "is it doing
+ * anything". Every stream event stamps lastActivityAt, and only silence
+ * counts against a run. Runaway cost is bounded separately and properly, by
+ * MAX_TURNS and MAX_BUDGET_USD; this is only here so a wedged process cannot
+ * hold the one-run-at-a-time slot forever.
+ */
+export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
+/** How often the idle check runs. */
+const IDLE_CHECK_MS = 60_000;
 /** Agent turns before Claude Code stops on its own (`error_max_turns`). */
 export const MAX_TURNS = 60;
 /** Claude Code's internal cost estimate cap. Informational for an unknown
@@ -325,7 +341,8 @@ export interface CodingAgentStatus {
   /** The ceilings a run stops at, so the app can show them without guessing. */
   maxTurns: number;
   maxBudgetUsd: number;
-  runTimeoutMs: number;
+  /** Silence, not total time, is what ends a run. */
+  runIdleTimeoutMs: number;
 }
 
 export interface StartRunInput {
@@ -382,6 +399,22 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
 
 function isEffort(value: unknown): value is CodingEffort {
   return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * Where Claude Code keeps this run's transcript.
+ *
+ * It encodes the working folder by replacing every slash with a dash, so
+ * /home/clawbox/x becomes -home-clawbox-x. Returns null until the run has a
+ * session id, which arrives with the first stream event.
+ *
+ * The file exists and grows WHILE the run works, which is what makes a live
+ * preview possible rather than only a post-mortem.
+ */
+export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory">): string | null {
+  if (!run.sessionId) return null;
+  const configDir = process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
+  return path.join(configDir, "projects", run.directory.replace(/\//g, "-"), `${run.sessionId}.jsonl`);
 }
 
 /** The owner's effort level. Anything unrecognised reads as the default. */
@@ -511,7 +544,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     subagents,
     maxTurns: MAX_TURNS,
     maxBudgetUsd: MAX_BUDGET_USD,
-    runTimeoutMs: RUN_TIMEOUT_MS,
+    runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
   };
 }
 
@@ -602,6 +635,7 @@ function writeAll(list: CodingRun[]): void {
 
 interface LiveRun {
   child: ChildProcess;
+  /** Rolling idle check — see RUN_IDLE_TIMEOUT_MS. */
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
   stopRequested: boolean;
@@ -1320,7 +1354,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.error = run.error ?? "Stopped before it finished.";
     } else if (state.timedOut) {
       run.status = "failed";
-      run.error = `Ran longer than ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes and was stopped.`;
+      run.error = `Stopped after ${Math.round(RUN_IDLE_TIMEOUT_MS / 60_000)} minutes with no sign of life. The run was not making progress.`;
     } else {
       run.status = "failed";
       const tail = stderrTail(state.stderr);
@@ -1330,7 +1364,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // A stop that raced the final message keeps "completed": the work is done.
   run.exitCode = exitCode;
   run.completedAt = Date.now();
-  clearTimeout(state.timeout);
+  clearInterval(state.timeout);
   if (state.killTimer) clearTimeout(state.killTimer);
   live.delete(run.id);
 
@@ -1430,12 +1464,16 @@ function spawnRun(
     setprivPath,
     settings,
     commandMayHaveSideEffects: false,
-    timeout: setTimeout(() => {
+    // A rolling check, not a deadline: a run that keeps producing events is
+    // allowed to work for as long as it needs.
+    timeout: setInterval(() => {
+      const idleFor = Date.now() - run.lastActivityAt;
+      if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
       killTree(child, "SIGTERM");
       state.killTimer = setTimeout(() => killTree(child, "SIGKILL"), STOP_GRACE_MS);
       state.killTimer.unref();
-    }, RUN_TIMEOUT_MS),
+    }, IDLE_CHECK_MS),
     killTimer: null,
     stopRequested: false,
     timedOut: false,

@@ -1191,6 +1191,17 @@ function ChromeDesktopInner() {
     const handlePrimaryAiConfigured = () => {
       void syncSetupStatus().catch(() => {});
     };
+    // The Coding Agent app asks for a terminal on a specific run: a live tail
+    // while it works, or `claude-ds --resume` once it has finished.
+    const handleOpenTerminal = (e: Event) => {
+      const command = (e as CustomEvent<{ command?: string }>).detail?.command;
+      if (typeof command !== "string" || !command) return;
+      // forceNew: a second run must get its own terminal rather than typing
+      // into one already busy following the first.
+      setTerminalCommand(command);
+      openApp("terminal", true);
+    };
+    window.addEventListener("clawbox:open-terminal", handleOpenTerminal);
     window.addEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
     return () => window.removeEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
   }, [syncSetupStatus]);
@@ -1240,6 +1251,8 @@ function ChromeDesktopInner() {
   }, []);
 
   /** Finished coding runs waiting to be seen, newest first. */
+  // Typed into the next terminal window that opens — see clawbox:open-terminal.
+  const [terminalCommand, setTerminalCommand] = useState<string | null>(null);
   const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
 
   useEffect(() => {
@@ -1578,7 +1591,7 @@ function ChromeDesktopInner() {
           </div>
         );
       case "terminal":
-        return <TerminalApp />;
+        return <TerminalApp initialCommand={terminalCommand ?? undefined} />;
       case "coding":
         return <CodingAgentApp />;
       case "store":
