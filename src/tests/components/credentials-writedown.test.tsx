@@ -305,6 +305,34 @@ describe("CredentialsStep write-down confirmation", () => {
     expect(proceed.getAttribute("style")).not.toContain("--coral-bright");
   });
 
+  it("tells a screen reader when a password has been copied", async () => {
+    // The button's label flipping to "Copied!" is a visual confirmation only:
+    // nothing announces a text change inside a control the reader is not on.
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+
+    const { container } = await mountStep();
+    fillForm(container);
+    fireEvent.click(connect());
+
+    const live = screen
+      .getByTestId("writedown-system-plate")
+      .querySelector('[role="status"]');
+    expect(live).not.toBeNull();
+    expect(live?.getAttribute("aria-live")).toBe("polite");
+    // Mounted and empty before the copy — a region that appears with its
+    // message already in it is not reliably announced.
+    expect(live?.textContent).toBe("");
+
+    fireEvent.click(screen.getByTestId("writedown-system-copy"));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith(SYSTEM_PASSWORD);
+    });
+    await waitFor(() => {
+      expect(live?.textContent).toContain("Copied!");
+    });
+  });
+
   it("keeps the danger band red on both editions — it is not the brand accent", async () => {
     // The band names the stake. Repainting it in the SKU's colour would make it
     // read as decoration, which is the one thing this screen must not be.

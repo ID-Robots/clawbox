@@ -377,6 +377,16 @@ function CredentialCard({
         </button>
       </div>
 
+      {/* The button's own label changing from "Copy" to "Copied" is a visual
+          confirmation only — a screen reader is not told that the content of a
+          control it is not focused on has changed. This is where it hears it.
+          The region is always mounted so the announcement is a text change
+          inside a live region rather than a region appearing, which some
+          screen readers do not read at all. */}
+      <span role="status" aria-live="polite" className="sr-only">
+        {copied ? `${t("copied")} ${label}` : ""}
+      </span>
+
       {/* `select-all` so one tap on a phone grabs the whole string, `break-all`
           so a long password wraps instead of pushing the card off screen. */}
       <p
