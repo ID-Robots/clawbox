@@ -36,7 +36,7 @@ import {
   type ModelOptionsPayload,
 } from "@/lib/hermes-model-options";
 import { appendTranscript } from "@/lib/harness/transcript-store";
-import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { chatMediaRoot, resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
@@ -454,7 +454,13 @@ async function settleTurn(
   // path as a second image, and every generated picture rendered as a
   // broken card beside the real one - one generation, two attachments, the
   // first a 404.
-  const { text: caption, sources: mentioned } = reclaimImageMentions(spoken);
+  // The media root is handed in so the ONE tree whose paths the browser can
+  // already fetch keeps them: a picture the customer attached and the model
+  // echoed back stays in the caption for `splitAssistantMedia` to lift, exactly
+  // as it did before any of this. Everything else the model names comes out and
+  // has to earn its card through adoption.
+  const servableRoot = await chatMediaRoot().catch(() => null);
+  const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
   const drawn = await adoptHermesGeneratedImages([
     ...(record?.generatedImages ?? []),
     ...mentioned,

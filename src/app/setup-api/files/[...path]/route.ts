@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
 import { Readable } from "stream";
-import { isProtectedFilePath } from "@/lib/file-guard";
+import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -40,7 +40,7 @@ const MIME_TYPES: Record<string, string> = {
   mp4: 'video/mp4', webm: 'video/webm', mp3: 'audio/mpeg', wav: 'audio/wav',
 };
 
-const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
+const BASE_DIR = filesBrowseRoot();
 
 function safePath(segments: string[]): string | null {
   const rel = segments.join("/");

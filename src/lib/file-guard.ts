@@ -128,10 +128,45 @@ function isProtectedDataDirPath(abs: string): boolean {
   return !DATA_DIR_PUBLIC_SUBTREES.has(top);
 }
 
+/**
+ * The separator the patterns above are written in.
+ *
+ * Every rule in this file spells its separator `/`, so on Windows — where a
+ * resolved path arrives with backslashes — the name-shaped half of this guard
+ * matched nothing at all and `~/.ssh` was not protected. The appliance is Linux
+ * and never took that branch, but the tests run on developer machines, and a
+ * security rule that quietly no-ops on the platform it is TESTED on is a rule
+ * nobody is really testing.
+ *
+ * Rewritten only where the separator actually differs: on POSIX a backslash is
+ * a legal character in a filename, and normalising there would invent matches
+ * rather than find them. (`isProtectedDataDirPath` needs none of this — it
+ * compares with `path.sep` throughout.)
+ */
+const toPatternPath: (abs: string) => string =
+  path.sep === "/" ? (abs) => abs : (abs) => abs.replace(/\\/g, "/");
+
 function isProtected(abs: string): boolean {
   if (isProtectedDataDirPath(abs)) return true;
-  if (PROTECTED_FILE_RES.some((re) => re.test(abs))) return true;
-  return PROTECTED_DIR_RES.some((re) => re.test(abs));
+  const p = toPatternPath(abs);
+  if (PROTECTED_FILE_RES.some((re) => re.test(p))) return true;
+  return PROTECTED_DIR_RES.some((re) => re.test(p));
+}
+
+/**
+ * The tree the box lets an authenticated session browse: the customer's home
+ * directory, and also the agent's own working directory — on the appliance they
+ * are the same place.
+ *
+ * Lives beside the guard rather than in the routes because the root and the
+ * rule that carves secrets out of it are one decision, and it was written out
+ * three times before this: both Files API routes and, now, the adoption of a
+ * picture the agent wrote outside its image cache. A root defined in one file
+ * and guarded in another is how a fourth caller ends up browsing a tree nobody
+ * remembered to protect.
+ */
+export function filesBrowseRoot(): string {
+  return process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
 }
 
 /**

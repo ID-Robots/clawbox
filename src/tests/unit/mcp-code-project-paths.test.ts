@@ -62,6 +62,9 @@ const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers: [],
+  emailCanRead: false,
+  codingAgent: false,
+  canGenerateImages: true,
 });
 
 /** Route replies for the two calls code_project_init makes, in order. */

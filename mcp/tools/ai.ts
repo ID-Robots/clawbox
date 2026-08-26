@@ -104,7 +104,38 @@ const SET_RULES: ErrorRule[] = [
   },
 ];
 
+/**
+ * What an unlinked box says when it is asked for a picture.
+ *
+ * Two jobs, and the second is the one that was missing. It names the reason and
+ * the fix, so the agent can say something true instead of nothing; and it
+ * closes the door the agent walked through when nothing was there — writing an
+ * SVG with the file tool and rasterising it from the shell produced a real
+ * 1024x1024 PNG that the chat still could not display, because a picture only
+ * renders when it comes from a path the chat can serve.
+ *
+ * Told to the AGENT, not shown to the customer, so it is deliberately in
+ * English and deliberately unlocalised: the agent writes the customer's own
+ * sentence, in the customer's own language, out of it.
+ */
+const IMAGE_GEN_UNAVAILABLE =
+  "Picture generation is not available on this ClawBox. It runs on ClawBox AI and this device is not connected to one. Tell the user that in their own language, and that they can connect it in Settings -> AI Providers. Do NOT try to make the picture some other way — not with the terminal, not by writing an SVG or HTML and converting it, not with a Python imaging library. A file made that way cannot be displayed in this chat, so the user would get a broken image instead of an answer.";
+
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
+  // Registered only where the box CANNOT draw. On a linked box the harness's
+  // own image tool is present and this would be a second, contradicting tool
+  // beside it; on an unlinked one there is no image tool at all, and this is
+  // the only thing standing between the customer and an improvised answer.
+  if (!ctx.canGenerateImages) {
+    reg.tool(
+      "image_generate",
+      "Generate a picture from a text description. Call this whenever the user asks for an image, a picture, a drawing or a logo. On this device it will tell you why it cannot run and what the user should do — say that, and do not attempt to make the picture by any other means.",
+      {},
+      { editions: ["openclaw", "hermes"], readOnly: true },
+      async () => text(IMAGE_GEN_UNAVAILABLE),
+    );
+  }
+
   reg.tool(
     "ai_list_models",
     "List the AI providers configured on this device and the models each one serves, plus which provider and model are in use right now. Call this before ai_set_provider or ai_set_model so you use ids that exist here.",
