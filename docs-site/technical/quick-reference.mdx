@@ -130,7 +130,7 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 | `GET /setup-api/gateway/health` · `ws-config` | Gateway health / WS URL + token — **OpenClaw/dual**; on Hermes health always reports unavailable |
 | `/setup-api/hermes/{chat,models,provider-key,oauth,clawai,skills}` · `/setup-api/harness/active` | **Hermes/dual** — chat, model catalog, provider key/OAuth, ClawBox AI, Skills |
 | `GET /setup-api/portal/status` · `POST portal/start` · `portal/stop` | Remote access (Cloudflare Quick Tunnel). **Not** `/setup-api/tunnel/*`, which the UI does not use |
-| `POST /setup-api/setup/reset` | **Factory reset** (destructive) |
+| `POST /setup-api/setup/reset` | **Factory reset** (destructive) — needs a session **and** `{ password, confirm: "RESET" }`; the password is throttled like `/login-api` |
 | `/setup-api/wifi/*` · `files/*` · `apps/*` · `clawkeep/*` · `code/*` · `preferences` | Wi-Fi, file manager, app store, backups, code projects, prefs (all under `/setup-api/`) |
 
 ## Gotchas (hard-won)

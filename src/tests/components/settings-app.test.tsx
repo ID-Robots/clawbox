@@ -149,10 +149,23 @@ describe("SettingsApp factory reset overlay", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
     fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
-    fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+
+    const confirmButton = screen.getByRole("button", { name: "settings.reset" });
+    // TASK-443: the wipe cannot start on the dialog opening alone.
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+    fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+    expect(confirmButton).toBeEnabled();
+
+    fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/setup-api/setup/reset", { method: "POST" });
+      expect(fetch).toHaveBeenCalledWith("/setup-api/setup/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+      });
     });
 
     const overlay = await screen.findByRole("status");
@@ -162,6 +175,33 @@ describe("SettingsApp factory reset overlay", () => {
     expect(within(overlay).getAllByText("settings.erasingSettings")).toHaveLength(2);
     expect(within(overlay).getByText("settings.waitingOnline")).toBeInTheDocument();
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
+  });
+
+  it("keeps the dialog up and shows why when the box refuses the reset", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url === "/setup-api/setup/reset") {
+        return new Response(JSON.stringify({ error: "Incorrect password" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: false });
+      return jsonResponse({});
+    }));
+
+    render(<SettingsApp ui={defaultUi} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "wrong" } });
+    fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+    fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+
+    // The old flow went straight to the "erasing..." overlay without reading
+    // the response, so a refusal was indistinguishable from a wipe in progress.
+    expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect password");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
   });
 
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
