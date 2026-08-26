@@ -174,3 +174,28 @@ describe("steps and tokens", () => {
     expect(args).not.toContain("--max-budget-usd");
   });
 });
+
+describe("what a run is told about the shell", () => {
+  it("says one command per call, because the parts being safe is not enough", async () => {
+    // Four of six denials in a real run were compound commands whose every
+    // part was allow-listed: `git rev-parse; git status`, `(node --check … )`,
+    // a python3 heredoc. The run worked it out by trial and error and spent
+    // turns doing it.
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.HEADLESS_BRIEF).toMatch(/ONE command per Bash call/i);
+    for (const form of ["&&", "heredoc", "redirection", "pipes", "subshell"]) {
+      expect(lib.HEADLESS_BRIEF.toLowerCase()).toContain(form.toLowerCase());
+    }
+  });
+
+  it("allows the read-only git queries a real run reached for", async () => {
+    const lib = await import("@/lib/coding-agent");
+    for (const rule of ["Bash(git rev-parse:*)", "Bash(git check-ignore:*)"]) {
+      expect(lib.BASH_ALLOWLIST).toContain(rule);
+    }
+    // ...and still refuses the ones that change history.
+    for (const rule of ["Bash(git push:*)", "Bash(git reset:*)"]) {
+      expect(lib.BASH_DENYLIST).toContain(rule);
+    }
+  });
+});

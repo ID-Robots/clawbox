@@ -72,9 +72,19 @@ const ASSISTANT = JSON.stringify({
   message: {
     content: [
       { type: "text", text: "Working on it" },
-      { type: "tool_use", name: "Edit", input: { file_path: "index.html" } },
-      { type: "tool_use", name: "Write", input: { file_path: "__DIR__/style.css" } },
-      { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+      { type: "tool_use", id: "t_edit", name: "Edit", input: { file_path: "index.html" } },
+      { type: "tool_use", id: "t_write", name: "Write", input: { file_path: "__DIR__/style.css" } },
+      { type: "tool_use", id: "t_bash", name: "Bash", input: { command: "npm test" } },
+    ],
+  },
+});
+const TOOL_RESULTS = JSON.stringify({
+  type: "user",
+  message: {
+    content: [
+      { type: "tool_result", tool_use_id: "t_edit", content: "ok" },
+      { type: "tool_result", tool_use_id: "t_write", content: "ok" },
+      { type: "tool_result", tool_use_id: "t_bash", content: "ok" },
     ],
   },
 });
@@ -92,6 +102,8 @@ const RESULT = JSON.stringify({
 const HAPPY_BODY = [
   `echo '${INIT}'`,
   `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`,
+  // A write counts only once its result comes back clean, as it does here.
+  `echo '${TOOL_RESULTS}'`,
   `echo '${RESULT}'`,
   "exit 0",
 ].join("\n");
@@ -590,7 +602,11 @@ describe("retrying a transient upstream failure", () => {
 
     expect(run.status).toBe("failed");
     expect(run.retries).toBe(0);
-    expect(run.filesTouched).toEqual(["out.txt"]);
+    // The write was never confirmed by a tool_result, so it is NOT reported as
+    // a changed file — but it still blocks the retry, because the file may
+    // have been written anyway and a second attempt would start from it.
+    expect(run.filesTouched).toEqual([]);
+    expect(run.progress.join("\n")).toContain("Write out.txt");
     expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
   });
 
@@ -645,6 +661,68 @@ describe("retrying a transient upstream failure", () => {
 
     expect(run.status).toBe("stopped");
     expect(run.retries).toBe(0);
+  });
+});
+
+describe("what a run reports as changed", () => {
+  beforeEach(() => readyDevice());
+
+  const WRITE = (id: string, file: string) => JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name: "Write", input: { file_path: file } }] },
+  });
+  const RESULT = (id: string, isError: boolean) => JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: isError, content: isError ? "denied" : "ok" }] },
+  });
+
+  it("does not claim a file it was REFUSED permission to write", async () => {
+    // A real run listed /tmp/check_html.py among its changed files when the
+    // write had been denied. The list was built from what it asked to do.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WRITE("w1", "index.html")}'`,
+      `echo '${RESULT("w1", false)}'`,
+      `echo '${WRITE("w2", "/tmp/check_html.py")}'`,
+      `echo '${RESULT("w2", true)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":2,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.filesTouched).toEqual(["index.html"]);
+    expect(run.filesTouched.join(" ")).not.toContain("check_html");
+  });
+
+  it("still shows the attempt in the progress feed", async () => {
+    // The owner should see what it tried, even when it was refused — the
+    // denial itself is reported separately.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WRITE("w1", "/tmp/nope.py")}'`,
+      `echo '${RESULT("w1", true)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.filesTouched).toEqual([]);
+    expect(run.progress.join("\n")).toContain("Write");
+  });
+
+  it("counts a write whose result never arrives as NOT done", async () => {
+    // A run killed mid-write must not claim the file.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WRITE("w1", "half.html")}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.filesTouched).toEqual([]);
   });
 });
 

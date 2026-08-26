@@ -217,6 +217,8 @@ export const BASH_ALLOWLIST: readonly string[] = [
   "Bash(python3:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(pip3:*)", "Bash(pytest:*)",
   "Bash(tsc:*)", "Bash(eslint:*)", "Bash(prettier:*)", "Bash(make:*)", "Bash(cargo:*)", "Bash(go:*)",
   "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)",
+  // Read-only queries a real run asked for and was refused; they change nothing.
+  "Bash(git rev-parse:*)", "Bash(git check-ignore:*)", "Bash(git show:*)", "Bash(git branch:*)",
   "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(find:*)",
   "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(touch:*)", "Bash(pwd:*)", "Bash(echo:*)",
 ];
@@ -721,6 +723,25 @@ interface LiveRun {
   sawThinking: boolean;
   stderr: string;
   /**
+   * Files a Write/Edit has ASKED for, by tool_use id, not yet confirmed.
+   *
+   * A real run reported /tmp/check_html.py among its changed files when the
+   * write had in fact been refused: the list was built from what the model
+   * asked to do, and a request is not an outcome. Nothing lands in
+   * filesTouched now until the tool_result comes back without an error.
+   */
+  pendingFiles: Map<string, string>;
+  /**
+   * Whether the run ever ASKED to write, confirmed or not.
+   *
+   * filesTouched holds only confirmed writes, which is right for reporting and
+   * wrong for the retry gate: a run killed between the request and its result
+   * may have written the file anyway, and a retry would then start from a
+   * half-finished edit. Reporting takes the strict answer, the gate takes the
+   * cautious one.
+   */
+  sawWriteAttempt: boolean;
+  /**
    * tool_use ids of sub-agents that have started and not yet reported back.
    * Ids rather than a counter: a tool_result can arrive out of order, and a
    * duplicate must not decrement twice.
@@ -1060,6 +1081,7 @@ async function projectFolder(dir: string, projectsRoot: string, id: string): Pro
 export const HEADLESS_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
+  "Run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
   "Verify your work where you can (run the build or the tests you have).",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
@@ -1327,7 +1349,9 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
           case "Edit":
           case "NotebookEdit": {
             const file = relativeToRun(run, input.file_path ?? input.notebook_path);
-            noteFile(run, file);
+            // Asked for, not yet done — confirmed when its tool_result lands.
+            state.sawWriteAttempt = true;
+            if (file && typeof block.id === "string" && block.id) state.pendingFiles.set(block.id, file);
             pushProgress(run, `${block.name} ${file ?? ""}`);
             break;
           }
@@ -1365,6 +1389,12 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       if (state.openSubagents.delete(block.tool_use_id)) {
         run.subagentsActive = state.openSubagents.size;
         pushProgress(run, "Sub-agent finished");
+      }
+      const pending = state.pendingFiles.get(block.tool_use_id);
+      if (pending !== undefined) {
+        state.pendingFiles.delete(block.tool_use_id);
+        // A refusal comes back as an error result; only a clean one counts.
+        if (block.is_error !== true) noteFile(run, pending);
       }
     }
     return;
@@ -1485,6 +1515,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && !state.timedOut
     && isTransientFailure(run.error)
     && run.filesTouched.length === 0
+    && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
   ) {
     {
@@ -1558,6 +1589,8 @@ function spawnRun(
   const state: LiveRun = {
     child,
     openSubagents: new Set<string>(),
+    pendingFiles: new Map<string, string>(),
+    sawWriteAttempt: false,
     sawThinking: false,
     setprivPath,
     settings,
