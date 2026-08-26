@@ -12,7 +12,7 @@
  * that already touched files, would be worse than the failure it fixes.
  */
 import { describe, expect, it } from "vitest";
-import { isTransientFailure } from "@/lib/coding-agent";
+import { isReadOnlyInspectionCommand, isTransientFailure } from "@/lib/coding-agent";
 
 describe("what counts as transient", () => {
   it("catches the failure actually seen on the box", () => {
@@ -58,5 +58,22 @@ describe("what counts as transient", () => {
     expect(isTransientFailure("I added a Cloudflare Worker to the project.")).toBe(true);
     // ^ deliberately true: this classifier only ever reads run.error, which
     //   the device writes, never run.summary, which the model writes.
+  });
+});
+
+describe("what is safe to repeat", () => {
+  it("allows only single read-only inspection commands", () => {
+    for (const command of ["ls -la", "pwd", "cat package.json", "git status --short", "git diff --check", "git log -5"]) {
+      expect(isReadOnlyInspectionCommand(command), command).toBe(true);
+    }
+  });
+
+  it("rejects shell composition, redirection, and commands that may mutate", () => {
+    for (const command of [
+      "ls; touch changed", "cat a > b", "echo $(touch changed)", "npm test", "python3 script.py",
+      "git commit -am fix", "mkdir output", "cp a b", "find . -delete", "",
+    ]) {
+      expect(isReadOnlyInspectionCommand(command), command).toBe(false);
+    }
   });
 });

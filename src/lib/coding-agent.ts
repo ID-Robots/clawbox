@@ -590,6 +590,8 @@ interface LiveRun {
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
   settings: { effort: CodingEffort; subagents: boolean };
+  /** A shell command ran whose effects cannot be proven read-only. */
+  commandMayHaveSideEffects: boolean;
 }
 
 /** Newest first. `null` until first use. */
@@ -1054,6 +1056,24 @@ function noteFile(run: CodingRun, file: string | null): void {
   run.filesTouched.push(file);
 }
 
+/**
+ * Commands that inspect the project without changing it.
+ *
+ * `commandsRun === 0` was too blunt for the retry gate: the real authentication
+ * failure can arrive after Claude Code has only run `ls -la`, leaving no state
+ * that makes a fresh attempt unsafe. Keep this deliberately narrower than the
+ * Bash allow-list. Shell composition/redirection and commands such as npm,
+ * Python, git commit, mkdir or cp remain side-effecting because proving their
+ * behaviour from a command string is not possible.
+ */
+export function isReadOnlyInspectionCommand(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const trimmed = command.trim();
+  if (!trimmed || /[;&|<>`\n\r]|\$\(/.test(trimmed)) return false;
+  return /^(?:pwd|ls|cat|head|tail|wc|grep)(?:\s|$)/.test(trimmed)
+    || /^git\s+(?:status|diff|log)(?:\s|$)/.test(trimmed);
+}
+
 interface StreamEvent {
   type?: string;
   subtype?: string;
@@ -1090,6 +1110,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         switch (block.name) {
           case "Bash":
             run.commandsRun += 1;
+            if (!isReadOnlyInspectionCommand(input.command)) state.commandMayHaveSideEffects = true;
             pushProgress(run, `$ ${typeof input.command === "string" ? input.command : ""}`);
             break;
           case "Write":
@@ -1236,9 +1257,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   //
   // The guards are what make this safe rather than a loop: once only, only a
   // transient shape, only a run the owner did not stop, and only one that
-  // changed NOTHING — no files, no commands. A run that had already edited
-  // something must never be silently repeated, because the second attempt
-  // starts from the first one's leftovers.
+  // changed NOTHING — no files and no command that may have side effects. A
+  // read-only inspection such as `ls -la` is safe and must not suppress the
+  // recovery. A run that may have edited something must never be silently
+  // repeated, because the second attempt starts from the first one's leftovers.
   //
   // A FRESH session, never a resume: Claude Code persists the failure in the
   // session and replays it, which is how one bad run became two identical
@@ -1250,7 +1272,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     && !state.timedOut
     && isTransientFailure(run.error)
     && run.filesTouched.length === 0
-    && run.commandsRun === 0
+    && !state.commandMayHaveSideEffects
   ) {
     {
       run.retries = 1;
@@ -1325,6 +1347,7 @@ function spawnRun(
     openSubagents: new Set<string>(),
     setprivPath,
     settings,
+    commandMayHaveSideEffects: false,
     timeout: setTimeout(() => {
       state.timedOut = true;
       killTree(child, "SIGTERM");

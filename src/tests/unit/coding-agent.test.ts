@@ -560,6 +560,34 @@ describe("retrying a transient upstream failure", () => {
     expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
   });
 
+  it("does retry after a read-only inspection command", async () => {
+    const LS = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls -la" } }] },
+    });
+    flakyWrapper(`echo '${LS}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.retries).toBe(1);
+    expect(run.commandsRun).toBe(2);
+  });
+
+  it("does NOT retry after a command that may have side effects", async () => {
+    const NPM = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } }] },
+    });
+    flakyWrapper(`echo '${NPM}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
+  });
+
   it("does NOT retry a real refusal — a turn ceiling is an answer, not an accident", async () => {
     installFakeWrapper([
       `echo '${INIT}'`,
