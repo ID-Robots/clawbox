@@ -12,6 +12,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.terminalHint":
     "Your assistant's delegated coding runs. For a hands-on session, open the Terminal app and run claude-ds.",
 
+  // Shown in the chat while a delegated run is actually in flight — the tool
+  // pill for `coding_agent_run` is long gone by then.
+  "codingAgent.chatWorking": "Coding agent working",
+  "codingAgent.chatWorkingOwner": "Your coding run is working",
+  "codingAgent.chatOpenApp": "open",
+
   "codingAgent.switchLabel": "Let the assistant delegate coding work",
   "codingAgent.switchHelp":
     "When on, your assistant can hand a coding task to Claude Code, which works in the background inside a project folder on your ClawBox AI plan and reports back. Off by default.",

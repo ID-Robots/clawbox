@@ -11,10 +11,12 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, buildFixErrorPrompt, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
+import { FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -486,6 +488,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const queuedSendsRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
   useEffect(() => { queuedSendsRef.current = queuedSends }, [queuedSends])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
+  // A delegated coding run outlives the tool call that started it, so this is
+  // driven by the device's run record rather than the tool pills. Only probed
+  // while the chat is open, and only polled while a run is actually in flight.
+  const { run: codingRun, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
   // The questions the agent is currently parked on, newest last.
   //
   // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
@@ -1351,6 +1357,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (payload.stream === 'tool') {
             const toolData = payload.data as Record<string, unknown> | undefined
             applyToolEvent(toolData)
+            // The moment a coding-agent tool goes by, ask the device what is
+            // running. Cheaper and more certain than polling on a timer: the
+            // one event that means "a run may have just started" is right here.
+            if (typeof toolData?.name === 'string' && isCodingAgentTool(toolData.name)) nudgeCodingAgent()
             // ONLY `start` opens a wait. `image_generate` reports `result`
             // ~200ms later (the job is merely queued), and that event can be
             // delivered after the picture has already landed and closed the
@@ -2379,6 +2389,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // so the transport's stable `id` is handed over under that name.
         else if (event.kind === 'tool' && runIdRef.current !== null) {
           applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+          if (isCodingAgentTool(event.name)) nudgeCodingAgent()
         }
         // The agent has parked on a question. Held by `requestId`, so a
         // reconnect's REPLAY of a prompt still being waited on folds into the
@@ -2451,7 +2462,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // parked on is over too.
     clearClarifies()
     runIdRef.current = null
-  }, [adapter, applyToolEvent, clearToolCalls, clearClarifies])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
@@ -3749,6 +3760,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         })}
 
         {!reloadingSkill && <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />}
+
+        {/* Not a tool pill: `coding_agent_run` returns its run id in
+            milliseconds while the run itself works for minutes, so this is fed
+            by the device's run record and stays up for as long as the work
+            does. See src/lib/use-coding-agent-activity.ts. */}
+        {codingRun && (
+          <CodingAgentActivityPill
+            run={codingRun}
+            label={t("codingAgent.chatWorking")}
+            ownerLabel={t("codingAgent.chatWorkingOwner")}
+            openLabel={t("codingAgent.chatOpenApp")}
+            onOpen={() => dispatchOpenApp("coding")}
+          />
+        )}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one

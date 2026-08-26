@@ -424,6 +424,9 @@ export const it: Record<string, string> = {
   // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "Agente di codice",
   "codingAgent.terminalHint": "Le attività di programmazione delegate dal tuo assistente. Per una sessione interattiva apri l'app Terminale ed esegui claude-ds.",
+  "codingAgent.chatWorking": "L'agente di codice sta lavorando",
+  "codingAgent.chatWorkingOwner": "La tua esecuzione è in corso",
+  "codingAgent.chatOpenApp": "apri",
   "codingAgent.switchLabel": "Consenti all'assistente di delegare il lavoro di programmazione",
   "codingAgent.switchHelp": "Se attivo, l'assistente può affidare un compito di programmazione a Claude Code, che lavora in background in una cartella di progetto con il tuo piano ClawBox AI e riferisce al termine. Disattivato per impostazione predefinita.",
   "codingAgent.readiness": "Cosa serve a un'esecuzione",

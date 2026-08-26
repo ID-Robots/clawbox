@@ -413,6 +413,9 @@ export const nl: Record<string, string> = {
   // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "Codeeragent",
   "codingAgent.terminalHint": "De programmeertaken die je assistent delegeert. Voor een interactieve sessie open je de Terminal-app en voer je claude-ds uit.",
+  "codingAgent.chatWorking": "Codeeragent is bezig",
+  "codingAgent.chatWorkingOwner": "Jouw run is bezig",
+  "codingAgent.chatOpenApp": "openen",
   "codingAgent.switchLabel": "De assistent programmeerwerk laten delegeren",
   "codingAgent.switchHelp": "Als dit aanstaat, kan je assistent een programmeertaak overdragen aan Claude Code, dat op de achtergrond in een projectmap werkt via je ClawBox AI-abonnement en verslag uitbrengt. Standaard uit.",
   "codingAgent.readiness": "Wat een run nodig heeft",

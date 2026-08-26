@@ -424,6 +424,9 @@ export const zh: Record<string, string> = {
   // The Coding Agent app (the assistant's delegated Claude Code runs).
   "codingAgent.title": "编程助手",
   "codingAgent.terminalHint": "助手委派的编程任务。若想动手操作，请打开终端应用并运行 claude-ds。",
+  "codingAgent.chatWorking": "编程助手正在工作",
+  "codingAgent.chatWorkingOwner": "你的任务正在运行",
+  "codingAgent.chatOpenApp": "打开",
   "codingAgent.switchLabel": "允许助手委派编程工作",
   "codingAgent.switchHelp": "开启后，助手可以把编程任务交给 Claude Code，由它使用你的 ClawBox AI 套餐在项目文件夹中后台工作并汇报结果。默认关闭。",
   "codingAgent.readiness": "运行所需条件",
