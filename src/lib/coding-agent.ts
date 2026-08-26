@@ -680,7 +680,12 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,
-    effortLevels: OFFERED_EFFORT_LEVELS,
+    // Always include whatever is actually set. A box that stored "high"
+    // before the picker narrowed to three would otherwise show a row with
+    // nothing selected, and the owner could not tell what was in force.
+    effortLevels: OFFERED_EFFORT_LEVELS.includes(effort)
+      ? OFFERED_EFFORT_LEVELS
+      : (EFFORT_LEVELS.filter((l) => OFFERED_EFFORT_LEVELS.includes(l) || l === effort) as readonly CodingEffort[]),
     subagents,
     fullAccess,
     maxTurns,

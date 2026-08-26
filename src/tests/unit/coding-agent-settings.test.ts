@@ -287,3 +287,28 @@ describe("full command access", () => {
     expect(configSet).toHaveBeenCalledWith(lib.CODING_AGENT_FULL_ACCESS_CONFIG_KEY, true);
   });
 });
+
+describe("the effort picker", () => {
+  it("offers only the levels that measurably differ on this backend", async () => {
+    // low 82 / medium 94 / high 102 / xhigh 139 / max 414 reasoning tokens,
+    // measured on the box: the first three are within noise of each other.
+    const lib = await import("@/lib/coding-agent");
+    expect([...lib.OFFERED_EFFORT_LEVELS]).toEqual(["low", "xhigh", "max"]);
+    // ...while every level the CLI accepts stays valid to store.
+    for (const level of lib.EFFORT_LEVELS) {
+      await expect(lib.setEffort(level)).resolves.toBe(level);
+    }
+  });
+
+  it("still shows a stored level the picker no longer offers", async () => {
+    // A box that chose "high" before the narrowing must not render a row with
+    // nothing selected — the owner could not then tell what was in force.
+    configGet.mockImplementation(async (k: string) =>
+      k === "coding_agent_effort" ? "high" : undefined);
+    const lib = await import("@/lib/coding-agent");
+    const status = await lib.getCodingAgentStatus();
+    expect(status.effort).toBe("high");
+    expect(status.effortLevels).toContain("high");
+    expect(status.effortLevels).toContain("max");
+  });
+});
