@@ -207,6 +207,25 @@ describe("SettingsApp factory reset overlay", () => {
     expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
   });
 
+  it("closes the reset dialog on Escape and clears what was typed", async () => {
+    render(<SettingsApp ui={defaultUi} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(document.getElementById("factory-reset-confirm")).not.toBeInTheDocument();
+    });
+
+    // Reopening must not hand the next caller the last password typed.
+    fireEvent.click(screen.getByRole("button", { name: /factoryReset/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(document.getElementById("factory-reset-password")).toHaveValue("");
+  });
+
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
     const pendingWindow = window as Window & {
       __clawboxPendingSettingsSection?: string;

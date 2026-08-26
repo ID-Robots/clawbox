@@ -2427,12 +2427,35 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const factoryResetCancelRef = useRef<HTMLButtonElement | null>(null);
+
   const closeResetConfirm = () => {
     setResetConfirm(false);
     setResetPassword("");
     setResetTyped("");
     setResetError(null);
   };
+
+  // Same treatment the password-change dialog already gets: land on Cancel,
+  // leave on Escape, hand focus back where it came from. It matters more here —
+  // this dialog is the one standing in front of the wipe.
+  useEffect(() => {
+    if (!resetConfirm || resetting) return;
+    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+    factoryResetCancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || resetSubmitting) return;
+      setResetConfirm(false);
+      setResetPassword("");
+      setResetTyped("");
+      setResetError(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus?.();
+    };
+  }, [resetConfirm, resetting, resetSubmitting]);
 
   const resetSetup = async () => {
     if (resetSubmitting) return;
@@ -2632,7 +2655,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           autoComplete="current-password"
           value={resetPassword}
           onChange={e => { setResetPassword(e.target.value); setResetError(null); }}
-          className="w-full mb-4 px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+          className="w-full mb-4 px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
         />
 
         <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-confirm">
@@ -2646,13 +2669,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           value={resetTyped}
           onChange={e => { setResetTyped(e.target.value); setResetError(null); }}
           placeholder={FACTORY_RESET_CONFIRMATION}
-          className="w-full px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-sm text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+          className="w-full px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
         />
 
         {resetError && <p className="mt-3 text-xs text-red-400" role="alert">{resetError}</p>}
 
         <div className="flex gap-3 mt-5">
           <button
+            ref={factoryResetCancelRef}
             onClick={closeResetConfirm}
             disabled={resetSubmitting}
             className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-40"
