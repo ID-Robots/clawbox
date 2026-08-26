@@ -464,6 +464,8 @@ export const nl: Record<string, string> = {
   "codingAgent.startedByOwner": "gestart door jou",
   "codingAgent.runMeta": "{turns} stappen · {files} bestanden gewijzigd · {duration}",
   "codingAgent.denials": "{n} acties werden niet toegestaan",
+  "codingAgent.deniedTitle": "Niet toegestaan",
+  "codingAgent.deniedHelp": "De coding agent mag alleen een vaste set opdrachten in zijn eigen map uitvoeren. Dit is de veiligheidsgrens die werkt, geen fout — de run vindt meestal een andere weg.",
   "codingAgent.stop": "Stoppen",
   "codingAgent.showDetails": "Details tonen",
   "codingAgent.hideDetails": "Details verbergen",

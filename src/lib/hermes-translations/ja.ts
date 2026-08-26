@@ -466,6 +466,8 @@ export const ja: Record<string, string> = {
   "codingAgent.startedByOwner": "あなたが開始",
   "codingAgent.runMeta": "{turns} ターン · {files} ファイル変更 · {duration}",
   "codingAgent.denials": "{n} 件の操作が許可されませんでした",
+  "codingAgent.deniedTitle": "許可されていません",
+  "codingAgent.deniedHelp": "コーディングエージェントは自分のフォルダー内で決められたコマンドしか実行できません。これは安全のための制限が働いた結果であり、不具合ではありません。多くの場合、実行は別の方法を見つけます。",
   "codingAgent.stop": "停止",
   "codingAgent.showDetails": "詳細を表示",
   "codingAgent.hideDetails": "詳細を隠す",

@@ -459,6 +459,8 @@ export const es: Record<string, string> = {
   "codingAgent.startedByOwner": "iniciada por ti",
   "codingAgent.runMeta": "{turns} pasos · {files} archivos cambiados · {duration}",
   "codingAgent.denials": "{n} acciones no fueron permitidas",
+  "codingAgent.deniedTitle": "No permitido",
+  "codingAgent.deniedHelp": "El agente de código solo puede ejecutar un conjunto fijo de comandos dentro de su propia carpeta. Es el límite de seguridad funcionando, no un fallo: la ejecución suele encontrar otra vía.",
   "codingAgent.stop": "Detener",
   "codingAgent.showDetails": "Mostrar detalles",
   "codingAgent.hideDetails": "Ocultar detalles",

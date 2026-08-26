@@ -464,6 +464,8 @@ export const fr: Record<string, string> = {
   "codingAgent.startedByOwner": "lancée par vous",
   "codingAgent.runMeta": "{turns} étapes · {files} fichiers modifiés · {duration}",
   "codingAgent.denials": "{n} actions n'ont pas été autorisées",
+  "codingAgent.deniedTitle": "Non autorisé",
+  "codingAgent.deniedHelp": "L'agent de code ne peut exécuter qu'un ensemble fixe de commandes dans son propre dossier. C'est la limite de sécurité qui fonctionne, pas une panne — l'exécution trouve généralement un autre moyen.",
   "codingAgent.stop": "Arrêter",
   "codingAgent.showDetails": "Afficher les détails",
   "codingAgent.hideDetails": "Masquer les détails",

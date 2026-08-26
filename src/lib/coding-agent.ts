@@ -239,6 +239,17 @@ export interface CodingRun {
   commandsRun: number;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
+  /**
+   * WHICH ones, in the owner's words: "Bash: git -C . log --oneline -3".
+   *
+   * The count alone was not diagnosable — working out what a run had been
+   * refused meant reading the progress lines and inferring. This is the
+   * owner's own surface, and it holds the same class of text `progress`
+   * already does: the command the agent tried, not anything the model wrote
+   * about it. Capped, and never sent to Telegram — that notice stays a
+   * template.
+   */
+  deniedActions: string[];
   /** The effort the run was started with. Recorded per-run because the owner
    *  can change the setting while a run is in flight. */
   effort: CodingEffort;
@@ -534,6 +545,9 @@ function normalizeRun(raw: CodingRun): CodingRun {
     costUsd: typeof raw.costUsd === "number" ? raw.costUsd : null,
     filesTouched: Array.isArray(raw.filesTouched) ? raw.filesTouched.filter((f) => typeof f === "string") : [],
     commandsRun: typeof raw.commandsRun === "number" ? raw.commandsRun : 0,
+    deniedActions: Array.isArray(raw.deniedActions)
+      ? raw.deniedActions.filter((d): d is string => typeof d === "string")
+      : [],
     effort: isEffort(raw.effort) ? raw.effort : DEFAULT_EFFORT,
     // A record written before this field existed, or one left by a restart,
     // has no live sub-agents by definition.
@@ -673,7 +687,12 @@ function persist(immediate = false): void {
 }
 
 function cloneRun(run: CodingRun): CodingRun {
-  return { ...run, filesTouched: [...run.filesTouched], progress: [...run.progress] };
+  return {
+    ...run,
+    filesTouched: [...run.filesTouched],
+    progress: [...run.progress],
+    deniedActions: [...run.deniedActions],
+  };
 }
 
 export function getRun(id: string): CodingRun | null {
@@ -1089,6 +1108,29 @@ interface StreamEvent {
   errors?: unknown;
 }
 
+/** How many refused actions a run keeps. Enough to see the pattern. */
+const MAX_DENIALS_KEPT = 5;
+const MAX_DENIAL_CHARS = 160;
+
+/**
+ * One refused action, as the owner should read it. Claude Code sends
+ * `{ tool_name, tool_use_id, tool_input }`; the useful part is the tool and
+ * the one field that says what it was pointed at.
+ */
+function describeDenial(entry: unknown): string {
+  if (!entry || typeof entry !== "object") return "an action";
+  const e = entry as { tool_name?: unknown; tool_input?: unknown };
+  const tool = typeof e.tool_name === "string" && e.tool_name ? e.tool_name : "tool";
+  const input = (e.tool_input && typeof e.tool_input === "object" ? e.tool_input : {}) as Record<string, unknown>;
+  const target = ["command", "file_path", "notebook_path", "path", "pattern"]
+    .map((k) => input[k])
+    .find((v): v is string => typeof v === "string" && v !== "");
+  return `${tool}: ${target ?? "(no details)"}`.slice(0, MAX_DENIAL_CHARS);
+}
+
+/** Exported for the test: this parses a payload the device does not control. */
+export const describeDenialForTests = describeDenial;
+
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
@@ -1164,7 +1206,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     state.sawResult = true;
     if (typeof event.num_turns === "number") run.numTurns = event.num_turns;
     if (typeof event.total_cost_usd === "number") run.costUsd = event.total_cost_usd;
-    if (Array.isArray(event.permission_denials)) run.permissionDenials = event.permission_denials.length;
+    if (Array.isArray(event.permission_denials)) {
+      run.permissionDenials = event.permission_denials.length;
+      run.deniedActions = event.permission_denials.slice(0, MAX_DENIALS_KEPT).map(describeDenial);
+    }
     const text = typeof event.result === "string" ? event.result.trim() : "";
     if (text) run.summary = text.slice(0, MAX_SUMMARY_CHARS);
     switch (event.subtype) {
@@ -1501,6 +1546,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     filesTouched: [],
     commandsRun: 0,
     permissionDenials: 0,
+    deniedActions: [],
     effort,
     subagentsActive: 0,
     subagentsTotal: 0,

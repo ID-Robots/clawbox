@@ -64,6 +64,8 @@ interface Run {
   numTurns: number;
   filesTouched: string[];
   permissionDenials: number;
+  /** What was refused, in the owner's words. */
+  deniedActions?: string[];
   progress: string[];
   effort?: Effort;
   /** Sub-agents working right now; 0 once the run has settled. */
@@ -561,6 +563,26 @@ export default function CodingAgentApp() {
                           )}
                         </div>
                       </div>
+                      {/* What was refused, spelled out. The count alone said
+                          "1 action was not allowed" and left the owner to
+                          guess which — and the answer is usually a command
+                          shape worth knowing about. */}
+                      {open && (run.deniedActions?.length ?? 0) > 0 && (
+                        <div className="mt-2" data-testid="coding-agent-denied">
+                          <p className="text-[11px] font-medium text-amber-400">
+                            {t("codingAgent.deniedTitle")}
+                          </p>
+                          <ul className="mt-1 space-y-0.5">
+                            {run.deniedActions?.map((d, i) => (
+                              <li key={i} className="text-[11px] font-mono text-[var(--text-muted)] break-all">{d}</li>
+                            ))}
+                          </ul>
+                          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
+                            {t("codingAgent.deniedHelp")}
+                          </p>
+                        </div>
+                      )}
+
                       {open && details && (
                         <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-sans leading-relaxed">
                           {details}
