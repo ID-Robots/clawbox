@@ -37,7 +37,7 @@ flowchart TB
     end
 ```
 
-The user never talks to the gateway directly — everything enters through port 80, and on OpenClaw/dual the web app proxies chat/WebSocket traffic to the gateway. (The gateway itself listens on the LAN with token auth — browsing `:18789` directly is a classic mistake: it loads, but it will never accept your password.) On Hermes there is nothing on `18789` at all: the browser gets connection-refused, and chat runs over `/setup-api/hermes/chat`.
+The user never talks to the gateway directly — everything enters through port 80, and on OpenClaw/dual the web app proxies chat/WebSocket traffic to the gateway. (The gateway itself listens on the private LAN with token auth — browsing `:18789` directly is a classic mistake: it loads, but it will never accept your password.) On Hermes there is nothing on `18789` at all: the browser gets connection-refused, and chat runs over `/setup-api/hermes/chat`.
 
 ## Services
 
@@ -46,9 +46,9 @@ Everything runs under systemd. The two you will interact with most are **clawbox
 | Service | What it runs | Port | Restart policy |
 |---|---|---|---|
 | `clawbox-setup` | Node.js `production-server.js` → Next.js standalone build (desktop UI, wizard, `/setup-api/*`) | 80 (+443 if certs present) | always (3 s) |
-| `clawbox-gateway` — **OpenClaw / dual only** | `openclaw gateway --bind lan` — preceded by `gateway-pre-start.sh` config self-heals | 18789 (LAN, token-gated) | always (5 s) |
+| `clawbox-gateway` — **OpenClaw / dual only** | `openclaw gateway --bind lan` — preceded by `gateway-pre-start.sh` config self-heals | 18789 (private LAN only, token-gated) | always (5 s) |
 | `clawbox-hermes-dashboard` — **Hermes / dual only** | The Hermes dashboard | 9119 on `127.0.0.2` (loopback) | always |
-| `clawbox-hermes-dashboard-proxy` — **Hermes / dual only** | Session-gated auth proxy in front of the dashboard | 8090 (LAN) | always |
+| `clawbox-hermes-dashboard-proxy` — **Hermes / dual only** | Session-gated auth proxy in front of the dashboard | 8090 (private LAN only) | always |
 | `clawbox-ap` | Wi-Fi hotspot **ClawBox-Setup** for first-boot setup (oneshot) | — | oneshot |
 | `clawbox-ap-watchdog.timer` | Re-raises the hotspot until setup completes (every 20 s) | — | timer |
 | `clawbox-vnc` / `clawbox-websockify` | Xvfb virtual display `:99` + x11vnc + noVNC proxy | 5900 / 6080 | on-failure |
@@ -59,7 +59,11 @@ Everything runs under systemd. The two you will interact with most are **clawbox
 | `clawbox-root-update@<step>` | Privileged installer steps, templated (`install.sh --step <step>`) | — | oneshot |
 | `ollama` | Local model runtime (system package) | 11434 | managed by Ollama |
 
-Two more servers run as **children of the web app** (no systemd unit): the terminal PTY WebSocket server (port 3006) and the optional llama.cpp server (port 8080), both supervised by `src/instrumentation-node.ts`.
+Two more servers run as **children of the web app** (no systemd unit): the terminal PTY WebSocket server (port 3006) and the optional llama.cpp server (port 8080), both supervised by `src/instrumentation-node.ts`. Reached directly, that PTY has no authentication of its own — which is why 3006 is firewalled off the LAN and the terminal is only ever served through the session-gated `/terminal-ws` proxy on port 80.
+
+### What is actually reachable from your network
+
+Most of those ports are **not** exposed. The box ships a default-deny inbound firewall (`ufw`, from `scripts/clawbox-firewall.sh`, applied on fresh installs and on in-app updates alike) that opens only `22`, `80`, `443`, `18789` and `8090` (the Hermes dashboard proxy — the rule is present on every edition, but nothing binds it on OpenClaw). On IPv4 those are scoped to private source ranges (`10/8`, `172.16/12`, `192.168/16`, `169.254/16`, plus `100.64/10` so Tailscale keeps working); IPv6 is not source-scoped. `5353/udp` mDNS and the hotspot's own DHCP/DNS are the other exceptions. Everything else in the table is loopback-only in practice: VNC/noVNC on `5900`/`6080` (noVNC arrives through the port-80 `/novnc-ws` proxy), CDP on `18800`, Ollama on `11434`. Outgoing and routed traffic are untouched, so hotspot internet sharing and the Cloudflare tunnel behave exactly as before — full rules and rationale in [Networking → Firewall](/technical/networking#firewall).
 
 ### How the unprivileged web app does root things
 

@@ -14,7 +14,7 @@ summary: "AP setup mode, what the captive portal really does, mDNS discovery, fi
 | AP address | `10.42.0.1/24` normally; the box automatically falls back to `10.43.0.1/24` if the primary subnet is already in use upstream. dnsmasq's `clawbox.local` mapping follows the active address; the middleware's probe redirect targets `http://10.42.0.1/` unless `PORTAL_URL` overrides it, so on the fallback subnet browse to `http://10.43.0.1` directly |
 | Wi-Fi interface | `wlP1p1s0` (Jetson default; overridable via `NETWORK_INTERFACE`) |
 | DNS | **No hijack.** NetworkManager's shared-mode dnsmasq forwards queries upstream (`8.8.8.8`, `8.8.4.4`, `1.1.1.1`); the only local override is `clawbox.local` → the active AP address. `start-ap.sh` deletes the old `captive-portal.conf` on every start |
-| Captive portal | Partial — the web app's middleware answers OS probe paths (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) *when the request reaches the box on port 80*, but nothing at the DNS or iptables layer steers probes there (the legacy port-80 DNAT rule is actively removed on AP start and stop). **Browse to the AP address yourself** |
+| Captive portal | Partial — the web app's middleware answers OS probe paths (`/generate_204`, `/hotspot-detect.html`, `/ncsi.txt`, …) *when the request reaches the box on port 80*, but nothing **steers** probes there: no DNS hijack, and the legacy port-80 DNAT rule is actively removed on AP start and stop. (There *is* a host firewall — see [Firewall](#firewall) — but it only filters inbound traffic; it never redirects it, and hotspot clients on `10.42.0.0/24`/`10.43.0.0/24` are inside the allowed private ranges.) **Browse to the AP address yourself** |
 | Watchdog | `clawbox-ap-watchdog.timer` re-raises the hotspot every 20 s until setup completes |
 
 If an Ethernet uplink is connected while in AP mode, the box **shares** that internet connection to hotspot clients (IP forwarding + NAT).
@@ -44,24 +44,57 @@ The box already ships mitigations (avahi tuned for Windows quirks, re-announce o
 
 | Port | What | Exposure |
 |---|---|---|
-| **80** | ClawBox web OS (login, desktop, wizard, `/setup-api/*`) | LAN |
-| 443 | HTTPS (only if certs are installed at `data/certs/`) | LAN |
-| **18789** | OpenClaw gateway — **OpenClaw / dual only** | LAN, **token-gated** — the page loads, but never browse it directly: it won't accept your password. Everything goes through port 80. On [Hermes](/editions/hermes) the unit is masked and the port is closed (connection refused) |
-| 8090 | Hermes dashboard auth proxy — **Hermes / dual only** | LAN, gated by your ClawBox session; fronts the dashboard on `127.0.0.2:9119` |
-| 3006 | Terminal (xterm.js) WebSocket PTY | LAN (proxied at `/terminal-ws`) |
+| **80** | ClawBox web OS (login, desktop, wizard, `/setup-api/*`) | LAN-only — allowed from private source ranges only |
+| 443 | HTTPS (only if certs are installed at `data/certs/`) | LAN-only — allowed from private source ranges only, same as port 80 |
+| **18789** | OpenClaw gateway — **OpenClaw / dual only** | LAN-only (private source ranges), **token-gated** — the page loads, but never browse it directly: it won't accept your password. Everything goes through port 80. On [Hermes](/editions/hermes) the unit is masked and the port is closed (connection refused) |
+| 8090 | Hermes dashboard auth proxy — **Hermes / dual only** | LAN-only (private source ranges), gated by your ClawBox session; fronts the dashboard on `127.0.0.2:9119` |
+| 3006 | Terminal (xterm.js) WebSocket PTY | **Closed from the LAN** — the direct port is firewalled off (reached directly it is an *unauthenticated* PTY); use it only through the session-gated `/terminal-ws` proxy on port 80 |
 | 5900 / 6080 | x11vnc / noVNC websockify (Remote Desktop app) | localhost / proxied at `/novnc-ws` |
 | 18800 | Chromium DevTools Protocol (AI browser control) | localhost |
 | 11434 | Ollama (local models) | localhost |
 | 8080 | llama.cpp server (optional) | localhost |
 | 8880 | Kokoro TTS (voice) | localhost |
-| 22 | SSH (`ssh clawbox@<ip>`) | LAN |
+| 22 | SSH (`ssh clawbox@<ip>`) | LAN-only — allowed from private source ranges only |
+| 5353/udp | mDNS (avahi — `clawbox.local`) | LAN, from any source: avahi answers unsolicited multicast, so scoping it would stop the name resolving |
+| 631 / 111 / 8384 | CUPS, rpcbind, Syncthing (if present) | **Closed from the LAN.** ClawBox uses none of them; rpcbind is additionally disabled and masked. CUPS keeps working over loopback for local desktop printing |
+
+## Firewall
+
+The box ships a **default-deny inbound** firewall (`ufw`): deny incoming, allow outgoing,
+allow routed. It is an allowlist, so a port nobody opened is closed — including one that
+some future package decides to bind on `0.0.0.0`.
+
+- **The service ports are scoped to private sources.** 22, 80, 443, 18789 and 8090 are open
+  only *from* `10/8`, `172.16/12`, `192.168/16`, `169.254/16` and `100.64/10` (CGNAT,
+  which is what Tailscale uses). IPv6 is deliberately NOT source-scoped: there is no
+  RFC1918 on v6, a dual-stack LAN hands the box a global address, and that is the
+  address avahi publishes for `clawbox.local` — scoping to link-local/ULA would
+  drop SSH and the web UI over the very address the box advertises. A ClawBox is
+  an appliance on a home or office LAN; a non-private source address means it has ended
+  up somewhere it was never designed to be.
+- **Also open:** `5353/udp` mDNS from anywhere (otherwise `clawbox.local` stops
+  resolving), `67/udp` DHCP on the AP interface, and `53/tcp+udp` from `10.42.0.0/24`
+  and `10.43.0.0/24` for the hotspot's DNS.
+- **Now closed from the LAN:** 631 (CUPS), 111 (rpcbind), 8384 (Syncthing if present),
+  and the terminal PTY on 3006 — that last one matters most, because reached directly it
+  is unauthenticated. rpcbind is also disabled and masked, unless an NFS/NIS package is
+  installed. CUPS is left running: on the shipped image it is a snap, so closing 631 at
+  the firewall removes the LAN exposure without breaking local desktop printing.
+- **Routing is unchanged.** The FORWARD policy is deliberately pinned to `ACCEPT` so the
+  hotspot's internet sharing keeps working, and the firewall never flushes or resets —
+  NetworkManager's shared-AP chains are built once on connection activation and survive
+  untouched.
+- **Applied on update, not just on fresh installs**, so a box already in the field gets
+  it on its next in-app update.
+
+Inspect the live policy on the box with `sudo ufw status verbose`.
 
 ## Remote access
 
-- **Cloudflare Quick Tunnel** — `clawbox-tunnel.service` exposes port 80 through a temporary `*.trycloudflare.com` URL written to `data/cloudflared/tunnel.url`. No port-forwarding required. It is **opt-in** and off by default.
+- **Cloudflare Quick Tunnel** — `clawbox-tunnel.service` exposes port 80 through a temporary `*.trycloudflare.com` URL written to `data/cloudflared/tunnel.url`. No port-forwarding required. It is **opt-in** and off by default. The firewall doesn't affect it: `cloudflared` runs *on* the box and delivers to `http://localhost:80`, so the request arrives over `lo`.
 - **Settings → Remote Control** drives it through `GET /setup-api/portal/status`, `POST /setup-api/portal/start` and `POST /setup-api/portal/stop`. (`/setup-api/tunnel/*` also exists but nothing in the UI calls it — it is a separate legacy surface. It used to report `running:false` while a tunnel was in fact up, because it only recognised a `cloudflared` it had spawned itself; since TASK-453 it reads `clawbox-tunnel.service` and reports the URL the unit published, plus `service` and `managedBy` fields. It still cannot *stop* the unit, and says so rather than reporting success.)
 - **Start also regenerates.** `start` is a `systemctl restart`, so pressing it on a running tunnel publishes a *new* URL. Stopping is a clean `SIGTERM`, which the unit currently records as exit status 143 — systemd scores that as `failed`, which the panel renders as a red error box even though the stop worked.
-- **SSH** — standard Ubuntu OpenSSH on port 22, user `clawbox`, same password as the browser login.
+- **SSH** — standard Ubuntu OpenSSH on port 22, user `clawbox`, same password as the browser login. Reachable from the private source ranges listed under [Firewall](#firewall) — which includes a Tailscale address, since the tailnet lives in `100.64.0.0/10`.
 - On the OpenClaw/dual editions, the gateway's allowed origins are managed automatically (localhost, `<hostname>.local`, the AP addresses, and the box's live LAN IPs) — refreshed on every gateway start.
 
 ### Portal heartbeat

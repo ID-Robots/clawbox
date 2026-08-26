@@ -206,8 +206,11 @@ Full documentation: **[docs.clawbox.com/editions/overview](https://docs.clawbox.
 
 ```text
 Browser (http://<box-ip>)
+  │   inbound firewall: default deny — only 22 / 80 / 443 / 18789 / 8090
+  │   reachable, and on IPv4 only from private ranges (10/8, 172.16/12,
+  │   192.168/16, 169.254/16, 100.64/10 for Tailscale)
   │
-  ├── Port 80: Next.js (production-server.js)
+  ├── Port 80: Next.js (production-server.js)                    ← open on the LAN
   │     ├── /setup          → Setup wizard (React SPA)
   │     ├── /login          → Authentication
   │     ├── /               → Desktop environment (post-setup)
@@ -215,16 +218,31 @@ Browser (http://<box-ip>)
   │     ├── /api/*          → Proxy to OpenClaw gateway
   │     └── WebSocket       → Proxy to gateway + terminal PTY
   │
-  ├── Port 3006: Terminal WebSocket PTY server
+  ├── Port 3006: Terminal WebSocket PTY server                   ← closed to the LAN;
+  │        unauthenticated if reached directly, so it is only served through the
+  │        session-gated /terminal-ws proxy on port 80
   │
-  ├── Port 18789: OpenClaw Gateway (token-gated; all user traffic goes through port 80)
+  ├── Port 18789: OpenClaw Gateway (token-gated)                 ← open on the LAN;
+  │        all user traffic still goes through port 80
   │     ├── AI Agent (MCP tools → controls the entire OS)
   │     ├── Control UI
   │     ├── WebSocket (real-time chat)
   │     └── REST API
   │
-  └── Port 18800: Chromium CDP (browser automation)
+  └── Port 18800: Chromium CDP (browser automation)              ← closed to the LAN
 ```
+
+Everything not in that allowlist (3006, 18800, 5900/6080 VNC, 11434 Ollama, 631
+CUPS, …) is unreachable from the network and keeps working over loopback — the
+terminal and noVNC reach your browser through the port-80 proxies. rpcbind
+(111) is disabled and masked, since nothing on a ClawBox speaks NFS/NIS —
+unless an NFS/NIS package is installed, in which case it is left running and
+merely firewalled. Also
+open: 5353/udp mDNS, so `clawbox.local` keeps resolving, plus DHCP and
+captive-portal DNS on the setup hotspot's own subnets; on Hermes/dual the
+dashboard proxy on 8090 is allowed from the same private ranges. Policy lives
+in [`scripts/clawbox-firewall.sh`](scripts/clawbox-firewall.sh), and routing for
+the hotspot's internet sharing is unchanged.
 
 Node.js runs the production server because Bun doesn't support `http.Server` upgrade events needed for WebSocket proxying. The deep dive lives in the [Architecture reference](https://docs.clawbox.com/technical/architecture).
 

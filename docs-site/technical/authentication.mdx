@@ -63,6 +63,7 @@ AI provider keys and OAuth sessions are separate from all of the above — see [
 ## Security posture summary
 
 - The gateway listens on the LAN but is **token-gated** (per-device random token); users go through the authenticated web app on port 80, which injects the token for them.
+- A **default-deny inbound firewall** (ufw) ships on the device: only SSH (22), the web OS (80, and 443 when certs are installed at `data/certs/`), the gateway (18789) and the Hermes dashboard proxy (8090) are reachable. On IPv4 that is further scoped to private LAN/Tailscale source ranges; IPv6 is not source-scoped — there is no RFC1918 equivalent and a normal dual-stack LAN hands the box a global address, which is exactly what avahi publishes for `clawbox.local`; on v6 the site router is the boundary. mDNS, plus DHCP and captive-portal DNS on the hotspot interface, stay open so discovery and the AP keep working. Everything else that happens to bind `0.0.0.0` (CUPS on 631, rpcbind on 111, the terminal PTY on 3006, Syncthing on 8384) is closed to the LAN.
 - Web login is rate-limited with lockout; passwords are never logged; control characters are rejected.
 - Privileged operations run through an allowlisted systemd template (polkit + narrow sudoers), never arbitrary root exec from the web process.
 - Telegram DMs default to **pairing** mode — unknown senders are inert until the owner approves their 8-character code. Config that would open DMs to everyone (`dmPolicy:"open"` + `allowFrom:["*"]`) is actively stripped on boot.
