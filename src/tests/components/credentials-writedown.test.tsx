@@ -58,12 +58,14 @@ const HOTSPOT_PASSWORD = "Hotspot-9876";
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
+/** Every request the component actually sent — GETs on mount don't count. */
 function postCalls() {
   return fetchMock.mock.calls.filter(
     ([, init]) => (init as RequestInit | undefined)?.method === "POST",
   );
 }
 
+/** The JSON body the component POSTed to `url`, or null if it never did. */
 function postBody(url: string): Record<string, unknown> | null {
   const call = postCalls().find(([input]) => String(input) === url);
   if (!call) return null;
@@ -88,6 +90,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
 });
 
+/** Render Step 3 and wait out the two reads it does on mount. */
 async function mountStep(hermes = false) {
   const utils = render(<CredentialsStep onNext={vi.fn()} hermes={hermes} />);
   // The step reads the device's current hotspot + hostname on mount; wait for
@@ -98,12 +101,14 @@ async function mountStep(hermes = false) {
   return utils;
 }
 
+/** One of the step's inputs by id, loudly rather than as `null`. */
 function field(container: HTMLElement, selector: string): HTMLInputElement {
   const el = container.querySelector<HTMLInputElement>(selector);
   if (!el) throw new Error(`missing field: ${selector}`);
   return el;
 }
 
+/** Fill the step the way a customer does, hotspot on unless asked otherwise. */
 function fillForm(container: HTMLElement, { hotspot = true } = {}) {
   if (!hotspot) {
     fireEvent.click(screen.getByRole("switch", { name: /enable hotspot/i }));

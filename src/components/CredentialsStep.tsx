@@ -213,6 +213,14 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
     setWriteDownOpen(true);
   };
 
+  /**
+   * Apply the step: device name, then the system password, then the hotspot.
+   *
+   * Unchanged by the write-down confirmation — it still sends exactly these
+   * three requests, in this order, and still hands off to the reconnect
+   * overlay when the save takes the connection down with it. Only its trigger
+   * moved: `requestSave` now stands in front of it.
+   */
   const save = async () => {
     const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
     saveControllerRef.current?.abort();

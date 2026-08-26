@@ -245,6 +245,7 @@ function PasswordPlate({
     };
   }, []);
 
+  /** Put the value on the clipboard, and say so only if it actually landed. */
   const copy = async () => {
     const ok = await copyToClipboard(value);
     if (!ok) return;

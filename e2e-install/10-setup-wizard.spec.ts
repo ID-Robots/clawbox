@@ -101,6 +101,17 @@ test.describe("fresh-install setup wizard (UI)", () => {
     }
     await page.getByRole("button", { name: /^Connect$/ }).click();
 
+    // Connect no longer saves: the system password this step sets is
+    // write-only afterwards, so the wizard reads it back and waits for a
+    // deliberate acknowledgement first (CredentialsWriteDownDialog.tsx).
+    // The hotspot is off above, so only the system password is on the card.
+    const writeDown = page.getByTestId("credentials-writedown-dialog");
+    await expect(writeDown).toBeVisible({ timeout: 15_000 });
+    await expect(writeDown.getByTestId("writedown-system-value")).toHaveText("clawbox-e2e-pass");
+    await expect(writeDown.getByTestId("writedown-hotspot-value")).toHaveCount(0);
+    await writeDown.getByTestId("writedown-ack").check();
+    await writeDown.getByTestId("writedown-continue").click();
+
     // ── Step 4: Primary AI Models ────────────────────────────────
     // Credentials step Connects by posting to
     // /setup-api/system/credentials (which spawns the chpasswd systemd
