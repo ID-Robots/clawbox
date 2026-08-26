@@ -159,6 +159,17 @@ tool offline. The route enforces the gate independently, because the two live on
 opposite sides of a process boundary and the owner can change the mode under a
 running server.
 
+Because the probe is startup-only, a mode or credential change would otherwise
+leave a long-lived server with the tool list it built at boot — a mailbox
+connected under a running server stayed invisible to the agent until something
+respawned the server. So `/setup-api/email/configure` now asks Hermes to reload
+its MCP servers (`reload.mcp` on the dashboard socket, `confirm: true`) whenever
+a save or a disconnect **flips** `canRead`; the server starts again and re-probes
+the gate, and live sessions pick the new list up at their next turn boundary.
+Only on a flip: a reload respawns every MCP child process and invalidates the
+model's prompt cache, so it is not free and must not fire on an ordinary save.
+See `src/lib/email-mcp-refresh.ts`.
+
 Both read tools ARE `readOnly`, and that claim is literal rather than polite: the
 mailbox is opened with `EXAMINE` (read-only at the protocol level) and every
 fetch uses `BODY.PEEK`, so listing and reading do not even set `\Seen`. No

@@ -11,16 +11,24 @@
 //
 // DELETE disconnects: it clears ClawBox's stored credentials and, on Hermes,
 // removes the EMAIL_* block from ~/.hermes/.env.
+//
+// BOTH VERBS also tell Hermes to rebuild its MCP tool list when — and only when
+// — this change flips whether the agent may read the mailbox. The MCP server
+// probes that gate once at startup, so without this a mailbox connected under a
+// running server stays invisible to the agent. See email-mcp-refresh.ts for the
+// whole story, including why the reload is not fired on an ordinary save.
 
 import { NextResponse } from "next/server";
 import {
   clearEmailSettings,
   modeAllowsReading,
   parseEmailConfigure,
+  publicEmailStatus,
   saveEmailSettings,
   toImapConfig,
   toSmtpConfig,
 } from "@/lib/email-config";
+import { refreshEmailToolsIfReadabilityChanged } from "@/lib/email-mcp-refresh";
 import { clearPending } from "@/lib/email-pending";
 import { ImapError, verifyImap } from "@/lib/imap-client";
 import { getActiveHarness } from "@/lib/harness";
@@ -92,7 +100,41 @@ export async function POST(request: Request) {
       }
     }
 
+    // Whether the agent may open the mailbox, asked BEFORE the write and again
+    // after it. Read through publicEmailStatus rather than re-derived here:
+    // email-config.ts answers `canRead` in one place on purpose (its comment
+    // says so), and a second copy of "which modes allow reading" is a copy that
+    // can drift when a fourth mode arrives.
+    const couldReadBefore = (await publicEmailStatus()).canRead;
+
     await saveEmailSettings(settings);
+
+    // The "after" side needs no second read of the store. An account is provably
+    // connected at this point — the address, the password and the SMTP host were
+    // just accepted by the real server — so the mode is the whole of the answer,
+    // through the same helper `canRead` is built from.
+    //
+    // AWAITED, deliberately, rather than left to run after the response. Three
+    // reasons, in order of weight. It only ever does anything on a readability
+    // FLIP, which happens about once in the life of a mailbox, so the latency is
+    // not paid by ordinary saves. This route already awaits `restartHermesForEmail`
+    // below — a full gateway restart — on the inbound path, so seconds are
+    // already inside its budget and a tool-list reload is the smaller of the two.
+    // And a floating promise here would outlive the response with nothing
+    // watching it, on a request whose own later branches can restart the very
+    // gateway it is talking to; awaiting keeps the call ordered, bounded by the
+    // helper's own deadline, and observable by a test.
+    //
+    // It cannot fail the save: the helper swallows everything and returns void,
+    // so the worst case is a logged line and a tool list that catches up at the
+    // next restart.
+    //
+    // On a send → answer change the gateway restart below ALSO respawns the MCP
+    // servers, making this reload redundant for that one transition. Skipping it
+    // there would mean guessing that the restart is going to happen and going to
+    // succeed — and the case where it does not is precisely the case that needs
+    // the refresh, so the redundant reload is the cheaper mistake.
+    await refreshEmailToolsIfReadabilityChanged(couldReadBefore, modeAllowsReading(settings.mode));
 
     // Hermes' native adapter is the only way the agent can RECEIVE mail, and it
     // is opt-in. On OpenClaw there is no email channel at all (inventing one
@@ -189,6 +231,12 @@ export async function POST(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
+    // Asked before the account is dropped, for the same reason POST asks: this
+    // is the other direction of the same flip. An agent whose box no longer has
+    // a mailbox must stop being offered email_list/email_read, or every call it
+    // makes to them answers 409 — which is the failure the registration gate
+    // exists to avoid in the first place.
+    const couldReadBefore = (await publicEmailStatus()).canRead;
     await clearEmailSettings();
     // Drafts waiting on an account that no longer exists can never be approved,
     // and they hold agent-composed text. Disconnecting drops them.
@@ -204,6 +252,9 @@ export async function DELETE(request: Request) {
         console.error("[email/configure] Hermes email teardown failed:", err);
       }
     }
+    // There is no account left, so "after" is false by construction — no read of
+    // the store can say anything else. Same await-and-swallow contract as POST.
+    await refreshEmailToolsIfReadabilityChanged(couldReadBefore, false);
     return NextResponse.json({ success: true });
   } catch (err) {
     return NextResponse.json(
