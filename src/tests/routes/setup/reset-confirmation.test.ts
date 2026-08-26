@@ -12,7 +12,15 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
  * assertion each refusal case makes.
  */
 
-vi.mock("child_process", () => ({ execFile: vi.fn() }));
+// promisify(execFile) hangs forever on a mock that never calls its callback,
+// and the accepted path shells out several times on its way to the reboot.
+vi.mock("child_process", () => ({
+  execFile: vi.fn((...args: unknown[]) => {
+    const cb = args[args.length - 1];
+    if (typeof cb === "function") (cb as (e: null, r: unknown) => void)(null, { stdout: "", stderr: "" });
+    return {};
+  }),
+}));
 
 vi.mock("fs/promises", () => ({
   default: {

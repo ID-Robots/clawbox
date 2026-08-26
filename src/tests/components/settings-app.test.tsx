@@ -90,8 +90,9 @@ function jsonResponse(data: unknown) {
 }
 
 describe("SettingsApp factory reset overlay", () => {
-  beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+  /** The whole settings app mounts here, so every panel's status call needs an
+   *  answer. A test that wants one route to behave differently wraps this. */
+  function defaultFetch(input: string | URL, init?: RequestInit) {
       const url = input.toString();
 
       if (url === "/setup-api/preferences" && init?.method === "POST") return jsonResponse({ ok: true });
@@ -134,7 +135,10 @@ describe("SettingsApp factory reset overlay", () => {
       if (url === "/setup-api/setup/reset") return jsonResponse({ ok: true });
 
       return jsonResponse({});
-    }));
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(defaultFetch));
   });
 
   afterEach(() => {
@@ -178,15 +182,14 @@ describe("SettingsApp factory reset overlay", () => {
   });
 
   it("keeps the dialog up and shows why when the box refuses the reset", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-      if (url === "/setup-api/setup/reset") {
-        return new Response(JSON.stringify({ error: "Incorrect password" }), {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/setup/reset") {
+        return Promise.resolve(new Response(JSON.stringify({ error: "Incorrect password" }), {
           status: 401,
           headers: { "Content-Type": "application/json" },
-        });
+        }));
       }
-      if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: false });
-      return jsonResponse({});
+      return defaultFetch(input, init);
     }));
 
     render(<SettingsApp ui={defaultUi} />);
