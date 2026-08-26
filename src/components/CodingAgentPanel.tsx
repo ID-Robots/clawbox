@@ -25,6 +25,10 @@ interface Readiness {
   wrapperInstalled: boolean;
   claudeInstalled: boolean;
   clawaiConnected: boolean;
+  /** setpriv, which strips the web server's network capabilities off a run.
+   *  Not given a row of its own: it is present on every ClawBox, and when it
+   *  is not, `problems` says so in the owner's words. */
+  capabilityDropAvailable: boolean;
   problems: string[];
 }
 

@@ -272,6 +272,13 @@ shell tool, not less and not more:
   the run is using — but never the run's own `data/code-projects/<id>`), are
   denied to Claude Code's own Read/Edit/Write. A guard rail, not a sandbox —
   the same caveat as `bash`;
+- the run holds **no Linux capabilities**. `clawbox-setup.service` gives the web
+  server `CAP_NET_BIND_SERVICE`, `CAP_NET_ADMIN` and `CAP_NET_RAW` ambiently for
+  WiFi management and port 80, and ambient capabilities are inherited across
+  `execve` — so a run used to start with all three while the agent's own shell
+  tool, spawned by the gateway, had none. The wrapper is now spawned through
+  `setpriv --ambient-caps=-all --inh-caps=-all --no-new-privs`, and a box
+  without `setpriv` reports not-ready rather than running with them;
 - the folder must be a code project or a directory inside the home that is
   neither protected nor the ClawBox checkout itself, so a prompt-injected
   "fix the OS" cannot edit the running product in place;

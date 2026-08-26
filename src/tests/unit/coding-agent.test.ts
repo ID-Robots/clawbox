@@ -156,7 +156,20 @@ describe("readiness", () => {
   it("is ready once the installer's files and a ClawBox AI token are there", async () => {
     readyDevice();
     const r = await lib.checkReadiness();
-    expect(r).toMatchObject({ ready: true, claudeInstalled: true, wrapperInstalled: true, clawaiConnected: true, problems: [] });
+    expect(r).toMatchObject({
+      ready: true, claudeInstalled: true, wrapperInstalled: true, clawaiConnected: true,
+      capabilityDropAvailable: true, problems: [],
+    });
+  });
+
+  it("counts the capability stripper among the things a run needs", async () => {
+    readyDevice();
+    // setpriv is util-linux; if it ever is not here, a run must not start at
+    // all rather than start holding the web server's network capabilities.
+    expect(await lib.findExecutableOnPath(lib.CAPABILITY_DROP_COMMAND)).toMatch(/\/setpriv$/);
+    expect(await lib.findExecutableOnPath("definitely-not-installed-xyz")).toBeNull();
+    const r = await lib.checkReadiness();
+    expect(r.capabilityDropAvailable).toBe(true);
   });
 
   it("looks for claude on a login shell's PATH, not the web server's", () => {
@@ -260,6 +273,9 @@ describe("a run", () => {
     expect(run.status).toBe("running");
     await finished(run.id);
 
+    // What the wrapper received: setpriv strips its own arguments at `--`, so
+    // the wrapper still sees exactly the Claude Code flags. That it ran at all
+    // is the evidence the setpriv chain is well-formed.
     const argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
     const joined = argv.join(" ");
     expect(argv[0]).toBe("-p");
@@ -406,6 +422,34 @@ describe("a run", () => {
     const run = await finished((await lib.startRun({ task: "x", projectId: "site", source: "agent" })).id);
     expect(run.status).toBe("failed");
     expect(run.error).toBeTruthy();
+  });
+});
+
+describe("the capabilities a run starts with", () => {
+  /**
+   * clawbox-setup.service grants the web server CAP_NET_BIND_SERVICE,
+   * CAP_NET_ADMIN and CAP_NET_RAW as AMBIENT capabilities, and ambient
+   * capabilities are inherited across execve. Measured on a real box before
+   * this guard existed: a run asked for `python3 -c "…/proc/self/status…"` —
+   * an allow-listed interpreter, so no Claude Code tool policy applied — and
+   * printed back CapAmb=0x3400, while the gateway that hosts the agent's own
+   * shell tool holds none. This pins the prefix that closes that gap.
+   */
+  it("is spawned through setpriv, with the ambient and inheritable sets emptied", () => {
+    const { bin, argv } = lib.buildSpawnArgv("/usr/bin/setpriv", ["-p", "--verbose"]);
+    expect(bin).toBe("/usr/bin/setpriv");
+    expect(argv.slice(0, 4)).toEqual(["--ambient-caps=-all", "--inh-caps=-all", "--no-new-privs", "--"]);
+    // The wrapper comes after the separator, then its own arguments untouched.
+    expect(argv[4]).toBe(lib.wrapperPath());
+    expect(argv.slice(5)).toEqual(["-p", "--verbose"]);
+  });
+
+  it("puts every capability flag before the separator, or setpriv would pass them to the wrapper", () => {
+    const { argv } = lib.buildSpawnArgv("/usr/bin/setpriv", []);
+    const sep = argv.indexOf("--");
+    expect(sep).toBeGreaterThan(0);
+    expect(argv.slice(0, sep).every((a) => a.startsWith("--"))).toBe(true);
+    expect(argv.indexOf(lib.wrapperPath())).toBe(sep + 1);
   });
 });
 

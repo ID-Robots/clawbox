@@ -33,6 +33,18 @@
  *     Claude Code's own Read/Edit/Write as well. That is a guard rail against a
  *     mistake, not a sandbox: a shell can spell a path in ways no pattern list
  *     enumerates, exactly as mcp/README.md says of `bash`.
+ *   - The run starts with NO Linux capabilities. `clawbox-setup.service` grants
+ *     the web server `CAP_NET_BIND_SERVICE`, `CAP_NET_ADMIN` and `CAP_NET_RAW`
+ *     as AMBIENT capabilities so it can manage WiFi and bind port 80, and
+ *     ambient capabilities are inherited across execve by design — so without
+ *     this a run held `CapAmb=0x3400` while the agent's own shell tool, which
+ *     the gateway spawns, held none. Measured on a real box: a run asked for
+ *     `python3 -c "…/proc/self/status…"` — an allow-listed interpreter, so no
+ *     tool policy applied — and printed the three capabilities back. That is
+ *     more power than the bar this feature is held to, so the wrapper is
+ *     spawned through `setpriv` with the ambient and inheritable sets emptied
+ *     and no-new-privs set. Readiness refuses to start a run when `setpriv` is
+ *     missing rather than quietly running with the capabilities.
  *   - `--setting-sources user`: the ClawBox OS checkout's own CLAUDE.md and
  *     .claude/settings must not leak into a run that happens to sit under it
  *     (every code project does — data/code-projects is inside the repo).
@@ -94,6 +106,21 @@ const MAX_STDOUT_LINE_CHARS = 1_000_000;
 const STOP_GRACE_MS = 3_000;
 /** How often progress is flushed to disk while a run is busy. */
 const FLUSH_INTERVAL_MS = 1_000;
+
+/**
+ * The run is spawned through this, not directly, so it starts with an empty
+ * ambient and inheritable capability set. See the header: the web server holds
+ * CAP_NET_ADMIN and CAP_NET_RAW ambiently and every child would otherwise keep
+ * them. `--no-new-privs` is here for the same reason — a run has no business
+ * regaining through a setuid binary what these flags just took away.
+ */
+export const CAPABILITY_DROP_COMMAND = "setpriv";
+export const CAPABILITY_DROP_ARGS: readonly string[] = [
+  "--ambient-caps=-all",
+  "--inh-caps=-all",
+  "--no-new-privs",
+  "--",
+];
 
 /** Claude Code tools the run may use at all (`--tools`). No Task (sub-agents
  *  multiply cost), no WebFetch/WebSearch (the appliance is offline-first and
@@ -175,6 +202,11 @@ export interface CodingHarnessReadiness {
   wrapperInstalled: boolean;
   claudeInstalled: boolean;
   clawaiConnected: boolean;
+  /**
+   * Whether `setpriv` is here to strip the web server's inherited network
+   * capabilities off the run. False means no run may start: see the header.
+   */
+  capabilityDropAvailable: boolean;
   /** Owner-facing sentences, one per missing piece. Empty when ready. */
   problems: string[];
 }
@@ -258,20 +290,25 @@ async function isExecutableFile(file: string): Promise<boolean> {
   }
 }
 
-async function findOnPath(binary: string, pathValue: string): Promise<boolean> {
+/** The absolute path of `binary` on the runner's PATH, or null. */
+export async function findExecutableOnPath(binary: string, pathValue: string = runnerPath()): Promise<string | null> {
   for (const dir of pathValue.split(":")) {
     if (!dir) continue;
-    if (await isExecutableFile(path.join(dir, binary))) return true;
+    const candidate = path.join(dir, binary);
+    if (await isExecutableFile(candidate)) return candidate;
   }
-  return false;
+  return null;
 }
 
 export async function checkReadiness(): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudeInstalled, token] = await Promise.all([
+  const [wrapperInstalled, claudePath, setprivPath, token] = await Promise.all([
     isExecutableFile(wrapperPath()),
-    findOnPath("claude", runnerPath()),
+    findExecutableOnPath("claude"),
+    findExecutableOnPath(CAPABILITY_DROP_COMMAND),
     configGet("clawai_token"),
   ]);
+  const claudeInstalled = claudePath !== null;
+  const capabilityDropAvailable = setprivPath !== null;
   const clawaiConnected = typeof token === "string" && token.trim() !== "";
   const problems: string[] = [];
   if (!claudeInstalled) {
@@ -283,11 +320,15 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
   if (!clawaiConnected) {
     problems.push("ClawBox AI is not connected. Open Settings → AI Models and sign in to ClawBox AI first.");
   }
+  if (!capabilityDropAvailable) {
+    problems.push(`${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`);
+  }
   return {
     ready: problems.length === 0,
     wrapperInstalled,
     claudeInstalled,
     clawaiConnected,
+    capabilityDropAvailable,
     problems,
   };
 }
@@ -946,9 +987,18 @@ function installExitHook(): void {
   });
 }
 
-function spawnRun(run: CodingRun, resumeSessionId: string | null): void {
-  const args = buildRunArgs({ resumeSessionId });
-  const child = spawn(wrapperPath(), args, {
+/**
+ * The argv the box actually spawns: `setpriv`, the capability-dropping flags,
+ * then the wrapper and its own arguments. Exported for the contract test —
+ * this prefix is a security boundary, not a detail.
+ */
+export function buildSpawnArgv(setprivPath: string, claudeArgs: string[]): { bin: string; argv: string[] } {
+  return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, wrapperPath(), ...claudeArgs] };
+}
+
+function spawnRun(run: CodingRun, resumeSessionId: string | null, setprivPath: string): void {
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId }));
+  const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
     // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
@@ -1043,6 +1093,16 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   if (!readiness.ready) {
     throw new CodingAgentError("not_ready", readiness.problems.join(" "));
   }
+  // Resolved again rather than carried out of checkReadiness: this path is what
+  // strips the web server's network capabilities off the run, and a run must
+  // never start without it — not even if the binary vanished a moment ago.
+  const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
+  if (!setprivPath) {
+    throw new CodingAgentError(
+      "not_ready",
+      `${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`,
+    );
+  }
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -1101,7 +1161,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   }
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
-  spawnRun(run, resumeSessionId);
+  spawnRun(run, resumeSessionId, setprivPath);
   return cloneRun(run);
 }
 
