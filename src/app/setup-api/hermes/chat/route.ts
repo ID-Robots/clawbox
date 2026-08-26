@@ -539,6 +539,19 @@ async function settleTurn(
  *             at 240 seconds on the box — and before this the customer's only
  *             evidence that anything was happening was that nothing was.
  *   `status`— the agent's spinner line. A heartbeat, never the monologue.
+ *   `clarify` — the agent has STOPPED and is asking the customer something,
+ *             carrying the `requestId` its answer must be addressed to and one
+ *             or more questions. Its own event and not a `status`, because it
+ *             is the one frame in this stream the customer can act on: a
+ *             surface has to draw a form, and the answer goes back over
+ *             `/setup-api/hermes/chat/clarify` rather than up this stream,
+ *             which is one-directional by design. Before this existed the
+ *             frame was dropped on the floor and the agent sat parked on the
+ *             question for its full hour-long timeout while the customer was
+ *             told the stream had gone quiet.
+ *   `clarifyExpire` — that question's window closed. Sent so the form comes
+ *             down instead of leaving somebody typing an answer that can no
+ *             longer be delivered.
  *   `done`  — the settled turn, byte-identical in shape to what the non-
  *             streaming path returns, including the tool steps and the
  *             deduplicated reasoning that only the agent's database has.
@@ -559,9 +572,46 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
       try {
         const final = await turn.run(
           (chunk) => send("delta", { text: chunk }),
+          // Exhaustive on `kind`, deliberately, rather than "tool or else".
+          // The `else` branch was an assumption that every non-tool activity is
+          // a status line, and the day a third kind arrived it emitted one as
+          // `status` with `text: undefined` — a question the customer needed to
+          // answer, rendered as a blank spinner caption. A switch with a case
+          // per kind makes the next addition a compile error instead.
           (activity) => {
-            if (activity.kind === "tool") send("tool", activity);
-            else send("status", { text: activity.text });
+            switch (activity.kind) {
+              case "tool":
+                send("tool", activity);
+                break;
+              case "status":
+                send("status", { text: activity.text });
+                break;
+              case "clarify":
+                send("clarify", {
+                  requestId: activity.requestId,
+                  questions: activity.questions,
+                  // Only on a replayed batch, and only when something really is
+                  // already answered — an empty map would read as "nothing
+                  // filled in", which is what it means, so it is not sent.
+                  ...(activity.answered ? { answered: activity.answered } : {}),
+                });
+                break;
+              case "clarifyExpire":
+                send("clarifyExpire", { requestId: activity.requestId });
+                break;
+              default: {
+                // The line that makes the promise above TRUE rather than
+                // aspirational. A switch with no `default` over a callback
+                // returning `void` compiles perfectly happily when a fifth
+                // DashboardActivity member appears — it just drops it on the
+                // floor at runtime, which is the exact failure this switch
+                // replaced. Assigning the narrowed value to `never` turns that
+                // into a build error naming the kind nobody handled.
+                const unhandled: never = activity;
+                void unhandled;
+                break;
+              }
+            }
           },
         );
         if (final.status === "error") {

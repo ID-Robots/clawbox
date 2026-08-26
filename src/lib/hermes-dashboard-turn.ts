@@ -103,6 +103,36 @@ const EVENT = {
    * turn-finished line.
    */
   approvalRequest: "approval.request",
+  /**
+   * The agent is BLOCKED, asking the PERSON a question of its own.
+   *
+   * The same parked-thread failure as `approval.request` and a worse one,
+   * because this frame had no case at all: it fell to `default`, was counted as
+   * one more unknown event and dropped. Measured against hermes' own source
+   * rather than guessed — `tui_gateway/server.py` `_clarify_block` :3581 hands
+   * off to `_block` :3486, which mints `request_id = uuid4().hex[:8]` and then
+   * parks the agent's worker thread on `Event.wait(timeout)` with
+   * `_clarify_timeout_seconds()` :3568. That timeout defaults to 3600 seconds
+   * in config, and `<= 0` is passed through as `None`, which is Python's word
+   * for FOREVER.
+   *
+   * So the two clocks disagreed by twenty times over. The agent sat waiting an
+   * hour for an answer nobody had been shown, while this reader gave up after
+   * `IDLE_TIMEOUT_MS` (180s) and wrote "dashboard stream went quiet" into the
+   * customer's transcript — a question they were never asked, reported to them
+   * as a failure.
+   */
+  clarifyRequest: "clarify.request",
+  /**
+   * That question's window closed; nobody has to answer it any more.
+   *
+   * Carries only `{ request_id }` (server.py :3536 for a batch, :3546 for a
+   * single). Named here for two reasons: the surface has to be able to take the
+   * form away rather than leave a person typing into a prompt that can no
+   * longer be answered, and the idle watchdog has to come back down off the
+   * hour-long window this frame's absence justified.
+   */
+  clarifyExpire: "clarify.expire",
   error: "error",
 } as const;
 
@@ -133,6 +163,28 @@ const APPROVAL_CHOICE = "once";
  * minutes before writing a word still counts as working.
  */
 const IDLE_TIMEOUT_MS = Number(process.env.HERMES_STREAM_IDLE_TIMEOUT_MS || 180_000);
+
+/**
+ * The same clock, while the turn is waiting on a PERSON.
+ *
+ * 3600 seconds because that is hermes' own `agent.clarify_timeout` default —
+ * the number the agent's worker thread is itself parked on — and two clocks
+ * that disagree about how long a question may go unanswered produce exactly one
+ * outcome: the shorter one wins and kills a turn that was working perfectly.
+ * With 180s against 3600s the reader gave up twenty times too early, every
+ * time, on a question the customer had not even been shown.
+ *
+ * This is not the watchdog being weakened. `IDLE_TIMEOUT_MS` measures SILENCE,
+ * and silence is evidence because a running agent has no reason to produce
+ * none. A clarify is the one state where quiet is the expected shape of things:
+ * the agent is deliberately emitting nothing because it is waiting for a human
+ * being to read a question and type an answer, and a person taking four minutes
+ * over that is liveness, not a wedged socket. The window narrows again the
+ * moment the turn's own frames resume — see `TURN_PROGRESS` — so a turn that
+ * really does wedge after the answer lands is still given up on in three
+ * minutes rather than in an hour.
+ */
+const CLARIFY_IDLE_TIMEOUT_MS = Number(process.env.HERMES_CLARIFY_IDLE_TIMEOUT_MS || 3_600_000);
 
 /**
  * "Nothing arrived for the whole window" — raised, and NAMED, so the caller can
@@ -173,6 +225,28 @@ export function isQuietStreamError(err: unknown): err is DashboardStreamQuietErr
 }
 
 /**
+ * One question the agent is waiting on an answer to.
+ *
+ * Flattened from the TWO shapes the wire uses — a single question at the top of
+ * the payload, or a `questions` array — because a surface that has to branch on
+ * which of them arrived will get it wrong in exactly one of the two cases, and
+ * the batch case is the rarer one. Normalising here means the renderer draws a
+ * list of length one or length N and never asks how it was sent.
+ *
+ * `qid` is the identity the gateway answers by, and its emptiness is
+ * meaningful rather than missing: a single-question clarify HAS no qid, and
+ * `clarify.respond` for it must carry no `question_id` at all. For a batch the
+ * qid is mandatory, and the agent unblocks only once EVERY qid has an answer.
+ */
+export interface ClarifyQuestion {
+  /** Stable id for a batch question; "" for a single-question clarify. */
+  readonly qid: string;
+  readonly question: string;
+  readonly choices: readonly string[];
+  readonly multiSelect: boolean;
+}
+
+/**
  * Something the turn DID, reported while it is still doing it.
  *
  * Deliberately not the answer and deliberately not the reasoning: this is the
@@ -191,7 +265,31 @@ export type DashboardActivity =
    * reasoned at all. Both facts are true at once, and this type is how they
    * stay true: liveness here, monologue nowhere near here.
    */
-  | { kind: "status"; text: string };
+  | { kind: "status"; text: string }
+  /**
+   * The agent has stopped and is asking the customer something.
+   *
+   * Reported as ACTIVITY rather than as text for the same reason a tool step
+   * is: it is not part of the answer, and folding it into the bubble would put
+   * a question mid-sentence in a reply that has not been written yet. It is
+   * also the only activity the customer can act ON, which is why it carries the
+   * `requestId` — that value, and not the session, is what `clarify.respond`
+   * is addressed by.
+   *
+   * `answered` appears only on a REPLAYED batch: the gateway hands back the
+   * answers already locked in (`{ qid: answer }`) so a reconnecting surface can
+   * restore the half-filled form instead of asking everything again. An empty
+   * string in there is a real answer — hermes treats it as a locked SKIP — so
+   * a reader must not mistake it for an unanswered question.
+   */
+  | {
+      kind: "clarify";
+      requestId: string;
+      questions: readonly ClarifyQuestion[];
+      answered?: Readonly<Record<string, string>>;
+    }
+  /** That question expired; nothing can be answered against `requestId` now. */
+  | { kind: "clarifyExpire"; requestId: string };
 
 /** Bound on the handshake itself, which is local and answers in milliseconds. */
 const CONNECT_TIMEOUT_MS = 8_000;
@@ -310,6 +408,20 @@ export interface DashboardTurn {
     onDelta: (chunk: string) => void,
     onActivity?: (activity: DashboardActivity) => void,
   ): Promise<DashboardTurnFinal>;
+  /**
+   * Answer a pending clarify. Resolves when the gateway acknowledges.
+   *
+   * Offered on the turn because the socket is already open and authenticated,
+   * and used mainly by the tests — the HTTP route deliberately opens a socket
+   * of its own instead. Two reasons, and the second is the one that matters.
+   * The first: this socket has ONE frame reader, so an answer sent while `run`
+   * is waiting would compete with it for the next frame off the queue. The
+   * second: `clarify.respond` carries no session id, so an answer does not need
+   * this socket at all — and the case worth fixing is precisely the one where
+   * this socket is gone, the streaming request having died while the agent sat
+   * parked on the question for the rest of the hour.
+   */
+  respondToClarify(requestId: string, answer: string, questionId?: string): Promise<void>;
   /** Drop the socket. Safe to call twice, and safe to call after `run` settles. */
   close(): void;
 }
@@ -389,6 +501,123 @@ function payloadText(frame: GatewayFrame): string {
   if (!payload || typeof payload !== "object") return "";
   const text = (payload as Record<string, unknown>).text;
   return typeof text === "string" ? text : "";
+}
+
+/** The `clarify` member of the activity union, named so it can be returned. */
+type ClarifyActivity = Extract<DashboardActivity, { kind: "clarify" }>;
+
+/**
+ * The events only THIS TURN can produce, as opposed to the box's housekeeping.
+ *
+ * The distinction exists solely to decide when a clarify has stopped blocking.
+ * A person answers over a DIFFERENT socket — `clarify.respond` needs no session
+ * id, so the browser's answer travels on its own connection and this reader
+ * never sees the reply — which means the only evidence available here that the
+ * agent unparked is that the agent started talking again.
+ *
+ * Membership is drawn tightly on purpose. `sessions.changed` and friends arrive
+ * from OTHER sessions and prove nothing about this one; treating them as the
+ * end of the wait would re-arm the three-minute clock while the customer was
+ * still reading the question, which is the bug this whole file exists to avoid,
+ * merely rediscovered from the other side.
+ */
+const TURN_PROGRESS: ReadonlySet<string> = new Set<string>([
+  EVENT.messageStart,
+  EVENT.messageDelta,
+  EVENT.messageComplete,
+  EVENT.reasoningDelta,
+  EVENT.thinkingDelta,
+  EVENT.toolGenerating,
+  EVENT.toolStart,
+  EVENT.toolComplete,
+  EVENT.approvalRequest,
+  EVENT.error,
+]);
+
+/** Choice labels, keeping only the strings — the wire has been wrong here. */
+function clarifyChoices(raw: unknown): readonly string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((choice): choice is string => typeof choice === "string");
+}
+
+/**
+ * The questions in a clarify payload, whichever of the two shapes it arrived in.
+ *
+ * Coerced rather than trusted at every field. `choices` is absent on a
+ * free-text clarify and the tool has been seen to send it as something other
+ * than an array; `multi_select` is emitted ONLY when true (server.py :3628), so
+ * its absence is a real answer rather than a gap to guess at.
+ *
+ * A batch entry with no `qid` is DROPPED, and that is deliberate: a batch is
+ * answered per question, and `clarify.respond` with no `question_id` against a
+ * batch is upstream's cancel-all. Rendering a question that could only be
+ * answered by cancelling every other question in the same form would be worse
+ * than not rendering it.
+ */
+function clarifyQuestions(payload: Record<string, unknown>): ClarifyQuestion[] {
+  const batch = payload.questions;
+  if (Array.isArray(batch)) {
+    const out: ClarifyQuestion[] = [];
+    for (const entry of batch) {
+      if (!entry || typeof entry !== "object") continue;
+      const row = entry as Record<string, unknown>;
+      // Trimmed before the check, so a whitespace-only question is treated as
+      // the absence it is. `"   "` is truthy, and letting it through would arm
+      // the hour-long window on a card with nothing written on it. The adapter
+      // trims the same field, and two normalisers that disagree about the same
+      // payload is a bug waiting to be found the hard way.
+      const question = typeof row.question === "string" ? row.question.trim() : "";
+      const qid = typeof row.qid === "string" ? row.qid : "";
+      if (!question || !qid) continue;
+      out.push({ qid, question, choices: clarifyChoices(row.choices), multiSelect: row.multi_select === true });
+    }
+    return out;
+  }
+  const question = typeof payload.question === "string" ? payload.question.trim() : "";
+  if (!question) return [];
+  // The single case, given the empty qid that means "answer this with no
+  // `question_id`" — the one value the gateway accepts for a non-batch reply.
+  return [
+    { qid: "", question, choices: clarifyChoices(payload.choices), multiSelect: payload.multi_select === true },
+  ];
+}
+
+/**
+ * The answers already locked in, on a partially answered batch being replayed.
+ *
+ * Empty strings are KEPT. Upstream treats an empty answer as a deliberate skip
+ * that the batch counts as done, so dropping it here would show a reconnecting
+ * customer an unanswered question they had already dismissed — and any answer
+ * they then gave would be refused, because that qid is already locked.
+ */
+function clarifyAnswers(raw: unknown): Record<string, string> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const out: Record<string, string> = {};
+  for (const [qid, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (qid && typeof value === "string") out[qid] = value;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * A clarify payload as the activity a surface can actually render, or null.
+ *
+ * Null rather than a half-formed activity in the two cases where there is
+ * nothing a person could do with it: no `request_id`, so no answer could ever
+ * be addressed anywhere, and no usable question, so there would be nothing to
+ * ask. Both would otherwise draw an empty form with a Send button pointing at
+ * nowhere — and, worse, would suspend the idle watchdog for an hour on the
+ * strength of a frame that blocks nothing.
+ */
+function normaliseClarify(raw: unknown): ClarifyActivity | null {
+  if (!raw || typeof raw !== "object") return null;
+  const payload = raw as Record<string, unknown>;
+  const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
+  if (!requestId) return null;
+  const questions = clarifyQuestions(payload);
+  if (!questions.length) return null;
+  const answered = clarifyAnswers(payload.answers);
+  return { kind: "clarify", requestId, questions, ...(answered ? { answered } : {}) };
 }
 
 /**
@@ -729,6 +958,34 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       await awaitReply(effortId, SESSION_TIMEOUT_MS).catch(() => null);
     }
 
+    // ── A question that was already waiting before we got here ───────────
+    //
+    // Not an event, and that is the whole trap. A clarify emitted while nobody
+    // was connected is NOT re-emitted on reconnect — it is folded into the
+    // RESULT of `session.resume` / `session.info` as `pending_clarify`
+    // (server.py `_pending_clarify_request_payload` :1946, attached at :8971),
+    // carrying the original payload, its `request_id`, and — for a batch — the
+    // `answers` locked in so far. A reader that only listens for
+    // `clarify.request` therefore resumes a conversation whose agent is parked
+    // on a question, sees nothing at all, and waits out its idle window while
+    // the answer it needs is sitting in the reply it already received.
+    //
+    // Read here and emitted at the top of `run`, rather than handed to the
+    // caller now, because `openDashboardTurn` has no `onActivity` to give it
+    // to and a caller that never runs the turn has no surface to draw it on.
+    const replayClarify = normaliseClarify(result.pending_clarify);
+    /**
+     * Request ids the caller has already been told about.
+     *
+     * The dedupe exists because the replayed payload and a live
+     * `clarify.request` are the SAME question when the agent re-emits on
+     * reconnect, and a surface handed it twice draws two forms — the second
+     * one empty, over the top of the half-filled one the customer was typing
+     * into. Keyed on `request_id` because that is the identity the gateway
+     * itself uses: one id, one prompt, one answer.
+     */
+    const announcedClarifies = new Set<string>();
+
     let started = false;
     return {
       sessionId,
@@ -751,7 +1008,41 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
           close();
         };
         req.signal?.addEventListener("abort", onAbort, { once: true });
+        /**
+         * The clarify this turn is currently blocked on, or "".
+         *
+         * One id rather than a set: the gateway blocks the agent's worker
+         * thread on a single Event, so there is exactly one outstanding
+         * clarify per session by construction — a batch is one request_id
+         * covering many questions, not many requests.
+         */
+        let pendingClarifyId = "";
         try {
+          // The replayed question goes out FIRST, before the prompt is even
+          // submitted: it is older than this turn, the agent is already parked
+          // on it, and a surface that receives it after this turn's own
+          // activity would render it as though it had just been asked.
+          if (replayClarify) {
+            announcedClarifies.add(replayClarify.requestId);
+            // Armed ONLY when there is somewhere for the question to go.
+            //
+            // The hour-long window is justified by a PERSON being able to read
+            // the prompt and answer it. `onActivity` is optional — a caller
+            // that only wants the answer text passes none — and such a caller
+            // can never show the question to anybody. Arming the long window
+            // for it would park the turn for an hour on a prompt with no
+            // surface, which is precisely the failure this whole branch exists
+            // to prevent, merely reintroduced from the other side.
+            //
+            // Without a surface the turn keeps the ordinary idle window and
+            // gives up in three minutes. That is the honest outcome: the
+            // question cannot be answered on this transport, and saying so
+            // quickly beats waiting an hour to say the same thing.
+            if (onActivity) {
+              pendingClarifyId = replayClarify.requestId;
+              onActivity(replayClarify);
+            }
+          }
           socket.send(
             JSON.stringify({
               jsonrpc: "2.0",
@@ -764,8 +1055,19 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
           let reasoning = "";
           let truncated = false;
           for (;;) {
-            const frame = await nextFrame(IDLE_TIMEOUT_MS);
-            switch (frameType(frame)) {
+            // The one place the two windows are chosen between. While a person
+            // is being waited on, silence is the expected shape of the wire and
+            // the clock has to match the one the AGENT is running (3600s); the
+            // rest of the time silence is evidence and three minutes is plenty.
+            const frame = await nextFrame(pendingClarifyId ? CLARIFY_IDLE_TIMEOUT_MS : IDLE_TIMEOUT_MS);
+            const type = frameType(frame);
+            // The turn talking again is the only proof available here that the
+            // answer landed — it was sent over someone else's socket, and no
+            // acknowledgement of it ever reaches this reader. Narrowing the
+            // window back the moment the agent resumes is what keeps a turn
+            // that wedges AFTER a clarify from holding the response for an hour.
+            if (pendingClarifyId && TURN_PROGRESS.has(type)) pendingClarifyId = "";
+            switch (type) {
               case EVENT.messageDelta: {
                 const chunk = payloadText(frame);
                 if (!chunk) break;
@@ -857,6 +1159,49 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 );
                 break;
               }
+              case EVENT.clarifyRequest: {
+                // NOT auto-answered, and that is the difference from the case
+                // directly above. An approval asks whether a tool this route
+                // already permits may run, so answering it "once" grants
+                // nothing new and keeps the chat as capable as it was. A
+                // clarify asks the CUSTOMER something only they know — which
+                // file, which of these three, what should it be called — and
+                // there is no default that is not a guess put in their mouth.
+                // Answering it here would produce a confidently wrong turn,
+                // which is worse than the hang it would be curing.
+                //
+                // So it is forwarded and the turn WAITS, on the long window,
+                // for as long as hermes itself is prepared to wait.
+                const clarify = normaliseClarify(frame.params?.payload);
+                if (!clarify) break;
+                // Already announced — this is the same question replayed by a
+                // resume, not a second one. The customer is looking at it.
+                if (announcedClarifies.has(clarify.requestId)) {
+                  if (onActivity) pendingClarifyId = clarify.requestId;
+                  break;
+                }
+                announcedClarifies.add(clarify.requestId);
+                // Same rule as the replay branch above: the long window is
+                // armed only when the prompt actually reached a surface that
+                // can answer it.
+                if (onActivity) {
+                  pendingClarifyId = clarify.requestId;
+                  onActivity(clarify);
+                }
+                break;
+              }
+              case EVENT.clarifyExpire: {
+                const payload = (frame.params?.payload || {}) as Record<string, unknown>;
+                const requestId = typeof payload.request_id === "string" ? payload.request_id : "";
+                if (!requestId) break;
+                // Only the matching id stands the turn down. An expiry naming
+                // some OTHER request — a stale one, or another session's, since
+                // this transport carries frames the turn did not cause — must
+                // not shorten the window the customer is still typing inside.
+                if (pendingClarifyId === requestId) pendingClarifyId = "";
+                if (onActivity) onActivity({ kind: "clarifyExpire", requestId });
+                break;
+              }
               case EVENT.messageComplete: {
                 const payload = (frame.params?.payload || {}) as Record<string, unknown>;
                 const finalText = typeof payload.text === "string" ? payload.text : answer;
@@ -888,10 +1233,7 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
                 // asked, because the failure mode this exists for — the agent
                 // parked on a prompt nobody answered — is invisible from the
                 // outside and cost an afternoon to find once already.
-                if (DEBUG_FRAMES) {
-                  const type = frameType(frame);
-                  if (type) console.log(`[hermes-stream] ${type}`);
-                }
+                if (DEBUG_FRAMES && type) console.log(`[hermes-stream] ${type}`);
                 break;
             }
           }
@@ -899,6 +1241,39 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
           req.signal?.removeEventListener("abort", onAbort);
           close();
         }
+      },
+      async respondToClarify(requestId: string, answer: string, questionId?: string): Promise<void> {
+        const id = nextRpcId();
+        socket.send(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            method: "clarify.respond",
+            // No `session_id`, and that is upstream's contract rather than an
+            // omission: `_respond` resolves the session from a global pending
+            // registry keyed by request id (server.py :11898), which is why any
+            // authenticated dashboard socket can answer — including one opened
+            // after the socket that asked the question has gone.
+            //
+            // `question_id` is sent only when there is one. Against a BATCH an
+            // answer with no question_id is upstream's cancel-all, so an empty
+            // string here would not be a harmless default; it would throw away
+            // every other question in the same prompt.
+            params: {
+              request_id: requestId,
+              answer,
+              ...(questionId ? { question_id: questionId } : {}),
+            },
+          }),
+        );
+        const reply = await awaitReply(id, SESSION_TIMEOUT_MS);
+        if (reply.error) {
+          throw new Error(String(reply.error.message || "the dashboard refused the answer"));
+        }
+        // `{ status: "expired" }` is a successful call whose window had closed —
+        // `_respond` is invoked with `allow_expired=True` precisely so a late
+        // answer is reported rather than raised. Throwing on it would turn a
+        // customer being a few seconds slow into an error in their transcript.
       },
     };
   } catch {

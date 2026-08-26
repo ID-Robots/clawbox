@@ -4,6 +4,7 @@ import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-provider
 import {
   asHarnessError,
   HarnessError,
+  type ClarifyQuestion,
   type FetchLike,
   type HarnessAdapter,
   type HarnessCapabilities,
@@ -75,6 +76,56 @@ function toToolSummaries(value: unknown): ChatToolSummary[] {
     calls.push({ name, ...(detail ? { detail } : {}), ...(status ? { status } : {}) });
   }
   return calls;
+}
+
+/**
+ * The questions a clarify frame carries, re-validated rather than trusted.
+ *
+ * Same posture as `toToolSummaries` above and for a sharper reason: these
+ * become CONTROLS. A malformed entry rendered anyway would be a button with no
+ * label, or a question with no text and a submit that posts an answer to a qid
+ * the agent never asked about — so an entry with nothing to ask is dropped
+ * here, and a frame left with no askable question is not forwarded at all.
+ *
+ * `choices` is coerced to an array of strings rather than passed through: a
+ * non-string choice would render as `[object Object]` on a real button.
+ */
+function toClarifyQuestions(value: unknown): ClarifyQuestion[] {
+  if (!Array.isArray(value)) return [];
+  const questions: ClarifyQuestion[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const question = typeof row.question === "string" ? row.question.trim() : "";
+    if (!question) continue;
+    const choices = Array.isArray(row.choices)
+      ? row.choices.filter((c): c is string => typeof c === "string" && c.length > 0)
+      : [];
+    questions.push({
+      // A single clarify legitimately carries an empty qid — see ClarifyQuestion.
+      qid: typeof row.qid === "string" ? row.qid : "",
+      question,
+      choices,
+      multiSelect: row.multiSelect === true,
+    });
+  }
+  return questions;
+}
+
+/**
+ * The `answered` map off a reconnect replay, string keys to string values only.
+ *
+ * An already-locked answer decides whether a question renders as a control or
+ * as a read-only summary, so a value of the wrong type here would put an
+ * un-answerable question back in front of the customer.
+ */
+function toAnsweredMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const answered: Record<string, string> = {};
+  for (const [qid, answer] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof answer === "string") answered[qid] = answer;
+  }
+  return answered;
 }
 
 /**
@@ -176,6 +227,31 @@ async function readStreamedTurn(
         ...(detail ? { detail } : {}),
         ...(status ? { status } : {}),
       });
+    } else if (name === "clarify") {
+      // The agent has parked on a question. Forwarded only when it names the
+      // request it belongs to AND has something askable: without `requestId`
+      // no answer could ever be routed back, and a card with no question is a
+      // dead control the customer cannot dismiss. Unlike `tool`, nothing later
+      // in the turn repairs a dropped clarify — the turn simply waits — so the
+      // validation is about not rendering a prompt that cannot work, not about
+      // deferring to a better copy on `done`.
+      const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+      if (!requestId) return;
+      const questions = toClarifyQuestions(payload.questions);
+      if (!questions.length) return;
+      const answered = toAnsweredMap(payload.answered);
+      onEvent?.({
+        kind: "clarify",
+        requestId,
+        questions,
+        // Omitted rather than sent empty: `answered` present-but-empty and
+        // absent mean the same thing to a renderer, and the optional field
+        // reads as "this is a replay" where it appears.
+        ...(Object.keys(answered).length ? { answered } : {}),
+      });
+    } else if (name === "clarifyExpire") {
+      const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+      if (requestId) onEvent?.({ kind: "clarifyExpire", requestId });
     } else if (name === "status") {
       const text = typeof payload.text === "string" ? payload.text : "";
       if (text) onEvent?.({ kind: "status", text });
