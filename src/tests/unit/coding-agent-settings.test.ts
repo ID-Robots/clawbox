@@ -312,3 +312,39 @@ describe("the effort picker", () => {
     expect(status.effortLevels).toContain("max");
   });
 });
+
+describe("sub-agent definitions", () => {
+  it("ships agents to delegate to — the Task tool alone never fired", async () => {
+    // Every run on this box reported subagentsTotal 0: the tool existed and
+    // there was nothing on the other end of it.
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null, subagents: true });
+    const i = args.indexOf("--agents");
+    expect(i).toBeGreaterThan(-1);
+    const defs = JSON.parse(args[i + 1]);
+    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
+  });
+
+  it("says 'Use proactively' in every description — that is what triggers a hand-off", async () => {
+    const lib = await import("@/lib/coding-agent");
+    for (const [name, def] of Object.entries(lib.SUBAGENT_DEFINITIONS)) {
+      expect(def.description, `${name} must invite delegation`).toMatch(/use proactively/i);
+    }
+  });
+
+  it("keeps every helper read-or-verify only — writing stays on the main run", async () => {
+    // Delegating the code-writing would put the expensive judgement behind a
+    // summary, and Flash is chosen here precisely because these roles read.
+    const lib = await import("@/lib/coding-agent");
+    for (const [name, def] of Object.entries(lib.SUBAGENT_DEFINITIONS)) {
+      expect(def.tools, `${name} must not write`).not.toContain("Write");
+      expect(def.tools, `${name} must not edit`).not.toContain("Edit");
+      expect(def.model, `${name} should be the cheap tier`).toBe("deepseek-v4-flash");
+    }
+  });
+
+  it("passes no agents when sub-agents are switched off", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.buildRunArgs({ resumeSessionId: null, subagents: false })).not.toContain("--agents");
+  });
+});

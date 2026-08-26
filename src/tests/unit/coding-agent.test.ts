@@ -916,3 +916,48 @@ describe("after a restart", () => {
     expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))[0].status).toBe("failed");
   });
 });
+
+describe("naming the sub-agents that are out", () => {
+  beforeEach(() => readyDevice());
+
+  const TASK = (id: string, kind: string, what: string) => JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name: "Task", input: { subagent_type: kind, description: what } }] },
+  });
+  const DONE = (id: string) => JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] },
+  });
+
+  it("reports which helper is working, not just how many", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TASK("s1", "explorer", "find where the router is wired")}'`,
+      `echo '${TASK("s2", "tester", "run the unit tests")}'`,
+      `echo '${DONE("s1")}'`,
+      "sleep 20",
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const started = await lib.startRun({ task: "wide job", projectId: "site", source: "agent" });
+
+    // While it works: one finished, one still out — and we can say which.
+    // Poll rather than guess a delay: spawning through setpriv on a Jetson is
+    // not instant, and a fixed sleep makes this test flaky by construction.
+    let live = lib.getRun(started.id)!;
+    for (let i = 0; i < 60 && live.subagentsTotal < 2; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      live = lib.getRun(started.id)!;
+    }
+    expect(live.subagentsTotal).toBe(2);
+    expect(live.activeSubagents.map((a) => a.type)).toEqual(["tester"]);
+    expect(live.activeSubagents[0].description).toBe("run the unit tests");
+    expect(live.progress.join("\n")).toContain("Sub-agent started (explorer): find where the router is wired");
+
+    lib.stopRun(started.id);
+    const done = await finished(started.id);
+    // Nothing it spawned can outlive it.
+    expect(done.activeSubagents).toEqual([]);
+    expect(done.subagentsActive).toBe(0);
+  });
+});

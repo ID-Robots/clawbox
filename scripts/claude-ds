@@ -29,6 +29,8 @@
 #   CLAUDE_DS_MODEL         model for the main slot
 #   CLAUDE_DS_SMALL_MODEL   model for the haiku / subagent slots
 #   CLAUDE_DS_EFFORT        reasoning effort passed to Claude Code
+#   CLAUDE_DS_SUBAGENT_MODEL  force ONE model for every sub-agent (unset by
+#                           default so per-agent models work)
 #   CLAUDE_DS_CONFIG_DIR    where this harness keeps its own state
 #   CLAWBOX_AI_PROXY_URL    ClawBox AI base URL (same var the device uses)
 #   CLAUDE_DS_API_BASE_URL  override for Claude Code's non-inference API base
@@ -154,7 +156,14 @@ export ANTHROPIC_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
-export CLAUDE_CODE_SUBAGENT_MODEL="$SMALL_MODEL"
+# NOT set by default, deliberately. CLAUDE_CODE_SUBAGENT_MODEL outranks a
+# per-agent `model:`, so setting it forces every sub-agent onto one model and
+# makes the whole point of defining agents — a cheap reader, an expensive
+# writer — impossible. The coding agent picks the model per agent instead.
+# Set CLAUDE_DS_SUBAGENT_MODEL to force one anyway.
+if [ -n "${CLAUDE_DS_SUBAGENT_MODEL:-}" ]; then
+  export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDE_DS_SUBAGENT_MODEL"
+fi
 export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_DS_EFFORT:-max}"
 
 mkdir -p "$CLAUDE_CONFIG_DIR"

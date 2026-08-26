@@ -252,6 +252,66 @@ export const CLAUDE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash,NotebookEdit";
 /** The name of Claude Code's sub-agent tool, in the stream and in `--tools`. */
 export const SUBAGENT_TOOL = "Task";
 
+/**
+ * The sub-agents a run may hand work to.
+ *
+ * Without these the Task tool exists and is never used: every run on this box
+ * reported subagentsTotal 0, because the main model has nothing to delegate
+ * TO. Claude Code reads the `description` to decide, which is why each one
+ * says "Use proactively" — that phrasing is what actually triggers a hand-off.
+ *
+ * The model split follows what the two DeepSeek tiers are good at. Flash and
+ * Pro share the same 1M window, Flash is roughly three times cheaper, and
+ * sub-agents spend most of their tokens READING — files, logs, test output —
+ * and hand back a short summary the main model re-checks. So reading and
+ * summarising go to Flash, and anything that writes code stays on the main
+ * model, where multi-constraint correctness is measurably better.
+ *
+ * Deliberately no "builder" agent: writing the code is the run's own job, and
+ * delegating it would put the expensive judgement behind a summary.
+ */
+export const SUBAGENT_DEFINITIONS = {
+  explorer: {
+    description:
+      "Searches and maps a codebase: finds where something lives, which files "
+      + "matter, how a pattern is used. Use proactively before editing "
+      + "unfamiliar code, and whenever a question spans several files.",
+    prompt:
+      "You map code and report findings. Read and search only — never edit. "
+      + "Answer with file paths and line numbers, the shortest excerpt that "
+      + "proves the point, and nothing else. Say plainly when you did not find "
+      + "something rather than guessing.",
+    tools: ["Read", "Grep", "Glob"],
+    model: "deepseek-v4-flash",
+  },
+  tester: {
+    description:
+      "Runs a build, a test suite or a script and reports what failed. Use "
+      + "proactively after making changes, to check the work actually holds.",
+    prompt:
+      "You verify work. Run the build or tests you were asked to run, then "
+      + "report ONLY the outcome: pass or fail, the failing cases, and the "
+      + "exact error lines. Never edit a file. If a command is refused, say so "
+      + "and say which command.",
+    tools: ["Read", "Grep", "Glob", "Bash"],
+    model: "deepseek-v4-flash",
+  },
+  reviewer: {
+    description:
+      "Reads finished changes and reports real defects — bugs, unsafe handling, "
+      + "obvious omissions. Use proactively before reporting a task complete.",
+    prompt:
+      "You review changes already made. Read only — never edit. Report only "
+      + "defects you can point at in the code, each with a file, a line and "
+      + "what goes wrong. If the change looks correct, say so in one line "
+      + "rather than inventing something to say.",
+    tools: ["Read", "Grep", "Glob"],
+    model: "deepseek-v4-flash",
+  },
+} as const;
+
+export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
+
 export function toolsFor(subagents: boolean): string {
   return subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
 }
@@ -341,6 +401,8 @@ export interface CodingRun {
   /** Sub-agents working RIGHT NOW. Always 0 once the run has settled — a
    *  sub-agent cannot outlive the run that spawned it. */
   subagentsActive: number;
+  /** WHICH ones, so the app can show what each is doing rather than a count. */
+  activeSubagents: ActiveSubagent[];
   /** Sub-agents this run spawned in total, live or finished. */
   subagentsTotal: number;
   /** Whether sub-agents were available to this run at all. */
@@ -385,6 +447,15 @@ export interface CodingRun {
   resumable: boolean;
   progress: string[];
   exitCode: number | null;
+}
+
+/** One sub-agent currently out, as the owner should read it. */
+export interface ActiveSubagent {
+  /** Which definition it is — explorer, tester, reviewer. */
+  type: string;
+  /** What it was asked to do, in the run's own words. */
+  description: string;
+  startedAt: number;
 }
 
 export interface CodingHarnessReadiness {
@@ -746,6 +817,8 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // A record written before this field existed, or one left by a restart,
     // has no live sub-agents by definition.
     subagentsActive: 0,
+    // A record loaded from disk has none out by definition.
+    activeSubagents: [],
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     subagentsAllowed: raw.subagentsAllowed === true,
     fullAccess: raw.fullAccess === true,
@@ -821,7 +894,7 @@ interface LiveRun {
    * Ids rather than a counter: a tool_result can arrive out of order, and a
    * duplicate must not decrement twice.
    */
-  openSubagents: Set<string>;
+  openSubagents: Map<string, ActiveSubagent>;
   /** Resolved once at start, so a retry does not need an async lookup. */
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
@@ -914,6 +987,7 @@ function cloneRun(run: CodingRun): CodingRun {
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
     deniedActions: [...run.deniedActions],
+    activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
   };
 }
 
@@ -1158,6 +1232,7 @@ export const HEADLESS_BRIEF = [
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
   "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
   "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
+  "When sub-agents are available to you, use them: hand searching and mapping to the explorer, running builds and tests to the tester, and a last read-through to the reviewer before you report done. Do the writing yourself.",
   "Verify your work where you can (run the build or the tests you have).",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
@@ -1234,6 +1309,8 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
   args.push("--tools", toolsFor(opts.subagents === true));
+  // The Task tool with nothing to delegate to is a tool that never fires.
+  if (opts.subagents) args.push("--agents", JSON.stringify(SUBAGENT_DEFINITIONS));
   if (opts.fullAccess) {
     // "Bash(*)" — allow EVERY command — rather than withholding the lists.
     // Withholding grants nothing: in headless -p mode the allow-list is what
@@ -1445,11 +1522,19 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
           }
           case SUBAGENT_TOOL: {
             // A sub-agent is out. Its id is what tells us when it comes back.
-            if (typeof block.id === "string" && block.id) state.openSubagents.add(block.id);
+            const what = typeof input.description === "string" ? input.description : "";
+            const kind = typeof input.subagent_type === "string" ? input.subagent_type : "";
+            if (typeof block.id === "string" && block.id) {
+              state.openSubagents.set(block.id, {
+                type: kind || "sub-agent",
+                description: what.slice(0, 120),
+                startedAt: Date.now(),
+              });
+            }
             run.subagentsTotal += 1;
             run.subagentsActive = state.openSubagents.size;
-            const what = typeof input.description === "string" ? input.description : "";
-            pushProgress(run, `Sub-agent started${what ? `: ${what}` : ""}`);
+            run.activeSubagents = [...state.openSubagents.values()];
+            pushProgress(run, `Sub-agent started${kind ? ` (${kind})` : ""}${what ? `: ${what}` : ""}`);
             break;
           }
           case "Read":
@@ -1474,9 +1559,11 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
     for (const block of content) {
       if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
-      if (state.openSubagents.delete(block.tool_use_id)) {
+      const done = state.openSubagents.get(block.tool_use_id);
+      if (done && state.openSubagents.delete(block.tool_use_id)) {
         run.subagentsActive = state.openSubagents.size;
-        pushProgress(run, "Sub-agent finished");
+        run.activeSubagents = [...state.openSubagents.values()];
+        pushProgress(run, `Sub-agent finished${done.type !== "sub-agent" ? ` (${done.type})` : ""}`);
       }
       const pending = state.pendingFiles.get(block.tool_use_id);
       if (pending !== undefined) {
@@ -1564,6 +1651,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // whatever the stream did or did not say about each sub-agent.
   state.openSubagents.clear();
   run.subagentsActive = 0;
+  run.activeSubagents = [];
   if (run.status === "running") {
     if (state.stopRequested) {
       run.status = "stopped";
@@ -1681,7 +1769,7 @@ function spawnRun(
 
   const state: LiveRun = {
     child,
-    openSubagents: new Set<string>(),
+    openSubagents: new Map<string, ActiveSubagent>(),
     pendingFiles: new Map<string, string>(),
     sawWriteAttempt: false,
     sawThinking: false,
@@ -1850,6 +1938,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     deniedActions: [],
     effort,
     subagentsActive: 0,
+    activeSubagents: [],
     subagentsTotal: 0,
     subagentsAllowed: subagents,
     fullAccess,

@@ -217,12 +217,25 @@ describe("which model the owner actually gets", () => {
     expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
   });
 
-  it("keeps the cheap model in the haiku and subagent slots on every plan", () => {
+  it("keeps the cheap model in the haiku slot on every plan", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
     runWrapper();
-    const env = capturedEnv();
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("deepseek-v4-flash");
-    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
+    expect(capturedEnv().ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("does NOT force one model on every sub-agent", () => {
+    // CLAUDE_CODE_SUBAGENT_MODEL outranks a per-agent `model:`, so setting it
+    // makes a mixed fleet impossible — a cheap reader and an expensive writer
+    // both collapse onto one model. The coding agent picks per agent instead,
+    // so the wrapper must leave this unset.
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper();
+    expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
+
+  it("still lets someone force one deliberately", () => {
+    runWrapper({ CLAUDE_DS_SUBAGENT_MODEL: "deepseek-v4-flash" });
+    expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
   });
 
   it("lets an override win over the plan", () => {

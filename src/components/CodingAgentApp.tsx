@@ -75,6 +75,7 @@ interface Run {
   /** Sub-agents working right now; 0 once the run has settled. */
   subagentsActive?: number;
   subagentsTotal?: number;
+  activeSubagents?: { type: string; description: string; startedAt: number }[];
   fullAccess?: boolean;
   thinkingTokens?: number;
   tokensUsed?: number;
@@ -642,6 +643,23 @@ export default function CodingAgentApp() {
                           )}
                         </div>
                       </div>
+                      {/* Which helpers are out and what each is doing — a
+                          count alone does not say whether the run is stuck on
+                          one search or fanned across three files. */}
+                      {(run.activeSubagents?.length ?? 0) > 0 && (
+                        <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
+                          {run.activeSubagents?.map((a, i) => (
+                            <li key={i} className="flex items-start gap-2 text-[11px]">
+                              <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">
+                                sync
+                              </span>
+                              <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
+                              <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+
                       {/* What was refused, spelled out. The count alone said
                           "1 action was not allowed" and left the owner to
                           guess which — and the answer is usually a command
