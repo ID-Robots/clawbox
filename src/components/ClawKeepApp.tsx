@@ -3,11 +3,25 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
+import { backupSourceFor } from "@/lib/harness/backup-source";
 import type {
   ClawKeepMemoryStatus,
   MemoryIndexMode,
   MemoryIndexSchedule,
 } from "@/lib/clawkeep-memory";
+
+/**
+ * Is anything still missing before a backup can run?
+ *
+ * Reads the server's answer when it gave one, and otherwise falls back to the
+ * pre-Hermes meaning of the status object — "the openclaw CLI is on PATH" —
+ * so a browser holding a cached bundle against an older server still gates the
+ * button the way that server intends, rather than enabling it on a box that
+ * cannot archive.
+ */
+function archiverReady(status: ClawKeepStatus): boolean {
+  return status.archiverReady ?? status.openclawInstalled;
+}
 
 type ScheduleFrequency = "daily" | "weekly";
 interface ClawKeepSchedule {
@@ -34,8 +48,16 @@ interface ClawKeepStatus {
   uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
-  /** False on an edition with no OpenClaw to back up (Hermes). */
-  supportedOnEdition?: boolean;
+  /** Which agent this box archives — decides the wording throughout. */
+  agent?: "openclaw" | "hermes";
+  /** Everything the archiver needs is present. On OpenClaw that means the
+   *  `openclaw` CLI; on Hermes the archiver is inside the daemon, so there is
+   *  nothing extra to install. Optional so a status from an older server
+   *  (which had neither field) still renders. */
+  archiverReady?: boolean;
+  /** A snapshot from this box carries provider keys. Drives the warning that
+   *  a backup is a credential. */
+  backupContainsCredentials?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
   /** True when the device has a stored backup-encryption passphrase. The
@@ -504,22 +526,6 @@ export default function ClawKeepApp() {
     );
   }
 
-  // ClawKeep archives the OpenClaw agent through the openclaw CLI. On an edition
-  // that ships no OpenClaw (Hermes) the feature genuinely cannot run, so say so
-  // honestly and stop here — rather than dropping to the setup card that told
-  // the user to `npm install -g openclaw`, which would contradict this SKU.
-  if (status.supportedOnEdition === false) {
-    return (
-      <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-        <div className="min-h-full w-full flex items-center justify-center p-6">
-          <div className="w-full max-w-2xl">
-            <EditionUnavailableCard />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
       <div className="min-h-full w-full flex items-center justify-center p-6">
@@ -596,9 +602,15 @@ export default function ClawKeepApp() {
           {/* Not inside the `paired` branch above on purpose: the memory index
               is entirely on-device, so it is just as relevant on a box that
               has never been paired for cloud backups. */}
+          {/* The memory index IS OpenClaw's — its own store and its own
+              embedding provider (`clawkeep-memory.ts`). Hermes has no
+              equivalent, so this stays keyed to the OpenClaw CLI even now that
+              the backup itself works on both. */}
           {status.openclawInstalled && <MemoryIndexCard onError={setError} />}
 
-          {(!status.openclawInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+          <BackupContentsCard status={status} />
+
+          {(!archiverReady(status) || !status.daemonInstalled) && <SystemCard status={status} />}
 
           {backupResult && <BackupResultCard result={backupResult} />}
           {restoreResult && <RestoreResultCard result={restoreResult} />}
@@ -1708,7 +1720,7 @@ function DashboardCard({
     );
   }
 
-  const disabled = !status.daemonInstalled || !status.openclawInstalled;
+  const disabled = !status.daemonInstalled || !archiverReady(status);
   // No snapshots → restore nothing. Hide rather than offer an action that's
   // guaranteed to be empty.
   const canRestore = !disabled && status.snapshotCount > 0;
@@ -1818,19 +1830,43 @@ function DashboardCard({
   );
 }
 
-function EditionUnavailableCard() {
+/**
+ * What travels in a snapshot from THIS box, and the warning that goes with it.
+ *
+ * Rendered rather than left implicit because the archive holds the box's
+ * provider keys: the customer is entitled to know that before they schedule a
+ * nightly upload, and to know it again before they hand a restore file to
+ * anyone. The list is per-edition and comes from `backupSourceFor`, whose
+ * Hermes half is pinned by test to the archiver's own asset list — so this can
+ * never drift into describing a backup we do not actually make.
+ */
+function BackupContentsCard({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
+  const source = backupSourceFor(status.agent === "hermes" ? "hermes" : "openclaw");
   return (
     <div className={`${CARD} space-y-2`}>
       <div className="flex items-center gap-2">
         <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
-          cloud_off
+          inventory_2
         </span>
-        <h2 className="font-semibold text-[var(--text-primary)]">{t("clawkeep.edition.unsupportedTitle")}</h2>
+        <h2 className="font-semibold text-[var(--text-primary)]">
+          {t("clawkeep.contents.title")}
+        </h2>
       </div>
-      <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-        {t("clawkeep.edition.unsupportedBody")}
-      </p>
+      <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
+        {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
+      </ul>
+      {source.excludesKeys.length > 0 && (
+        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+          {t("clawkeep.contents.excludes")}{" "}
+          {source.excludesKeys.map((key) => t(key)).join("; ")}.
+        </p>
+      )}
+      {status.backupContainsCredentials !== false && (
+        <p className="text-xs text-amber-200/90 leading-relaxed">
+          🔒 {t("clawkeep.contents.credentialWarning")}
+        </p>
+      )}
     </div>
   );
 }
@@ -1841,7 +1877,11 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
       <h2 className="font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
       <ul className="text-sm text-amber-100 space-y-1">
-        {!status.openclawInstalled && (
+        {/* Only on the edition that HAS a separate CLI. On Hermes the archiver
+            ships inside the daemon, so telling the owner to
+            `npm install -g openclaw` would be an instruction that contradicts
+            their SKU and fixes nothing. */}
+        {status.agent !== "hermes" && !status.openclawInstalled && (
           <li>
             <code className="bg-black/30 px-1 rounded">openclaw</code>{" "}
             {t("clawkeep.system.notOnPath")}{" "}

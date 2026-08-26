@@ -4,12 +4,43 @@ On-device backup client for [ClawBox hardware](https://clawbox.com/) and any
 Linux box (Pi, Jetson, x86 server, VPS) that wants to back up to Cloudflare R2 through
 the OpenClaw portal.
 
-This is a thin Python wrapper around the [`openclaw backup`](https://docs.openclaw.ai/cli/backup) CLI that:
+It:
 
 1. Pairs the device with a portal account (one-time OAuth2 flow).
 2. On a daily systemd timer, mints short-lived R2 credentials from the portal.
-3. Runs `openclaw backup create` to produce a timestamped `.tar.gz` of OpenClaw state/config/credentials/workspaces, then PUTs it to the user's R2 prefix.
+3. Builds a timestamped `.tar.gz` of the agent's state, encrypts it with the
+   device passphrase, and PUTs it to the user's R2 prefix.
 4. Reports status (size + snapshot count from `list-objects-v2`) back to the portal.
+
+### Two editions, two archivers
+
+Which agent gets archived is decided by `clawkeep/agent.py` from the root-owned
+`/etc/clawbox/edition.env`, and both backends emit the **same** archive layout
+(`<root>/manifest.json` + `<root>/payload/posix/<abs-path>/…`), so restore is
+edition-agnostic:
+
+| Edition | Archiver | Captures |
+|---|---|---|
+| `openclaw` | shells out to [`openclaw backup create`](https://docs.openclaw.ai/cli/backup) | OpenClaw state, config, credentials, sessions, workspaces |
+| `hermes` | built in — `clawkeep/hermes.py`, no second CLI to install | `~/.hermes`: `config.yaml`, `.env`, `state.db` (via sqlite's online-backup API), `memories/`, `skills/`, `plugins/`, `hooks/`, `cron/`, `pairing/`, `pets/`, plus the shared identity at `~/.clawbox/agent-identity/` |
+
+The Hermes archiver works from an explicit **allowlist**, so the ~1.5 GB
+`hermes-agent/` checkout, the `bin/` virtualenv, and every cache and log stay
+out. `clawkeep/hermes.py`'s module docstring is the authoritative list, with the
+reasoning for each inclusion and exclusion.
+
+> **A snapshot is a credential.** Both editions' archives include the device's
+> provider keys (`~/.hermes/.env`, OpenClaw's `credentials`), because a restore
+> that brought back the config but not the keys would hand the customer a dead
+> box. That is safe only because encryption is **mandatory**: `runner.run_once`
+> refuses to back up at all without a device passphrase (`EXIT_NEED_PASSPHRASE`)
+> and the tarball is AES-encrypted before a byte leaves the device. Never move a
+> decrypted archive off the box.
+
+Restoring across editions is **refused**: one portal account gets one R2 prefix,
+so the snapshot list legitimately holds other devices' backups — including this
+box's own, from before it was converted. `assert_archive_matches_device` fails
+that with a plain-language message before anything on disk is touched.
 
 Server-side is already shipped on `clawbox-website`. This client implements
 the device half of the contract documented in `clawkeep-plan.md`.
@@ -67,12 +98,13 @@ SSH to the device's listener.
 | `/var/lib/clawkeep/token` | 0600 | clawkeep | The `claw_*` portal token |
 | `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes |
 
-> **Note on encryption:** the `openclaw backup` archive is plaintext —
-> Cloudflare R2 encrypts at rest, but anyone with read access to the bucket
-> sees the credentials/sessions inside the tarball. The portal-issued STS
-> creds are scoped to the user's prefix only, but if you need
-> defence-against-bucket-compromise, layer GPG/age over the archive before
-> upload. A future v1.1 will fold this in.
+> **Note on encryption:** archives are encrypted on the device before upload
+> (`clawkeep/crypto.py`), with a passphrase only the owner holds
+> (`clawkeep set-passphrase`). Encryption is mandatory — a device with no
+> passphrase refuses to back up rather than uploading plaintext, and reports
+> `needs-passphrase` so the UI can prompt. Uploaded objects end in
+> `.tar.gz.enc`; the legacy plaintext `.tar.gz` form is still *restorable* so
+> old snapshots are not stranded.
 
 ## Restoring a backup
 

@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import api, crypto, openclaw, passphrase, s3
+from . import agent, api, crypto, passphrase, s3
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -136,6 +136,45 @@ def _member_link_unsafe(member: tarfile.TarInfo) -> bool:
     return link.startswith("/")
 
 
+def _extract_file_from_open(
+    tf: tarfile.TarFile,
+    *,
+    archive_subpath: str,
+    staging_root: Path,
+) -> int:
+    """Extract a SINGLE-FILE asset: the one member whose name is exactly
+    `archive_subpath`.
+
+    The directory extractor below cannot do this. It computes each member's
+    path relative to `archive_subpath` and skips the empty result, so an asset
+    that IS the subpath extracts nothing and then fails with "no members
+    under …". OpenClaw never hit that, because every asset it declares is a
+    directory; Hermes' `config.yaml`, `.env` and `state.db` are files, and they
+    are the three most important things in its archive.
+
+    The extracted file lands at `staging_root/<basename>` — the caller swaps
+    that path into place, not `staging_root` itself.
+    """
+    staging_root.mkdir(parents=True, exist_ok=True)
+    name = archive_subpath.rsplit("/", 1)[-1]
+    try:
+        for member in tf:
+            if member.name != archive_subpath:
+                continue
+            if not member.isfile():
+                raise RestoreError(
+                    f"{archive_subpath!r} is declared as a file asset but is "
+                    "not a regular file in the archive",
+                )
+            size = member.size
+            member.name = name
+            tf.extract(member, path=staging_root)
+            return size
+    except (tarfile.TarError, OSError) as e:
+        raise RestoreError(f"extraction failed for {archive_subpath}: {e}") from e
+    raise RestoreError(f"no member at {archive_subpath} in archive")
+
+
 def _extract_asset_from_open(
     tf: tarfile.TarFile,
     *,
@@ -199,17 +238,40 @@ def _extract_asset(
     *,
     archive_subpath: str,
     staging_root: Path,
+    entry: str = "dir",
 ) -> int:
     """Standalone variant — opens the tarball just for one asset. Kept for
     tests; the orchestrator uses `_extract_asset_from_open` to share a
     single TarFile across all assets."""
+    extract = _extract_file_from_open if entry == "file" else _extract_asset_from_open
     try:
         with tarfile.open(archive_path, "r:gz") as tf:
-            return _extract_asset_from_open(
+            return extract(
                 tf, archive_subpath=archive_subpath, staging_root=staging_root,
             )
+    except RestoreError:
+        # Already a typed, human-readable failure from the extractor — do not
+        # re-wrap it as "extraction failed" and lose the reason.
+        raise
     except (tarfile.TarError, OSError) as e:
         raise RestoreError(f"extraction failed for {archive_subpath}: {e}") from e
+
+
+def _staging_beside(target: Path, *, kind: str, ts: int) -> Path:
+    """Where an asset is built before it is swapped in: a hidden SIBLING of the
+    live target, not a child of the downloaded-archive tmpdir.
+
+    `Path.rename` is `rename(2)`, which refuses to cross filesystems (EXDEV).
+    Staging under `tempfile.mkdtemp()` and then renaming onto `~/.hermes/…`
+    is a restore that dies at the very last step on any box where /tmp is its
+    own mount — a tmpfs, which is the norm on a Jetson image. A sibling is
+    always on the target's own filesystem, so the swap is both possible AND
+    atomic, and atomicity is the property this whole design rests on.
+
+    (The module docstring has said "a sibling staging directory next to the
+    live target" since the first version. The code did not do it.)
+    """
+    return target.with_name(f".clawkeep-restore-{kind}-{ts}-{target.name}")
 
 
 def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
@@ -384,6 +446,11 @@ def restore_snapshot(
     creds = api.mint_credentials(cfg.server, token)
 
     staging_dir = Path(tempfile.mkdtemp(prefix="clawkeep-restore-"))
+    # Asset staging happens beside each live target (see `_staging_beside`),
+    # which is outside `staging_dir` and so outside its cleanup. Track them so
+    # a failure part-way through does not leave `.clawkeep-restore-*` litter in
+    # the customer's state directory.
+    sibling_stagings: list[Path] = []
     archive_path = staging_dir / snapshot_name
     try:
         log.info("downloading snapshot %s", snapshot_name)
@@ -429,24 +496,44 @@ def restore_snapshot(
             # readers below — they expect the plaintext form.
             snapshot_name = archive_path.name
 
-        log.info("verifying %s (%d bytes)", archive_path, size)
-        try:
-            openclaw.verify_archive(cfg.openclaw.binary, archive_path)
-        except openclaw.OpenclawError as e:
-            raise RestoreError(f"archive verify failed: {e}") from e
-
-        ts = int(time.time())
-        results: list[RestoredAsset] = []
-
-        # Read the manifest with one tarball open. We re-open per asset
-        # below because gzip framing makes seek-back expensive — streaming
-        # forward from a fresh handle is cheaper than rewinding a shared
-        # one across multi-hundred-MB archives.
+        # The manifest is read BEFORE the integrity check, because WHICH
+        # verifier to run is a property of the ARCHIVE rather than of this box:
+        # an OpenClaw snapshot is verified by `openclaw backup verify` and a
+        # Hermes one by our own reader. Reading it first costs one tarball open
+        # and buys a plain-language refusal for the cross-edition case instead
+        # of a raw "verify failed (rc=1)". Nothing on disk is touched until
+        # after the verify either way, so the guarantee is unchanged.
+        #
+        # We re-open per asset below because gzip framing makes seek-back
+        # expensive — streaming forward from a fresh handle is cheaper than
+        # rewinding a shared one across multi-hundred-MB archives.
         try:
             with tarfile.open(archive_path, "r:gz") as tf:
                 manifest = _read_manifest_from_open(tf, snapshot_name[: -len(".tar.gz")])
         except (tarfile.TarError, OSError) as e:
             raise RestoreError(f"could not read manifest from {archive_path}: {e}") from e
+
+        # One portal account gets ONE R2 prefix, shared by every device paired
+        # to it — so this snapshot list legitimately holds other devices'
+        # backups, including this box's own from before it was converted to the
+        # other edition (a converted box keeps its `~/.clawkeep` pairing, and
+        # its stale `~/.openclaw` alongside the live `~/.hermes`). Swapping an
+        # OpenClaw snapshot onto a Hermes box would restore state the running
+        # agent never reads and report success. Refuse by name, before anything
+        # is verified or moved.
+        try:
+            agent.assert_archive_matches_device(manifest)
+        except agent.AgentMismatchError as e:
+            raise RestoreError(str(e)) from e
+
+        log.info("verifying %s (%d bytes)", archive_path, size)
+        try:
+            agent.verify_archive(cfg, archive_path, agent=agent.archive_agent(manifest))
+        except agent.ARCHIVE_ERRORS as e:
+            raise RestoreError(f"archive verify failed: {e}") from e
+
+        ts = int(time.time())
+        results: list[RestoredAsset] = []
 
         archive_root = str(manifest.get("archiveRoot", "")).strip()
         if not archive_root:
@@ -466,16 +553,30 @@ def restore_snapshot(
             if not isinstance(archive_subpath, str) or not archive_subpath:
                 raise RestoreError(f"manifest asset missing archivePath: {asset!r}")
 
+            # `entry` is new with the Hermes manifest and absent from every
+            # archive written before it, so "dir" is the default — that is all
+            # OpenClaw has ever declared.
+            entry = str(asset.get("entry") or "dir")
+            if entry not in ("dir", "file"):
+                raise RestoreError(f"manifest asset {kind!r} has unknown entry {entry!r}")
+
             target = Path(source_path)
-            asset_staging = staging_dir / f"asset-{kind}-{ts}"
+            asset_staging = _staging_beside(target, kind=kind, ts=ts)
+            sibling_stagings.append(asset_staging)
             log.info("extracting asset %s → %s", kind, asset_staging)
             try:
                 bytes_restored = _extract_asset(
                     archive_path,
                     archive_subpath=archive_subpath,
                     staging_root=asset_staging,
+                    entry=entry,
                 )
-                backup = _swap_into_place(asset_staging, target, ts=ts)
+                # A file asset landed at `<staging>/<basename>`; a directory
+                # asset IS the staging directory.
+                swap_source = (
+                    asset_staging if entry == "dir" else asset_staging / target.name
+                )
+                backup = _swap_into_place(swap_source, target, ts=ts)
             except Exception as primary:
                 # An asset failure after earlier assets already swapped would
                 # leave the device with a mixed restore (some new content,
@@ -504,6 +605,14 @@ def restore_snapshot(
         # asset-staging children out, so what's left is the downloaded
         # archive + empty asset dirs. Don't raise from here — the restore
         # itself succeeded.
+        for leftover in sibling_stagings:
+            try:
+                if leftover.is_dir():
+                    shutil.rmtree(leftover, ignore_errors=True)
+                else:
+                    leftover.unlink(missing_ok=True)
+            except Exception as e:  # noqa: BLE001 — cleanup never fails a restore
+                log.warning("could not clean up asset staging at %s: %s", leftover, e)
         try:
             shutil.rmtree(staging_dir, ignore_errors=True)
         except Exception as e:  # noqa: BLE001 — never let cleanup fail the restore

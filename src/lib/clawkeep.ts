@@ -25,6 +25,8 @@ import { StringDecoder } from "node:string_decoder";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { getEdition } from "@/lib/harness";
+import { backupSourceFor } from "@/lib/harness/backup-source";
+import type { HarnessId } from "@/lib/harness/transport";
 
 export const CLAWKEEP_DATA_DIR =
   process.env.CLAWKEEP_DATA_DIR?.trim() || path.join(os.homedir(), ".clawkeep");
@@ -121,13 +123,29 @@ export interface ClawKeepStatus {
   uploadBytesTotal: number;
   uploadBytesDone: number;
   uploadStartedAtMs: number;
+  /** Whether the `openclaw` CLI is on PATH. A prerequisite ONLY on the
+   *  OpenClaw edition, where the archive is made by `openclaw backup create`.
+   *  Kept as the raw fact; `archiverReady` is the question the UI asks. */
   openclawInstalled: boolean;
   daemonInstalled: boolean;
-  /** False on an edition that ships no OpenClaw to back up (Hermes). ClawKeep
-   *  archives the OpenClaw agent via the openclaw CLI, which that edition does
-   *  not have — so the feature genuinely cannot run there, and the UI must say
-   *  so honestly rather than print an `npm install -g openclaw` remedy that
-   *  contradicts the SKU. */
+  /** Which agent's state a backup on this box captures. Mirrors
+   *  `clawkeep.agent.device_agent()` in the daemon, which is the authority —
+   *  the daemon is what actually picks the backend. */
+  agent: HarnessId;
+  /** Is there anything left to install before a backup can run?
+   *
+   *  On OpenClaw this is `openclawInstalled`: no CLI, no archive. On Hermes the
+   *  archiver lives inside the daemon (`clawkeep/hermes.py`), so once the
+   *  daemon is there the box can back up — there is no second binary and no
+   *  `npm install -g openclaw` remedy to print, which would contradict the SKU.
+   */
+  archiverReady: boolean;
+  /** True when a snapshot from this box carries provider keys or platform
+   *  tokens, so the UI can say a backup is a credential. Both editions do. */
+  backupContainsCredentials: boolean;
+  /** Retained for older clients that gate the whole app on it. ClawKeep now
+   *  supports BOTH editions, so it is always true; the honest per-edition
+   *  answer is `archiverReady`. */
   supportedOnEdition: boolean;
   /** True while a restore is mid-flight (download → verify → swap). */
   restoring: boolean;
@@ -631,6 +649,12 @@ export async function getStatus(): Promise<ClawKeepStatus> {
   ]);
 
   const server = readServer(configToml);
+  // A single-harness edition names its own agent. "dual" installs both and
+  // defaults to OpenClaw (`DEFAULT_HARNESS` in harness.ts), which is also what
+  // the daemon's `device_agent()` picks when both state directories exist — the
+  // two must agree, because the daemon is what actually builds the archive.
+  const agent: HarnessId = getEdition() === "hermes" ? "hermes" : "openclaw";
+  const source = backupSourceFor(agent);
   return {
     paired: !!token,
     // openclaw decides what's in the archive — we no longer ask the user
@@ -650,9 +674,16 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     uploadStartedAtMs: stateRaw.upload_started_at_ms ?? 0,
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
-    // ClawKeep backs up the OpenClaw agent; the Hermes SKU ships no openclaw, so
-    // the feature has nothing to archive there and is not supported.
-    supportedOnEdition: getEdition() !== "hermes",
+    agent,
+    // On Hermes the archiver is part of the daemon, so `daemonInstalled` is the
+    // whole prerequisite and this is unconditionally true. On OpenClaw the
+    // archive is made by a separate CLI that has to be there.
+    archiverReady: source.requiresExternalCli ? openclawInstalled : true,
+    backupContainsCredentials: source.containsCredentials,
+    // ClawKeep now archives EITHER agent (see `clawkeep/agent.py`), so no
+    // edition is unsupported. Kept true rather than deleted so a client that
+    // still gates on it keeps working.
+    supportedOnEdition: true,
     restoring,
     schedule,
     nextRunAtMs: computeNextRunMs(schedule, new Date()),

@@ -205,7 +205,7 @@ def test_restore_snapshot_end_to_end(tmp_path: Path) -> None:
     with (
         patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
         patch("clawkeep.restore.s3.download", side_effect=fake_download),
-        patch("clawkeep.restore.openclaw.verify_archive"),
+        patch("clawkeep.restore.agent.verify_archive"),
     ):
         result = restore.restore_snapshot(cfg, "claw_x", "snap-root.tar.gz")
 
@@ -252,7 +252,7 @@ def test_restore_snapshot_propagates_verify_failure(tmp_path: Path) -> None:
         patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
         patch("clawkeep.restore.s3.download", side_effect=fake_download),
         patch(
-            "clawkeep.restore.openclaw.verify_archive",
+            "clawkeep.restore.agent.verify_archive",
             side_effect=openclaw.OpenclawError("manifest mismatch"),
         ),
     ):
