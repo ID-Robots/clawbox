@@ -78,6 +78,17 @@ import { announceCodingAgent } from "@/lib/coding-agent-notify";
 
 /** config.json key of the owner's switch. Absent means OFF. */
 export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
+/**
+ * config.json key of the folder a run works in when the caller names neither a
+ * project nor a directory. Absent means "no default": a run must then say
+ * where it works, as it always had to.
+ *
+ * It is stored as the owner typed it and re-validated on EVERY use, never
+ * trusted because it was validated once when it was set. The containment rules
+ * are the same ones an explicit directory faces — a default is a convenience,
+ * not a way around them.
+ */
+export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
 
 /** Wall-clock ceiling for one run. Claude Code's own retries can stall for
  *  minutes against an unreachable ClawBox AI, so this is the real backstop. */
@@ -193,6 +204,17 @@ export interface CodingRun {
   commandsRun: number;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
+  /**
+   * Whether RESUMING this run's session could help.
+   *
+   * True only where the session holds real work and merely ran out of room —
+   * a turn or cost ceiling. False for a run that died on authentication or
+   * transport, because Claude Code persists that failure IN the session and
+   * replays it on every resume: observed on a real box, where a transient
+   * upstream error at 09:01 was resumed at 09:05 into the same session id and
+   * failed identically. A resume is then not a retry, it is a re-enactment.
+   */
+  resumable: boolean;
   progress: string[];
   exitCode: number | null;
 }
@@ -214,6 +236,8 @@ export interface CodingHarnessReadiness {
 export interface CodingAgentStatus {
   /** The owner's switch. */
   enabled: boolean;
+  /** The owner's default working folder, or null when they have not set one. */
+  defaultDirectory: string | null;
   /** enabled AND the harness is installed and connected — i.e. a run can start. */
   ready: boolean;
   readiness: CodingHarnessReadiness;
@@ -248,6 +272,30 @@ export async function isCodingAgentEnabled(): Promise<boolean> {
 
 export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
   await configSet(CODING_AGENT_CONFIG_KEY, enabled === true);
+}
+
+/** The owner's default working folder, or null when they have not set one. */
+export async function getDefaultDirectory(): Promise<string | null> {
+  const raw = await configGet(CODING_AGENT_DIR_CONFIG_KEY);
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+/**
+ * Set (or clear, with null/"") the default working folder.
+ *
+ * Validated here rather than only at the route so there is one answer to "is
+ * this folder allowed", and it is the same answer a run gets. Returns the
+ * resolved path so the owner sees what the device actually recorded — a
+ * symlink is stored as the folder it leads to, not as the name they typed.
+ */
+export async function setDefaultDirectory(directory: string | null): Promise<string | null> {
+  if (directory === null || directory.trim() === "") {
+    await configSet(CODING_AGENT_DIR_CONFIG_KEY, undefined);
+    return null;
+  }
+  const { directory: resolved } = await resolveWorkingDirectory({ directory });
+  await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
+  return resolved;
 }
 
 // ─── Readiness ───────────────────────────────────────────────────────────────
@@ -334,9 +382,14 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness] = await Promise.all([isCodingAgentEnabled(), checkReadiness()]);
+  const [enabled, readiness, defaultDirectory] = await Promise.all([
+    isCodingAgentEnabled(),
+    checkReadiness(),
+    getDefaultDirectory(),
+  ]);
   return {
     enabled,
+    defaultDirectory,
     ready: enabled && readiness.ready,
     readiness,
     running: runningCount(),
@@ -388,6 +441,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     filesTouched: Array.isArray(raw.filesTouched) ? raw.filesTouched.filter((f) => typeof f === "string") : [],
     commandsRun: typeof raw.commandsRun === "number" ? raw.commandsRun : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
+    resumable: raw.resumable === true,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
   };
@@ -638,7 +692,15 @@ export async function resolveWorkingDirectory(input: {
   }
 
   if (!directory) {
-    throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
+    // The owner's default, if they set one. Re-validated by falling through
+    // into the same checks below — a folder that stopped being allowed since
+    // it was set (deleted, moved, replaced by a symlink out of the home) is
+    // refused now, not trusted because it passed once.
+    const fallback = await getDefaultDirectory();
+    if (!fallback) {
+      throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
+    }
+    return resolveWorkingDirectory({ directory: fallback });
   }
   if (directory.length > MAX_DIRECTORY_CHARS) {
     throw new CodingAgentError("invalid", "The folder path is too long.");
@@ -924,12 +986,16 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         run.status = event.is_error ? "failed" : "completed";
         if (event.is_error && !run.error) run.error = (text || "Claude Code reported an error.").slice(0, MAX_ERROR_CHARS);
         break;
+      // The two ceilings are the ONLY failures a resume can help with: the
+      // session did real work and simply ran out of room.
       case "error_max_turns":
         run.status = "failed";
+        run.resumable = true;
         run.error = `Stopped after ${run.numTurns || MAX_TURNS} turns without finishing. Resume it with a narrower task, or split the work.`;
         break;
       case "error_max_budget_usd":
         run.status = "failed";
+        run.resumable = true;
         run.error = "Stopped at the cost ceiling for one run. Resume it with a narrower task, or split the work.";
         break;
       default: {
@@ -1118,7 +1184,19 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // in, so a resume always happens where the original run happened.
     directory = await realDirectory(previous.directory);
     projectId = previous.projectId;
-    resumeSessionId = previous.sessionId;
+    // A session poisoned by an authentication or transport failure REPLAYS
+    // that failure on every resume — Claude Code persists it in the session,
+    // so resuming is a re-enactment, not a retry. Measured on a real box: a
+    // transient upstream error at 09:01 was resumed at 09:05 into the same
+    // session and failed identically, which is how a passing cloud hiccup
+    // became a permanently broken project.
+    //
+    // So the work carries on in a FRESH session instead. The task text is the
+    // caller's and says what to continue; what is lost is the old
+    // conversation, which was worthless anyway — it contains one failed
+    // request. Refusing outright would be worse: it would leave the owner
+    // with a project that can never be resumed.
+    resumeSessionId = previous.resumable ? previous.sessionId : null;
   } else {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
@@ -1147,10 +1225,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     filesTouched: [],
     commandsRun: 0,
     permissionDenials: 0,
+    resumable: false,
     progress: [],
     exitCode: null,
   };
   if (resumeSessionId) pushProgress(run, "Resuming the previous session");
+  else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
 
   list.unshift(run);
   // Never drop a running run; trim the oldest finished ones.

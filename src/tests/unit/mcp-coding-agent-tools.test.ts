@@ -68,6 +68,7 @@ const RUN = {
   filesTouched: ["index.html"],
   commandsRun: 1,
   permissionDenials: 2,
+  resumable: false,
   progress: ["Started", "$ npm test", "Finished: completed"],
 };
 
@@ -257,6 +258,26 @@ describe("coding_agent_status", () => {
     if (out.isError) return;
     expect(out.text).toMatch(/Still working/);
     expect(out.text).toMatch(/wait_seconds/);
+  });
+
+  it("never tells the agent to resume a run a resume cannot fix", async () => {
+    // This advice is what turned one transient upstream failure into a project
+    // that failed forever: the agent resumed the poisoned session and
+    // re-enacted the same authentication error.
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "failed", resumable: false, error: "Failed to authenticate." } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/Do not resume this one/);
+    expect(out.text).not.toMatch(/resume_run_id/);
+  });
+
+  it("does offer a resume when the run merely hit a ceiling", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "failed", resumable: true, error: "Stopped after 60 turns." } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/resume_run_id/);
   });
 
   it("answers NOT_FOUND with the listing as the next step", async () => {

@@ -413,6 +413,42 @@ describe("a run", () => {
     expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
   });
 
+  it("does NOT replay a session poisoned by an auth failure — it starts fresh", async () => {
+    // Observed on a real box: a transient upstream failure at 09:01 recorded
+    // session a5ef1ff6; the run was resumed at 09:05 into that same session
+    // and failed identically, because Claude Code persists the failure IN the
+    // session. One cloud hiccup became a permanently broken project.
+    installFakeWrapper(`echo '${INIT}'\necho '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Failed to authenticate. API Error: Attention Required! | Cloudflare"],"session_id":"sess-abc-123"}'\nexit 0`);
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "build it", projectId: "site", source: "agent" })).id);
+    expect(first.status).toBe("failed");
+    expect(first.error).toMatch(/authenticate/i);
+    // The session exists, but resuming it cannot help.
+    expect(first.sessionId).toBe("sess-abc-123");
+    expect(first.resumable).toBe(false);
+
+    installFakeWrapper(HAPPY_BODY);
+    const second = await lib.startRun({ task: "carry on", resumeRunId: first.id, source: "agent" });
+    await finished(second.id);
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+    expect(argv).not.toContain("--resume");
+    expect(second.progress.join(" ")).toMatch(/Starting fresh/);
+    // Same folder, so the work continues where it was.
+    expect(second.directory).toBe(first.directory);
+  });
+
+  it("still resumes a run that merely ran out of room", async () => {
+    installFakeWrapper(`echo '${INIT}'\necho '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":60,"session_id":"sess-abc-123"}'\nexit 0`);
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
+    expect(first.resumable).toBe(true);
+
+    installFakeWrapper(HAPPY_BODY);
+    await finished((await lib.startRun({ task: "finish it", resumeRunId: first.id, source: "agent" })).id);
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+    expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
+  });
+
   it("surfaces the wrapper's own refusal, minus its banner", async () => {
     installFakeWrapper("echo 'claude-ds: ClawBox AI is not connected yet. Open Settings -> AI Models first.' >&2\nexit 1");
     makeProject("site");

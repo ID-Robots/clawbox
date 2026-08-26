@@ -21,11 +21,23 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.chatStopped": "Coding agent stopped",
   "codingAgent.chatOpenApp": "open",
 
+  // The desktop card a finished run raises, top-right with the others.
+  "codingAgent.noticeOpen": "Open the coding agent",
+  "codingAgent.noticeDismiss": "Dismiss",
+
   "codingAgent.switchLabel": "Let the assistant delegate coding work",
   "codingAgent.switchHelp":
     "When on, your assistant can hand a coding task to Claude Code, which works in the background inside a project folder on your ClawBox AI plan and reports back. Off by default.",
 
   "codingAgent.readiness": "What a run needs",
+  "codingAgent.readyLine": "Claude Code, claude-ds and ClawBox AI are all ready.",
+
+  "codingAgent.folderLabel": "Default project folder",
+  "codingAgent.folderPlaceholder": "/home/clawbox/projects",
+  "codingAgent.folderHelp":
+    "Where a run works when your assistant does not name a code project. Must be a folder inside the ClawBox home — not the ClawBox OS folder itself, and not one holding credentials. Leave empty to require a project every time.",
+  "codingAgent.folderSave": "Save",
+  "codingAgent.folderFailed": "Could not save the default folder.",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",
   "codingAgent.clawai": "ClawBox AI",

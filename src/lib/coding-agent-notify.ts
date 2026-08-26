@@ -74,11 +74,31 @@ export function buildAnnouncement(run: CodingRun): string {
   }
 }
 
-function notifyDesktop(message: string): void {
+/**
+ * The desktop notice.
+ *
+ * Its own action type rather than the generic `notify` toast: a finished run
+ * is something the owner may want to ACT on — read the summary, see what was
+ * changed — and the desktop's top-right cards are where a notice with a button
+ * belongs. The toast is for one-line remarks with nowhere to go.
+ *
+ * The extra fields are facts the device already knows (which run, how it
+ * ended, which project). Still no task and no summary: those are model-authored
+ * and the rule in this file's header applies to a card exactly as it does to a
+ * toast.
+ */
+function notifyDesktop(run: CodingRun, message: string): void {
   try {
     kvSet(
       UI_ACTION_KEY,
-      JSON.stringify({ type: "notify", message: message.slice(0, MAX_TOAST_CHARS), ts: Date.now() }),
+      JSON.stringify({
+        type: "coding_agent",
+        message: message.slice(0, MAX_TOAST_CHARS),
+        runId: run.id,
+        status: run.status,
+        projectId: run.projectId,
+        ts: Date.now(),
+      }),
     );
   } catch (err) {
     console.error("[coding-agent] desktop notice failed:", err instanceof Error ? err.message : err);
@@ -146,7 +166,7 @@ async function notifyTelegram(message: string): Promise<void> {
  */
 export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
-  notifyDesktop(message);
+  notifyDesktop(run, message);
   try {
     await notifyTelegram(message);
   } catch (err) {

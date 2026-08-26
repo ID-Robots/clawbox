@@ -132,6 +132,7 @@ interface RunPayload {
   filesTouched: string[];
   commandsRun: number;
   permissionDenials: number;
+  resumable: boolean;
   progress: string[];
 }
 
@@ -171,8 +172,14 @@ function describeRun(run: RunPayload, tail: number): string {
     parts.push("Still working. Call coding_agent_status again with this run_id (wait_seconds up to 120 lets you block instead of polling).");
   } else if (run.status === "completed") {
     parts.push("Finished. Relay the summary to the user; if it was a code project, call code_project_build to install the result on the desktop.");
-  } else if (run.status === "failed" && run.sessionId) {
-    parts.push("It can be continued: call coding_agent_run with resume_run_id set to this id and a narrower task.");
+  } else if (run.status === "failed" && run.resumable && run.sessionId) {
+    // Only where a resume can actually help — a turn or cost ceiling. Advising
+    // it for an authentication or transport failure is what turned one
+    // transient upstream error into a project that failed forever: the agent
+    // dutifully resumed the poisoned session and re-enacted the failure.
+    parts.push("It hit a ceiling with work already done: call coding_agent_run with resume_run_id set to this id and a narrower task.");
+  } else if (run.status === "failed") {
+    parts.push("Do not resume this one — start a fresh run. Tell the user what failed if it looks like the device rather than the task.");
   }
   return redact(parts.join("\n"));
 }

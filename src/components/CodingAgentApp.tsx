@@ -39,6 +39,8 @@ interface AgentStatus {
   ready: boolean;
   readiness: Readiness;
   running: number;
+  /** The folder a run uses when the assistant names neither project nor path. */
+  defaultDirectory: string | null;
 }
 
 interface Run {
@@ -123,6 +125,13 @@ export default function CodingAgentApp() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Runs are behind a button: the answer to "is this on and does it work" is
+  // the whole point of opening this window, and a list of past runs pushed it
+  // below the fold.
+  const [showRuns, setShowRuns] = useState(false);
+  // The folder field is a DRAFT until saved, so typing does not fight the
+  // status the route keeps returning.
+  const [dirDraft, setDirDraft] = useState<string | null>(null);
 
   // `load` must not re-run because a translation function was re-created: a
   // refetch on every render would overwrite a freshly toggled switch with the
@@ -140,7 +149,9 @@ export default function CodingAgentApp() {
         fetch(`/setup-api/coding-agent/runs?limit=${RECENT_RUNS}`, { cache: "no-store" }),
       ]);
       if (!s.ok) throw new Error("status");
-      setStatus(await s.json() as AgentStatus);
+      const next = await s.json() as AgentStatus;
+      setStatus(next);
+      setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
       if (r.ok) {
         const data = await r.json() as { runs?: Run[] };
         setRuns(Array.isArray(data.runs) ? data.runs : []);
@@ -189,6 +200,29 @@ export default function CodingAgentApp() {
     }
   };
 
+  const saveDirectory = async () => {
+    setBusy("dir");
+    setError(null);
+    try {
+      const value = (dirDraft ?? "").trim();
+      const res = await fetch("/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // "" clears it. The route answers the re-read status, so a symlink
+        // comes back as the folder it actually leads to.
+        body: JSON.stringify({ defaultDirectory: value === "" ? null : value }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.folderFailed")));
+      const next = await res.json() as AgentStatus;
+      setStatus(next);
+      setDirDraft(next.defaultDirectory ?? "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.folderFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const stop = async (id: string) => {
     setBusy(id);
     setError(null);
@@ -224,133 +258,187 @@ export default function CodingAgentApp() {
 
   return (
     <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto" data-testid="coding-agent-panel">
-      <div className="mx-auto w-full max-w-3xl p-6">
-        <div className="flex items-center gap-2 mb-1">
-          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }}>smart_toy</span>
-          <h1 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
-        </div>
-        {/* Where the interactive session went. This icon used to open a
-            terminal already running the harness; it now opens this, so the
-            owner is told once, here, rather than left hunting for it. */}
-        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mb-5 leading-relaxed">
-          {t("codingAgent.terminalHint")}
-        </p>
+      <div className="mx-auto w-full max-w-2xl px-5 py-4">
 
-        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-sm text-[var(--text-primary)]">{t("codingAgent.switchLabel")}</p>
-              <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-                {t("codingAgent.switchHelp")}
-              </p>
+        {/* One row: what this is, and whether it is on. The switch is the
+            reason the window gets opened, so it is the first thing in it. */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
+              <h1 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.switchLabel")}</h1>
             </div>
-            <Switch
-              checked={status?.enabled ?? false}
-              busy={busy === "switch"}
-              disabled={!status}
-              label={t("codingAgent.switchLabel")}
-              onChange={toggle}
-            />
-          </div>
-
-      {readiness && (
-        <div className="mt-4 rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-          <div className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
-            {t("codingAgent.readiness")}
-          </div>
-          <ul className="space-y-1">
-            {checks.map((c) => (
-              <li key={c.label} className="flex items-center gap-2 text-xs">
-                <span
-                  className={`material-symbols-rounded ${c.ok ? "text-emerald-400" : "text-red-400"}`}
-                  style={{ fontSize: 16 }}
-                  aria-hidden="true"
-                >
-                  {c.ok ? "check_circle" : "cancel"}
-                </span>
-                <span className="text-[var(--text-primary)]">{c.label}</span>
-                <span className="text-[var(--text-muted)]">· {c.ok ? c.okText : c.badText}</span>
-              </li>
-            ))}
-          </ul>
-          {!readiness.ready && readiness.problems.length > 0 && (
-            <p className="text-[11px] text-amber-400 mt-2 leading-relaxed" role="alert">
-              {readiness.problems.join(" ")}
+            <p className="text-[11px] text-[var(--text-muted)] opacity-70 mt-1 leading-relaxed">
+              {t("codingAgent.switchHelp")}
             </p>
+          </div>
+          <Switch
+            checked={status?.enabled ?? false}
+            busy={busy === "switch"}
+            disabled={!status}
+            label={t("codingAgent.switchLabel")}
+            onChange={toggle}
+          />
+        </div>
+
+        {/* Readiness collapses to one green line when everything is there.
+            The three-row checklist only earns its space when something is
+            missing — which is exactly when the owner needs to read it. */}
+        {readiness && (
+          <div className="mt-3 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+            {readiness.ready ? (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="material-symbols-rounded text-emerald-400" style={{ fontSize: 16 }} aria-hidden="true">check_circle</span>
+                <span className="text-[var(--text-muted)]">{t("codingAgent.readyLine")}</span>
+              </div>
+            ) : (
+              <>
+                <ul className="space-y-1">
+                  {checks.filter((c) => !c.ok).map((c) => (
+                    <li key={c.label} className="flex items-center gap-2 text-xs">
+                      <span className="material-symbols-rounded text-red-400" style={{ fontSize: 16 }} aria-hidden="true">cancel</span>
+                      <span className="text-[var(--text-primary)]">{c.label}</span>
+                      <span className="text-[var(--text-muted)]">· {c.badText}</span>
+                    </li>
+                  ))}
+                </ul>
+                {readiness.problems.length > 0 && (
+                  <p className="text-[11px] text-amber-400 mt-1.5 leading-relaxed" role="alert">
+                    {readiness.problems.join(" ")}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Where work goes when the assistant does not name a project. */}
+        <div className="mt-3">
+          <label htmlFor="coding-agent-dir" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+            {t("codingAgent.folderLabel")}
+          </label>
+          <div className="flex items-center gap-2 mt-1.5">
+            <input
+              id="coding-agent-dir"
+              type="text"
+              value={dirDraft ?? ""}
+              onChange={(e) => setDirDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") void saveDirectory(); }}
+              placeholder={t("codingAgent.folderPlaceholder")}
+              spellCheck={false}
+              data-testid="coding-agent-folder"
+              className="flex-1 min-w-0 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+            />
+            <button
+              type="button"
+              onClick={() => void saveDirectory()}
+              disabled={busy === "dir" || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
+              className="px-3 py-1.5 rounded-lg border border-white/10 text-xs text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            >
+              {t("codingAgent.folderSave")}
+            </button>
+          </div>
+          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
+            {t("codingAgent.folderHelp")}
+          </p>
+        </div>
+
+        {/* Runs behind a button. Opening the window is usually about the
+            switch; the history is one click away when it is wanted. */}
+        <div className="mt-4">
+          <button
+            type="button"
+            onClick={() => setShowRuns((v) => !v)}
+            aria-expanded={showRuns}
+            data-testid="coding-agent-runs-toggle"
+            className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
+          >
+            <span className="flex items-center gap-2">
+              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
+              {t("codingAgent.recentRuns")}
+              {runs.length > 0 && <span className="text-[var(--text-muted)]">({runs.length})</span>}
+              {anyRunning && (
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
+                  {t("codingAgent.statusRunning")}
+                </span>
+              )}
+            </span>
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+              {showRuns ? "expand_less" : "expand_more"}
+            </span>
+          </button>
+
+          {showRuns && (
+            runs.length === 0 ? (
+              <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
+            ) : (
+              <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
+                {runs.map((run) => {
+                  const details = [run.error, run.summary].filter(Boolean).join("\n\n");
+                  const open = expanded === run.id;
+                  return (
+                    <li key={run.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_CLASS[run.status]}`}>
+                              {statusLabel(run.status)}
+                            </span>
+                            {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
+                            <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
+                          </div>
+                          <p className="text-xs text-[var(--text-primary)] mt-1 break-words">{firstLine(run.task, 80)}</p>
+                          <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
+                            {t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
+                            {" · "}
+                            {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
+                            {run.permissionDenials > 0 && (
+                              <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
+                            )}
+                          </p>
+                        </div>
+                        <div className="flex flex-col items-end gap-1 shrink-0">
+                          {run.status === "running" && (
+                            <button
+                              type="button"
+                              onClick={() => stop(run.id)}
+                              disabled={busy === run.id}
+                              className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-50"
+                            >
+                              {t("codingAgent.stop")}
+                            </button>
+                          )}
+                          {details && (
+                            <button
+                              type="button"
+                              onClick={() => setExpanded(open ? null : run.id)}
+                              aria-expanded={open}
+                              className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                            >
+                              {open ? t("codingAgent.hideDetails") : t("codingAgent.showDetails")}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {open && details && (
+                        <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-sans leading-relaxed">
+                          {details}
+                        </pre>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )
           )}
         </div>
-      )}
-        </div>
 
-        <div className="mt-5 rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-      <div className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest mb-2">
-        {t("codingAgent.recentRuns")}
-      </div>
-      {runs.length === 0 ? (
-        <p className="text-xs text-[var(--text-muted)]">{t("codingAgent.noRuns")}</p>
-      ) : (
-        <ul className="space-y-2" data-testid="coding-agent-runs">
-          {runs.map((run) => {
-            const details = [run.error, run.summary].filter(Boolean).join("\n\n");
-            const open = expanded === run.id;
-            return (
-              <li key={run.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_CLASS[run.status]}`}>
-                        {statusLabel(run.status)}
-                      </span>
-                      <span className="text-[11px] font-mono text-[var(--text-muted)]">{run.id}</span>
-                      {run.projectId && (
-                        <span className="text-[11px] text-[var(--text-muted)]">· {run.projectId}</span>
-                      )}
-                    </div>
-                    <p className="text-sm text-[var(--text-primary)] mt-1 break-words">{firstLine(run.task)}</p>
-                    <p className="text-[11px] text-[var(--text-muted)] mt-1">
-                      {t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
-                      {" · "}
-                      {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
-                    </p>
-                    {run.permissionDenials > 0 && (
-                      <p className="text-[11px] text-amber-400 mt-1">{t("codingAgent.denials", { n: run.permissionDenials })}</p>
-                    )}
-                  </div>
-                  <div className="flex flex-col items-end gap-1 shrink-0">
-                    {run.status === "running" && (
-                      <button
-                        type="button"
-                        onClick={() => stop(run.id)}
-                        disabled={busy === run.id}
-                        className="text-xs px-3 py-1 rounded-lg border border-white/10 text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-50"
-                      >
-                        {t("codingAgent.stop")}
-                      </button>
-                    )}
-                    {details && (
-                      <button
-                        type="button"
-                        onClick={() => setExpanded(open ? null : run.id)}
-                        aria-expanded={open}
-                        className="text-xs px-3 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                      >
-                        {open ? t("codingAgent.hideDetails") : t("codingAgent.showDetails")}
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {open && details && (
-                  <pre className="mt-3 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-72 overflow-y-auto font-sans leading-relaxed">
-                    {details}
-                  </pre>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-        </div>
+        {/* Where the interactive session went: this icon used to open a
+            terminal already running the harness. Last, in small type — it is
+            an answer to a question, not a thing to do. */}
+        <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-4 leading-relaxed">
+          {t("codingAgent.terminalHint")}
+        </p>
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>

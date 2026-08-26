@@ -1239,6 +1239,9 @@ function ChromeDesktopInner() {
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
   }, []);
 
+  /** Finished coding runs waiting to be seen, newest first. */
+  const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
+
   useEffect(() => {
     let active = true;
     let lastProcessedTs = 0;
@@ -1279,6 +1282,16 @@ function ChromeDesktopInner() {
                 },
               }));
               setHiddenInstalledApps(prev => prev.includes(action.appId) ? prev.filter(id => id !== action.appId) : prev);
+            } else if (action.type === "coding_agent" && action.runId) {
+              // A finished coding run is something the owner may want to act
+              // on, so it becomes a top-right CARD with a button rather than a
+              // toast that slides away. Newest first, deduped by run id — the
+              // slot is single-consumer but a reload can replay one.
+              setCodingNotices(prev => (
+                prev.some(n => n.runId === action.runId)
+                  ? prev
+                  : [{ runId: action.runId as string, status: String(action.status ?? ""), projectId: (action.projectId as string | null) ?? null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
+              ));
             } else if (action.type === "notify" && action.message) {
               window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
             }
@@ -1800,7 +1813,7 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
-      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0) && (
+      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
           {updateAvailable && (() => {
@@ -1914,6 +1927,59 @@ function ChromeDesktopInner() {
           )}
 
           {/* New Telegram access request popup(s) */}
+          {/* A finished coding run. Same shape as the pairing card above,
+              because it is the same kind of thing: a notice the owner may want
+              to act on. The button opens the Coding Agent app, where the run's
+              summary and what it changed are — the card itself carries only
+              ClawBox-authored text, never the model's. */}
+          {codingNotices.map((notice) => {
+            const failed = notice.status === "failed";
+            const stopped = notice.status === "stopped";
+            const accent = failed ? "#f87171" : stopped ? "#cbd5e1" : "#4ade80";
+            const glyph = failed ? "error" : stopped ? "stop_circle" : "task_alt";
+            const title = failed
+              ? t("codingAgent.chatFailed")
+              : stopped ? t("codingAgent.chatStopped") : t("codingAgent.chatFinished");
+            return (
+              <div
+                key={notice.runId}
+                className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                role="status"
+                aria-live="polite"
+                data-testid="coding-agent-notice"
+              >
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: `${accent}26`, border: `1px solid ${accent}4d` }}>
+                    <span className="material-symbols-rounded" style={{ fontSize: 20, color: accent }}>{glyph}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-white">{title}</div>
+                    {notice.projectId && <div className="text-xs text-white/60 mt-0.5 truncate">{notice.projectId}</div>}
+                    <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">{notice.runId}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId))}
+                    className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                    aria-label={t("codingAgent.noticeDismiss")}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+                  </button>
+                </div>
+                <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => { openApp("coding"); setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId)); }}
+                    className="flex-1 px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>smart_toy</span>
+                    {t("codingAgent.noticeOpen")}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+
           {pairingRequests.map((req) => {
             const label = req.name || req.id || "A Telegram user";
             const code = req.code || "";
