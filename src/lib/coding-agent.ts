@@ -249,8 +249,17 @@ export const CAPABILITY_DROP_ARGS: readonly string[] = [
  *  is added only when the owner has switched them on — see
  *  CODING_AGENT_SUBAGENTS_CONFIG_KEY. */
 export const CLAUDE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash,NotebookEdit";
-/** The name of Claude Code's sub-agent tool, in the stream and in `--tools`. */
-export const SUBAGENT_TOOL = "Task";
+/**
+ * Claude Code's sub-agent tool, as it appears in `--tools` and in the stream.
+ *
+ * It is "Agent". This was "Task" — a name the binary also contains — and the
+ * mismatch is why every run reported subagentsTotal 0 while the transcripts
+ * showed real delegation: the runs WERE handing work to the explorer, and the
+ * parser was counting a tool nobody had called. Both names are recognised on
+ * the way in so a version that renames it back cannot silence the count
+ * again.
+ */
+export const SUBAGENT_TOOL = "Agent";
 
 /**
  * The sub-agents a run may hand work to.
@@ -1520,6 +1529,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
             pushProgress(run, `${block.name} ${file ?? ""}`);
             break;
           }
+          case "Task":
           case SUBAGENT_TOOL: {
             // A sub-agent is out. Its id is what tells us when it comes back.
             const what = typeof input.description === "string" ? input.description : "";

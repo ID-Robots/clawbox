@@ -97,6 +97,16 @@ describe("sub-agents", () => {
     expect(await getSubagentsEnabled()).toBe(true);
   });
 
+  it("names the sub-agent tool the way the CLI actually emits it", async () => {
+    // "Task" for the name here meant every run reported 0 sub-agents while
+    // its transcript showed real delegation — the parser counted a tool the
+    // CLI never calls. Confirmed against a live transcript: name "Agent",
+    // input carries subagent_type.
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.SUBAGENT_TOOL).toBe("Agent");
+    expect(lib.toolsFor(true).split(",")).toContain("Agent");
+  });
+
   it("is a capability, not a hint: Task is absent from --tools when off", () => {
     expect(CLAUDE_TOOLS).not.toContain(SUBAGENT_TOOL);
     expect(toolsFor(false)).toBe(CLAUDE_TOOLS);
