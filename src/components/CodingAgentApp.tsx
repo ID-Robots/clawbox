@@ -194,6 +194,7 @@ export default function CodingAgentApp() {
   const [showRuns, setShowRuns] = useState(true);
   const [runsShown, setRunsShown] = useState(RUNS_PAGE);
   const [github, setGithub] = useState<GitHubState | null>(null);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
   // Clearing is two clicks, not a browser confirm(): the second click is the
   // confirmation, and collapsing the list takes the offer back.
   const [confirmClear, setConfirmClear] = useState(false);
@@ -358,6 +359,24 @@ export default function CodingAgentApp() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.backupFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Disconnect GitHub. Two clicks, like clearing history: it is not
+   *  destructive — pushed repositories stay — but it is not what anyone means
+   *  to do by brushing a button. */
+  const disconnectGithub = async () => {
+    setBusy("gh-out");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/git", { method: "DELETE" });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.githubOutFailed")));
+      setGithub(await res.json() as GitHubState);
+      setConfirmSignOut(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.githubOutFailed"));
     } finally {
       setBusy(null);
     }
@@ -538,14 +557,31 @@ export default function CodingAgentApp() {
                 <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.githubOff")}</span>
               )}
             </div>
-            <button
-              type="button"
-              onClick={connectGithub}
-              data-testid="coding-agent-github-connect"
-              className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
-            >
-              {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
-            </button>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={connectGithub}
+                data-testid="coding-agent-github-connect"
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+              >
+                {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
+              </button>
+              {github.connected && (
+                <button
+                  type="button"
+                  onClick={() => (confirmSignOut ? void disconnectGithub() : setConfirmSignOut(true))}
+                  disabled={busy === "gh-out"}
+                  data-testid="coding-agent-github-signout"
+                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
+                    confirmSignOut
+                      ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
+                      : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+                  }`}
+                >
+                  {confirmSignOut ? t("codingAgent.githubOutConfirm") : t("codingAgent.githubOut")}
+                </button>
+              )}
+            </div>
           </div>
         )}
 

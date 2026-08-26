@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { backupToGitHub, githubStatus } from "@/lib/coding-github";
+import { backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
 import { CodingAgentError, resolveWorkingDirectory } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +20,10 @@ export const dynamic = "force-dynamic";
  * private repo or not. The owner decides that, not a task that may itself
  * have come from an email or a web page.
  *
+ * DELETE → disconnect the account. Owner-only for the same reason as the
+ *        switch: the agent must not be able to change the owner's credentials,
+ *        in either direction.
+ *
  * No token is ever handled here. gh holds the credential and lends it to git;
  * this route only asks gh whether it has one.
  */
@@ -32,6 +36,19 @@ export async function GET() {
       { status: 500 },
     );
   }
+}
+
+export async function DELETE(request: Request) {
+  if (!(await hasOwnerSession(request))) {
+    return NextResponse.json(
+      { error: "Disconnecting GitHub needs a signed-in browser session.", kind: "owner_only" },
+      { status: 403 },
+    );
+  }
+  const out = await disconnectGitHub();
+  if (!out.ok) return NextResponse.json({ error: out.detail ?? "Could not disconnect" }, { status: 500 });
+  console.error("[coding-agent] GitHub disconnected by the owner");
+  return NextResponse.json(await githubStatus());
 }
 
 export async function POST(request: Request) {

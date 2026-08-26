@@ -122,6 +122,23 @@ export async function githubStatus(): Promise<GitHubStatus> {
   };
 }
 
+/**
+ * Disconnect the GitHub account.
+ *
+ * `gh auth logout --hostname github.com` with stdin closed — verified
+ * non-interactive on gh 2.4.0, which has no --yes flag. gh forgets its own
+ * credential; nothing of ours to clear, because ClawBox never held one.
+ *
+ * Any repository already pushed stays on GitHub, and any remote already set
+ * on a folder stays set — this removes the ability to push, not the history.
+ */
+export async function disconnectGitHub(): Promise<{ ok: boolean; detail?: string }> {
+  const r = await run("gh", ["auth", "logout", "--hostname", "github.com"]);
+  if (r.code === null) return { ok: false, detail: "gh is not installed on this ClawBox." };
+  if (r.code !== 0) return { ok: false, detail: (r.stderr || r.stdout).slice(0, 300) };
+  return { ok: true };
+}
+
 /** A repository name GitHub will accept, from a folder name. */
 export function repoNameFor(directory: string): string {
   const base = path.basename(path.resolve(directory));
