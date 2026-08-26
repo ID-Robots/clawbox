@@ -27,10 +27,22 @@ beforeEach(() => {
 describe("stopHermesEmailPolling", () => {
   it("restarts the gateway when one is already running", async () => {
     mockStatus.mockResolvedValue({ installed: true, running: true, scope: "system" });
-    mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
 
     await expect(stopHermesEmailPolling()).resolves.toBe("stopped");
     expect(mockEnsure).toHaveBeenCalledTimes(1);
+  });
+
+  // runHermesCli resolves on a non-zero exit and the status probe runs
+  // unprivileged, so before `applied` existed a restart that was REFUSED still
+  // came back as `running: true` and this function answered "stopped" — telling
+  // the owner receiving had ended while the old process kept polling the old
+  // mailbox with the old allowlist.
+  it("does not claim 'stopped' when the restart was refused", async () => {
+    mockStatus.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system", applied: false });
+
+    await expect(stopHermesEmailPolling()).resolves.toBe("restart-failed");
   });
 
   it("installs nothing on a device whose gateway is not running", async () => {

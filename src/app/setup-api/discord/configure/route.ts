@@ -127,7 +127,9 @@ async function applyRestart(harness: string, signal: AbortSignal, secret: string
   try {
     if (harness === "hermes") {
       const status = await ensureHermesGateway(signal);
-      return status.running;
+      // A refused restart leaves the previous process up, and the unprivileged
+      // status probe cannot tell the two apart — so require both.
+      return status.running && status.applied;
     }
     await restartGateway();
     return true;

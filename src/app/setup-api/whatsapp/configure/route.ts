@@ -133,7 +133,9 @@ export async function POST(request: Request) {
     // as /telegram/configure.
     try {
       const status = await ensureHermesGateway(request.signal);
-      if (!status.running) {
+      // See /telegram/configure: `running` alone is satisfied by the pre-restart
+      // process, so the new config would be reported live while unread.
+      if (!status.running || !status.applied) {
         return NextResponse.json({ success: true, restarted: false, warning: warning ?? "restart_pending" });
       }
     } catch (gatewayErr) {

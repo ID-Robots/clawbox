@@ -40,7 +40,7 @@ beforeEach(async () => {
     paired: true,
     authorized: true,
   });
-  mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system" });
+  mockEnsure.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
   POST = (await import("@/app/setup-api/whatsapp/configure/route")).POST;
 });
 
@@ -145,7 +145,7 @@ describe("POST /setup-api/whatsapp/configure", () => {
   });
 
   it("reports success without a restart when the gateway is not running", async () => {
-    mockEnsure.mockResolvedValue({ installed: false, running: false, scope: null });
+    mockEnsure.mockResolvedValue({ installed: false, running: false, scope: null, applied: false });
     const body = await (await post({ mode: "bot" })).json();
     expect(body).toMatchObject({ success: true, restarted: false, warning: "restart_pending" });
   });
@@ -187,7 +187,7 @@ describe("POST /setup-api/whatsapp/configure", () => {
       paired: true,
       authorized: false,
     });
-    mockEnsure.mockResolvedValue({ installed: false, running: false, scope: null });
+    mockEnsure.mockResolvedValue({ installed: false, running: false, scope: null, applied: false });
     const body = await (await post({ enabled: true })).json();
     expect(body).toMatchObject({ success: true, restarted: false, warning: "no_allowed_users" });
   });

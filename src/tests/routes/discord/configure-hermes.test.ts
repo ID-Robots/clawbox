@@ -80,7 +80,7 @@ describe("POST /setup-api/discord/configure — Hermes", () => {
     mockHarness.mockResolvedValue("hermes");
     mockSetHermesToken.mockResolvedValue();
     mockSetAllowlist.mockResolvedValue({ changedKeys: [], allowedUsers: [], authorized: true });
-    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
 
     POST = (await import("@/app/setup-api/discord/configure/route")).POST;
   });
@@ -105,7 +105,7 @@ describe("POST /setup-api/discord/configure — Hermes", () => {
   });
 
   it("reports a gateway that would not come up as saved-with-warning", async () => {
-    mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system" });
+    mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system", applied: false });
 
     const res = await POST(req());
     const body = await res.json();

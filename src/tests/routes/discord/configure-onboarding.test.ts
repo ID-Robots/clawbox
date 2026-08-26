@@ -130,7 +130,7 @@ describe("POST /setup-api/discord/configure — onboarding", () => {
     mockGet.mockResolvedValue(TOKEN);
     mockHarness.mockResolvedValue("hermes");
     mockSetToken.mockResolvedValue();
-    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
     mockSetAllowlist.mockImplementation(async (ids: string[]) => ({
       changedKeys: ids.length > 0 ? ["DISCORD_ALLOWED_USERS"] : [],
       allowedUsers: ids,
@@ -321,7 +321,7 @@ describe("POST /setup-api/discord/configure — onboarding", () => {
 
     it("reports a pending restart honestly instead of claiming success", async () => {
       useApi();
-      mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system" });
+      mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system", applied: false });
 
       const body = await (await POST(req({ allowedUserIds: [OWNER_ID] }))).json();
 

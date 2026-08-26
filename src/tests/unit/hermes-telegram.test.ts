@@ -14,6 +14,19 @@ import path from "path";
 const runHermesCliMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: runHermesCliMock }));
 
+// The system-scope restart goes through `sudo -n /usr/bin/systemctl restart
+// hermes-gateway.service` rather than the Hermes CLI — see ensureHermesGateway.
+const execFileMock = vi.hoisted(() => vi.fn());
+vi.mock("child_process", () => ({ execFile: execFileMock }));
+
+/** Make the mocked execFile succeed / fail the way promisify(execFile) sees it. */
+function execFileSucceeds() {
+  execFileMock.mockImplementation((_bin: string, _argv: string[], _opts: unknown, cb: (e: Error | null, out?: string, err?: string) => void) => cb(null, "", ""));
+}
+function execFileFails(message: string) {
+  execFileMock.mockImplementation((_bin: string, _argv: string[], _opts: unknown, cb: (e: Error | null) => void) => cb(new Error(message)));
+}
+
 // Captured verbatim from `hermes pairing list` with two pending requests and
 // one approved user. Note the second pending row: the display name is wider
 // than its 20-char column, so every field after it is shifted — column offsets
@@ -71,6 +84,16 @@ const GATEWAY_SERVICE_RUNNING = `● hermes-gateway.service - Hermes Agent Gatew
 ✓ System gateway service is running
 Configured to run as: clawbox
 ✓ System service starts at boot without requiring systemd linger`;
+
+// The user-scope spelling of the same verdict. ClawBox installs a SYSTEM unit,
+// but a device someone set up by hand can have this one, and it must never be
+// driven through sudo — `systemctl --user` from a system service would target
+// root's session bus, not clawbox's.
+const GATEWAY_USER_SERVICE_RUNNING = `● hermes-gateway.service - Hermes Agent Gateway - Messaging Platform Integration
+     Loaded: loaded (/home/clawbox/.config/systemd/user/hermes-gateway.service; enabled)
+     Active: active (running) since Mon 2026-08-10 22:45:04 UTC; 21s ago
+   Main PID: 86759 (hermes)
+✓ User gateway service is running`;
 
 const GATEWAY_MANUAL_RUNNING = `✓ Gateway is running (PID: 4242)
   (Running manually, not as a system service)
@@ -336,6 +359,8 @@ describe("ensureHermesGateway", () => {
   beforeEach(() => {
     vi.resetModules();
     runHermesCliMock.mockReset();
+    execFileMock.mockReset();
+    execFileSucceeds();
   });
 
   it("installs a boot-time system service when none exists", async () => {
@@ -360,18 +385,60 @@ describe("ensureHermesGateway", () => {
     expect(opts.sudo).toBe(true);
   });
 
-  it("restarts an installed system service as root instead of reinstalling", async () => {
+  // The restart used to be `sudo -n /home/clawbox/.local/bin/hermes gateway
+  // restart --system`. That binary is clawbox-owned and clawbox-writable, so it
+  // could never be allow-listed — the sudoers coverage checker had to EXEMPT it
+  // — which meant the restart silently failed on any narrowed box. The unit is
+  // root-owned and runs User=clawbox, so systemctl grants nothing new.
+  it("restarts an installed system service through systemctl, not the CLI", async () => {
     runHermesCliMock
       .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_SERVICE_STOPPED, stderr: "" })
-      .mockResolvedValueOnce({ code: 0, stdout: "✓ System service restarted", stderr: "" })
       .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_SERVICE_RUNNING, stderr: "" });
 
     const { ensureHermesGateway } = await import("@/lib/hermes-telegram");
-    await ensureHermesGateway();
+    await expect(ensureHermesGateway()).resolves.toMatchObject({ running: true, applied: true });
 
-    const [args, opts] = runHermesCliMock.mock.calls[1];
-    expect(args).toEqual(["gateway", "restart", "--system"]);
-    expect(opts.sudo).toBe(true);
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const [bin, argv] = execFileMock.mock.calls[0];
+    expect(bin).toBe("/usr/bin/sudo");
+    expect(argv).toEqual(["-n", "/usr/bin/systemctl", "restart", "hermes-gateway.service"]);
+    // Never sudo the clawbox-writable hermes binary again.
+    for (const [, opts] of runHermesCliMock.mock.calls) {
+      expect(opts?.sudo).not.toBe(true);
+    }
+  });
+
+  // THE FALSE SUCCESS. `hermes gateway status` runs UNPRIVILEGED, so after a
+  // refused restart it still sees the OLD process and answers "running". The
+  // route then replied {restarted: true} and the owner's new token did nothing.
+  it("reports applied: false when the restart is refused, even though the old process is still up", async () => {
+    runHermesCliMock
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_SERVICE_RUNNING, stderr: "" })
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_SERVICE_RUNNING, stderr: "" });
+    execFileFails("sudo: a password is required");
+
+    const { ensureHermesGateway } = await import("@/lib/hermes-telegram");
+    await expect(ensureHermesGateway()).resolves.toMatchObject({
+      running: true,
+      applied: false,
+    });
+  });
+
+  // A user-scope unit must NOT be driven with sudo (systemctl --user would be
+  // aimed at root's session bus), so that branch stays on the CLI — but
+  // runHermesCli RESOLVES on a non-zero exit, so the code has to be checked.
+  it("keeps a user-scope service on the CLI and honours its exit code", async () => {
+    runHermesCliMock
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_USER_SERVICE_RUNNING, stderr: "" })
+      .mockResolvedValueOnce({ code: 1, stdout: "", stderr: "Failed to restart" })
+      .mockResolvedValueOnce({ code: 0, stdout: GATEWAY_USER_SERVICE_RUNNING, stderr: "" });
+
+    const { ensureHermesGateway } = await import("@/lib/hermes-telegram");
+    const res = await ensureHermesGateway();
+    expect(res).toMatchObject({ scope: "user", running: true, applied: false });
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(runHermesCliMock.mock.calls[1][0]).toEqual(["gateway", "restart"]);
+    expect(runHermesCliMock.mock.calls[1][1]?.sudo).toBeUndefined();
   });
 
   // `gateway restart` with no service unit falls back to starting the gateway
