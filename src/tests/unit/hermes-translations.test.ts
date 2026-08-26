@@ -68,6 +68,11 @@ const BRAND_ONLY = new Set([
   "Pro", "Max", "Free", "ClawBox AI", "Hermes CLI", "macOS", "Windows", "Linux",
   "Linux/macOS", "SKILL.md", "Disk", "Memory",
   "Claude Code", "claude-ds",
+  // A loanword that is genuinely identical in several languages.
+  "tokens",
+  // A filesystem path shown as a placeholder. Translating it would invent a
+  // folder that does not exist on the box.
+  "/home/clawbox/Projects",
 ]);
 
 function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {

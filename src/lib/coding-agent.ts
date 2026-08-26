@@ -73,20 +73,116 @@ import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/codin
 import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { projectPath, validateProjectId } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
+import { commitRunWork } from "@/lib/coding-git";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
 /** config.json key of the owner's switch. Absent means OFF. */
 export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
+/**
+ * config.json key of the folder a run works in when the caller names neither a
+ * project nor a directory. Absent means "no default": a run must then say
+ * where it works, as it always had to.
+ *
+ * It is stored as the owner typed it and re-validated on EVERY use, never
+ * trusted because it was validated once when it was set. The containment rules
+ * are the same ones an explicit directory faces — a default is a convenience,
+ * not a way around them.
+ */
+export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
+
+/**
+ * How hard Claude Code thinks per turn (`--effort`, via the wrapper's
+ * CLAUDE_DS_EFFORT). These are the levels the installed CLI accepts — it
+ * warns and falls back to its default on anything else, so the set is
+ * validated here rather than passed through.
+ *
+ * Higher is slower and costs more; on a Jetson the difference is felt. "max"
+ * stays the default because a delegated run is unattended: the owner is not
+ * watching to notice it gave up early.
+ */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+/**
+ * The levels the app offers, as opposed to the ones the CLI accepts.
+ *
+ * Measured on this box, same prompt, deepseek-v4-pro[1m], reasoning tokens:
+ *
+ *     low 82   medium 94   high 102   xhigh 139   max 414
+ *
+ * The effort does reach the model — the request carries
+ * output_config {"effort": "..."} and it changes with the flag — but low,
+ * medium and high land within noise of each other. Offering five buttons
+ * where three do the same thing teaches a false model of the machine, so the
+ * picker shows the three that measurably differ. All five stay valid for
+ * anyone setting the config key directly.
+ */
+export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max"];
+export type CodingEffort = (typeof EFFORT_LEVELS)[number];
+export const DEFAULT_EFFORT: CodingEffort = "max";
+export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
+
+
+/**
+ * Full command access and sub-agents are BOTH permanent now, at the owner's
+ * instruction. They were switches; the switches are gone.
+ *
+ * What that settles, so nobody has to rediscover it:
+ *
+ *   - Every command runs without asking. There is no command policy.
+ *   - Claude Code's own Read/Edit/Write tools still refuse the credential
+ *     paths, and that is worth keeping because it costs nothing — but it does
+ *     NOT hold against Bash. `python3 -c "open('.../config.json').read()"`
+ *     reads the file, measured on the box. A tool-name policy cannot fence an
+ *     interpreter, so in practice a run can read and write anything the
+ *     clawbox user can.
+ *   - What still holds: the working folder must resolve inside the ClawBox
+ *     home and never the OS checkout, and setpriv still empties the ambient
+ *     capability set.
+ *
+ * Real containment would be an OS boundary — a user that cannot read those
+ * files — not a switch.
+ */
 
 /** Wall-clock ceiling for one run. Claude Code's own retries can stall for
  *  minutes against an unreachable ClawBox AI, so this is the real backstop. */
-export const RUN_TIMEOUT_MS = 20 * 60_000;
+/**
+ * How long a run may go with NO sign of life before the device calls it stuck.
+ *
+ * This used to be a wall-clock ceiling — twenty minutes from spawn, whatever
+ * the run was doing — which quietly made a long project impossible: a build
+ * that was working perfectly well was killed mid-flight for the crime of
+ * taking a while. Real projects run for hours.
+ *
+ * So the question is no longer "how long has it been alive" but "is it doing
+ * anything". Every stream event stamps lastActivityAt, and only silence
+ * counts against a run. Runaway cost is bounded separately and properly, by
+ * the owner's step and token ceilings; this is only here so a wedged process cannot
+ * hold the one-run-at-a-time slot forever.
+ */
+export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
+/** How often the idle check runs. */
+const IDLE_CHECK_MS = 60_000;
 /** Agent turns before Claude Code stops on its own (`error_max_turns`). */
-export const MAX_TURNS = 60;
-/** Claude Code's internal cost estimate cap. Informational for an unknown
- *  model name — ClawBox AI bills by plan — but it stops a runaway loop. */
-export const MAX_BUDGET_USD = 3;
+/** Default agent turns before Claude Code stops itself. The owner can change
+ *  it; a long project needs more than a short one. */
+export const DEFAULT_MAX_TURNS = 150;
+export const MIN_MAX_TURNS = 10;
+export const MAX_MAX_TURNS = 2_000;
+export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
+
+/**
+ * Optional ceiling on the tokens one run may spend. Null means no ceiling.
+ *
+ * Claude Code has no flag for this — only --max-budget-usd, which prices an
+ * unknown model name and so meant nothing here — so the device enforces it
+ * from the usage the stream already reports, and stops the run itself.
+ *
+ * Counted the way a bill is: every request pays for the input it carries, so
+ * input is summed per turn even though the conversation repeats. Cache reads
+ * are cheaper than fresh input but are not free, so they count too.
+ */
+export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
+export const MIN_TOKEN_LIMIT = 10_000;
 export const MAX_TASK_CHARS = 4_000;
 export const MAX_DIRECTORY_CHARS = 512;
 /** Runs at once. A Jetson has one coding agent's worth of memory to spare,
@@ -122,10 +218,86 @@ export const CAPABILITY_DROP_ARGS: readonly string[] = [
   "--",
 ];
 
-/** Claude Code tools the run may use at all (`--tools`). No Task (sub-agents
- *  multiply cost), no WebFetch/WebSearch (the appliance is offline-first and
- *  the task is local code). */
+/** Claude Code tools the run may use at all (`--tools`). No WebFetch/WebSearch:
+ *  the appliance is offline-first and the task is local code. Task (sub-agents)
+ *  is added only when the owner has switched them on — see
+ *  CODING_AGENT_SUBAGENTS_CONFIG_KEY. */
 export const CLAUDE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash,NotebookEdit";
+/**
+ * Claude Code's sub-agent tool, as it appears in `--tools` and in the stream.
+ *
+ * It is "Agent". This was "Task" — a name the binary also contains — and the
+ * mismatch is why every run reported subagentsTotal 0 while the transcripts
+ * showed real delegation: the runs WERE handing work to the explorer, and the
+ * parser was counting a tool nobody had called. Both names are recognised on
+ * the way in so a version that renames it back cannot silence the count
+ * again.
+ */
+export const SUBAGENT_TOOL = "Agent";
+
+/**
+ * The sub-agents a run may hand work to.
+ *
+ * Without these the Task tool exists and is never used: every run on this box
+ * reported subagentsTotal 0, because the main model has nothing to delegate
+ * TO. Claude Code reads the `description` to decide, which is why each one
+ * says "Use proactively" — that phrasing is what actually triggers a hand-off.
+ *
+ * The model split follows what the two DeepSeek tiers are good at. Flash and
+ * Pro share the same 1M window, Flash is roughly three times cheaper, and
+ * sub-agents spend most of their tokens READING — files, logs, test output —
+ * and hand back a short summary the main model re-checks. So reading and
+ * summarising go to Flash, and anything that writes code stays on the main
+ * model, where multi-constraint correctness is measurably better.
+ *
+ * Deliberately no "builder" agent: writing the code is the run's own job, and
+ * delegating it would put the expensive judgement behind a summary.
+ */
+export const SUBAGENT_DEFINITIONS = {
+  explorer: {
+    description:
+      "Searches and maps a codebase: finds where something lives, which files "
+      + "matter, how a pattern is used. Use proactively before editing "
+      + "unfamiliar code, and whenever a question spans several files.",
+    prompt:
+      "You map code and report findings. Read and search only — never edit. "
+      + "Answer with file paths and line numbers, the shortest excerpt that "
+      + "proves the point, and nothing else. Say plainly when you did not find "
+      + "something rather than guessing.",
+    tools: ["Read", "Grep", "Glob"],
+    model: "deepseek-v4-flash",
+  },
+  tester: {
+    description:
+      "Runs a build, a test suite or a script and reports what failed. Use "
+      + "proactively after making changes, to check the work actually holds.",
+    prompt:
+      "You verify work. Run the build or tests you were asked to run, then "
+      + "report ONLY the outcome: pass or fail, the failing cases, and the "
+      + "exact error lines. Never edit a file. If a command is refused, say so "
+      + "and say which command.",
+    tools: ["Read", "Grep", "Glob", "Bash"],
+    model: "deepseek-v4-flash",
+  },
+  reviewer: {
+    description:
+      "Reads finished changes and reports real defects — bugs, unsafe handling, "
+      + "obvious omissions. Use proactively before reporting a task complete.",
+    prompt:
+      "You review changes already made. Read only — never edit. Report only "
+      + "defects you can point at in the code, each with a file, a line and "
+      + "what goes wrong. If the change looks correct, say so in one line "
+      + "rather than inventing something to say.",
+    tools: ["Read", "Grep", "Glob"],
+    model: "deepseek-v4-flash",
+  },
+} as const;
+
+export type SubagentName = keyof typeof SUBAGENT_DEFINITIONS;
+
+export function toolsFor(subagents: boolean): string {
+  return subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
+}
 
 /**
  * Bash commands that run without asking. Claude Code's rule syntax: a
@@ -139,6 +311,8 @@ export const BASH_ALLOWLIST: readonly string[] = [
   "Bash(python3:*)", "Bash(python:*)", "Bash(pip:*)", "Bash(pip3:*)", "Bash(pytest:*)",
   "Bash(tsc:*)", "Bash(eslint:*)", "Bash(prettier:*)", "Bash(make:*)", "Bash(cargo:*)", "Bash(go:*)",
   "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git add:*)", "Bash(git commit:*)",
+  // Read-only queries a real run asked for and was refused; they change nothing.
+  "Bash(git rev-parse:*)", "Bash(git check-ignore:*)", "Bash(git show:*)", "Bash(git branch:*)",
   "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(grep:*)", "Bash(find:*)",
   "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)", "Bash(touch:*)", "Bash(pwd:*)", "Bash(echo:*)",
 ];
@@ -193,8 +367,78 @@ export interface CodingRun {
   commandsRun: number;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
+  /**
+   * WHICH ones, in the owner's words: "Bash: git -C . log --oneline -3".
+   *
+   * The count alone was not diagnosable — working out what a run had been
+   * refused meant reading the progress lines and inferring. This is the
+   * owner's own surface, and it holds the same class of text `progress`
+   * already does: the command the agent tried, not anything the model wrote
+   * about it. Capped, and never sent to Telegram — that notice stays a
+   * template.
+   */
+  deniedActions: string[];
+  /** The effort the run was started with. Recorded per-run because the owner
+   *  can change the setting while a run is in flight. */
+  effort: CodingEffort;
+  /** Sub-agents working RIGHT NOW. Always 0 once the run has settled — a
+   *  sub-agent cannot outlive the run that spawned it. */
+  subagentsActive: number;
+  /** WHICH ones, so the app can show what each is doing rather than a count. */
+  activeSubagents: ActiveSubagent[];
+  /** Sub-agents this run spawned in total, live or finished. */
+  subagentsTotal: number;
+  /** The commit this run's work was recorded as, when it changed anything. */
+  commit: string | null;
+  /** How many of each kind — explorer, tester, reviewer. */
+  subagentsByType: Record<string, number>;
+  /** Every model that did work for this run, main and sub-agents alike. */
+  modelsUsed: string[];
+  /** The step ceiling this run started with. */
+  maxTurns: number;
+  /** Tokens spent so far, summed the way a bill is — see the config key. */
+  tokensUsed: number;
+  /** The ceiling that applied, or null when the run was uncapped. */
+  tokenLimit: number | null;
+  /**
+   * Reasoning tokens Claude Code reports so far.
+   *
+   * Without this a run on `effort: max` looks identical to a hung one: the
+   * first turn of a big task can spend minutes thinking before it emits a
+   * single word, and `numTurns` only arrives with the final result event. On
+   * a real box that cost a healthy run — the assistant read "0 turns, no
+   * progress" and called coding_agent_stop at 295 seconds.
+   */
+  thinkingTokens: number;
+  /** When the run last showed ANY sign of life. The answer to "is it stuck?". */
+  lastActivityAt: number;
+  /**
+   * Automatic restarts after a transient upstream failure. At most one, and
+   * only for a run that had done no work — see TRANSIENT_FAILURE_RE.
+   */
+  retries: number;
+  /**
+   * Whether RESUMING this run's session could help.
+   *
+   * True only where the session holds real work and merely ran out of room —
+   * a turn or cost ceiling. False for a run that died on authentication or
+   * transport, because Claude Code persists that failure IN the session and
+   * replays it on every resume: observed on a real box, where a transient
+   * upstream error at 09:01 was resumed at 09:05 into the same session id and
+   * failed identically. A resume is then not a retry, it is a re-enactment.
+   */
+  resumable: boolean;
   progress: string[];
   exitCode: number | null;
+}
+
+/** One sub-agent currently out, as the owner should read it. */
+export interface ActiveSubagent {
+  /** Which definition it is — explorer, tester, reviewer. */
+  type: string;
+  /** What it was asked to do, in the run's own words. */
+  description: string;
+  startedAt: number;
 }
 
 export interface CodingHarnessReadiness {
@@ -214,12 +458,30 @@ export interface CodingHarnessReadiness {
 export interface CodingAgentStatus {
   /** The owner's switch. */
   enabled: boolean;
+  /** The owner's default working folder, or null when they have not set one. */
+  defaultDirectory: string | null;
   /** enabled AND the harness is installed and connected — i.e. a run can start. */
   ready: boolean;
   readiness: CodingHarnessReadiness;
   running: number;
   harnessCommand: string;
   maxTaskChars: number;
+  /** How hard a run thinks per turn. */
+  effort: CodingEffort;
+  /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
+  effortLevels: readonly CodingEffort[];
+  /** Folders in the default project folder the assistant may work in. */
+  projectFolders: string[];
+  /** The ceilings a run stops at, so the app can show them without guessing. */
+  /** Agent steps a run gets, and the range the owner may choose from. */
+  maxTurns: number;
+  minMaxTurns: number;
+  maxMaxTurns: number;
+  /** Token ceiling the device enforces, or null for none. */
+  tokenLimit: number | null;
+  minTokenLimit: number;
+  /** Silence, not total time, is what ends a run. */
+  runIdleTimeoutMs: number;
 }
 
 export interface StartRunInput {
@@ -248,6 +510,130 @@ export async function isCodingAgentEnabled(): Promise<boolean> {
 
 export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
   await configSet(CODING_AGENT_CONFIG_KEY, enabled === true);
+}
+
+/** The owner's default working folder, or null when they have not set one. */
+export async function getDefaultDirectory(): Promise<string | null> {
+  const raw = await configGet(CODING_AGENT_DIR_CONFIG_KEY);
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+/**
+ * Set (or clear, with null/"") the default working folder.
+ *
+ * Validated here rather than only at the route so there is one answer to "is
+ * this folder allowed", and it is the same answer a run gets. Returns the
+ * resolved path so the owner sees what the device actually recorded — a
+ * symlink is stored as the folder it leads to, not as the name they typed.
+ */
+export async function setDefaultDirectory(directory: string | null): Promise<string | null> {
+  if (directory === null || directory.trim() === "") {
+    await configSet(CODING_AGENT_DIR_CONFIG_KEY, undefined);
+    return null;
+  }
+  const { directory: resolved } = await resolveWorkingDirectory({ directory });
+  await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
+  return resolved;
+}
+
+function isEffort(value: unknown): value is CodingEffort {
+  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * Where Claude Code keeps this run's transcript.
+ *
+ * It encodes the working folder by replacing every slash with a dash, so
+ * /home/clawbox/x becomes -home-clawbox-x. Returns null until the run has a
+ * session id, which arrives with the first stream event.
+ *
+ * The file exists and grows WHILE the run works, which is what makes a live
+ * preview possible rather than only a post-mortem.
+ */
+export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory">): string | null {
+  if (!run.sessionId) return null;
+  const configDir = process.env.CLAUDE_DS_CONFIG_DIR || path.join(homeDir(), ".claude-ds");
+  return path.join(configDir, "projects", run.directory.replace(/\//g, "-"), `${run.sessionId}.jsonl`);
+}
+
+/** The owner's effort level. Anything unrecognised reads as the default. */
+export async function getEffort(): Promise<CodingEffort> {
+  const raw = await configGet(CODING_AGENT_EFFORT_CONFIG_KEY);
+  return isEffort(raw) ? raw : DEFAULT_EFFORT;
+}
+
+export async function setEffort(effort: string): Promise<CodingEffort> {
+  if (!isEffort(effort)) {
+    throw new CodingAgentError("invalid", `Effort must be one of: ${EFFORT_LEVELS.join(", ")}.`);
+  }
+  await configSet(CODING_AGENT_EFFORT_CONFIG_KEY, effort);
+  return effort;
+}
+
+
+/** The owner's turn ceiling, clamped to something the CLI will accept. */
+export async function getMaxTurns(): Promise<number> {
+  const raw = await configGet(CODING_AGENT_TURNS_CONFIG_KEY);
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_TURNS;
+  return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
+}
+
+export async function setMaxTurns(turns: unknown): Promise<number> {
+  if (typeof turns !== "number" || !Number.isFinite(turns)) {
+    throw new CodingAgentError("invalid", "Steps must be a number.");
+  }
+  const n = Math.round(turns);
+  if (n < MIN_MAX_TURNS || n > MAX_MAX_TURNS) {
+    throw new CodingAgentError("invalid", `Steps must be between ${MIN_MAX_TURNS} and ${MAX_MAX_TURNS}.`);
+  }
+  await configSet(CODING_AGENT_TURNS_CONFIG_KEY, n);
+  return n;
+}
+
+/** The owner's token ceiling, or null when they have not set one. */
+export async function getTokenLimit(): Promise<number | null> {
+  const raw = await configGet(CODING_AGENT_TOKENS_CONFIG_KEY);
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
+}
+
+export async function setTokenLimit(limit: number | null): Promise<number | null> {
+  if (limit === null) {
+    await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, undefined);
+    return null;
+  }
+  if (typeof limit !== "number" || !Number.isFinite(limit)) {
+    throw new CodingAgentError("invalid", "The token limit must be a number, or empty for no limit.");
+  }
+  const n = Math.round(limit);
+  if (n < MIN_TOKEN_LIMIT) {
+    throw new CodingAgentError("invalid", `A token limit below ${MIN_TOKEN_LIMIT.toLocaleString("en-US")} would stop almost every run before it started.`);
+  }
+  await configSet(CODING_AGENT_TOKENS_CONFIG_KEY, n);
+  return n;
+}
+
+
+  /**
+ * Folder names directly inside the owner's default project folder.
+ *
+ * The assistant could only ever see code projects — the 15 under
+ * data/code-projects — so a folder the owner made themselves in ~/Projects
+ * was invisible and could only be reached by typing its absolute path.
+ * Names only: this is a picker, not a file listing.
+ */
+export async function listProjectFolders(): Promise<string[]> {
+  const base = await getDefaultDirectory();
+  if (!base) return [];
+  try {
+    const entries = await fs.promises.readdir(base, { withFileTypes: true });
+    return entries
+      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      .map((e) => e.name)
+      .sort()
+      .slice(0, 100);
+  } catch {
+    return [];
+  }
 }
 
 // ─── Readiness ───────────────────────────────────────────────────────────────
@@ -334,14 +720,37 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness] = await Promise.all([isCodingAgentEnabled(), checkReadiness()]);
+  const [enabled, readiness, defaultDirectory, effort, maxTurns, tokenLimit, projectFolders] = await Promise.all([
+    isCodingAgentEnabled(),
+    checkReadiness(),
+    getDefaultDirectory(),
+    getEffort(),
+    getMaxTurns(),
+    getTokenLimit(),
+    listProjectFolders(),
+  ]);
   return {
     enabled,
+    defaultDirectory,
     ready: enabled && readiness.ready,
     readiness,
     running: runningCount(),
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
+    effort,
+    // Always include whatever is actually set. A box that stored "high"
+    // before the picker narrowed to three would otherwise show a row with
+    // nothing selected, and the owner could not tell what was in force.
+    effortLevels: OFFERED_EFFORT_LEVELS.includes(effort)
+      ? OFFERED_EFFORT_LEVELS
+      : (EFFORT_LEVELS.filter((l) => OFFERED_EFFORT_LEVELS.includes(l) || l === effort) as readonly CodingEffort[]),
+    projectFolders,
+    maxTurns,
+    minMaxTurns: MIN_MAX_TURNS,
+    maxMaxTurns: MAX_MAX_TURNS,
+    tokenLimit,
+    minTokenLimit: MIN_TOKEN_LIMIT,
+    runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
   };
 }
 
@@ -387,7 +796,29 @@ function normalizeRun(raw: CodingRun): CodingRun {
     costUsd: typeof raw.costUsd === "number" ? raw.costUsd : null,
     filesTouched: Array.isArray(raw.filesTouched) ? raw.filesTouched.filter((f) => typeof f === "string") : [],
     commandsRun: typeof raw.commandsRun === "number" ? raw.commandsRun : 0,
+    deniedActions: Array.isArray(raw.deniedActions)
+      ? raw.deniedActions.filter((d): d is string => typeof d === "string")
+      : [],
+    effort: isEffort(raw.effort) ? raw.effort : DEFAULT_EFFORT,
+    // A record written before this field existed, or one left by a restart,
+    // has no live sub-agents by definition.
+    subagentsActive: 0,
+    // A record loaded from disk has none out by definition.
+    activeSubagents: [],
+    subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
+    subagentsByType: (raw.subagentsByType && typeof raw.subagentsByType === "object")
+      ? (raw.subagentsByType as Record<string, number>) : {},
+    commit: typeof raw.commit === "string" ? raw.commit : null,
+    modelsUsed: Array.isArray(raw.modelsUsed)
+      ? raw.modelsUsed.filter((m): m is string => typeof m === "string") : [],
+    maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
+    tokensUsed: typeof raw.tokensUsed === "number" ? raw.tokensUsed : 0,
+    tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
+    thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
+    lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
+    retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
+    resumable: raw.resumable === true,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
   };
@@ -419,12 +850,46 @@ function writeAll(list: CodingRun[]): void {
 
 interface LiveRun {
   child: ChildProcess;
+  /** Rolling idle check — see RUN_IDLE_TIMEOUT_MS. */
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
   stopRequested: boolean;
   timedOut: boolean;
   sawResult: boolean;
+  /** Whether "Thinking…" has already been said once. */
+  sawThinking: boolean;
   stderr: string;
+  /**
+   * Files a Write/Edit has ASKED for, by tool_use id, not yet confirmed.
+   *
+   * A real run reported /tmp/check_html.py among its changed files when the
+   * write had in fact been refused: the list was built from what the model
+   * asked to do, and a request is not an outcome. Nothing lands in
+   * filesTouched now until the tool_result comes back without an error.
+   */
+  pendingFiles: Map<string, string>;
+  /**
+   * Whether the run ever ASKED to write, confirmed or not.
+   *
+   * filesTouched holds only confirmed writes, which is right for reporting and
+   * wrong for the retry gate: a run killed between the request and its result
+   * may have written the file anyway, and a retry would then start from a
+   * half-finished edit. Reporting takes the strict answer, the gate takes the
+   * cautious one.
+   */
+  sawWriteAttempt: boolean;
+  /**
+   * tool_use ids of sub-agents that have started and not yet reported back.
+   * Ids rather than a counter: a tool_result can arrive out of order, and a
+   * duplicate must not decrement twice.
+   */
+  openSubagents: Map<string, ActiveSubagent>;
+  /** Resolved once at start, so a retry does not need an async lookup. */
+  setprivPath: string;
+  /** What this run was spawned with — a retry must match, not re-read. */
+  settings: { effort: CodingEffort; maxTurns: number };
+  /** A shell command ran whose effects cannot be proven read-only. */
+  commandMayHaveSideEffects: boolean;
 }
 
 /** Newest first. `null` until first use. */
@@ -506,7 +971,15 @@ function persist(immediate = false): void {
 }
 
 function cloneRun(run: CodingRun): CodingRun {
-  return { ...run, filesTouched: [...run.filesTouched], progress: [...run.progress] };
+  return {
+    ...run,
+    filesTouched: [...run.filesTouched],
+    progress: [...run.progress],
+    deniedActions: [...run.deniedActions],
+    activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
+    subagentsByType: { ...run.subagentsByType },
+    modelsUsed: [...run.modelsUsed],
+  };
 }
 
 export function getRun(id: string): CodingRun | null {
@@ -516,6 +989,32 @@ export function getRun(id: string): CodingRun | null {
 
 export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
   return loadRuns().slice(0, Math.max(0, limit)).map(cloneRun);
+}
+
+/**
+ * Forget the finished runs. Returns how many were removed.
+ *
+ * A run still in flight is KEPT, whatever the caller asked for: it is the only
+ * handle on a live process — the record the stop route looks up, and the one
+ * the boot sweep settles if the server dies. Dropping it would leave a coding
+ * agent working in a folder with nothing on the device that knows about it.
+ *
+ * Owner-only at the route, for the same reason the switch is: these records
+ * are the account of what the assistant did with a delegated shell, and the
+ * party they describe is not the party who should be able to erase them.
+ */
+export function clearFinishedRuns(): number {
+  const list = loadRuns();
+  const keep = list.filter((r) => r.status === "running");
+  const removed = list.length - keep.length;
+  if (removed === 0) return 0;
+  // Mutate the array the module hands out rather than replacing the binding,
+  // so every existing reader sees the same list.
+  list.length = 0;
+  list.push(...keep);
+  persist(true);
+  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request`);
+  return removed;
 }
 
 export function runningCount(): number {
@@ -638,13 +1137,32 @@ export async function resolveWorkingDirectory(input: {
   }
 
   if (!directory) {
-    throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
+    // The owner's default, if they set one. Re-validated by falling through
+    // into the same checks below — a folder that stopped being allowed since
+    // it was set (deleted, moved, replaced by a symlink out of the home) is
+    // refused now, not trusted because it passed once.
+    const fallback = await getDefaultDirectory();
+    if (!fallback) {
+      throw new CodingAgentError("invalid", "Give a code project id or a folder to work in.");
+    }
+    return resolveWorkingDirectory({ directory: fallback });
   }
   if (directory.length > MAX_DIRECTORY_CHARS) {
     throw new CodingAgentError("invalid", "The folder path is too long.");
   }
   if (!path.isAbsolute(directory)) {
-    throw new CodingAgentError("invalid", "The folder must be an absolute path.");
+    // A bare name means a folder in the owner's default directory. Without
+    // this, working on a folder they already have — ~/Projects/my-app —
+    // required the assistant to know and type the whole absolute path, and
+    // nothing told it the folder existed.
+    const base = await getDefaultDirectory();
+    if (!base) {
+      throw new CodingAgentError("invalid", "The folder must be an absolute path, or a folder name inside your default project folder.");
+    }
+    if (directory.includes("/") || directory.includes("\\") || directory === "." || directory === "..") {
+      throw new CodingAgentError("invalid", "Give a single folder name, or an absolute path.");
+    }
+    return resolveWorkingDirectory({ directory: path.join(base, directory) });
   }
   const normalized = path.resolve(directory);
 
@@ -714,6 +1232,9 @@ async function projectFolder(dir: string, projectsRoot: string, id: string): Pro
 export const HEADLESS_BRIEF = [
   "You are running unattended on a ClawBox — a small Linux device on someone's desk — inside the folder you were started in, on behalf of the device's assistant.",
   "Nobody can answer questions, so make sensible assumptions and keep going. Stay inside this folder; do not install system packages or change device settings.",
+  "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
+  "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
+  "When sub-agents are available to you, use them: hand searching and mapping to the explorer, running builds and tests to the tester, and a last read-through to the reviewer before you report done. Do the writing yourself.",
   "Verify your work where you can (run the build or the tests you have).",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
@@ -776,28 +1297,38 @@ export function denyRulesCover(rules: readonly string[], directory: string): boo
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number }): string[] {
   const args = [
     "-p",
     "--verbose",
     "--output-format", "stream-json",
     "--permission-mode", "acceptEdits",
     "--setting-sources", "user",
-    "--max-turns", String(MAX_TURNS),
-    "--max-budget-usd", String(MAX_BUDGET_USD),
+    "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", HEADLESS_BRIEF,
   ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
-  args.push("--tools", CLAUDE_TOOLS);
-  args.push("--allowedTools", ...BASH_ALLOWLIST);
-  args.push("--disallowedTools", ...BASH_DENYLIST, ...fileDenyRules());
+  args.push("--tools", toolsFor(true));
+  // The Agent tool with nothing to delegate to is a tool that never fires.
+  args.push("--agents", JSON.stringify(SUBAGENT_DEFINITIONS));
+  {
+    // "Bash(*)" — allow EVERY command — rather than withholding the lists.
+    // Withholding grants nothing: in headless -p mode the allow-list is what
+    // approves a command, and with no list at all every Bash call just waits
+    // for an approval nobody is there to give (verified on the box: curl was
+    // still denied with the lists absent). The FILE rules still ship, and a
+    // deny rule outranks any allow, so the credential stores stay closed.
+    // Full access is about commands, not secrets.
+    args.push("--allowedTools", "Bash(*)");
+    args.push("--disallowedTools", ...fileDenyRules());
+  }
   return args;
 }
 
 /** The environment a run gets — and nothing else. Exported for the contract test. */
-export function buildRunEnv(): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -818,6 +1349,9 @@ export function buildRunEnv(): Record<string, string> {
     const value = process.env[key];
     if (typeof value === "string" && value) env[key] = value;
   }
+  // The owner's setting wins over anything inherited: this is the knob the
+  // Coding Agent app writes, and a stale shell variable must not override it.
+  if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
   return env;
 }
 
@@ -852,23 +1386,87 @@ function noteFile(run: CodingRun, file: string | null): void {
   run.filesTouched.push(file);
 }
 
+/**
+ * Commands that inspect the project without changing it.
+ *
+ * `commandsRun === 0` was too blunt for the retry gate: the real authentication
+ * failure can arrive after Claude Code has only run `ls -la`, leaving no state
+ * that makes a fresh attempt unsafe. Keep this deliberately narrower than the
+ * Bash allow-list. Shell composition/redirection and commands such as npm,
+ * Python, git commit, mkdir or cp remain side-effecting because proving their
+ * behaviour from a command string is not possible.
+ */
+export function isReadOnlyInspectionCommand(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const trimmed = command.trim();
+  if (!trimmed || /[;&|<>`\n\r]|\$\(/.test(trimmed)) return false;
+  return /^(?:pwd|ls|cat|head|tail|wc|grep)(?:\s|$)/.test(trimmed)
+    || /^git\s+(?:status|diff|log)(?:\s|$)/.test(trimmed);
+}
+
 interface StreamEvent {
   type?: string;
   subtype?: string;
+  /** system/thinking_tokens: reasoning tokens so far. */
+  estimated_tokens?: number;
+  /** `user` events carry tool_result blocks; that is how a sub-agent reports back. */
   session_id?: string;
   model?: string;
-  message?: { content?: unknown };
+  message?: { content?: unknown; usage?: unknown };
   result?: unknown;
   is_error?: boolean;
   num_turns?: number;
   total_cost_usd?: number;
   permission_denials?: unknown;
+  /** result event: per-model token breakdown, keyed by model name. */
+  modelUsage?: unknown;
   errors?: unknown;
 }
+
+/** How many refused actions a run keeps. Enough to see the pattern. */
+const MAX_DENIALS_KEPT = 5;
+const MAX_DENIAL_CHARS = 160;
+
+/**
+ * One refused action, as the owner should read it. Claude Code sends
+ * `{ tool_name, tool_use_id, tool_input }`; the useful part is the tool and
+ * the one field that says what it was pointed at.
+ */
+function describeDenial(entry: unknown): string {
+  if (!entry || typeof entry !== "object") return "an action";
+  const e = entry as { tool_name?: unknown; tool_input?: unknown };
+  const tool = typeof e.tool_name === "string" && e.tool_name ? e.tool_name : "tool";
+  const input = (e.tool_input && typeof e.tool_input === "object" ? e.tool_input : {}) as Record<string, unknown>;
+  const target = ["command", "file_path", "notebook_path", "path", "pattern"]
+    .map((k) => input[k])
+    .find((v): v is string => typeof v === "string" && v !== "");
+  return `${tool}: ${target ?? "(no details)"}`.slice(0, MAX_DENIAL_CHARS);
+}
+
+/** Exported for the test: this parses a payload the device does not control. */
+export const describeDenialForTests = describeDenial;
 
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
+
+  // ANY event is a sign of life, whatever it is.
+  run.lastActivityAt = Date.now();
+
+  // Claude Code reports reasoning progress before it has anything to say. It
+  // is the only signal that separates "thinking hard" from "hung", and a run
+  // on `effort: max` can sit here for minutes on the first turn.
+  if (event.type === "system" && event.subtype === "thinking_tokens") {
+    const total = typeof event.estimated_tokens === "number" ? event.estimated_tokens : 0;
+    if (total > run.thinkingTokens) run.thinkingTokens = total;
+    // One line, not one per event: these arrive continuously and would drown
+    // the progress feed. The live count is on the record for anyone watching.
+    if (!state.sawThinking) {
+      state.sawThinking = true;
+      pushProgress(run, "Thinking…");
+    }
+    return;
+  }
 
   if (event.type === "system" && event.subtype === "init") {
     if (typeof event.model === "string" && event.model) run.model = event.model;
@@ -877,6 +1475,29 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   }
 
   if (event.type === "assistant") {
+    // Every request pays for the input it carries, so input is summed per turn
+    // even though the conversation repeats — that is what a bill counts.
+    const usage = event.message?.usage;
+    if (usage && typeof usage === "object") {
+      const u = usage as Record<string, unknown>;
+      const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
+      run.tokensUsed += n("input_tokens") + n("output_tokens")
+        + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+      if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && !state.stopRequested) {
+        // The CLI has no flag for this, so the device stops the run itself.
+        // Marked resumable: the work is real, it simply ran out of room —
+        // the same shape as a step ceiling.
+        state.stopRequested = true;
+        run.resumable = true;
+        run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
+        pushProgress(run, "Token limit reached");
+        console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
+        killTree(state.child, "SIGTERM");
+        state.killTimer = setTimeout(() => killTree(state.child, "SIGKILL"), STOP_GRACE_MS);
+        state.killTimer.unref();
+        return;
+      }
+    }
     const raw = event.message?.content;
     const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
     for (const block of content) {
@@ -887,14 +1508,37 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         switch (block.name) {
           case "Bash":
             run.commandsRun += 1;
+            if (!isReadOnlyInspectionCommand(input.command)) state.commandMayHaveSideEffects = true;
             pushProgress(run, `$ ${typeof input.command === "string" ? input.command : ""}`);
             break;
           case "Write":
           case "Edit":
           case "NotebookEdit": {
             const file = relativeToRun(run, input.file_path ?? input.notebook_path);
-            noteFile(run, file);
+            // Asked for, not yet done — confirmed when its tool_result lands.
+            state.sawWriteAttempt = true;
+            if (file && typeof block.id === "string" && block.id) state.pendingFiles.set(block.id, file);
             pushProgress(run, `${block.name} ${file ?? ""}`);
+            break;
+          }
+          case "Task":
+          case SUBAGENT_TOOL: {
+            // A sub-agent is out. Its id is what tells us when it comes back.
+            const what = typeof input.description === "string" ? input.description : "";
+            const kind = typeof input.subagent_type === "string" ? input.subagent_type : "";
+            if (typeof block.id === "string" && block.id) {
+              state.openSubagents.set(block.id, {
+                type: kind || "sub-agent",
+                description: what.slice(0, 120),
+                startedAt: Date.now(),
+              });
+            }
+            run.subagentsTotal += 1;
+            const typeKey = kind || "sub-agent";
+            run.subagentsByType[typeKey] = (run.subagentsByType[typeKey] ?? 0) + 1;
+            run.subagentsActive = state.openSubagents.size;
+            run.activeSubagents = [...state.openSubagents.values()];
+            pushProgress(run, `Sub-agent started${kind ? ` (${kind})` : ""}${what ? `: ${what}` : ""}`);
             break;
           }
           case "Read":
@@ -912,11 +1556,41 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     return;
   }
 
+  // A tool_result closes whatever it answers. Only sub-agent ids are tracked,
+  // so every other tool_result falls through harmlessly.
+  if (event.type === "user") {
+    const raw = event.message?.content;
+    const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+    for (const block of content) {
+      if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+      const done = state.openSubagents.get(block.tool_use_id);
+      if (done && state.openSubagents.delete(block.tool_use_id)) {
+        run.subagentsActive = state.openSubagents.size;
+        run.activeSubagents = [...state.openSubagents.values()];
+        pushProgress(run, `Sub-agent finished${done.type !== "sub-agent" ? ` (${done.type})` : ""}`);
+      }
+      const pending = state.pendingFiles.get(block.tool_use_id);
+      if (pending !== undefined) {
+        state.pendingFiles.delete(block.tool_use_id);
+        // A refusal comes back as an error result; only a clean one counts.
+        if (block.is_error !== true) noteFile(run, pending);
+      }
+    }
+    return;
+  }
+
   if (event.type === "result") {
     state.sawResult = true;
     if (typeof event.num_turns === "number") run.numTurns = event.num_turns;
     if (typeof event.total_cost_usd === "number") run.costUsd = event.total_cost_usd;
-    if (Array.isArray(event.permission_denials)) run.permissionDenials = event.permission_denials.length;
+    // Which models actually did work — the main run and every sub-agent.
+    if (event.modelUsage && typeof event.modelUsage === "object") {
+      run.modelsUsed = Object.keys(event.modelUsage as Record<string, unknown>).sort();
+    }
+    if (Array.isArray(event.permission_denials)) {
+      run.permissionDenials = event.permission_denials.length;
+      run.deniedActions = event.permission_denials.slice(0, MAX_DENIALS_KEPT).map(describeDenial);
+    }
     const text = typeof event.result === "string" ? event.result.trim() : "";
     if (text) run.summary = text.slice(0, MAX_SUMMARY_CHARS);
     switch (event.subtype) {
@@ -924,12 +1598,16 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         run.status = event.is_error ? "failed" : "completed";
         if (event.is_error && !run.error) run.error = (text || "Claude Code reported an error.").slice(0, MAX_ERROR_CHARS);
         break;
+      // The two ceilings are the ONLY failures a resume can help with: the
+      // session did real work and simply ran out of room.
       case "error_max_turns":
         run.status = "failed";
-        run.error = `Stopped after ${run.numTurns || MAX_TURNS} turns without finishing. Resume it with a narrower task, or split the work.`;
+        run.resumable = true;
+        run.error = `Stopped after ${run.numTurns || run.maxTurns} steps without finishing. Resume it with a narrower task, raise the step limit, or split the work.`;
         break;
       case "error_max_budget_usd":
         run.status = "failed";
+        run.resumable = true;
         run.error = "Stopped at the cost ceiling for one run. Resume it with a narrower task, or split the work.";
         break;
       default: {
@@ -939,6 +1617,63 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       }
     }
   }
+}
+
+/**
+ * Failures worth ONE automatic retry.
+ *
+ * Observed on a real box: a run dies in four seconds with "Failed to
+ * authenticate. API Error: Attention Required! | Cloudflare" while the same
+ * request from the same box with the same token succeeds immediately before
+ * and after. Concurrency, payload size, the restricted environment and the
+ * capability drop were each tested and each ruled out; the upstream cause is
+ * still unidentified.
+ *
+ * What IS certain is the device's part: it turned one transient upstream
+ * hiccup into a dead run and told the owner their box was offline. Claude
+ * Code retries ordinary API errors itself, but treats an auth failure as
+ * final — reasonably, since a bad key will never come good. Here the key is
+ * fine, so the run is worth starting again.
+ *
+ * Deliberately narrow: an auth/transport shape, and nothing that could be a
+ * real refusal of the work.
+ */
+const TRANSIENT_FAILURE_RE =
+  /failed to authenticate|attention required|cloudflare|502 bad gateway|503|504|gateway time-?out|econnreset|etimedout|enotfound|socket hang up|fetch failed/i;
+
+export function isTransientFailure(error: string | null): boolean {
+  return typeof error === "string" && TRANSIENT_FAILURE_RE.test(error);
+}
+
+/**
+ * Commit what the run changed, in its own folder.
+ *
+ * Fire-and-forget and never allowed to throw: a run that did its work is
+ * finished whether or not the history was recorded, and the owner is told
+ * either way.
+ */
+function recordRunWork(run: CodingRun): void {
+  if (run.filesTouched.length === 0) return;
+  void commitRunWork({
+    directory: run.directory,
+    runId: run.id,
+    task: run.task,
+    summary: run.summary,
+  })
+    .then((outcome) => {
+      if (outcome.committed) {
+        run.commit = outcome.sha;
+        pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
+        console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
+      } else if (outcome.reason !== "no_changes") {
+        pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
+        console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
+      }
+      persist(true);
+    })
+    .catch((err: unknown) => {
+      console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
+    });
 }
 
 /** The wrapper's own diagnostics, minus its start-up banner. */
@@ -951,13 +1686,18 @@ function stderrTail(stderr: string): string {
 }
 
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
+  // The run's process tree is gone, so nothing it spawned is still working —
+  // whatever the stream did or did not say about each sub-agent.
+  state.openSubagents.clear();
+  run.subagentsActive = 0;
+  run.activeSubagents = [];
   if (run.status === "running") {
     if (state.stopRequested) {
       run.status = "stopped";
       run.error = run.error ?? "Stopped before it finished.";
     } else if (state.timedOut) {
       run.status = "failed";
-      run.error = `Ran longer than ${Math.round(RUN_TIMEOUT_MS / 60_000)} minutes and was stopped.`;
+      run.error = `Stopped after ${Math.round(RUN_IDLE_TIMEOUT_MS / 60_000)} minutes with no sign of life. The run was not making progress.`;
     } else {
       run.status = "failed";
       const tail = stderrTail(state.stderr);
@@ -967,13 +1707,64 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // A stop that raced the final message keeps "completed": the work is done.
   run.exitCode = exitCode;
   run.completedAt = Date.now();
-  clearTimeout(state.timeout);
+  clearInterval(state.timeout);
   if (state.killTimer) clearTimeout(state.killTimer);
   live.delete(run.id);
+
+  // One automatic restart when the upstream blinked and the run got nowhere.
+  //
+  // The guards are what make this safe rather than a loop: once only, only a
+  // transient shape, only a run the owner did not stop, and only one that
+  // changed NOTHING — no files and no command that may have side effects. A
+  // read-only inspection such as `ls -la` is safe and must not suppress the
+  // recovery. A run that may have edited something must never be silently
+  // repeated, because the second attempt starts from the first one's leftovers.
+  //
+  // A FRESH session, never a resume: Claude Code persists the failure in the
+  // session and replays it, which is how one bad run became two identical
+  // ones on this box. See CodingRun.resumable.
+  if (
+    run.status === "failed"
+    && run.retries === 0
+    && !state.stopRequested
+    && !state.timedOut
+    && isTransientFailure(run.error)
+    && run.filesTouched.length === 0
+    && !state.sawWriteAttempt
+    && !state.commandMayHaveSideEffects
+  ) {
+    {
+      run.retries = 1;
+      run.status = "running";
+      run.completedAt = null;
+      run.exitCode = null;
+      run.error = null;
+      run.sessionId = null;
+      run.numTurns = 0;
+      run.subagentsTotal = 0;
+      pushProgress(run, "The provider did not answer; starting over in a fresh session");
+      persist(true);
+      console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
+      try {
+        spawnRun(run, null, state.setprivPath, state.settings);
+        return;
+      } catch (err) {
+        // The retry could not even start; fall through and report the
+        // original shape of failure rather than losing the run.
+        run.status = "failed";
+        run.completedAt = Date.now();
+        run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+      }
+    }
+  }
+
   pushProgress(run, `Finished: ${run.status}`);
   persist(true);
   wakeWaiters(run.id);
   console.error(`[coding-agent] ${run.id} ${run.status} after ${Math.round((run.completedAt - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
+  // History first, then the notice: by the time the owner is told a run
+  // finished, its work is already recoverable.
+  void recordRunWork(run);
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -996,26 +1787,42 @@ export function buildSpawnArgv(setprivPath: string, claudeArgs: string[]): { bin
   return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, wrapperPath(), ...claudeArgs] };
 }
 
-function spawnRun(run: CodingRun, resumeSessionId: string | null, setprivPath: string): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId }));
+function spawnRun(
+  run: CodingRun,
+  resumeSessionId: string | null,
+  setprivPath: string,
+  settings: { effort: CodingEffort; maxTurns: number },
+): void {
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns }));
   const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
     // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
     // no use for.
-    env: buildRunEnv() as NodeJS.ProcessEnv,
+    env: buildRunEnv({ effort: settings.effort }) as NodeJS.ProcessEnv,
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
   const state: LiveRun = {
     child,
-    timeout: setTimeout(() => {
+    openSubagents: new Map<string, ActiveSubagent>(),
+    pendingFiles: new Map<string, string>(),
+    sawWriteAttempt: false,
+    sawThinking: false,
+    setprivPath,
+    settings,
+    commandMayHaveSideEffects: false,
+    // A rolling check, not a deadline: a run that keeps producing events is
+    // allowed to work for as long as it needs.
+    timeout: setInterval(() => {
+      const idleFor = Date.now() - run.lastActivityAt;
+      if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
       killTree(child, "SIGTERM");
       state.killTimer = setTimeout(() => killTree(child, "SIGKILL"), STOP_GRACE_MS);
       state.killTimer.unref();
-    }, RUN_TIMEOUT_MS),
+    }, IDLE_CHECK_MS),
     killTimer: null,
     stopRequested: false,
     timedOut: false,
@@ -1087,7 +1894,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task);
 
   if (!(await isCodingAgentEnabled())) {
-    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in Settings → System → Coding agent.");
+    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
   const readiness = await checkReadiness();
   if (!readiness.ready) {
@@ -1118,7 +1925,19 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // in, so a resume always happens where the original run happened.
     directory = await realDirectory(previous.directory);
     projectId = previous.projectId;
-    resumeSessionId = previous.sessionId;
+    // A session poisoned by an authentication or transport failure REPLAYS
+    // that failure on every resume — Claude Code persists it in the session,
+    // so resuming is a re-enactment, not a retry. Measured on a real box: a
+    // transient upstream error at 09:01 was resumed at 09:05 into the same
+    // session and failed identically, which is how a passing cloud hiccup
+    // became a permanently broken project.
+    //
+    // So the work carries on in a FRESH session instead. The task text is the
+    // caller's and says what to continue; what is lost is the old
+    // conversation, which was worthless anyway — it contains one failed
+    // request. Refusing outright would be worse: it would leave the owner
+    // with a project that can never be resumed.
+    resumeSessionId = previous.resumable ? previous.sessionId : null;
   } else {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
@@ -1128,6 +1947,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   if (active.length >= MAX_CONCURRENT_RUNS) {
     throw new CodingAgentError("busy", `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`);
   }
+
+  // Read once, here: a run keeps the settings it started with even if the
+  // owner changes them while it works.
+  const [effort, maxTurns, tokenLimit] = await Promise.all([
+    getEffort(), getMaxTurns(), getTokenLimit(),
+  ]);
 
   const run: CodingRun = {
     id: newRunId(),
@@ -1147,10 +1972,26 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     filesTouched: [],
     commandsRun: 0,
     permissionDenials: 0,
+    deniedActions: [],
+    effort,
+    subagentsActive: 0,
+    activeSubagents: [],
+    subagentsTotal: 0,
+    subagentsByType: {},
+    modelsUsed: [],
+    commit: null,
+    maxTurns,
+    tokensUsed: 0,
+    tokenLimit,
+    thinkingTokens: 0,
+    lastActivityAt: Date.now(),
+    retries: 0,
+    resumable: false,
     progress: [],
     exitCode: null,
   };
   if (resumeSessionId) pushProgress(run, "Resuming the previous session");
+  else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
 
   list.unshift(run);
   // Never drop a running run; trim the oldest finished ones.
@@ -1162,7 +2003,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
   try {
-    spawnRun(run, resumeSessionId, setprivPath);
+    spawnRun(run, resumeSessionId, setprivPath, { effort, maxTurns });
   } catch (err) {
     // The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
     // — a cwd that vanished between the check and here, a setpriv that is not

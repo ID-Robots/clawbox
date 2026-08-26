@@ -72,9 +72,19 @@ const ASSISTANT = JSON.stringify({
   message: {
     content: [
       { type: "text", text: "Working on it" },
-      { type: "tool_use", name: "Edit", input: { file_path: "index.html" } },
-      { type: "tool_use", name: "Write", input: { file_path: "__DIR__/style.css" } },
-      { type: "tool_use", name: "Bash", input: { command: "npm test" } },
+      { type: "tool_use", id: "t_edit", name: "Edit", input: { file_path: "index.html" } },
+      { type: "tool_use", id: "t_write", name: "Write", input: { file_path: "__DIR__/style.css" } },
+      { type: "tool_use", id: "t_bash", name: "Bash", input: { command: "npm test" } },
+    ],
+  },
+});
+const TOOL_RESULTS = JSON.stringify({
+  type: "user",
+  message: {
+    content: [
+      { type: "tool_result", tool_use_id: "t_edit", content: "ok" },
+      { type: "tool_result", tool_use_id: "t_write", content: "ok" },
+      { type: "tool_result", tool_use_id: "t_bash", content: "ok" },
     ],
   },
 });
@@ -92,6 +102,8 @@ const RESULT = JSON.stringify({
 const HAPPY_BODY = [
   `echo '${INIT}'`,
   `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`,
+  // A write counts only once its result comes back clean, as it does here.
+  `echo '${TOOL_RESULTS}'`,
   `echo '${RESULT}'`,
   "exit 0",
 ].join("\n");
@@ -292,13 +304,18 @@ describe("a run", () => {
     expect(joined).toContain("--output-format stream-json");
     expect(joined).toContain("--permission-mode acceptEdits");
     expect(joined).toContain("--setting-sources user");
-    expect(joined).toContain(`--max-turns ${lib.MAX_TURNS}`);
-    expect(joined).toContain(`--max-budget-usd ${lib.MAX_BUDGET_USD}`);
-    expect(joined).toContain(`--tools ${lib.CLAUDE_TOOLS}`);
-    expect(argv).toContain("--allowedTools");
-    for (const rule of lib.BASH_ALLOWLIST) expect(argv).toContain(rule);
+
+    // No price ceiling: --max-budget-usd priced an unknown model name, so it
+    // never meant anything here. Steps and (optionally) tokens bound a run now.
+    expect(joined).not.toContain("--max-budget-usd");
+    expect(joined).toContain(`--max-turns ${lib.DEFAULT_MAX_TURNS}`);
+    // Full command access is permanent now, so the allow-list is Bash(*) and
+    // the command deny-list is gone. The FILE rules below still ship.
+    expect(joined).toContain(`--tools ${lib.toolsFor(true)}`);
+    expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
+    for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
-    for (const rule of lib.BASH_DENYLIST) expect(argv).toContain(rule);
+    expect(argv).toContain("--agents");
     // The credential folders and this checkout's secrets are denied to
     // Read/Edit/Write — but never the run's own folder under data/, because a
     // deny rule outranks acceptEdits and the run could not edit anything.
@@ -401,7 +418,8 @@ describe("a run", () => {
     makeProject("site");
     const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
     expect(first.status).toBe("failed");
-    expect(first.error).toMatch(/60 turns/);
+    // "steps" in the owner's words; the number is the run's own ceiling.
+    expect(first.error).toMatch(/60 steps/);
     expect(first.sessionId).toBe("sess-abc-123");
 
     installFakeWrapper(HAPPY_BODY);
@@ -409,6 +427,42 @@ describe("a run", () => {
     expect(resumed.directory).toBe(first.directory);
     expect(resumed.projectId).toBe("site");
     await finished(resumed.id);
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+    expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
+  });
+
+  it("does NOT replay a session poisoned by an auth failure — it starts fresh", async () => {
+    // Observed on a real box: a transient upstream failure at 09:01 recorded
+    // session a5ef1ff6; the run was resumed at 09:05 into that same session
+    // and failed identically, because Claude Code persists the failure IN the
+    // session. One cloud hiccup became a permanently broken project.
+    installFakeWrapper(`echo '${INIT}'\necho '{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Failed to authenticate. API Error: Attention Required! | Cloudflare"],"session_id":"sess-abc-123"}'\nexit 0`);
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "build it", projectId: "site", source: "agent" })).id);
+    expect(first.status).toBe("failed");
+    expect(first.error).toMatch(/authenticate/i);
+    // The session exists, but resuming it cannot help.
+    expect(first.sessionId).toBe("sess-abc-123");
+    expect(first.resumable).toBe(false);
+
+    installFakeWrapper(HAPPY_BODY);
+    const second = await lib.startRun({ task: "carry on", resumeRunId: first.id, source: "agent" });
+    await finished(second.id);
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+    expect(argv).not.toContain("--resume");
+    expect(second.progress.join(" ")).toMatch(/Starting fresh/);
+    // Same folder, so the work continues where it was.
+    expect(second.directory).toBe(first.directory);
+  });
+
+  it("still resumes a run that merely ran out of room", async () => {
+    installFakeWrapper(`echo '${INIT}'\necho '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":60,"session_id":"sess-abc-123"}'\nexit 0`);
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
+    expect(first.resumable).toBe(true);
+
+    installFakeWrapper(HAPPY_BODY);
+    await finished((await lib.startRun({ task: "finish it", resumeRunId: first.id, source: "agent" })).id);
     const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
     expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
   });
@@ -462,6 +516,374 @@ describe("the capabilities a run starts with", () => {
   });
 });
 
+describe("retrying a transient upstream failure", () => {
+  beforeEach(() => readyDevice());
+
+  const CF = "Failed to authenticate. API Error: Attention Required! | Cloudflare";
+  const counter = () => path.join(home, "attempts.txt");
+
+  /** Fails the first time with the real Cloudflare text, succeeds the second. */
+  function flakyWrapper(extra = ""): void {
+    installFakeWrapper([
+      `n=$(cat "${counter()}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter()}"`,
+      `echo '${INIT}'`,
+      extra,
+      'if [ "$n" = "1" ]; then',
+      `  echo "${CF}" >&2`,
+      "  exit 1",
+      "fi",
+      `echo '{"type":"result","subtype":"success","num_turns":2,"result":"SECOND-TRY-OK"}'`,
+      "exit 0",
+    ].join("\n"));
+  }
+
+  it("starts over once, in a FRESH session, and the run succeeds", async () => {
+    flakyWrapper();
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.summary).toBe("SECOND-TRY-OK");
+    expect(run.retries).toBe(1);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("2");
+    // The owner is told it happened rather than it being hidden.
+    expect(run.progress.join("\n")).toContain("starting over in a fresh session");
+    // A resume would have replayed the failure; the retry must not use one.
+    expect(fs.readFileSync(argvFile(), "utf-8")).not.toContain("--resume");
+  });
+
+  it("retries at most once — a second failure is reported, not looped", async () => {
+    installFakeWrapper([`echo '${INIT}'`, `echo "${CF}" >&2`, "exit 1"].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(1);
+    expect(run.error).toContain("Attention Required");
+  });
+
+  it("DOES retry a run that only looked around — a read-only ls is not work", async () => {
+    // The exact shape seen on the box: the run did `ls -la`, then died on the
+    // provider. The first guard counted that command as work and blocked the
+    // retry, which is why it never fired when it was needed.
+    const LOOKED = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "b1", name: "Bash", input: { command: "ls -la ." } }] },
+    });
+    flakyWrapper(`echo '${LOOKED}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.retries).toBe(1);
+    expect(run.commandsRun).toBeGreaterThan(0);
+  });
+
+  it("does NOT retry after a command that could have left something behind", async () => {
+    const BUILT = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "b2", name: "Bash", input: { command: "npm install" } }] },
+    });
+    flakyWrapper(`echo '${BUILT}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+  });
+
+  it("does NOT retry a run that already changed something", async () => {
+    // The second attempt would start from the first one's leftovers.
+    const WROTE = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: "out.txt" } }] },
+    });
+    flakyWrapper(`echo '${WROTE}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    // The write was never confirmed by a tool_result, so it is NOT reported as
+    // a changed file — but it still blocks the retry, because the file may
+    // have been written anyway and a second attempt would start from it.
+    expect(run.filesTouched).toEqual([]);
+    expect(run.progress.join("\n")).toContain("Write out.txt");
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
+  });
+
+  it("does retry after a read-only inspection command", async () => {
+    const LS = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls -la" } }] },
+    });
+    flakyWrapper(`echo '${LS}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.retries).toBe(1);
+    expect(run.commandsRun).toBe(2);
+  });
+
+  it("does NOT retry after a command that may have side effects", async () => {
+    const NPM = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "npm test" } }] },
+    });
+    flakyWrapper(`echo '${NPM}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
+  });
+
+  it("does NOT retry a real refusal — a turn ceiling is an answer, not an accident", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '{"type":"result","subtype":"error_max_turns","num_turns":60}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(run.resumable).toBe(true);
+  });
+
+  it("does NOT retry a run the owner stopped", async () => {
+    installFakeWrapper([`echo '${INIT}'`, "sleep 30", "exit 0"].join("\n"));
+    makeProject("site");
+    const started = await lib.startRun({ task: "t", projectId: "site", source: "owner" });
+    lib.stopRun(started.id);
+    const run = await finished(started.id);
+
+    expect(run.status).toBe("stopped");
+    expect(run.retries).toBe(0);
+  });
+});
+
+describe("what a run reports as changed", () => {
+  beforeEach(() => readyDevice());
+
+  const WRITE = (id: string, file: string) => JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name: "Write", input: { file_path: file } }] },
+  });
+  const RESULT = (id: string, isError: boolean) => JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, is_error: isError, content: isError ? "denied" : "ok" }] },
+  });
+
+  it("does not claim a file it was REFUSED permission to write", async () => {
+    // A real run listed /tmp/check_html.py among its changed files when the
+    // write had been denied. The list was built from what it asked to do.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WRITE("w1", "index.html")}'`,
+      `echo '${RESULT("w1", false)}'`,
+      `echo '${WRITE("w2", "/tmp/check_html.py")}'`,
+      `echo '${RESULT("w2", true)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":2,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.filesTouched).toEqual(["index.html"]);
+    expect(run.filesTouched.join(" ")).not.toContain("check_html");
+  });
+
+  it("still shows the attempt in the progress feed", async () => {
+    // The owner should see what it tried, even when it was refused — the
+    // denial itself is reported separately.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WRITE("w1", "/tmp/nope.py")}'`,
+      `echo '${RESULT("w1", true)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.filesTouched).toEqual([]);
+    expect(run.progress.join("\n")).toContain("Write");
+  });
+
+  it("counts a write whose result never arrives as NOT done", async () => {
+    // A run killed mid-write must not claim the file.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${WRITE("w1", "half.html")}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.filesTouched).toEqual([]);
+  });
+});
+
+describe("showing that a quiet run is alive", () => {
+  beforeEach(() => readyDevice());
+
+  /** The event Claude Code emits while reasoning, before it has any output. */
+  const THINK = (n: number) => JSON.stringify({
+    type: "system", subtype: "thinking_tokens", estimated_tokens: n, estimated_tokens_delta: 2,
+  });
+
+  it("records reasoning progress, so silence is not mistaken for a hang", async () => {
+    // A real run on this box spent 295s on its first turn at effort "max" with
+    // nothing in the feed. The assistant read that as stuck and stopped it.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${THINK(43)}'`,
+      `echo '${THINK(120)}'`,
+      `echo '${THINK(870)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "big one", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.thinkingTokens).toBe(870);
+    // Said ONCE, not once per event — these arrive continuously.
+    const said = run.progress.filter((p) => p === "Thinking…");
+    expect(said).toHaveLength(1);
+  });
+
+  it("never lets the count go backwards on an out-of-order event", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${THINK(500)}'`,
+      `echo '${THINK(12)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.thinkingTokens).toBe(500);
+  });
+
+  it("stamps a last-sign-of-life the status can answer 'is it stuck?' with", async () => {
+    makeProject("site");
+    const before = Date.now();
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.lastActivityAt).toBeGreaterThanOrEqual(before);
+  });
+});
+
+describe("counting sub-agents", () => {
+  beforeEach(() => readyDevice());
+
+  /** A run that spawns two sub-agents and gets one of them back. */
+  const TASK_A = JSON.stringify({
+    type: "assistant",
+    message: { content: [
+      { type: "tool_use", id: "toolu_a", name: "Task", input: { description: "search the tests" } },
+      { type: "tool_use", id: "toolu_b", name: "Task", input: { description: "search the docs" } },
+    ] },
+  });
+  const RESULT_A = JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "toolu_a", content: "done" }] },
+  });
+
+  it("counts them out and back, and never leaves one counted after the run ends", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TASK_A}'`,
+      `echo '${RESULT_A}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":3,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+
+    const started = await lib.startRun({ task: "wide sweep", projectId: "site", source: "agent" });
+    const run = await finished(started.id);
+
+    expect(run.status).toBe("completed");
+    expect(run.subagentsTotal).toBe(2);
+    // One never reported back, but the process tree is gone — nothing it
+    // spawned can still be working, so a settled run shows none active.
+    expect(run.subagentsActive).toBe(0);
+    expect(run.progress.join(" ")).toContain("Sub-agent started: search the tests");
+    expect(run.progress.join(" ")).toContain("Sub-agent finished");
+  });
+
+  it("does not double-count a repeated tool_result", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TASK_A}'`,
+      `echo '${RESULT_A}'`,
+      `echo '${RESULT_A}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":3,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "sweep", projectId: "site", source: "agent" })).id);
+    // Two "started", exactly one "finished" — the duplicate id is ignored.
+    const progress = run.progress.join("\n");
+    expect(progress.match(/Sub-agent finished/g) ?? []).toHaveLength(1);
+    expect(run.subagentsTotal).toBe(2);
+  });
+
+  it("records the effort the run started with", async () => {
+    writeConfig({
+      clawai_token: "claw_test_token",
+      clawai_tier: "flash",
+      coding_agent_enabled: true,
+      coding_agent_effort: "low",
+    });
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "quick one", projectId: "site", source: "agent" })).id);
+    expect(run.effort).toBe("low");
+    // And it actually reached the wrapper's environment.
+    expect(fs.readFileSync(envFile(), "utf-8")).toContain("CLAUDE_DS_EFFORT=low");
+  });
+});
+
+describe("clearing the history", () => {
+  beforeEach(() => readyDevice());
+
+  it("forgets the finished runs", async () => {
+    makeProject("site");
+    await finished((await lib.startRun({ task: "one", projectId: "site", source: "agent" })).id);
+    await finished((await lib.startRun({ task: "two", projectId: "site", source: "agent" })).id);
+    expect(lib.listRuns()).toHaveLength(2);
+
+    expect(lib.clearFinishedRuns()).toBe(2);
+    expect(lib.listRuns()).toEqual([]);
+    // On disk too, not just in memory.
+    expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))).toEqual([]);
+    // Nothing left to clear says so honestly.
+    expect(lib.clearFinishedRuns()).toBe(0);
+  });
+
+  it("keeps a run that is still in flight — it is the only handle on the process", async () => {
+    installFakeWrapper(`echo '${INIT}'\nsleep 30\nexit 0`);
+    makeProject("site");
+    const live = await lib.startRun({ task: "slow one", projectId: "site", source: "agent" });
+    expect(lib.runningCount()).toBe(1);
+
+    expect(lib.clearFinishedRuns()).toBe(0);
+    expect(lib.listRuns().map((r) => r.id)).toEqual([live.id]);
+    // Still stoppable, which is the point of keeping it.
+    lib.stopRun(live.id);
+    const done = await finished(live.id);
+    expect(done.status).toBe("stopped");
+
+    // Once settled it is history like any other.
+    expect(lib.clearFinishedRuns()).toBe(1);
+    expect(lib.listRuns()).toEqual([]);
+  });
+});
+
 describe("after a restart", () => {
   it("settles a run the previous server left running", async () => {
     fs.writeFileSync(runsFile(), JSON.stringify([{
@@ -494,5 +916,50 @@ describe("after a restart", () => {
     expect(run?.status).toBe("failed");
     expect(run?.error).toMatch(/restarted/);
     expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))[0].status).toBe("failed");
+  });
+});
+
+describe("naming the sub-agents that are out", () => {
+  beforeEach(() => readyDevice());
+
+  const TASK = (id: string, kind: string, what: string) => JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name: "Task", input: { subagent_type: kind, description: what } }] },
+  });
+  const DONE = (id: string) => JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] },
+  });
+
+  it("reports which helper is working, not just how many", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TASK("s1", "explorer", "find where the router is wired")}'`,
+      `echo '${TASK("s2", "tester", "run the unit tests")}'`,
+      `echo '${DONE("s1")}'`,
+      "sleep 20",
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const started = await lib.startRun({ task: "wide job", projectId: "site", source: "agent" });
+
+    // While it works: one finished, one still out — and we can say which.
+    // Poll rather than guess a delay: spawning through setpriv on a Jetson is
+    // not instant, and a fixed sleep makes this test flaky by construction.
+    let live = lib.getRun(started.id)!;
+    for (let i = 0; i < 60 && live.subagentsTotal < 2; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      live = lib.getRun(started.id)!;
+    }
+    expect(live.subagentsTotal).toBe(2);
+    expect(live.activeSubagents.map((a) => a.type)).toEqual(["tester"]);
+    expect(live.activeSubagents[0].description).toBe("run the unit tests");
+    expect(live.progress.join("\n")).toContain("Sub-agent started (explorer): find where the router is wired");
+
+    lib.stopRun(started.id);
+    const done = await finished(started.id);
+    // Nothing it spawned can outlive it.
+    expect(done.activeSubagents).toEqual([]);
+    expect(done.subagentsActive).toBe(0);
   });
 });

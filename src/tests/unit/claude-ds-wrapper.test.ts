@@ -132,6 +132,32 @@ describe("routing to ClawBox AI", () => {
     expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
   });
 
+  it("also moves Claude Code's NON-inference base, so nothing falls back to Anthropic", () => {
+    // ANTHROPIC_BASE_URL covers /v1/messages and nothing else. Claude Code
+    // keeps a second base for its account/entitlement calls
+    // (api.anthropic.com/api/oauth/claude_cli/*, /api/web/domain_info). On a
+    // box whose plan is ClawBox AI those can only fail, and Claude Code words
+    // that failure as "Failed to authenticate" — which reads like a bad token
+    // when the token is fine.
+    expect(runWrapper().status).toBe(0);
+    expect(capturedEnv().CLAUDE_CODE_API_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
+  it("moves both bases together when the proxy URL is overridden", () => {
+    runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai" });
+    const env = capturedEnv();
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
+  });
+
+  it("lets the non-inference base be aimed somewhere else on purpose", () => {
+    runWrapper({ CLAUDE_DS_API_BASE_URL: "https://elsewhere.example/api" });
+    const env = capturedEnv();
+    expect(env.CLAUDE_CODE_API_BASE_URL).toBe("https://elsewhere.example/api");
+    // ...without dragging the messages API along with it.
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
   it("honours CLAWBOX_AI_PROXY_URL — the same variable the device's provider config uses", () => {
     runWrapper({ CLAWBOX_AI_PROXY_URL: "https://staging.example/api/ai" });
     expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://staging.example/api/ai/anthropic");
@@ -191,12 +217,25 @@ describe("which model the owner actually gets", () => {
     expect(capturedEnv().ANTHROPIC_MODEL).toBe("deepseek-v4-flash");
   });
 
-  it("keeps the cheap model in the haiku and subagent slots on every plan", () => {
+  it("keeps the cheap model in the haiku slot on every plan", () => {
     writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
     runWrapper();
-    const env = capturedEnv();
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("deepseek-v4-flash");
-    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
+    expect(capturedEnv().ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("deepseek-v4-flash");
+  });
+
+  it("does NOT force one model on every sub-agent", () => {
+    // CLAUDE_CODE_SUBAGENT_MODEL outranks a per-agent `model:`, so setting it
+    // makes a mixed fleet impossible — a cheap reader and an expensive writer
+    // both collapse onto one model. The coding agent picks per agent instead,
+    // so the wrapper must leave this unset.
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "pro" });
+    runWrapper();
+    expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBeUndefined();
+  });
+
+  it("still lets someone force one deliberately", () => {
+    runWrapper({ CLAUDE_DS_SUBAGENT_MODEL: "deepseek-v4-flash" });
+    expect(capturedEnv().CLAUDE_CODE_SUBAGENT_MODEL).toBe("deepseek-v4-flash");
   });
 
   it("lets an override win over the plan", () => {

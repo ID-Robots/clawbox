@@ -12,18 +12,20 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 import { saveEnv } from "@/tests/helpers/env";
 
 const getRun = vi.hoisted(() => vi.fn());
+const clearFinishedRuns = vi.hoisted(() => vi.fn());
 const listRuns = vi.hoisted(() => vi.fn());
 const waitForRun = vi.hoisted(() => vi.fn());
 const stopRun = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, getRun, listRuns, waitForRun, stopRun };
+  return { ...actual, getRun, listRuns, waitForRun, stopRun, clearFinishedRuns };
 });
 
 const RUN = { id: "run-k3x9q2ab", status: "completed", summary: "done", source: "agent" };
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
 
 let GET: (req: Request) => Promise<Response>;
+let DELETE: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let MAX_WAIT_MS: number;
 let CodingAgentError: typeof import("@/lib/coding-agent").CodingAgentError;
@@ -43,7 +45,10 @@ beforeEach(async () => {
   const lib = await import("@/lib/coding-agent");
   MAX_WAIT_MS = lib.MAX_WAIT_MS;
   CodingAgentError = lib.CodingAgentError;
-  GET = (await import("@/app/setup-api/coding-agent/runs/route")).GET;
+  clearFinishedRuns.mockReturnValue(2);
+  const runsRoute = await import("@/app/setup-api/coding-agent/runs/route");
+  GET = runsRoute.GET;
+  DELETE = runsRoute.DELETE;
   POST = (await import("@/app/setup-api/coding-agent/stop/route")).POST;
 });
 
@@ -56,13 +61,15 @@ describe("GET runs", () => {
   it("lists recent runs with a bounded limit", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?limit=999"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ runs: [RUN] });
+    // The route decorates each run with where its transcript lives, so the
+    // app can offer a live preview without knowing Claude Code's layout.
+    expect(await res.json()).toEqual({ runs: [{ ...RUN, transcriptPath: null }] });
     expect(listRuns).toHaveBeenCalledWith(30);
   });
 
   it("returns one run by id without waiting when wait is absent", async () => {
     const res = await GET(new Request("http://localhost/setup-api/coding-agent/runs?id=run-k3x9q2ab"));
-    expect(await res.json()).toEqual({ run: RUN });
+    expect(await res.json()).toEqual({ run: { ...RUN, transcriptPath: null } });
     expect(waitForRun).not.toHaveBeenCalled();
   });
 
@@ -81,6 +88,37 @@ describe("GET runs", () => {
     const body = await res.json();
     expect(typeof body.error).toBe("string");
     expect(body.kind).toBe("not_found");
+  });
+});
+
+describe("DELETE runs — clearing the history", () => {
+  const del = (auth: "cookie" | "bearer" | "none") => {
+    const headers: Record<string, string> = {};
+    if (auth === "cookie") headers.Cookie = session.cookie;
+    if (auth === "bearer") headers.Authorization = `Bearer ${MCP_TOKEN}`;
+    return DELETE(new Request("http://localhost/setup-api/coding-agent/runs", { method: "DELETE", headers }));
+  };
+
+  it("refuses the agent's bearer — these records are the account of what it did", async () => {
+    const res = await del("bearer");
+    expect(res.status).toBe(403);
+    expect((await res.json()).kind).toBe("owner_only");
+    expect(clearFinishedRuns).not.toHaveBeenCalled();
+  });
+
+  it("refuses a caller with no credential, identically", async () => {
+    const bearer = await del("bearer");
+    const bare = await del("none");
+    expect(bare.status).toBe(403);
+    expect(await bare.json()).toEqual(await bearer.json());
+    expect(clearFinishedRuns).not.toHaveBeenCalled();
+  });
+
+  it("clears for the owner and says how many went", async () => {
+    const res = await del("cookie");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ cleared: 2 });
+    expect(clearFinishedRuns).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -142,5 +180,23 @@ describe("POST stop", () => {
     const raced = await stop({ id: "run-k3x9q2ab" });
     expect(raced.status).toBe(404);
     expect((await raced.json()).error).toBe("no such run");
+  });
+});
+
+describe("malformed request bodies", () => {
+  // A JSON body may legally be a string, a number or a boolean. Reading
+  // fields off one with `in` throws a TypeError, which reached the caller as
+  // a 500. Measured on the box before the fix: "a string", 42 and true all
+  // returned 500.
+  it("answers 400, never 500, for JSON that is not an object", async () => {
+    const enable = (await import("@/app/setup-api/coding-agent/enable/route")).POST;
+    for (const body of ['"a string"', "42", "true", "null", "[1,2]"]) {
+      const res = await enable(new Request("http://localhost/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: session.cookie },
+        body,
+      }));
+      expect(res.status, `body ${body}`).toBe(400);
+    }
   });
 });

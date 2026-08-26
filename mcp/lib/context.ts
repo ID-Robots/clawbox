@@ -30,7 +30,7 @@ const COMMON_APPS: DesktopApp[] = [
   { id: "files", name: "Files", description: "File manager" },
   { id: "browser", name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
   { id: "vnc", name: "Remote Desktop", description: "VNC viewer" },
-  { id: "coding", name: "Coding Agent", description: "Interactive Claude Code terminal (claude-ds) for the person at the desk" },
+  { id: "coding", name: "Coding Agent", description: "The owner's switch for delegated coding runs, what a run needs, and recent runs" },
 ];
 
 export function builtInApps(edition: Ed): DesktopApp[] {

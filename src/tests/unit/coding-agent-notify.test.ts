@@ -90,23 +90,35 @@ describe("the text", () => {
   });
 
   it("says where to look for the details", () => {
-    expect(buildAnnouncement(run({ status: "completed" }))).toMatch(/Settings → System → Coding agent/);
+    expect(buildAnnouncement(run({ status: "completed" }))).toMatch(/open the Coding Agent app/);
     expect(buildAnnouncement(run({ status: "failed" }))).toMatch(/did not finish/);
     expect(buildAnnouncement(run({ status: "stopped" }))).toMatch(/was stopped/);
   });
 });
 
 describe("the desktop leg", () => {
-  it("writes the same notify slot ui_notify uses, under the toast's length cap", async () => {
+  it("raises a card the owner can act on, not a toast that slides away", async () => {
     await announceCodingAgent(run());
     expect(kvSet).toHaveBeenCalledTimes(1);
     const [key, value] = kvSet.mock.calls[0];
     expect(key).toBe("ui:pending-action");
     const payload = JSON.parse(value);
-    expect(payload.type).toBe("notify");
+    // Its own action type: the desktop renders this in the top-right stack
+    // with a button into the app, where the summary is.
+    expect(payload.type).toBe("coding_agent");
+    expect(payload.runId).toBe("run-k3x9q2ab");
+    expect(payload.status).toBe("completed");
+    expect(payload.projectId).toBe("site");
     expect(payload.message).toBe(buildAnnouncement(run()));
     expect(payload.message.length).toBeLessThanOrEqual(280);
     expect(typeof payload.ts).toBe("number");
+  });
+
+  it("still carries no task and no summary — a card is not a licence to quote the model", async () => {
+    await announceCodingAgent(run());
+    const raw = String(kvSet.mock.calls[0][1]);
+    expect(raw).not.toContain("DO-NOT-LEAK");
+    expect(raw).not.toContain("config.js");
   });
 
   it("swallows a failed write", async () => {

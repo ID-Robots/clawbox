@@ -68,6 +68,7 @@ const RUN = {
   filesTouched: ["index.html"],
   commandsRun: 1,
   permissionDenials: 2,
+  resumable: false,
   progress: ["Started", "$ npm test", "Finished: completed"],
 };
 
@@ -141,7 +142,7 @@ describe("coding_agent_run", () => {
     if (!out.isError) return;
     expect(out.error.code).toBe("CONFLICT");
     expect(out.error.next).toMatch(/Do not retry/);
-    expect(out.error.next).toMatch(/Settings/);
+    expect(out.error.next).toMatch(/Coding Agent app/);
   });
 
   it("turns 'busy' into CONFLICT pointing at the running run", async () => {
@@ -250,13 +251,36 @@ describe("coding_agent_status", () => {
     expect(capped.indexOf("[summary from the coding agent")).toBeLessThan(capped.indexOf("[recent activity]"));
   });
 
-  it("tells the agent to keep waiting while a run is still working", async () => {
+  it("tells the agent to go back to the user rather than sit on a running run", async () => {
+    // The assistant used to block the whole conversation waiting for a run,
+    // so the owner could not ask it anything until it returned.
     apiGet.mockResolvedValue({ run: { ...RUN, status: "running", completedAt: null, summary: null } });
     const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toMatch(/Still working/);
-    expect(out.text).toMatch(/wait_seconds/);
+    expect(out.text).toMatch(/do not sit here polling/i);
+    expect(out.text).toMatch(/available for other questions/i);
+  });
+
+  it("never tells the agent to resume a run a resume cannot fix", async () => {
+    // This advice is what turned one transient upstream failure into a project
+    // that failed forever: the agent resumed the poisoned session and
+    // re-enacted the same authentication error.
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "failed", resumable: false, error: "Failed to authenticate." } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/Do not resume this one/);
+    expect(out.text).not.toMatch(/resume_run_id/);
+  });
+
+  it("does offer a resume when the run merely hit a ceiling", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "failed", resumable: true, error: "Stopped after 60 turns." } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/resume_run_id/);
   });
 
   it("answers NOT_FOUND with the listing as the next step", async () => {
@@ -299,7 +323,7 @@ describe("coding_agent_stop", () => {
     if (!out.isError) return;
     expect(out.error.code).toBe("CONFLICT");
     expect(out.error.next).toMatch(/Do not retry/);
-    expect(out.error.next).toMatch(/Settings/);
+    expect(out.error.next).toMatch(/Coding Agent app/);
   });
 
   it("is honest when the process has not exited yet", async () => {
