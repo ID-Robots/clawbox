@@ -329,6 +329,23 @@ describe("adopting a picture the agent drew", () => {
     expect(await adoptHermesGeneratedImages([drawn, wordy])).toHaveLength(1);
   });
 
+  it("does not lose an attachment echo when the media root cannot be exempted", async () => {
+    // The exemption in `reclaimImageMentions` normally leaves this path in the
+    // caption. If it ever misses — an unresolvable media root, a symlink the
+    // lexical test cannot see — the mention IS reclaimed, and the DATA_DIR guard
+    // would refuse it. The media root is an adoption root of its own so the
+    // picture still renders instead of vanishing.
+    const attached = writeImage(
+      path.join(home, "data", "chat-media", "chat-attachments", "echo.png"),
+    );
+    const { adoptHermesGeneratedImages, reclaimImageMentions } = await load();
+    // No media root passed: the exemption cannot fire.
+    const { sources } = reclaimImageMentions(`Got it.
+MEDIA:${attached}`);
+    expect(sources).toEqual([attached]);
+    expect(await adoptHermesGeneratedImages(sources)).toHaveLength(1);
+  });
+
   it("still stops at four however many the agent wrote", async () => {
     const files = ["a", "b", "c", "d", "e", "f"].map((n) =>
       writeWorkspaceImage(`spam_${n}.png`),

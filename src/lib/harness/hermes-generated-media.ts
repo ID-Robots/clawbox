@@ -4,6 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import {
   chatGeneratedImageDir,
+  chatMediaRoot,
   GENERATED_IMAGE_RETENTION,
   pruneMediaDir,
   resolveInMediaRoot,
@@ -127,6 +128,7 @@ interface AdoptionRoot {
 async function adoptionRoots(): Promise<AdoptionRoot[]> {
   const roots: AdoptionRoot[] = [];
   const add = async (dir: string, guarded: boolean) => {
+    if (!dir) return;
     try {
       const real = await fsp.realpath(dir);
       // A root nested inside an earlier one (the tests' fake HOME lives under
@@ -141,6 +143,16 @@ async function adoptionRoots(): Promise<AdoptionRoot[]> {
   // root, so a later, guarded root would otherwise claim it and the guard would
   // refuse it for being under `~/.hermes`.
   await add(hermesImageCacheDir(), false);
+  // The chat's OWN tree, as a source as well as a destination. It is normally
+  // never reached: `reclaimImageMentions` leaves a path this tree already holds
+  // in the caption, precisely so an attachment the model echoed back is not
+  // copied for no reason. This is the belt to that exemption's braces — if the
+  // media root cannot be resolved at reclaim time, or a symlink hides it from
+  // the lexical test, the mention IS reclaimed, and without this root the
+  // DATA_DIR guard would then refuse it and the customer would lose a picture
+  // that works today. Unguarded for the same reason as the cache: `chat/media`
+  // already serves this exact tree to this exact session.
+  await add(await chatMediaRoot().catch(() => ""), false);
   await add(filesBrowseRoot(), true);
   // Where a shell-improvising agent writes when it does not write beside itself.
   await add(os.tmpdir(), true);
