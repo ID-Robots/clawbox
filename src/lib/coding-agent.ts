@@ -247,6 +247,13 @@ export interface CodingRun {
   subagentsActive: number;
   /** Sub-agents this run spawned in total, live or finished. */
   subagentsTotal: number;
+  /** Whether sub-agents were available to this run at all. */
+  subagentsAllowed: boolean;
+  /**
+   * Automatic restarts after a transient upstream failure. At most one, and
+   * only for a run that had done no work — see TRANSIENT_FAILURE_RE.
+   */
+  retries: number;
   /**
    * Whether RESUMING this run's session could help.
    *
@@ -532,6 +539,8 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // has no live sub-agents by definition.
     subagentsActive: 0,
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
+    subagentsAllowed: raw.subagentsAllowed === true,
+    retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
@@ -577,6 +586,10 @@ interface LiveRun {
    * duplicate must not decrement twice.
    */
   openSubagents: Set<string>;
+  /** Resolved once at start, so a retry does not need an async lookup. */
+  setprivPath: string;
+  /** What this run was spawned with — a retry must match, not re-read. */
+  settings: { effort: CodingEffort; subagents: boolean };
 }
 
 /** Newest first. `null` until first use. */
@@ -1159,6 +1172,32 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   }
 }
 
+/**
+ * Failures worth ONE automatic retry.
+ *
+ * Observed on a real box: a run dies in four seconds with "Failed to
+ * authenticate. API Error: Attention Required! | Cloudflare" while the same
+ * request from the same box with the same token succeeds immediately before
+ * and after. Concurrency, payload size, the restricted environment and the
+ * capability drop were each tested and each ruled out; the upstream cause is
+ * still unidentified.
+ *
+ * What IS certain is the device's part: it turned one transient upstream
+ * hiccup into a dead run and told the owner their box was offline. Claude
+ * Code retries ordinary API errors itself, but treats an auth failure as
+ * final — reasonably, since a bad key will never come good. Here the key is
+ * fine, so the run is worth starting again.
+ *
+ * Deliberately narrow: an auth/transport shape, and nothing that could be a
+ * real refusal of the work.
+ */
+const TRANSIENT_FAILURE_RE =
+  /failed to authenticate|attention required|cloudflare|502 bad gateway|503|504|gateway time-?out|econnreset|etimedout|enotfound|socket hang up|fetch failed/i;
+
+export function isTransientFailure(error: string | null): boolean {
+  return typeof error === "string" && TRANSIENT_FAILURE_RE.test(error);
+}
+
 /** The wrapper's own diagnostics, minus its start-up banner. */
 function stderrTail(stderr: string): string {
   const lines = stderr
@@ -1192,6 +1231,52 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   clearTimeout(state.timeout);
   if (state.killTimer) clearTimeout(state.killTimer);
   live.delete(run.id);
+
+  // One automatic restart when the upstream blinked and the run got nowhere.
+  //
+  // The guards are what make this safe rather than a loop: once only, only a
+  // transient shape, only a run the owner did not stop, and only one that
+  // changed NOTHING — no files, no commands. A run that had already edited
+  // something must never be silently repeated, because the second attempt
+  // starts from the first one's leftovers.
+  //
+  // A FRESH session, never a resume: Claude Code persists the failure in the
+  // session and replays it, which is how one bad run became two identical
+  // ones on this box. See CodingRun.resumable.
+  if (
+    run.status === "failed"
+    && run.retries === 0
+    && !state.stopRequested
+    && !state.timedOut
+    && isTransientFailure(run.error)
+    && run.filesTouched.length === 0
+    && run.commandsRun === 0
+  ) {
+    {
+      run.retries = 1;
+      run.status = "running";
+      run.completedAt = null;
+      run.exitCode = null;
+      run.error = null;
+      run.sessionId = null;
+      run.numTurns = 0;
+      run.subagentsTotal = 0;
+      pushProgress(run, "The provider did not answer; starting over in a fresh session");
+      persist(true);
+      console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
+      try {
+        spawnRun(run, null, state.setprivPath, state.settings);
+        return;
+      } catch (err) {
+        // The retry could not even start; fall through and report the
+        // original shape of failure rather than losing the run.
+        run.status = "failed";
+        run.completedAt = Date.now();
+        run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+      }
+    }
+  }
+
   pushProgress(run, `Finished: ${run.status}`);
   persist(true);
   wakeWaiters(run.id);
@@ -1238,6 +1323,8 @@ function spawnRun(
   const state: LiveRun = {
     child,
     openSubagents: new Set<string>(),
+    setprivPath,
+    settings,
     timeout: setTimeout(() => {
       state.timedOut = true;
       killTree(child, "SIGTERM");
@@ -1394,6 +1481,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     effort,
     subagentsActive: 0,
     subagentsTotal: 0,
+    subagentsAllowed: subagents,
+    retries: 0,
     resumable: false,
     progress: [],
     exitCode: null,

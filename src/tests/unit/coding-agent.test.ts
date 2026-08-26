@@ -498,6 +498,94 @@ describe("the capabilities a run starts with", () => {
   });
 });
 
+describe("retrying a transient upstream failure", () => {
+  beforeEach(() => readyDevice());
+
+  const CF = "Failed to authenticate. API Error: Attention Required! | Cloudflare";
+  const counter = () => path.join(home, "attempts.txt");
+
+  /** Fails the first time with the real Cloudflare text, succeeds the second. */
+  function flakyWrapper(extra = ""): void {
+    installFakeWrapper([
+      `n=$(cat "${counter()}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter()}"`,
+      `echo '${INIT}'`,
+      extra,
+      'if [ "$n" = "1" ]; then',
+      `  echo "${CF}" >&2`,
+      "  exit 1",
+      "fi",
+      `echo '{"type":"result","subtype":"success","num_turns":2,"result":"SECOND-TRY-OK"}'`,
+      "exit 0",
+    ].join("\n"));
+  }
+
+  it("starts over once, in a FRESH session, and the run succeeds", async () => {
+    flakyWrapper();
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.summary).toBe("SECOND-TRY-OK");
+    expect(run.retries).toBe(1);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("2");
+    // The owner is told it happened rather than it being hidden.
+    expect(run.progress.join("\n")).toContain("starting over in a fresh session");
+    // A resume would have replayed the failure; the retry must not use one.
+    expect(fs.readFileSync(argvFile(), "utf-8")).not.toContain("--resume");
+  });
+
+  it("retries at most once — a second failure is reported, not looped", async () => {
+    installFakeWrapper([`echo '${INIT}'`, `echo "${CF}" >&2`, "exit 1"].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(1);
+    expect(run.error).toContain("Attention Required");
+  });
+
+  it("does NOT retry a run that already changed something", async () => {
+    // The second attempt would start from the first one's leftovers.
+    const WROTE = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "t1", name: "Write", input: { file_path: "out.txt" } }] },
+    });
+    flakyWrapper(`echo '${WROTE}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(run.filesTouched).toEqual(["out.txt"]);
+    expect(fs.readFileSync(counter(), "utf-8").trim()).toBe("1");
+  });
+
+  it("does NOT retry a real refusal — a turn ceiling is an answer, not an accident", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '{"type":"result","subtype":"error_max_turns","num_turns":60}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+    expect(run.resumable).toBe(true);
+  });
+
+  it("does NOT retry a run the owner stopped", async () => {
+    installFakeWrapper([`echo '${INIT}'`, "sleep 30", "exit 0"].join("\n"));
+    makeProject("site");
+    const started = await lib.startRun({ task: "t", projectId: "site", source: "owner" });
+    lib.stopRun(started.id);
+    const run = await finished(started.id);
+
+    expect(run.status).toBe("stopped");
+    expect(run.retries).toBe(0);
+  });
+});
+
 describe("counting sub-agents", () => {
   beforeEach(() => readyDevice());
 
