@@ -77,3 +77,37 @@ describe("what is safe to repeat", () => {
     }
   });
 });
+
+describe("what counts as having changed something", () => {
+  it("treats plainly read-only commands as leaving nothing behind", () => {
+    // The bug this replaces: the guard asked "did it run ANY command", and a
+    // bare `ls -la` was enough to block the retry on a real box.
+    for (const cmd of [
+      "ls -la /home/clawbox/clawbox/data/code-projects/globe-3d",
+      "cat index.html", "head -20 app.js", "wc -l style.css",
+      "grep -n foo app.js", "pwd",
+      "git status", "git diff", "git log --oneline -5",
+    ]) {
+      expect(isReadOnlyInspectionCommand(cmd), cmd).toBe(true);
+    }
+  });
+
+  it("treats anything else as work, including near-misses", () => {
+    for (const cmd of [
+      "npm install", "bun run build", "mkdir -p out", "cp a b", "mv a b",
+      "touch new.txt", "git add .", "git commit -m x", "python3 build.py",
+      "node script.js", "make", "rm -rf /", "sudo id",
+      // Not a prefix match on a read-only name:
+      "lsof -i", "catalina start", "echoserver --run",
+      // `find` is NOT on the safe list, deliberately: -exec and -delete make
+      // it as side-effecting as anything else.
+      "find . -name '*.js'", "find . -delete",
+      // Shell composition hides a mutation behind a read-only prefix. A
+      // prefix-only check would wave these through.
+      "ls -la; rm -rf out", "cat a > b", "grep x f | tee out", "ls `touch z`",
+      "cat $(touch z)", "ls && npm install",
+    ]) {
+      expect(isReadOnlyInspectionCommand(cmd), cmd).toBe(false);
+    }
+  });
+});

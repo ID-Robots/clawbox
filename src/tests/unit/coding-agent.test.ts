@@ -544,6 +544,36 @@ describe("retrying a transient upstream failure", () => {
     expect(run.error).toContain("Attention Required");
   });
 
+  it("DOES retry a run that only looked around — a read-only ls is not work", async () => {
+    // The exact shape seen on the box: the run did `ls -la`, then died on the
+    // provider. The first guard counted that command as work and blocked the
+    // retry, which is why it never fired when it was needed.
+    const LOOKED = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "b1", name: "Bash", input: { command: "ls -la ." } }] },
+    });
+    flakyWrapper(`echo '${LOOKED}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.retries).toBe(1);
+    expect(run.commandsRun).toBeGreaterThan(0);
+  });
+
+  it("does NOT retry after a command that could have left something behind", async () => {
+    const BUILT = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "b2", name: "Bash", input: { command: "npm install" } }] },
+    });
+    flakyWrapper(`echo '${BUILT}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.retries).toBe(0);
+  });
+
   it("does NOT retry a run that already changed something", async () => {
     // The second attempt would start from the first one's leftovers.
     const WROTE = JSON.stringify({
