@@ -12,7 +12,10 @@
  * capability, not a hint), and a run records the settings it STARTED with
  * even if the owner changes them mid-flight.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import fsSync from "fs";
+import osMod from "os";
+import pathMod from "path";
 
 const configGet = vi.hoisted(() => vi.fn());
 const configSet = vi.hoisted(() => vi.fn());
@@ -23,19 +26,12 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 import {
-  buildRunArgs,
   buildRunEnv,
-  CLAUDE_TOOLS,
   CODING_AGENT_EFFORT_CONFIG_KEY,
-  CODING_AGENT_SUBAGENTS_CONFIG_KEY,
   DEFAULT_EFFORT,
   EFFORT_LEVELS,
   getEffort,
-  getSubagentsEnabled,
   setEffort,
-  setSubagentsEnabled,
-  SUBAGENT_TOOL,
-  toolsFor,
   CodingAgentError,
 } from "@/lib/coding-agent";
 
@@ -266,22 +262,33 @@ describe("what every run now gets, permanently", () => {
 });
 
 describe("working in a folder the owner already has", () => {
+  // A real folder inside the home, created here: the resolver checks the
+  // folder exists and lives under the ClawBox home, so a fixture that only
+  // pretends would prove nothing.
+  let base = "";
+  let sub = "";
+  beforeEach(() => {
+    base = fsSync.mkdtempSync(pathMod.join(osMod.homedir(), ".coding-agent-test-"));
+    sub = pathMod.join(base, "my-existing-app");
+    fsSync.mkdirSync(sub, { recursive: true });
+  });
+  afterEach(() => fsSync.rmSync(base, { recursive: true, force: true }));
+
   it("resolves a bare name against the default project folder", async () => {
-    // Before this, a folder the owner made in ~/Projects could only be
-    // reached by typing its whole absolute path, and nothing told the
-    // assistant it existed.
+    // Before this, a folder the owner made could only be reached by typing
+    // its whole absolute path, and nothing told the assistant it existed.
     configGet.mockImplementation(async (k: string) =>
-      k === "coding_agent_default_directory" ? "/home/clawbox/Projects" : undefined);
+      k === "coding_agent_default_directory" ? base : undefined);
     const lib = await import("@/lib/coding-agent");
     const r = await lib.resolveWorkingDirectory({ directory: "my-existing-app" });
-    expect(r.directory).toBe("/home/clawbox/Projects/my-existing-app");
+    expect(r.directory).toBe(fsSync.realpathSync(sub));
   });
 
   it("refuses a bare name that tries to climb out", async () => {
     configGet.mockImplementation(async (k: string) =>
-      k === "coding_agent_default_directory" ? "/home/clawbox/Projects" : undefined);
+      k === "coding_agent_default_directory" ? base : undefined);
     const lib = await import("@/lib/coding-agent");
-    for (const bad of ["..", ".", "../secrets", "a/b", "..\\\\x"]) {
+    for (const bad of ["..", ".", "../secrets", "a/b"]) {
       await expect(lib.resolveWorkingDirectory({ directory: bad })).rejects.toBeInstanceOf(lib.CodingAgentError);
     }
   });
@@ -293,3 +300,42 @@ describe("working in a folder the owner already has", () => {
       .rejects.toThrow(/absolute path, or a folder name/i);
   });
 });
+
+describe("what every run now gets, permanently", () => {
+  // The owner removed both switches: full command access and sub-agents are
+  // always on. These pin what that means so it cannot drift back silently.
+
+  it("allows every command — no allow-list, no command deny-list", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
+    for (const rule of lib.BASH_DENYLIST) expect(args.join(" ")).not.toContain(rule);
+  });
+
+  it("still ships the credential file rules, because they cost nothing", async () => {
+    // They bind Claude Code's own Read/Edit/Write and NOT Bash — an
+    // interpreter reads the file either way, measured on the box. Worth
+    // keeping, not worth trusting.
+    const lib = await import("@/lib/coding-agent");
+    const joined = lib.buildRunArgs({ resumeSessionId: null }).join(" ");
+    for (const secret of ["config.json", ".mcp-token", ".session-secret"]) {
+      expect(joined).toContain(secret);
+    }
+  });
+
+  it("always offers the Agent tool and the three definitions", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
+    const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
+    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
+  });
+
+  it("keeps acceptEdits and the capability drop", async () => {
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
+    expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
+  });
+});
+

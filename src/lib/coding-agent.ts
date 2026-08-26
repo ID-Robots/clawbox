@@ -73,6 +73,7 @@ import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/codin
 import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { projectPath, validateProjectId } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
+import { commitRunWork } from "@/lib/coding-git";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -387,6 +388,8 @@ export interface CodingRun {
   activeSubagents: ActiveSubagent[];
   /** Sub-agents this run spawned in total, live or finished. */
   subagentsTotal: number;
+  /** The commit this run's work was recorded as, when it changed anything. */
+  commit: string | null;
   /** How many of each kind — explorer, tester, reviewer. */
   subagentsByType: Record<string, number>;
   /** Every model that did work for this run, main and sub-agents alike. */
@@ -805,6 +808,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     subagentsByType: (raw.subagentsByType && typeof raw.subagentsByType === "object")
       ? (raw.subagentsByType as Record<string, number>) : {},
+    commit: typeof raw.commit === "string" ? raw.commit : null,
     modelsUsed: Array.isArray(raw.modelsUsed)
       ? raw.modelsUsed.filter((m): m is string => typeof m === "string") : [],
     maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
@@ -1641,6 +1645,37 @@ export function isTransientFailure(error: string | null): boolean {
   return typeof error === "string" && TRANSIENT_FAILURE_RE.test(error);
 }
 
+/**
+ * Commit what the run changed, in its own folder.
+ *
+ * Fire-and-forget and never allowed to throw: a run that did its work is
+ * finished whether or not the history was recorded, and the owner is told
+ * either way.
+ */
+function recordRunWork(run: CodingRun): void {
+  if (run.filesTouched.length === 0) return;
+  void commitRunWork({
+    directory: run.directory,
+    runId: run.id,
+    task: run.task,
+    summary: run.summary,
+  })
+    .then((outcome) => {
+      if (outcome.committed) {
+        run.commit = outcome.sha;
+        pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
+        console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
+      } else if (outcome.reason !== "no_changes") {
+        pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
+        console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
+      }
+      persist(true);
+    })
+    .catch((err: unknown) => {
+      console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
+    });
+}
+
 /** The wrapper's own diagnostics, minus its start-up banner. */
 function stderrTail(stderr: string): string {
   const lines = stderr
@@ -1727,6 +1762,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   persist(true);
   wakeWaiters(run.id);
   console.error(`[coding-agent] ${run.id} ${run.status} after ${Math.round((run.completedAt - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
+  // History first, then the notice: by the time the owner is told a run
+  // finished, its work is already recoverable.
+  void recordRunWork(run);
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -1941,6 +1979,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     subagentsTotal: 0,
     subagentsByType: {},
     modelsUsed: [],
+    commit: null,
     maxTurns,
     tokensUsed: 0,
     tokenLimit,
