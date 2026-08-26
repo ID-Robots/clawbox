@@ -196,6 +196,7 @@ export default function CredentialsWriteDownDialog({
               customer sees, and its focus ring is `peer`-driven so the keyboard
               state stays declarative rather than mirrored into React state. */}
           <label
+            data-testid="writedown-ack-label"
             className="flex cursor-pointer items-start gap-[var(--s-3)]"
             style={{ marginTop: "0.9rem" }}
           >

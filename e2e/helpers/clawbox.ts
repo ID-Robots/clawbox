@@ -1225,7 +1225,11 @@ export async function submitCredentialsStep(page: Page) {
   await page.getByRole("button", { name: /^Connect$/ }).click();
   const writeDown = page.getByTestId("credentials-writedown-dialog");
   await expect(writeDown).toBeVisible({ timeout: 10_000 });
-  await writeDown.getByTestId("writedown-ack").check();
+  // The acknowledgement input is visually replaced, so its own label sits over
+  // it — clicking the label is both what a customer does and the only thing
+  // Playwright can land on.
+  await writeDown.getByTestId("writedown-ack-label").click();
+  await expect(writeDown.getByTestId("writedown-ack")).toBeChecked();
   await writeDown.getByTestId("writedown-continue").click();
 }
 
