@@ -414,7 +414,10 @@ export const fr: Record<string, string> = {
   "codingAgent.title": "Agent de code",
   "codingAgent.terminalHint": "Les tâches de programmation déléguées par votre assistant. Pour une session interactive, ouvrez l'application Terminal et lancez claude-ds.",
   "codingAgent.chatWorking": "L'agent de code travaille",
-  "codingAgent.chatWorkingOwner": "Votre exécution est en cours",
+  "codingAgent.chatWorkingOwner": "Votre exécution est en cours",  "codingAgent.chatFinished": "L'agent de code a terminé",
+  "codingAgent.chatFailed": "L'agent de code n'a pas fini",
+  "codingAgent.chatStopped": "Agent de code arrêté",
+
   "codingAgent.chatOpenApp": "ouvrir",
   "codingAgent.switchLabel": "Autoriser l'assistant à déléguer du travail de programmation",
   "codingAgent.switchHelp": "Lorsque cette option est activée, votre assistant peut confier une tâche de programmation à Claude Code, qui travaille en arrière-plan dans un dossier de projet avec votre forfait ClawBox AI et rend compte du résultat. Désactivé par défaut.",

@@ -401,7 +401,10 @@ export const bg: Record<string, string> = {
   "codingAgent.title": "Кодиращ агент",
   "codingAgent.terminalHint": "Делегираните задачи за програмиране на вашия асистент. За работа на живо отворете приложението Терминал и стартирайте claude-ds.",
   "codingAgent.chatWorking": "Кодиращият агент работи",
-  "codingAgent.chatWorkingOwner": "Вашето изпълнение работи",
+  "codingAgent.chatWorkingOwner": "Вашето изпълнение работи",  "codingAgent.chatFinished": "Кодиращият агент приключи",
+  "codingAgent.chatFailed": "Кодиращият агент не завърши",
+  "codingAgent.chatStopped": "Кодиращият агент е спрян",
+
   "codingAgent.chatOpenApp": "отвори",
   "codingAgent.switchLabel": "Позволи на асистента да делегира програмиране",
   "codingAgent.switchHelp": "Когато е включено, асистентът може да предаде задача за програмиране на Claude Code, който работи във фонов режим в папка на проект през вашия план ClawBox AI и докладва резултата. По подразбиране е изключено.",

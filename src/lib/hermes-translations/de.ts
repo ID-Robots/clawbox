@@ -413,7 +413,10 @@ export const de: Record<string, string> = {
   "codingAgent.title": "Coding-Agent",
   "codingAgent.terminalHint": "Die delegierten Programmierläufe Ihres Assistenten. Für eine interaktive Sitzung öffnen Sie die Terminal-App und starten claude-ds.",
   "codingAgent.chatWorking": "Coding-Agent arbeitet",
-  "codingAgent.chatWorkingOwner": "Ihr Lauf arbeitet",
+  "codingAgent.chatWorkingOwner": "Ihr Lauf arbeitet",  "codingAgent.chatFinished": "Coding-Agent fertig",
+  "codingAgent.chatFailed": "Coding-Agent nicht fertiggestellt",
+  "codingAgent.chatStopped": "Coding-Agent gestoppt",
+
   "codingAgent.chatOpenApp": "öffnen",
   "codingAgent.switchLabel": "Dem Assistenten erlauben, Programmierarbeit zu delegieren",
   "codingAgent.switchHelp": "Wenn aktiv, kann Ihr Assistent eine Programmieraufgabe an Claude Code übergeben, das im Hintergrund in einem Projektordner über Ihren ClawBox-AI-Plan arbeitet und Bericht erstattet. Standardmäßig aus.",

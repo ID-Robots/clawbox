@@ -4,72 +4,85 @@ import { useEffect, useState } from "react";
 import type { CodingAgentActivity } from "@/lib/use-coding-agent-activity";
 
 /**
- * "The coding agent is still working", shown in the chat for exactly as long
- * as that is true.
+ * One delegated coding run, as a badge in the chat.
  *
- * It sits with the live tool pills and borrows their shape on purpose: this is
- * the same kind of fact they report — what the box is doing right now — and the
- * eye should not have to learn a second vocabulary for it. The difference is
- * what drives it. A tool pill is fed by the gateway's tool-call lifecycle and
- * so goes "done" the moment `coding_agent_run` returns its run id; this is fed
- * by the device's own run record, so it stays up while the work does.
+ * It sits with the live tool pills and borrows their shape and their three
+ * tones on purpose: this is the same kind of fact they report — what the box
+ * did — and the eye should not have to learn a second vocabulary for it. What
+ * differs is the source. A tool pill is fed by the gateway's tool-call
+ * lifecycle and so reaches "done" the moment `coding_agent_run` hands back a
+ * run id; this is fed by the device's own run record, so it tracks the work.
  *
- * The elapsed time ticks because a run takes minutes: a static pill leaves the
- * owner wondering whether it is working or wedged, and the ticking second is
- * the cheapest possible proof of life.
+ * The badge STAYS once the run ends, reporting the outcome. Runs measured on
+ * the box take 9-15 seconds — a badge that vanished with the run was gone
+ * before the owner had finished reading the message above it.
+ *
+ * The elapsed time ticks while the run is in flight and freezes at the total
+ * once it is not: a moving second is the cheapest proof a multi-minute run is
+ * alive, and a frozen one is the record of how long it took.
  */
 
-const RUNNING_BG = "rgba(251,191,36,0.12)";
-const RUNNING_BORDER = "1px solid rgba(251,191,36,0.25)";
-const RUNNING_FG = "#fcd34d";
+const TONE = {
+  running: { background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.25)", color: "#fcd34d", glyph: "🤖" },
+  completed: { background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.22)", color: "#86efac", glyph: "✓" },
+  failed: { background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.25)", color: "#fca5a5", glyph: "!" },
+  stopped: { background: "rgba(148,163,184,0.12)", border: "1px solid rgba(148,163,184,0.25)", color: "#cbd5e1", glyph: "◼" },
+} as const;
 
-function elapsed(startedAt: number, now: number): string {
-  const s = Math.max(0, Math.round((now - startedAt) / 1000));
+function elapsed(from: number, to: number): string {
+  const s = Math.max(0, Math.round((to - from) / 1000));
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return `${m}m ${s - m * 60}s`;
 }
 
 export default function CodingAgentActivityPill(
-  { run, label, ownerLabel, openLabel, onOpen }: {
+  { run, labels, openLabel, onOpen }: {
     run: CodingAgentActivity;
-    label: string;
-    ownerLabel: string;
+    /** One per status, plus the owner-started variant of "running". */
+    labels: { running: string; runningOwner: string; completed: string; failed: string; stopped: string };
     openLabel: string;
     onOpen?: () => void;
   },
 ) {
+  const live = run.status === "running";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (!live) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, []);
+  }, [live]);
+
+  const tone = TONE[run.status];
+  // A run the OWNER started says so, so the assistant is not credited with
+  // work the person at the desk kicked off.
+  const label = live && run.source === "owner" ? labels.runningOwner : labels[run.status];
+  const took = elapsed(run.startedAt, live ? now : (run.completedAt ?? now));
 
   return (
     <div
       data-testid="coding-agent-activity"
+      data-status={run.status}
       role="status"
-      aria-live="polite"
+      aria-live={live ? "polite" : "off"}
       style={{
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
         padding: "4px 10px",
         borderRadius: 999,
-        background: RUNNING_BG,
-        border: RUNNING_BORDER,
-        color: RUNNING_FG,
+        background: tone.background,
+        border: tone.border,
+        color: tone.color,
         fontSize: 12,
         fontWeight: 500,
         maxWidth: "100%",
       }}
     >
-      <span aria-hidden="true">🤖</span>
-      {/* The run the OWNER started is named as theirs: the assistant should not
-          appear to be doing something the person at the desk kicked off. */}
-      <span>{run.source === "owner" ? ownerLabel : label}</span>
+      <span aria-hidden="true">{tone.glyph}</span>
+      <span>{label}</span>
       {run.projectId ? <span style={{ opacity: 0.7 }}>· {run.projectId}</span> : null}
-      <span style={{ opacity: 0.7 }}>· {elapsed(run.startedAt, now)}</span>
+      <span style={{ opacity: 0.7 }}>· {took}</span>
       {onOpen ? (
         <button
           type="button"

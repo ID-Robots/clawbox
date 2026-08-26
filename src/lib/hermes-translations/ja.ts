@@ -416,7 +416,10 @@ export const ja: Record<string, string> = {
   "codingAgent.title": "コーディングエージェント",
   "codingAgent.terminalHint": "アシスタントに委任されたコーディング実行の一覧です。対話的に操作するには、ターミナルアプリを開いて claude-ds を実行してください。",
   "codingAgent.chatWorking": "コーディングエージェントが作業中",
-  "codingAgent.chatWorkingOwner": "あなたの実行が進行中",
+  "codingAgent.chatWorkingOwner": "あなたの実行が進行中",  "codingAgent.chatFinished": "コーディングエージェント完了",
+  "codingAgent.chatFailed": "コーディングエージェントは完了しませんでした",
+  "codingAgent.chatStopped": "コーディングエージェント停止",
+
   "codingAgent.chatOpenApp": "開く",
   "codingAgent.switchLabel": "アシスタントにコーディング作業の委任を許可する",
   "codingAgent.switchHelp": "オンにすると、アシスタントはコーディング作業を Claude Code に引き渡せます。Claude Code は ClawBox AI プランを使ってプロジェクトフォルダー内でバックグラウンドで作業し、結果を報告します。既定ではオフです。",

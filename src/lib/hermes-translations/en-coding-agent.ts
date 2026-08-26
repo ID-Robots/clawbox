@@ -16,6 +16,9 @@ export const codingAgentEn: Record<string, string> = {
   // pill for `coding_agent_run` is long gone by then.
   "codingAgent.chatWorking": "Coding agent working",
   "codingAgent.chatWorkingOwner": "Your coding run is working",
+  "codingAgent.chatFinished": "Coding agent finished",
+  "codingAgent.chatFailed": "Coding agent did not finish",
+  "codingAgent.chatStopped": "Coding agent stopped",
   "codingAgent.chatOpenApp": "open",
 
   "codingAgent.switchLabel": "Let the assistant delegate coding work",

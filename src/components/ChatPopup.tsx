@@ -491,7 +491,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // A delegated coding run outlives the tool call that started it, so this is
   // driven by the device's run record rather than the tool pills. Only probed
   // while the chat is open, and only polled while a run is actually in flight.
-  const { run: codingRun, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
+  const { runs: codingRuns, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
   // The questions the agent is currently parked on, newest last.
   //
   // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
@@ -3761,19 +3761,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         {!reloadingSkill && <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />}
 
-        {/* Not a tool pill: `coding_agent_run` returns its run id in
-            milliseconds while the run itself works for minutes, so this is fed
-            by the device's run record and stays up for as long as the work
-            does. See src/lib/use-coding-agent-activity.ts. */}
-        {codingRun && (
+        {/* Not tool pills: `coding_agent_run` returns its run id in
+            milliseconds while the run itself works for minutes, so these are
+            fed by the device's run record. They stay after the run ends and
+            report the outcome — a badge that vanished with the run was gone
+            before the owner had read the message above it, since runs here
+            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
+        {codingRuns.map(run => (
           <CodingAgentActivityPill
-            run={codingRun}
-            label={t("codingAgent.chatWorking")}
-            ownerLabel={t("codingAgent.chatWorkingOwner")}
+            key={run.id}
+            run={run}
+            labels={{
+              running: t("codingAgent.chatWorking"),
+              runningOwner: t("codingAgent.chatWorkingOwner"),
+              completed: t("codingAgent.chatFinished"),
+              failed: t("codingAgent.chatFailed"),
+              stopped: t("codingAgent.chatStopped"),
+            }}
             openLabel={t("codingAgent.chatOpenApp")}
             onOpen={() => dispatchOpenApp("coding")}
           />
-        )}
+        ))}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one
