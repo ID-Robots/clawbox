@@ -117,7 +117,13 @@ afterEach(() => {
 const RUNS_TOGGLE = translations.en["codingAgent.recentRuns"];
 
 /** The runs list is behind a button now — open it the way a person would. */
+/** The runs list is OPEN by default now — this only waits for it. */
 async function openRuns() {
+  await screen.findByTestId("coding-agent-runs-toggle");
+}
+
+/** Click the toggle, which now COLLAPSES a list that starts open. */
+async function toggleRuns() {
   fireEvent.click(await screen.findByTestId("coding-agent-runs-toggle"));
 }
 
@@ -133,10 +139,14 @@ describe("CodingAgentApp", () => {
     await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
   });
 
-  it("says where the interactive terminal went — this icon used to open one", async () => {
+  it("carries no explanatory prose in the panel body", async () => {
+    // The panel read like documentation; the owner asked for it stripped.
+    // Labels stay, paragraphs go.
     stubFetch({ enabled: false, readiness: READY });
     render(<CodingAgentApp />);
-    expect(await screen.findByText(/open the Terminal app and run claude-ds/)).toBeInTheDocument();
+    await screen.findByText(translations.en["codingAgent.switchLabel"]);
+    expect(screen.queryByText(/open the Terminal app and run claude-ds/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/works in the background inside a project folder/)).not.toBeInTheDocument();
   });
 
   it("collapses readiness to one line when everything is there", async () => {
@@ -200,16 +210,33 @@ describe("CodingAgentApp", () => {
   });
 
   describe("recent runs", () => {
-    it("stays out of the way until asked for", async () => {
+    it("shows the runs straight away, and can still be collapsed", async () => {
+      // Reversed deliberately: the history is why the window gets opened once
+      // the switch is already on.
       stubFetch({ enabled: true, readiness: READY }, [RUN]);
       render(<CodingAgentApp />);
       const toggle = await screen.findByTestId("coding-agent-runs-toggle");
-      expect(toggle).toHaveAttribute("aria-expanded", "false");
-      expect(screen.queryByText("Add a dark mode toggle")).not.toBeInTheDocument();
-      // The count is on the button, so the window says how much there is
-      // without showing it.
-      expect(toggle.textContent).toContain(RUNS_TOGGLE);
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
       expect(toggle.textContent).toContain("(1)");
+
+      fireEvent.click(toggle);
+      expect(screen.queryByText("Add a dark mode toggle")).not.toBeInTheDocument();
+    });
+
+    it("pages the list rather than showing an unbounded history", async () => {
+      const many = Array.from({ length: 23 }, (_, i) => ({ ...RUN, id: `run-${String(i).padStart(8, "0")}`, task: `task number ${i}` }));
+      stubFetch({ enabled: true, readiness: READY }, many);
+      render(<CodingAgentApp />);
+      await screen.findByTestId("coding-agent-runs");
+      expect(screen.getByText("task number 0")).toBeInTheDocument();
+      expect(screen.queryByText("task number 10")).not.toBeInTheDocument();
+
+      const more = screen.getByTestId("coding-agent-runs-more");
+      expect(more.textContent).toContain("13");
+      fireEvent.click(more);
+      expect(screen.getByText("task number 10")).toBeInTheDocument();
+      expect(screen.queryByText("task number 20")).not.toBeInTheDocument();
     });
 
     it("opens on the button, with the outcome and the summary on demand", async () => {
@@ -266,8 +293,8 @@ describe("CodingAgentApp", () => {
       fireEvent.click(await screen.findByTestId("coding-agent-clear"));
       expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearConfirm"]);
 
-      await openRuns(); // collapse
-      await openRuns(); // and open again
+      await toggleRuns(); // collapse
+      await toggleRuns(); // and open again
       expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearRuns"]);
       expect(posts).toEqual([]);
     });

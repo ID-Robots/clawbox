@@ -101,6 +101,21 @@ export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
  * watching to notice it gave up early.
  */
 export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+/**
+ * The levels the app offers, as opposed to the ones the CLI accepts.
+ *
+ * Measured on this box, same prompt, deepseek-v4-pro[1m], reasoning tokens:
+ *
+ *     low 82   medium 94   high 102   xhigh 139   max 414
+ *
+ * The effort does reach the model — the request carries
+ * output_config {"effort": "..."} and it changes with the flag — but low,
+ * medium and high land within noise of each other. Offering five buttons
+ * where three do the same thing teaches a false model of the machine, so the
+ * picker shows the three that measurably differ. All five stay valid for
+ * anyone setting the config key directly.
+ */
+export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max"];
 export type CodingEffort = (typeof EFFORT_LEVELS)[number];
 export const DEFAULT_EFFORT: CodingEffort = "max";
 export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
@@ -176,7 +191,7 @@ const IDLE_CHECK_MS = 60_000;
 /** Agent turns before Claude Code stops on its own (`error_max_turns`). */
 /** Default agent turns before Claude Code stops itself. The owner can change
  *  it; a long project needs more than a short one. */
-export const DEFAULT_MAX_TURNS = 60;
+export const DEFAULT_MAX_TURNS = 150;
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
@@ -399,6 +414,7 @@ export interface CodingAgentStatus {
   maxTaskChars: number;
   /** How hard a run thinks per turn. */
   effort: CodingEffort;
+  /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
   effortLevels: readonly CodingEffort[];
   /** Whether a run may fan out into sub-agents. */
   subagents: boolean;
@@ -664,7 +680,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,
-    effortLevels: EFFORT_LEVELS,
+    effortLevels: OFFERED_EFFORT_LEVELS,
     subagents,
     fullAccess,
     maxTurns,

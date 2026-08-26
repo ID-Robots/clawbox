@@ -9,8 +9,6 @@
  */
 export const codingAgentEn: Record<string, string> = {
   "codingAgent.title": "Coding agent",
-  "codingAgent.terminalHint":
-    "Your assistant's delegated coding runs. For a hands-on session, open the Terminal app and run claude-ds.",
 
   // Shown in the chat while a delegated run is actually in flight — the tool
   // pill for `coding_agent_run` is long gone by then.
@@ -26,42 +24,28 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.noticeDismiss": "Dismiss",
 
   "codingAgent.switchLabel": "Let the assistant delegate coding work",
-  "codingAgent.switchHelp":
-    "When on, your assistant can hand a coding task to Claude Code, which works in the background inside a project folder on your ClawBox AI plan and reports back. Off by default.",
+  "codingAgent.readyLine": "Ready",
 
-  "codingAgent.readiness": "What a run needs",
-  "codingAgent.readyLine": "Claude Code, claude-ds and ClawBox AI are all ready.",
-
-  "codingAgent.folderLabel": "Default project folder",
+  "codingAgent.folderLabel": "Project folder",
   "codingAgent.folderPlaceholder": "/home/clawbox/Projects",
-  "codingAgent.folderHelp":
-    "Where a run works when your assistant does not name a code project. Must be a folder inside the ClawBox home — not the ClawBox OS folder itself, and not one holding credentials. Leave empty to require a project every time.",
   "codingAgent.folderSave": "Save",
   "codingAgent.folderFailed": "Could not save the default folder.",
   "codingAgent.claudeCode": "Claude Code",
   "codingAgent.wrapper": "claude-ds",
   "codingAgent.clawai": "ClawBox AI",
-  "codingAgent.installed": "installed",
-  "codingAgent.connected": "connected",
   "codingAgent.missing": "missing",
   "codingAgent.notConnected": "not connected",
 
   // Real Claude Code settings: --effort, and whether the Task tool is in
   // --tools at all. There is no "ultracode" setting in the CLI, so the app
   // does not pretend there is one.
-  "codingAgent.effortLabel": "Thinking effort",
-  "codingAgent.effortHelp":
-    "How hard the coding agent thinks on each step. Higher is more thorough but slower and costs more. Max is the default, because a delegated run works unattended.",
+  "codingAgent.effortLabel": "Effort",
   "codingAgent.effort.low": "Low",
-  "codingAgent.effort.medium": "Medium",
-  "codingAgent.effort.high": "High",
   "codingAgent.effort.xhigh": "Very high",
   "codingAgent.effort.max": "Max",
   "codingAgent.effortFailed": "Could not change the thinking effort.",
 
-  "codingAgent.subagentsLabel": "Let a run use sub-agents",
-  "codingAgent.subagentsHelp":
-    "A run can split wide work across helper agents that search or edit in parallel. Each one is a whole extra conversation, so this costs more and uses more memory. Off by default; worth it for work spanning many files.",
+  "codingAgent.subagentsLabel": "Sub-agents",
   "codingAgent.subagentsFailed": "Could not change the sub-agent setting.",
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.subagentsActive": "{n} sub-agents working",
@@ -74,14 +58,8 @@ export const codingAgentEn: Record<string, string> = {
     "A run can now read and change any file on this device, including your saved keys and passwords. Only turn this on for tasks you trust.",
   "codingAgent.fullAccessFailed": "Could not change full command access.",
   "codingAgent.fullAccessBadge": "full access",
-  "codingAgent.turnsLabel": "Steps per run",
-  "codingAgent.turnsFailed": "Could not change the step limit.",
-  "codingAgent.tokensLabel": "Token limit (optional)",
-  "codingAgent.tokensPlaceholder": "no limit",
-  "codingAgent.tokensFailed": "Could not change the token limit.",
-  "codingAgent.limitsHelp":
-    "A run ends when it finishes, runs out of steps, or reaches the token limit if you set one. There is no time limit and no cost limit — a long project may work for hours, and only stops on its own if it goes quiet for a long stretch.",
   "codingAgent.recentRuns": "Recent runs",
+  "codingAgent.more": "Show more",
   "codingAgent.clearRuns": "Clear history",
   "codingAgent.clearConfirm": "Clear — tap again",
   "codingAgent.clearFailed": "Could not clear the run history.",

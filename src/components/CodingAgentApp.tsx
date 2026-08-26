@@ -83,7 +83,10 @@ interface Run {
   transcriptPath?: string | null;
 }
 
-const RECENT_RUNS = 5;
+/** One page of runs. The list is open by default now, so it has to be paged
+ *  rather than unbounded — a long history should not push the settings off
+ *  the top of the window. */
+const RUNS_PAGE = 10;
 /** Where the preview script lives on the device. */
 const CLAWBOX_ROOT = "/home/clawbox/clawbox";
 const POLL_MS = 5_000;
@@ -153,15 +156,16 @@ export default function CodingAgentApp() {
   // Runs are behind a button: the answer to "is this on and does it work" is
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
-  const [showRuns, setShowRuns] = useState(false);
+  // Open by default: the history is the reason the window gets opened once
+  // the switch is already on.
+  const [showRuns, setShowRuns] = useState(true);
+  const [runsShown, setRunsShown] = useState(RUNS_PAGE);
   // Clearing is two clicks, not a browser confirm(): the second click is the
   // confirmation, and collapsing the list takes the offer back.
   const [confirmClear, setConfirmClear] = useState(false);
   // The folder field is a DRAFT until saved, so typing does not fight the
   // status the route keeps returning.
   const [dirDraft, setDirDraft] = useState<string | null>(null);
-  const [turnsDraft, setTurnsDraft] = useState<string | null>(null);
-  const [tokensDraft, setTokensDraft] = useState<string | null>(null);
 
   // `load` must not re-run because a translation function was re-created: a
   // refetch on every render would overwrite a freshly toggled switch with the
@@ -176,14 +180,12 @@ export default function CodingAgentApp() {
     try {
       const [s, r] = await Promise.all([
         fetch("/setup-api/coding-agent/status", { cache: "no-store" }),
-        fetch(`/setup-api/coding-agent/runs?limit=${RECENT_RUNS}`, { cache: "no-store" }),
+        fetch(`/setup-api/coding-agent/runs?limit=30`, { cache: "no-store" }),
       ]);
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
       setStatus(next);
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
-      setTurnsDraft(prev => (prev === null ? String(next.maxTurns) : prev));
-      setTokensDraft(prev => (prev === null ? (next.tokenLimit === null ? "" : String(next.tokenLimit)) : prev));
       if (r.ok) {
         const data = await r.json() as { runs?: Run[] };
         setRuns(Array.isArray(data.runs) ? data.runs : []);
@@ -248,8 +250,6 @@ export default function CodingAgentApp() {
       const next = await res.json() as AgentStatus;
       setStatus(next);
       setDirDraft(next.defaultDirectory ?? "");
-      setTurnsDraft(String(next.maxTurns));
-      setTokensDraft(next.tokenLimit === null ? "" : String(next.tokenLimit));
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.folderFailed"));
     } finally {
@@ -357,9 +357,6 @@ export default function CodingAgentApp() {
               <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
               <h1 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.switchLabel")}</h1>
             </div>
-            <p className="text-[11px] text-[var(--text-muted)] opacity-70 mt-1 leading-relaxed">
-              {t("codingAgent.switchHelp")}
-            </p>
           </div>
           <Switch
             checked={status?.enabled ?? false}
@@ -427,9 +424,6 @@ export default function CodingAgentApp() {
               {t("codingAgent.folderSave")}
             </button>
           </div>
-          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-            {t("codingAgent.folderHelp")}
-          </p>
         </div>
 
         {/* How a run thinks. Both are real Claude Code settings: --effort, and
@@ -460,9 +454,6 @@ export default function CodingAgentApp() {
               );
             })}
           </div>
-          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-            {t("codingAgent.effortHelp")}
-          </p>
         </div>
 
         <div className="flex items-start justify-between gap-4 mt-4">
@@ -470,9 +461,6 @@ export default function CodingAgentApp() {
             <h2 className="text-xs font-medium text-[var(--text-secondary)]">
               {t("codingAgent.subagentsLabel")}
             </h2>
-            <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
-              {t("codingAgent.subagentsHelp")}
-            </p>
           </div>
           <Switch
             checked={status?.subagents === true}
@@ -514,64 +502,13 @@ export default function CodingAgentApp() {
         {/* The ceilings a run stops at — both the owner's to set. There is no
             time limit and no price limit: a run ends when it finishes, runs
             out of steps, hits a token ceiling if one is set, or goes quiet. */}
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <div>
-            <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.turnsLabel")}
-            </label>
-            <input
-              id="coding-agent-turns"
-              type="number"
-              inputMode="numeric"
-              min={status?.minMaxTurns ?? 10}
-              max={status?.maxMaxTurns ?? 2000}
-              value={turnsDraft ?? ""}
-              onChange={(e) => setTurnsDraft(e.target.value)}
-              onBlur={() => {
-                const n = Number(turnsDraft);
-                if (Number.isFinite(n) && n !== status?.maxTurns) {
-                  void saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
-                }
-              }}
-              data-testid="coding-agent-turns"
-              className="w-full mt-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
-            />
-          </div>
-          <div>
-            <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.tokensLabel")}
-            </label>
-            <input
-              id="coding-agent-tokens"
-              type="number"
-              inputMode="numeric"
-              min={status?.minTokenLimit ?? 10000}
-              placeholder={t("codingAgent.tokensPlaceholder")}
-              value={tokensDraft ?? ""}
-              onChange={(e) => setTokensDraft(e.target.value)}
-              onBlur={() => {
-                const raw = (tokensDraft ?? "").trim();
-                const next = raw === "" ? null : Number(raw);
-                if (next !== null && !Number.isFinite(next)) return;
-                if (next !== (status?.tokenLimit ?? null)) {
-                  void saveSetting({ tokenLimit: next }, "tokens", t("codingAgent.tokensFailed"));
-                }
-              }}
-              data-testid="coding-agent-tokens"
-              className="w-full mt-1.5 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
-            />
-          </div>
-        </div>
-        <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1.5 leading-relaxed">
-          {t("codingAgent.limitsHelp")}
-        </p>
 
         {/* Runs behind a button. Opening the window is usually about the
             switch; the history is one click away when it is wanted. */}
         <div className="mt-4">
           <button
             type="button"
-            onClick={() => { setShowRuns((v) => !v); setConfirmClear(false); }}
+            onClick={() => { setShowRuns((v) => !v); setConfirmClear(false); setRunsShown(RUNS_PAGE); }}
             aria-expanded={showRuns}
             data-testid="coding-agent-runs-toggle"
             className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
@@ -614,7 +551,7 @@ export default function CodingAgentApp() {
               <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
             ) : (
               <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
-                {runs.map((run) => {
+                {runs.slice(0, runsShown).map((run) => {
                   const details = [run.error, run.summary].filter(Boolean).join("\n\n");
                   const open = expanded === run.id;
                   return (
@@ -736,14 +673,17 @@ export default function CodingAgentApp() {
               </ul>
             )
           )}
+          {showRuns && runs.length > runsShown && (
+            <button
+              type="button"
+              onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
+              data-testid="coding-agent-runs-more"
+              className="w-full mt-2 px-3 py-1.5 rounded-lg border border-white/[0.08] text-[11px] text-[var(--text-muted)] hover:bg-white/5"
+            >
+              {t("codingAgent.more")} ({runs.length - runsShown})
+            </button>
+          )}
         </div>
-
-        {/* Where the interactive session went: this icon used to open a
-            terminal already running the harness. Last, in small type — it is
-            an answer to a question, not a thing to do. */}
-        <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-4 leading-relaxed">
-          {t("codingAgent.terminalHint")}
-        </p>
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>
