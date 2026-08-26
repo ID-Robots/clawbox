@@ -6,6 +6,8 @@ import {
   MAX_DIRECTORY_CHARS,
   setCodingAgentEnabled,
   setDefaultDirectory,
+  setEffort,
+  setSubagentsEnabled,
 } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
@@ -14,6 +16,8 @@ export const dynamic = "force-dynamic";
  * POST { enabled: boolean } → flip the owner's switch.
  * POST { defaultDirectory: string | null } → set (or clear) the folder a run
  * works in when the assistant names neither a project nor a directory.
+ * POST { effort: "low"|"medium"|"high"|"xhigh"|"max" } → how hard a run thinks.
+ * POST { subagents: boolean } → whether a run may fan out into sub-agents.
  * Either way the answer is the same payload as GET
  * /setup-api/coding-agent/status, re-read after the change.
  *
@@ -41,15 +45,26 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const fields = (body ?? {}) as { enabled?: unknown; defaultDirectory?: unknown };
+  const fields = (body ?? {}) as {
+    enabled?: unknown;
+    defaultDirectory?: unknown;
+    effort?: unknown;
+    subagents?: unknown;
+  };
   const hasEnabled = typeof fields.enabled === "boolean";
+  const hasEffort = typeof fields.effort === "string";
+  const hasSubagents = typeof fields.subagents === "boolean";
   // `null` is meaningful here — it CLEARS the default — so presence is what
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasSubagents) {
     return NextResponse.json(
-      { error: "Invalid body. Expected { enabled: boolean } or { defaultDirectory: string | null }." },
+      {
+        error:
+          "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
+          + "{ effort: string } or { subagents: boolean }.",
+      },
       { status: 400 },
     );
   }
@@ -61,6 +76,16 @@ export async function POST(request: Request) {
     if (hasDirectory) {
       const saved = await setDefaultDirectory(fields.defaultDirectory as string | null);
       console.error(`[coding-agent] default folder ${saved ? "set" : "cleared"} by the owner`);
+    }
+    if (hasEffort) {
+      const saved = await setEffort(fields.effort as string);
+      console.error(`[coding-agent] effort set to ${saved} by the owner`);
+    }
+    if (hasSubagents) {
+      // Worth a log line of its own: this is the switch that lets one run
+      // become several model conversations at once.
+      await setSubagentsEnabled(fields.subagents as boolean);
+      console.error(`[coding-agent] sub-agents ${fields.subagents ? "allowed" : "disallowed"} by the owner`);
     }
     if (hasEnabled) {
       await setCodingAgentEnabled(fields.enabled as boolean);

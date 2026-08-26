@@ -34,6 +34,8 @@ interface Readiness {
   problems: string[];
 }
 
+type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+
 interface AgentStatus {
   enabled: boolean;
   ready: boolean;
@@ -41,6 +43,11 @@ interface AgentStatus {
   running: number;
   /** The folder a run uses when the assistant names neither project nor path. */
   defaultDirectory: string | null;
+  effort: Effort;
+  effortLevels: Effort[];
+  subagents: boolean;
+  maxTurns: number;
+  maxBudgetUsd: number;
 }
 
 interface Run {
@@ -58,6 +65,10 @@ interface Run {
   filesTouched: string[];
   permissionDenials: number;
   progress: string[];
+  effort?: Effort;
+  /** Sub-agents working right now; 0 once the run has settled. */
+  subagentsActive?: number;
+  subagentsTotal?: number;
 }
 
 const RECENT_RUNS = 5;
@@ -226,6 +237,25 @@ export default function CodingAgentApp() {
     }
   };
 
+  /** One writer for both settings — the route takes either field. */
+  const saveSetting = async (patch: Record<string, unknown>, key: string, failMsg: string) => {
+    setBusy(key);
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/enable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) throw new Error(await readError(res, failMsg));
+      setStatus(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : failMsg);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const clearRuns = async () => {
     setBusy("clear");
     setError(null);
@@ -362,6 +392,67 @@ export default function CodingAgentApp() {
           </p>
         </div>
 
+        {/* How a run thinks. Both are real Claude Code settings: --effort, and
+            whether the Task (sub-agent) tool is in --tools at all. */}
+        <div className="mt-4">
+          <label className="text-xs font-medium text-[var(--text-secondary)]">
+            {t("codingAgent.effortLabel")}
+          </label>
+          <div className="flex gap-1 mt-1.5" data-testid="coding-agent-effort">
+            {(status?.effortLevels ?? []).map((level) => {
+              const active = status?.effort === level;
+              return (
+                <button
+                  key={level}
+                  type="button"
+                  onClick={() => void saveSetting({ effort: level }, "effort", t("codingAgent.effortFailed"))}
+                  disabled={busy === "effort"}
+                  aria-pressed={active}
+                  data-testid={`coding-agent-effort-${level}`}
+                  className={`flex-1 px-2 py-1.5 rounded-lg border text-[11px] capitalize transition-colors disabled:opacity-50 ${
+                    active
+                      ? "border-[var(--coral-bright)]/60 bg-[var(--coral-bright)]/10 text-[var(--text-primary)]"
+                      : "border-white/[0.08] text-[var(--text-muted)] hover:bg-white/5"
+                  }`}
+                >
+                  {t(`codingAgent.effort.${level}`)}
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
+            {t("codingAgent.effortHelp")}
+          </p>
+        </div>
+
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0">
+            <h2 className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.subagentsLabel")}
+            </h2>
+            <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-1 leading-relaxed">
+              {t("codingAgent.subagentsHelp")}
+            </p>
+          </div>
+          <Switch
+            checked={status?.subagents === true}
+            busy={busy === "subagents"}
+            disabled={!status}
+            label={t("codingAgent.subagentsLabel")}
+            onChange={(v) => void saveSetting({ subagents: v }, "subagents", t("codingAgent.subagentsFailed"))}
+          />
+        </div>
+
+        {/* The ceilings a run stops at. Read-only: they are the device's
+            limits, not a preference. */}
+        {status && (
+          <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-2.5 leading-relaxed">
+            {t("codingAgent.limits")
+              .replace("{turns}", String(status.maxTurns))
+              .replace("{budget}", String(status.maxBudgetUsd))}
+          </p>
+        )}
+
         {/* Runs behind a button. Opening the window is usually about the
             switch; the history is one click away when it is wanted. */}
         <div className="mt-4">
@@ -421,6 +512,16 @@ export default function CodingAgentApp() {
                             <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_CLASS[run.status]}`}>
                               {statusLabel(run.status)}
                             </span>
+                            {/* Only while they are actually out: a count that
+                                lingers at 0 is noise on every finished run. */}
+                            {(run.subagentsActive ?? 0) > 0 && (
+                              <span
+                                data-testid="coding-agent-subagents-active"
+                                className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-sky-400 border-sky-400/40"
+                              >
+                                {t("codingAgent.subagentsActive", { n: run.subagentsActive ?? 0 })}
+                              </span>
+                            )}
                             {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
                             <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
                           </div>
@@ -429,6 +530,9 @@ export default function CodingAgentApp() {
                             {t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
                             {" · "}
                             {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
+                            {run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
+                            {(run.subagentsTotal ?? 0) > 0
+                              && ` · ${t("codingAgent.subagentsUsed", { n: run.subagentsTotal ?? 0 })}`}
                             {run.permissionDenials > 0 && (
                               <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
                             )}

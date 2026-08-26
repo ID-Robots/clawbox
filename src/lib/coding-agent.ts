@@ -90,6 +90,34 @@ export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
  */
 export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
 
+/**
+ * How hard Claude Code thinks per turn (`--effort`, via the wrapper's
+ * CLAUDE_DS_EFFORT). These are the levels the installed CLI accepts — it
+ * warns and falls back to its default on anything else, so the set is
+ * validated here rather than passed through.
+ *
+ * Higher is slower and costs more; on a Jetson the difference is felt. "max"
+ * stays the default because a delegated run is unattended: the owner is not
+ * watching to notice it gave up early.
+ */
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export type CodingEffort = (typeof EFFORT_LEVELS)[number];
+export const DEFAULT_EFFORT: CodingEffort = "max";
+export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
+
+/**
+ * Whether a run may spawn sub-agents (Claude Code's Task tool).
+ *
+ * OFF by default and deliberately so: each sub-agent is a whole extra model
+ * conversation, so a run that fans out multiplies both cost and the memory a
+ * 7 GB Jetson has to find. Worth switching on for genuinely wide work — a
+ * sweep over many files — and not otherwise.
+ *
+ * Sub-agents inherit the SAME tool and Bash rules as the run that spawned
+ * them; this switch widens what a run may do, not what it may reach.
+ */
+export const CODING_AGENT_SUBAGENTS_CONFIG_KEY = "coding_agent_subagents";
+
 /** Wall-clock ceiling for one run. Claude Code's own retries can stall for
  *  minutes against an unreachable ClawBox AI, so this is the real backstop. */
 export const RUN_TIMEOUT_MS = 20 * 60_000;
@@ -133,10 +161,17 @@ export const CAPABILITY_DROP_ARGS: readonly string[] = [
   "--",
 ];
 
-/** Claude Code tools the run may use at all (`--tools`). No Task (sub-agents
- *  multiply cost), no WebFetch/WebSearch (the appliance is offline-first and
- *  the task is local code). */
+/** Claude Code tools the run may use at all (`--tools`). No WebFetch/WebSearch:
+ *  the appliance is offline-first and the task is local code. Task (sub-agents)
+ *  is added only when the owner has switched them on — see
+ *  CODING_AGENT_SUBAGENTS_CONFIG_KEY. */
 export const CLAUDE_TOOLS = "Read,Write,Edit,Glob,Grep,Bash,NotebookEdit";
+/** The name of Claude Code's sub-agent tool, in the stream and in `--tools`. */
+export const SUBAGENT_TOOL = "Task";
+
+export function toolsFor(subagents: boolean): string {
+  return subagents ? `${CLAUDE_TOOLS},${SUBAGENT_TOOL}` : CLAUDE_TOOLS;
+}
 
 /**
  * Bash commands that run without asking. Claude Code's rule syntax: a
@@ -204,6 +239,14 @@ export interface CodingRun {
   commandsRun: number;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
+  /** The effort the run was started with. Recorded per-run because the owner
+   *  can change the setting while a run is in flight. */
+  effort: CodingEffort;
+  /** Sub-agents working RIGHT NOW. Always 0 once the run has settled — a
+   *  sub-agent cannot outlive the run that spawned it. */
+  subagentsActive: number;
+  /** Sub-agents this run spawned in total, live or finished. */
+  subagentsTotal: number;
   /**
    * Whether RESUMING this run's session could help.
    *
@@ -244,6 +287,15 @@ export interface CodingAgentStatus {
   running: number;
   harnessCommand: string;
   maxTaskChars: number;
+  /** How hard a run thinks per turn. */
+  effort: CodingEffort;
+  effortLevels: readonly CodingEffort[];
+  /** Whether a run may fan out into sub-agents. */
+  subagents: boolean;
+  /** The ceilings a run stops at, so the app can show them without guessing. */
+  maxTurns: number;
+  maxBudgetUsd: number;
+  runTimeoutMs: number;
 }
 
 export interface StartRunInput {
@@ -296,6 +348,33 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
   const { directory: resolved } = await resolveWorkingDirectory({ directory });
   await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
   return resolved;
+}
+
+function isEffort(value: unknown): value is CodingEffort {
+  return typeof value === "string" && (EFFORT_LEVELS as readonly string[]).includes(value);
+}
+
+/** The owner's effort level. Anything unrecognised reads as the default. */
+export async function getEffort(): Promise<CodingEffort> {
+  const raw = await configGet(CODING_AGENT_EFFORT_CONFIG_KEY);
+  return isEffort(raw) ? raw : DEFAULT_EFFORT;
+}
+
+export async function setEffort(effort: string): Promise<CodingEffort> {
+  if (!isEffort(effort)) {
+    throw new CodingAgentError("invalid", `Effort must be one of: ${EFFORT_LEVELS.join(", ")}.`);
+  }
+  await configSet(CODING_AGENT_EFFORT_CONFIG_KEY, effort);
+  return effort;
+}
+
+/** Whether runs may spawn sub-agents. Off unless the owner turned it on. */
+export async function getSubagentsEnabled(): Promise<boolean> {
+  return (await configGet(CODING_AGENT_SUBAGENTS_CONFIG_KEY)) === true;
+}
+
+export async function setSubagentsEnabled(enabled: boolean): Promise<void> {
+  await configSet(CODING_AGENT_SUBAGENTS_CONFIG_KEY, enabled === true);
 }
 
 // ─── Readiness ───────────────────────────────────────────────────────────────
@@ -382,10 +461,12 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness, defaultDirectory] = await Promise.all([
+  const [enabled, readiness, defaultDirectory, effort, subagents] = await Promise.all([
     isCodingAgentEnabled(),
     checkReadiness(),
     getDefaultDirectory(),
+    getEffort(),
+    getSubagentsEnabled(),
   ]);
   return {
     enabled,
@@ -395,6 +476,12 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     running: runningCount(),
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
+    effort,
+    effortLevels: EFFORT_LEVELS,
+    subagents,
+    maxTurns: MAX_TURNS,
+    maxBudgetUsd: MAX_BUDGET_USD,
+    runTimeoutMs: RUN_TIMEOUT_MS,
   };
 }
 
@@ -440,6 +527,11 @@ function normalizeRun(raw: CodingRun): CodingRun {
     costUsd: typeof raw.costUsd === "number" ? raw.costUsd : null,
     filesTouched: Array.isArray(raw.filesTouched) ? raw.filesTouched.filter((f) => typeof f === "string") : [],
     commandsRun: typeof raw.commandsRun === "number" ? raw.commandsRun : 0,
+    effort: isEffort(raw.effort) ? raw.effort : DEFAULT_EFFORT,
+    // A record written before this field existed, or one left by a restart,
+    // has no live sub-agents by definition.
+    subagentsActive: 0,
+    subagentsTotal: typeof raw.subagentsTotal === "number" ? raw.subagentsTotal : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
@@ -479,6 +571,12 @@ interface LiveRun {
   timedOut: boolean;
   sawResult: boolean;
   stderr: string;
+  /**
+   * tool_use ids of sub-agents that have started and not yet reported back.
+   * Ids rather than a counter: a tool_result can arrive out of order, and a
+   * duplicate must not decrement twice.
+   */
+  openSubagents: Set<string>;
 }
 
 /** Newest first. `null` until first use. */
@@ -864,7 +962,7 @@ export function denyRulesCover(rules: readonly string[], directory: string): boo
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; subagents?: boolean }): string[] {
   const args = [
     "-p",
     "--verbose",
@@ -878,14 +976,14 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null }): string[
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
-  args.push("--tools", CLAUDE_TOOLS);
+  args.push("--tools", toolsFor(opts.subagents === true));
   args.push("--allowedTools", ...BASH_ALLOWLIST);
   args.push("--disallowedTools", ...BASH_DENYLIST, ...fileDenyRules());
   return args;
 }
 
 /** The environment a run gets — and nothing else. Exported for the contract test. */
-export function buildRunEnv(): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -906,6 +1004,9 @@ export function buildRunEnv(): Record<string, string> {
     const value = process.env[key];
     if (typeof value === "string" && value) env[key] = value;
   }
+  // The owner's setting wins over anything inherited: this is the knob the
+  // Coding Agent app writes, and a stale shell variable must not override it.
+  if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
   return env;
 }
 
@@ -943,6 +1044,7 @@ function noteFile(run: CodingRun, file: string | null): void {
 interface StreamEvent {
   type?: string;
   subtype?: string;
+  /** `user` events carry tool_result blocks; that is how a sub-agent reports back. */
   session_id?: string;
   model?: string;
   message?: { content?: unknown };
@@ -985,6 +1087,15 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
             pushProgress(run, `${block.name} ${file ?? ""}`);
             break;
           }
+          case SUBAGENT_TOOL: {
+            // A sub-agent is out. Its id is what tells us when it comes back.
+            if (typeof block.id === "string" && block.id) state.openSubagents.add(block.id);
+            run.subagentsTotal += 1;
+            run.subagentsActive = state.openSubagents.size;
+            const what = typeof input.description === "string" ? input.description : "";
+            pushProgress(run, `Sub-agent started${what ? `: ${what}` : ""}`);
+            break;
+          }
           case "Read":
             pushProgress(run, `Read ${relativeToRun(run, input.file_path) ?? ""}`);
             break;
@@ -995,6 +1106,21 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
           default:
             pushProgress(run, `${block.name}`);
         }
+      }
+    }
+    return;
+  }
+
+  // A tool_result closes whatever it answers. Only sub-agent ids are tracked,
+  // so every other tool_result falls through harmlessly.
+  if (event.type === "user") {
+    const raw = event.message?.content;
+    const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
+    for (const block of content) {
+      if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+      if (state.openSubagents.delete(block.tool_use_id)) {
+        run.subagentsActive = state.openSubagents.size;
+        pushProgress(run, "Sub-agent finished");
       }
     }
     return;
@@ -1043,6 +1169,10 @@ function stderrTail(stderr: string): string {
 }
 
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
+  // The run's process tree is gone, so nothing it spawned is still working —
+  // whatever the stream did or did not say about each sub-agent.
+  state.openSubagents.clear();
+  run.subagentsActive = 0;
   if (run.status === "running") {
     if (state.stopRequested) {
       run.status = "stopped";
@@ -1088,20 +1218,26 @@ export function buildSpawnArgv(setprivPath: string, claudeArgs: string[]): { bin
   return { bin: setprivPath, argv: [...CAPABILITY_DROP_ARGS, wrapperPath(), ...claudeArgs] };
 }
 
-function spawnRun(run: CodingRun, resumeSessionId: string | null, setprivPath: string): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId }));
+function spawnRun(
+  run: CodingRun,
+  resumeSessionId: string | null,
+  setprivPath: string,
+  settings: { effort: CodingEffort; subagents: boolean },
+): void {
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, subagents: settings.subagents }));
   const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
     // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
     // no use for.
-    env: buildRunEnv() as NodeJS.ProcessEnv,
+    env: buildRunEnv({ effort: settings.effort }) as NodeJS.ProcessEnv,
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
 
   const state: LiveRun = {
     child,
+    openSubagents: new Set<string>(),
     timeout: setTimeout(() => {
       state.timedOut = true;
       killTree(child, "SIGTERM");
@@ -1233,6 +1369,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     throw new CodingAgentError("busy", `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`);
   }
 
+  // Read once, here: a run keeps the settings it started with even if the
+  // owner changes them while it works.
+  const [effort, subagents] = await Promise.all([getEffort(), getSubagentsEnabled()]);
+
   const run: CodingRun = {
     id: newRunId(),
     task,
@@ -1251,6 +1391,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     filesTouched: [],
     commandsRun: 0,
     permissionDenials: 0,
+    effort,
+    subagentsActive: 0,
+    subagentsTotal: 0,
     resumable: false,
     progress: [],
     exitCode: null,
@@ -1268,7 +1411,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   persist(true);
   console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
   try {
-    spawnRun(run, resumeSessionId, setprivPath);
+    spawnRun(run, resumeSessionId, setprivPath, { effort, subagents });
   } catch (err) {
     // The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
     // — a cwd that vanished between the check and here, a setpriv that is not

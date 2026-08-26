@@ -498,6 +498,76 @@ describe("the capabilities a run starts with", () => {
   });
 });
 
+describe("counting sub-agents", () => {
+  beforeEach(() => readyDevice());
+
+  /** A run that spawns two sub-agents and gets one of them back. */
+  const TASK_A = JSON.stringify({
+    type: "assistant",
+    message: { content: [
+      { type: "tool_use", id: "toolu_a", name: "Task", input: { description: "search the tests" } },
+      { type: "tool_use", id: "toolu_b", name: "Task", input: { description: "search the docs" } },
+    ] },
+  });
+  const RESULT_A = JSON.stringify({
+    type: "user",
+    message: { content: [{ type: "tool_result", tool_use_id: "toolu_a", content: "done" }] },
+  });
+
+  it("counts them out and back, and never leaves one counted after the run ends", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TASK_A}'`,
+      `echo '${RESULT_A}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":3,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+
+    const started = await lib.startRun({ task: "wide sweep", projectId: "site", source: "agent" });
+    const run = await finished(started.id);
+
+    expect(run.status).toBe("completed");
+    expect(run.subagentsTotal).toBe(2);
+    // One never reported back, but the process tree is gone — nothing it
+    // spawned can still be working, so a settled run shows none active.
+    expect(run.subagentsActive).toBe(0);
+    expect(run.progress.join(" ")).toContain("Sub-agent started: search the tests");
+    expect(run.progress.join(" ")).toContain("Sub-agent finished");
+  });
+
+  it("does not double-count a repeated tool_result", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TASK_A}'`,
+      `echo '${RESULT_A}'`,
+      `echo '${RESULT_A}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":3,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "sweep", projectId: "site", source: "agent" })).id);
+    // Two "started", exactly one "finished" — the duplicate id is ignored.
+    const progress = run.progress.join("\n");
+    expect(progress.match(/Sub-agent finished/g) ?? []).toHaveLength(1);
+    expect(run.subagentsTotal).toBe(2);
+  });
+
+  it("records the effort the run started with", async () => {
+    writeConfig({
+      clawai_token: "claw_test_token",
+      clawai_tier: "flash",
+      coding_agent_enabled: true,
+      coding_agent_effort: "low",
+    });
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "quick one", projectId: "site", source: "agent" })).id);
+    expect(run.effort).toBe("low");
+    // And it actually reached the wrapper's environment.
+    expect(fs.readFileSync(envFile(), "utf-8")).toContain("CLAUDE_DS_EFFORT=low");
+  });
+});
+
 describe("clearing the history", () => {
   beforeEach(() => readyDevice());
 

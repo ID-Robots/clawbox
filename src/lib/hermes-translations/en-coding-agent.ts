@@ -46,6 +46,27 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.missing": "missing",
   "codingAgent.notConnected": "not connected",
 
+  // Real Claude Code settings: --effort, and whether the Task tool is in
+  // --tools at all. There is no "ultracode" setting in the CLI, so the app
+  // does not pretend there is one.
+  "codingAgent.effortLabel": "Thinking effort",
+  "codingAgent.effortHelp":
+    "How hard the coding agent thinks on each step. Higher is more thorough but slower and costs more. Max is the default, because a delegated run works unattended.",
+  "codingAgent.effort.low": "Low",
+  "codingAgent.effort.medium": "Medium",
+  "codingAgent.effort.high": "High",
+  "codingAgent.effort.xhigh": "Very high",
+  "codingAgent.effort.max": "Max",
+  "codingAgent.effortFailed": "Could not change the thinking effort.",
+
+  "codingAgent.subagentsLabel": "Let a run use sub-agents",
+  "codingAgent.subagentsHelp":
+    "A run can split wide work across helper agents that search or edit in parallel. Each one is a whole extra conversation, so this costs more and uses more memory. Off by default; worth it for work spanning many files.",
+  "codingAgent.subagentsFailed": "Could not change the sub-agent setting.",
+  "codingAgent.subagentsActive": "{n} sub-agents working",
+  "codingAgent.subagentsUsed": "{n} sub-agents",
+  "codingAgent.limits": "A run stops on its own after {turns} steps or ${budget} of model usage.",
+
   "codingAgent.recentRuns": "Recent runs",
   "codingAgent.clearRuns": "Clear history",
   "codingAgent.clearConfirm": "Clear — tap again",
