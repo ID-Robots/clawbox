@@ -1570,14 +1570,27 @@ step_openclaw_setup() {
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
-  # Non-fatal by design: a box that could not install GPU TTS must still finish
-  # provisioning and come up reachable on the CPU fallback. NOT silent, though —
-  # the step has already recorded the failure with record_provision_failure, so
-  # the final summary, install.sh's exit status and the provisioning marker all
-  # carry it, and step_validate_services fails its TTS check below. Swallowing
-  # the status here without that record is what let "flashed successfully" and
-  # "the GPU TTS silently did not install" mean the same thing.
-  step_openclaw_tts || echo "  Warning: openclaw_tts reported a failure (recorded above; provisioning continues)"
+  # Only 12 — "Kokoro was requested and did not install" — is tolerated here,
+  # and only because the step has already recorded it with
+  # record_provision_failure, so the summary, the exit status, the provisioning
+  # marker and step_validate_services' TTS probe all carry it. A box that could
+  # not install GPU TTS must still finish provisioning and come up reachable on
+  # the CPU fallback.
+  #
+  # Every OTHER non-zero return stays FATAL, exactly as it was before this
+  # tolerance existed. Those are the provider-configuration failures — no
+  # clawbox-tts.sh, a tts-local-cli plugin that will not resolve, a config write
+  # that never landed — and they mean the box has no working speech path at all,
+  # not a downgraded one. Blanket-swallowing them here would recreate this PR's
+  # own bug one layer up: a successful-looking flash over a box that cannot
+  # speak, with nothing in the marker to say so.
+  local TTS_STEP_RC=0
+  step_openclaw_tts || TTS_STEP_RC=$?
+  case "$TTS_STEP_RC" in
+    0) ;;
+    12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; provisioning continues)" ;;
+    *) return "$TTS_STEP_RC" ;;
+  esac
 }
 
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every

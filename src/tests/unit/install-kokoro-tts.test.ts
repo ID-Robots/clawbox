@@ -237,6 +237,7 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
  * Run the real step_openclaw_tts against a stub `openclaw` and a stub
  * install-voice.sh whose exit code the test picks.
  */
+/** @param voiceExit the exit status the stub install-voice.sh reports. */
 function runStep(voiceExit: number) {
   const projectDir = path.join(root, "project");
   const callsLog = path.join(root, "openclaw.log");
@@ -267,7 +268,6 @@ function runStep(voiceExit: number) {
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
     `OPENCLAW_BIN="${openclaw}"`,
-    `TTS_STATUS_FILE="${ttsStatus}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
     "is_hermes_edition() { return 1; }",
@@ -283,7 +283,14 @@ function runStep(voiceExit: number) {
     "step_openclaw_tts",
   ].join("\n");
 
-  const res = spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 60_000 });
+  // TTS_STATUS_FILE travels as an environment variable rather than as an
+  // interpolated shell assignment: JSON quoting is not shell quoting, and a
+  // path is data, not script.
+  const res = spawnSync("bash", ["-c", program], {
+    encoding: "utf-8",
+    timeout: 60_000,
+    env: { ...process.env, TTS_STATUS_FILE: ttsStatus },
+  });
   const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8").trim().split("\n").filter(Boolean) : []);
   return {
     status: res.status,
@@ -767,6 +774,11 @@ describe.skipIf(!hasBash)("the Kokoro verdict outlives the run", () => {
 
 // ── The health check that makes "flashed successfully" mean something ────────
 
+/**
+ * Run the real step_validate_services with everything except the TTS verdict
+ * stubbed healthy. `ttsStatusContents` is written to the verdict file, or the
+ * file is left absent when it is null.
+ */
 function runValidator(ttsStatusContents: string | null): { status: number; out: string } {
   const ttsStatus = path.join(root, "validator-tts-status");
   if (ttsStatusContents !== null) writeFileSync(ttsStatus, ttsStatusContents);
@@ -779,7 +791,6 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/home/clawbox/clawbox",
     'IFACE_ENV="/nonexistent/network.env"',
-    `TTS_STATUS_FILE="${ttsStatus}"`,
     // The unit registry is another file's subject; empty lists keep this test
     // about the one probe it is here to pin.
     "EXPECTED_ACTIVE_SERVICES=()",
@@ -801,7 +812,11 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
     "step_validate_services",
   ].join("\n");
 
-  const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 60_000 });
+  const r = spawnSync("bash", ["-c", program], {
+    encoding: "utf-8",
+    timeout: 60_000,
+    env: { ...process.env, TTS_STATUS_FILE: ttsStatus },
+  });
   return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
@@ -831,5 +846,65 @@ describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box 
     const res = runValidator(null);
     expect(res.status).toBe(1);
     expect(res.out).toMatch(/no on-device TTS verdict/);
+  });
+});
+
+// ── The call site must not launder a hard failure into a warning ─────────────
+//
+// step_openclaw_tts returns 12 for "Kokoro was requested and did not install",
+// which is survivable — the box still speaks, on Piper — and is already carried
+// by record_provision_failure, the marker and the validator's TTS probe. It
+// also returns 1 from six OTHER paths that mean the box has no working speech
+// path at all: no clawbox-tts.sh, a tts-local-cli plugin that will not resolve,
+// a provider definition or selection that never landed.
+//
+// Those were fatal before the 12 case existed, because step_openclaw_setup is
+// called bare under `set -e`. Tolerating every non-zero return here would have
+// recreated this PR's own bug one layer up — a successful-looking flash over a
+// box that cannot speak, with nothing in the marker to say so.
+
+/**
+ * Run the real step_openclaw_setup with the three steps before the TTS one
+ * stubbed out and step_openclaw_tts scripted to exit `ttsExit`, so the call
+ * site's handling of that status is what is under test.
+ */
+function runOpenclawSetup(ttsExit: number): { status: number; out: string } {
+  const program = [
+    "set -euo pipefail",
+    "PROJECT_DIR=/nonexistent",
+    "is_hermes_edition() { return 1; }",
+    "step_openclaw_install() { :; }",
+    "step_openclaw_patch() { :; }",
+    "step_openclaw_config() { :; }",
+    `step_openclaw_tts() { return ${ttsExit}; }`,
+    extractShellFn(INSTALL_SH, "step_openclaw_setup"),
+    "step_openclaw_setup",
+    'echo "SETUP_COMPLETED=$?"',
+  ].join("\n");
+  const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 60_000 });
+  return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+}
+
+describe.skipIf(!hasBash)("the openclaw setup step weighs the TTS result", () => {
+  it("continues when everything worked", () => {
+    const res = runOpenclawSetup(0);
+    expect(res.status, res.out).toBe(0);
+    expect(res.out).toContain("SETUP_COMPLETED=0");
+  });
+
+  it("continues past a Kokoro-only failure, saying so", () => {
+    const res = runOpenclawSetup(12);
+    expect(res.status, res.out).toBe(0);
+    expect(res.out).toContain("SETUP_COMPLETED=0");
+    expect(res.out).toMatch(/Kokoro GPU TTS did not install/);
+  });
+
+  it.each([1, 2])("stays FATAL on a provider-configuration failure (exit %i)", (code) => {
+    // A box with no configured speech path must not finish provisioning quietly.
+    // `set -e` carries this out of step_openclaw_setup and aborts the install,
+    // which is exactly what it did before the Kokoro tolerance was added.
+    const res = runOpenclawSetup(code as number);
+    expect(res.status, `a hard TTS failure was swallowed:\n${res.out}`).not.toBe(0);
+    expect(res.out).not.toContain("SETUP_COMPLETED=");
   });
 });

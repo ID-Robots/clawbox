@@ -403,7 +403,6 @@ function runValidator(
   const script = [
     "set -uo pipefail",
     `CLAWBOX_EDITION=${edition}`,
-    `TTS_STATUS_FILE=${JSON.stringify(ttsStatus)}`,
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/nonexistent",
     "CLAWBOX_HOME=/nonexistent",
@@ -430,7 +429,10 @@ function runValidator(
     encoding: "utf-8",
     // NODE_ENV is not read by any shell here; it is carried only because this
     // repo's ProcessEnv typing makes it required on an env literal.
-    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV },
+    // TTS_STATUS_FILE travels as an environment variable rather than as an
+    // interpolated shell assignment: JSON quoting is not shell quoting, and a
+    // path is data, not script.
+    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }

@@ -407,7 +407,6 @@ function runValidator(
   const script = [
     "set -uo pipefail",
     `CLAWBOX_EDITION=${edition}`,
-    `TTS_STATUS_FILE=${JSON.stringify(ttsStatus)}`,
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/home/clawbox/clawbox",
     "CLAWBOX_HOME=/nonexistent",
@@ -429,7 +428,10 @@ function runValidator(
 
   const r = spawnSync("bash", ["-c", script], {
     encoding: "utf-8",
-    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV },
+    // TTS_STATUS_FILE travels as an environment variable rather than as an
+    // interpolated shell assignment: JSON quoting is not shell quoting, and a
+    // path is data, not script.
+    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
