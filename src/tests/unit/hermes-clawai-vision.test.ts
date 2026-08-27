@@ -30,6 +30,15 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
+// The vision id is RESOLVED against the proxy (DeepSeek's model when served,
+// the previous one until then). The resolver has its own unit file
+// (`clawbox-ai-vision.test.ts`); here it answers "preferred allowed" unless a
+// test says otherwise, so no unit test touches the network.
+const resolveVisionMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  resolveVisionModelId: resolveVisionMock,
+}));
 
 import {
   CLAWAI_PROVIDER,
@@ -37,7 +46,7 @@ import {
   applyClawaiToHermes,
   clawaiModelForTier,
 } from "@/lib/hermes-clawai";
-import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_LEGACY_VISION_MODEL_ID, CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 
 /** Every `config set`, as "key=value", in the order they were issued. */
 function sets(): string[] {
@@ -56,12 +65,54 @@ describe("pointing Hermes at ClawBox AI", () => {
   beforeEach(() => {
     cliMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    resolveVisionMock.mockReset();
+    resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_VISION_MODEL_ID, verified: true, reason: "proxy-allows" });
   });
 
   it("names a model that can see, so an attached picture is looked at", async () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets()).toContain(`auxiliary.vision.provider=${CLAWAI_PROVIDER}`);
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
+  });
+
+  it("keeps an already-upgraded box on the DeepSeek id when the probe cannot answer", async () => {
+    resolveVisionMock.mockResolvedValue({ id: "gpt-5.6-luna", verified: false, reason: "probe-failed" });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "auxiliary.vision.model"
+        ? { code: 0, stdout: `${CLAWBOX_AI_VISION_MODEL_ID}\n`, stderr: "" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    // A bad network moment must not downgrade a box the proxy already upgraded.
+    expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
+  });
+
+  it("writes no vision model at all when neither the proxy nor the config answers", async () => {
+    resolveVisionMock.mockResolvedValue({ id: "gpt-5.6-luna", verified: false, reason: "probe-failed" });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "auxiliary.vision.model"
+        ? { code: 1, stdout: "", stderr: "permission denied" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    // An unreadable config is not an empty one — nothing may be overwritten.
+    // (sets(), not keys(): the read probe itself legitimately touches the key.)
+    expect(sets().some((kv) => kv.startsWith("auxiliary.vision."))).toBe(false);
+  });
+
+  it("still treats an unset key as unset — the conservative default applies", async () => {
+    resolveVisionMock.mockResolvedValue({ id: "gpt-5.6-luna", verified: false, reason: "probe-failed" });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "auxiliary.vision.model"
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain("auxiliary.vision.model=gpt-5.6-luna");
+  });
+
+  it("writes the previous vision model while the proxy refuses the DeepSeek id", async () => {
+    resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, verified: true, reason: "proxy-refuses" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}`);
+    expect(sets()).not.toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
   });
 
   it("leaves the vision endpoint and key to be inherited from the provider block", async () => {
