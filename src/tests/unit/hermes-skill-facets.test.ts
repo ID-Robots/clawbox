@@ -85,6 +85,8 @@ describe('normalizeCategory', () => {
     expect(categoryLabelFromKey('ai')).toBe('AI');
     expect(categoryLabelFromKey('smart-home')).toBe('Smart Home');
     expect(categoryLabelFromKey('devops')).toBe('DevOps');
+    // Seen on the box's Installed tab, where it read "Github".
+    expect(categoryLabelFromKey('github')).toBe('GitHub');
   });
 
   it('merges the registry synonyms actually seen on the box', () => {
