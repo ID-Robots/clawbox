@@ -69,7 +69,7 @@ export function isPrivateAddress(ip: string): boolean {
   if (version === 4) {
     const parts = ip.split(".").map(Number);
     if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return true;
-    const [a, b] = parts;
+    const [a, b, c] = parts;
     if (a === 0) return true;                     // "this network"
     if (a === 10) return true;                    // private
     if (a === 127) return true;                   // loopback
@@ -81,9 +81,12 @@ export function isPrivateAddress(ip: string): boolean {
     // Documentation and benchmarking ranges. Not routable on the internet, so
     // nothing legitimate serves an image from one — but a LAN is free to use
     // them internally, which is exactly the case this guard exists for.
-    if (a === 198 && (b === 18 || b === 19)) return true;   // benchmarking
-    if (a === 198 && b === 51) return true;                 // TEST-NET-2
-    if (a === 203 && b === 0) return true;                  // TEST-NET-3
+    // The third octet matters: TEST-NET-2 and TEST-NET-3 are a /24 each, and
+    // refusing the whole /16 would turn away real image hosts in the rest of
+    // it. The benchmarking range genuinely is a /15.
+    if (a === 198 && (b === 18 || b === 19)) return true;              // 198.18/15
+    if (a === 198 && b === 51 && c === 100) return true;               // TEST-NET-2
+    if (a === 203 && b === 0 && c === 113) return true;                // TEST-NET-3
     if (a >= 224) return true;                    // multicast and reserved
     return false;
   }

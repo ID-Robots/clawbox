@@ -26,7 +26,7 @@
 // agent, never used to choose what the app does, and never treated as anything
 // but text to look at.
 
-import { useCallback, useEffect, useId, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import type { EmailNode } from '@/lib/email-html'
@@ -365,6 +365,10 @@ export function EmailFullView({
   const [loadingImages, setLoadingImages] = useState(false)
   const titleId = useId()
   const panelRef = useModalDialog<HTMLDivElement>({ onClose })
+  // The in-flight request the OWNER started, so closing the panel can call it
+  // off. The mount request has the effect's own controller; this is for the
+  // ones a button starts.
+  const actionRef = useRef<AbortController | null>(null)
 
   /**
    * Ask the device for the message.
@@ -419,8 +423,31 @@ export function EmailFullView({
     return () => {
       live = false
       controller.abort()
+      // The mount request is not the only one in flight. "Load images" and
+      // "try again" start their own, and those are the EXPENSIVE ones — the
+      // route forwards its request signal into the outbound image fetching, so
+      // an abandoned one leaves the device pulling pictures for a panel nobody
+      // is looking at.
+      actionRef.current?.abort()
     }
   }, [uid])
+
+  /**
+   * Start a request the OWNER asked for, replacing whatever the last one was.
+   *
+   * One controller for both buttons rather than one each: only ever one of
+   * these is worth having in flight, so starting a second is also the moment
+   * to give up on the first.
+   */
+  const startAction = useCallback(
+    (images: boolean) => {
+      actionRef.current?.abort()
+      const controller = new AbortController()
+      actionRef.current = controller
+      void fetchMessage(images, controller.signal)
+    },
+    [fetchMessage],
+  )
 
   const onLoadImages = useCallback(() => {
     setWithImages(true)
@@ -430,14 +457,14 @@ export function EmailFullView({
     // screen that says anything is happening, because the blocked-image notice
     // that `loadingImages` drives is not rendered in that state.
     setState((prev) => (prev.phase === 'ready' ? prev : { phase: 'loading' }))
-    void fetchMessage(true)
-  }, [fetchMessage])
+    startAction(true)
+  }, [startAction])
 
   const onRetry = useCallback(() => {
     setState({ phase: 'loading' })
     if (withImages) setLoadingImages(true)
-    void fetchMessage(withImages)
-  }, [fetchMessage, withImages])
+    startAction(withImages)
+  }, [startAction, withImages])
 
   const message = state.phase === 'ready' ? state.message : null
 

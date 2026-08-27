@@ -169,8 +169,24 @@ describe("addresses that are not the public internet", () => {
     ["172.15 is NOT in the private range", "172.15.0.1"],
     ["172.32 is NOT in the private range", "172.32.0.1"],
     ["a public IPv6", "2606:2800:220:1:248:1893:25c8:1946"],
+    // The documentation ranges are a /24 each. Refusing the whole /16 would
+    // turn away real image hosts in the rest of it.
+    ["198.51.99 is NOT TEST-NET-2", "198.51.99.1"],
+    ["198.51.101 is NOT TEST-NET-2", "198.51.101.1"],
+    ["203.0.112 is NOT TEST-NET-3", "203.0.112.1"],
+    ["203.0.114 is NOT TEST-NET-3", "203.0.114.1"],
   ])("allows %s", (_label, ip) => {
     expect(isPrivateAddress(ip)).toBe(false);
+  });
+
+  it.each([
+    ["TEST-NET-1", "192.0.2.5"],
+    ["TEST-NET-2", "198.51.100.5"],
+    ["TEST-NET-3", "203.0.113.5"],
+    ["benchmarking 198.18/15", "198.18.0.1"],
+    ["benchmarking 198.19/15", "198.19.255.254"],
+  ])("refuses %s, which nothing legitimate serves an image from", (_label, ip) => {
+    expect(isPrivateAddress(ip)).toBe(true);
   });
 });
 
