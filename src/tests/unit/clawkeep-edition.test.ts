@@ -58,21 +58,34 @@ describe("clawkeep getStatus — which agent this box archives", () => {
 });
 
 describe("clawkeep getStatus — archiverReady", () => {
-  it("is true on hermes without any openclaw CLI, because the archiver is built in", async () => {
-    // THE regression this whole change is about. `openclawInstalled` is false
-    // on a Hermes box and always will be; gating the backup button on it is
-    // what made ClawKeep dead there.
+  // These pin the RELATIONSHIP rather than absolute values, because whether a
+  // developer's machine happens to have `clawkeepd` or `openclaw` on PATH is
+  // not what is being tested.
+
+  it("on hermes, depends on the daemon and NOTHING else", async () => {
+    // THE regression this whole change is about: `openclawInstalled` is false
+    // on a Hermes box and always will be, so gating the backup on it is what
+    // made ClawKeep dead there. The daemon still has to be present — it is
+    // both the runner and, on Hermes, the archiver itself.
     mockGetEdition.mockReturnValue("hermes");
-    // NOT asserted against `openclawInstalled`: whether an `openclaw` binary
-    // happens to sit on a developer's PATH is not the point. The point is that
-    // Hermes does not care either way.
-    expect((await clawkeep.getStatus()).archiverReady).toBe(true);
+    const status = await clawkeep.getStatus();
+    expect(status.archiverReady).toBe(status.daemonInstalled);
   }, STATUS_TIMEOUT_MS);
 
-  it("follows the openclaw CLI on the openclaw edition", async () => {
+  it("on openclaw, needs the daemon AND the openclaw CLI", async () => {
     mockGetEdition.mockReturnValue("openclaw");
     const status = await clawkeep.getStatus();
-    expect(status.archiverReady).toBe(status.openclawInstalled);
+    expect(status.archiverReady).toBe(status.daemonInstalled && status.openclawInstalled);
+  }, STATUS_TIMEOUT_MS);
+
+  it("never claims readiness on a box with no daemon", async () => {
+    // The specific thing CodeRabbit caught: reporting a usable backup path on
+    // a device that cannot create a backup at all.
+    for (const edition of ["hermes", "openclaw", "dual"] as const) {
+      mockGetEdition.mockReturnValue(edition);
+      const status = await clawkeep.getStatus();
+      if (!status.daemonInstalled) expect(status.archiverReady).toBe(false);
+    }
   }, STATUS_TIMEOUT_MS);
 });
 

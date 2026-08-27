@@ -12,7 +12,7 @@ It:
    device passphrase, and PUTs it to the user's R2 prefix.
 4. Reports status (size + snapshot count from `list-objects-v2`) back to the portal.
 
-### Two editions, two archivers
+## Two editions, two archivers
 
 Which agent gets archived is decided by `clawkeep/agent.py` from the root-owned
 `/etc/clawbox/edition.env`, and both backends emit the **same** archive layout
@@ -108,43 +108,54 @@ SSH to the device's listener.
 
 ## Restoring a backup
 
-v1 doesn't ship a restore CLI. Until v2 lands, mint creds, list the user's
-prefix, and pull the most recent `.tar.gz` with `aws s3 cp` (or any
-S3-compatible client). Never write the credentials response to a
-world-readable path like `/tmp/creds.json`:
+Restore from the device UI (ClawKeep → Restore) or the CLI:
+
+```bash
+clawkeep snapshots                 # list what is in the cloud, as JSON
+clawkeep restore <snapshot-name>   # download, decrypt, verify, swap into place
+```
+
+`restore` handles the whole path: it mints credentials, downloads, decrypts with
+the device passphrase (prompting via `--passphrase-file` when none is stored),
+verifies with the backend that WROTE the archive, and swaps each asset into
+place atomically, rolling every asset back if any one of them fails.
+
+It refuses, loudly and before touching anything, when the snapshot was made by
+the other edition — see "Two editions, two archivers" above.
+
+### Pulling an archive by hand
+
+Only useful for inspection or disaster recovery from another machine. Current
+uploads are encrypted and end in `.tar.gz.enc`; legacy plaintext `.tar.gz`
+snapshots are still restorable and skip the decrypt step.
 
 ```bash
 TOKEN=$(sudo cat /var/lib/clawkeep/token)
-CREDS_FILE=$(mktemp)
-chmod 600 "$CREDS_FILE"
+CREDS_FILE=$(mktemp); chmod 600 "$CREDS_FILE"
 trap 'shred -u "$CREDS_FILE" 2>/dev/null || rm -f "$CREDS_FILE"' EXIT
 
-curl -s -X POST -H "Authorization: Bearer $TOKEN" \
-     https://clawbox.com/api/clawkeep/credentials > "$CREDS_FILE"
+curl -s -X POST -H "Authorization: Bearer $TOKEN"      https://clawbox.com/api/clawkeep/credentials > "$CREDS_FILE"
 
 export AWS_ACCESS_KEY_ID=$(jq -r .accessKeyId "$CREDS_FILE")
 export AWS_SECRET_ACCESS_KEY=$(jq -r .secretAccessKey "$CREDS_FILE")
 export AWS_SESSION_TOKEN=$(jq -r .sessionToken "$CREDS_FILE")
 export AWS_DEFAULT_REGION=auto
-
 ENDPOINT=$(jq -r .endpoint "$CREDS_FILE")
-BUCKET=$(jq -r .bucket "$CREDS_FILE")
-PREFIX=$(jq -r .prefix "$CREDS_FILE")
+BUCKET=$(jq -r .bucket "$CREDS_FILE"); PREFIX=$(jq -r .prefix "$CREDS_FILE")
 
-# List all snapshots under your prefix:
 aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/$PREFIX"
+aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/$PREFIX<snapshot>" ./snap.tar.gz.enc
 
-# Pull the most recent one:
-LATEST=$(aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/$PREFIX" \
-  | awk '{print $4}' | sort | tail -1)
-aws --endpoint-url "$ENDPOINT" s3 cp \
-  "s3://$BUCKET/$PREFIX$LATEST" /tmp/restore.tar.gz
+# Decrypt with the device passphrase (the same one `clawkeep set-passphrase` took).
+# See clawkeep/crypto.py for the exact cipher and KDF parameters.
+openssl enc -d -aes-256-cbc -pbkdf2 -in snap.tar.gz.enc -out snap.tar.gz -pass file:<passphrase-file>
 
-# Then validate the manifest and unpack:
-openclaw backup verify /tmp/restore.tar.gz
-tar -xzf /tmp/restore.tar.gz -C /tmp/restore
-# trap shreds the temp creds file when the shell exits.
+tar -tzf snap.tar.gz | head            # <root>/manifest.json + <root>/payload/posix/...
+tar -xOzf snap.tar.gz '*/manifest.json' | jq .agent   # "hermes" or absent (openclaw)
 ```
+
+> The decrypted tarball holds the device's provider keys. Work on it in a 0700
+> directory and shred it when you are done.
 
 ## Development
 

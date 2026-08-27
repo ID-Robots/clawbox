@@ -420,3 +420,55 @@ def test_a_link_out_of_the_archives_own_roots_is_refused_and_reported(
 
     assert not (home / ".hermes" / "memories" / "escape.md").exists()
     assert any("escape.md" in m for m in result.skipped_members)
+
+
+def test_a_later_asset_failure_does_not_strip_the_old_database_of_its_wal(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retiring the sqlite sidecars is the one step in the asset loop that
+    `_rollback_swaps` cannot reverse — and what it would destroy is the newest
+    data on the box.
+
+    A WAL database keeps its most recent writes in the sidecar: 2.6 MB of them
+    against a 2.8 MB `state.db` on the QA box. Retiring them as soon as the
+    `sessions` asset landed, and then failing on an asset later in the list,
+    would roll the OLD database back into place with its WAL renamed away —
+    silently losing every conversation that had not been checkpointed. So the
+    retirement waits until the whole restore has succeeded.
+    """
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    _seed(home)
+
+    made = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
+
+    db = home / ".hermes" / "state.db"
+    db.with_name("state.db-wal").write_bytes(b"the newest 2.6MB")
+    db.with_name("state.db-shm").write_bytes(b"shm")
+
+    # Fail on an asset that sorts AFTER `sessions` in the manifest order.
+    real_swap = restore._swap_into_place
+
+    def swap_but_fail_on_skills(staging: Path, target: Path, *, ts: int) -> Path:
+        if target.name == "skills":
+            raise OSError("disk went away mid-restore")
+        return real_swap(staging, target, ts=ts)
+
+    monkeypatch.setattr(restore, "_swap_into_place", swap_but_fail_on_skills)
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(made.path.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        with pytest.raises(restore.RestoreError):
+            restore.restore_snapshot(_cfg(), "claw_x", made.path.name)
+
+    # The rolled-back database still has the sidecar holding its newest writes.
+    assert db.with_name("state.db-wal").read_bytes() == b"the newest 2.6MB"
+    assert db.with_name("state.db-shm").exists()

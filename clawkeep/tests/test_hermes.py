@@ -264,9 +264,36 @@ def test_created_at_is_real_iso_and_the_stem_is_path_safe(
 ) -> None:
     moment = datetime(2026, 8, 26, 9, 30, 0, tzinfo=timezone.utc)
     out = hermes.create_archive(output_dir=tmp_path / "out", now=moment)
-    assert out.archive_root == "2026-08-26T09-30-00.000Z-hermes-backup"
+    # The stem carries the instant in a form that is legal as a path AND as an
+    # S3 object key, and the UI parses the leading timestamp off it.
+    assert out.path.name.startswith("2026-08-26T09-30-00.000Z-")
+    assert out.path.name.endswith("-hermes-backup.tar.gz")
     assert ":" not in out.path.name
+    # The invariant restore depends on: stem == tarball top-level directory.
+    assert out.path.name == f"{out.archive_root}.tar.gz"
+    # `createdAt` is real ISO-8601; only the filename has to avoid ":".
     assert _manifest(out.path)["createdAt"] == "2026-08-26T09:30:00.000Z"
+
+
+def test_two_backups_in_the_same_second_do_not_collide(
+    box: Path, tmp_path: Path,
+) -> None:
+    """The nightly timer firing while somebody presses "Back up now".
+
+    `runner` uploads under the archive's own filename, so two runs that agreed
+    on a name would have the second overwrite the first's object in R2 — the
+    customer left with one recovery point where they should have had two.
+    """
+    moment = datetime(2026, 8, 26, 9, 30, 0, tzinfo=timezone.utc)
+    first = hermes.create_archive(output_dir=tmp_path / "out", now=moment)
+    second = hermes.create_archive(output_dir=tmp_path / "out", now=moment)
+    assert first.path.name != second.path.name
+    assert first.archive_root != second.archive_root
+    assert first.path.exists() and second.path.exists()
+    # Each still names its own manifest correctly.
+    for made in (first, second):
+        assert _manifest(made.path)["archiveRoot"] == made.archive_root
+        hermes.verify_archive(made.path)
 
 
 def test_an_empty_directory_asset_survives_the_round_trip(
@@ -290,6 +317,11 @@ def test_an_empty_directory_asset_survives_the_round_trip(
     sub = next(a["archivePath"] for a in _manifest(out.path)["assets"]
                if a["kind"] == "hooks")
     staging = tmp_path / "staged"
-    assert restore_mod._extract_asset(out.path, archive_subpath=sub,
-                                      staging_root=staging) == 0
+    extracted, swap_source = restore_mod._extract_asset(
+        out.path, archive_subpath=sub, staging_root=staging,
+    )
+    assert extracted == 0
+    # A directory asset swaps the staging directory itself...
+    assert swap_source == staging
+    # ...and it exists and is empty, which is the whole point.
     assert staging.is_dir() and not any(staging.iterdir())

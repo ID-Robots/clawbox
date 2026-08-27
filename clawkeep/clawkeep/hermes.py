@@ -256,11 +256,22 @@ def _is_transient(rel: Path) -> bool:
     return rel.name.endswith(TRANSIENT_SUFFIXES)
 
 
-def _add_tree(tf: tarfile.TarFile, *, src: Path, arcname: str) -> int:
+def _add_tree(
+    tf: tarfile.TarFile,
+    *,
+    src: Path,
+    arcname: str,
+    kind: str,
+    skipped: list[dict[str, str]],
+) -> int:
     """Add `src` (a directory) under `arcname`, returning bytes of regular
     files added. Symlinks are stored as links, not followed — following them
-    would let a link inside `skills/` pull an arbitrary tree into the
-    archive."""
+    would let a link inside `skills/` pull an arbitrary tree into the archive.
+
+    A member we cannot read is appended to `skipped`, which lands in the
+    manifest. One unreadable file must not lose the customer the other
+    thousand, but it must not vanish either: a backup quietly missing a file
+    is only discovered at restore, when it is far too late to do anything."""
     total = 0
     tf.add(src, arcname=arcname, recursive=False)
     for entry in sorted(src.rglob("*")):
@@ -273,10 +284,12 @@ def _add_tree(tf: tarfile.TarFile, *, src: Path, arcname: str) -> int:
             if entry.is_file() and not entry.is_symlink():
                 total += entry.stat().st_size
         except OSError as e:
-            # One unreadable file must not lose the customer the other
-            # thousand. Recorded loudly; the manifest's `skipped` list carries
-            # it out to whoever reads the archive.
             log.warning("skipping unreadable %s: %s", entry, e)
+            skipped.append({
+                "kind": kind,
+                "path": rel.as_posix(),
+                "reason": f"unreadable: {e}",
+            })
     return total
 
 
@@ -303,9 +316,21 @@ def create_archive(
     # `createdAt` keeps real ISO-8601 because that is what readers parse.
     stamp = moment.strftime("%Y-%m-%dT%H-%M-%S.000Z")
     created_at = moment.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    archive_root = f"{stamp}-hermes-backup"
     output_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = output_dir / f"{archive_root}.tar.gz"
+    # The name has to be UNIQUE, not merely timestamped. Two runs in the same
+    # second — the nightly timer firing while somebody presses "Back up now" —
+    # produced one name, and `runner` uploads under `encrypted_path.name`, so
+    # the second run would overwrite the first's object in R2 and the customer
+    # would be left with one recovery point where they should have two.
+    # mkstemp both reserves the name and creates the file exclusively.
+    fd, reserved = tempfile.mkstemp(
+        prefix=f"{stamp}-", suffix="-hermes-backup.tar.gz", dir=str(output_dir),
+    )
+    os.close(fd)
+    archive_path = Path(reserved)
+    # The stem and the tarball's top-level directory MUST stay equal: restore
+    # derives the manifest's location from the snapshot name.
+    archive_root = archive_path.name[: -len(".tar.gz")]
 
     wanted = [a for a in ASSETS if not only_config or a.kind in ONLY_CONFIG_KINDS]
 
@@ -335,7 +360,10 @@ def create_archive(
                     elif asset.entry == "file":
                         tf.add(target, arcname=arcname, recursive=False)
                     else:
-                        _add_tree(tf, src=target, arcname=arcname)
+                        _add_tree(
+                            tf, src=target, arcname=arcname,
+                            kind=asset.kind, skipped=skipped,
+                        )
                 except HermesError:
                     raise
                 except OSError as e:

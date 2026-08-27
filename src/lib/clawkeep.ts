@@ -675,10 +675,15 @@ export async function getStatus(): Promise<ClawKeepStatus> {
     openclawInstalled,
     daemonInstalled: daemonBin !== null,
     agent,
-    // On Hermes the archiver is part of the daemon, so `daemonInstalled` is the
-    // whole prerequisite and this is unconditionally true. On OpenClaw the
-    // archive is made by a separate CLI that has to be there.
-    archiverReady: source.requiresExternalCli ? openclawInstalled : true,
+    // "Is there anything left to install before a backup can run?"
+    //
+    // The daemon is required on BOTH editions — it is the thing that runs, and
+    // on Hermes it is also where the archiver itself lives. Reporting `true`
+    // for Hermes on a box with no `clawkeepd` said the backup path was usable
+    // on a device that cannot create a backup at all. OpenClaw needs the
+    // separate `openclaw` CLI on top of that.
+    archiverReady:
+      daemonBin !== null && (source.requiresExternalCli ? openclawInstalled : true),
     backupContainsCredentials: source.containsCredentials,
     // ClawKeep now archives EITHER agent (see `clawkeep/agent.py`), so no
     // edition is unsupported. Kept true rather than deleted so a client that

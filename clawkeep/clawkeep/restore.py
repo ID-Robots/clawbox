@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import time
@@ -77,6 +78,22 @@ class PassphraseMissingError(RestoreError):
     """
 
 
+def _find_manifest_member(tf: tarfile.TarFile) -> str | None:
+    """The archive's own `<root>/manifest.json`, found by looking.
+
+    The root is normally derivable from the snapshot NAME, but not always: a
+    plaintext `.tar.gz` that `crypto.is_likely_encrypted()` misreads gets run
+    through the decrypt path and renamed to `<name>.decrypted.tar.gz`, and the
+    name-derived lookup then asks for a root that was never in the tarball and
+    fails with "archive missing manifest.json" on an archive that is perfectly
+    good. Looking costs one pass and cannot be wrong.
+    """
+    for member in tf:
+        if member.name.endswith("/manifest.json") and member.name.count("/") == 1:
+            return member.name
+    return None
+
+
 def _read_manifest_from_open(tf: tarfile.TarFile, archive_root: str) -> dict:
     """Pull `<root>/manifest.json` out of an already-open tarball.
 
@@ -87,8 +104,15 @@ def _read_manifest_from_open(tf: tarfile.TarFile, archive_root: str) -> dict:
     member_name = f"{archive_root}/manifest.json"
     try:
         m = tf.getmember(member_name)
-    except KeyError as e:
-        raise RestoreError(f"archive missing manifest.json (looked for {member_name!r})") from e
+    except KeyError:
+        # Fall back to whatever root the tarball actually has — see
+        # `_find_manifest_member` for the case that makes the name unreliable.
+        found = _find_manifest_member(tf)
+        if found is None:
+            raise RestoreError(
+                f"archive missing manifest.json (looked for {member_name!r})",
+            ) from None
+        m = tf.getmember(found)
     extracted = tf.extractfile(m)
     if extracted is None:
         raise RestoreError("manifest.json is not a regular file in the archive")
@@ -125,6 +149,21 @@ def _member_name_unsafe(member: tarfile.TarInfo, prefix: str) -> bool:
         tail = tail[1:]
     parts = tail.split("/")
     return any(p == ".." for p in parts if p)
+
+
+# Python 3.12 warns about an unset extraction filter and 3.14 DEFAULTS to
+# `data`, which refuses absolute symlinks — exactly the ones
+# `_link_target_allowed` exists to permit, so a restore that works on the
+# device's 3.10 today would start silently dropping the identity bridge on a
+# newer interpreter. `fully_trusted` restores the historical behaviour, and it
+# is safe HERE specifically because this module does its own vetting first:
+# every member passes `_member_name_unsafe` (no absolute paths, no `..`) and
+# every link passes `_member_link_unsafe` / `_link_target_allowed`, on a
+# tarball whose integrity was already verified. The keyword does not exist
+# before 3.12, hence the version gate rather than passing it unconditionally.
+_EXTRACT_KWARGS: dict[str, str] = (
+    {"filter": "fully_trusted"} if sys.version_info >= (3, 12) else {}
+)
 
 
 def _link_target_allowed(link: str, allowed_roots: tuple[str, ...]) -> bool:
@@ -167,8 +206,7 @@ def _extract_file_from_open(
     *,
     archive_subpath: str,
     staging_root: Path,
-    allowed_roots: tuple[str, ...] = (),
-) -> int:
+) -> Path:
     """Extract a SINGLE-FILE asset: the one member whose name is exactly
     `archive_subpath`.
 
@@ -179,8 +217,15 @@ def _extract_file_from_open(
     directory; Hermes' `config.yaml`, `.env` and `state.db` are files, and they
     are the three most important things in its archive.
 
-    The extracted file lands at `staging_root/<basename>` — the caller swaps
-    that path into place, not `staging_root` itself.
+    Returns the PATH it wrote, rather than a byte count, so the caller never
+    has to re-derive the name. It used to look for `staging_root/<sourcePath
+    basename>` while this wrote `staging_root/<archivePath basename>` — the two
+    agree only because the Hermes layout embeds one inside the other, and a
+    manifest that broke that coincidence would move the live target aside and
+    then fail to rename anything into place.
+
+    (There is no `allowed_roots` here on purpose: a single-file asset is one
+    regular file, checked below, so there is no link-target policy to apply.)
     """
     staging_root.mkdir(parents=True, exist_ok=True)
     name = archive_subpath.rsplit("/", 1)[-1]
@@ -193,10 +238,9 @@ def _extract_file_from_open(
                     f"{archive_subpath!r} is declared as a file asset but is "
                     "not a regular file in the archive",
                 )
-            size = member.size
             member.name = name
-            tf.extract(member, path=staging_root)
-            return size
+            tf.extract(member, path=staging_root, **_EXTRACT_KWARGS)
+            return staging_root / name
     except (tarfile.TarError, OSError) as e:
         raise RestoreError(f"extraction failed for {archive_subpath}: {e}") from e
     raise RestoreError(f"no member at {archive_subpath} in archive")
@@ -270,7 +314,7 @@ def _extract_asset_from_open(
                     extracted_any = True
                     continue
                 member.name = relative
-                tf.extract(member, path=staging_root)
+                tf.extract(member, path=staging_root, **_EXTRACT_KWARGS)
                 if member.isfile():
                     bytes_extracted += member.size
                 extracted_any = True
@@ -290,20 +334,28 @@ def _extract_asset(
     entry: str = "dir",
     allowed_roots: tuple[str, ...] = (),
     skipped: list[str] | None = None,
-) -> int:
-    """Standalone variant — opens the tarball just for one asset. Kept for
-    tests; the orchestrator uses `_extract_asset_from_open` to share a
-    single TarFile across all assets."""
-    extract = _extract_file_from_open if entry == "file" else _extract_asset_from_open
+) -> tuple[int, Path]:
+    """Extract one asset. Returns `(bytes_extracted, path_to_swap_into_place)`.
+
+    The second element is what removes the old coupling: a directory asset
+    swaps `staging_root` itself, a file asset swaps the file the extractor
+    actually wrote, and only the extractor decides which.
+    """
     try:
         with tarfile.open(archive_path, "r:gz") as tf:
-            kwargs = {"allowed_roots": allowed_roots}
-            if extract is _extract_asset_from_open:
-                kwargs["skipped"] = skipped
-            return extract(
-                tf, archive_subpath=archive_subpath, staging_root=staging_root,
-                **kwargs,
+            if entry == "file":
+                written = _extract_file_from_open(
+                    tf, archive_subpath=archive_subpath, staging_root=staging_root,
+                )
+                return written.stat().st_size, written
+            extracted = _extract_asset_from_open(
+                tf,
+                archive_subpath=archive_subpath,
+                staging_root=staging_root,
+                allowed_roots=allowed_roots,
+                skipped=skipped,
             )
+            return extracted, staging_root
     except RestoreError:
         # Already a typed, human-readable failure from the extractor — do not
         # re-wrap it as "extraction failed" and lose the reason.
@@ -633,6 +685,9 @@ def restore_snapshot(
             if isinstance(a, dict) and a.get("sourcePath")
         )
         skipped_members: list[str] = []
+        # sqlite targets whose stale `-wal`/`-shm` need retiring, applied after
+        # every asset has landed. See the note at the call site.
+        pending_sqlite: list[Path] = []
 
         for asset in assets:
             if not isinstance(asset, dict):
@@ -657,7 +712,7 @@ def restore_snapshot(
             sibling_stagings.append(asset_staging)
             log.info("extracting asset %s → %s", kind, asset_staging)
             try:
-                bytes_restored = _extract_asset(
+                bytes_restored, swap_source = _extract_asset(
                     archive_path,
                     archive_subpath=archive_subpath,
                     staging_root=asset_staging,
@@ -665,14 +720,20 @@ def restore_snapshot(
                     allowed_roots=allowed_roots,
                     skipped=skipped_members,
                 )
-                # A file asset landed at `<staging>/<basename>`; a directory
-                # asset IS the staging directory.
-                swap_source = (
-                    asset_staging if entry == "dir" else asset_staging / target.name
-                )
                 backup = _swap_into_place(swap_source, target, ts=ts)
                 if asset.get("sqlite"):
-                    _retire_sqlite_sidecars(target, ts=ts)
+                    # DEFERRED, not done here. Retiring the sidecars is the one
+                    # step in this loop that `_rollback_swaps` cannot reverse,
+                    # and the thing it would destroy is the newest data on the
+                    # box: a WAL database keeps its most recent writes in the
+                    # sidecar — 2.6 MB of them against a 2.8 MB `state.db` on
+                    # the QA box. Retiring them here and then failing on a
+                    # LATER asset would roll the old database back into place
+                    # with its WAL renamed away, silently losing every
+                    # conversation that had not been checkpointed. So the
+                    # target is remembered and dealt with only once the whole
+                    # restore has succeeded.
+                    pending_sqlite.append(target)
             except Exception as primary:
                 # An asset failure after earlier assets already swapped would
                 # leave the device with a mixed restore (some new content,
@@ -690,6 +751,11 @@ def restore_snapshot(
                 backup_path=backup,
                 bytes_restored=bytes_restored,
             ))
+
+        # Every asset is in place and no rollback can happen from here, so the
+        # one irreversible step is finally safe to take.
+        for db_target in pending_sqlite:
+            _retire_sqlite_sidecars(db_target, ts=ts)
 
         return RestoreResult(
             archive_name=snapshot_name,
