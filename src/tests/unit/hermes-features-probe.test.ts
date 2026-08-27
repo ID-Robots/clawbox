@@ -15,7 +15,15 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli }));
 
 /** The mtime-keyed memo around `hermes config get <key>`. */
 const hermesConfigGet = vi.fn();
-vi.mock("@/lib/hermes-config-cache", () => ({ hermesConfigGet }));
+/** Did the memo SERVE that value, or hand back a placeholder it will replace? */
+const hermesConfigReadPending = vi.fn(() => false);
+vi.mock("@/lib/hermes-config-cache", () => ({
+  hermesConfigGet,
+  hermesConfigReadPending,
+  // Mirrors the module: `hermes-features` composes its published retry
+  // delay out of both backoffs, so a partial mock hides that composition.
+  FAILED_READ_TTL_MS: 60_000,
+}));
 
 /** The real help text from the box's checkout (1091472, 2026-08-22), trimmed. */
 const HELP_WITH_IMAGE = `usage: hermes chat [-h] [-q QUERY | --query-file PATH] [--image IMAGE]
@@ -262,5 +270,83 @@ describe("hermesHasVisionRoute", () => {
 
     hermesConfigGet.mockResolvedValue("gpt-4.1-mini");
     expect(await hermesHasVisionRoute()).toBe(true);
+  });
+});
+
+/**
+ * Which of these facts is still a PLACEHOLDER.
+ *
+ * Every probe in this file fails closed, so a box that could not answer and a
+ * box that answered "no" produce the same `false`. That is the right answer to
+ * give the composer — a wrong `true` costs the customer's file — but it is not
+ * the whole truth, and the browser was told only the `false`. It fetches these
+ * facts once on mount and re-asks solely on an explicit provider change, so a
+ * single slow moment during chat open hid the attach button for the entire page
+ * session while the server quietly recovered sixty seconds later. These
+ * accessors are how that recovery becomes visible to the page that needs it.
+ */
+describe("pending accessors", () => {
+  beforeEach(() => {
+    runHermesCli.mockReset();
+    hermesConfigGet.mockReset();
+    hermesConfigReadPending.mockReset();
+    hermesConfigReadPending.mockReturnValue(false);
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("says nothing is pending before anything has been probed", async () => {
+    const { hermesFeatureProbePending } = await load();
+    expect(hermesFeatureProbePending()).toBe(false);
+  });
+
+  it("reports the flag probe as pending after a probe that never answered", async () => {
+    runHermesCli.mockRejectedValue(new Error("hermes timed out"));
+    const { hermesSupportsImages, hermesFeatureProbePending } = await load();
+    expect(await hermesSupportsImages()).toBe(false);
+    expect(hermesFeatureProbePending()).toBe(true);
+  });
+
+  it("does not report a real help text as pending, flag present or absent", async () => {
+    runHermesCli.mockResolvedValue({ code: 0, stdout: HELP_WITHOUT_IMAGE, stderr: "" });
+    const { hermesSupportsImages, hermesFeatureProbePending } = await load();
+    expect(await hermesSupportsImages()).toBe(false);
+    expect(hermesFeatureProbePending()).toBe(false);
+  });
+
+  it("stops reporting the flag probe as pending once the backoff answered", async () => {
+    runHermesCli.mockRejectedValue(new Error("hermes timed out"));
+    const { hermesSupportsImages, hermesFeatureProbePending } = await load();
+    expect(await hermesSupportsImages()).toBe(false);
+    expect(hermesFeatureProbePending()).toBe(true);
+
+    runHermesCli.mockReset();
+    runHermesCli.mockResolvedValue({ code: 0, stdout: HELP_WITH_IMAGE, stderr: "" });
+    vi.setSystemTime(Date.now() + PAST_THE_BACKOFF_MS);
+    expect(await hermesSupportsImages()).toBe(true);
+    expect(hermesFeatureProbePending()).toBe(false);
+  });
+
+  it("passes the two config-backed facts through to the memo, by their own keys", async () => {
+    // The key names stay private to this module — the route asks "is this fact
+    // still a placeholder", not "is `auxiliary.vision.model` in backoff".
+    hermesConfigReadPending.mockImplementation(
+      (key: string) => key === "auxiliary.vision.model",
+    );
+    const { hermesVisionRoutePending, hermesImageBackendPending } = await load();
+    expect(hermesVisionRoutePending()).toBe(true);
+    expect(hermesImageBackendPending()).toBe(false);
+    expect(hermesConfigReadPending).toHaveBeenCalledWith("auxiliary.vision.model");
+    expect(hermesConfigReadPending).toHaveBeenCalledWith("image_gen.provider");
+  });
+
+  it("publishes a retry delay no shorter than the backoff it describes", async () => {
+    // The browser waits this out before re-asking. Published rather than
+    // duplicated on the client, so the two cannot drift apart.
+    const { HERMES_FACT_RETRY_MS } = await load();
+    expect(HERMES_FACT_RETRY_MS).toBeGreaterThanOrEqual(PAST_THE_BACKOFF_MS - 1_000);
   });
 });

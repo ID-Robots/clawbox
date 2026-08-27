@@ -3,9 +3,13 @@ import { getActiveHarness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import type { HarnessFacts } from "@/lib/harness/capabilities";
 import {
+  HERMES_FACT_RETRY_MS,
   hermesAgentDrawsImages,
+  hermesFeatureProbePending,
   hermesHasVisionRoute,
+  hermesImageBackendPending,
   hermesSupportsImages,
+  hermesVisionRoutePending,
 } from "@/lib/harness/hermes-features";
 import { clawaiImageRouteReachable } from "@/lib/harness/clawai-images";
 import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
@@ -78,5 +82,36 @@ export async function GET() {
     // installed there at all.
     hermesAgentDrawsImages: harness === "hermes" ? await hermesAgentDrawsImages() : false,
   };
-  return NextResponse.json({ harness, facts });
+  // Which of those `false`s is an ANSWER, and which is a placeholder the server
+  // has already undertaken to replace by itself.
+  //
+  // Every Hermes fact above fails closed, so "this box cannot" and "this box
+  // could not say" leave by the same door — correct for the composer, because a
+  // wrong `true` stages the customer's file into a turn that ignores it, but it
+  // stranded the browser. `use-harness-adapter` fetches this once on mount and
+  // re-asks only on an explicit provider change, on no timer, so one probe
+  // timeout during chat open hid the attach button for the entire page session
+  // while the memos behind these facts recovered a minute later. Saying so lets
+  // the page come back for the real answer instead of waiting for a reload.
+  //
+  // Asked ONLY on Hermes, and only after the awaits above: these accessors read
+  // the memos without touching them, so on an OpenClaw box — where none of the
+  // probes ran — an entry left over from an earlier harness must not put that
+  // page on a timer for a fact no OpenClaw capability reads.
+  //
+  // `hasClawaiImageRoute` is deliberately NOT counted. Its probe caches a plain
+  // `false` for a minute whether the proxy answered "no" or did not answer at
+  // all — it draws no answer/failure distinction to report — so folding it in
+  // would mean claiming a precision that module does not have.
+  const factsPending =
+    harness === "hermes" &&
+    (hermesFeatureProbePending() || hermesVisionRoutePending() || hermesImageBackendPending());
+  return NextResponse.json({
+    harness,
+    facts,
+    factsPending,
+    // Published rather than duplicated in the browser, so the wait and the
+    // backoff it is waiting on cannot drift apart.
+    factsRetryAfterMs: HERMES_FACT_RETRY_MS,
+  });
 }
