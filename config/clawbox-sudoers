@@ -115,13 +115,37 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    ollama.service
 
 # Update / power / install paths.
 #
-# `reset-failed *` and `start --no-block *` used to take ANY unit name. Both are
-# only ever called with a clawbox-* unit (src/lib/updater.ts, the llamacpp
-# installer, the credentials chpasswd path, install/run-step), so scope them to
-# that prefix rather than handing over the whole unit namespace. TASK-445.
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-*
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-*
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@*.service
+# NO WILDCARDS, DELIBERATELY. These were three prefix rules — `reset-failed
+# clawbox-*`, `start --no-block clawbox-*` and `start
+# clawbox-root-update@*.service` — and a prefix is not a scope here. sudoers(5)
+# matches a command's arguments as one CONCATENATED string, so `*` spans
+# whitespace; `systemctl start` takes a LIST of units. That made
+#
+#     sudo /usr/bin/systemctl start clawbox-root-update@chpasswd.service ssh.service
+#
+# a match, i.e. the three rules together read "start, or reset-failed, ANY unit
+# as root without a password, as long as the first word begins with clawbox-".
+# Reproduced against sudo 1.9.9 — the Ubuntu 22.04 vintage the appliance runs —
+# with `sudo -U clawbox -l <cmd>`, which tests matching without executing.
+#
+# Regex Cmnd arguments would express the intent directly, but they arrived in
+# sudo 1.9.10, after the version on the device. So: enumeration, one exact rule
+# per (verb, unit) pair the product actually issues. The list is short because
+# only four `clawbox-root-update@` instances are reachable from the web server;
+# every other step is an operator path (`sudo bash install.sh --step …`) or runs
+# inside the updater's own root chain.
+#
+# Adding an instance here adds a root entrypoint — the granted step runs as root
+# through /usr/local/libexec/clawbox/clawbox-root-step.sh — so review it as a
+# privilege boundary, not as a config line. TASK-445.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@chpasswd.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@chpasswd.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@set_hostname.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@set_hostname.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@restart_ap.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@restart_ap.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@llamacpp_install.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-root-update@llamacpp_install.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 # apt is granted ONLY for the exact commands the Browser-app chromium recovery

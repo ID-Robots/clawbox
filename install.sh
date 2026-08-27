@@ -70,6 +70,15 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
   git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
   if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
     chown -R clawbox:clawbox "$_b" 2>/dev/null || true
+    # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
+    # reset just replaced install.sh, scripts/ and config/ wholesale, so the
+    # manifest the root dispatcher checks is now stale by construction — and a
+    # stale manifest fails every subsequent step of this very update. Paths are
+    # literal because the constants block has not been parsed yet.
+    _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh
+    if [ "$_b" = "/home/clawbox/clawbox" ] && [ -x "$_mf" ]; then
+      "$_mf" --write || echo "[bootstrap] WARN: could not re-record the root-exec manifest" >&2
+    fi
     echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
     exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
   fi
@@ -515,12 +524,45 @@ if ! has_openclaw_harness; then
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
 
-# Load persisted WiFi interface if available
+# Read one KEY=VALUE out of a file this script does NOT trust.
+#
+# Everything under $PROJECT_DIR/data is written by the web server, i.e. by the
+# clawbox user — and install.sh runs as root, reached from a NOPASSWD grant. So
+# `source`ing anything in there is arbitrary root code execution for anything
+# with clawbox-level code execution: the web server, the in-UI terminal, the
+# agent's shell. `printf 'x() { :; }; id > /tmp/pwn\n' > data/hostname.env` plus
+# the granted `clawbox-root-update@set_hostname.service` was exactly that, and
+# data/network.env was worse still because it was sourced on EVERY root run of
+# this script, `--step chpasswd` included.
+#
+# Parse instead: first matching assignment, optional single or double quotes
+# stripped, and nothing containing a character that could not have come from the
+# writer we expect. The caller still validates the meaning of the value.
+# TASK-445.
+read_untrusted_env_value() {
+  local file="$1" key="$2" line value
+  [ -f "$file" ] || return 0
+  [ -L "$file" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
+  value="${line#*=}"
+  # Strip one layer of matching quotes.
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  case "$value" in
+    ""|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s' "$value"
+}
+
+# Load persisted WiFi interface if available.
 IFACE_ENV="$PROJECT_DIR/data/network.env"
-if [ -f "$IFACE_ENV" ]; then
-  # shellcheck disable=SC1090
-  source "$IFACE_ENV"
+_persisted_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_persisted_iface" ]; then
+  NETWORK_INTERFACE="$_persisted_iface"
 fi
+unset _persisted_iface
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -991,11 +1033,13 @@ validate_hostname() {
 # Falls back to "clawbox".
 read_configured_hostname() {
   local hostname_env="$PROJECT_DIR/data/hostname.env"
-  local name=""
-  if [ -f "$hostname_env" ]; then
-    # shellcheck source=/dev/null
-    name=$(. "$hostname_env" 2>/dev/null; printf '%s' "${HOSTNAME:-}")
-  fi
+  # PARSED, never sourced. data/ is clawbox-writable and this function runs as
+  # root from the granted clawbox-root-update@set_hostname.service, so `.` on
+  # this file was arbitrary root code execution for anything that can already
+  # run code as clawbox. validate_hostname below still decides whether the value
+  # is usable; this only decides that it is a value and not a program. TASK-445.
+  local name
+  name="$(read_untrusted_env_value "$hostname_env" HOSTNAME)"
   if [ -z "$name" ]; then
     name="clawbox"
   fi
@@ -1338,6 +1382,10 @@ sync_repo_to_update_target() {
   fi
   git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard "$upstream_branch"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+  # The tree root is allowed to execute just changed. Re-record it here, in the
+  # same function that changed it, so no later step of this update runs against
+  # a manifest describing the previous checkout.
+  refresh_root_exec_manifest
 }
 
 step_bootstrap_updater() {
@@ -2627,11 +2675,32 @@ step_persistent_journal() {
 # TASK-445.
 ROOT_LIBEXEC_DIR="/usr/local/libexec/clawbox"
 
+ROOT_EXEC_MANIFEST_HELPER="$ROOT_LIBEXEC_DIR/clawbox-root-manifest.sh"
+
+# Record the tree root is allowed to execute. Strict: a non-zero return means
+# the record is NOT current, and the caller must treat that as a failure.
+write_root_exec_manifest() {
+  [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 1
+  "$ROOT_EXEC_MANIFEST_HELPER" --write
+}
+
+# Best-effort variant for the update paths that legitimately change the tree. A
+# device that has not installed the helper yet has no manifest to keep in step,
+# and warning about that on every sync would be noise; a helper that IS present
+# and fails is worth a line, because the next root step refuses until the record
+# is current again.
+refresh_root_exec_manifest() {
+  [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 0
+  write_root_exec_manifest || echo "  Warning: could not re-record the root-exec manifest; root steps will refuse until an operator runs 'sudo bash $PROJECT_DIR/install.sh --step systemd_services'" >&2
+}
+
 install_root_libexec() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
   local src
-  for src in clawbox-root-step.sh; do
+  # The integrity helper first: the dispatcher installed at the END of this
+  # function refuses to run any step unless the manifest this writes verifies.
+  for src in clawbox-root-manifest.sh; do
     if [ -f "$PROJECT_DIR/config/$src" ]; then
       install -o root -g root -m 0755 "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -2650,6 +2719,23 @@ install_root_libexec() {
     install -o root -g root -m 0644 "$PROJECT_DIR/config/clawbox-resource-limits.env" \
       /etc/clawbox/resource-limits.env
   fi
+
+  # Manifest, THEN dispatcher — never the other way round. The dispatcher fails
+  # closed on a missing or stale manifest, so installing it first would leave a
+  # window (and, if the manifest write failed, a permanent state) in which every
+  # root step refuses: no password change, no hostname change, no hotspot
+  # restart, on an appliance with no console. If the record cannot be written we
+  # keep whatever dispatcher is already installed and say so — the same rule
+  # install_sudoers_dropin follows for the allow-list. TASK-445.
+  if write_root_exec_manifest; then
+    if [ -f "$PROJECT_DIR/config/clawbox-root-step.sh" ]; then
+      install -o root -g root -m 0755 "$PROJECT_DIR/config/clawbox-root-step.sh" \
+        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh"
+    fi
+  else
+    echo "  Warning: could not record the root-exec manifest; leaving the existing root dispatcher in place" >&2
+    record_provision_failure "root_exec_manifest"
+  fi
 }
 
 # ── sudoers ────────────────────────────────────────────────────────────────
@@ -2660,7 +2746,13 @@ SUDOERS_DIR="/etc/sudoers.d"
 SUDOERS_QUARANTINE_DIR="/var/lib/clawbox/sudoers-quarantine"
 # Where a candidate drop-in is staged while it is validated. Root-owned and
 # NOT under /etc/sudoers.d — see install_sudoers_dropin().
-SUDOERS_STAGING_DIR="/var/lib/clawbox"
+#
+# A subdirectory of its own, not /var/lib/clawbox itself: that directory is
+# shared (clawbox-power-mode.sh keeps its clock snapshot there, the first-boot
+# VNC marker lives there), and install_sudoers_dropin creates its staging dir
+# 0700 root:root. Applying that to the shared parent would stop every non-root
+# reader from even traversing it.
+SUDOERS_STAGING_DIR="/var/lib/clawbox/sudoers-staging"
 # The drop-ins this installer owns. Nothing else in /etc/sudoers.d is ours, and
 # quarantine_overbroad_sudoers() below is the only code that touches the rest.
 CLAWBOX_SUDOERS_MANAGED=(clawbox clawbox-ollama)
@@ -2792,6 +2884,21 @@ install_sudoers_dropin() {
 # operator's own `%sudo`/`%admin` rule, and the distro default in /etc/sudoers,
 # are never inspected and never touched: removing those could lock the only
 # administrator out of a device that is 3000 km away.
+#
+# ACCEPTED RESIDUAL, recorded so the next reader does not mistake it for an
+# oversight. Three shapes are knowingly out of scope, all for the same reason —
+# each would mean this installer silently rewriting rules a human wrote:
+#
+#   1. A blanket line inside /etc/sudoers itself. Only /etc/sudoers.d is walked.
+#      e2e-install/06-sudoers.spec.ts catches this behaviourally instead: it runs
+#      `sudo -n` probes for commands no grant names and requires DENIED.
+#   2. A grant that reaches clawbox through a User_Alias rather than by name.
+#   3. Over-broad but not blanket — e.g. `clawbox ALL=(ALL) NOPASSWD: /bin/bash`,
+#      which is root in one move but is not a bare `ALL`.
+#
+# Widening the detector to any of these means an installer that can delete an
+# operator's deliberate rule on an appliance with no console; the behavioural
+# probes in CI are the compensating control. TASK-445.
 sudoers_grants_blanket_nopasswd() {
   local file="$1"
   [ -f "$file" ] || return 1
@@ -3757,14 +3864,78 @@ step_llamacpp_install() {
   echo "  llama.cpp runtime ready"
 }
 
+# Set the appliance owner's system password.
+#
+# The record arrives in a file the web server wrote, and the web server runs as
+# the clawbox user — so $PROJECT_DIR/data is clawbox-writable and this input is
+# attacker-choosable by anything with clawbox-level code execution. Until
+# TASK-445 every guard on the record lived on the UNPRIVILEGED side, in
+# src/lib/chpasswd.ts; the root side piped whatever it found straight into
+# chpasswd. Dropping `root:<new>` into that path and starting the granted unit
+# therefore set ROOT's password.
+#
+# So validate here, where the boundary actually is. chpasswd's format is
+# `<user>:<password>` per line and it happily takes a list, so all three of
+# "which user", "how many records" and "what may the record contain" have to be
+# pinned:
+#
+#   * exactly one record, so a second line cannot smuggle in another account;
+#   * the user field is exactly $CLAWBOX_USER — never root, never anything else;
+#   * a non-empty password with no CR or NUL, matching the checks the route
+#     already makes (src/lib/chpasswd.ts::chpasswdRecord).
+#
+# Residual, recorded deliberately: clawbox is in the `sudo` group, so being able
+# to set the CLAWBOX user's own password is still a route from clawbox code
+# execution to an interactive root shell. That is the owner's own administrator
+# account and removing it would lock the only administrator out of a console-less
+# appliance (see config/clawbox-sudoers and e2e-install/06-sudoers.spec.ts). What
+# this closes is the part that was never intended: changing a DIFFERENT account's
+# password, root's included.
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
+  # -f follows symlinks; -L rejects the link itself. A symlink here would be a
+  # way to make root read a file the clawbox user could not otherwise feed in.
+  if [ -L "$INPUT_FILE" ]; then
+    rm -f "$INPUT_FILE"
+    echo "Error: password input file is a symlink; refusing" >&2
+    exit 64
+  fi
   if [ ! -f "$INPUT_FILE" ]; then
     echo "Error: password input file not found" >&2
     exit 1
   fi
-  /usr/sbin/chpasswd < "$INPUT_FILE"
+
+  # Read the file ONCE and validate the value actually used — re-reading it
+  # after the checks would leave a window to swap the contents. Command
+  # substitution strips trailing newlines, so a well-formed single record has no
+  # embedded newline left and a second record is visible as one. It also drops
+  # NUL bytes, and it is the stripped value that is piped to chpasswd below, so
+  # no NUL can reach it either.
+  local record user
+  record="$(cat "$INPUT_FILE")"
   rm -f "$INPUT_FILE"
+
+  case "$record" in
+    *$'\n'*)
+      echo "Error: password input must be exactly one record" >&2
+      exit 64
+      ;;
+    *$'\r'*)
+      echo "Error: password input contains a carriage return" >&2
+      exit 64
+      ;;
+  esac
+  user="${record%%:*}"
+  if [ "$user" != "$CLAWBOX_USER" ]; then
+    echo "Error: password input names '$user'; only $CLAWBOX_USER may be changed here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "${record#*:}" ]; then
+    echo "Error: password input has no password" >&2
+    exit 64
+  fi
+
+  printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
 step_rebuild() {
@@ -4315,11 +4486,13 @@ step_validate_services() {
   # probe failures.
 
   # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
-  # export it, so on a fresh install our process still has it unset. Reload
-  # the file before probing.
-  if [ -f "$IFACE_ENV" ]; then
-    # shellcheck disable=SC1090
-    source "$IFACE_ENV"
+  # export it, so on a fresh install our process still has it unset. Reload the
+  # value before probing — PARSED from the clawbox-writable copy, sourced only
+  # from the root-owned one. See read_untrusted_env_value. TASK-445.
+  local _iface
+  _iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+  if [ -n "$_iface" ]; then
+    NETWORK_INTERFACE="$_iface"
   elif [ -f /etc/clawbox/network.env ]; then
     # shellcheck disable=SC1091
     source /etc/clawbox/network.env
@@ -4702,10 +4875,13 @@ step_validate_services || VALIDATE_RC=$?
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
-# Re-read persisted interface for summary
-if [ -f "$IFACE_ENV" ]; then
-  source "$IFACE_ENV"
+# Re-read the persisted interface for the summary. Parsed, not sourced — this
+# file is clawbox-writable and we are root. TASK-445.
+_summary_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_summary_iface" ]; then
+  NETWORK_INTERFACE="$_summary_iface"
 fi
+unset _summary_iface
 
 echo ""
 echo "=== ClawBox Setup Complete ==="

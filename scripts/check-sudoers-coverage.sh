@@ -21,6 +21,19 @@
 #     for why both spellings are shipped) or is acknowledged in
 #     ACKNOWLEDGED_UNUSED with a reason.
 #
+# It also enforces two SHAPE invariants on the allow-list itself, because
+# coverage alone does not make a grant safe (TASK-445 audit, GAP 2 and GAP 3):
+#
+#   * NO WILDCARDS. sudoers(5) matches a command's arguments as one concatenated
+#     string, so `*` and `?` span whitespace: `start --no-block clawbox-*` also
+#     matched `start --no-block clawbox-setup.service ssh.service`, and
+#     `systemctl start` takes a LIST of units. Every Cmnd_Spec must be literal,
+#     path and arguments alike.
+#   * ROOT-OWNED TARGETS ONLY. The command a grant names has to live somewhere
+#     the clawbox user cannot write, or the grant hands root a file the web
+#     server itself can rewrite. Anything outside the root-owned prefixes is
+#     rejected — see ROOT_OWNED_PREFIXES below.
+#
 # Repo convention this relies on: a real sudo INVOCATION from TypeScript either
 # spawns the literal "sudo"/"/usr/bin/sudo" as argv[0], or writes the absolute
 # "/usr/bin/sudo" inside a generated shell script. A bare `sudo` inside a
@@ -68,6 +81,51 @@ my @SUDOERS_FILES = (
   'config/clawbox-sudoers',
   'config/sudoers-clawbox-ollama',
 );
+
+# ── Where a granted command may live ────────────────────────────────────────
+# Directories no unprivileged account on the appliance can write to.
+# install.sh::install_root_libexec creates /usr/local/libexec/clawbox root:root
+# 0755 under a root:root parent and copies every helper it grants into it,
+# precisely so that no grant names a file in /home/clawbox/clawbox — a tree
+# install.sh itself hands back to the clawbox user with `chown -R` on every root
+# run.
+my @ROOT_OWNED_PREFIXES = (
+  '/bin/', '/sbin/', '/usr/bin/', '/usr/sbin/', '/usr/local/libexec/clawbox/',
+);
+
+# Reject a grant that cannot be safe regardless of who invokes it.
+sub check_grant_shape {
+  my ($rel, $lineno, $cmd) = @_;
+
+  if ($cmd =~ /[*?]/) {
+    fatal("$rel:$lineno uses a wildcard:\n  $cmd\n"
+      . "  sudoers matches arguments as ONE concatenated string, so `*` and `?` span\n"
+      . "  whitespace and swallow extra arguments: a rule ending in `*` also matches\n"
+      . "  `<granted command> <anything else>`. Enumerate the exact commands instead.\n");
+  }
+
+  my ($path) = split /\s+/, $cmd;
+  fatal("$rel:$lineno grants the relative command `$path`. sudo resolves that through\n"
+    . "  secure_path, which is a convenience, not a privilege boundary. Use an absolute path.\n")
+    unless $path =~ m{^/};
+
+  # sudo matches the command PATH as a string and does not canonicalise it, so
+  # `/usr/bin/../home/clawbox/clawbox/payload` would sail past the prefix test
+  # below while naming a file in the clawbox-writable tree. Only canonical paths
+  # can be reasoned about here.
+  fatal("$rel:$lineno grants `$path`, which contains a `.` or `..` component.\n"
+    . "  sudo compares the command path as a string and never canonicalises it, so a\n"
+    . "  traversal like /usr/bin/../home/clawbox/... would pass the root-owned prefix\n"
+    . "  check below while naming a file clawbox can write. Use the canonical path.\n")
+    if grep { $_ eq '.' || $_ eq '..' } split m{/}, $path;
+
+  return if grep { index($path, $_) == 0 } @ROOT_OWNED_PREFIXES;
+  fatal("$rel:$lineno grants `$path`, which is outside every root-owned prefix\n"
+    . "  (" . join(', ', @ROOT_OWNED_PREFIXES) . ").\n"
+    . "  A NOPASSWD grant on a file the clawbox user can write IS passwordless local root:\n"
+    . "  the web server, the in-UI terminal and the agent's shell all run as clawbox.\n"
+    . "  Install a root-owned copy under /usr/local/libexec/clawbox and grant that instead.\n");
+}
 
 # ── Where a root command may be invoked from ────────────────────────────────
 # install.sh, config/clawbox-root-step.sh and e2e-install/ are deliberately
@@ -190,6 +248,7 @@ for my $rel (@SUDOERS_FILES) {
         unless $runas eq 'root';
       fatal("$rel:$lineno grants a bare ALL — that is the blanket rule this whole "
         . "task removed\n") if $cmd eq 'ALL';
+      check_grant_shape($rel, $lineno, $cmd);
       push @grants, { file => $rel, line => $lineno, cmd => $cmd, used => 0 };
       next;
     }
@@ -430,27 +489,16 @@ sub normalize_argv {
   return (\@a, undef);
 }
 
-sub glob_eq {
-  my ($pattern, $value) = @_;
-  return 1 if $pattern eq $value;
-  return 0 unless $pattern =~ /[*?]/;
-  my $re = quotemeta($pattern);
-  $re =~ s/\\\*/.*/g;
-  $re =~ s/\\\?/./g;
-  return $value =~ /^$re$/ ? 1 : 0;
-}
-
+# Exact comparison throughout: check_grant_shape() rejects `*` and `?` at parse
+# time, so every grant is a literal command line and sudo's glob semantics — the
+# ones that let `clawbox-*` swallow a second unit name — cannot apply here.
 sub grant_matches {
   my ($grant, $argv) = @_;
-  my @g = split /\s+/, $grant;
-  my $gpath = shift @g;
-  return 0 unless glob_eq($gpath, $argv->[0]);
+  my ($gpath, @gargs) = split /\s+/, $grant;
+  return 0 unless $gpath eq $argv->[0];
   # sudoers(5): a Cmnd listed without arguments may be run with any arguments.
-  return 1 unless @g;
-  my @a = @$argv[1 .. $#$argv];
-  return 0 unless scalar(@g) == scalar(@a);
-  glob_eq($g[$_], $a[$_]) or return 0 for 0 .. $#g;
-  return 1;
+  return 1 unless @gargs;
+  return "@gargs" eq "@{$argv}[1 .. $#$argv]" ? 1 : 0;
 }
 
 my (@uncovered, %seen);

@@ -7,6 +7,7 @@ import { getSystemUsername } from "@/lib/auth";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
 import { readEdition } from "@/lib/edition-source";
+import { startOllamaService } from "@/lib/local-ai-runtime";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -53,32 +54,40 @@ const HERMES_KEEP = new Set(["hermes-agent"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
+  // Deliberately the loopback address, not getOllamaBaseUrl(): that one honours
+  // OLLAMA_HOST, and a factory reset must never issue /api/delete against
+  // somebody else's Ollama server. What this cleans is the models this device
+  // downloaded, which live under /usr/share/ollama on the device itself.
   const OLLAMA = "http://127.0.0.1:11434";
   // Ollama is routinely STOPPED at reset time (the Local AI exclusive-mode
   // runtime shuts it down while llama.cpp is active), and its models live
   // under /usr/share/ollama — out of reach of the home wipe. Start it
-  // best-effort so the API deletes below actually run; the polkit grant
-  // already allows the clawbox user to manage units.
+  // best-effort so the API deletes below actually run.
+  //
+  // Through startOllamaService() rather than a hand-rolled systemctl call. This
+  // used to be a bare `systemctl start ollama` with no sudo, which worked only
+  // because of the unscoped polkit `manage-units` grant — the one thing that
+  // still makes the whole allow-list bypassable (TASK-539). The moment that
+  // grant goes, an unprivileged call here fails with "Interactive
+  // authentication required" and factory reset stops deleting models, silently.
+  // The shared helper already spells the unit `ollama.service` (sudoers matches
+  // arguments exactly, so the bare name matches nothing), passes `-n` so a box
+  // without the grant fails in milliseconds instead of sitting on a prompt,
+  // keeps the unprivileged call as a dev-shell fallback, and waits for the API
+  // to answer — which is what the retry loop here used to approximate. TASK-445.
   try {
-    await execFile("/usr/bin/systemctl", ["start", "ollama"], { timeout: 30_000 });
+    await startOllamaService();
   } catch {
-    // Not installed / failed to start — the fetch below decides what's cleanable.
+    // Not installed / never came up — the fetch below decides what's cleanable.
   }
   let models: { name: string }[] = [];
-  // The API needs a moment after a cold start; retry briefly.
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
-      if (res.ok) {
-        const data = await res.json();
-        models = data.models ?? [];
-        break;
-      }
-    } catch {
-      // Ollama not (yet) answering.
-    }
-    if (attempt < 2) await new Promise((r) => setTimeout(r, 1_500));
-    else return; // never came up — nothing reachable to clean
+  try {
+    const res = await fetch(`${OLLAMA}/api/tags`, { signal: AbortSignal.timeout(5_000) });
+    if (!res.ok) return;
+    const data = await res.json();
+    models = data.models ?? [];
+  } catch {
+    return; // nothing reachable to clean
   }
   for (const { name } of models) {
     try {
@@ -504,6 +513,12 @@ export async function POST(request: Request) {
     // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
     // already wiped, so clawbox-root-update@set_hostname.service will read the
     // default and apply it before the reboot.
+    // reset-failed first — see the same note in system/hostname/route.ts.
+    await execFile("/usr/bin/sudo", [
+      "/usr/bin/systemctl",
+      "reset-failed",
+      "clawbox-root-update@set_hostname.service",
+    ], { timeout: 10_000 }).catch(() => {});
     try {
       await execFile("/usr/bin/sudo", [
         "/usr/bin/systemctl",

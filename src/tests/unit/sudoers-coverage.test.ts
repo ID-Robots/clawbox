@@ -151,12 +151,83 @@ d("check-sudoers-coverage", () => {
     expect(r.stderr).toMatch(/is not a `clawbox ALL=\(root\) NOPASSWD: <cmd>` rule/);
   });
 
+  // ── Shape invariants (TASK-445 audit, GAP 2 + GAP 3) ──────────────────────
+  //
+  // Coverage alone never made a grant safe. These two rules are what stop the
+  // allow-list drifting back into the shapes the audit failed it for, and they
+  // are asserted here so a regression fails CI rather than a device.
+
+  it("refuses a wildcard in the command arguments", () => {
+    // The real defect: sudoers matches arguments as one concatenated string, so
+    // this rule also matched `... start --no-block clawbox-setup.service ssh.service`
+    // and `systemctl start` takes a list of units.
+    appendGrant("clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-*");
+    const r = run(fixture);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/uses a wildcard/);
+  });
+
+  it("refuses a wildcard in the command path", () => {
+    appendGrant("clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/*.sh");
+    const r = run(fixture);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/uses a wildcard/);
+  });
+
+  it("refuses a `?` wildcard too, not just `*`", () => {
+    appendGrant("clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-gatewa?.service");
+    const r = run(fixture);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/uses a wildcard/);
+  });
+
+  it("refuses a grant pointing into the clawbox-writable project tree", () => {
+    // GAP 2 in one line: install.sh is clawbox:clawbox 0755 inside a
+    // clawbox-writable directory, so this grant is passwordless local root for
+    // anything that can already run code as clawbox.
+    appendGrant("clawbox ALL=(root) NOPASSWD: /home/clawbox/clawbox/install.sh --step build");
+    const r = run(fixture);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/outside every root-owned prefix/);
+  });
+
+  it("refuses a grant on any other clawbox-writable location", () => {
+    for (const target of ["/tmp/helper.sh", "/home/clawbox/.local/bin/hermes", "/var/tmp/x"]) {
+      fs.copyFileSync(path.join(REPO, "config", "clawbox-sudoers"), grants());
+      appendGrant(`clawbox ALL=(root) NOPASSWD: ${target}`);
+      const r = run(fixture);
+      expect(r.status, `${target} was accepted`).toBe(1);
+      expect(r.stderr).toMatch(/outside every root-owned prefix/);
+    }
+  });
+
+  it("refuses a relative command, which sudo would resolve through secure_path", () => {
+    appendGrant("clawbox ALL=(root) NOPASSWD: systemctl reboot");
+    const r = run(fixture);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/relative command/);
+  });
+
+  it("still accepts a root-owned libexec helper", () => {
+    // The escape hatch the invariant leaves open, and the pattern every new
+    // privileged helper is supposed to follow. Granting a path nothing calls is
+    // an unused grant, not a shape error — so assert on the message, not the code.
+    appendGrant("clawbox ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-new-helper.sh --go");
+    const r = run(fixture);
+    expect(r.stderr).not.toMatch(/outside every root-owned prefix|uses a wildcard/);
+    expect(r.stderr).toMatch(/UNUSED grants/);
+  });
+
+  // A direct assertion that the SHIPPED files contain no wildcard lives in
+  // root-steps.test.ts, which reads both drop-ins; the tests above prove the
+  // checker is what fails CI when one comes back.
+
   it("lists what it matched", () => {
     const r = run(REPO, ["--list"]);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/GRANTS \(\d+\):/);
     expect(r.stdout).toContain("/usr/local/libexec/clawbox/optimize-ollama.sh");
-    expect(r.stdout).toContain("/usr/bin/systemctl start clawbox-root-update@\*.service".replace("\\", ""));
+    expect(r.stdout).toContain("/usr/bin/systemctl start clawbox-root-update@chpasswd.service");
     expect(r.stdout).toMatch(/RESOLVED CALL SITES:/);
   });
 

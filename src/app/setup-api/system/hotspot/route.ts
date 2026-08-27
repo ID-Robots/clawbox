@@ -139,6 +139,12 @@ export async function POST(request: Request) {
             "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
           );
         } else {
+          // reset-failed first — see the note in system/hostname/route.ts.
+          await execFileAsync("/usr/bin/sudo", [
+            "/usr/bin/systemctl",
+            "reset-failed",
+            "clawbox-root-update@restart_ap.service",
+          ]).catch(() => {});
           await execFileAsync("/usr/bin/sudo", [
             "/usr/bin/systemctl",
             "start",
