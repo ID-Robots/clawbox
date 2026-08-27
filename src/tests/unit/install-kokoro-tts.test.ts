@@ -237,8 +237,14 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
  * Run the real step_openclaw_tts against a stub `openclaw` and a stub
  * install-voice.sh whose exit code the test picks.
  */
-/** @param voiceExit the exit status the stub install-voice.sh reports. */
-function runStep(voiceExit: number) {
+/**
+ * @param voiceExit       the exit status the stub install-voice.sh reports.
+ * @param currentProvider what `openclaw config get messages.tts.provider`
+ *                        answers. Non-empty puts the step on the
+ *                        already-configured branch — the shipped-box update
+ *                        path, which returns early.
+ */
+function runStep(voiceExit: number, currentProvider = "") {
   const projectDir = path.join(root, "project");
   const callsLog = path.join(root, "openclaw.log");
   const voiceArgs = path.join(root, "voice-args.log");
@@ -256,7 +262,10 @@ function runStep(voiceExit: number) {
     openclaw,
     [
       `echo "$*" >> "${callsLog}"`,
-      'if [ "$1" = "config" ] && [ "$2" = "get" ]; then exit 0; fi',
+      'if [ "$1" = "config" ] && [ "$2" = "get" ]; then',
+      `  [ "$3" = "messages.tts.provider" ] && printf '%s' "${currentProvider}"`,
+      "  exit 0",
+      "fi",
       "exit 0",
     ].join("\n"),
   );
@@ -375,9 +384,13 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
   it("carries the failure through even when the owner's provider is preserved", () => {
     // The update path on a shipped box: messages.tts.provider is already set,
     // so the step returns early. Returning 0 from there would drop the verdict
-    // on exactly the population that has the defect.
-    const res = runStep(12);
+    // on exactly the population that has the defect — and without a provider in
+    // the stub's answer this case never reaches that branch at all, it just
+    // retreads the one above.
+    const res = runStep(12, "tts-local-cli");
+    expect(res.stdout, "the preserve branch was never reached").toContain("preserved");
     expect(res.status).not.toBe(0);
+    expect(res.provisionFailures).toContain("openclaw_tts");
   });
 
   it("hands install-voice.sh the verdict path so both halves cannot drift", () => {
