@@ -1,6 +1,7 @@
 import { spawn } from "child_process";
 import path from "path";
 import { HERMES_BIN } from "@/lib/harness";
+import { spawnFailureMessage } from "@/lib/hermes-cli-message";
 
 // Shared helper to run a `hermes` CLI subcommand from a setup-api route.
 //
@@ -123,11 +124,13 @@ export function runHermesCli(
 
     child.on("error", (e) => {
       finish(() => {
-        if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-          reject(new Error("Hermes is not installed on this device"));
-          return;
-        }
-        reject(e);
+        // Same rule as the chat route's own spawn: ENOENT was rewritten to keep
+        // the binary path off a customer's screen, and every other errno went
+        // out raw. That matters MORE here — eleven setup-api routes reject-path
+        // this straight into their JSON `error` — so the sanitising belongs at
+        // the spawn, not at each caller.
+        console.error("[hermes cli] spawn failed", e);
+        reject(new Error(spawnFailureMessage(e)));
       });
     });
     child.on("close", (code) => {

@@ -47,6 +47,11 @@ import {
 } from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
+import {
+  errorFromStderr,
+  hermesFailureMessage,
+  spawnFailureMessage,
+} from "@/lib/hermes-cli-message";
 
 /**
  * How many images one turn may carry — the same number the composer is told,
@@ -166,14 +171,14 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
     child.on("error", (e) => {
       if (settled) return;
       cleanup();
-      // A missing binary surfaces as ENOENT with the full spawn path in the
-      // message (`spawn /home/clawbox/.local/bin/hermes ENOENT`). Don't leak
-      // that path to the client — report the actionable cause instead.
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
-        reject(new Error("Hermes is not installed on this device"));
-        return;
-      }
-      reject(e);
+      // EVERY spawn failure carries the full binary path in its message
+      // (`spawn /home/clawbox/.local/bin/hermes EACCES`), not just ENOENT —
+      // and this message becomes the chat bubble, the 502 body AND the durable
+      // transcript line. Sanitising one errno and passing the rest through was
+      // the whole of the leak. Keep the raw text in the journal, where a path
+      // is a diagnosis rather than a disclosure.
+      console.error("[hermes chat] spawn failed", e);
+      reject(new Error(spawnFailureMessage(e)));
     });
     child.on("close", (code) => {
       if (settled) return;
@@ -187,180 +192,9 @@ function runHermes(args: string[], signal?: AbortSignal): Promise<{ out: string;
   });
 }
 
-/**
- * Turn `chat -q`'s stderr into something worth showing a person.
- *
- * The first thing on stderr is always the `session_id:` banner, so a failed run
- * used to surface as "Error: session_id: 20260810_221825_609d1e" — the one line
- * on the stream that says nothing about what went wrong. The actual cause sat
- * on the next line: "HTTP 404: Model 'claude-opus-5' not found. The requested
- * model does not exist in our configuration or OpenRouter catalog."
- *
- * So: drop the banner and anything else that is pure bookkeeping, and lead with
- * the first line that names a failure — a stack trace's later frames are worse
- * than useless in a chat bubble.
- */
-function errorFromStderr(stderr: string): string {
-  return usefulLines(stderr)[0] ?? "";
-}
-
-/**
- * Hermes hard-wraps its output at ~76 columns, so ONE sentence arrives as
- * several lines. Rejoining them is the difference between
- *
- *   "No inference provider configured. Run 'hermes model' to choose a provider and"
- *
- * — which is what the customer used to get, ending on a dangling "and" — and the
- * whole message, whose second half is the part they can act on: which API key to
- * set, and that it goes in ~/.hermes/.env.
- *
- * A line continues the one above it when the one above looks WRAPPED: long
- * enough to have hit the wrap column, and followed by something that does not
- * start a new record of its own (a list item, a `key: value` line, an
- * `HTTP 404:` / `SomeError:` header). Nothing here joins two independent
- * failures — those start with one of those markers — and a short line is never
- * treated as wrapped, so a terse two-line report stays two lines.
- */
-const WRAP_COLUMN_HINT = 60;
-
-function startsNewRecord(line: string): boolean {
-  return /^(?:[-*•]|\d+[.)])\s/.test(line)
-    || /^HTTP\s+\d{3}\b/.test(line)
-    || /^[A-Za-z][\w.]*(?:Error|Exception|Warning)\b/.test(line)
-    || /^[A-Za-z][\w .\-]*:\s/.test(line);
-}
-
-function unwrap(lines: string[]): string[] {
-  const paragraphs: string[] = [];
-  for (const line of lines) {
-    const previous = paragraphs[paragraphs.length - 1];
-    if (previous !== undefined && previous.length >= WRAP_COLUMN_HINT && !startsNewRecord(line)) {
-      paragraphs[paragraphs.length - 1] = `${previous} ${line}`;
-    } else {
-      paragraphs.push(line);
-    }
-  }
-  return paragraphs;
-}
-
-/** The cap is per MESSAGE, not per line — a bubble is not a log viewer. */
-const MAX_MESSAGE_CHARS = 400;
-
-/**
- * Lines `chat -q` prints as STATUS, not as causes.
- *
- * `--resume` announces itself on stderr before the turn says anything, and on
- * EVERY resumed run — success or failure alike. Captured verbatim from the
- * live box (exit 1, the real cause sitting on stdout as "HTTP 403 — Just a
- * moment..."):
- *
- *   ↻ Resumed session 20260825_165225_be089e "What model are you and what is
- *   this machine?" (2 user messages, 7 total messages)
- *   Model restored from session: claude-fable-5 (anthropic)
- *   session_id: 20260825_165225_be089e
- *
- * Because only the `session_id:` line was being stripped, `errorFromStderr`
- * found the resume banner, decided stderr "said something", and the customer's
- * bubble read "Error: ↻ Resumed session …" while the actual failure was never
- * looked at. A banner is bookkeeping exactly like the session id under it.
- *
- * Matching on text is the only classifier available HERE: the CLI's streams
- * carry no framing to gate on. The streamed transport does not have this
- * problem to begin with — the dashboard socket reports the same resume as a
- * typed `session.resume` RESULT frame (captured live: `{"resumed":
- * "20260825_165225_be089e", …}`), never as an event the turn loop could
- * mistake for output.
- */
-function isBookkeepingLine(line: string): boolean {
-  return /^session_id:/i.test(line)
-    || /^(?:↻\s*)?Resumed session\b/.test(line)
-    || /^Model restored from session\b/.test(line)
-    // The connectors CPython prints between chained tracebacks. They sit at
-    // column 0, so they survive the frame strip below, and they name no cause.
-    || /^(?:During handling of the above exception|The above exception was the direct cause)\b/
-      .test(line);
-}
-
-/**
- * Drop the FRAMES of a Python traceback, keeping only its summary line.
- *
- * CPython indents everything belonging to a frame — the `File "…"` header, the
- * source line under it and (3.11+) the `^^^^` anchor beneath that — and returns
- * the exception summary to column 0. Trimming every line before classifying it
- * threw that signal away. Only the frame HEADER was being dropped, so the
- * source line under it survived, matched the "names a failure" filter below on
- * its `RuntimeError(` text, and — sitting earlier in the stream than the real
- * summary — became the customer's error bubble. Captured shape:
- *
- *   Traceback (most recent call last):
- *     File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider
- *       raise RuntimeError("upstream refused the request")     <- what was shown
- *   RuntimeError: upstream refused the request                 <- what to show
- *
- * So classify on the RAW line: once a traceback opens, drop everything indented
- * under it and let the first column-0 line both end the block and stand as the
- * cause. A frame header opens a block too, so a stream whose `Traceback:` line
- * was already cut off still reads correctly. If the stream ENDS inside the
- * frames, nothing is invented — the caller falls back to the exit code rather
- * than quoting Python source at a customer. The block is scoped: once it ends,
- * an indented line is ordinary output again.
- *
- * A frame header is matched by its FULL shape — `File "…", line <n>` — not by
- * its first six characters. `File "config.yaml" was denied` is a sentence a
- * customer needs to read, and the loose form both swallowed it and reopened a
- * block that had already closed, taking the indented lines after it with it.
- */
-const TRACEBACK_OPENER = /^[ \t]*(?:Traceback\b|File "[^"]+", line \d+\b)/;
-
-function withoutTracebackFrames(lines: string[]): string[] {
-  const kept: string[] = [];
-  let inTraceback = false;
-  for (const line of lines) {
-    if (TRACEBACK_OPENER.test(line)) {
-      inTraceback = true;
-      continue;
-    }
-    if (inTraceback) {
-      if (!line || /^[ \t]/.test(line)) continue;
-      inTraceback = false;
-    }
-    kept.push(line);
-  }
-  return kept;
-}
-
-/** Bookkeeping and stack noise, dropped before we look for a cause. */
-function usefulLines(stream: string): string[] {
-  // Strip frames BEFORE trimming: the indentation is the only thing that tells
-  // a frame's source line apart from a line the customer needs to read.
-  const lines = withoutTracebackFrames(stream.split(/\r?\n/))
-    .map((l) => l.trim())
-    .filter((l) => l && !isBookkeepingLine(l));
-  // Unwrap FIRST: the filter below keeps lines that themselves name a failure,
-  // and the continuation lines of a wrapped message read as prose. That is how
-  // the remedy half of every multi-line Hermes error was being dropped.
-  const paragraphs = unwrap(lines);
-  const named = paragraphs.filter((l) =>
-    /\b(?:HTTP\s+\d{3}|error|failed|not found|denied|invalid|unauthor)/i.test(l));
-  return (named.length ? named : paragraphs).map((l) =>
-    l.length > MAX_MESSAGE_CHARS ? `${l.slice(0, MAX_MESSAGE_CHARS - 1)}…` : l);
-}
-
-/**
- * The message for a failed turn, from whichever stream actually carries it.
- *
- * Reading stderr alone was not enough. On a provider-side failure Hermes puts
- * the explanation on STDOUT — "API call failed after 3 retries: HTTP 404:
- * model: claude-opus-4-20250514" — and leaves stderr holding only the
- * `session_id:` banner. Stripping that banner (correctly) then left nothing,
- * so the customer got "hermes exited with code 1": true, and useless.
- *
- * stderr is still preferred when it says something, since a crash reports
- * there; stdout is the fallback that covers the provider-error case.
- */
-function hermesFailureMessage(stdout: string, stderr: string): string {
-  return errorFromStderr(stderr) || (usefulLines(stdout)[0] ?? "");
-}
+// The failure-message parser lives in @/lib/hermes-cli-message: the Settings
+// panel renders the same `hermes` stderr through two more routes, and a parser
+// that only the chat route could reach is how the frames got back on screen.
 
 /**
  * The exit code `hermes chat -q` uses when a turn is cut short by a signal.
@@ -425,6 +259,7 @@ function hermesExitMessage(code: number | null, stdout: string, stderr: string):
 export const __test = {
   hermesFailureMessage,
   errorFromStderr,
+  spawnFailureMessage,
   hermesExitMessage,
   HERMES_INTERRUPTED_EXIT_CODE,
 };
