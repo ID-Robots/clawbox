@@ -439,6 +439,7 @@ export const nl: Record<string, string> = {
   "codingAgent.chatStopped": "Codeeragent gestopt",
 
   "codingAgent.chatOpenApp": "openen",
+  "codingAgent.chatAgents": "{n} agenten",
   "codingAgent.noticeOpen": "Codeeragent openen",
   "codingAgent.noticeDismiss": "Sluiten",
   "codingAgent.switchLabel": "De assistent programmeerwerk laten delegeren",

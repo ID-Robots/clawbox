@@ -450,6 +450,7 @@ export const zh: Record<string, string> = {
   "codingAgent.chatStopped": "编程助手已停止",
 
   "codingAgent.chatOpenApp": "打开",
+  "codingAgent.chatAgents": "{n} 个代理",
   "codingAgent.noticeOpen": "打开编程助手",
   "codingAgent.noticeDismiss": "忽略",
   "codingAgent.switchLabel": "允许助手委派编程工作",

@@ -18,6 +18,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.chatFailed": "Coding agent did not finish",
   "codingAgent.chatStopped": "Coding agent stopped",
   "codingAgent.chatOpenApp": "open",
+  // A template the chat's run card fills in — "{n} agents" — shown when a
+  // delegated run fans out to sub-agents.
+  "codingAgent.chatAgents": "{n} agents",
 
   // The desktop card a finished run raises, top-right with the others.
   "codingAgent.noticeOpen": "Open the coding agent",

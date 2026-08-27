@@ -4,16 +4,16 @@ import { useEffect, useState } from "react";
 import type { CodingAgentActivity } from "@/lib/use-coding-agent-activity";
 
 /**
- * One delegated coding run, as a badge in the chat.
+ * One delegated coding run, as a card in the chat.
  *
- * It sits with the live tool pills and borrows their shape and their three
- * tones on purpose: this is the same kind of fact they report — what the box
- * did — and the eye should not have to learn a second vocabulary for it. What
- * differs is the source. A tool pill is fed by the gateway's tool-call
- * lifecycle and so reaches "done" the moment `coding_agent_run` hands back a
- * run id; this is fed by the device's own run record, so it tracks the work.
+ * Grown from a one-line pill into the same kind of card the Claude Code web
+ * UI shows for a delegated workflow: a title line naming the work, a meta
+ * line with the status, how the run is spending its effort and for how long,
+ * and — when the run fans out — one dot per sub-agent, filled while that
+ * helper is still out. The dots are the Coding Agent app's own vocabulary
+ * (see CodingAgentApp), so the chat and the app read the same way.
  *
- * The badge STAYS once the run ends, reporting the outcome. Runs measured on
+ * The card STAYS once the run ends, reporting the outcome. Runs measured on
  * the box take 9-15 seconds — a badge that vanished with the run was gone
  * before the owner had finished reading the message above it.
  *
@@ -23,10 +23,10 @@ import type { CodingAgentActivity } from "@/lib/use-coding-agent-activity";
  */
 
 const TONE = {
-  running: { background: "rgba(251,191,36,0.12)", border: "1px solid rgba(251,191,36,0.25)", color: "#fcd34d", glyph: "🤖" },
-  completed: { background: "rgba(34,197,94,0.10)", border: "1px solid rgba(34,197,94,0.22)", color: "#86efac", glyph: "✓" },
-  failed: { background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.25)", color: "#fca5a5", glyph: "!" },
-  stopped: { background: "rgba(148,163,184,0.12)", border: "1px solid rgba(148,163,184,0.25)", color: "#cbd5e1", glyph: "◼" },
+  running: { color: "#fcd34d", glyph: "🤖" },
+  completed: { color: "#86efac", glyph: "✓" },
+  failed: { color: "#fca5a5", glyph: "!" },
+  stopped: { color: "#cbd5e1", glyph: "◼" },
 } as const;
 
 function elapsed(from: number, to: number): string {
@@ -36,11 +36,27 @@ function elapsed(from: number, to: number): string {
   return `${m}m ${s - m * 60}s`;
 }
 
+/** "46k" / "1.3M" — the Coding Agent app's own compaction. */
+function tokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+function firstLine(text: string, max = 64): string {
+  const line = (text ?? "").split("\n")[0].trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
 export default function CodingAgentActivityPill(
   { run, labels, openLabel, onOpen }: {
     run: CodingAgentActivity;
-    /** One per status, plus the owner-started variant of "running". */
-    labels: { running: string; runningOwner: string; completed: string; failed: string; stopped: string };
+    /**
+     * One per status, plus the owner-started variant of "running", plus the
+     * counted words for the meta line: `agents` is a "{n} agents" template,
+     * `tokensWord` follows a count.
+     */
+    labels: { running: string; runningOwner: string; completed: string; failed: string; stopped: string; agents?: string; tokensWord?: string };
     openLabel: string;
     onOpen?: () => void;
   },
@@ -58,6 +74,26 @@ export default function CodingAgentActivityPill(
   // work the person at the desk kicked off.
   const label = live && run.source === "owner" ? labels.runningOwner : labels[run.status];
   const took = elapsed(run.startedAt, live ? now : (run.completedAt ?? now));
+  const title = firstLine(run.task) || run.projectId || label;
+
+  // Tolerate a record from before these fields existed (or a test's stub).
+  const subTotal = run.subagentsTotal ?? 0;
+  const subActive = live ? (run.subagentsActive ?? 0) : 0;
+  const byType = run.subagentsByType ?? {};
+  const used = run.tokensUsed ?? 0;
+
+  const meta: React.ReactNode[] = [
+    <span key="label" style={{ color: tone.color }}>{label}</span>,
+  ];
+  if (run.projectId) meta.push(<span key="project">{run.projectId}</span>);
+  if (subTotal > 0 && labels.agents) {
+    meta.push(<span key="agents">{labels.agents.replaceAll("{n}", String(subTotal))}</span>);
+  }
+  if (used > 0 && labels.tokensWord) {
+    meta.push(<span key="tokens">{`${tokens(used)} ${labels.tokensWord}`}</span>);
+  }
+  // aria-hidden lives on the clock's own span below.
+  meta.push(<span key="took" aria-hidden="true">{took}</span>);
 
   return (
     <div
@@ -65,51 +101,93 @@ export default function CodingAgentActivityPill(
       data-status={run.status}
       role="status"
       // The elapsed time re-renders every second. Inside a polite live region
-      // that makes a screen reader announce the whole pill on every tick for
+      // that makes a screen reader announce the whole card on every tick for
       // as long as the run lasts. The status text is what is worth announcing;
-      // the clock is marked aria-hidden below.
+      // the clock is marked aria-hidden above.
       aria-live={live ? "polite" : "off"}
       style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "4px 10px",
-        borderRadius: 999,
-        background: tone.background,
-        border: tone.border,
-        color: tone.color,
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        padding: "8px 12px",
+        borderRadius: 12,
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        color: "rgba(255,255,255,0.85)",
         fontSize: 12,
-        fontWeight: 500,
         maxWidth: "100%",
+        minWidth: 220,
+        alignSelf: "flex-start",
       }}
     >
-      <span aria-hidden="true">{tone.glyph}</span>
-      <span>{label}</span>
-      {run.projectId ? <span style={{ opacity: 0.7 }}>· {run.projectId}</span> : null}
-      {/* aria-hidden: it changes every second, and a live region would
-          announce the whole pill on every tick. Sighted users get the clock;
-          screen readers get the status, which is what actually changed. */}
-      <span aria-hidden="true" style={{ opacity: 0.7 }}>· {took}</span>
-      {onOpen ? (
-        <button
-          type="button"
-          onClick={onOpen}
-          title={openLabel}
-          aria-label={openLabel}
-          style={{
-            marginLeft: 2,
-            background: "transparent",
-            border: 0,
-            color: "inherit",
-            opacity: 0.75,
-            cursor: "pointer",
-            font: "inherit",
-            padding: 0,
-            textDecoration: "underline",
-          }}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span aria-hidden="true" style={{ color: tone.color, flexShrink: 0 }}>{tone.glyph}</span>
+        <span style={{
+          fontWeight: 600,
+          fontSize: 12.5,
+          color: "rgba(255,255,255,0.9)",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          flex: 1,
+        }}>
+          {title}
+        </span>
+        {onOpen ? (
+          <button
+            type="button"
+            onClick={onOpen}
+            title={openLabel}
+            aria-label={openLabel}
+            style={{
+              background: "transparent",
+              border: 0,
+              color: "rgba(255,255,255,0.55)",
+              cursor: "pointer",
+              font: "inherit",
+              fontSize: 11.5,
+              padding: 0,
+              textDecoration: "underline",
+              flexShrink: 0,
+            }}
+          >
+            {openLabel}
+          </button>
+        ) : null}
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 6, rowGap: 2, color: "rgba(255,255,255,0.5)", fontSize: 11.5 }}>
+        {meta.map((part, i) => (
+          <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {i > 0 ? <span aria-hidden="true">·</span> : null}
+            {part}
+          </span>
+        ))}
+      </div>
+      {subTotal > 0 ? (
+        // One dot per sub-agent, capped so a fan-out cannot flood the card;
+        // filled + pulsing while that helper is still out, hollow once it is
+        // back. The per-type breakdown rides on `title` — same vocabulary as
+        // the Coding Agent app's dots.
+        <span
+          data-testid="coding-agent-activity-subagents"
+          style={{ display: "flex", alignItems: "center", gap: 4 }}
+          title={Object.entries(byType).map(([k, n]) => `${n}× ${k}`).join(", ")}
         >
-          {openLabel}
-        </button>
+          {Array.from({ length: Math.min(subTotal, 12) }).map((_, i) => (
+            <span
+              key={i}
+              className={i < subActive ? "animate-pulse" : undefined}
+              style={{
+                display: "inline-block",
+                width: 7,
+                height: 7,
+                borderRadius: "50%",
+                background: i < subActive ? "#34d399" : "rgba(52,211,153,0.35)",
+              }}
+            />
+          ))}
+          {subTotal > 12 ? <span style={{ fontSize: 10.5, color: "rgba(255,255,255,0.5)" }}>+{subTotal - 12}</span> : null}
+        </span>
       ) : null}
     </div>
   );

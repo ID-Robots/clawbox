@@ -150,6 +150,8 @@ describe("the tool steps in the chat bubble", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
 
     const chips = await screen.findByTestId("chat-tool-summary");
+    // The record rests behind its "Ran N commands" line.
+    fireEvent.click(await screen.findByTestId("chat-tool-summary-toggle"));
     // Prettified the same way the live OpenClaw pill does it.
     expect(chips.textContent).toContain("terminal");
     // The arguments ride on the tooltip, not in the chip.
@@ -170,6 +172,7 @@ describe("the tool steps in the chat bubble", () => {
     await send("how is the box");
 
     const chips = await screen.findByTestId("chat-tool-summary");
+    fireEvent.click(await screen.findByTestId("chat-tool-summary-toggle"));
     // The MCP server prefix is stripped, as it is for the live pills.
     expect(chips.textContent).toContain("system stats");
     expect(chips.textContent).not.toContain("clawbox__");

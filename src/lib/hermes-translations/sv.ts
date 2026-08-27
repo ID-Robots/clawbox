@@ -435,6 +435,7 @@ export const sv: Record<string, string> = {
   "codingAgent.chatStopped": "Kodagenten stoppad",
 
   "codingAgent.chatOpenApp": "öppna",
+  "codingAgent.chatAgents": "{n} agenter",
   "codingAgent.noticeOpen": "Öppna kodagenten",
   "codingAgent.noticeDismiss": "Stäng",
   "codingAgent.switchLabel": "Låt assistenten delegera programmeringsarbete",
