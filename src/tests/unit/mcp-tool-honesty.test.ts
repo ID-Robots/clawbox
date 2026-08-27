@@ -66,6 +66,7 @@ import { registerAiTools } from "../../../mcp/tools/ai";
 import { registerBrowserTools } from "../../../mcp/tools/browser";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { buildContext } from "../../../mcp/lib/context";
+import { registerOrientationTools } from "../../../mcp/tools/orientation";
 import { desktopDisplay, registerSystemTools } from "../../../mcp/tools/system";
 
 const ctx = (
@@ -643,5 +644,204 @@ describe("a box that cannot draw says so instead of improvising", () => {
     // as far as the honest answer inside.
     const { description } = ai("hermes", false).get("image_generate");
     expect(description).toMatch(/picture|image/i);
+  });
+});
+
+// ── skill_install ────────────────────────────────────────────────────────────
+
+/**
+ * TASK-453 round 3. `hermes skills install` exits 0 on every refusal, so the
+ * install route used to answer "Skill could not be resolved" for all of them,
+ * and this decoder turned that into `NOT_FOUND` + "Call skill_search, then pass
+ * the exact id it returned" — the step the agent had just taken. Live on a
+ * Hermes box, every ClawHub id sampled came back that way, so the loop was
+ * guaranteed for three quarters of the store.
+ *
+ * The route now names which refusal happened. What matters here is that each
+ * one gets a next step the agent CAN follow, and that the one the agent must
+ * not act on — a refusal no confirmation overrides — never sends it back round.
+ */
+describe("skill_install — a refusal the agent can act on", () => {
+  function skills() {
+    const h = captureRegistrar("hermes");
+    registerSkillTools(h.reg);
+    return h;
+  }
+
+  const refuse = (status: number, body: Record<string, unknown>) =>
+    apiPost.mockRejectedValue(new ApiError(status, JSON.stringify(body)));
+
+  async function installErr(id = "oo-terraform") {
+    const out = await skills().call("skill_install", { id, confirm: false });
+    if (!out.isError) throw new Error("expected skill_install to refuse");
+    return out.error;
+  }
+
+  it("does not send the agent back to skill_search when the DEVICE blocked the skill", async () => {
+    refuse(409, {
+      error: 'The device refused to install "oo-terraform".',
+      code: "dangerous_skill_blocked",
+      requiresConfirmation: false,
+      overridable: false,
+      warning: {
+        verdict: "dangerous",
+        trust: "community",
+        capabilities: [{ id: "shell" }, { id: "credentials" }],
+      },
+    });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("CONFLICT");
+    // The exact loop that was live: "pass the exact id it returned" is what had
+    // just been done.
+    expect(e.next).not.toMatch(/skill_search, then pass the exact id/);
+    expect(e.next).toMatch(/do NOT retry/i);
+    // And it must not offer a confirmation that cannot work.
+    expect(e.next).not.toMatch(/confirm=true/);
+    // It says what the skill can do, in words a user understands.
+    expect(e.message).toMatch(/run commands on the device/);
+    expect(e.message).toMatch(/read saved keys/);
+  });
+
+  it("still asks the user when the device's refusal IS confirmable", async () => {
+    refuse(409, {
+      error: "This skill did not pass the device's security scan.",
+      code: "dangerous_skill",
+      requiresConfirmation: true,
+      warning: { verdict: "caution", capabilities: [{ id: "network" }] },
+    });
+
+    const e = await installErr();
+
+    expect(e.next).toMatch(/confirm=true/);
+  });
+
+  it("keeps 'that id did not resolve' for the case where it is true, and passes the suggestions on", async () => {
+    refuse(502, {
+      error: "Skill could not be resolved — try the full identifier",
+      code: "unresolved",
+      candidates: ["oo-terraform"],
+    });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("NOT_FOUND");
+    expect(e.message).toMatch(/oo-terraform/);
+  });
+
+  it("tells the agent to wait, not to retry, when the GitHub allowance is gone", async () => {
+    refuse(502, { error: "the hourly GitHub API allowance is gone.", code: "rate_limited" });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("CONFLICT");
+    expect(e.next).toMatch(/hour/i);
+  });
+
+  it("does not report an unfinished install as a missing id", async () => {
+    // This branch was unreachable: an ErrorRule for status 502 is applied
+    // inside api() and always won before the body was ever looked at.
+    refuse(502, {
+      error: "The download was incomplete — the skill was not installed.",
+      code: "incomplete_install",
+      missingFiles: ["reference/pdf.md"],
+    });
+
+    const e = await installErr();
+
+    expect(e.message).toMatch(/incomplete/i);
+    expect(e.message).toMatch(/reference\/pdf\.md/);
+    expect(e.next).toMatch(/wifi_status/);
+  });
+
+  it("refuses a short name the store cannot narrow down, without inventing an id", async () => {
+    refuse(409, { error: "More than one skill goes by that name.", code: "ambiguous_id" });
+
+    const e = await installErr("pdf");
+
+    expect(e.code).toBe("BAD_ARGUMENT");
+    expect(e.next).toMatch(/FULL id/);
+  });
+
+  it("does not report an auth failure as a device refusal", async () => {
+    // The catch-all for an unrecognised code is scoped to the two statuses the
+    // route refuses with. A 401 has to keep classifyError's own advice: a
+    // missing token is recoverable, and "do not retry" hides that.
+    refuse(401, { error: "Authentication required" });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("AUTH_FAILED");
+    expect(e.next).not.toMatch(/would not install/i);
+  });
+});
+
+// ── device_status ────────────────────────────────────────────────────────────
+
+/**
+ * TASK-453 round 3. `ai_list_models` was taught that /setup-api/hermes/models
+ * answers with EMPTY STRINGS on an unconfigured device — but the guard went
+ * into mcp/tools/ai.ts only, and device_status kept `??`. Live on a Hermes box
+ * device_status answered `"provider": "", "model": "", "thinking": ""`.
+ *
+ * This is the worse instance of the two: the server's own instructions tell
+ * every model to call device_status BEFORE answering anything about the device,
+ * and to read `ai.limits` before stating any context or output limit — a key
+ * the Hermes branch never emitted at all.
+ */
+describe("device_status — nothing read is reported as unknown", () => {
+  function status(edition: "openclaw" | "hermes") {
+    const h = captureRegistrar(edition);
+    registerOrientationTools(h.reg, ctx(edition));
+    return h;
+  }
+
+  const routes = (map: Record<string, unknown>) =>
+    apiTry.mockImplementation(async (route: unknown) => map[route as string] ?? null);
+
+  async function body(edition: "openclaw" | "hermes") {
+    const out = await status(edition).call("device_status", {});
+    if (out.isError) throw new Error("device_status failed");
+    return JSON.parse(out.text) as { ai: Record<string, unknown> };
+  }
+
+  it("says unknown, not blank, for a Hermes device with nothing configured", async () => {
+    // The exact payload the route returns on a fresh box.
+    routes({ "/setup-api/hermes/models": { provider: "", current: "", reasoning: "" } });
+
+    const { ai } = await body("hermes");
+
+    expect(ai.provider).toBe("unknown");
+    expect(ai.model).toBe("unknown");
+    expect(ai.thinking).toBe("unknown");
+  });
+
+  it("emits ai.limits on Hermes, because the server's instructions tell the model to read it", async () => {
+    routes({ "/setup-api/hermes/models": { provider: "", current: "", reasoning: "" } });
+
+    const { ai } = await body("hermes");
+
+    expect(ai).toHaveProperty("limits");
+    expect(ai.limits).toBe("unknown");
+  });
+
+  it("reports what the device actually says when it says something", async () => {
+    routes({
+      "/setup-api/hermes/models": { provider: "clawlocal", current: "llama3.2:3b", reasoning: "minimal" },
+    });
+
+    const { ai } = await body("hermes");
+
+    expect(ai).toMatchObject({ provider: "clawlocal", model: "llama3.2:3b", thinking: "minimal" });
+  });
+
+  it("applies the same guard to the OpenClaw branch, which reads the same shape", async () => {
+    routes({ "/setup-api/chat/model": { selected: { provider: "", model: "" }, current: "" } });
+
+    const { ai } = await body("openclaw");
+
+    expect(ai.provider).toBe("unknown");
+    expect(ai.model).toBe("unknown");
   });
 });

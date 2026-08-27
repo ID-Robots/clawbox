@@ -16,6 +16,15 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 // child can't grow it unbounded.
 const MAX_OUTPUT_BYTES = 1_000_000;
 
+/**
+ * Console width for the CLI's `rich` output.
+ *
+ * Wide enough that no line this repo parses wraps: the widest is a scan-report
+ * row (severity + category + `file:line` + a 60-character excerpt, padded to
+ * ~110 columns) and a browse table row.
+ */
+const WIDE_CONSOLE_COLUMNS = "400";
+
 export interface HermesCliResult {
   code: number | null;
   stdout: string;
@@ -55,6 +64,14 @@ export function runHermesCli(
         ...process.env,
         HOME: HOME_DIR,
         PATH: `${path.dirname(HERMES_BIN)}:${process.env.PATH || ""}`,
+        // Hermes prints through `rich`, which falls back to 80 columns when
+        // stdout is a pipe and hard-wraps everything it renders — mid-sentence
+        // in a refusal, mid-cell in a table. Every caller that reads this
+        // output is parsing it, so the wide console is the default rather than
+        // something each one has to remember (three call sites already passed
+        // their own COLUMNS, at two different widths). Still overridable
+        // through `opts.env`.
+        COLUMNS: WIDE_CONSOLE_COLUMNS,
         ...opts.env,
       },
     });

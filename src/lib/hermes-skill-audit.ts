@@ -37,7 +37,13 @@ const MAX_BYTES = 512 * 1024;
 export interface SkillAuditRecord {
   /** ISO-8601, UTC. */
   at: string;
-  action: 'install-confirmed' | 'install-refused' | 'install-incomplete' | 'install-name-conflict';
+  action:
+    | 'install-confirmed'
+    | 'install-refused'
+    /** The device's own installer refused it outright — no confirmation overrides this one. */
+    | 'install-blocked-by-device'
+    | 'install-incomplete'
+    | 'install-name-conflict';
   /** Registry identifier the owner asked for. */
   id: string;
   /** Resolved skill name / lock key, when the install got far enough to have one. */
