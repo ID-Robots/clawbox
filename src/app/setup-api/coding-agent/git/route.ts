@@ -92,9 +92,15 @@ export async function POST(request: Request) {
       // 409 means "the request cannot be satisfied as it stands" — true of a
       // folder with no commits, false of a network that is merely down. That
       // one gets 503, so nothing tells the owner to install a gh they have.
+      //
+      // `transient` covers the same class one layer down: a local `git
+      // rev-parse` our own timer killed has no reason of its own to report, and
+      // answering 409 would tell the owner their request was wrong about a
+      // request that was fine.
+      const retryable = outcome.reason === "gh_unreachable" || outcome.transient === true;
       return NextResponse.json(
         { error: outcome.detail ?? outcome.reason, kind: outcome.reason },
-        { status: outcome.reason === "gh_unreachable" ? 503 : 409 },
+        { status: retryable ? 503 : 409 },
       );
     }
     console.error(`[coding-agent] backed up ${directory} to ${outcome.repo}${outcome.created ? " (new repo)" : ""}`);

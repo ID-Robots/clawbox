@@ -463,6 +463,7 @@ export const fr: Record<string, string> = {
   "codingAgent.updated": "mis à jour",
   "codingAgent.githubOff": "non connecté",
   "codingAgent.githubUnreachable": "GitHub injoignable",
+  "codingAgent.githubNotRunnable": "gh est installé mais ne démarre pas — vérifiez ses permissions",
   "codingAgent.githubConnect": "Connecter",
   "codingAgent.githubReconnect": "Changer",
   "codingAgent.githubOut": "Se déconnecter",

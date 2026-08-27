@@ -465,6 +465,7 @@ export const ja: Record<string, string> = {
   "codingAgent.updated": "更新",
   "codingAgent.githubOff": "未接続",
   "codingAgent.githubUnreachable": "GitHub に接続できません",
+  "codingAgent.githubNotRunnable": "gh は入っていますが起動しません — 権限を確認してください",
   "codingAgent.githubConnect": "接続",
   "codingAgent.githubReconnect": "変更",
   "codingAgent.githubOut": "サインアウト",

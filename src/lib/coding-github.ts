@@ -23,8 +23,14 @@
  * in a file should not have that mistake amplified into a public repo.
  */
 
-import { spawn } from "child_process";
 import path from "path";
+import {
+  type ChildResult,
+  killedDetail,
+  runChild,
+  startedMissing,
+  wasKilled,
+} from "@/lib/child-run";
 
 const GH_TIMEOUT_MS = 60_000;
 /** Pushing over the network gets longer than a local git call. */
@@ -66,7 +72,20 @@ export interface GitHubStatus {
 
 export type BackupOutcome =
   | { pushed: true; repo: string; created: boolean; branch: string }
-  | { pushed: false; reason: BackupFailure; detail?: string };
+  | {
+      pushed: false;
+      reason: BackupFailure;
+      detail?: string;
+      /**
+       * The fault was transient — a call our own timer killed, or one that
+       * never started — and the same request is worth making again unchanged.
+       * `gh_unreachable` says this for the calls that reach github.com; this
+       * says it for the LOCAL git probes, which have no reason of their own
+       * and whose refusal would otherwise be answered 409: "your request is
+       * wrong", about a request that was fine.
+       */
+      transient?: boolean;
+    };
 
 export type BackupFailure =
   /** gh is not installed on this device. */
@@ -90,99 +109,39 @@ export type DisconnectOutcome =
    *  than as a broken box (500). */
   | { ok: false; kind: "no_gh" | "gh_unreachable" | "failed"; detail: string };
 
-interface Result {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-  /** The signal that killed it, when one did. A signalled child closes with a
-   *  null `code` — the SAME null a failed spawn gives — so the code alone
-   *  cannot tell "killed" from "never started". This is what tells them
-   *  apart, and getting it wrong reported a network outage as a missing gh. */
-  signal: NodeJS.Signals | null;
-  /** True when OUR timer killed it: the command outlived its budget. */
-  timedOut: boolean;
-  /** True when the binary could not be started at all. Necessary evidence
-   *  that the command is unusable, but NOT sufficient to call it absent —
-   *  see startError. */
-  startFailed: boolean;
-  /** The errno of a failed spawn: ENOENT means genuinely missing, EACCES
-   *  means present but not executable. Collapsing the two would send someone
-   *  to reinstall a binary that is sitting right there. */
-  startError: string | null;
-}
-
 /**
  * Run a command with a deliberate, minimal environment.
  *
  * HOME is the one thing gh genuinely needs — its credential lives in
  * ~/.config/gh/hosts.yml. GIT_TERMINAL_PROMPT=0 so a missing credential fails
  * instead of blocking forever on a prompt nobody can answer.
+ *
+ * The wrapper itself, and the rules for reading a null exit code, live in
+ * `@/lib/child-run` — shared with coding-git.ts, which used to carry its own
+ * pre-#518 copy of both.
  */
-function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<Result> {
-  return new Promise((resolve) => {
-    const child = spawn(bin, args, {
-      cwd: opts.cwd,
-      env: {
-        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        HOME: process.env.HOME ?? "/home/clawbox",
-        GIT_TERMINAL_PROMPT: "0",
-        GH_PROMPT_DISABLED: "1",
-        NO_COLOR: "1",
-        LANG: "C",
-      } as unknown as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, opts.timeoutMs ?? GH_TIMEOUT_MS);
-    timer.unref();
-    child.stdout.on("data", (c) => { stdout += String(c); });
-    child.stderr.on("data", (c) => { stderr += String(c); });
-    // `error` is not proof the binary is missing. It also fires on a child
-    // that spawned perfectly well and whose kill() could not deliver its
-    // signal — so treating every error as "not installed" would reintroduce
-    // the exact false-failure this file exists to prevent, on the timeout path
-    // of all places. `spawn` fires only when the process really started, so it
-    // is what separates "never ran" from "ran and then something went wrong".
-    let spawned = false;
-    child.on("spawn", () => { spawned = true; });
-    // A failed spawn emits `error` and THEN `close` with a null code; the
-    // first resolve wins, so this is the one place startFailed is set.
-    child.on("error", (err: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
-      resolve({
-        code: null,
-        stdout,
-        stderr: spawned ? stderr.trim() : "could not start",
-        signal: null,
-        timedOut,
-        startFailed: !spawned,
-        startError: spawned ? null : (err?.code ?? null),
-      });
-    });
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({ code, stdout: stdout.trim(), stderr: stderr.trim(), signal, timedOut, startFailed: false, startError: null });
-    });
+function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<ChildResult> {
+  return runChild(bin, args, {
+    cwd: opts.cwd,
+    timeoutMs: opts.timeoutMs ?? GH_TIMEOUT_MS,
+    env: {
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+      HOME: process.env.HOME ?? "/home/clawbox",
+      GIT_TERMINAL_PROMPT: "0",
+      GH_PROMPT_DISABLED: "1",
+      NO_COLOR: "1",
+      LANG: "C",
+    },
   });
 }
 
-/** True when the command ran but produced no exit code — it was killed, by our
- *  own timer or by something else. It started, so the binary exists. */
-function wasKilled(r: Result): boolean {
-  return !r.startFailed && r.code === null;
-}
-
 /**
- * What to tell the owner about a call that was cut short. Never mentions
- * installing anything: the binary demonstrably ran. Never blank either — a
- * SIGKILLed child writes no stderr, so the old `(stderr || stdout)` detail for
- * a killed call was the empty string.
+ * The refusal for a local git call that carried no finding — killed by our own
+ * timer, or never started. `transient` is what tells the route this is a fault
+ * to retry (503) and not a request that cannot be satisfied (409).
  */
-function killedDetail(r: Result, what: string, advice = "Check this ClawBox's network connection and try again."): string {
-  const how = r.timedOut ? "timed out" : `was stopped before it finished${r.signal ? ` (${r.signal})` : ""}`;
-  return `${what} ${how}. ${advice}`;
+function transientGit(r: ChildResult, what: string): BackupOutcome {
+  return { pushed: false, reason: "failed", detail: killedDetail(r, what, "Try again."), transient: true };
 }
 
 /**
@@ -210,7 +169,7 @@ export async function githubStatus(): Promise<GitHubStatus> {
     // else — EACCES above all — is a binary that EXISTS and would not run, and
     // answering that with "not installed" hands over the one remedy that
     // cannot work.
-    const missing = r.startError === "ENOENT" || r.startError === null;
+    const missing = startedMissing(r);
     return {
       installed: !missing,
       connected: false,
@@ -254,7 +213,7 @@ export async function disconnectGitHub(): Promise<DisconnectOutcome> {
   if (r.startFailed) {
     // Present but unrunnable is not missing, and must not be answered with an
     // install: the file is there, its permissions are not.
-    return r.startError === "ENOENT" || r.startError === null
+    return startedMissing(r)
       ? { ok: false, kind: "no_gh", detail: "gh is not installed on this ClawBox." }
       : { ok: false, kind: "failed", detail: `The GitHub CLI is on this ClawBox but would not start (${r.startError}). Check its permissions.` };
   }
@@ -311,7 +270,7 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   // A killed probe is not evidence about the folder. Reading it as one would
   // tell the owner their repository is not a repository.
   if (wasKilled(top)) {
-    return { pushed: false, reason: "failed", detail: killedDetail(top, "Reading the folder's git repository", "Try again.") };
+    return transientGit(top, "Reading the folder's git repository");
   }
   if (top.code !== 0 || path.resolve(top.stdout || "") !== dir) {
     return { pushed: false, reason: "not_a_repo", detail: "This folder is not its own git repository." };
@@ -322,7 +281,7 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   // finding, and saying it would tell an owner with a full history that their
   // work is empty.
   if (wasKilled(head)) {
-    return { pushed: false, reason: "failed", detail: killedDetail(head, "Reading the folder's commits", "Try again.") };
+    return transientGit(head, "Reading the folder's commits");
   }
   if (head.code !== 0) return { pushed: false, reason: "nothing_to_push", detail: "The folder has no commits yet." };
 
@@ -332,7 +291,7 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   // had no name to give; wrong when the probe was killed, which would push a
   // `develop` checkout to `main` and bind it there over a transient fault.
   if (wasKilled(branchOut)) {
-    return { pushed: false, reason: "failed", detail: killedDetail(branchOut, "Reading the folder's branch", "Try again.") };
+    return transientGit(branchOut, "Reading the folder's branch");
   }
   const branch = branchOut.code === 0 && branchOut.stdout ? branchOut.stdout : "main";
 
@@ -343,7 +302,7 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   // second repository for a folder that already has one — an irreversible
   // guess made from a transient fault.
   if (wasKilled(hasRemote)) {
-    return { pushed: false, reason: "failed", detail: killedDetail(hasRemote, "Reading the folder's git remote", "Try again.") };
+    return transientGit(hasRemote, "Reading the folder's git remote");
   }
   let created = false;
   let repo = hasRemote.code === 0 ? hasRemote.stdout : "";
@@ -358,13 +317,23 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
       { cwd: dir, timeoutMs: PUSH_TIMEOUT_MS },
     );
     if (create.code !== 0) {
-      return {
-        pushed: false,
-        reason: "failed",
-        detail: wasKilled(create)
-          ? killedDetail(create, "Creating the repository on GitHub")
-          : (create.stderr || create.stdout).slice(0, 400),
-      };
+      // A killed create is a NETWORK fault, and the detail below already says
+      // so — "check this ClawBox's network connection and try again". Leaving
+      // the reason as "failed" made the route answer 409, a non-retryable
+      // client error, to its own retry advice. gh_unreachable is what 503 is
+      // wired to, and it is the true statement about a call that hung on the
+      // uplink for three minutes.
+      if (wasKilled(create)) {
+        return {
+          pushed: false,
+          reason: "gh_unreachable",
+          detail: killedDetail(create, "Creating the repository on GitHub"),
+          transient: true,
+        };
+      }
+      // GitHub itself refusing — a name already taken, a scope missing — IS a
+      // request that cannot be satisfied as it stands. That one keeps its 409.
+      return { pushed: false, reason: "failed", detail: (create.stderr || create.stdout).slice(0, 400) };
     }
     created = true;
     const url = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
@@ -378,13 +347,17 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
     { timeoutMs: PUSH_TIMEOUT_MS },
   );
   if (push.code !== 0) {
-    return {
-      pushed: false,
-      reason: "failed",
-      detail: wasKilled(push)
-        ? killedDetail(push, "Pushing to GitHub")
-        : (push.stderr || push.stdout).slice(0, 400),
-    };
+    // Same rule as the create above: the push is the other call that leaves
+    // the box, and a killed one is the network, not the request.
+    if (wasKilled(push)) {
+      return {
+        pushed: false,
+        reason: "gh_unreachable",
+        detail: killedDetail(push, "Pushing to GitHub"),
+        transient: true,
+      };
+    }
+    return { pushed: false, reason: "failed", detail: (push.stderr || push.stdout).slice(0, 400) };
   }
   return { pushed: true, repo, created, branch };
 }

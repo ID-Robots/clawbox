@@ -42,7 +42,10 @@ interface GitHubState {
   login: string | null;
   loginCommand: string;
   /** "unreachable" means gh is here but could not reach github.com — a
-   *  network fault. The card must not read like a missing install. */
+   *  network fault. "not_runnable" means it is here and would not execute, so
+   *  the remedy is permissions, not `gh auth login`. Neither reads like a
+   *  missing install, and neither reads like "not connected": every reason the
+   *  library can answer has an arm below, or the card says something false. */
   reason?: "not_installed" | "unreachable" | "not_runnable";
 }
 
@@ -567,19 +570,31 @@ export default function CodingAgentApp() {
                 <span className="text-[11px] text-amber-400" data-testid="coding-agent-github-unreachable">
                   {t("codingAgent.githubUnreachable")}
                 </span>
+              ) : github.reason === "not_runnable" ? (
+                // gh is on the box and would not start. "Not connected" is not
+                // what was found, and Connect — which opens a terminal on
+                // `gh auth login` — is the one remedy that cannot work here.
+                <span className="text-[11px] text-amber-400" data-testid="coding-agent-github-not-runnable">
+                  {t("codingAgent.githubNotRunnable")}
+                </span>
               ) : (
                 <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.githubOff")}</span>
               )}
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
-              <button
-                type="button"
-                onClick={connectGithub}
-                data-testid="coding-agent-github-connect"
-                className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-              >
-                {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
-              </button>
+              {/* Not offered to a gh that would not start: the button opens a
+                  terminal on `gh auth login`, which needs the very binary that
+                  will not execute. The badge beside it says what to fix. */}
+              {github.reason !== "not_runnable" && (
+                <button
+                  type="button"
+                  onClick={connectGithub}
+                  data-testid="coding-agent-github-connect"
+                  className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                >
+                  {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
+                </button>
+              )}
               {github.connected && (
                 <button
                   type="button"

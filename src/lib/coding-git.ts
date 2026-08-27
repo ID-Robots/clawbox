@@ -31,8 +31,15 @@
  * somewhere is a separate decision the owner makes.
  */
 
-import { spawn } from "child_process";
 import path from "path";
+import {
+  type ChildResult,
+  failureDetail,
+  inconclusive,
+  killedDetail,
+  runChild,
+  startedMissing,
+} from "@/lib/child-run";
 
 /** A commit message never grows past this, however long the summary is. */
 const MAX_MESSAGE_CHARS = 900;
@@ -53,48 +60,61 @@ export type GitSkipReason =
   | "no_changes"
   /** The folder belongs to a repository that tracks it — not ours to commit to. */
   | "foreign_repo"
-  /** git is not installed. */
+  /** git is not installed — the spawn failed with ENOENT and nothing else.
+   *  A git that ran, or one present with the wrong mode bits, is NOT this:
+   *  answering either with "install git" offers the one remedy that cannot
+   *  work. */
   | "no_git"
-  /** git refused; detail carries what it said. */
+  /** git refused, was cut short, or would not start. `detail` always says
+   *  which, and is never blank — the run panel renders `detail ?? reason`. */
   | "git_failed";
-
-interface RunResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
-}
 
 /**
  * Run one git command in a folder.
  *
  * `git -C` with an argv array, never a shell: the folder name and the commit
  * message both come from outside and neither is quoted by us.
+ *
+ * The wrapper and the rules for reading a null exit code are shared with
+ * coding-github.ts (`@/lib/child-run`). They did not used to be: this file kept
+ * its own pre-#518 copy, with no `spawn` listener and no errno, so every fault
+ * here — a killed call, a git that would not execute — arrived as the same
+ * bare `code: null` and was read as "git is not installed".
  */
-function git(dir: string, args: string[]): Promise<RunResult> {
-  return new Promise((resolve) => {
-    const child = spawn("git", ["-C", dir, ...args], {
-      // Cast only because this repo's ProcessEnv augmentation insists on
-      // NODE_ENV, which git has no use for. GIT_TERMINAL_PROMPT=0 matters:
-      // git must fail rather than block forever waiting for a password that
-      // nobody is there to type.
-      env: {
-        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-        HOME: process.env.HOME ?? "",
-        GIT_TERMINAL_PROMPT: "0",
-        GIT_CONFIG_NOSYSTEM: "1",
-        LANG: "C",
-      } as unknown as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), GIT_TIMEOUT_MS);
-    timer.unref();
-    child.stdout.on("data", (c) => { stdout += String(c); });
-    child.stderr.on("data", (c) => { stderr += String(c); });
-    child.on("error", () => { clearTimeout(timer); resolve({ code: null, stdout, stderr: "git could not be started" }); });
-    child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() }); });
+function git(dir: string, args: string[]): Promise<ChildResult> {
+  return runChild("git", ["-C", dir, ...args], {
+    timeoutMs: GIT_TIMEOUT_MS,
+    // GIT_TERMINAL_PROMPT=0 matters: git must fail rather than block forever
+    // waiting for a password that nobody is there to type.
+    env: {
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+      HOME: process.env.HOME ?? "",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_NOSYSTEM: "1",
+      LANG: "C",
+    },
+    notStarted: "git could not be started",
   });
+}
+
+/**
+ * The answer to a yes/no question about the folder — or the admission that the
+ * probe never produced one.
+ *
+ * A non-zero exit code is a FINDING: git looked and said no. A null code is
+ * not; the call was killed or never started. Collapsing the second into the
+ * first is what turned "this folder belongs to another repository, refuse" into
+ * `git init` inside somebody else's tracked tree.
+ */
+type Probe =
+  | { known: true; value: boolean }
+  | { known: false; result: ChildResult };
+
+/** The refusal for a probe that found nothing. Never blank, and it never
+ *  mentions installing anything: git demonstrably ran, or said why it could
+ *  not start. */
+function unknownShape(probe: { known: false; result: ChildResult }, what: string): GitOutcome {
+  return { committed: false, reason: "git_failed", detail: failureDetail(probe.result, what) };
 }
 
 /**
@@ -103,24 +123,27 @@ function git(dir: string, args: string[]): Promise<RunResult> {
  * Deliberately compares resolved paths: being *inside* a repository is not
  * enough, and is exactly the case that would commit into ClawBox's own tree.
  */
-async function isOwnRepoRoot(dir: string): Promise<boolean> {
+async function isOwnRepoRoot(dir: string): Promise<Probe> {
   const r = await git(dir, ["rev-parse", "--show-toplevel"]);
-  if (r.code !== 0 || !r.stdout) return false;
-  return path.resolve(r.stdout) === path.resolve(dir);
+  if (inconclusive(r)) return { known: false, result: r };
+  if (r.code !== 0 || !r.stdout) return { known: true, value: false };
+  return { known: true, value: path.resolve(r.stdout) === path.resolve(dir) };
 }
 
 /** Whether an enclosing repository ignores this folder — i.e. a private repo
  *  inside it is invisible to that outer tree. */
-async function ignoredByOuterRepo(dir: string): Promise<boolean> {
+async function ignoredByOuterRepo(dir: string): Promise<Probe> {
   const parent = path.dirname(path.resolve(dir));
   const r = await git(parent, ["check-ignore", "-q", path.resolve(dir)]);
-  return r.code === 0;
+  if (inconclusive(r)) return { known: false, result: r };
+  return { known: true, value: r.code === 0 };
 }
 
 /** Whether the folder sits inside ANY repository. */
-async function insideSomeRepo(dir: string): Promise<boolean> {
+async function insideSomeRepo(dir: string): Promise<Probe> {
   const r = await git(dir, ["rev-parse", "--is-inside-work-tree"]);
-  return r.code === 0 && r.stdout === "true";
+  if (inconclusive(r)) return { known: false, result: r };
+  return { known: true, value: r.code === 0 && r.stdout === "true" };
 }
 
 /**
@@ -129,7 +152,10 @@ async function insideSomeRepo(dir: string): Promise<boolean> {
  */
 async function initRepo(dir: string): Promise<string | null> {
   const init = await git(dir, ["init", "--quiet"]);
-  if (init.code !== 0) return init.stderr || "git init failed";
+  // Never `init.stderr` alone: a killed `git init` writes none, and the caller
+  // renders `detail ?? reason`, so an empty string reached the owner as a
+  // failure with nothing in it.
+  if (init.code !== 0) return failureDetail(init, "Creating a git repository for the folder");
   await git(dir, ["config", "user.name", COMMIT_NAME]);
   await git(dir, ["config", "user.email", COMMIT_EMAIL]);
   return null;
@@ -167,14 +193,47 @@ export async function commitRunWork(input: {
   const dir = path.resolve(input.directory);
 
   const probe = await git(dir, ["--version"]);
-  if (probe.code === null) return { committed: false, reason: "no_git" };
+  // `code === null` was read here as "git is not installed". It is not: a
+  // failed spawn and a killed child close identically, and even a failed spawn
+  // only means absent when the errno is ENOENT. EACCES is a git that is right
+  // there with the wrong mode bits, and "install git" is the one remedy that
+  // cannot help it.
+  if (probe.startFailed) {
+    return startedMissing(probe)
+      ? { committed: false, reason: "no_git", detail: "git is not installed on this ClawBox." }
+      : {
+          committed: false,
+          reason: "git_failed",
+          detail: `git is on this ClawBox but would not start (${probe.startError}). Check its permissions.`,
+        };
+  }
+  if (probe.code === null) {
+    // It RAN. Being killed says nothing about whether git is on the box.
+    return { committed: false, reason: "git_failed", detail: killedDetail(probe, "Reading the git version", "Try again.") };
+  }
 
   let initialized = false;
-  if (!(await isOwnRepoRoot(dir))) {
+  const ownRoot = await isOwnRepoRoot(dir);
+  if (!ownRoot.known) return unknownShape(ownRoot, "Reading the folder's git repository");
+  if (!ownRoot.value) {
     // Inside something else's tree, and that tree tracks us: refuse. This is
     // the case that would commit into the ClawBox checkout.
-    if ((await insideSomeRepo(dir)) && !(await ignoredByOuterRepo(dir))) {
-      return { committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." };
+    //
+    // Both halves of that test must be FINDINGS. A killed probe read as
+    // "no repo here" turns the refusal into `git init` inside a tree somebody
+    // else's repository tracks — shadowing that subtree's history and
+    // committing into it, from a transient fault. An unknown repository shape
+    // is not an absent one, and `git init` is not a step to take on a guess.
+    const inside = await insideSomeRepo(dir);
+    if (!inside.known) return unknownShape(inside, "Checking whether the folder is inside a git repository");
+    if (inside.value) {
+      const ignored = await ignoredByOuterRepo(dir);
+      // The mirror lie: a killed check-ignore read as "not ignored" tells the
+      // owner their folder belongs to another repository when it may not.
+      if (!ignored.known) return unknownShape(ignored, "Checking whether the outer repository ignores the folder");
+      if (!ignored.value) {
+        return { committed: false, reason: "foreign_repo", detail: "The folder belongs to another git repository." };
+      }
     }
     const err = await initRepo(dir);
     if (err) return { committed: false, reason: "git_failed", detail: err };
@@ -183,7 +242,10 @@ export async function commitRunWork(input: {
 
   // Stage everything in THIS repository. Safe now: its root is this folder.
   const add = await git(dir, ["add", "-A"]);
-  if (add.code !== 0) return { committed: false, reason: "git_failed", detail: add.stderr };
+  // Not `add.stderr`: a SIGKILLed child writes none, and coding-agent.ts renders
+  // `detail ?? reason` — "" is not nullish, so the run panel showed the owner
+  // literally "Not committed: " and stopped there.
+  if (add.code !== 0) return { committed: false, reason: "git_failed", detail: failureDetail(add, "Staging the run's changes") };
 
   const staged = await git(dir, ["diff", "--cached", "--name-only"]);
   if (staged.code === 0 && !staged.stdout) return { committed: false, reason: "no_changes" };
@@ -194,7 +256,7 @@ export async function commitRunWork(input: {
     "-c", `user.email=${COMMIT_EMAIL}`,
     "commit", "--no-verify", "-m", message,
   ]);
-  if (commit.code !== 0) return { committed: false, reason: "git_failed", detail: commit.stderr };
+  if (commit.code !== 0) return { committed: false, reason: "git_failed", detail: failureDetail(commit, "Committing the run's changes") };
 
   const sha = await git(dir, ["rev-parse", "--short", "HEAD"]);
   return { committed: true, sha: sha.stdout || "unknown", initialized };

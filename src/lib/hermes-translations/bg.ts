@@ -450,6 +450,7 @@ export const bg: Record<string, string> = {
   "codingAgent.updated": "обновено",
   "codingAgent.githubOff": "не е свързан",
   "codingAgent.githubUnreachable": "GitHub е недостъпен",
+  "codingAgent.githubNotRunnable": "gh е инсталиран, но не се стартира — проверете правата му",
   "codingAgent.githubConnect": "Свържи",
   "codingAgent.githubReconnect": "Промени",
   "codingAgent.githubOut": "Изход",

@@ -454,7 +454,10 @@ describe("a killed git probe is never read as an answer", () => {
 
     expect(outcome.pushed).toBe(false);
     if (outcome.pushed) return;
-    expect(outcome.reason).toBe("failed");
+    // GH-01c: the reason used to be "failed", which the route answers 409 —
+    // a non-retryable client error attached to a detail that says "check the
+    // network and try again". A push killed on the uplink is the network.
+    expect(outcome.reason).toBe("gh_unreachable");
     expect((outcome.detail ?? "").trim()).not.toBe("");
     expect(outcome.detail ?? "").toMatch(/push/i);
   });

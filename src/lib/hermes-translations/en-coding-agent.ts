@@ -51,6 +51,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.updated": "updated",
   "codingAgent.githubOff": "not connected",
   "codingAgent.githubUnreachable": "GitHub unreachable",
+  "codingAgent.githubNotRunnable": "gh installed but will not start — check its permissions",
   "codingAgent.githubConnect": "Connect",
   "codingAgent.githubReconnect": "Change",
   "codingAgent.githubOut": "Sign out",
