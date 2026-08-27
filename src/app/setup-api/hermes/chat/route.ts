@@ -452,17 +452,17 @@ async function settleTurn(
   const record = await readHermesTurn(threaded);
   const spoken = record?.text ?? consoleReply.text;
   // The model's own copy of the path comes OUT of the caption and INTO the
-  // adoption list. The backend tells the model where it saved the file and
-  // the model repeats it (a MEDIA: directive, an "[Image: ...]" aside);
-  // left in place, `splitAssistantMedia` below lifted that unservable cache
-  // path as a second image, and every generated picture rendered as a
-  // broken card beside the real one - one generation, two attachments, the
-  // first a 404.
-  // The media root is handed in so the ONE tree whose paths the browser can
-  // already fetch keeps them: a picture the customer attached and the model
-  // echoed back stays in the caption for `splitAssistantMedia` to lift, exactly
-  // as it did before any of this. Everything else the model names comes out and
-  // has to earn its card through adoption.
+  // adoption list, because `splitAssistantMedia` below lifts EVERY surviving
+  // MEDIA: line into a card without asking where it points. Left in, a path the
+  // model merely repeated became a second, unservable attachment beside the
+  // real one (#482), and a path the agent wrote itself became the only
+  // attachment and a dead one. Only what adoption actually copied is said
+  // again, so a card exists exactly when there is a picture behind it.
+  //
+  // The media root is handed in as the ONE exemption: paths the browser can
+  // already fetch stay in the caption for `splitAssistantMedia` to lift, which
+  // is how a picture the customer attached and the model echoed back keeps
+  // working. Everything else has to earn its card through adoption.
   const servableRoot = await servableMediaRoot();
   const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
   const drawn = await adoptHermesGeneratedImages([
