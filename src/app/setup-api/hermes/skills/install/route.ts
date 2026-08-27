@@ -5,7 +5,11 @@ import path from "path";
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta } from "@/lib/hermes-skills";
-import { type InstallOutcome, parseInstallOutcome } from "@/lib/hermes-skill-install-outcome";
+import {
+  type InstallOutcome,
+  type InstallOutcomeKind,
+  parseInstallOutcome,
+} from "@/lib/hermes-skill-cli-outcome";
 import {
   type HubLockEntry,
   SKILLS_DIR,
@@ -15,6 +19,7 @@ import {
   lockInstallDir,
   officialSkillDir,
   readHubLock,
+  readScanReport,
   readShadowableSkillNames,
   resolveLockKey,
   scanReportFromLock,
@@ -146,7 +151,7 @@ export async function POST(request: Request) {
   // (community + caution, agent-created + dangerous), and a confirmation that
   // never reaches the CLI cannot override those — which is how "warn + confirm,
   // never a hard block, every trust tier" ended up unreachable for the three
-  // quarters of the catalogue that is ClawHub. See hermes-skill-install-outcome.
+  // quarters of the catalogue that is ClawHub. See hermes-skill-cli-outcome.
   //
   // A bare ClawHub slug has to be sent as `clawhub/<slug>` or the CLI resolves
   // nothing — see cliInstallIdentifier(). `id` itself stays as the customer
@@ -159,14 +164,7 @@ export async function POST(request: Request) {
 
   let cli;
   try {
-    cli = await runHermesCli(args, {
-      timeoutMs: INSTALL_TIMEOUT_MS,
-      // The installer prints its refusals through `rich`, which hard-wraps at
-      // 80 columns when stdout is a pipe — splitting both the reason sentence
-      // and the scan-report rows this route has to read. COLUMNS is the one
-      // knob rich honours off a TTY.
-      env: { COLUMNS: "400" },
-    });
+    cli = await runHermesCli(args, { timeoutMs: INSTALL_TIMEOUT_MS });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Hermes install failed" },
@@ -228,26 +226,7 @@ export async function POST(request: Request) {
 
   if (warning && !confirmDangerous) {
     await rollback(lockName, entry);
-    await auditSkillInstall({
-      action: "install-refused",
-      id,
-      name: lockName,
-      source: warning.source,
-      trust: warning.trust,
-      verdict,
-      findingCount: findings.length,
-      capabilities: warning.capabilities.map((c) => c.id),
-      severities: warning.severityCounts,
-    });
-    return NextResponse.json(
-      {
-        error: "This skill did not pass the device's security scan.",
-        code: "dangerous_skill",
-        requiresConfirmation: true,
-        warning,
-      },
-      { status: 409 },
-    );
+    return await askTheOwner(warning, { id, findingCount: findings.length });
   }
 
   // ── 4. Did every file actually land? ─────────────────────────────────────
@@ -322,149 +301,181 @@ export async function POST(request: Request) {
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /**
+ * The 409 that asks the owner, and the audit line that records the question.
+ *
+ * Both scan gates end here — the one that reads the lock AFTER an install and
+ * the one that reads the installer's refusal BEFORE anything landed — so there
+ * is a single producer of the `dangerous_skill` contract that the store's
+ * confirmation dialog and the MCP decoder both consume.
+ */
+async function askTheOwner(
+  warning: SkillDangerWarning,
+  ctx: { id: string; findingCount: number },
+): Promise<NextResponse> {
+  await auditSkillInstall({
+    action: "install-refused",
+    id: ctx.id,
+    name: warning.name,
+    source: warning.source,
+    trust: warning.trust,
+    verdict: warning.verdict,
+    findingCount: ctx.findingCount,
+    capabilities: warning.capabilities.map((c) => c.id),
+    severities: warning.severityCounts,
+  });
+  return NextResponse.json(
+    {
+      error: "This skill did not pass the device's security scan.",
+      code: "dangerous_skill",
+      requiresConfirmation: true,
+      warning,
+    },
+    { status: 409 },
+  );
+}
+
+/**
+ * How each non-scan refusal is answered.
+ *
+ * A table rather than a chain of branches: the kind-to-code mapping is the
+ * thing a reader wants, `Record<Exclude<…>>` makes a new outcome kind a compile
+ * error rather than a silent fall-through, and every entry is data.
+ *
+ * `blocked-other` and `unknown` share the last row on purpose — both carry free
+ * text from a Python exception, which on this CLI can hold on-device paths, so
+ * neither is echoed. Same rule the non-zero-exit branch already follows: log it
+ * here, answer with fixed words.
+ */
+const REFUSALS: Record<
+  Exclude<InstallOutcomeKind, "scan-refused">,
+  { status: number; code: string; error: string }
+> = {
+  ambiguous: {
+    status: 409,
+    code: "ambiguous_id",
+    error: "More than one skill goes by that name — install it by its full identifier.",
+  },
+  "already-installed": {
+    status: 409,
+    code: "already_installed",
+    error: "That skill is already installed on this device.",
+  },
+  "rate-limited": {
+    status: 502,
+    code: "rate_limited",
+    error: "The skill could not be downloaded: this device has used up its hourly GitHub API allowance.",
+  },
+  unfetchable: {
+    status: 502,
+    code: "download_failed",
+    error: "The skill was found in the store but none of its sources would serve it.",
+  },
+  // The one case the old message was right about, and now the only one it is
+  // used for — so "did not resolve" stays a meaningful diagnosis.
+  unresolved: {
+    status: 502,
+    code: "unresolved",
+    error: "Skill could not be resolved — try the full identifier",
+  },
+  "blocked-other": {
+    status: 502,
+    code: "install_failed",
+    error: "The device's installer stopped without installing the skill.",
+  },
+  unknown: {
+    status: 502,
+    code: "install_failed",
+    error: "The device's installer stopped without installing the skill.",
+  },
+};
+
+/**
  * Answer a `hermes skills install` that exited 0 without installing anything.
  *
- * WHY this exists: the CLI exits 0 on every one of its refusals, so for years
- * this route inferred failure from the missing lock entry and said the only
- * thing a missing lock entry can mean on its own — "Skill could not be resolved
- * — try the full identifier". Live on a Hermes box that sentence was returned
- * for skills whose id resolved perfectly and whose INSTALL had been refused by
- * the device's own security scanner, and the MCP tool turned it into "call
+ * WHY this exists: the CLI exits 0 on every one of its refusals, so this route
+ * inferred failure from the missing lock entry and said the only thing a
+ * missing lock entry can mean on its own — "Skill could not be resolved — try
+ * the full identifier". Live on a Hermes box that sentence was returned for
+ * skills whose id resolved perfectly and whose INSTALL had been refused by the
+ * device's own security scanner, and the MCP tool turned it into "call
  * skill_search and pass the exact id it returned" — the step the agent had just
  * taken. A tool that cannot do the thing has to say so, say why, and give a
  * next step that is not the step that just failed.
  *
- * Every branch below therefore reports the installer's OWN outcome. The
- * scanner's refusal reuses the existing `dangerous_skill` contract so the
- * store's confirmation dialog and the MCP decoder need no new vocabulary for
- * the case the owner can act on.
+ * The scanner's refusal reuses the existing `dangerous_skill` contract for the
+ * case the owner can act on, so the store's dialog and the MCP decoder need no
+ * new vocabulary for it.
  */
 async function refusalResponse(
   outcome: InstallOutcome,
   ctx: { id: string; name: string; source?: string; trust?: string; confirmDangerous: boolean },
 ): Promise<NextResponse> {
-  if (outcome.kind === "scan-refused") {
-    const warning = buildDangerWarning({
-      id: ctx.id,
-      name: ctx.name,
-      source: ctx.source,
-      trust: outcome.trust ?? ctx.trust,
-      verdict: outcome.verdict,
-      scannerVersion: outcome.scannerVersion,
-      summary: outcome.reason,
-      findings: outcome.findings,
-    });
-    await auditSkillInstall({
-      action: outcome.confirmable ? "install-refused" : "install-blocked-by-device",
-      id: ctx.id,
-      name: ctx.name,
-      source: ctx.source,
-      trust: outcome.trust ?? ctx.trust,
-      verdict: outcome.verdict,
-      findingCount: outcome.findingCount ?? outcome.findings.length,
-      capabilities: warning.capabilities.map((c) => c.id),
-      severities: warning.severityCounts,
-    });
-
-    // The owner CAN get past this one — same 409 the post-install gate returns,
-    // so one dialog and one MCP branch cover both. `confirmDangerous` already
-    // sends `--force`, so reaching here with it set means the installer refused
-    // a confirmation it had advertised as sufficient.
-    if (outcome.confirmable && !ctx.confirmDangerous) {
-      return NextResponse.json(
-        {
-          error: "This skill did not pass the device's security scan.",
-          code: "dangerous_skill",
-          requiresConfirmation: true,
-          warning,
-        },
-        { status: 409 },
-      );
+  if (outcome.kind !== "scan-refused") {
+    if (outcome.kind === "blocked-other" || outcome.kind === "unknown") {
+      console.error("[hermes skills install] installer exited 0 without installing", outcome.kind);
     }
-
-    // Nothing the owner does will get this installed: the device's installer
-    // refuses a `dangerous` verdict from a community or trusted source outright
-    // and says so itself. Say that, rather than blaming the id.
+    const refusal = REFUSALS[outcome.kind];
     return NextResponse.json(
       {
-        error:
-          `The device's installer refused to install "${ctx.name}": `
-          + `its security scan returned a ${outcome.verdict ?? "failing"} verdict for a `
-          + `${outcome.trust ?? ctx.trust ?? "third-party"} source, which it will not install even when confirmed.`,
-        code: "dangerous_skill_blocked",
-        requiresConfirmation: false,
-        overridable: false,
-        reason: outcome.reason,
-        warning,
-      },
-      { status: 409 },
-    );
-  }
-
-  if (outcome.kind === "ambiguous") {
-    return NextResponse.json(
-      {
-        error: "More than one skill goes by that name — install it by its full identifier.",
-        code: "ambiguous_id",
-      },
-      { status: 409 },
-    );
-  }
-
-  if (outcome.kind === "already-installed") {
-    return NextResponse.json(
-      {
-        error: `"${ctx.name}" is already installed on this device.`,
-        code: "already_installed",
-      },
-      { status: 409 },
-    );
-  }
-
-  if (outcome.kind === "rate-limited") {
-    return NextResponse.json(
-      {
-        error:
-          "The skill could not be downloaded: this device has used up its hourly GitHub API allowance.",
-        code: "rate_limited",
-      },
-      { status: 502 },
-    );
-  }
-
-  if (outcome.kind === "unfetchable") {
-    return NextResponse.json(
-      {
-        error: "The skill was found in the store but none of its sources would serve it.",
-        code: "download_failed",
-      },
-      { status: 502 },
-    );
-  }
-
-  if (outcome.kind === "unresolved") {
-    // The one case the old message was right about, and now the only one it is
-    // used for — so "did not resolve" stays a meaningful diagnosis.
-    return NextResponse.json(
-      {
-        error: "Skill could not be resolved — try the full identifier",
-        code: "unresolved",
+        ...refusal,
         ...(outcome.suggestions.length ? { candidates: outcome.suggestions } : {}),
       },
-      { status: 502 },
+      { status: refusal.status },
     );
   }
 
-  // `blocked-other` and `unknown` carry free text from an exception, which on a
-  // Python CLI can hold on-device paths. Same rule the non-zero-exit branch
-  // follows: log it here, answer with fixed words.
-  console.error("[hermes skills install] installer exited 0 without installing", outcome.kind);
+  // The installer writes its structured report to the scan cache BEFORE the
+  // policy gate runs, and prints that report's digest. Reading it back gets the
+  // findings with their `pattern_id` — which the rendered table does not carry
+  // and which the capability buckets are keyed on — and makes both scan gates
+  // describe a skill from the same source. The scraped table is the fallback
+  // for a device whose cache entry has been swept.
+  const cached = await readScanReport(outcome.contentHash);
+  const findings = cached?.findings.length ? cached.findings : outcome.findings;
+  const warning = buildDangerWarning({
+    id: ctx.id,
+    name: ctx.name,
+    source: ctx.source,
+    trust: outcome.trust ?? ctx.trust,
+    verdict: outcome.verdict,
+    scannerVersion: cached?.scannerVersion ?? outcome.scannerVersion,
+    summary: cached?.summary ?? outcome.reason,
+    findings,
+  });
+  const findingCount = outcome.findingCount ?? findings.length;
+
+  // The owner CAN get past this one, and `confirmDangerous` already sends
+  // `--force`, so reaching here with it set means the installer refused a
+  // confirmation it had advertised as sufficient.
+  if (outcome.confirmable && !ctx.confirmDangerous) {
+    return await askTheOwner(warning, { id: ctx.id, findingCount });
+  }
+
+  // Nothing the owner does will get this installed: the device's installer
+  // refuses a `dangerous` verdict from a community or trusted source outright
+  // and says so itself. Say that, rather than blaming the id.
+  await auditSkillInstall({
+    action: "install-blocked-by-device",
+    id: ctx.id,
+    name: ctx.name,
+    source: ctx.source,
+    trust: warning.trust,
+    verdict: outcome.verdict,
+    findingCount,
+    capabilities: warning.capabilities.map((c) => c.id),
+    severities: warning.severityCounts,
+  });
   return NextResponse.json(
     {
-      error: "The device's installer stopped without installing the skill.",
-      code: "install_failed",
+      error:
+        `The device's installer refused to install "${ctx.name}": `
+        + `its security scan returned a ${outcome.verdict ?? "failing"} verdict for a `
+        + `${warning.trust ?? "third-party"} source, which it will not install even when confirmed.`,
+      code: "dangerous_skill_blocked",
+      requiresConfirmation: false,
+      warning,
     },
-    { status: 502 },
+    { status: 409 },
   );
 }
 

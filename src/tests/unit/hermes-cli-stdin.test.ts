@@ -84,3 +84,51 @@ describe("runHermesCli stdin handling", () => {
     expect(spawnMock.mock.calls[0][2].stdio[0]).toBe("ignore");
   });
 });
+
+/**
+ * TASK-453 — every caller that READS Hermes' output is parsing it, and Hermes
+ * prints through `rich`, which falls back to 80 columns when stdout is a pipe
+ * and hard-wraps what it renders. Live on a Hermes box, `hermes skills install
+ * clawhub/oo-terraform` split its refusal mid-sentence and its scan-report rows
+ * mid-excerpt at that width; at a wide COLUMNS the same run printed both whole.
+ *
+ * Three call sites used to pass their own COLUMNS, at two different widths, and
+ * the fourth (install) did not — so its output was the wrapped one.
+ */
+describe("runHermesCli console width", () => {
+  beforeEach(() => spawnMock.mockReset());
+  afterEach(() => vi.clearAllMocks());
+
+  /** Spawn a child that just exits 0, and hand back the options spawn was given. */
+  function spawnOptions(): Record<string, unknown> {
+    return spawnMock.mock.calls[0][2] as Record<string, unknown>;
+  }
+
+  function exitZero(): void {
+    spawnMock.mockImplementation(() => {
+      const child = new EventEmitter() as FakeChild;
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      child.kill = () => {};
+      queueMicrotask(() => child.emit("close", 0));
+      return child;
+    });
+  }
+
+  it("asks for a console wide enough that nothing this repo parses wraps", async () => {
+    exitZero();
+
+    await runHermesCli(["skills", "install", "clawhub/x", "--yes"]);
+
+    const env = spawnOptions().env as Record<string, string>;
+    expect(Number(env.COLUMNS)).toBeGreaterThanOrEqual(200);
+  });
+
+  it("still lets a caller choose its own width", async () => {
+    exitZero();
+
+    await runHermesCli(["skills", "browse"], { env: { COLUMNS: "120" } });
+
+    expect((spawnOptions().env as Record<string, string>).COLUMNS).toBe("120");
+  });
+});

@@ -43,6 +43,7 @@ vi.mock("@/lib/hermes-skill-index", () => ({ getCatalogRecord: vi.fn(async () =>
 
 import { runHermesCli } from "@/lib/hermes-cli";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
+import { saveEnv } from "../../helpers/env";
 
 const mockCli = vi.mocked(runHermesCli);
 const mockRecord = vi.mocked(getCatalogRecord);
@@ -140,18 +141,25 @@ function installArgs(): string[][] {
     .filter((a) => a[1] === "install");
 }
 
+/**
+ * The audit log, read back through the module that owns its path and format.
+ *
+ * Imported here rather than at the top of the file: the module resolves its
+ * path from CLAWBOX_ROOT at load time, so it has to be loaded from the same
+ * fresh registry the route under test used.
+ */
 async function auditActions(): Promise<string[]> {
-  const raw = await fs
-    .readFile(path.join(clawboxRoot, "data", "skill-install-audit.log"), "utf8")
-    .catch(() => "");
-  return raw
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => (JSON.parse(line) as { action: string }).action);
+  const { readSkillAuditLog } = await import("@/lib/hermes-skill-audit");
+  return (await readSkillAuditLog()).map((r) => r.action);
 }
+
+let restoreEnv: () => void;
 
 beforeEach(async () => {
   vi.resetModules();
+  // Vitest reuses a worker across files: DELETING these in afterEach instead of
+  // restoring them breaks whichever file runs next in the same worker.
+  restoreEnv = saveEnv("HERMES_HOME", "CLAWBOX_ROOT");
   hermesHome = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-hermes-blocked-"));
   clawboxRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-root-blocked-"));
   process.env.HERMES_HOME = hermesHome;
@@ -163,8 +171,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env.HERMES_HOME;
-  delete process.env.CLAWBOX_ROOT;
+  restoreEnv();
   await fs.rm(hermesHome, { recursive: true, force: true });
   await fs.rm(clawboxRoot, { recursive: true, force: true });
 });
@@ -174,7 +181,7 @@ describe("POST …/skills/install — a scanner refusal is not a bad id", () => 
     const res = await install({ id: SLUG });
 
     expect(res.status).toBe(409);
-    expect(res.body).toMatchObject({ code: "dangerous_skill_blocked", overridable: false });
+    expect(res.body).toMatchObject({ code: "dangerous_skill_blocked", requiresConfirmation: false });
     expect(JSON.stringify(res.body)).not.toMatch(/could not be resolved/i);
   });
 
@@ -294,12 +301,5 @@ describe("POST …/skills/install — every other way the CLI exits 0", () => {
     expect(JSON.stringify(res.body)).not.toMatch(/home\/clawbox/);
   });
 
-  it("un-wraps the installer's own line width so the reason survives the pipe", async () => {
-    // The route asks for a wide console precisely because `rich` splits both
-    // the reason and the scan-report rows at 80 columns off a TTY.
-    await install({ id: SLUG });
 
-    const opts = mockCli.mock.calls[0][1] as { env?: Record<string, string> };
-    expect(opts.env?.COLUMNS).toBeTruthy();
-  });
 });

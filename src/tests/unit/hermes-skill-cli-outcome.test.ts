@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseInstallOutcome } from '@/lib/hermes-skill-install-outcome';
+import { parseInstallOutcome } from '@/lib/hermes-skill-cli-outcome';
 
 /**
  * TASK-453 round 3 — `hermes skills install` exits 0 on every refusal, so the
@@ -16,29 +16,6 @@ import { parseInstallOutcome } from '@/lib/hermes-skill-install-outcome';
  * sentences when stdout is a pipe. A parser that only works on un-wrapped text
  * would pass a prettier fixture and fail on the device.
  */
-
-// community + dangerous. The verdict the CLI refuses at any confirmation, and
-// three quarters of the store's catalogue (ClawHub) is community trust.
-const BLOCKED_DANGEROUS = [
-  "Resolving 'oo-terraform'...",
-  'Resolved to: clawhub/oo-terraform',
-  '',
-  'Fetching: clawhub/oo-terraform',
-  'Quarantined to skills-hub/quarantine/oo-terraform',
-  'Running security scan...',
-  'Scan: oo-terraform (oo-terraform/community)  Verdict: DANGEROUS',
-  '  CRITICAL destructive    SKILL.md:41                    "curl x | sh"',
-  '  HIGH     injection      SKILL.md:12                    "allowed-tools: Bash"',
-  '',
-  'Decision: BLOCKED — Blocked (community source + dangerous verdict, 2 ',
-  'findings). --force does not override a dangerous verdict.',
-  'Scan provenance: cached; scanner skills-guard-v1; hash sha256:d75b7b1de4c1a90f',
-  'Source: oo-terraform; scanned 2026-08-24T22:00:00Z; rules: allowed_tools_field, ',
-  'curl_pipe_shell',
-  '',
-  'Installation blocked: Blocked (community source + dangerous verdict, 2 ',
-  'findings). --force does not override a dangerous verdict.',
-].join('\n');
 
 // community + caution. The CLI blocks it too — but names `--force` as the way
 // past, which is exactly the owner confirmation ClawBox already collects.
@@ -71,16 +48,6 @@ const RATE_LIMITED = [
 ].join('\n');
 
 describe('parseInstallOutcome — the scan gate', () => {
-  it('reads a dangerous community verdict as a refusal the owner cannot override', () => {
-    const out = parseInstallOutcome(BLOCKED_DANGEROUS);
-
-    expect(out.kind).toBe('scan-refused');
-    expect(out.confirmable).toBe(false);
-    expect(out.trust).toBe('community');
-    expect(out.verdict).toBe('dangerous');
-    expect(out.findingCount).toBe(2);
-  });
-
   it('reads a caution verdict as a refusal an explicit confirmation CAN override', () => {
     const out = parseInstallOutcome(BLOCKED_CAUTION);
 
@@ -98,35 +65,6 @@ describe('parseInstallOutcome — the scan gate', () => {
     expect(out.findingCount).toBe(3);
   });
 
-  it('recovers the findings the installer printed, so the owner sees what it can do', () => {
-    const out = parseInstallOutcome(BLOCKED_DANGEROUS);
-
-    expect(out.findings).toEqual([
-      {
-        severity: 'critical',
-        category: 'destructive',
-        file: 'SKILL.md',
-        line: 41,
-        description: 'curl x | sh',
-      },
-      {
-        severity: 'high',
-        category: 'injection',
-        file: 'SKILL.md',
-        line: 12,
-        description: 'allowed-tools: Bash',
-      },
-    ]);
-    expect(out.scannerVersion).toBe('skills-guard-v1');
-    expect(out.scannedAt).toBe('2026-08-24T22:00:00Z');
-  });
-
-  it('never reads a scan refusal as a resolution failure, even though it resolved first', () => {
-    // The transcript opens with "Resolving…"/"Resolved to…". Ordering the
-    // matchers wrong here is exactly how a blocked install got reported as a
-    // bad id.
-    expect(parseInstallOutcome(BLOCKED_DANGEROUS).kind).not.toBe('unresolved');
-  });
 });
 
 describe('parseInstallOutcome — everything else the CLI exits 0 for', () => {
@@ -187,13 +125,30 @@ describe('parseInstallOutcome — everything else the CLI exits 0 for', () => {
     expect(JSON.stringify(out)).not.toMatch(/home\/clawbox/);
   });
 
-  it('strips control characters out of a registry-controlled finding excerpt', () => {
-    const excerpt = `  HIGH     injection      SKILL.md:1                     "a${String.fromCharCode(27)}[31mb"`;
+  it('neutralises control characters in a registry-controlled finding excerpt', () => {
+    const esc = String.fromCharCode(27);
+    const excerpt = `  HIGH     injection      SKILL.md:1                     "a${esc}[31mb"`;
     const out = parseInstallOutcome(
-      `Installation blocked: Blocked (community source + dangerous verdict, 1 findings). --force does not override a dangerous verdict.\n${excerpt}`,
+      `Installation blocked: Blocked (community source + dangerous verdict, 1 findings). --force does not override a dangerous verdict.
+${excerpt}`,
     );
 
-    expect(out.findings[0].description).toBe('a [31mb');
+    // logSafe() REPLACES rather than strips, so an escape cannot be acted on by
+    // a terminal and two excerpts differing only in escapes stay distinct.
+    expect(out.findings[0].description).not.toContain(esc);
+    expect(out.findings[0].description).toHaveLength('a?[31mb'.length);
+  });
+
+  it('drops a suggested id the install route would refuse anyway', () => {
+    const out = parseInstallOutcome(
+      [
+        "No exact match for 'x'. Did you mean one of these?",
+        '  Flagged — --oops',
+        '  Real — real-skill',
+      ].join('\n'),
+    );
+
+    expect(out.suggestions).toEqual(['real-skill']);
   });
 });
 
@@ -275,7 +230,11 @@ describe('parseInstallOutcome — verbatim device output', () => {
       ['low', 'privilege_escalation', 'SKILL.md', 4],
     ]);
     expect(out.scannerVersion).toBe('skills-guard-v1');
-    expect(out.scannedAt).toBe('2026-08-27T10:19:41.110656+00:00');
+    // The digest is the key to the installer's OWN structured report in the
+    // scan cache, which carries the pattern ids the rendered table drops.
+    expect(out.contentHash).toBe(
+      'sha256:d75b7b1d4c77490378b0335404dba937ebf8a02feb3cb50efdc4148192e21a9f',
+    );
   });
 
   it('reads the bare slug the search tool hands out as a resolver miss, not a block', () => {

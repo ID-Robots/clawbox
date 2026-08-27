@@ -10,6 +10,7 @@ import {
   checkInstallIdentifier,
   cliInstallIdentifier,
 } from "@/lib/hermes-skills";
+import { parseAmbiguousSkills } from "@/lib/hermes-skill-cli-outcome";
 import {
   type HubLockEntry,
   findInstalledSkill,
@@ -150,28 +151,17 @@ function parseInspect(stdout: string): ParsedInspect {
 
 /**
  * `inspect <bare name>` can print a disambiguation table instead of a panel
- * ("Multiple skills named 'notion' found" → 11 rows). Parse the three columns so
- * the store can offer the choice rather than dead-ending on "not found".
+ * ("Multiple skills named 'notion' found" → 11 rows), so the store can offer
+ * the choice rather than dead-ending on "not found". `install` prints the same
+ * table for the same reason, so the row parsing is shared.
  */
 function parseAmbiguity(stdout: string): HermesSkill[] {
-  if (!/Multiple skills named/i.test(stdout)) return [];
-  const out: HermesSkill[] = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.startsWith("│")) continue;
-    const cells = line.split("│").map((c) => c.trim());
-    if (cells.length < 5) continue;
-    const [, source, trust, identifier] = cells;
-    if (!identifier || identifier === "Identifier") continue;
-    if (!checkInstallIdentifier(identifier).ok) continue;
-    out.push({
-      id: identifier,
-      name: identifier.split("/").pop() || identifier,
-      source: source || undefined,
-      trust: trust || undefined,
-    });
-    if (out.length >= 40) break;
-  }
-  return out;
+  return parseAmbiguousSkills(stdout).map(({ identifier, source, trust }) => ({
+    id: identifier,
+    name: identifier.split("/").pop() || identifier,
+    source,
+    trust,
+  }));
 }
 
 // ── Small helpers ───────────────────────────────────────────────────────────
@@ -437,7 +427,6 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
   // Queued (max 2 children) and cancelled with the request: clicking through a
   // dozen cards must not leave a dozen Python processes resident on a Jetson.
   const r = await runSkillsCli(["skills", "inspect", cliId], {
-    env: { COLUMNS: "200" },
     timeoutMs: 45_000,
     signal,
   });

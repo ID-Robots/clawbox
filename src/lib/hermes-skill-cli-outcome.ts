@@ -1,4 +1,4 @@
-// TASK-453 round 3 — reading what the Hermes installer ACTUALLY said.
+// TASK-453 round 3 — reading what the Hermes skills CLI ACTUALLY said.
 //
 // `hermes skills install` exits 0 on almost every refusal. It resolves nothing
 // and exits 0; it fails to download and exits 0; the security scanner blocks
@@ -15,13 +15,13 @@
 // and a customer told their id was wrong when the id was fine and the SCANNER
 // had refused it.
 //
-// This module is the fix's foundation: parse the installer's own output into a
-// structured outcome, so the route can say which of these actually happened.
-// It is PURE (no fs, no child_process) so it can be unit-tested against
-// verbatim CLI transcripts.
+// This module is the fix's foundation: classify the CLI's own output, so the
+// route can say which of these actually happened. It is PURE (no fs, no
+// child_process) so it can be unit-tested against verbatim CLI transcripts, and
+// it is shared — `inspect` dead-ends on the same disambiguation table.
 //
-// Two shapes of the CLI matter here, both read from the deployed
-// hermes-agent on a live box:
+// Two shapes of the CLI matter here, both read from the deployed hermes-agent
+// on a live box:
 //
 //   tools/skills_guard.py:797  should_allow_install(result, force)
 //     INSTALL_POLICY   safe     caution   dangerous
@@ -34,16 +34,21 @@
 //       "Blocked (community source + dangerous verdict, 2 findings).
 //        --force does not override a dangerous verdict."
 //     Everything else that is refused names its own escape hatch:
-//       "Blocked (community source + caution verdict, 1 findings). Use --force
+//       "Blocked (community source + caution verdict, 4 findings). Use --force
 //        to override."   /   "Requires confirmation (…)"
 //
 //   hermes_cli/skills_hub.py:728  prints "Installation blocked: <that reason>"
-//     through a `rich` Console. Not a TTY ⇒ width 80 ⇒ the reason WRAPS
-//     mid-sentence. Verified on the box: the 128-character reason above comes
-//     out as two lines. Every matcher here therefore runs against a
-//     whitespace-collapsed copy of the output, never against raw lines.
+//     through a `rich` Console. Off a TTY that console is 80 columns wide, so
+//     the reason WRAPS mid-sentence — verified on the box, where the
+//     128-character reason above comes out as two lines. Every matcher here
+//     therefore runs against a whitespace-collapsed copy of the output, never
+//     against raw lines. (runHermesCli now asks for a wide console, so the
+//     scan-report ROWS survive too; this stays newline-tolerant because a
+//     device that ignores COLUMNS must still be classified correctly.)
 
+import { checkInstallIdentifier } from '@/lib/hermes-skills';
 import type { ScanFinding } from '@/lib/hermes-skills';
+import { logSafe } from '@/lib/log-safe';
 
 export type InstallOutcomeKind =
   /** The security scanner refused it. `confirmable` says whether the owner can override. */
@@ -83,28 +88,30 @@ export interface InstallOutcome {
   verdict?: string;
   /** How many findings the installer counted — its number, not ours. */
   findingCount?: number;
-  /** Findings recovered from the printed scan report. Empty when it printed none. */
+  /**
+   * The scanned bundle's digest, from the `Scan provenance:` line. It is the
+   * key to the installer's OWN structured report in
+   * `~/.hermes/skills/.hub/scan-cache`, which is written before the policy gate
+   * runs — so the caller can read the real findings (`pattern_id` included)
+   * instead of the rendered table.
+   */
+  contentHash?: string;
+  /** Findings recovered from the printed table — the fallback when the cache is gone. */
   findings: ScanFinding[];
   scannerVersion?: string;
-  scannedAt?: string;
-  /** `unresolved`: the identifiers the installer's "did you mean" list offered. */
+  /** `unresolved`/`ambiguous`: the ids the installer offered instead. */
   suggestions: string[];
 }
 
 /** Longest CLI output worth scanning; anything past this is noise. */
 const MAX_OUTPUT_CHARS = 200_000;
-const MAX_FINDINGS = 60;
+// Matches buildDangerWarning()'s own cap: parsing more only to have them sliced
+// off before anything renders them is work for nobody.
+const MAX_FINDINGS = 40;
 const MAX_SUGGESTIONS = 5;
 const MAX_EXCERPT = 200;
-
-/** One line, no control characters, bounded — for anything registry-controlled. */
-function tidy(value: string, maxLen: number): string {
-  return value
-    .replace(/[\u0000-\u001F\u007F]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxLen);
-}
+/** Trust tiers and verdicts are single words; this is a sanity bound, not a policy. */
+const MAX_WORD = 32;
 
 /**
  * The scan gate's verdict line, tolerant of the 80-column wrap.
@@ -122,48 +129,83 @@ const UNOVERRIDABLE_RE = /--force does not override a dangerous verdict/i;
 
 /**
  * One row of `format_scan_report`:
- *   `  CRITICAL destructive    SKILL.md:41    "curl x | sh"`
+ *   `  CRITICAL supply_chain   SKILL.md:62    "curl -fsSL https://…| bash"`
  * severity is ljust(8), category ljust(14), `file:line` ljust(30), then the
  * matched excerpt in quotes. The excerpt is attacker-controlled text from the
- * skill, so it is tidied before it is kept.
+ * skill, so it goes through logSafe() before it is kept.
  */
 const FINDING_RE =
   /^\s{2}(CRITICAL|HIGH|MEDIUM|LOW|INFO)\s+(\S+)\s+(.+?):(\d+)\s+"([\s\S]*)"\s*$/;
 
-/** `Scan provenance: cached; scanner skills-guard-v1; hash sha256:d75b7b1d…` */
-const PROVENANCE_RE = /Scan provenance:\s*\w+;\s*scanner\s+([\w.-]+);/i;
-/**
- * `Source: oo-terraform; scanned 2026-08-27T10:19:41.110656+00:00; rules: …`
- * The device emits an offset, not a `Z`; a cached report can carry either.
- */
-const SCANNED_AT_RE = /;\s*scanned\s+(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:?\d{2})?)\s*;/i;
+/** `Scan provenance: fresh; scanner skills-guard-v1; hash sha256:d75b7b1d…` */
+const PROVENANCE_RE = /Scan provenance:\s*\w+;\s*scanner\s+([\w.-]+);\s*hash\s+(sha256:[0-9a-f]{16,64})/i;
 
-/** `  QR Code Decode — qrcode-decode` under a "did you mean" / ambiguity table. */
+/** `  Terraform — oo-terraform` under a "did you mean" list. */
 const SUGGESTION_RE = /^\s{2,}(?:\S.*?)\s+[—–-]\s+(\S+)\s*$/;
 
-function parseFindings(lines: string[]): ScanFinding[] {
+/** `Multiple skills named 'x' found:` — the header above the ambiguity table. */
+const AMBIGUOUS_RE = /Multiple skills named '[^']*' found/i;
+
+function parseFindings(raw: string): ScanFinding[] {
   const out: ScanFinding[] = [];
-  for (const line of lines) {
+  for (const line of raw.split(/\r?\n/)) {
     if (out.length >= MAX_FINDINGS) break;
     const m = FINDING_RE.exec(line);
     if (!m) continue;
     out.push({
       severity: m[1].toLowerCase(),
-      category: tidy(m[2], 64),
-      file: tidy(m[3], 120),
+      category: logSafe(m[2], 40),
+      file: logSafe(m[3], 200),
       line: Number(m[4]),
-      description: tidy(m[5], MAX_EXCERPT),
+      description: logSafe(m[5], MAX_EXCERPT),
     });
   }
   return out;
 }
 
-function parseSuggestions(lines: string[]): string[] {
+/**
+ * The ids a "did you mean" list offered.
+ *
+ * Each one is validated with the install route's own identifier check: an id
+ * the route would answer 400 for is not a next step, it is a wasted round trip.
+ */
+function parseSuggestions(raw: string): string[] {
   const out: string[] = [];
-  for (const line of lines) {
+  for (const line of raw.split(/\r?\n/)) {
     if (out.length >= MAX_SUGGESTIONS) break;
     const m = SUGGESTION_RE.exec(line);
-    if (m) out.push(tidy(m[1], 128));
+    if (m && checkInstallIdentifier(m[1]).ok) out.push(m[1]);
+  }
+  return out;
+}
+
+export interface AmbiguousSkill {
+  identifier: string;
+  source?: string;
+  trust?: string;
+}
+
+/**
+ * The rows of the disambiguation table `install`/`inspect` print for a short
+ * name that several registries answer to ("Multiple skills named 'notion'
+ * found" — 11 rows). A `rich` Table, so the cells are `│`-delimited.
+ *
+ * Shared because both routes dead-ended on it: inspect answered "not found"
+ * and install answered "could not be resolved", for a name the device could
+ * see perfectly well and simply wanted narrowed down.
+ */
+export function parseAmbiguousSkills(stdout: string, limit = 40): AmbiguousSkill[] {
+  if (!AMBIGUOUS_RE.test(stdout)) return [];
+  const out: AmbiguousSkill[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.startsWith('│')) continue;
+    const cells = line.split('│').map((c) => c.trim());
+    if (cells.length < 5) continue;
+    const [, source, trust, identifier] = cells;
+    if (!identifier || identifier === 'Identifier') continue;
+    if (!checkInstallIdentifier(identifier).ok) continue;
+    out.push({ identifier, source: source || undefined, trust: trust || undefined });
+    if (out.length >= limit) break;
   }
   return out;
 }
@@ -177,7 +219,6 @@ function parseSuggestions(lines: string[]): string[] {
  */
 export function parseInstallOutcome(stdout: string, stderr = ''): InstallOutcome {
   const raw = `${stdout || ''}\n${stderr || ''}`.slice(0, MAX_OUTPUT_CHARS);
-  const lines = raw.split(/\r?\n/);
   // `rich` hard-wraps at 80 columns off a TTY, so no sentence can be matched
   // against a single line.
   const flat = raw.replace(/\s+/g, ' ');
@@ -186,7 +227,7 @@ export function parseInstallOutcome(stdout: string, stderr = ''): InstallOutcome
   const scan = SCAN_REASON_RE.exec(flat);
   if (scan) {
     const [, decision, trust, verdict, count] = scan;
-    const unoverridable = UNOVERRIDABLE_RE.test(flat);
+    const provenance = PROVENANCE_RE.exec(flat);
     return {
       ...empty,
       kind: 'scan-refused',
@@ -194,14 +235,14 @@ export function parseInstallOutcome(stdout: string, stderr = ''): InstallOutcome
       // every word here is one this module recognised.
       reason:
         `${decision === 'Blocked' ? 'Blocked' : 'Requires confirmation'} `
-        + `(${tidy(trust, 32)} source + ${tidy(verdict, 32)} verdict, ${count} findings)`,
-      confirmable: !unoverridable,
-      trust: tidy(trust, 32),
-      verdict: tidy(verdict, 32).toLowerCase(),
+        + `(${trust.slice(0, MAX_WORD)} source + ${verdict.slice(0, MAX_WORD)} verdict, ${count} findings)`,
+      confirmable: !UNOVERRIDABLE_RE.test(flat),
+      trust: trust.slice(0, MAX_WORD),
+      verdict: verdict.slice(0, MAX_WORD).toLowerCase(),
       findingCount: Number(count),
-      findings: parseFindings(lines),
-      scannerVersion: PROVENANCE_RE.exec(flat)?.[1],
-      scannedAt: SCANNED_AT_RE.exec(flat)?.[1],
+      contentHash: provenance?.[2],
+      findings: parseFindings(raw),
+      scannerVersion: provenance?.[1],
     };
   }
 
@@ -212,15 +253,15 @@ export function parseInstallOutcome(stdout: string, stderr = ''): InstallOutcome
     return { ...empty, kind: 'blocked-other' };
   }
 
-  // The ambiguity list is a `rich` Table with box-drawing borders and a folded
-  // Identifier column; it is deliberately not scraped. "Use the full
-  // identifier" is actionable on its own, and a half-parsed table row is worse
-  // than none.
-  if (/Multiple skills named '[^']*' found/i.test(flat)) {
-    return { ...empty, kind: 'ambiguous' };
+  if (AMBIGUOUS_RE.test(flat)) {
+    return {
+      ...empty,
+      kind: 'ambiguous',
+      suggestions: parseAmbiguousSkills(raw, MAX_SUGGESTIONS).map((s) => s.identifier),
+    };
   }
   if (/No exact match for '[^']*'/i.test(flat)) {
-    return { ...empty, kind: 'unresolved', suggestions: parseSuggestions(lines) };
+    return { ...empty, kind: 'unresolved', suggestions: parseSuggestions(raw) };
   }
   if (/No skill named '[^']*' found in any source/i.test(flat)) {
     return { ...empty, kind: 'unresolved' };

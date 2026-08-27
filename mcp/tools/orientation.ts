@@ -144,12 +144,10 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
           : Promise.resolve(null),
       ]);
 
-      // `reported()`, not `??`: both model routes answer with EMPTY STRINGS on
-      // an unconfigured device, which `??` passes straight through. This tool's
-      // own description promises "unknown" for anything that cannot be read,
-      // and device_status is the surface the server's instructions tell every
-      // model to call FIRST — two blanks here are an invitation to invent a
-      // model name.
+      // `reported()`, not `??` — see mcp/lib/report.ts. device_status is the
+      // surface the server's instructions tell every model to call FIRST, so a
+      // blank here is the likeliest of all of them to be filled in with a
+      // plausible-sounding model name.
       const ai =
         ctx.edition === "hermes"
           ? {

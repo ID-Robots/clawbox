@@ -208,7 +208,7 @@ function refusalToToolError(err: unknown): ToolError | null {
   } catch {
     return null;
   }
-  if (err.status === 409 && payload.code === "dangerous_skill") {
+  if (payload.code === "dangerous_skill") {
     const caps = capabilityText(payload);
     const what = caps ? `It can ${caps}.` : "The scan did not say which part of the device it touches.";
     return new ToolError(
@@ -218,7 +218,7 @@ function refusalToToolError(err: unknown): ToolError | null {
         + "Only if they say yes, call skill_install again with the same id and confirm=true.",
     );
   }
-  if (err.status === 409 && payload.code === "dangerous_skill_blocked") {
+  if (payload.code === "dangerous_skill_blocked") {
     // The device's installer refuses this one outright — a `dangerous` verdict
     // from a community or trusted source is not overridable, by ITS policy, not
     // ours. There is no confirmation to ask for, so the agent must not offer
@@ -232,14 +232,14 @@ function refusalToToolError(err: unknown): ToolError | null {
         + "Tell the user the device blocked it, then call skill_search to offer a different skill for the same job.",
     );
   }
-  if (err.status === 409 && payload.code === "ambiguous_id") {
+  if (payload.code === "ambiguous_id") {
     return new ToolError(
       "BAD_ARGUMENT",
       "More than one skill in the store goes by that name.",
       "Call skill_search for that name and pass the FULL id of the one you want — a short name cannot be resolved.",
     );
   }
-  if (err.status === 409 && payload.code === "already_installed") {
+  if (payload.code === "already_installed") {
     return new ToolError(
       "CONFLICT",
       "That skill is already installed on this device.",
@@ -267,7 +267,7 @@ function refusalToToolError(err: unknown): ToolError | null {
       "Do not retry. Tell the user the install failed on the device and that Settings -> Skills has the details.",
     );
   }
-  if (err.status === 409 && payload.code === "bundled_conflict") {
+  if (payload.code === "bundled_conflict") {
     return new ToolError(
       "CONFLICT",
       `"${payload.conflictsWith ?? "That skill"}" already came with this device, and a store skill of the same name would replace it.`,
@@ -295,9 +295,11 @@ function refusalToToolError(err: unknown): ToolError | null {
         : "Call skill_search, then pass the exact id it returned.",
     );
   }
-  // Our JSON, a code this build does not know: still better than the generic
-  // 502 mapping, which tells the agent to retry.
-  if (typeof payload.error === "string" && payload.error.trim()) {
+  // Our JSON, a code this build does not know. Scoped to the two statuses this
+  // route refuses with, so an auth or transport failure still reaches
+  // classifyError() and keeps its own advice — a 401 must not be reported as
+  // "the device refused the install, do not retry".
+  if ((err.status === 409 || err.status === 502) && typeof payload.error === "string") {
     return new ToolError(
       "CONFLICT",
       "The device refused the install.",
