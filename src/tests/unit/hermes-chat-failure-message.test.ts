@@ -54,15 +54,19 @@ describe("the message shown for a failed Hermes turn", () => {
   });
 
   it("drops stack frames rather than showing them in a chat bubble", () => {
+    // A REAL CPython traceback prints an indented SOURCE line under every
+    // `File "…"` frame. Omitting it let this test pass against a filter that
+    // only knew about the frame header — the very hole it was meant to close.
     const stderr = [
       "session_id: 20260811_000000_aaaaaa",
       "Traceback (most recent call last):",
-      '  File "/home/clawbox/.hermes/x.py", line 12, in run',
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider',
+      '    raise RuntimeError("upstream refused the request")',
       "RuntimeError: upstream refused the request",
     ].join("\n");
     const msg = hermesFailureMessage("", stderr);
     expect(msg).toBe("RuntimeError: upstream refused the request");
-    expect(msg).not.toMatch(/Traceback|File "/);
+    expect(msg).not.toMatch(/Traceback|File "|raise /);
   });
 
   it("returns empty when neither stream says anything, so the caller can be generic", () => {
@@ -264,5 +268,116 @@ describe("a failed turn on a resumed session", () => {
       'Resumed session 20260825_165225_be089e "t" (1 user message, 5 total messages)',
     );
     expect(msg).toBe("HTTP 403 — Just a moment...");
+  });
+});
+
+/**
+ * The chat bubble showed a line of PYTHON SOURCE when Hermes crashed.
+ *
+ * Every line was trimmed before it was classified, which threw away the one
+ * signal CPython gives for free: it INDENTS everything belonging to a frame —
+ * the `File "…"` header, the source line under it, and (3.11+) the `^^^^`
+ * anchor beneath that — and returns the exception summary to column 0. With
+ * the indentation gone, `raise RuntimeError("upstream refused the request")`
+ * matched the "names a failure" heuristic on "RuntimeError", sat earlier in
+ * the stream than the real summary, and won. Captured shape below is what
+ * CPython 3.11+ prints.
+ */
+describe("a Python traceback in the output", () => {
+  const TRACEBACK = [
+    "session_id: 20260811_000000_aaaaaa",
+    "Traceback (most recent call last):",
+    '  File "/home/clawbox/.hermes/agent.py", line 212, in _turn',
+    "    return self._call_provider(payload)",
+    "           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^",
+    '  File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider',
+    '    raise RuntimeError("upstream refused the request")',
+    "RuntimeError: upstream refused the request",
+  ].join("\n");
+
+  it("shows the exception summary, never the source line that raised it", () => {
+    expect(hermesFailureMessage("", TRACEBACK)).toBe("RuntimeError: upstream refused the request");
+  });
+
+  it("shows no fragment of a frame — header, source line or anchor", () => {
+    const msg = hermesFailureMessage("", TRACEBACK);
+    expect(msg).not.toMatch(/raise |_call_provider|\^\^\^|File "|Traceback/);
+  });
+
+  it("still wins over partial answer text left on stdout", () => {
+    expect(hermesFailureMessage("half an answer", TRACEBACK))
+      .toBe("RuntimeError: upstream refused the request");
+  });
+
+  it("reads a traceback on stdout the same way", () => {
+    expect(hermesFailureMessage(TRACEBACK, "")).toBe("RuntimeError: upstream refused the request");
+  });
+
+  it("reports an exception summary, not a source line, for a chained traceback", () => {
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider',
+      "    resp = self.session.post(url, json=payload)",
+      "ConnectionError: connection refused",
+      "",
+      "During handling of the above exception, another exception occurred:",
+      "",
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/chat.py", line 40, in turn',
+      '    raise RuntimeError("the turn failed")',
+      "RuntimeError: the turn failed",
+    ].join("\n");
+    const msg = hermesFailureMessage("", stderr);
+    expect(msg).toMatch(/^(?:ConnectionError|RuntimeError): /);
+    expect(msg).not.toMatch(/resp = |raise |File "|above exception/);
+  });
+
+  it("says nothing rather than guess when the stream is cut off mid-frame", () => {
+    // stderr hit the size cap partway through the frames, so no summary line
+    // ever arrived. Silence lets the caller fall back to the exit code; a
+    // source line here would be a confident wrong answer.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 212, in _turn',
+      "    return self._call_provider(payload)",
+    ].join("\n");
+    expect(hermesFailureMessage("", stderr)).toBe("");
+    expect(hermesExitMessage(1, "", stderr)).toBe("hermes exited with code 1");
+  });
+
+  it("stops dropping indented lines once the traceback has ended", () => {
+    // The frame rule is scoped to the traceback. An indented line in ordinary
+    // Hermes output after it is still something the customer needs, and here
+    // it is the only line naming the failure at all.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in run',
+      "    resp = self.session.post(url, json=payload)",
+      "KeyboardInterrupt",
+      "  the provider denied the request; check the API key",
+    ].join("\n");
+    expect(hermesFailureMessage("", stderr))
+      .toBe("the provider denied the request; check the API key");
+  });
+
+  it("keeps a sentence that merely starts with File \"…\" after the traceback", () => {
+    // `File "` alone used to open a traceback block, so an ordinary diagnostic
+    // naming a file was both discarded AND reopened suppression over the lines
+    // under it. Only the real frame shape — File "…", line <n> — opens one.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in run',
+      "    cfg = load(path)",
+      "KeyboardInterrupt",
+      '  File "config.yaml" was denied to the hermes user',
+    ].join("\n");
+    const msg = hermesFailureMessage("", stderr);
+    expect(msg).toBe('File "config.yaml" was denied to the hermes user');
+    expect(msg).not.toMatch(/cfg = load|agent\.py/);
+  });
+
+  it("keeps indented prose that was never part of a traceback", () => {
+    expect(hermesFailureMessage("    the request was denied by the provider", ""))
+      .toBe("the request was denied by the provider");
   });
 });
