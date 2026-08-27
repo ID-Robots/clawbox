@@ -53,6 +53,10 @@ beforeEach(() => {
   restartGatewayMock.mockReset().mockResolvedValue(undefined);
   getMock.mockReset();
   setMock.mockReset().mockResolvedValue(undefined);
+  // Reset like the rest. `mockReturnValue` outlives the test that set it, so
+  // without this the gateway-absent case below would silently make every test
+  // added after it run on the Hermes branch.
+  gatewayIsAbsentMock.mockReset().mockReturnValue(false);
 });
 
 afterEach(async () => {
