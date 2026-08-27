@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseInstallOutcome } from '@/lib/hermes-skill-cli-outcome';
+import { parseAmbiguousSkills, parseInstallOutcome } from '@/lib/hermes-skill-cli-outcome';
 
 /**
  * TASK-453 round 3 — `hermes skills install` exits 0 on every refusal, so the
@@ -244,5 +244,55 @@ describe('parseInstallOutcome — verbatim device output', () => {
     // The CLI suggesting the identical id it was handed is a Hermes-side
     // resolver bug; passing it through is still the only actionable answer.
     expect(out.suggestions).toEqual(['oo-terraform']);
+  });
+});
+
+/**
+ * Verbatim from the same device, `hermes skills inspect pdf` at a wide console:
+ * the disambiguation table both `install` and `inspect` used to dead-end on.
+ * `rich` draws the header row with the heavy bar and the body rows with the
+ * light one, so the shape — not just the text — is pinned here.
+ */
+const DEVICE_AMBIGUITY = [
+  "Resolving 'pdf'...",
+  '',
+  "Multiple skills named 'pdf' found:",
+  '┏━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┓',
+  '┃ Source    ┃ Trust     ┃ Identifier                      ┃',
+  '┡━━━━━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━┩',
+  '│ skills.sh │ trusted   │ skills-sh/anthropics/skills/pdf │',
+  '│ github    │ trusted   │ anthropics/skills/skills/pdf    │',
+  '│ clawhub   │ community │ martin-pdf                      │',
+  '└───────────┴───────────┴─────────────────┘',
+  'Use the full identifier to install a specific one.',
+].join('\n');
+
+describe('parseAmbiguousSkills — the real table', () => {
+  it('reads every body row, and none of the borders or the header', () => {
+    expect(parseAmbiguousSkills(DEVICE_AMBIGUITY)).toEqual([
+      { identifier: 'skills-sh/anthropics/skills/pdf', source: 'skills.sh', trust: 'trusted' },
+      { identifier: 'anthropics/skills/skills/pdf', source: 'github', trust: 'trusted' },
+      { identifier: 'martin-pdf', source: 'clawhub', trust: 'community' },
+    ]);
+  });
+
+  it('offers those ids from the install route as well', () => {
+    const out = parseInstallOutcome(DEVICE_AMBIGUITY);
+
+    expect(out.kind).toBe('ambiguous');
+    expect(out.suggestions).toContain('martin-pdf');
+  });
+
+  it('says nothing when the output is not an ambiguity table', () => {
+    expect(parseAmbiguousSkills('Name: pdf\nSource: clawhub\n')).toEqual([]);
+  });
+
+  it('honours the row cap, so a 200-row table cannot become a 200-item payload', () => {
+    const many = [
+      "Multiple skills named 'x' found:",
+      ...Array.from({ length: 50 }, (_, i) => `│ clawhub │ community │ slug-${i} │`),
+    ].join('\n');
+
+    expect(parseAmbiguousSkills(many, 5)).toHaveLength(5);
   });
 });

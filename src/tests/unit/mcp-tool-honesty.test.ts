@@ -763,6 +763,18 @@ describe("skill_install — a refusal the agent can act on", () => {
     expect(e.code).toBe("BAD_ARGUMENT");
     expect(e.next).toMatch(/FULL id/);
   });
+
+  it("does not report an auth failure as a device refusal", async () => {
+    // The catch-all for an unrecognised code is scoped to the two statuses the
+    // route refuses with. A 401 has to keep classifyError's own advice: a
+    // missing token is recoverable, and "do not retry" hides that.
+    refuse(401, { error: "Authentication required" });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("AUTH_FAILED");
+    expect(e.next).not.toMatch(/would not install/i);
+  });
 });
 
 // ── device_status ────────────────────────────────────────────────────────────

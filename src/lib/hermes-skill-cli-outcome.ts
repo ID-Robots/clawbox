@@ -143,6 +143,9 @@ const PROVENANCE_RE = /Scan provenance:\s*\w+;\s*scanner\s+([\w.-]+);\s*hash\s+(
 /** `  Terraform — oo-terraform` under a "did you mean" list. */
 const SUGGESTION_RE = /^\s{2,}(?:\S.*?)\s+[—–-]\s+(\S+)\s*$/;
 
+/** The cell separator of a `rich` Table row: light bar for body rows, heavy for the header. */
+const ROW_SEPARATOR_RE = /[│┃]/;
+
 /** `Multiple skills named 'x' found:` — the header above the ambiguity table. */
 const AMBIGUOUS_RE = /Multiple skills named '[^']*' found/i;
 
@@ -197,9 +200,14 @@ export interface AmbiguousSkill {
 export function parseAmbiguousSkills(stdout: string, limit = 40): AmbiguousSkill[] {
   if (!AMBIGUOUS_RE.test(stdout)) return [];
   const out: AmbiguousSkill[] = [];
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.startsWith('│')) continue;
-    const cells = line.split('│').map((c) => c.trim());
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    // A `rich` Table draws its BODY rows with the light bar and its HEADER row
+    // with the heavy one (the default HEAVY_HEAD box, confirmed on a device).
+    // Both are accepted so a different box style still parses; the header row is
+    // rejected by its own label below rather than by which bar it uses.
+    if (!ROW_SEPARATOR_RE.test(line)) continue;
+    const cells = line.split(ROW_SEPARATOR_RE).map((c) => c.trim());
     if (cells.length < 5) continue;
     const [, source, trust, identifier] = cells;
     if (!identifier || identifier === 'Identifier') continue;
