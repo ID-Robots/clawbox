@@ -253,21 +253,25 @@ describe("setHermesEnvValues on disk", () => {
     // SETTLING is the property under test, not which way it settles: a
     // non-blocking read of a writer-less FIFO gives EOF on some kernels and
     // EAGAIN on others, and either is a fine answer. Hanging is not.
-    const settles = async (work: Promise<unknown>, what: string) => {
+    const inTime = async (work: Promise<unknown>, what: string) => {
       let timer: ReturnType<typeof setTimeout>;
       const hung = new Promise((_, reject) => {
         timer = setTimeout(() => reject(new Error(`${what} hung on a fifo`)), 2000);
       });
       try {
-        await Promise.race([work.catch((err: unknown) => err), hung]);
+        await Promise.race([work, hung]);
       } finally {
         clearTimeout(timer!);
       }
     };
-    await settles(readHermesEnv(), "readHermesEnv");
-    // The write must not merely settle — it must REFUSE. A FIFO is not a base
-    // to build the next .env on.
-    await settles(
+    // Neither side may merely settle: a FIFO reads as zero bytes, so "it
+    // resolved empty" would be this module reporting a device whose settings
+    // file is a pipe as a device with no settings.
+    await inTime(
+      expect(readHermesEnv()).rejects.toBeInstanceOf(HermesEnvUnreadableError),
+      "readHermesEnv",
+    );
+    await inTime(
       expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError),
       "setHermesEnvValues",
     );

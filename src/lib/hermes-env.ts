@@ -213,6 +213,14 @@ export async function readHermesEnv(): Promise<Record<string, string>> {
 async function readEnvText(envPath: string): Promise<string> {
   const handle = await fs.open(envPath, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
+    const stat = await handle.stat();
+    // A directory raises the OS's own EISDIR from the read below, and callers
+    // key on those codes, so it is left to do that. Anything else that is not a
+    // regular file — a FIFO, a socket, a device — would READ perfectly well and
+    // answer nothing, which this module would then report as "no settings are
+    // configured". A pipe where the environment file should be is a fault, and
+    // is refused as one.
+    if (!stat.isFile() && !stat.isDirectory()) throw new HermesEnvUnreadableError("not-a-regular-file");
     return await handle.readFile("utf-8");
   } finally {
     await handle.close().catch(() => {});

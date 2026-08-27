@@ -193,25 +193,29 @@ describe("skill secrets (TASK-452)", () => {
   // ran against the path again. They now run against one open descriptor, and
   // the open is non-blocking so the regular-file check can still be reached.
   it("does not hang on a path that is not a regular file", async () => {
-    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+    const { HermesEnvUnreadableError, readHermesEnv } = await import("@/lib/hermes-skill-secrets");
     try {
       execFileSync("mkfifo", [envPath()]);
       if (!(await fs.stat(envPath())).isFIFO()) return;
     } catch {
       return; // no real FIFOs here; CI runs on Linux, which has them
     }
-    // Settling is the property under test: a non-blocking read of a
-    // writer-less FIFO gives EOF on some kernels and EAGAIN on others, and
-    // either is a fine answer. Parking the request forever is not.
+    // Two properties, and the first is why the open is O_NONBLOCK: it must
+    // ANSWER. A blocking open of a writer-less FIFO parks the request forever.
     let timer: ReturnType<typeof setTimeout>;
     const hung = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error("readHermesEnv hung on a fifo")), 2000);
     });
+    let outcome: unknown;
     try {
-      await Promise.race([readHermesEnv().catch((err: unknown) => err), hung]);
+      outcome = await Promise.race([readHermesEnv().catch((err: unknown) => err), hung]);
     } finally {
       clearTimeout(timer!);
     }
+    // And the answer must be a fault. A FIFO reads as zero bytes, which would
+    // otherwise be reported as "no keys are set" for a device whose secrets
+    // file has been replaced by a pipe.
+    expect(outcome).toBeInstanceOf(HermesEnvUnreadableError);
   });
 
   // Answering "nothing is set" for a file nobody could read is the wrong answer
