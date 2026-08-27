@@ -70,12 +70,51 @@ const INSTALL_RULES: ErrorRule[] = [
   },
 ];
 
-const UNINSTALL_RULES: ErrorRule[] = [
+// The two reasons a skill cannot be removed, worded once. skill_uninstall can
+// reach either conclusion twice over — from the installed list in its own
+// pre-condition, or from the route's 404/409 when that list could not be read —
+// and one device state must not produce two different sentences.
+const notInstalledMessage = (name: string) =>
+  `There is no installed skill called "${name}" on this device.`;
+const NOT_INSTALLED_NEXT =
+  "Call skill_list and pass the name field of a skill it actually lists. Do not retry this name.";
+const builtinMessage = (name: string) => `"${name}" came with the device, so it cannot be removed.`;
+const BUILTIN_NEXT =
+  "Only skills that skill_list marks \"from the store\" can be removed. "
+  + "Tell the user this one is built in. Do not retry.";
+
+/**
+ * Built per call so the refusals can name the skill, exactly as the
+ * pre-condition does.
+ *
+ * The 404 and 409 rules are matched on the route's `code` field and not on the
+ * status alone. The Hermes edition gate answers 404 from this same route with
+ * no code, and these tools are registered off an edition probe taken once at
+ * startup — so on a device that changed harness since then, "no such skill is
+ * installed" would be a confident answer to a question nobody asked. An
+ * unlabelled status falls through to the generic mapping, which is the honest
+ * outcome when we cannot tell which failure it was.
+ */
+const uninstallRules = (name: string): ErrorRule[] => [
   {
     status: 400,
     code: "BAD_ARGUMENT",
     message: "Uninstall takes the short skill name, not the full store id.",
     next: "Call skill_list and pass the name field of the skill you want removed.",
+  },
+  {
+    status: 404,
+    match: /"code"\s*:\s*"not_installed"/,
+    code: "NOT_FOUND",
+    message: notInstalledMessage(name),
+    next: NOT_INSTALLED_NEXT,
+  },
+  {
+    status: 409,
+    match: /"code"\s*:\s*"builtin_skill"/,
+    code: "CONFLICT",
+    message: builtinMessage(name),
+    next: BUILTIN_NEXT,
   },
   {
     status: 502,
@@ -559,25 +598,21 @@ export function registerSkillTools(reg: Registrar): void {
         // its identifier is what the post-condition needs.
         const entry = before.find((sk) => sk.name === name && isStoreSkill(sk)) ?? before.find((sk) => sk.name === name);
         if (!entry) {
-          throw new ToolError(
-            "NOT_FOUND",
-            `There is no installed skill called "${name}" on this device.`,
-            "Call skill_list and pass the name field of a skill it actually lists. Do not retry this name.",
-          );
+          throw new ToolError("NOT_FOUND", notInstalledMessage(name), NOT_INSTALLED_NEXT);
         }
         if (!isStoreSkill(entry)) {
-          throw new ToolError(
-            "CONFLICT",
-            `"${name}" came with the device, so it cannot be removed.`,
-            "Only skills that skill_list marks \"from the store\" can be removed. Tell the user this one is built in.",
-          );
+          throw new ToolError("CONFLICT", builtinMessage(name), BUILTIN_NEXT);
         }
         removing = entry;
       }
       // The route's field is `id`, but it means the lock NAME — the MCP
       // parameter is called `name` so the model cannot confuse it with the
       // store id that skill_install takes.
-      await apiPost("/setup-api/hermes/skills/uninstall", { id: name }, { timeoutMs: 60_000, rules: UNINSTALL_RULES });
+      await apiPost(
+        "/setup-api/hermes/skills/uninstall",
+        { id: name },
+        { timeoutMs: 60_000, rules: uninstallRules(name) },
+      );
       // POST-CONDITION. A STORE skill still there means the CLI refused it
       // quietly; a builtin of the same name resurfacing means it worked.
       const after = await installedSkills();

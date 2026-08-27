@@ -224,6 +224,98 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
     expect(out.isError).toBe(false);
     expect(apiPost).toHaveBeenCalled();
   });
+
+  /**
+   * MCP-02 — the pre-condition above is the ONLY thing that normally decodes
+   * "there is no such skill" and "that one is built in", and it is skipped
+   * whenever the installed list cannot be read (installedSkills() swallows any
+   * failure and returns null). In that window the route's own structured
+   * refusals are all the agent gets, and neither had a rule: the 404 became the
+   * generic resource-404 and the 409 became a generic CONFLICT whose next step
+   * was "ask them to finish the setup in Settings" — advice that cannot make a
+   * built-in skill removable.
+   */
+  describe("the route's own refusals, when the pre-condition could not run", () => {
+    /** The installed list is unreadable, so the route's answer is the whole story. */
+    const blindfolded = () => apiGet.mockRejectedValue(new ApiError(502, "{}"));
+    const routeSays = (status: number, body: Record<string, string>) =>
+      apiPost.mockRejectedValue(new ApiError(status, JSON.stringify(body)));
+
+    it("reports a built-in skill as built in, not as unfinished setup", async () => {
+      blindfolded();
+      routeSays(409, {
+        error: '"memo" came with this device, so it cannot be removed.',
+        code: "builtin_skill",
+      });
+
+      const out = await skills().call("skill_uninstall", { name: "memo" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("CONFLICT");
+      expect(out.error.message).toMatch(/came with the device/i);
+      expect(out.error.next).toMatch(/built in/i);
+      expect(out.error.next).toMatch(/do not retry/i);
+      // The generic 409 sent the agent to Settings. There is nothing to finish
+      // there, and the skill will still be built in when it comes back.
+      expect(out.error.next).not.toMatch(/settings/i);
+    });
+
+    it("reports a name the device does not have as not installed", async () => {
+      blindfolded();
+      routeSays(404, {
+        error: 'No store skill called "ghost" is installed on this device.',
+        code: "not_installed",
+      });
+
+      const out = await skills().call("skill_uninstall", { name: "ghost" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("NOT_FOUND");
+      expect(out.error.message).toMatch(/no installed skill called "ghost"/i);
+      expect(out.error.next).toMatch(/skill_list/);
+      expect(out.error.next).toMatch(/do not retry this name/i);
+      // The generic resource-404 offered tools that have nothing to do with skills.
+      expect(out.error.next).not.toMatch(/ui_list_apps|code_project_list/);
+    });
+
+    /**
+     * The edition gate answers 404 from the SAME route, with no `code`. The
+     * tool is registered off a probe taken once at startup, so a device that
+     * switched harness since then reaches this branch — and "no such skill is
+     * installed" would be a confident answer to a question nobody asked.
+     */
+    it("does not read the Hermes edition guard's 404 as a missing skill", async () => {
+      blindfolded();
+      routeSays(404, { error: "Not found" });
+
+      const out = await skills().call("skill_uninstall", { name: "pdf" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.message).not.toMatch(/no installed skill called/i);
+    });
+
+    /**
+     * Anti-drift: the same device state has to produce the same sentence
+     * whichever path noticed it, or the agent gets two stories about one fact.
+     */
+    it("says the same thing as the pre-condition for the same device state", async () => {
+      installed([{ name: "memo", origin: "builtin" }]);
+      const viaPrecondition = await skills().call("skill_uninstall", { name: "memo" });
+
+      apiGet.mockReset();
+      blindfolded();
+      routeSays(409, {
+        error: '"memo" came with this device, so it cannot be removed.',
+        code: "builtin_skill",
+      });
+      const viaRoute = await skills().call("skill_uninstall", { name: "memo" });
+
+      expect(viaPrecondition.isError).toBe(true);
+      expect(viaRoute.isError).toBe(true);
+      if (!viaPrecondition.isError || !viaRoute.isError) return;
+      expect(viaRoute.error).toEqual(viaPrecondition.error);
+    });
+  });
 });
 
 // ── skill_info ───────────────────────────────────────────────────────────────
