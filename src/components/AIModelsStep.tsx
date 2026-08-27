@@ -1162,25 +1162,42 @@ export default function AIModelsStep({
    * every caller below treats that as "send no model" rather than sending one
    * the customer has just been told is unavailable.
    */
+  /**
+   * The catalog default when this credential can route it, else the first model
+   * that it can, else `""`. The ONE fallback in this component — the curated
+   * picker and the blank-custom-field path both take it, so neither can quietly
+   * resurrect `activeCatalog.defaultModelId` when that default is a model the
+   * picker has just greyed out.
+   */
+  const usableDefaultModelId = useMemo(() => {
+    if (!activeCatalog) return "";
+    const usable = activeCatalog.models.filter(isModelUsable);
+    return (usable.find((m) => m.id === activeCatalog.defaultModelId) ?? usable[0])?.id ?? "";
+  }, [activeCatalog, isModelUsable]);
+
   const effectiveModelId = useMemo(() => {
     const requested = selectedModelId.trim();
     if (!activeCatalog || useCustomModel) return requested;
     const picked = activeCatalog.models.find((m) => m.id === requested);
     if (picked && isModelUsable(picked)) return picked.id;
-    const usable = activeCatalog.models.filter(isModelUsable);
-    return (usable.find((m) => m.id === activeCatalog.defaultModelId) ?? usable[0])?.id ?? "";
-  }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable]);
+    return usableDefaultModelId;
+  }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable, usableDefaultModelId]);
 
-  /** The catalogue has models and this auth mode can run none of them. */
+  /** The catalogue has models and this auth mode can run none of them. Not
+   * gated on `useCustomModel`: a blank custom field falls back to the catalogue
+   * too, so custom mode is not an exemption from the question. */
   const noUsableCatalogModel = Boolean(
-    activeCatalog && !useCustomModel && activeCatalog.models.length > 0 && !effectiveModelId,
+    activeCatalog && activeCatalog.models.length > 0 && !usableDefaultModelId,
   );
 
   const getRequestedCatalogModelId = useCallback((fallbackToDefault = false) => {
     if (!activeCatalog) return "";
     if (useCustomModel) {
       const typed = customModelId.trim();
-      return typed || (fallbackToDefault ? activeCatalog.defaultModelId : "");
+      // A blank custom field falls back to a model this credential can actually
+      // route — never to the raw catalog default, which the picker may have
+      // just greyed out.
+      return typed || (fallbackToDefault ? usableDefaultModelId : "");
     }
     // No `fallbackToDefault` on the curated path: `effectiveModelId` already
     // resolves to the catalog default when this credential can route it, so
@@ -1188,7 +1205,7 @@ export default function AIModelsStep({
     // falling back to the default there would post the very model the picker
     // has just greyed out.
     return effectiveModelId;
-  }, [activeCatalog, customModelId, effectiveModelId, useCustomModel]);
+  }, [activeCatalog, customModelId, effectiveModelId, usableDefaultModelId, useCustomModel]);
 
   const saveModel = async () => {
     if (!selectedProvider) return showError(t("ai.selectProvider"));
@@ -1201,12 +1218,13 @@ export default function AIModelsStep({
     if (selectedProvider === "clawai") {
       payload.clawaiTier = clawaiTier;
     } else if (activeCatalog) {
-      if (noUsableCatalogModel) {
-        return showError(t("ai.modelNoneAvailable"));
-      }
       const requestedId = getRequestedCatalogModelId();
       if (!requestedId) {
-        return showError(`Please choose a model for ${selectedProvider}`);
+        // A typed custom id is always allowed through — the refusal is only for
+        // "we have nothing to send", and which message depends on why.
+        return showError(noUsableCatalogModel
+          ? t("ai.modelNoneAvailable")
+          : `Please choose a model for ${selectedProvider}`);
       }
       if (!isValidModelId(activeCatalog.provider, requestedId)) {
         return showError(`Invalid model ID for ${activeCatalog.provider}: ${requestedId}`);
@@ -1245,11 +1263,12 @@ export default function AIModelsStep({
   const saveOAuthToken = useCallback(async (
     tokenData: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string; oauthHandoff?: boolean }
   ) => {
-    if (noUsableCatalogModel) {
-      // Every model in the catalogue sits outside this sign-in's surface. Say
-      // so, rather than configuring the provider and letting the server's own
-      // default — which comes from the same catalogue — fail at the first turn.
-      // Before the controller, so a refused save leaves no live one behind.
+    if (noUsableCatalogModel && !getRequestedCatalogModelId(true)) {
+      // Every model in the catalogue sits outside this sign-in's surface and
+      // the customer has not typed one of their own. Say so, rather than
+      // configuring the provider and letting the server's own default — which
+      // comes from the same catalogue — fail at the first turn. Before the
+      // controller, so a refused save leaves no live one behind.
       return showError(t("ai.modelNoneAvailable"));
     }
     saveControllerRef.current?.abort();

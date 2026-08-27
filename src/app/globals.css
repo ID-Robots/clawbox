@@ -386,6 +386,11 @@ h6 {
   --dd-accent-hot: rgba(249, 115, 22, 0.24);    /* active + hover   */
   --dd-accent-ring: var(--coral-ring);
 }
+/* Both forms deliberately: the component stamps `data-agent` on the container
+   ITSELF (and on the portaled popover, which shares no ancestor with it), so a
+   descendant-only selector would leave the trigger coral under a green list.
+   The descendant form still matters for a Hermes ancestor further up. */
+.header-dropdown[data-agent="hermes"],
 [data-agent="hermes"] .header-dropdown,
 .header-dropdown-popover[data-agent="hermes"] {
   --dd-accent: #12d6a4;

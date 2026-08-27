@@ -85,8 +85,12 @@ const CATALOG = {
   ],
 };
 
+/** Bodies posted to /setup-api/ai-models/configure during a test. */
+const configurePosts: Array<Record<string, unknown>> = [];
+
 function stubFetch(catalog: unknown = CATALOG) {
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+  configurePosts.length = 0;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
     if (url.includes("/setup-api/ai-models/oauth/providers")) {
       return { ok: true, json: async () => ({ providers: ["anthropic"] }) } as Response;
@@ -94,11 +98,31 @@ function stubFetch(catalog: unknown = CATALOG) {
     if (url.includes("/setup-api/ai-models/catalog")) {
       return { ok: true, json: async () => catalog } as Response;
     }
+    if (url.includes("/setup-api/ai-models/oauth/start")) {
+      return { ok: true, json: async () => ({ url: "https://claude.ai/oauth/authorize" }) } as Response;
+    }
+    if (url.includes("/setup-api/ai-models/oauth/exchange")) {
+      return { ok: true, json: async () => ({ status: "complete" }) } as Response;
+    }
+    if (url.includes("/setup-api/ai-models/configure")) {
+      configurePosts.push(JSON.parse(String(init?.body ?? "{}")));
+      return { ok: true, json: async () => ({ success: true }) } as Response;
+    }
     if (url.includes("harness")) {
       return { ok: true, json: async () => ({ edition: "openclaw" }) } as Response;
     }
     return { ok: true, json: async () => ({}) } as Response;
   }));
+}
+
+/** Drive the Claude subscription sign-in through to the configure POST. */
+async function completeSubscriptionSignIn() {
+  fireEvent.click(await screen.findByRole("button", { name: /ai\.anthropicConnect|Connect/i }));
+  const code = await screen.findByLabelText(/ai\.anthropicInputLabel|Authorization/i);
+  fireEvent.change(code, { target: { value: "auth-code-123" } });
+  fireEvent.keyDown(code, { key: "Enter" });
+  await waitFor(() => expect(configurePosts.length).toBe(1));
+  return configurePosts[0];
 }
 
 async function renderAnthropicSubscription() {
@@ -186,6 +210,29 @@ describe("wizard model picker", () => {
     const active = within(listbox).getAllByRole("option", { selected: true });
     expect(active).toHaveLength(1);
     expect(active[0].textContent).toContain("Claude Opus 4.8");
+  });
+
+  it("never posts a model the subscription cannot run, not even the catalog default", async () => {
+    // The catalogue's own default is off the subscription surface. Neither the
+    // picker nor the sign-in may fall back to it.
+    stubFetch({ ...CATALOG, defaultModelId: "claude-mythos-5" });
+    await renderAnthropicSubscription();
+    const body = await completeSubscriptionSignIn();
+    expect(body.model).not.toBe("claude-mythos-5");
+    expect(body.model).toBe("claude-opus-4-8");
+  });
+
+  it("does not resurrect the blocked default through a blank custom-model field", async () => {
+    // Custom mode is the power-user escape hatch, but an EMPTY field is not a
+    // pick — it falls back to the catalogue, and that fallback has to obey the
+    // same rule the picker does.
+    stubFetch({ ...CATALOG, defaultModelId: "claude-mythos-5" });
+    await renderAnthropicSubscription();
+    fireEvent.click(await screen.findByRole("button", { name: /^Model/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Enter a custom model ID/ }));
+    const body = await completeSubscriptionSignIn();
+    expect(body.model).not.toBe("claude-mythos-5");
+    expect(body.model).toBe("claude-opus-4-8");
   });
 
   it("leaves the whole list pickable when the surface could not be enumerated", async () => {
