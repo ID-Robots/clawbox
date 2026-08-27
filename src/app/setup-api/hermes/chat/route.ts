@@ -275,13 +275,60 @@ function isBookkeepingLine(line: string): boolean {
   return /^session_id:/i.test(line)
     || /^(?:↻\s*)?Resumed session\b/.test(line)
     || /^Model restored from session\b/.test(line)
-    || /^\s*(?:Traceback|File ")/.test(line);
+    // The connectors CPython prints between chained tracebacks. They sit at
+    // column 0, so they survive the frame strip below, and they name no cause.
+    || /^(?:During handling of the above exception|The above exception was the direct cause)\b/
+      .test(line);
+}
+
+/**
+ * Drop the FRAMES of a Python traceback, keeping only its summary line.
+ *
+ * CPython indents everything belonging to a frame — the `File "…"` header, the
+ * source line under it and (3.11+) the `^^^^` anchor beneath that — and returns
+ * the exception summary to column 0. Trimming every line before classifying it
+ * threw that signal away. Only the frame HEADER was being dropped, so the
+ * source line under it survived, matched the "names a failure" filter below on
+ * its `RuntimeError(` text, and — sitting earlier in the stream than the real
+ * summary — became the customer's error bubble. Captured shape:
+ *
+ *   Traceback (most recent call last):
+ *     File "/home/clawbox/.hermes/agent.py", line 88, in _call_provider
+ *       raise RuntimeError("upstream refused the request")     <- what was shown
+ *   RuntimeError: upstream refused the request                 <- what to show
+ *
+ * So classify on the RAW line: once a traceback opens, drop everything indented
+ * under it and let the first column-0 line both end the block and stand as the
+ * cause. A frame header opens a block too, so a stream whose `Traceback:` line
+ * was already cut off still reads correctly. If the stream ENDS inside the
+ * frames, nothing is invented — the caller falls back to the exit code rather
+ * than quoting Python source at a customer. The block is scoped: once it ends,
+ * an indented line is ordinary output again.
+ */
+const TRACEBACK_OPENER = /^[ \t]*(?:Traceback\b|File ")/;
+
+function withoutTracebackFrames(lines: string[]): string[] {
+  const kept: string[] = [];
+  let inTraceback = false;
+  for (const line of lines) {
+    if (TRACEBACK_OPENER.test(line)) {
+      inTraceback = true;
+      continue;
+    }
+    if (inTraceback) {
+      if (!line || /^[ \t]/.test(line)) continue;
+      inTraceback = false;
+    }
+    kept.push(line);
+  }
+  return kept;
 }
 
 /** Bookkeeping and stack noise, dropped before we look for a cause. */
 function usefulLines(stream: string): string[] {
-  const lines = stream
-    .split(/\r?\n/)
+  // Strip frames BEFORE trimming: the indentation is the only thing that tells
+  // a frame's source line apart from a line the customer needs to read.
+  const lines = withoutTracebackFrames(stream.split(/\r?\n/))
     .map((l) => l.trim())
     .filter((l) => l && !isBookkeepingLine(l));
   // Unwrap FIRST: the filter below keeps lines that themselves name a failure,
