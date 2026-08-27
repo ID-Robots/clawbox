@@ -407,7 +407,14 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     // The old wording said "Kokoro still works, but a GPU failure will be
     // silent" — written when Kokoro was assumed present, which it never was.
     const res = runStep(1);
-    expect(res.status).toBe(0);
+    // 14, not 0. Returning 0 here is what left PROVISION_FAILURES empty for a
+    // box that had lost its CPU fallback, so the run printed Setup Complete
+    // over it (TTS-01); the step now records the failure and says so in its
+    // status. It stays out of the fatal range because a missing fallback must
+    // not abort an otherwise good install — see step_openclaw_setup, which
+    // tolerates 12, 13 and 14 and nothing else. It is deliberately NOT 13:
+    // that code means the box cannot speak at all, and this box still can.
+    expect(res.status).toBe(14);
     expect(res.stderr).toMatch(/Piper CPU fallback did not install/);
     expect(res.stderr).not.toMatch(/Kokoro still works/);
     // Exit 1 is the Piper half failing, so claiming Piper is the active engine
@@ -848,12 +855,15 @@ describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box 
     // The distinction the whole verdict file exists for: no CUDA is not a
     // defect, and failing every x86 or non-Jetson install would just teach
     // everyone to ignore this check.
-    const res = runValidator("KOKORO=skipped:no-cuda\n");
+    // The Piper verdict is part of the fixture because it is part of the
+    // published contract now: the probe reads both engines, and a board that
+    // declined Kokoro still has to say whether it got a CPU engine (TTS-01).
+    const res = runValidator("KOKORO=skipped:no-cuda\nPIPER=ready\n");
     expect(res.status, res.out).toBe(0);
   });
 
   it("passes a box that has the engine", () => {
-    expect(runValidator("KOKORO=ready\n").status).toBe(0);
+    expect(runValidator("KOKORO=ready\nPIPER=ready\n").status).toBe(0);
   });
 
   it("refuses to read a MISSING verdict as a healthy one", () => {
