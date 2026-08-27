@@ -97,6 +97,11 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.running": "running…",
     "chat.reasoning": "Reasoning",
     "chat.toolsUsed": "Tools used",
+    "chat.ranCommand": "Ran 1 command",
+    "chat.ranCommands": "Ran {n} commands",
+    "chat.showMore": "Show more",
+    "chat.showLess": "Show less",
+    "chat.working": "Working…",
     // === Full message view: the real email, opened from the chat ===
     "chat.email.openFull": "Open full message",
     "chat.email.title": "Message",

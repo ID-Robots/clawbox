@@ -153,6 +153,16 @@ describe("what a run is told about the shell", () => {
     expect(lib.HEADLESS_BRIEF).toMatch(/note it in your final report/i);
   });
 
+  // Bench run run-g6vwqr9y: the Edit on an outside path was denied, so the
+  // run made the same change with `sed -i` through Bash and reported success.
+  // The brief now names that move and forbids it; this pins the sentence.
+  it("tells the run a denial is a decision, not a puzzle for Bash", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.HEADLESS_BRIEF).toMatch(/denied file action is a DECISION/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/no sed, tee, redirection or scripts through Bash/);
+    expect(lib.HEADLESS_BRIEF).toMatch(/report plainly which part was refused/);
+  });
+
   it("allows the read-only git queries a real run reached for", async () => {
     const lib = await import("@/lib/coding-agent");
     for (const rule of ["Bash(git rev-parse:*)", "Bash(git check-ignore:*)"]) {

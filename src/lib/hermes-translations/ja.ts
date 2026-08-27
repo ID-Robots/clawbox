@@ -441,6 +441,7 @@ export const ja: Record<string, string> = {
   "codingAgent.chatStopped": "コーディングエージェント停止",
 
   "codingAgent.chatOpenApp": "開く",
+  "codingAgent.chatAgents": "エージェント {n} 体",
   "codingAgent.noticeOpen": "コーディングエージェントを開く",
   "codingAgent.noticeDismiss": "閉じる",
   "codingAgent.switchLabel": "アシスタントにコーディング作業の委任を許可する",

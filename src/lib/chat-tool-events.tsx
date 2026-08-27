@@ -85,33 +85,35 @@ export function useChatToolCalls(): {
   return { toolCalls, applyToolEvent, clearToolCalls };
 }
 
-const RUNNING_BG = "rgba(249,115,22,0.12)";
-const RUNNING_BORDER = "1px solid rgba(249,115,22,0.25)";
-const RUNNING_FG = "#fdba74";
-const DONE_BG = "rgba(34,197,94,0.12)";
-const DONE_BORDER = "1px solid rgba(34,197,94,0.25)";
-const DONE_FG = "#86efac";
-// A step that came back with a failure. Same pill, the palette the chat already
-// uses for an error banner — so "it ran" and "it went wrong" are one glance
-// apart instead of looking identical.
-const FAILED_BG = "rgba(239,68,68,0.12)";
-const FAILED_BORDER = "1px solid rgba(239,68,68,0.25)";
-const FAILED_FG = "#fca5a5";
+// ---------------------------------------------------------------------------
+// Rendering. Restyled after the Claude Code web UI: while a turn runs, each
+// step is a quiet text row rather than a colored pill; once the turn is done,
+// the whole step record collapses behind one "Ran N commands" line. The three
+// tones survive the restyle — "it ran", "it is running" and "it went wrong"
+// must stay one glance apart — they just moved from pill backgrounds onto the
+// glyph and the text itself.
+// ---------------------------------------------------------------------------
+
+const ROW_FG_RUNNING = "#fdba74";
+const ROW_FG_DONE = "rgba(255,255,255,0.45)";
+// The palette the chat already uses for an error banner — so "it ran" and
+// "it went wrong" stay one glance apart.
+const ROW_FG_FAILED = "#fca5a5";
 
 type ChipTone = "running" | "done" | "failed";
 
-const CHIP_TONE: Record<ChipTone, { background: string; border: string; color: string }> = {
-  running: { background: RUNNING_BG, border: RUNNING_BORDER, color: RUNNING_FG },
-  done: { background: DONE_BG, border: DONE_BORDER, color: DONE_FG },
-  failed: { background: FAILED_BG, border: FAILED_BORDER, color: FAILED_FG },
+const ROW_FG: Record<ChipTone, string> = {
+  running: ROW_FG_RUNNING,
+  done: ROW_FG_DONE,
+  failed: ROW_FG_FAILED,
 };
 
 const CHIP_GLYPH: Record<ChipTone, string> = { running: "🔧", done: "✓", failed: "!" };
 
 /**
- * One pill.
+ * One step row.
  *
- * Extracted so the LIVE pill and the REPLAYED chip are the same element rather
+ * Extracted so the LIVE row and the REPLAYED row are the same element rather
  * than two that merely look alike today: a turn must not change appearance the
  * moment the page is refreshed, and the only way to guarantee that is to render
  * both from here.
@@ -126,17 +128,16 @@ function ToolChip(
         display: "inline-flex",
         alignItems: "center",
         gap: 6,
-        padding: "4px 10px",
-        borderRadius: 999,
-        ...CHIP_TONE[tone],
+        padding: "1px 2px",
+        color: ROW_FG[tone],
         fontSize: 12,
         fontWeight: 500,
         maxWidth: "100%",
       }}
     >
-      <span aria-hidden="true">{CHIP_GLYPH[tone]}</span>
-      <span>{label}</span>
-      {suffix ? <span style={{ opacity: 0.7 }}>· {suffix}</span> : null}
+      <span aria-hidden="true" style={{ width: 14, textAlign: "center", flexShrink: 0 }}>{CHIP_GLYPH[tone]}</span>
+      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
+      {suffix ? <span style={{ opacity: 0.7, flexShrink: 0 }}>· {suffix}</span> : null}
     </div>
   );
 }
@@ -168,7 +169,7 @@ export function ToolCallPills({ toolCalls, runningLabel }: { toolCalls: ChatTool
   if (toolCalls.length === 0) return null;
   const groups = groupConsecutiveBy(toolCalls, (tc) => tc.prettyName);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
       {groups.map((group) => {
         // The running call is always the group's newest member; a group with
         // one still in flight shows as running so the count keeps ticking up
@@ -196,40 +197,79 @@ export function ToolCallPills({ toolCalls, runningLabel }: { toolCalls: ChatTool
  * reply. These persist — they come back with the transcript on a refresh, which
  * is the whole difference between an indicator and a record.
  *
- * The argument summary rides on `title` rather than in the pill: it is
- * model-authored text of unpredictable length, and a chip row that reflows to
- * three lines because one command was long stops reading as a row of steps.
+ * Collapsed to one "Ran N commands" line by default: the record matters, the
+ * screen space does not. It opens itself when any step FAILED — a failure is
+ * not something to fold away — and the argument summary rides on `title`
+ * rather than in the row, because it is model-authored text of unpredictable
+ * length.
  */
 export function ToolCallSummaryChips(
-  { toolCalls, label }: { toolCalls: ChatToolSummary[]; label: string },
+  { toolCalls, label, ranLabel }: {
+    toolCalls: ChatToolSummary[];
+    /** Accessible name for the whole record. */
+    label: string;
+    /** The collapsed line, already counted — e.g. "Ran 4 commands". */
+    ranLabel?: string;
+  },
 ) {
+  // A failed step must be visible without a click.
+  const [open, setOpen] = useState(() => (toolCalls ?? []).some((c) => c.status === "error"));
   if (!toolCalls || toolCalls.length === 0) return null;
+  const anyFailed = toolCalls.some((c) => c.status === "error");
   return (
-    <div
-      data-testid="chat-tool-summary"
-      aria-label={label}
-      style={{
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 4,
-        alignItems: "flex-start",
-        marginTop: 8,
-      }}
-    >
-      {groupConsecutiveBy(
-        toolCalls,
-        // Tone is part of the key: a failed call must never disappear into a
-        // collapsed run of successes.
-        (call) => `${prettifyToolName(call.name)} ${call.status === "error" ? "error" : "ok"}`,
-      ).map((group, index) => (
-        <ToolChip
-          key={`${group[0].name}-${index}`}
-          tone={group[0].status === "error" ? "failed" : "done"}
-          label={countedLabel(prettifyToolName(group[0].name), group.length)}
-          // Every collapsed call keeps its argument summary — one per line.
-          title={group.map((call) => (call.detail ? `${call.name}: ${call.detail}` : call.name)).join("\n")}
-        />
-      ))}
+    <div data-testid="chat-tool-summary" aria-label={label} style={{ marginTop: 8 }}>
+      <button
+        type="button"
+        data-testid="chat-tool-summary-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 4,
+          background: "none",
+          border: 0,
+          padding: "2px 4px",
+          marginLeft: -4,
+          borderRadius: 6,
+          cursor: "pointer",
+          font: "inherit",
+          fontSize: 12,
+          fontWeight: 500,
+          color: anyFailed ? ROW_FG_FAILED : "rgba(255,255,255,0.5)",
+        }}
+      >
+        <span>{ranLabel ?? countedLabel(label, toolCalls.length)}</span>
+        <span
+          aria-hidden="true"
+          className="material-symbols-rounded"
+          style={{
+            fontSize: 14,
+            transform: open ? "rotate(90deg)" : "none",
+            transition: "transform 120ms ease",
+          }}
+        >
+          chevron_right
+        </span>
+      </button>
+      {open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start", marginTop: 2 }}>
+          {groupConsecutiveBy(
+            toolCalls,
+            // Tone is part of the key: a failed call must never disappear into a
+            // collapsed run of successes.
+            (call) => `${prettifyToolName(call.name)} ${call.status === "error" ? "error" : "ok"}`,
+          ).map((group, index) => (
+            <ToolChip
+              key={`${group[0].name}-${index}`}
+              tone={group[0].status === "error" ? "failed" : "done"}
+              label={countedLabel(prettifyToolName(group[0].name), group.length)}
+              // Every collapsed call keeps its argument summary — one per line.
+              title={group.map((call) => (call.detail ? `${call.name}: ${call.detail}` : call.name)).join("\n")}
+            />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

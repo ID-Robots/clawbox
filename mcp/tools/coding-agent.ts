@@ -219,7 +219,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list, or a folder name from the list coding_agent_status shows — a bare name works as `directory`. Prefer a folder the owner already has over scaffolding a new project. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task.",
+    "Hand a coding task to the coding agent on this ClawBox: a separate Claude Code session that works in the background inside one folder, edits files, runs builds and tests, and reports back. Use it for work that spans several files or needs a build to prove it worked; for a one-line change use your own file tools. Give a project_id from code_project_list, or a folder name from coding_agent_status as `directory`; with neither, the owner's default folder is used. Prefer a folder the owner already has to scaffolding a new one. The task must be self-contained: the run cannot ask questions. Returns a run id AT ONCE; the work continues in the background. Tell the user it is running, then STOP — do not wait, poll, or call coding_agent_status straight after. Blocking makes you deaf to the user until you return, and the device already shows live progress and tells them when it finishes. Stay available for other questions; check only when they ask. Do not start a second run for the same task.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -230,13 +230,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     async ({ task, project_id, directory, resume_run_id }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
     }) => {
-      if (!project_id && !directory && !resume_run_id) {
-        throw new ToolError(
-          "BAD_ARGUMENT",
-          "A run needs a place to work.",
-          "Pass project_id (see code_project_list, or create one with code_project_init) or an absolute directory.",
-        );
-      }
+      // No client-side "needs a place to work" guard: the route itself falls
+      // back to the owner's stored default folder when neither a project nor
+      // a directory is named — the fallback the enable route documents — and
+      // when no default is stored it answers 400 with its own sentence, which
+      // the catch below carries through. Duplicating the check here is how
+      // the tool ended up refusing runs the device would happily place.
       const body: Record<string, unknown> = { task };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
@@ -335,7 +334,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       if (before.run && before.run.status !== "running") {
         return text(`Run ${run_id} already finished (${before.run.status}). Call coding_agent_status for its summary.`);
       }
-      await apiPost("/setup-api/coding-agent/stop", { id: run_id }, { timeoutMs: 15_000, rules: STOP_RULES });
+      await apiPost("/setup-api/coding-agent/stop", { runId: run_id }, { timeoutMs: 15_000, rules: STOP_RULES });
       // A 200 is a request acknowledged, not a process gone: give it the grace
       // period the server uses, then read back the truth.
       const after = await apiGet<{ run?: RunPayload }>("/setup-api/coding-agent/runs", {

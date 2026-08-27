@@ -1,0 +1,13 @@
+{
+  "suiteVersion": "1",
+  "tasks": [
+    "s-01-single-edit",
+    "s-02-refusal",
+    "m-01-static-site",
+    "m-02-existing-repo",
+    "m-03-failing-tests",
+    "m-04-ambiguity",
+    "l-01-docs-site",
+    "x-01-recovery"
+  ]
+}

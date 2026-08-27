@@ -1,0 +1,9 @@
+{
+  "id": "l-01-docs-site",
+  "tier": "L",
+  "title": "12-page docs site + shared data layer",
+  "timeoutMinutes": 75,
+  "expectedCostUsd": 6.0,
+  "nightly": false,
+  "manual": false
+}

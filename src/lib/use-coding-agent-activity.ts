@@ -49,6 +49,17 @@ export interface CodingAgentActivity {
   completedAt: number | null;
   status: CodingRunStatus;
   source: "agent" | "owner";
+  /**
+   * How the run is spending its effort, live off the same record the Coding
+   * Agent app reads. `subagentsActive`/`activeSubagents` exist only while the
+   * run is in flight (the server zeroes them when it settles); the totals and
+   * the per-type breakdown are cumulative and survive the finish.
+   */
+  subagentsTotal: number;
+  subagentsActive: number;
+  subagentsByType: Record<string, number>;
+  tokensUsed: number;
+  filesTouched: number;
 }
 
 interface RunPayload {
@@ -59,6 +70,11 @@ interface RunPayload {
   startedAt: number;
   completedAt: number | null;
   source: string;
+  subagentsTotal?: number;
+  subagentsActive?: number;
+  subagentsByType?: Record<string, number>;
+  tokensUsed?: number;
+  filesTouched?: string[];
 }
 
 /** How often to re-ask while a run is actually in flight. */
@@ -88,6 +104,11 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     completedAt: typeof r.completedAt === "number" ? r.completedAt : null,
     status: (STATUSES as string[]).includes(r.status) ? r.status as CodingRunStatus : "completed",
     source: r.source === "owner" ? "owner" : "agent",
+    subagentsTotal: typeof r.subagentsTotal === "number" ? r.subagentsTotal : 0,
+    subagentsActive: typeof r.subagentsActive === "number" ? r.subagentsActive : 0,
+    subagentsByType: r.subagentsByType && typeof r.subagentsByType === "object" ? r.subagentsByType : {},
+    tokensUsed: typeof r.tokensUsed === "number" ? r.tokensUsed : 0,
+    filesTouched: Array.isArray(r.filesTouched) ? r.filesTouched.length : 0,
   };
 }
 

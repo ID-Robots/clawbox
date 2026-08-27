@@ -439,6 +439,7 @@ export const fr: Record<string, string> = {
   "codingAgent.chatStopped": "Agent de code arrêté",
 
   "codingAgent.chatOpenApp": "ouvrir",
+  "codingAgent.chatAgents": "{n} sous-agents",
   "codingAgent.noticeOpen": "Ouvrir l'agent de code",
   "codingAgent.noticeDismiss": "Ignorer",
   "codingAgent.switchLabel": "Autoriser l'assistant à déléguer du travail de programmation",

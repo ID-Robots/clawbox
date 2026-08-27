@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { render } from "@/tests/helpers/test-utils";
+import { fireEvent, render } from "@/tests/helpers/test-utils";
 import {
   groupConsecutiveBy,
   ToolCallPills,
@@ -66,25 +66,39 @@ describe("ToolCallPills", () => {
 });
 
 describe("ToolCallSummaryChips", () => {
-  it("collapses consecutive same-name summaries and keeps each detail in the title", () => {
+  it("rests collapsed behind the counted line, and opens on a click", () => {
     const toolCalls: ChatToolSummary[] = [
       { name: "gateway", detail: "GET /a" },
       { name: "gateway", detail: "GET /b" },
     ];
-    const { container } = render(<ToolCallSummaryChips toolCalls={toolCalls} label="steps" />);
+    const { container } = render(
+      <ToolCallSummaryChips toolCalls={toolCalls} label="steps" ranLabel="Ran 2 commands" />,
+    );
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="chat-tool-summary-toggle"]');
+    expect(toggle?.textContent).toContain("Ran 2 commands");
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+    // The step record is a click away, not on screen.
+    expect(container.textContent).not.toContain("gateway");
+    if (toggle) fireEvent.click(toggle);
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
     expect(container.textContent).toContain("gateway (2)");
-    const chip = container.querySelector("[title]");
+    const chip = container.querySelector("div[title]");
     expect(chip?.getAttribute("title")).toBe("gateway: GET /a\ngateway: GET /b");
   });
 
-  it("never hides a failed call inside a collapsed run of successes", () => {
+  it("opens itself when any call failed, and never hides the failure in a collapsed run", () => {
     const toolCalls: ChatToolSummary[] = [
       { name: "gateway" },
       { name: "gateway", status: "error" },
       { name: "gateway" },
     ];
-    const { container } = render(<ToolCallSummaryChips toolCalls={toolCalls} label="steps" />);
-    // Three separate chips: ok, failed, ok — no counts anywhere.
+    const { container } = render(
+      <ToolCallSummaryChips toolCalls={toolCalls} label="steps" ranLabel="Ran 3 commands" />,
+    );
+    // A failure is not something to fold away: the record starts open …
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="chat-tool-summary-toggle"]');
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+    // … and the failed call stands alone: ok, failed, ok — no counts anywhere.
     expect(container.textContent).not.toContain("(");
     expect(container.textContent).toContain("!");
   });

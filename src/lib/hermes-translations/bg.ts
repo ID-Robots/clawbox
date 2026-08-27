@@ -426,6 +426,7 @@ export const bg: Record<string, string> = {
   "codingAgent.chatStopped": "Кодиращият агент е спрян",
 
   "codingAgent.chatOpenApp": "отвори",
+  "codingAgent.chatAgents": "{n} агента",
   "codingAgent.noticeOpen": "Отвори кодиращия агент",
   "codingAgent.noticeDismiss": "Скрий",
   "codingAgent.switchLabel": "Позволи на асистента да делегира програмиране",

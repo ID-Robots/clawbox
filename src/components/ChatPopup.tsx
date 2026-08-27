@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
@@ -87,6 +88,10 @@ const RETRY_DELAY = 3000
 // having to reload.
 const AUTH_BACKOFF_DELAY = 30000
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
+// The status line's small sibling of SPINNER_STYLE.
+const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border: '2px solid rgba(249,115,22,0.25)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }
+// Past this, a pasted user message folds behind "Show more".
+const USER_CLAMP_CHARS = 700
 
 // The chat used to clip up to two sentences out of every assistant reply into
 // `clawbox-mascot-convo-lines` so the crab could quote them back. It has been
@@ -514,6 +519,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const sendingRef = useRef(false)
   const queuedSendsRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
   useEffect(() => { queuedSendsRef.current = queuedSends }, [queuedSends])
+  // The status line under the thread while a turn runs: a ticking clock, and
+  // whatever the harness last said it was doing ({kind:'status'} events — a
+  // contract the popup used to ignore). Both are per-turn: armed when
+  // `sending` flips true, cleared when it flips back.
+  const turnStartedAtRef = useRef(0)
+  const [turnNow, setTurnNow] = useState(0)
+  const [turnStatus, setTurnStatus] = useState<string | null>(null)
+  // The turn's spinner verb — "Percolating…", "Scuttling…" — picked once per
+  // turn so the line does not flicker through the dictionary, and replaced by
+  // the harness's own status text the moment one arrives.
+  const turnVerbRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!sending) { setTurnStatus(null); return }
+    turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
+    turnStartedAtRef.current = Date.now()
+    setTurnNow(Date.now())
+    const id = setInterval(() => setTurnNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [sending])
+  // Long pasted user messages the owner chose to unfold, keyed by position and
+  // timestamp so a history reconcile cannot re-collapse a different message.
+  const [expandedLong, setExpandedLong] = useState<Set<string>>(() => new Set())
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
   // A delegated coding run outlives the tool call that started it, so this is
   // driven by the device's run record rather than the tool pills. Only probed
@@ -2592,6 +2619,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // the state this card exists to end.
           if (isEmailSendTool(event.name)) emailSendSeenRef.current = true
         }
+        // A one-line "what I am doing" from the harness, painted on the status
+        // line under the thread. Gated on the live run for the reason a delta
+        // is: a status frame after the turn ended describes nothing.
+        else if (event.kind === 'status' && runIdRef.current !== null) {
+          setTurnStatus(event.text?.trim() ? event.text.trim() : null)
+        }
         // The agent has parked on a question. Held by `requestId`, so a
         // reconnect's REPLAY of a prompt still being waited on folds into the
         // card already on screen instead of drawing a second one beside it —
@@ -3841,8 +3874,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         {!reloadingSkill && messages.map((msg, i) => {
           const isSuccess = msg.variant === 'success';
-          const systemBg = isSuccess ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
-          const systemColor = isSuccess ? '#22c55e' : '#ef4444';
+          const isUser = msg.role === 'user';
+          const isSystem = msg.role === 'system';
           // Messages the agent pointed at, as `EMAIL:<uid>` lines in the reply.
           // Derived at render rather than stored on the message: a replayed
           // turn carries the same directive text a live one did, so deriving
@@ -3851,27 +3884,50 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // deliberately does not belong.
           const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null;
           const bodyText = emailRefs ? emailRefs.text : msg.text;
+          // A long paste folds behind "Show more": the paste is the owner's
+          // own text, and the answer should not sit a page of it away.
+          const longKey = `${i}:${msg.timestamp}`;
+          const isLongUser = isUser && bodyText.length > USER_CLAMP_CHARS;
+          const userExpanded = expandedLong.has(longKey);
+          const shownText = isLongUser && !userExpanded
+            ? `${bodyText.slice(0, USER_CLAMP_CHARS).trimEnd()}…`
+            : bodyText;
           return (
             <div key={i} style={{
               display: 'flex',
-              justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              justifyContent: isUser ? 'flex-end' : 'flex-start',
             }}>
-              <div style={{
+              {/* Three treatments, after the Claude Code web UI: the owner's
+                  words in a quiet right-aligned pill, the assistant's answer
+                  as plain unbubbled text, and system notices as a bordered
+                  row that keeps the green/red verdict on the text alone. */}
+              <div style={isUser ? {
                 maxWidth: '85%',
-                padding: msg.role === 'system' ? '6px 12px' : '8px 14px',
-                borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-                background: msg.role === 'user'
-                  ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
-                  : msg.role === 'system'
-                    ? systemBg
-                    : 'rgba(255,255,255,0.06)',
-                color: msg.role === 'user'
-                  ? '#fff'
-                  : msg.role === 'system'
-                    ? systemColor
-                    : 'rgba(255,255,255,0.85)',
+                padding: '8px 14px',
+                borderRadius: 14,
+                background: 'rgba(255,255,255,0.07)',
+                border: '1px solid rgba(255,255,255,0.07)',
+                color: 'rgba(255,255,255,0.92)',
                 fontSize: 13.5,
                 lineHeight: 1.45,
+                wordBreak: 'break-word',
+                whiteSpace: 'pre-wrap',
+              } : isSystem ? {
+                width: '100%',
+                padding: '6px 12px',
+                borderRadius: 10,
+                background: 'rgba(255,255,255,0.02)',
+                border: `1px solid ${isSuccess ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.3)'}`,
+                color: isSuccess ? '#86efac' : '#fca5a5',
+                fontSize: 12.5,
+                lineHeight: 1.45,
+                wordBreak: 'break-word',
+              } : {
+                width: '100%',
+                padding: '2px 2px',
+                color: 'rgba(255,255,255,0.88)',
+                fontSize: 13.5,
+                lineHeight: 1.5,
                 wordBreak: 'break-word',
               }}>
                 {msg.images && msg.images.length > 0 && (
@@ -3924,7 +3980,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     })}
                   </div>
                 )}
-                {bodyText ? (msg.role === 'user' ? bodyText : renderText(bodyText, t("chat.table"))) : null}
+                {bodyText ? (isUser ? shownText : renderText(bodyText, t("chat.table"))) : null}
+                {isLongUser && (
+                  <button
+                    type="button"
+                    data-testid="chat-user-expand"
+                    aria-expanded={userExpanded}
+                    onClick={() => setExpandedLong(prev => {
+                      const next = new Set(prev);
+                      if (next.has(longKey)) next.delete(longKey);
+                      else next.add(longKey);
+                      return next;
+                    })}
+                    style={{
+                      display: 'block', marginTop: 6, background: 'none', border: 0,
+                      padding: 0, color: 'rgba(255,255,255,0.55)', cursor: 'pointer',
+                      font: 'inherit', fontSize: 12, textDecoration: 'underline',
+                    }}
+                  >
+                    {userExpanded ? t("chat.showLess") : t("chat.showMore")}
+                  </button>
+                )}
                 {msg.audio && msg.audio.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
                     {msg.audio.map((src) => (
@@ -3976,7 +4052,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     did — the chips sit where the live pills sat, and the
                     monologue stays collapsed until it is asked for. */}
                 {msg.role === 'assistant' && msg.toolCalls && msg.toolCalls.length > 0 && (
-                  <ToolCallSummaryChips toolCalls={msg.toolCalls} label={t("chat.toolsUsed")} />
+                  <ToolCallSummaryChips
+                    toolCalls={msg.toolCalls}
+                    label={t("chat.toolsUsed")}
+                    ranLabel={t(msg.toolCalls.length === 1 ? "chat.ranCommand" : "chat.ranCommands", { n: msg.toolCalls.length })}
+                  />
                 )}
                 {msg.role === 'assistant' && msg.reasoning && (
                   <ReasoningDisclosure reasoning={msg.reasoning} label={t("chat.reasoning")} />
@@ -4004,6 +4084,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               completed: t("codingAgent.chatFinished"),
               failed: t("codingAgent.chatFailed"),
               stopped: t("codingAgent.chatStopped"),
+              // A template, not a sentence: the card fills in the count.
+              agents: t("codingAgent.chatAgents"),
+              tokensWord: t("codingAgent.tokensWord"),
             }}
             openLabel={t("codingAgent.chatOpenApp")}
             onOpen={() => dispatchOpenApp("coding")}
@@ -4062,15 +4145,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {/* Streaming message */}
+        {/* Streaming message — the same plain treatment the finished answer
+            gets, so nothing jumps when the turn lands. */}
         {!reloadingSkill && streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
             <div style={{
-              maxWidth: '85%', padding: '8px 14px',
-              borderRadius: '14px 14px 14px 4px',
-              background: 'rgba(255,255,255,0.06)',
-              color: 'rgba(255,255,255,0.85)',
-              fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
+              width: '100%', padding: '2px 2px',
+              color: 'rgba(255,255,255,0.88)',
+              fontSize: 13.5, lineHeight: 1.5, wordBreak: 'break-word',
             }}>
               {renderText(streaming, t("chat.table"))}
               <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
@@ -4079,23 +4161,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           </div>
         )}
 
-        {/* Typing indicator while bootstrapping or generating but no stream yet */}
-        {(sending || isBootstrappingHistory) && !streaming && (
-          <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-            <div style={{
-              padding: '10px 16px',
-              borderRadius: '14px 14px 14px 4px',
-              background: 'rgba(255,255,255,0.06)',
-              display: 'flex', gap: 4, alignItems: 'center',
-            }}>
-              <style>{`@keyframes bounce-dot { 0%, 80%, 100% { transform: translateY(0) } 40% { transform: translateY(-5px) } }`}</style>
-              {[0, 0.15, 0.3].map((delay, i) => (
-                <div key={i} style={{
-                  width: 6, height: 6, borderRadius: '50%', background: 'rgba(249,115,22,0.6)',
-                  animation: `bounce-dot 1s ${delay}s ease-in-out infinite`,
-                }} />
-              ))}
-            </div>
+        {/* The status line: a small spinner, what the harness says it is
+            doing (or just "Working…"), and a ticking clock for the whole
+            turn. Shown for the whole run — under the stream too — because a
+            moving second is the cheapest proof a long turn is alive. The
+            clock is aria-hidden: a live region that re-announced itself every
+            second would talk over the answer. */}
+        {!reloadingSkill && (sending || isBootstrappingHistory) && (
+          <div
+            data-testid="chat-turn-status"
+            role="status"
+            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
+          >
+            <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
+            <span>{turnStatus ?? (sending && turnVerbRef.current ? `${turnVerbRef.current}…` : t("chat.working"))}</span>
+            {sending && turnStartedAtRef.current > 0 && (
+              <span aria-hidden="true">
+                · {(() => {
+                  const s = Math.max(0, Math.round((turnNow - turnStartedAtRef.current) / 1000));
+                  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+                })()}
+              </span>
+            )}
           </div>
         )}
 
@@ -4103,12 +4190,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           <div key={q.id} style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <div style={{
               maxWidth: '85%', padding: '7px 12px',
-              borderRadius: '14px 14px 4px 14px',
-              background: 'rgba(249,115,22,0.25)',
-              color: 'rgba(255,255,255,0.7)',
+              borderRadius: 14,
+              background: 'rgba(255,255,255,0.04)',
+              color: 'rgba(255,255,255,0.6)',
               fontSize: 13, lineHeight: 1.4, wordBreak: 'break-word',
               display: 'flex', alignItems: 'center', gap: 8,
-              border: '1px dashed rgba(249,115,22,0.4)',
+              border: '1px dashed rgba(255,255,255,0.25)',
             }}>
               <span style={{ flex: 1 }}>{q.text}</span>
               <button
