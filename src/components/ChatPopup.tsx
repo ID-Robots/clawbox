@@ -12,6 +12,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
 import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
 import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
@@ -525,8 +526,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const turnStartedAtRef = useRef(0)
   const [turnNow, setTurnNow] = useState(0)
   const [turnStatus, setTurnStatus] = useState<string | null>(null)
+  // The turn's spinner verb — "Percolating…", "Scuttling…" — picked once per
+  // turn so the line does not flicker through the dictionary, and replaced by
+  // the harness's own status text the moment one arrives.
+  const turnVerbRef = useRef<string | null>(null)
   useEffect(() => {
     if (!sending) { setTurnStatus(null); return }
+    turnVerbRef.current = pickSpinnerVerb(turnVerbRef.current)
     turnStartedAtRef.current = Date.now()
     setTurnNow(Date.now())
     const id = setInterval(() => setTurnNow(Date.now()), 1000)
@@ -4168,7 +4174,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(255,255,255,0.5)' }}
           >
             <span aria-hidden="true" style={TURN_SPINNER_STYLE} />
-            <span>{turnStatus ?? t("chat.working")}</span>
+            <span>{turnStatus ?? (sending && turnVerbRef.current ? `${turnVerbRef.current}…` : t("chat.working"))}</span>
             {sending && turnStartedAtRef.current > 0 && (
               <span aria-hidden="true">
                 · {(() => {

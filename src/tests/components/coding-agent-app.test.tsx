@@ -267,7 +267,7 @@ describe("CodingAgentApp", () => {
       await openRuns();
       const stop = await screen.findByRole("button", { name: translations.en["codingAgent.stop"] });
       fireEvent.click(stop);
-      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { id: "run-k3x9q2ab" } }));
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { runId: "run-k3x9q2ab" } }));
     });
 
     it("clears the history, but only after a second click", async () => {

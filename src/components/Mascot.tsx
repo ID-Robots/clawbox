@@ -14,6 +14,7 @@ import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
 import PetSprite from '@/components/PetSprite'
 import EggMascot from '@/components/EggMascot'
 import { petLayout, widestFreeSpan, PET_BODY_PX, MASCOT_SHELF_Z_INDEX, type PetLayout, type Span } from '@/lib/pet-layout'
+import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -139,6 +140,13 @@ function intersectRange(a: Range, b: Range): Range {
 
 function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }: { onTap?: (x?: number) => void; frozen?: boolean; thinking?: boolean; onPositionChange?: (x: number) => void; rightInset?: number } = {}) {
   const { locale, localeResolved } = useT()
+  // The verb at the thinking dots, picked once per thinking episode so it
+  // reads as one word for one wait, not a slot machine.
+  const [thinkingVerb, setThinkingVerb] = useState<string | null>(null)
+  useEffect(() => {
+    if (!thinking) { setThinkingVerb(null); return }
+    setThinkingVerb((prev) => pickSpinnerVerb(prev))
+  }, [thinking])
   // Read by `say()` — the language gate must judge against the locale the UI
   // is rendering RIGHT NOW, and `say` is a stable callback.
   //
@@ -1929,7 +1937,11 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
             ))}
           </div>
         )}
-        {/* Thinking indicator — dots above mascot head */}
+        {/* Thinking indicator — dots above mascot head, and for the crab a
+            spinner verb beside them ("Percolating…", "Scuttling…") — the same
+            deliberately-English whimsy vocabulary the chat's status line
+            draws on (src/lib/spinner-verbs.ts). Picked once per thinking
+            episode; the pet keeps plain dots, spinner whimsy is crab voice. */}
         {thinking && (
           <div style={{
             position: 'absolute', top: pet ? headTopPx - 14 : -5, left: '50%', transform: 'translateX(-50%)',
@@ -1944,6 +1956,16 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
                 animation: `think-dot 1.2s ${delay}s ease-in-out infinite`,
               }} />
             ))}
+            {!pet && thinkingVerb && (
+              <div data-testid="mascot-thinking-verb" style={{
+                marginLeft: 4, padding: '2px 8px', borderRadius: 999,
+                background: 'rgba(13,17,23,0.85)', border: '1px solid rgba(99,179,237,0.35)',
+                color: 'rgba(191,219,254,0.95)', fontSize: 11, fontWeight: 600,
+                whiteSpace: 'nowrap',
+              }}>
+                {thinkingVerb}…
+              </div>
+            )}
           </div>
         )}
 
