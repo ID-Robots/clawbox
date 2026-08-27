@@ -459,6 +459,7 @@ export const sv: Record<string, string> = {
   "codingAgent.updated": "uppdaterad",
   "codingAgent.githubOff": "inte ansluten",
   "codingAgent.githubUnreachable": "GitHub kan inte nås",
+  "codingAgent.githubNotRunnable": "gh är installerat men startar inte — kontrollera behörigheterna",
   "codingAgent.githubConnect": "Anslut",
   "codingAgent.githubReconnect": "Ändra",
   "codingAgent.githubOut": "Logga ut",

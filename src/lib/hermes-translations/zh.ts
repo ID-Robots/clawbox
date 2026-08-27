@@ -474,6 +474,7 @@ export const zh: Record<string, string> = {
   "codingAgent.updated": "更新于",
   "codingAgent.githubOff": "未连接",
   "codingAgent.githubUnreachable": "无法连接 GitHub",
+  "codingAgent.githubNotRunnable": "gh 已安装但无法启动 — 请检查其权限",
   "codingAgent.githubConnect": "连接",
   "codingAgent.githubReconnect": "更改",
   "codingAgent.githubOut": "退出登录",
