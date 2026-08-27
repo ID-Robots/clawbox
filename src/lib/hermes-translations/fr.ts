@@ -462,6 +462,7 @@ export const fr: Record<string, string> = {
   "codingAgent.tokensWord": "jetons",
   "codingAgent.updated": "mis à jour",
   "codingAgent.githubOff": "non connecté",
+  "codingAgent.githubUnreachable": "GitHub injoignable",
   "codingAgent.githubConnect": "Connecter",
   "codingAgent.githubReconnect": "Changer",
   "codingAgent.githubOut": "Se déconnecter",

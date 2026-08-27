@@ -462,6 +462,7 @@ export const nl: Record<string, string> = {
   "codingAgent.tokensWord": "tokens",
   "codingAgent.updated": "bijgewerkt",
   "codingAgent.githubOff": "niet verbonden",
+  "codingAgent.githubUnreachable": "GitHub onbereikbaar",
   "codingAgent.githubConnect": "Verbinden",
   "codingAgent.githubReconnect": "Wijzigen",
   "codingAgent.githubOut": "Afmelden",

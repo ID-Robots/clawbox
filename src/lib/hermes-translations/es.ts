@@ -457,6 +457,7 @@ export const es: Record<string, string> = {
   "codingAgent.tokensWord": "tokens",
   "codingAgent.updated": "actualizado",
   "codingAgent.githubOff": "sin conectar",
+  "codingAgent.githubUnreachable": "GitHub no accesible",
   "codingAgent.githubConnect": "Conectar",
   "codingAgent.githubReconnect": "Cambiar",
   "codingAgent.githubOut": "Cerrar sesión",

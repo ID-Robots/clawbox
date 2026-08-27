@@ -458,6 +458,7 @@ export const sv: Record<string, string> = {
   "codingAgent.tokensWord": "tokens",
   "codingAgent.updated": "uppdaterad",
   "codingAgent.githubOff": "inte ansluten",
+  "codingAgent.githubUnreachable": "GitHub kan inte nås",
   "codingAgent.githubConnect": "Anslut",
   "codingAgent.githubReconnect": "Ändra",
   "codingAgent.githubOut": "Logga ut",

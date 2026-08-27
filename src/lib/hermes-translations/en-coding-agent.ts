@@ -50,6 +50,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.tokensWord": "tokens",
   "codingAgent.updated": "updated",
   "codingAgent.githubOff": "not connected",
+  "codingAgent.githubUnreachable": "GitHub unreachable",
   "codingAgent.githubConnect": "Connect",
   "codingAgent.githubReconnect": "Change",
   "codingAgent.githubOut": "Sign out",

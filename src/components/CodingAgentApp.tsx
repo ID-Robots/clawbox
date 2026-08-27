@@ -41,6 +41,9 @@ interface GitHubState {
   connected: boolean;
   login: string | null;
   loginCommand: string;
+  /** "unreachable" means gh is here but could not reach github.com — a
+   *  network fault. The card must not read like a missing install. */
+  reason?: "not_installed" | "unreachable";
 }
 
 interface AgentStatus {
@@ -557,6 +560,12 @@ export default function CodingAgentApp() {
               {github.connected ? (
                 <span className="text-[11px] text-emerald-400 truncate" data-testid="coding-agent-github-login">
                   {github.login}
+                </span>
+              ) : github.reason === "unreachable" ? (
+                // Not "not connected": we do not know whether an account is
+                // connected, only that github.com could not be asked.
+                <span className="text-[11px] text-amber-400" data-testid="coding-agent-github-unreachable">
+                  {t("codingAgent.githubUnreachable")}
                 </span>
               ) : (
                 <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.githubOff")}</span>
