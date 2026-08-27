@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { hermesSkillsGuard } from "@/lib/hermes-skills-server";
 import {
+  HermesEnvUnreadableError,
   clearHermesSecret,
   hermesSecretsPresent,
   isValidEnvKey,
@@ -49,8 +50,18 @@ export async function GET(request: Request) {
   }
   try {
     return NextResponse.json({ secrets: await hermesSecretsPresent(keys) });
-  } catch {
-    return NextResponse.json({ error: "Could not read stored keys" }, { status: 500 });
+  } catch (err) {
+    // A file that could not be read holds no answer about which keys are set,
+    // and reporting them all as unset is how a customer is shown an empty field
+    // for a credential that may well be there.
+    console.error("[hermes skills secrets] read failed", err);
+    return NextResponse.json(
+      {
+        error: "The device's environment file could not be read.",
+        code: err instanceof HermesEnvUnreadableError ? "env_unreadable" : undefined,
+      },
+      { status: 500 },
+    );
   }
 }
 
@@ -106,6 +117,19 @@ export async function POST(request: Request) {
   } catch (err) {
     // The message could name the .env path; log it, answer generically.
     console.error("[hermes skills secrets] write failed", err);
+    // One failure the customer can act on, and the one that must never be
+    // mistaken for a save: the device's environment file is there but could not
+    // be read, so it was left exactly as it was rather than replaced by a file
+    // built from nothing.
+    if (err instanceof HermesEnvUnreadableError) {
+      return NextResponse.json(
+        {
+          error: "The device's environment file could not be read, so nothing was changed.",
+          code: "env_unreadable",
+        },
+        { status: 500 },
+      );
+    }
     return NextResponse.json({ error: "Could not save the key" }, { status: 500 });
   }
 }

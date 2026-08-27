@@ -58,6 +58,20 @@ A few things are worth knowing before you install:
     This applies to **every** publisher, including the skills Hermes itself
     publishes. A trusted name is not a reason to skip the question.
   </Accordion>
+  <Accordion title="Some skills the device refuses outright, and you cannot override it">
+    A few skills never reach that question. Hermes' own installer refuses a
+    skill rated **dangerous** when it comes from a community or third-party
+    source, and it refuses it before ClawBox is consulted — so there is nothing
+    to tick and no way to proceed from the store.
+
+    When that happens the store tells you so: which verdict the scan returned,
+    which kind of source the skill came from, and that the device will not
+    install it even if you confirm. There is deliberately no "install anyway"
+    here, because it would not work. No skill files reach the device; the only
+    thing written is the device's own record that it refused.
+
+    This is a limit of the device's skill installer, not of the store.
+  </Accordion>
   <Accordion title="An incomplete download is not an install">
     A skill is its instructions plus the files those instructions point at. If
     any of them could not be fetched, the device says which ones are missing and
@@ -125,7 +139,7 @@ Under Hermes' own data directory, `~/.hermes/skills/`:
 | `~/.hermes/skills/<category>/<name>/SKILL.md` | The skill itself — instructions plus any supporting files |
 | `~/.hermes/skills/.hub/lock.json` | The record of everything installed from the store |
 | `~/.hermes/skills/.bundled_manifest` | What shipped with the device |
-| `~/.hermes/.env` | API keys you entered for skills that need one |
+| `~/.hermes/.env` | Hermes' own environment file, where an API key you enter for a skill is stored. ClawBox edits one line of it — the rest, including Hermes' settings and its commented key hints, is left exactly as it was |
 
 Alongside those, ClawBox keeps its own record of any flagged skill you chose to
 install anyway, at `data/skill-install-audit.log` — one line per decision, with

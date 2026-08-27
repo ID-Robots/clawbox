@@ -1,10 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "child_process";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
 
 import {
+  HermesEnvUnreadableError,
   applyEnvValues,
+  clearHermesEnvValues,
   envLineDefinesKey,
   getHermesEnvValue,
   hermesEnvPath,
@@ -228,6 +231,94 @@ describe("setHermesEnvValues on disk", () => {
     await fs.mkdir(hermesEnvPath(), { recursive: true });
     await expect(readHermesEnv()).rejects.toMatchObject({ code: "EISDIR" });
     await expect(getHermesEnvValue("A")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+
+  // A FIFO at the path is the one shape that must not produce a WRONG kind of
+  // answer: `fs.readFile` opens with plain O_RDONLY, and opening a FIFO that
+  // way parks until someone opens the write end — a request that never
+  // returns. Both paths open O_NONBLOCK for that reason.
+  it("does not hang when the path is a fifo", async () => {
+    // Skipped where the platform cannot make one — Git Bash on Windows exits 0
+    // from `mkfifo` and creates nothing, which would make this test assert the
+    // opposite of what it is for. CI runs on Linux, which has real FIFOs.
+    const isFifo = await (async () => {
+      try {
+        execFileSync("mkfifo", [hermesEnvPath()]);
+        return (await fs.stat(hermesEnvPath())).isFIFO();
+      } catch {
+        return false;
+      }
+    })();
+    if (!isFifo) return;
+    // SETTLING is the property under test, not which way it settles: a
+    // non-blocking read of a writer-less FIFO gives EOF on some kernels and
+    // EAGAIN on others, and either is a fine answer. Hanging is not.
+    const inTime = async (work: Promise<unknown>, what: string) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const hung = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} hung on a fifo`)), 2000);
+      });
+      try {
+        await Promise.race([work, hung]);
+      } finally {
+        clearTimeout(timer!);
+      }
+    };
+    // Neither side may merely settle: a FIFO reads as zero bytes, so "it
+    // resolved empty" would be this module reporting a device whose settings
+    // file is a pipe as a device with no settings.
+    await inTime(
+      expect(readHermesEnv()).rejects.toBeInstanceOf(HermesEnvUnreadableError),
+      "readHermesEnv",
+    );
+    await inTime(
+      expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError),
+      "setHermesEnvValues",
+    );
+  });
+
+  // TASK-452 round 2. The READ path has refused to flatten a fault into
+  // "nothing configured" since the WhatsApp panel bug above; the WRITE path was
+  // still doing exactly that, one `catch` further down, and the consequence is
+  // worse. `existing` stayed "" and `applyEnvValues("", …)` then wrote a
+  // two-line file over whatever was there — the whole of ~/.hermes/.env, which
+  // on a real device is Hermes' own 504-line template plus every credential the
+  // email, WhatsApp, Discord, ClawAI and skill-secret settings have stored.
+  //
+  // A file this module cannot read is a file it must not merge into.
+  describe("a base it could not read", () => {
+    it("refuses to write rather than rebuilding the file from nothing", async () => {
+      await fs.mkdir(hermesEnvPath(), { recursive: true });
+
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+      // Still a directory: nothing was renamed over it.
+      expect((await fs.stat(hermesEnvPath())).isDirectory()).toBe(true);
+    });
+
+    it("refuses when the file is larger than it will parse, and changes nothing", async () => {
+      const huge = `# big\n${"# padding padding padding\n".repeat(12_000)}KEEP_ME=yes\n`;
+      await fs.writeFile(hermesEnvPath(), huge, { mode: 0o600 });
+
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toMatchObject({ reason: "too-large" });
+      expect(await fs.readFile(hermesEnvPath(), "utf8")).toBe(huge);
+    });
+
+    it("leaves a clearing write refused too, so a delete cannot empty the file", async () => {
+      await fs.mkdir(hermesEnvPath(), { recursive: true });
+
+      await expect(clearHermesEnvValues(["A"])).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+      expect((await fs.stat(hermesEnvPath())).isDirectory()).toBe(true);
+    });
+
+    it("keeps writing after a refusal — the single-writer chain survives it", async () => {
+      const blocked = hermesEnvPath();
+      await fs.mkdir(blocked, { recursive: true });
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+
+      await fs.rm(blocked, { recursive: true, force: true });
+      await setHermesEnvValues({ A: "1" });
+      expect(await readHermesEnv()).toEqual({ A: "1" });
+    });
   });
 });
 

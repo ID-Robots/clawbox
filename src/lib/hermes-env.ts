@@ -37,10 +37,43 @@
 // in-process; a concurrent interactive provisioning run is not something either
 // side can detect.
 
+import { constants } from "fs";
 import fs from "fs/promises";
+import type { FileHandle } from "fs/promises";
 import path from "path";
 
 const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Beyond this, the existing file is not something this module will merge into.
+ * ~/.hermes/.env is Hermes' own ~25 KB template plus a handful of settings; a
+ * quarter of a megabyte is not that file.
+ */
+const MAX_ENV_BYTES = 256 * 1024;
+
+export type HermesEnvUnreadableReason = "not-a-regular-file" | "too-large" | "unreadable";
+
+/**
+ * The existing ~/.hermes/.env is there but could not be read in a way that
+ * makes merging into it safe.
+ *
+ * Thrown rather than swallowed, because the alternative is what this module
+ * used to do: treat any read failure as "no .env yet" and write a file built
+ * from an empty base. That turns an EACCES or a failing eMMC into the silent
+ * deletion of every setting in the file — a whole-file loss reported as a 200.
+ * TASK-452's own version of that bug destroyed 500 lines of Hermes' template on
+ * a real device; the same hazard was live here for the email, WhatsApp, Discord
+ * and ClawAI writers, which is why the guard belongs in the shared writer.
+ */
+export class HermesEnvUnreadableError extends Error {
+  readonly reason: HermesEnvUnreadableReason;
+
+  constructor(reason: HermesEnvUnreadableReason) {
+    super(`the Hermes environment file could not be read safely (${reason})`);
+    this.name = "HermesEnvUnreadableError";
+    this.reason = reason;
+  }
+}
 
 /** Hermes' data root. Matches HERMES_HOME resolution in the CLI. */
 export function hermesHome(): string {
@@ -154,7 +187,7 @@ export function applyEnvValues(existing: string, values: Record<string, string |
 export async function readHermesEnv(): Promise<Record<string, string>> {
   let raw: string;
   try {
-    raw = await fs.readFile(hermesEnvPath(), "utf-8");
+    raw = await readEnvText(hermesEnvPath());
   } catch (err) {
     // ENOENT: no .env, or no ~/.hermes to hold one. ENOTDIR: a component of
     // the path is a file, so there is no ~/.hermes directory either. Both mean
@@ -164,6 +197,37 @@ export async function readHermesEnv(): Promise<Record<string, string>> {
     throw err;
   }
   return parseHermesEnv(raw);
+}
+
+/**
+ * Read a path that may not be a regular file, without ever blocking on it.
+ *
+ * `fs.readFile` opens the path with plain `O_RDONLY`, and opening a FIFO that
+ * way parks until someone opens the write end — a request that never returns,
+ * which is worse than any wrong answer. `O_NONBLOCK` makes that open return
+ * immediately; it has no effect on a regular file, which is the only case that
+ * goes on to read.
+ *
+ * The OS's own errors are passed through unchanged, because `readHermesEnv`
+ * tells "not configured" apart from "broken" by their codes. The one thing
+ * added is a refusal for a path that is not a regular file and would otherwise
+ * read as nothing at all — see below.
+ */
+async function readEnvText(envPath: string): Promise<string> {
+  const handle = await fs.open(envPath, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const stat = await handle.stat();
+    // A directory raises the OS's own EISDIR from the read below, and callers
+    // key on those codes, so it is left to do that. Anything else that is not a
+    // regular file — a FIFO, a socket, a device — would READ perfectly well and
+    // answer nothing, which this module would then report as "no settings are
+    // configured". A pipe where the environment file should be is a fault, and
+    // is refused as one.
+    if (!stat.isFile() && !stat.isDirectory()) throw new HermesEnvUnreadableError("not-a-regular-file");
+    return await handle.readFile("utf-8");
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 /** The pure half of readHermesEnv, so parsing is testable without a file. */
@@ -189,6 +253,45 @@ export async function getHermesEnvValue(key: string): Promise<string | null> {
   return Object.prototype.hasOwnProperty.call(env, key) ? env[key] : null;
 }
 
+/**
+ * The text a merge-write must build on, and the mode to write it back as.
+ *
+ * Absent is fine — that is a box with nothing configured yet, and the answer is
+ * an empty base and a fresh 0600 file. ANY OTHER failure is not fine: merging
+ * into a base we could not read means writing a file whose previous contents
+ * nobody saw. That case throws.
+ *
+ * The open is done ONCE and the stat and read both run through that descriptor,
+ * so the size and regular-file checks cannot be made against a different file
+ * than the one that is read (the path can come to mean something else between
+ * two lookups). O_NONBLOCK because the regular-file check now happens after the
+ * open: opening a fifo for reading would otherwise park here until someone
+ * opens the write end, and a hang is a worse outcome than the race it closes.
+ * It has no effect on regular files, the only case that goes on to read.
+ */
+async function readForMerge(envPath: string): Promise<{ existing: string; mode: number }> {
+  let handle: FileHandle;
+  try {
+    handle = await fs.open(envPath, constants.O_RDONLY | constants.O_NONBLOCK);
+  } catch (err) {
+    // ENOENT: no .env. ENOTDIR: a component of the path is a file, so there is
+    // no ~/.hermes directory either. Both mean "nothing configured yet".
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "ENOENT" || code === "ENOTDIR") return { existing: "", mode: 0o600 };
+    throw new HermesEnvUnreadableError("unreadable");
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new HermesEnvUnreadableError("not-a-regular-file");
+    if (stat.size > MAX_ENV_BYTES) throw new HermesEnvUnreadableError("too-large");
+    return { existing: await handle.readFile("utf-8"), mode: stat.mode & 0o777 };
+  } catch (err) {
+    throw err instanceof HermesEnvUnreadableError ? err : new HermesEnvUnreadableError("unreadable");
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
 // One writer at a time within this process. Two Settings saves landing together
 // would otherwise read the same base text and the second would drop the first.
 let writeChain: Promise<unknown> = Promise.resolve();
@@ -202,18 +305,11 @@ export async function setHermesEnvValues(values: Record<string, string | null>):
     const envPath = hermesEnvPath();
     await fs.mkdir(path.dirname(envPath), { recursive: true });
 
-    let existing = "";
-    let mode = 0o600;
-    try {
-      existing = await fs.readFile(envPath, "utf-8");
-      const stat = await fs.stat(envPath);
-      mode = stat.mode & 0o777;
-    } catch {
-      // No .env yet — create one at 0600.
-    }
-    if (existing.charCodeAt(0) === 0xfeff) existing = existing.slice(1);
+    const { existing, mode } = await readForMerge(envPath);
+    // Tolerate a BOM — Hermes reads with utf-8-sig for the same reason.
+    const base = existing.charCodeAt(0) === 0xfeff ? existing.slice(1) : existing;
 
-    const next = applyEnvValues(existing, values);
+    const next = applyEnvValues(base, values);
     const tmp = `${envPath}.clawbox.tmp`;
     // writeFile's `mode` is ignored when the path already exists (a stale temp
     // from a crash would keep its old, possibly wider, permissions), so chmod
