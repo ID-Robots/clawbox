@@ -1,4 +1,4 @@
-import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
+import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
 
 /**
  * Ask Hermes to rebuild its MCP tool list when the mailbox becomes readable, or
@@ -24,21 +24,10 @@ import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
  * and 21 logged `43 tools`, the 41-tool starts all predating the mailbox
  * becoming readable, and the two missing tools were exactly these.
  *
- * The mechanism is Hermes' own. Its dashboard JSON-RPC socket accepts
- * `reload.mcp`; with `confirm: true` and NO `session_id` it runs
- * `shutdown_mcp_servers()` + `discover_mcp_tools()` globally, which is precisely
- * the respawn needed — the ClawBox server starts again and re-probes the gate,
- * and live sessions pick the new list up at their next turn boundary via
- * Hermes' own between-turns refresh. `confirm` is not optional: the call is
- * gated by `approvals.mcp_reload_confirm`, which defaults to true, and without
- * it the dashboard answers `{ status: "confirm_required" }` and does nothing.
+ * The mechanism is Hermes' own `reload.mcp`, and it is shared with the other
+ * family that has the same startup-only gate — see `hermes-mcp-reload.ts`. What
+ * belongs HERE is the rule for when it is worth paying for, below.
  */
-
-/**
- * Hermes' own confirmation flag for `reload.mcp`. Passing it is what makes the
- * call act rather than ask — see the note above.
- */
-const RELOAD_PARAMS = { confirm: true } as const;
 
 /**
  * Reload Hermes' MCP servers, but ONLY if this settings change flipped whether
@@ -60,8 +49,7 @@ const RELOAD_PARAMS = { confirm: true } as const;
  */
 export async function refreshEmailToolsIfReadabilityChanged(before: boolean, after: boolean): Promise<void> {
   if (before === after) return;
-  const result = await dashboardRpc("reload.mcp", RELOAD_PARAMS).catch(() => null);
-  if (result === null) {
+  if (!(await reloadMcpServers())) {
     // Logged, not surfaced. Worth a line because "the agent still cannot see my
     // mailbox" is otherwise invisible from the outside, and this is the one
     // place that knows the refresh was wanted and did not happen.

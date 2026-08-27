@@ -104,6 +104,31 @@ prompt-injection payload with a financial outcome. The plan is reported by
 
 There is also no thinking/reasoning setter yet — see "Work owned by others".
 
+### Pictures
+`image_generate` (both editions, **only where the box CANNOT draw**)
+
+The inverse of every other gate here: this one is registered when the probe says
+NO. On a box that can draw, the harness already has its own `image_generate` and
+a second one beside it would contradict it; on a box that cannot, there is no
+image tool at all — and an agent asked for a picture with no tool to draw it does
+not stop. Measured on a customer's device: it reached for the shell, hand-wrote
+an SVG, installed `cairosvg`, rasterised it, and then wrote itself a SKILL to do
+it again — producing files the chat cannot serve and telling the customer nothing
+about why. So the absence gets a voice: one tool, empty schema, whose whole job
+is to name the reason (ClawBox AI is not connected) and the fix (Settings → AI
+Providers) and to forbid improvising around it.
+
+The probe is `canGenerateImages` off `/setup-api/chat/capabilities`, resolved
+once at startup like the rest — so the same staleness the email tools had applies
+here, in both directions: after linking, the refusal must go, and the harness's
+own image tool must actually appear. Linking asks for both
+(`src/lib/hermes-image-refresh.ts`): `reload.env`, because the backend's
+credential lives in `~/.hermes/.env` and only reaches a running agent that way;
+then `reload.mcp`, which drops the refusal. Where the backend was installed into
+an agent that had already scanned its plugins — nothing reachable over the socket
+re-scans them — the dashboard is bounced instead, and only when its unit promises
+to come back.
+
 ### Device
 `system_stats` · `system_info` · `system_power` (needs `confirm: true` + a
 `reason`) · `disk_usage` · `disk_cleanup` · `update_check` (reports only, never

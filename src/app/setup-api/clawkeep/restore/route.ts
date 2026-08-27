@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { ClawKeepError, RestoreNeedsPassphraseError, runRestore } from "@/lib/clawkeep";
 import { getEdition } from "@/lib/harness";
+import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,7 @@ const exec = promisify(execFile);
 // quiet about it.
 function restartServicesFor(edition: string): string[] {
   return edition === "hermes"
-    ? ["clawbox-hermes-dashboard.service"]
+    ? [HERMES_DASHBOARD_UNIT]
     : ["clawbox-gateway.service"];
 }
 

@@ -20,8 +20,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const cliMock = vi.hoisted(() => vi.fn());
 const envMock = vi.hoisted(() => vi.fn());
 const installMock = vi.hoisted(() => vi.fn());
+const drawsMock = vi.hoisted(() => vi.fn());
+const refreshMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
+// The two halves of "and then tell the RUNNING agent". The fact is mocked so a
+// case can say what the writes ended up meaning; the refresh is mocked because
+// what belongs here is that it is CALLED with that fact — what it then does
+// with it has its own suite (hermes-image-refresh.test.ts).
+vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
+vi.mock("@/lib/hermes-image-refresh", () => ({ refreshHermesImageTools: refreshMock }));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: envMock }));
@@ -49,7 +57,12 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     cliMock.mockReset();
     envMock.mockReset();
     installMock.mockReset();
+    drawsMock.mockReset();
+    refreshMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    // Called twice per link: once before the writes, once after. The default is
+    // the ordinary case — a box that could not draw, and now can.
+    drawsMock.mockResolvedValueOnce(false).mockResolvedValue(true);
   });
 
   it("installs the backend and names it as the one to use", async () => {
@@ -162,13 +175,30 @@ describe("enabling image generation when ClawBox AI is linked", () => {
     // Drawing is an extra. Chat, vision and transcription are not, and a box
     // that could not copy a Python file must not be left unable to talk.
     installMock.mockRejectedValue(new Error("EACCES"));
+    // And the box now reads as one that cannot draw, which is the fact the
+    // refresh is handed — the half that keeps #497's honest refusal alive.
+    drawsMock.mockResolvedValue(false);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await applyClawaiToHermes("claw_token_abc", "flash");
     expect(result.provider).toBe("clawai");
     expect(sets()).toContain("model.provider=clawai");
+    expect(refreshMock).toHaveBeenCalledWith(false, false);
     // The failure is named in the journal, and the token is not.
     expect(warn.mock.calls.flat().join(" ")).not.toContain("claw_token_abc");
     warn.mockRestore();
+  });
+
+  it("tells the RUNNING agent about the backend it just installed", async () => {
+    // The writes above all land on DISK. The agent that serves the next turn is
+    // a process that started long before them and reads its credential and its
+    // plugin list exactly once — at ITS startup. Measured on the owner's box
+    // (2026-08-27): linked at 09:08:52 into a dashboard up since the previous
+    // day, and the 09:10:07 request for a picture found no `image_generate` at
+    // all. A link that only writes files is a link the agent never hears about.
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    // Both values, because the two stale things have two lifetimes: the MCP
+    // tool list turns on the FLIP, the running agent's credential does not.
+    expect(refreshMock).toHaveBeenCalledWith(false, true);
   });
 
   it("does not stop the link when a config write for images fails", async () => {
