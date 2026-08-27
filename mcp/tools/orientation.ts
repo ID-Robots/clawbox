@@ -6,6 +6,7 @@ import { join } from "path";
 import { apiTry, apiToken, API_BASE, authHeader } from "../lib/api";
 import { DEFAULT_CWD } from "../lib/guard";
 import { json, text, type Registrar } from "../lib/register";
+import { reported } from "../lib/report";
 import type { McpContext } from "../lib/context";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
@@ -143,22 +144,36 @@ export function registerOrientationTools(reg: Registrar, ctx: McpContext): void 
           : Promise.resolve(null),
       ]);
 
+      // `reported()`, not `??`: both model routes answer with EMPTY STRINGS on
+      // an unconfigured device, which `??` passes straight through. This tool's
+      // own description promises "unknown" for anything that cannot be read,
+      // and device_status is the surface the server's instructions tell every
+      // model to call FIRST — two blanks here are an invitation to invent a
+      // model name.
       const ai =
         ctx.edition === "hermes"
           ? {
-              provider: hermesModels?.provider ?? "unknown",
-              model: hermesModels?.current ?? "unknown",
-              thinking: hermesModels?.reasoning ?? "unknown",
+              provider: reported(hermesModels?.provider),
+              model: reported(hermesModels?.current),
+              // The instructions tell the model to read `ai.limits` before
+              // stating any context/output limit. Hermes has no configured-limit
+              // source to read (readConfiguredModelLimits() parses the OpenClaw
+              // gateway config, a file this SKU does not have), so the key is
+              // emitted as an explicit "unknown" rather than omitted — a missing
+              // key is the one answer that sends the model back to its training
+              // memory for a number.
+              limits: "unknown",
+              thinking: reported(hermesModels?.reasoning),
               // READ ONLY. Changing the plan changes what the customer is
               // billed, so there is deliberately no tool that switches it:
               // point the user at Settings -> AI instead.
               clawbox_ai: clawai
-                ? { signed_in: clawai.hasToken === true, tier: clawai.tier ?? "unknown", in_use: clawai.active === true }
+                ? { signed_in: clawai.hasToken === true, tier: reported(clawai.tier), in_use: clawai.active === true }
                 : "unknown",
             }
           : {
-              provider: chatModel?.selected?.provider ?? "unknown",
-              model: chatModel?.selected?.model ?? chatModel?.current ?? "unknown",
+              provider: reported(chatModel?.selected?.provider),
+              model: reported(chatModel?.selected?.model ?? chatModel?.current),
               limits: readConfiguredModelLimits(),
               thinking: "unknown",
             };

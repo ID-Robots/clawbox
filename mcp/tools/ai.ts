@@ -15,6 +15,7 @@ import { isPlausibleHermesProviderId, isSafeHermesModelId } from "../../src/lib/
 import { apiGet, apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
+import { reported } from "../lib/report";
 import { zEnumOf, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 
@@ -48,19 +49,6 @@ const MODEL_LIMIT = 40;
 // about, was what got cut. Only the usable providers are listed; the rest are a
 // count.
 const PROVIDER_LIMIT = 12;
-
-/**
- * "unknown" for anything the route did not actually report.
- *
- * `??` was not enough: /setup-api/hermes/models answers with EMPTY STRINGS, not
- * null, on a device where no provider or model has been chosen yet, so the
- * fallback never fired and the tool returned `{"provider":"","model":""}`. A
- * small model reading two blanks is far likelier to fill them in with a
- * plausible-sounding model name than one reading "unknown".
- */
-function reported(value: unknown): string {
-  return typeof value === "string" && value.trim() ? value : "unknown";
-}
 
 const SET_RULES: ErrorRule[] = [
   {
