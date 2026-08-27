@@ -17,9 +17,9 @@ import { SUBSCRIPTION_SURFACE } from "@/lib/provider-models";
 
 const CACHE_DIR = path.join(DATA_DIR, "catalog-cache");
 
+/** Only the part of the catalog route's cached payload this module reads. */
 interface CachedSurface {
   models?: Array<{ id?: unknown }>;
-  fetchedAt?: unknown;
 }
 
 /**
