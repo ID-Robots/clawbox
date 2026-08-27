@@ -1,5 +1,9 @@
 import { runHermesCli } from "@/lib/hermes-cli";
-import { hermesConfigGet } from "@/lib/hermes-config-cache";
+import {
+  FAILED_READ_TTL_MS,
+  hermesConfigGet,
+  hermesConfigReadPending,
+} from "@/lib/hermes-config-cache";
 
 /**
  * What the INSTALLED `hermes` can do — asked, not assumed. SERVER ONLY.
@@ -25,7 +29,7 @@ const PROBE_TIMEOUT_MS = 30_000;
  * button back inside a minute rather than at the next restart. Matches
  * `PROBE_TTL_FAIL_MS` next door in `clawai-images`.
  */
-const PROBE_RETRY_BACKOFF_MS = 60_000;
+export const PROBE_RETRY_BACKOFF_MS = 60_000;
 
 /**
  * Once per process, never per request — for an ANSWER.
@@ -109,6 +113,40 @@ export function resetHermesFeatureProbe(): void {
 }
 
 /**
+ * How long a page should wait before re-asking for a fact that is still a
+ * placeholder.
+ *
+ * Published rather than duplicated in the browser. Both memos behind these
+ * facts hold a failed read for their own backoff, and the longer of the two is
+ * the only delay after which BOTH have given up and will genuinely re-ask; a
+ * client that guessed the number would poll early on the shorter one and go
+ * stale if either constant were ever changed here.
+ */
+export const HERMES_FACT_RETRY_MS = Math.max(PROBE_RETRY_BACKOFF_MS, FAILED_READ_TTL_MS);
+
+/**
+ * Is the `--image` answer above a real one, or a placeholder held for the
+ * backoff?
+ *
+ * Every probe in this file fails CLOSED, which is right — a wrong `true` costs
+ * the customer's file — but it means "the box cannot do this" and "the box
+ * could not answer" both leave as `false`, and the browser was told only the
+ * `false`. It fetches these facts once on mount and re-asks solely on an
+ * explicit provider change, on no timer, so a single 30 s timeout during chat
+ * open hid the attach button for the entire page session while this module
+ * recovered by itself a minute later. The unknown-ness has to travel with the
+ * fact for that recovery to reach anybody.
+ *
+ * Reads the memo WITHOUT touching it: asking whether a fact is settled must not
+ * itself start a Python interpreter.
+ */
+export function hermesFeatureProbePending(): boolean {
+  // An answered probe is stamped `Infinity`. Anything finite is a failure being
+  // held for the backoff, or a probe still in flight — both are "ask again".
+  return probe !== null && probe.expiresAt !== Number.POSITIVE_INFINITY;
+}
+
+/**
  * The config key that names the model an attached picture is actually LOOKED AT
  * with. Written by `applyClawaiToHermes`; empty on a box nobody has linked.
  */
@@ -178,6 +216,17 @@ export async function hermesHasVisionRoute(): Promise<boolean> {
 }
 
 /**
+ * Same question as `hermesFeatureProbePending`, for the vision route.
+ *
+ * The key name stays private to this module: callers ask "is this FACT still a
+ * placeholder", not "is `auxiliary.vision.model` in backoff", so the route
+ * never has to know which config key answers which capability.
+ */
+export function hermesVisionRoutePending(): boolean {
+  return hermesConfigReadPending(VISION_MODEL_KEY);
+}
+
+/**
  * The config key that names the backend a drawing request is serviced BY.
  *
  * `image_gen.provider` is what `agent/image_gen_registry.get_active_provider()`
@@ -232,4 +281,9 @@ export async function hermesAgentDrawsImages(): Promise<boolean> {
     // braces — and it fails closed for the same reason the rest of this file does.
     return false;
   }
+}
+
+/** Same question again, for the agent's image backend. See above. */
+export function hermesImageBackendPending(): boolean {
+  return hermesConfigReadPending(IMAGE_PROVIDER_KEY);
 }
