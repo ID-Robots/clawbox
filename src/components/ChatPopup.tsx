@@ -951,7 +951,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * `useCallback([])` on purpose, and adding a dependency to it would tear the
    * socket down and rebuild it every time this callback's identity changed.
    */
-  const settleEmailDraftsRef = useRef<() => void>(() => {})
+  const settleEmailDraftsRef = useRef<() => Promise<void>>(async () => {})
   // Timer for the ack-only `chat.history` refetch — single-flight so a
   // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
   // cancellable on unmount.
@@ -1581,7 +1581,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             sendingRef.current = false; setSending(false)
             // The turn is over on this harness too, so mail it queued is now
             // waiting and gets its one card.
-            settleEmailDraftsRef.current()
+            void settleEmailDraftsRef.current()
             // OpenClaw can ack a turn with "Sent." (delivery-mirror persona
             // pipeline / internal-source-reply) while the real reply is
             // generated server-side a moment later — persisted but never
@@ -1610,7 +1610,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             sendingRef.current = false; setSending(false)
             // Same as the failing adapter path: a turn that died may still
             // have left a draft on disk before it did.
-            settleEmailDraftsRef.current()
+            void settleEmailDraftsRef.current()
             if (state === 'error') {
               // Never render the gateway's own error text. It is written for
               // an operator reading a log and has carried an absolute device
@@ -2411,18 +2411,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // ── Outgoing mail, approved once for the whole batch ──────────────────────
 
   /**
-   * Read the approval queue and put anything new on screen as ONE card.
+   * If this turn asked to send mail, read the approval queue and put anything
+   * new on screen as ONE card.
    *
-   * Called at the end of a turn that used `email_send`, not on a timer: the
-   * drafts are written by that tool and by nothing else this surface can see,
-   * so polling would be asking a question whose answer only changes for a
-   * reason we already know about.
+   * Guarded by the turn's own flag rather than run on a timer: the drafts are
+   * written by `email_send` and by nothing else this surface can see, so
+   * polling would be asking a question whose answer only changes for a reason
+   * we already know about. Check-and-clear, so a turn collects exactly once.
    *
    * Drafts already inside a live card are left alone (`shownDraftIds`). That is
    * what stops a second turn's mail from being folded into a card the owner is
    * part-way through reading — it gets its own card, with its own consent.
    */
-  const collectEmailBatch = useCallback(async () => {
+  const settleEmailDrafts = useCallback(async () => {
+    if (!emailSendSeenRef.current) return
+    emailSendSeenRef.current = false
     try {
       const res = await fetch('/setup-api/email/pending', { headers: { Accept: 'application/json' } })
       // 403 is the ordinary answer on a surface with no owner session, and 409
@@ -2459,13 +2462,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // is concerned, and Settings → Email is unaffected.
     }
   }, [])
-
-  /** Check-and-clear, so a turn that queued mail collects it exactly once. */
-  const settleEmailDrafts = useCallback(() => {
-    if (!emailSendSeenRef.current) return
-    emailSendSeenRef.current = false
-    void collectEmailBatch()
-  }, [collectEmailBatch])
   useEffect(() => { settleEmailDraftsRef.current = settleEmailDrafts }, [settleEmailDrafts])
 
   /**
@@ -2597,7 +2593,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // A turn that failed may still have queued mail before it did. The
       // drafts are on disk either way, so the card is offered on this path too
       // rather than only on the happy one.
-      settleEmailDrafts()
+      void settleEmailDrafts()
       runIdRef.current = null
       // A user-initiated Stop shows nothing, not an error line.
       if (err instanceof HarnessError && err.code === 'aborted') return
@@ -2646,7 +2642,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     clearClarifies()
     // The turn is done and anything it wanted to post is now waiting. This is
     // where the batch card appears.
-    settleEmailDrafts()
+    void settleEmailDrafts()
     runIdRef.current = null
   }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])

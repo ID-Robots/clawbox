@@ -73,7 +73,7 @@ export interface EmailBatchOutcome {
   readonly error?: string;
 }
 
-export type EmailBatchStatus = "waiting" | "sending" | "settled" | "dismissed";
+export type EmailBatchStatus = "waiting" | "sending" | "settled";
 
 export interface EmailBatchCardState {
   readonly batchId: string;
@@ -120,12 +120,15 @@ export function shownDraftIds(cards: readonly EmailBatchCardState[]): Set<string
 
 /** Replace one card by id, leaving the rest untouched. */
 export function updateBatchCard(
-  cards: readonly EmailBatchCardState[],
+  cards: EmailBatchCardState[],
   batchId: string,
   change: Partial<EmailBatchCardState>,
 ): EmailBatchCardState[] {
   const index = cards.findIndex((card) => card.batchId === batchId);
-  if (index === -1) return cards.slice();
+  // The SAME array back when nothing matched, the way expireClarifyCard does
+  // it: a fresh copy would be a state change React has to re-render for, in the
+  // one case where nothing changed.
+  if (index === -1) return cards;
   const next = cards.slice();
   next[index] = { ...next[index], ...change };
   return next;
@@ -197,7 +200,7 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
   const failedCount = outcomes.length - sentCount;
   const canSend = !sending && included.length > 0;
 
-  if (status === "dismissed" || drafts.length === 0) return null;
+  if (drafts.length === 0) return null;
 
   return (
     <section

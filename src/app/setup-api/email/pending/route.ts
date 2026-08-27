@@ -164,7 +164,7 @@ type BatchOutcome =
   | {
       id: string;
       ok: false;
-      reason: "gone" | "changed" | "send_failed" | "not_attempted";
+      reason: "gone" | "changed" | "send_failed";
       error: string;
       kind?: string;
       /** Returned for a draft that was claimed and then failed — see below. */
@@ -199,12 +199,6 @@ function parseBatch(raw: unknown): { ok: true; entries: BatchEntry[] } | { ok: f
     entries.push({ id, fingerprint });
   }
   return { ok: true, entries };
-}
-
-/** Whatever an SMTP failure turns out to be, said in the two fields the card renders. */
-function describeSendFailure(err: unknown): { error: string; kind: string } {
-  if (err instanceof SmtpError) return { error: err.message, kind: err.kind };
-  return { error: "Could not send the message.", kind: "network" };
 }
 
 /**
@@ -244,17 +238,10 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
 
   for (const entry of parsed.entries) {
     // The owner's browser went away mid-batch. Stop rather than keep mailing on
-    // behalf of a tab that is gone: what is left is still queued, and unsent is
-    // the recoverable direction.
-    if (request.signal.aborted) {
-      results.push({
-        id: entry.id,
-        ok: false,
-        reason: "not_attempted",
-        error: "The approval was interrupted before this message was sent.",
-      });
-      continue;
-    }
+    // behalf of a tab that is gone: nothing here has been claimed yet, so what
+    // is left stays queued, and unsent is the recoverable direction. Nothing is
+    // recorded for the rest — an aborted request has no reader.
+    if (request.signal.aborted) break;
 
     const claim = claimPendingIfUnchanged(entry.id, entry.fingerprint);
     if (!claim.ok) {
@@ -285,7 +272,8 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
       );
       results.push({ id: draft.id, ok: true, recipients: draft.to.length, ...(messageId ? { messageId } : {}) });
     } catch (err) {
-      const { error, kind } = describeSendFailure(err);
+      const kind = err instanceof SmtpError ? err.kind : "network";
+      const error = err instanceof SmtpError ? err.message : "Could not send the message.";
       // Never the recipient, never the subject, never a line of the body: this
       // log is the one part of an approved send that outlives the request.
       console.error(`[email/pending] batch send failed: kind=${kind} host=${settings.smtpHost}`);
