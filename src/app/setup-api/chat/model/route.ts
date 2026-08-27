@@ -151,6 +151,46 @@ function hasCodexOauthProfile(config: OpenClawConfig): boolean {
   });
 }
 
+/**
+ * Refuses a Claude model the box's subscription surface does not carry, or
+ * null when the target is fine (or is not Claude, or the box is not on a
+ * Claude subscription, or the surface could not be read).
+ *
+ * Anthropic's subscription keeps the `anthropic/` namespace but narrows the
+ * set: only the plugin's `claude-cli` catalogue routes, so claude-mythos-5 /
+ * claude-fable-5 / the Haikus are API-key-only.
+ *
+ * A helper rather than an inline block because there are THREE ways a model id
+ * becomes the target and only one of them is the custom-model branch: an id
+ * already in `models.providers.anthropic.models` matches `state.options`
+ * first, and `{"source":"primary"}` skips the branch entirely. That list is
+ * exactly where the old unguarded auto-extend wrote, so a box already broken
+ * by this defect could re-arm itself through either door. The OpenAI guard is
+ * applied at both sites for the same reason.
+ *
+ * `null` from `readSubscriptionSurfaceIds` means UNKNOWN, not "no": refusing
+ * where the pickers allow would be a rejection over something that works.
+ */
+async function refuseOffSurfaceClaudeModel(
+  provider: string | null | undefined,
+  modelId: string,
+  // A getter, not the config: the provider check comes first, so a switch to
+  // any other provider costs no openclaw.json read at all. On a Jetson that
+  // read is not free, and it is the caller's memoised one either way.
+  getConfig: () => Promise<OpenClawConfig | null>,
+): Promise<NextResponse | null> {
+  if (provider !== "anthropic") return null;
+  const config = await getConfig();
+  if (!config) return null;
+  if (!subscriptionOnlyProviders(config.auth?.profiles).includes("anthropic")) return null;
+  const surfaceIds = await readSubscriptionSurfaceIds("anthropic");
+  if (!surfaceIds || surfaceIds.has(modelId)) return null;
+  const surface = subscriptionSurfaceLabel("anthropic");
+  return NextResponse.json({
+    error: `${modelId} is not on the Claude subscription surface (${surface}). Pick one of ${[...surfaceIds].sort().join(", ")}, or switch Anthropic to API-key mode for the API-only models.`,
+  }, { status: 400 });
+}
+
 function sortPrimaryOptions(options: ChatModelOption[]) {
   return [...options].sort((a, b) => {
     const aRank = PROVIDER_ORDER.indexOf((a.provider ?? "") as typeof PROVIDER_ORDER[number]);
@@ -413,35 +453,19 @@ export async function POST(request: Request) {
             }, { status: 400 });
           }
         }
-        // The Claude equivalent of the Codex branch above. Anthropic's
-        // subscription keeps the `anthropic/` namespace but narrows the set:
-        // only the plugin's `claude-cli` catalogue actually routes, so
-        // claude-mythos-5 / claude-fable-5 / the Haikus are API-key-only.
-        //
-        // Without this, an id from a stale tab (or any browser that never
-        // received the catalogue stamp) fell through to the openai-compat
-        // auto-extend below, which either wrote it to
-        // `models.providers.anthropic.models` and pinned the box to a model
-        // that cannot route, or — when the providerDef was thin — answered
-        // 409 "isn't fully configured. Re-save it in Settings", which is the
-        // wrong next step for a box whose settings are fine.
-        if (effectiveProvider === "anthropic") {
-          const openclawConfig = await getAuthConfig();
-          const onSubscription = !!openclawConfig
-            && subscriptionOnlyProviders(openclawConfig.auth?.profiles).includes("anthropic");
-          if (onSubscription) {
-            // Null = the surface could not be read. UNKNOWN is not "no": the
-            // pickers keep an unstamped model usable, and refusing here where
-            // the UI allowed would be a rejection over something that works.
-            const surfaceIds = await readSubscriptionSurfaceIds("anthropic");
-            if (surfaceIds && !surfaceIds.has(effectiveModelId)) {
-              const surface = subscriptionSurfaceLabel("anthropic");
-              return NextResponse.json({
-                error: `${effectiveModelId} is not on the Claude subscription surface (${surface}). Pick one of ${[...surfaceIds].sort().join(", ")}, or switch Anthropic to API-key mode for the API-only models.`,
-              }, { status: 400 });
-            }
-          }
-        }
+        // Refuse BEFORE the openai-compat auto-extend below: that path writes
+        // `models.providers.anthropic.models`, and a rejection that has
+        // already had a side effect is not a rejection. Without this, an id
+        // from a stale tab either pinned the box to a model that cannot route
+        // or - when the providerDef was thin - drew a 409 "isn't fully
+        // configured. Re-save it in Settings", the wrong next step for a box
+        // whose settings are fine.
+        const offSurface = await refuseOffSurfaceClaudeModel(
+          effectiveProvider,
+          effectiveModelId,
+          getAuthConfig,
+        );
+        if (offSurface) return offSurface;
         // Normalize the parsed provider so the deepseek/clawai alias
         // comparison works — option.provider was set via normalizeProvider
         // (deepseek → clawai), so a raw `parsed.provider === "deepseek"`
@@ -553,6 +577,16 @@ export async function POST(request: Request) {
         }, { status: 400 });
       }
     }
+
+    // Second site, on the RESOLVED target — the openai guard above is applied
+    // twice for the same reason. An id that matched `state.options`, or one
+    // restored by `{"source":"primary"}`, never went through the branch above.
+    const targetOffSurface = await refuseOffSurfaceClaudeModel(
+      targetParsed?.provider,
+      targetParsed?.modelId ?? "",
+      getAuthConfig,
+    );
+    if (targetOffSurface) return targetOffSurface;
 
     if (state.activeModel === targetModel) {
       return NextResponse.json({

@@ -201,6 +201,102 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
     expect(response.status).toBe(200);
   });
 
+  /**
+   * The custom-model branch is not the only way an id becomes the target.
+   * A model already listed in `models.providers.anthropic.models` shows up in
+   * `state.options` and matches BEFORE that branch; `{"source":"primary"}`
+   * skips it entirely. Both matter here in particular, because the very defect
+   * this PR fixes is what writes an off-surface Claude id into that list — so a
+   * box broken by the old behaviour could re-arm itself through either door.
+   *
+   * The OpenAI guard is applied twice for exactly this reason (once in the
+   * branch, once on the resolved target). The Claude one has to be too.
+   */
+  describe("a target that never passes through the custom-model branch", () => {
+    /** Active model is LOCAL, so the anthropic row takes its model from the
+     * provider definition — which is where the old auto-extend wrote. */
+    function boxWithOffSurfaceModelConfigured() {
+      return {
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode: "oauth" } } },
+        models: {
+          mode: "merge",
+          providers: {
+            anthropic: {
+              apiKey: "placeholder",
+              baseUrl: "https://api.anthropic.com/v1",
+              api: "openai-completions",
+              models: [{ id: "claude-fable-5", name: "claude-fable-5" }],
+            },
+          },
+        },
+        agents: { defaults: { model: { primary: "llamacpp/gemma4-e2b-it-q4_0" } } },
+      };
+    }
+
+    beforeEach(() => {
+      vi.mocked(readConfig).mockResolvedValue(boxWithOffSurfaceModelConfigured() as never);
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_provider: "anthropic",
+        local_ai_provider: "llamacpp",
+        local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      });
+    });
+
+    it("refuses it when it arrives as an id already in state.options", async () => {
+      const response = await postModel(POST, "anthropic/claude-fable-5");
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain("claude-cli");
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("refuses it when it is restored via {source: primary}", async () => {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "primary" }),
+      }));
+
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toContain("claude-cli");
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+
+    it("still restores a supported Claude model through {source: primary}", async () => {
+      const config = boxWithOffSurfaceModelConfigured();
+      config.models.providers.anthropic.models = [
+        { id: "claude-sonnet-4-6", name: "claude-sonnet-4-6" },
+      ];
+      vi.mocked(readConfig).mockResolvedValue(config as never);
+
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "primary" }),
+      }));
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        "agents.defaults.model.primary",
+        "anthropic/claude-sonnet-4-6",
+      ]);
+    });
+
+    it("leaves the local model alone", async () => {
+      // The guard must not reach past its own provider.
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source: "local" }),
+      }));
+
+      // Already the active model, so the route answers with state and no write.
+      expect(response.status).toBe(200);
+    });
+  });
+
   it("re-reads the surface on every request instead of probing once", async () => {
     // The cache is refreshed by the catalog route on its own schedule. A
     // module-level memo here would pin this guard to whatever the surface
