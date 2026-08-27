@@ -451,7 +451,11 @@ function runValidator(
   // on-device TTS verdict would otherwise fail every case here for a reason
   // that has nothing to do with editions.
   const ttsStatus = path.join(tmp, "tts-status");
-  fs.writeFileSync(ttsStatus, "KOKORO=ready\n");
+  // BOTH engine verdicts, because scripts/install-voice.sh now publishes
+  // both and step_validate_services fails an ABSENT one under the same
+  // rule it already applied to KOKORO. This device is healthy, so the TTS
+  // probe is not what these tests are about.
+  fs.writeFileSync(ttsStatus, "KOKORO=ready\nPIPER=ready\n");
 
   const script = [
     "set -uo pipefail",
