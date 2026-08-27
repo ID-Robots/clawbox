@@ -1554,18 +1554,23 @@ export async function POST(request: Request) {
     // because a refusal that has already persisted a credential is not a
     // refusal, it is a half-applied save. Nothing between here and there
     // writes anything (the OAuth handoff file is consumed only on success).
-    {
+    //
+    // Only a SUBSCRIPTION save can create the hazard. An API-key save writes
+    // the anthropic key that makes the API-only models routable, so after it
+    // lands the box is not subscription-only and there is nothing to refuse —
+    // refusing there would block the very switch the message recommends
+    // ("switch Anthropic to API-key mode for the API-only models").
+    if (authMode === "subscription") {
       const slash = config.defaultModel.indexOf("/");
       const offSurface = await offSurfaceClaudeModelMessage(
         slash > 0 ? config.defaultModel.slice(0, slash) : null,
         config.defaultModel.slice(slash + 1),
         async () => {
           // Ask about the profiles this save is ABOUT TO leave behind, not the
-          // ones on disk: a first Claude sign-in writes the OAuth profile that
-          // makes the box subscription-only, and an API-key save writes the
-          // key that stops it being. Reading disk alone gets BOTH of those
-          // backwards — it would wave the sign-in through and then refuse the
-          // very switch the refusal message recommends.
+          // ones already on disk: this sign-in is what writes the OAuth
+          // profile that makes the box subscription-only, so disk alone would
+          // wave the very first Claude sign-in straight through. A key held
+          // under some other profile key still counts, and still allows.
           let existing: OpenClawConfig | null = null;
           try {
             existing = await readOpenClawConfig();
@@ -1576,10 +1581,7 @@ export async function POST(request: Request) {
           return isClaudeSubscriptionOnly({
             ...(existing?.auth?.profiles ?? {}),
             // Exactly what `baseOps` writes for this profile key below.
-            [config.profileKey]: {
-              provider: ocProvider,
-              mode: authMode === "subscription" ? "oauth" : "api_key",
-            },
+            [config.profileKey]: { provider: ocProvider, mode: "oauth" },
           });
         },
       );

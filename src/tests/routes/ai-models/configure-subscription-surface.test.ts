@@ -127,6 +127,7 @@ function surfaceCache(ids: string[]) {
   });
 }
 
+/** A spawned `openclaw` that exits 0 immediately — the happy-path stand-in. */
 function successfulChild(): ChildProcess {
   const emitter = new EventEmitter() as ChildProcess;
   emitter.stdin = { end: vi.fn() } as unknown as ChildProcess["stdin"];
@@ -150,6 +151,7 @@ function successfulChild(): ChildProcess {
 describe("POST /setup-api/ai-models/configure and the Claude subscription surface", () => {
   let configurePost: (request: Request) => Promise<Response>;
 
+  /** A POST to this route carrying `body` as JSON. */
   function jsonRequest(body: unknown): Request {
     return new Request("http://localhost/test", {
       method: "POST",
@@ -158,6 +160,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     });
   }
 
+  /** The wizard's Claude sign-in save, with `body` overriding its fields. */
   function subscribe(body: Record<string, unknown> = {}) {
     return jsonRequest({
       provider: "anthropic",
