@@ -7,38 +7,42 @@
 // `OP_SERVICE_ACCOUNT_TOKEN`, given a link to go and create one, and then left
 // with nowhere on the device to type it — the skill silently does nothing.
 //
-// Hermes reads process environment from ~/.hermes/.env; that is where
-// `hermes config set TELEGRAM_BOT_TOKEN` puts the Telegram token
-// (src/lib/hermes-telegram.ts is the working precedent for the same idea). This
-// module writes that file directly rather than through the CLI, because
-// `hermes config set` routes only its OWN allowlisted keys to .env — an
-// arbitrary skill's variable name is not on that list and would land in
-// config.yaml, where nothing would ever read it as an environment variable.
+// ── What this module is, and what it is NOT ─────────────────────────────────
 //
-// Rules that make a direct write safe:
-//   * the KEY must look like an environment variable and nothing else, so a
-//     value can never smuggle in a second assignment or a shell fragment;
-//   * the VALUE must be printable ASCII, so one secret is always one line and
-//     no control byte survives into a file support engineers read;
-//   * the file is rewritten whole from a parsed map, so a malformed pre-existing
-//     line cannot be duplicated or half-edited;
-//   * it is written 0600 through a temp file + rename, so a reader never sees a
-//     half-written secrets file and no other account can read it;
-//   * values are NEVER read back out to the browser — only whether a key is set.
+// It is the skill store's ALPHABET for a secret, and nothing else. The bytes go
+// to ~/.hermes/.env through `hermes-env.ts`, which is the device's one writer
+// for that file — the same one the email, WhatsApp, Discord and ClawAI settings
+// use. That matters for a reason a real device proved:
+//
+// The first cut of this module was its own reader and writer. It parsed the
+// file into a map and wrote the map back out, on the premise that ~/.hermes/.env
+// is a secret store ClawBox owns. It is not: the installer creates it from
+// Hermes' own 504-line template and `hermes config env-path` points customers at
+// it. Saving ONE skill API key took the file from 24792 bytes to 372 — every
+// live value survived, and all 116 of its commented-out key hints did not.
+// `applyEnvValues` had been merge-writing that file correctly the whole time;
+// the fork simply did not use it. A second writer also meant a second
+// read-modify-write cycle outside `hermes-env.ts`'s single-writer chain, so a
+// skill-secret save landing beside a Settings save could silently drop one.
+//
+// So: the rules below decide what a skill secret may look like, and
+// `setHermesEnvValues` decides what happens to the file.
 
-import { constants } from 'fs';
+import {
+  clearHermesEnvValues,
+  hermesEnvPath,
+  readHermesEnv as readHermesEnvRecord,
+  setHermesEnvValues,
+} from '@/lib/hermes-env';
 import fs from 'fs/promises';
-import type { FileHandle } from 'fs/promises';
-import path from 'path';
 
-const HERMES_HOME =
-  process.env.HERMES_HOME || path.join(process.env.HOME || '/home/clawbox', '.hermes');
-
-export const HERMES_ENV_PATH = path.join(HERMES_HOME, '.env');
+export { HermesEnvUnreadableError } from '@/lib/hermes-env';
 
 // The shape every declared skill secret uses (OP_SERVICE_ACCOUNT_TOKEN,
-// BRAVE_API_KEY, …). Deliberately upper-snake only: a lowercase or dotted name
-// is a config key, not an env var, and belongs in a different store.
+// BRAVE_API_KEY, …). Deliberately upper-snake only, and stricter than the
+// `^[A-Za-z_][A-Za-z0-9_]*$` the .env writer itself accepts: a lowercase or
+// dotted name is a config key, not an env var, and belongs in a different
+// store.
 const ENV_KEY_RE = /^[A-Z][A-Z0-9_]{1,63}$/;
 
 export function isValidEnvKey(key: string): boolean {
@@ -62,112 +66,62 @@ export function isValidEnvValue(value: string): boolean {
   return typeof value === 'string' && ENV_VALUE_RE.test(value);
 }
 
-const MAX_ENV_BYTES = 256 * 1024;
+/** Every live assignment in ~/.hermes/.env, for lookup only. */
+export async function readHermesEnv(): Promise<Map<string, string>> {
+  try {
+    return new Map(Object.entries(await readHermesEnvRecord()));
+  } catch {
+    // A file that cannot be read holds no keys this store can report. The WRITE
+    // path treats the same condition as a refusal; a read has nothing to
+    // destroy by answering "nothing is set".
+    return new Map();
+  }
+}
 
 /**
- * Parse ~/.hermes/.env into a map, preserving nothing but the assignments.
- * Comments and blank lines are dropped on purpose: this file is a secret store
- * written by tooling, and round-tripping arbitrary text through a rewrite is
- * how half-edited files happen.
+ * Set one skill secret, leaving the rest of ~/.hermes/.env alone.
+ *
+ * Returns false when the key or value is not acceptable. Throws
+ * HermesEnvUnreadableError when the existing file cannot be read — the caller
+ * must report that as a failure, never as a save.
  */
-export async function readHermesEnv(): Promise<Map<string, string>> {
-  const out = new Map<string, string>();
-  let raw: string;
-  // Open once, then stat and read through that SAME descriptor. Statting the
-  // path and then reading the path are two lookups, and between them the name
-  // ~/.hermes/.env can come to mean a different file — a symlink swap, or a
-  // rename by anything else that writes this file. The size cap would then have
-  // been checked against a file we never read, and the regular-file check
-  // against a path that is now a fifo, which blocks the read forever. A handle
-  // is pinned to one inode, so what we measured is what we get.
-  let handle: FileHandle | undefined;
-  try {
-    // O_NONBLOCK, because the regular-file check now happens after the open
-    // rather than before it: opening a fifo for reading otherwise parks here
-    // until someone opens the write end, and a hang is a worse outcome than the
-    // stale-stat race this open is meant to close. It has no effect on regular
-    // files, which is the only case that goes on to read.
-    handle = await fs.open(HERMES_ENV_PATH, constants.O_RDONLY | constants.O_NONBLOCK);
-    const st = await handle.stat();
-    if (!st.isFile() || st.size > MAX_ENV_BYTES) return out;
-    raw = await handle.readFile('utf8');
-  } catch {
-    return out;
-  } finally {
-    await handle?.close().catch(() => {});
-  }
-  for (const line of raw.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) continue;
-    const key = trimmed.slice(0, eq).replace(/^export\s+/, '').trim();
-    if (!isValidEnvKey(key)) continue;
-    out.set(key, unquote(trimmed.slice(eq + 1).trim()));
-  }
-  return out;
-}
-
-function unquote(value: string): string {
-  if (value.length >= 2 && value[0] === '"' && value[value.length - 1] === '"') {
-    return value.slice(1, -1).replace(/\\(["\\])/g, '$1');
-  }
-  if (value.length >= 2 && value[0] === "'" && value[value.length - 1] === "'") {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-// Quote only when the raw form would be ambiguous. An unquoted token is what
-// every existing hand-written .env on these devices looks like, and keeping the
-// common case unquoted means a support engineer reading the file sees what they
-// expect.
-function quote(value: string): string {
-  if (value === '') return '""';
-  if (/^[A-Za-z0-9._:/@+-]+$/.test(value)) return value;
-  return `"${value.replace(/([\\"])/g, '\\$1')}"`;
-}
-
-function serialize(env: Map<string, string>): string {
-  const lines = ['# Managed by ClawBox. One KEY=value per line.'];
-  for (const key of Array.from(env.keys()).sort()) {
-    lines.push(`${key}=${quote(env.get(key) as string)}`);
-  }
-  return `${lines.join('\n')}\n`;
-}
-
-async function writeHermesEnv(env: Map<string, string>): Promise<void> {
-  await fs.mkdir(HERMES_HOME, { recursive: true });
-  const tmp = `${HERMES_ENV_PATH}.tmp-${process.pid}`;
-  await fs.writeFile(tmp, serialize(env), { mode: 0o600 });
-  await fs.rename(tmp, HERMES_ENV_PATH);
-  // rename preserves the temp file's mode, but an .env that predates this code
-  // may be 0644; make the final state explicit either way.
-  await fs.chmod(HERMES_ENV_PATH, 0o600).catch(() => {});
-}
-
-/** Set one skill secret. Returns false when the key or value is not acceptable. */
 export async function setHermesSecret(key: string, value: string): Promise<boolean> {
   // Both alphabets are re-tested here, against the same anchored expressions
   // the exported predicates use, rather than being delegated to them. This is
-  // the function that puts bytes in the file, so the check that decides what
-  // may end up there belongs on this line: a future caller that forgets to
-  // pre-validate, or a predicate that grows a special case, cannot widen what
-  // reaches ~/.hermes/.env without editing the write path itself.
+  // the function that decides what may end up in the file, so the check belongs
+  // on this line: a future caller that forgets to pre-validate, or a predicate
+  // that grows a special case, cannot widen what reaches ~/.hermes/.env without
+  // editing the write path itself.
   if (!ENV_KEY_RE.test(key) || !ENV_VALUE_RE.test(value)) return false;
-  const env = await readHermesEnv();
-  env.set(key, value);
-  await writeHermesEnv(env);
+  await setHermesEnvValues({ [key]: value });
+  await tightenEnvMode();
   return true;
 }
 
 /** Clear one skill secret. Returns true when it existed and is now gone. */
 export async function clearHermesSecret(key: string): Promise<boolean> {
   if (!isValidEnvKey(key)) return false;
-  const env = await readHermesEnv();
-  if (!env.delete(key)) return false;
-  await writeHermesEnv(env);
+  if (!(await readHermesEnv()).has(key)) return false;
+  await clearHermesEnvValues([key]);
   return true;
+}
+
+/**
+ * Never widen, but do narrow. `setHermesEnvValues` preserves whatever mode the
+ * file already had, deliberately — it mirrors Hermes' own writer. That is the
+ * right default for a settings file and the wrong one for the moment a
+ * credential is first written into it: the installer's template arrives 0644 on
+ * some boxes, and a world-readable file holding an API key is worth quietly
+ * fixing. Best-effort: a failure here must not turn a stored key into an error.
+ */
+async function tightenEnvMode(): Promise<void> {
+  const envPath = hermesEnvPath();
+  try {
+    const mode = (await fs.stat(envPath)).mode & 0o777;
+    if (mode & 0o077) await fs.chmod(envPath, mode & 0o700);
+  } catch {
+    // The write succeeded; the permissions are a hardening, not the result.
+  }
 }
 
 /**

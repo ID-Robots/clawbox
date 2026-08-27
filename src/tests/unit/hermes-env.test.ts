@@ -4,7 +4,9 @@ import os from "os";
 import path from "path";
 
 import {
+  HermesEnvUnreadableError,
   applyEnvValues,
+  clearHermesEnvValues,
   envLineDefinesKey,
   getHermesEnvValue,
   hermesEnvPath,
@@ -228,6 +230,50 @@ describe("setHermesEnvValues on disk", () => {
     await fs.mkdir(hermesEnvPath(), { recursive: true });
     await expect(readHermesEnv()).rejects.toMatchObject({ code: "EISDIR" });
     await expect(getHermesEnvValue("A")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+
+  // TASK-452 round 2. The READ path has refused to flatten a fault into
+  // "nothing configured" since the WhatsApp panel bug above; the WRITE path was
+  // still doing exactly that, one `catch` further down, and the consequence is
+  // worse. `existing` stayed "" and `applyEnvValues("", …)` then wrote a
+  // two-line file over whatever was there — the whole of ~/.hermes/.env, which
+  // on a real device is Hermes' own 504-line template plus every credential the
+  // email, WhatsApp, Discord, ClawAI and skill-secret settings have stored.
+  //
+  // A file this module cannot read is a file it must not merge into.
+  describe("a base it could not read", () => {
+    it("refuses to write rather than rebuilding the file from nothing", async () => {
+      await fs.mkdir(hermesEnvPath(), { recursive: true });
+
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+      // Still a directory: nothing was renamed over it.
+      expect((await fs.stat(hermesEnvPath())).isDirectory()).toBe(true);
+    });
+
+    it("refuses when the file is larger than it will parse, and changes nothing", async () => {
+      const huge = `# big\n${"# padding padding padding\n".repeat(12_000)}KEEP_ME=yes\n`;
+      await fs.writeFile(hermesEnvPath(), huge, { mode: 0o600 });
+
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toMatchObject({ reason: "too-large" });
+      expect(await fs.readFile(hermesEnvPath(), "utf8")).toBe(huge);
+    });
+
+    it("leaves a clearing write refused too, so a delete cannot empty the file", async () => {
+      await fs.mkdir(hermesEnvPath(), { recursive: true });
+
+      await expect(clearHermesEnvValues(["A"])).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+      expect((await fs.stat(hermesEnvPath())).isDirectory()).toBe(true);
+    });
+
+    it("keeps writing after a refusal — the single-writer chain survives it", async () => {
+      const blocked = hermesEnvPath();
+      await fs.mkdir(blocked, { recursive: true });
+      await expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+
+      await fs.rm(blocked, { recursive: true, force: true });
+      await setHermesEnvValues({ A: "1" });
+      expect(await readHermesEnv()).toEqual({ A: "1" });
+    });
   });
 });
 

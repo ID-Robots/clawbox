@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { hermesSkillsGuard } from "@/lib/hermes-skills-server";
 import {
+  HermesEnvUnreadableError,
   clearHermesSecret,
   hermesSecretsPresent,
   isValidEnvKey,
@@ -106,6 +107,19 @@ export async function POST(request: Request) {
   } catch (err) {
     // The message could name the .env path; log it, answer generically.
     console.error("[hermes skills secrets] write failed", err);
+    // One failure the customer can act on, and the one that must never be
+    // mistaken for a save: the device's environment file is there but could not
+    // be read, so it was left exactly as it was rather than replaced by a file
+    // built from nothing.
+    if (err instanceof HermesEnvUnreadableError) {
+      return NextResponse.json(
+        {
+          error: "The device's environment file could not be read, so nothing was changed.",
+          code: "env_unreadable",
+        },
+        { status: 500 },
+      );
+    }
     return NextResponse.json({ error: "Could not save the key" }, { status: 500 });
   }
 }
