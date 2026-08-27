@@ -304,8 +304,13 @@ function isBookkeepingLine(line: string): boolean {
  * frames, nothing is invented — the caller falls back to the exit code rather
  * than quoting Python source at a customer. The block is scoped: once it ends,
  * an indented line is ordinary output again.
+ *
+ * A frame header is matched by its FULL shape — `File "…", line <n>` — not by
+ * its first six characters. `File "config.yaml" was denied` is a sentence a
+ * customer needs to read, and the loose form both swallowed it and reopened a
+ * block that had already closed, taking the indented lines after it with it.
  */
-const TRACEBACK_OPENER = /^[ \t]*(?:Traceback\b|File ")/;
+const TRACEBACK_OPENER = /^[ \t]*(?:Traceback\b|File "[^"]+", line \d+\b)/;
 
 function withoutTracebackFrames(lines: string[]): string[] {
   const kept: string[] = [];

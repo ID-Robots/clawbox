@@ -360,6 +360,22 @@ describe("a Python traceback in the output", () => {
       .toBe("the provider denied the request; check the API key");
   });
 
+  it("keeps a sentence that merely starts with File \"…\" after the traceback", () => {
+    // `File "` alone used to open a traceback block, so an ordinary diagnostic
+    // naming a file was both discarded AND reopened suppression over the lines
+    // under it. Only the real frame shape — File "…", line <n> — opens one.
+    const stderr = [
+      "Traceback (most recent call last):",
+      '  File "/home/clawbox/.hermes/agent.py", line 88, in run',
+      "    cfg = load(path)",
+      "KeyboardInterrupt",
+      '  File "config.yaml" was denied to the hermes user',
+    ].join("\n");
+    const msg = hermesFailureMessage("", stderr);
+    expect(msg).toBe('File "config.yaml" was denied to the hermes user');
+    expect(msg).not.toMatch(/cfg = load|agent\.py/);
+  });
+
   it("keeps indented prose that was never part of a traceback", () => {
     expect(hermesFailureMessage("    the request was denied by the provider", ""))
       .toBe("the request was denied by the provider");
