@@ -43,6 +43,8 @@ export interface SkillAuditRecord {
     /** The device's own installer refused it outright — no confirmation overrides this one. */
     | 'install-blocked-by-device'
     | 'install-incomplete'
+    /** The install was refused and the device could not undo it — see the route. */
+    | 'install-rollback-incomplete'
     | 'install-name-conflict';
   /** Registry identifier the owner asked for. */
   id: string;

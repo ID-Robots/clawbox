@@ -225,14 +225,47 @@ export async function POST(request: Request) {
     : null;
 
   if (warning && !confirmDangerous) {
-    await rollback(lockName, entry);
+    const undo = await rollback(lockName, entry);
+    // A refusal we could not carry out is not the refusal the caller expects:
+    // answering `dangerous_skill` here would invite a confirmation that walks
+    // straight into the completeness check below, on a skill whose files this
+    // rollback has already removed.
+    if (!undo.clean) {
+      return await rollbackIncomplete(undo, {
+        id,
+        name: lockName,
+        cause: "This skill did not pass the device's security scan.",
+        source: entry?.source,
+        trust: entry?.trust_level,
+        scanVerdict: verdict,
+        findingCount: findings.length,
+        warning,
+      });
+    }
     return await askTheOwner(warning, { id, findingCount: findings.length });
   }
 
   // ── 4. Did every file actually land? ─────────────────────────────────────
   const completeness = await verifyAndRepair(entry, record);
   if (completeness && completeness.missing.length > 0) {
-    await rollback(lockName, entry);
+    const undo = await rollback(lockName, entry);
+    if (!undo.clean) {
+      return await rollbackIncomplete(undo, {
+        id,
+        name: lockName,
+        // Deliberately not "the download was incomplete": the same branch is
+        // reached when the installer met a lock entry a previous rollback could
+        // not remove, exited 0 without fetching anything, and there was no
+        // download to blame. What is true in both cases is that the files are
+        // not there.
+        cause: `Some of "${lockName}"'s files are missing from the device, so it was not installed.`,
+        source: entry?.source,
+        trust: entry?.trust_level,
+        scanVerdict: verdict,
+        missingFiles: completeness.missing.slice(0, 20),
+        warning,
+      });
+    }
     await auditSkillInstall({
       action: "install-incomplete",
       id,
@@ -500,16 +533,41 @@ async function findShadowConflict(
   return null;
 }
 
+/** What a rollback ACHIEVED, as opposed to what the CLI printed about it. */
+interface RollbackVerdict {
+  /** Neither a lock entry nor a skill directory was left behind. */
+  clean: boolean;
+  /** The hub lock still lists the skill — every store surface calls it installed. */
+  lockEntry: boolean;
+  /** The skill directory is still on disk — the agent would load it. */
+  dir: boolean;
+}
+
 /**
- * Undo an install this route has decided not to keep.
+ * Undo an install this route has decided not to keep, and report what is left.
  *
  * `hermes skills uninstall` is what removes the LOCK entry, so it runs first
  * and its result is deliberately not trusted: the CLI prints its refusals and
  * still exits 0. The directory removal is the belt to that braces — a skill
  * directory left behind would be loaded by the agent even with no lock entry,
  * which is the exact failure this whole route exists to prevent.
+ *
+ * TASK-547 / PR #510 gave the uninstall ROUTE the post-condition that follows
+ * from that distrust — a removal is only real when the lock entry is gone
+ * afterwards — and this rollback, which drives the same command, kept inferring
+ * success from having called it. It could not: `runHermesCli` throws on the
+ * 30 s timeout a loaded Jetson hits mid-install and the throw was swallowed with
+ * a console line, `removeSkillDir` returns false for a path the validator
+ * refuses and its answer was discarded, and nothing re-read the lock. A refused
+ * skill then stayed in the lock, `enumerateInstalledSkills` listed it as
+ * installed from the hub, and the route said it had refused the install.
+ *
+ * So: read the outcome, both halves of it, and let the caller answer honestly.
  */
-async function rollback(lockName: string, entry: HubLockEntry | undefined): Promise<void> {
+async function rollback(
+  lockName: string,
+  entry: HubLockEntry | undefined,
+): Promise<RollbackVerdict> {
   try {
     await runHermesCli(["skills", "uninstall", lockName], {
       timeoutMs: UNINSTALL_TIMEOUT_MS,
@@ -519,8 +577,96 @@ async function rollback(lockName: string, entry: HubLockEntry | undefined): Prom
     console.error("[hermes skills install] rollback uninstall failed", err);
   }
   const installPath = entry?.install_path;
-  if (installPath) await removeSkillDir(SKILLS_DIR, installPath);
+  let dir = false;
+  if (installPath) {
+    // Two things can leave the directory behind, so both are checked: a path
+    // `removeSkillDir` will not resolve (it answers false and removes nothing),
+    // and a removal it believes it made — `fs.rm` on a tree it cannot fully
+    // traverse, the root-owned subdirectory case this device family produces.
+    const removed = await removeSkillDir(SKILLS_DIR, installPath);
+    const abs = lockInstallDir(entry);
+    dir = !removed || (abs !== null && (await pathExists(abs)));
+  }
   invalidateInstalledCache();
+  // Read the lock AFTER the CLI, never before: it is the only thing that says
+  // whether the store will still list this skill.
+  const lockEntry = await isInHubLock(lockName, entry?.identifier);
+  return { clean: !lockEntry && !dir, lockEntry, dir };
+}
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The answer for an install this route refused and could not undo.
+ *
+ * Distinct from both refusals it replaces, because the device is in a state
+ * neither of them describes and the next step is neither of theirs: there is
+ * nothing to confirm (`requiresConfirmation` is false — confirming re-enters the
+ * completeness check on a skill whose files are gone) and nothing to retry until
+ * the leftover is removed. The scan warning and the missing-file list are still
+ * carried, so no surface loses what it already showed.
+ */
+async function rollbackIncomplete(
+  left: RollbackVerdict,
+  ctx: {
+    id: string;
+    name: string;
+    /** Why the install was being undone, as a finished sentence. */
+    cause: string;
+    source?: string;
+    trust?: string;
+    scanVerdict?: string;
+    findingCount?: number;
+    missingFiles?: string[];
+    warning?: SkillDangerWarning | null;
+  },
+): Promise<NextResponse> {
+  const leftover = left.lockEntry
+    ? left.dir
+      ? `"${ctx.name}" is still listed in the Skills store and its files are still on the device`
+      : `"${ctx.name}" is still listed in the Skills store although its files were removed`
+    : `"${ctx.name}" is no longer listed in the Skills store but its files are still on the device`;
+  console.error(
+    "[hermes skills install] rollback incomplete",
+    ctx.name,
+    "lockEntry:",
+    left.lockEntry,
+    "dir:",
+    left.dir,
+  );
+  await auditSkillInstall({
+    action: "install-rollback-incomplete",
+    id: ctx.id,
+    name: ctx.name,
+    source: ctx.source,
+    trust: ctx.warning?.trust ?? ctx.trust,
+    verdict: ctx.scanVerdict,
+    findingCount: ctx.findingCount,
+    missingFiles: ctx.missingFiles,
+    capabilities: ctx.warning?.capabilities.map((c) => c.id),
+    severities: ctx.warning?.severityCounts,
+  });
+  return NextResponse.json(
+    {
+      error:
+        `${ctx.cause} The device could not fully undo the install: ${leftover}. `
+        + `Remove "${ctx.name}" from the Skills store, then try again.`,
+      code: "rollback_incomplete",
+      requiresConfirmation: false,
+      name: ctx.name,
+      leftover: { lockEntry: left.lockEntry, directory: left.dir },
+      ...(ctx.missingFiles?.length ? { missingFiles: ctx.missingFiles } : {}),
+      ...(ctx.warning ? { warning: ctx.warning } : {}),
+    },
+    { status: 409 },
+  );
 }
 
 interface VerifiedCompleteness extends CompletenessReport {

@@ -313,6 +313,20 @@ function refusalToToolError(err: unknown): ToolError | null {
       "Do not retry. Tell the user the device already has that skill built in; built-in skills update with the device.",
     );
   }
+  if (payload.code === "rollback_incomplete") {
+    // The device refused the install AND could not take back what the installer
+    // had already done. Retrying is the one thing that cannot work: the leftover
+    // lock entry makes the installer say "already installed" and exit 0 without
+    // fetching anything, so the next attempt fails on the files that are not
+    // there. A person has to remove it first.
+    return new ToolError(
+      "CONFLICT",
+      payload.error
+        ?? "The device refused the install and could not fully undo it; the skill is listed but not installed.",
+      "Do NOT retry and do NOT ask the user to confirm — neither can succeed while the leftover is there. "
+        + "Tell the user to remove that skill in Settings -> Skills, and to try the install again afterwards.",
+    );
+  }
   if (payload.code === "incomplete_install") {
     const missing = (payload.missingFiles ?? []).slice(0, 5).join(", ");
     return new ToolError(
