@@ -298,6 +298,15 @@ def _extract_asset_from_open(
                     continue
                 relative = member.name[len(prefix):] if member.name != archive_subpath else ""
                 if not relative:
+                    if not member.isdir():
+                        # The asset root is in the archive but is not a
+                        # directory — a symlink, most likely. Treating it as
+                        # proof of presence would hand `_swap_into_place` an
+                        # empty staging directory to move over live data.
+                        raise RestoreError(
+                            f"{archive_subpath!r} is declared as a directory asset "
+                            f"but the archive holds it as {member.type!r}",
+                        )
                     # The asset's own root directory. There is nothing to
                     # extract for it -- `staging_root` already exists -- but
                     # seeing it PROVES the asset is present in the archive,

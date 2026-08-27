@@ -18,7 +18,7 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -506,8 +506,18 @@ async function getDaemonBin(): Promise<string | null> {
   if (daemonBinCache) return daemonBinCache;
   const override = process.env.CLAWKEEP_BIN?.trim();
   if (override) {
-    daemonBinCache = override;
-    return override;
+    // Checked, not trusted. An override left pointing at a path that no longer
+    // exists used to report the daemon as installed, which now also reports
+    // `archiverReady: true` — a box that cannot back up telling the owner it
+    // can. A bad override falls through to the normal probe rather than
+    // failing outright, so a stale env var degrades to "look for it properly".
+    try {
+      await fs.access(override, fsConstants.X_OK);
+      daemonBinCache = override;
+      return override;
+    } catch {
+      // fall through to the PATH / user-local probes below
+    }
   }
   if (await which(DEFAULT_BIN_NAME)) {
     daemonBinCache = DEFAULT_BIN_NAME;

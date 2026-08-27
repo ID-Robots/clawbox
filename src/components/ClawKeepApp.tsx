@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
@@ -141,6 +141,31 @@ interface BackupResponse {
 
 const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
 
+/**
+ * The name of the agent this box runs, for the strings that name it.
+ *
+ * Eight ClawKeep strings say "OpenClaw" out loud — "Protect my OpenClaw",
+ * "Your OpenClaw is safe in the ClawBox cloud", "This replaces your current
+ * OpenClaw state". On a Hermes box every one of them named software the device
+ * does not run. They now interpolate `{agent}`, which keeps each locale's
+ * existing wording and case endings intact — it is the brand that varies, not
+ * the sentence.
+ *
+ * A context rather than a prop because the eight sites sit in five different
+ * components, and this is a property of the DEVICE, not of any one card.
+ * "OpenClaw" is the default because that is what a box is unless its status
+ * says otherwise, and it is what every one of these strings used to say.
+ */
+const AgentLabelContext = createContext("OpenClaw");
+
+function useAgentLabel(): string {
+  return useContext(AgentLabelContext);
+}
+
+function agentLabelFor(agent: ClawKeepStatus["agent"]): string {
+  return agent === "hermes" ? "Hermes" : "OpenClaw";
+}
+
 type Translator = (key: string, params?: Record<string, string | number>) => string;
 
 function timeAgo(ms: number, t: Translator): string {
@@ -189,6 +214,10 @@ export default function ClawKeepApp() {
   // outer full-app login gate was tried and removed — it duplicated the
   // inline UX and broke local-only flows where ClawBox AI isn't required.
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
+  // Which agent this box archives, for the strings that name it. Read before
+  // the status has landed too, hence the optional chain — the default is the
+  // word every one of those strings used to be hardcoded to.
+  const agent = agentLabelFor(status?.agent);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "restore">("");
   const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
@@ -465,17 +494,17 @@ export default function ClawKeepApp() {
 
   const onRestore = useCallback(
     (name: string) => {
-      // The restore is destructive — we move ~/.openclaw aside and replace
-      // it with the snapshot's contents, then bounce the gateway. Route
-      // the confirm through our themed dialog instead of window.confirm
-      // so the look matches the rest of the app on every browser.
+      // The restore is destructive — we move the agent's state directory aside
+      // and replace it with the snapshot's contents, then bounce the service
+      // that holds it open. Route the confirm through our themed dialog
+      // instead of window.confirm so the look matches on every browser.
       setConfirmPending({
         title: t("clawkeep.confirm.restoreTitle", { name }),
         body: (
           <>
-            <p>{t("clawkeep.confirm.restoreBody1")}</p>
+            <p>{t("clawkeep.confirm.restoreBody1", { agent })}</p>
             <p className="mt-2 text-[var(--text-muted)]">
-              {t("clawkeep.confirm.restoreBody2")}
+              {t("clawkeep.confirm.restoreBody2", { agent })}
             </p>
           </>
         ),
@@ -529,6 +558,7 @@ export default function ClawKeepApp() {
   }
 
   return (
+    <AgentLabelContext.Provider value={agent}>
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
       <div className="min-h-full w-full flex items-center justify-center p-6">
         <div className="w-full max-w-2xl space-y-4">
@@ -678,6 +708,7 @@ export default function ClawKeepApp() {
         />
       )}
     </div>
+    </AgentLabelContext.Provider>
   );
 }
 
@@ -1308,6 +1339,7 @@ function ConfirmDialog({
 
 function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
   const { t } = useT();
+  const agent = useAgentLabel();
   return (
     <div
       className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
@@ -1337,7 +1369,7 @@ function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
       </div>
       <h2 className="relative text-3xl font-bold font-display">{t("clawkeep.pair.title")}</h2>
       <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t("clawkeep.pair.description")}
+        {t("clawkeep.pair.description", { agent })}
       </p>
       <button
         type="button"
@@ -1500,6 +1532,7 @@ function BackupProgressPanel({
   onReset?: () => void;
 }) {
   const { t } = useT();
+  const agent = useAgentLabel();
   // `nowMs` is sampled by the 1s tick so render stays pure (no `Date.now()`
   // reads at render time — the React compiler rule that flags those is on).
   // It's the only thing the panel uses time for: deriving the upload MB/s
@@ -1528,7 +1561,7 @@ function BackupProgressPanel({
   const isBackup = kind === "backup";
   const fallback = isBackup
     ? t("clawkeep.progress.backupFallback")
-    : t("clawkeep.progress.restoreFallback");
+    : t("clawkeep.progress.restoreFallback", { agent });
   const stepLabel = explicitStepLabel || fallback;
 
   // Backup = green (we're actively protecting). Restore = orange (recovery
@@ -1564,7 +1597,7 @@ function BackupProgressPanel({
         <div className="flex-1 min-w-0">
           <div className={`text-base font-semibold ${palette.text}`}>
             {isBackup
-              ? t("clawkeep.progress.backupTitle")
+              ? t("clawkeep.progress.backupTitle", { agent })
               : t("clawkeep.progress.restoreTitle")}
           </div>
           <div className="text-xs text-[var(--text-muted)] mt-0.5">
@@ -1704,6 +1737,7 @@ function DashboardCard({
   busyKind: "backup" | "restore" | null;
 }) {
   const { t } = useT();
+  const agent = agentLabelFor(status.agent);
   // Optional "Name this backup" field for the manual run — passed to the
   // daemon as the snapshot label. Cleared after we hand it off.
   const [backupName, setBackupName] = useState("");
@@ -1774,7 +1808,7 @@ function DashboardCard({
 
       <h2 className="relative text-3xl font-bold font-display mt-2">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(copy.subheadKey)}
+        {t(copy.subheadKey, { agent })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
@@ -1813,7 +1847,7 @@ function DashboardCard({
           disabled={disabled}
           className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
         >
-          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw")}
+          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
         </button>
         {canRestore && (
           <button

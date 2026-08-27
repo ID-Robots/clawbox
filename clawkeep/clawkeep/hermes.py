@@ -344,6 +344,22 @@ def create_archive(
         with tarfile.open(archive_path, "w:gz") as tf:
             for asset in wanted:
                 target = source_path(asset)
+                # `exists()` follows symlinks, so a directory asset whose
+                # source is ITSELF a symlink would be added to the tarball as a
+                # single symlink member. Restore would then find that member,
+                # take it as proof the asset is present, and swap the empty
+                # staging directory over the live one — deleting the asset it
+                # was asked to restore. Refuse here, and say so in the
+                # manifest, rather than writing an archive that destroys data
+                # on the way back in.
+                if asset.entry == "dir" and target.is_symlink():
+                    log.warning("refusing to archive symlinked directory %s", target)
+                    skipped.append({
+                        "kind": asset.kind,
+                        "reason": f"source is a symlink to {os.readlink(target)!r}; "
+                                  "a directory asset must be a real directory",
+                    })
+                    continue
                 if not target.exists():
                     # Absent is normal, not an error: a box nobody has given a
                     # pet has no `pets/`. Recorded so a reader of the manifest
