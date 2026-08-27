@@ -75,6 +75,47 @@ describe("describeChatFailure", () => {
     }
   });
 
+  it("maps an Anthropic 429 to a calm, actionable rate-limit sentence", () => {
+    // TASK: an Anthropic 429 reached the owner as "The agent run failed before
+    // producing a reply." — a generic dead-end. The gateway had already worded
+    // the real cause ("API rate limit reached. Please try again later.");
+    // reason=rate_limit / a bare 429 carry the same signal. Whichever wording
+    // reaches us, the customer must be told it is a rate limit, that the box is
+    // fine, and what to do — wait, or switch provider in Settings.
+    for (const raw of [
+      "API rate limit reached. Please try again later.",
+      "rate_limit",
+      "429 Error",
+      "Error: 429 Too Many Requests",
+    ]) {
+      const shown = describeChatFailure(raw);
+      expect(shown).toMatch(/rate[ -]?limit/i);
+      expect(shown).toMatch(/settings/i);
+      // Says the box itself is not broken.
+      expect(shown).toMatch(/nothing is (wrong|broken)|not broken|is fine/i);
+      // A rate limit is transient — never the generic "log has the details".
+      expect(shown).not.toMatch(/stayed in this box's log/i);
+    }
+  });
+
+  it("does not leak anything unsafe on the rate-limit path", () => {
+    // The rate-limit sentence is authored by us, but the matcher must not let a
+    // rate-limit-shaped string smuggle a path/UUID/CLI line onto the screen.
+    const shown = describeChatFailure(
+      "429 rate limit on run 3b45304b-89ff-496c-a392-4e1719de0878; "
+      + "see /home/clawbox/.openclaw/logs; Logs: openclaw logs --follow",
+    );
+    expect(leaks(shown)).toBe(false);
+    expect(shown).toMatch(/rate[ -]?limit/i);
+  });
+
+  it("does not misfire on ordinary text that merely mentions limits", () => {
+    // "Request exceeds the size limit" is a size limit, not a rate limit — it
+    // must keep its own useful passthrough, not get swallowed by the new case.
+    expect(describeChatFailure("Request exceeds the size limit"))
+      .toBe("Error: Request exceeds the size limit");
+  });
+
   it("drops anything that carries an internal handle, whatever the wording", () => {
     for (const raw of [
       "run 3b45304b-89ff-496c-a392-4e1719de0878 failed",
