@@ -140,7 +140,11 @@ export async function POST(request: Request) {
               // A gateway nobody installed cannot be restarted from here, so
               // it is still receiving on the credentials it loaded at
               // startup. Saying nothing would read as "receiving stopped".
-              ...(stop === "unmanaged"
+              // "unmanaged" and "restart-failed" both mean the same thing to
+              // the owner: nothing restarted, so it is still receiving on the
+              // credentials it loaded at startup. Saying nothing would read as
+              // "receiving stopped".
+              ...(stop === "unmanaged" || stop === "restart-failed"
                 ? { warning: "Saved — receiving stops on the next gateway restart" }
                 : {}),
             });

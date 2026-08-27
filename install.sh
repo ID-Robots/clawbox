@@ -2686,14 +2686,30 @@ install_sudoers_dropin() {
     return 1
   fi
 
-  install -d -o root -g root -m 0755 "$SUDOERS_DIR"
-  install -d -o root -g root -m 0700 "$SUDOERS_STAGING_DIR"
+  install -d -o root -g root -m 0755 "$SUDOERS_DIR" || return 1
+  install -d -o root -g root -m 0700 "$SUDOERS_STAGING_DIR" || return 1
 
   local staged
   staged="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-candidate.XXXXXX")" || return 1
-  cat "$src" > "$staged"
-  chown root:root "$staged"
-  chmod 0440 "$staged"
+  # Checked, not assumed. Both call sites invoke this function in a CONDITION
+  # context (`if install_sudoers_dropin …`, `… || echo`), and bash disables
+  # `set -e` for the whole dynamic extent of a command being tested. So every
+  # step in here has to carry its own `|| return 1`: an unchecked failure does
+  # not abort the script, it falls through to the next line and reports success.
+  # A truncated-but-parseable candidate — a `cat` that hit ENOSPC halfway down
+  # the allow-list — validates under visudo and installs cleanly. TASK-445.
+  if ! cat "$src" > "$staged"; then
+    rm -f "$staged"
+    echo "Error: could not stage $src; keeping the existing $dest" >&2
+    return 1
+  fi
+  if ! cmp -s "$src" "$staged"; then
+    rm -f "$staged"
+    echo "Error: staged copy of $src is truncated; keeping the existing $dest" >&2
+    return 1
+  fi
+  chown root:root "$staged" || { rm -f "$staged"; return 1; }
+  chmod 0440 "$staged" || { rm -f "$staged"; return 1; }
 
   if ! visudo -cf "$staged" >/dev/null 2>&1; then
     rm -f "$staged"
@@ -2711,20 +2727,52 @@ install_sudoers_dropin() {
   local backup=""
   if [ -f "$dest" ]; then
     backup="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-previous.XXXXXX")" || { rm -f "$staged"; return 1; }
-    cat "$dest" > "$backup"
+    if ! cat "$dest" > "$backup" || ! cmp -s "$dest" "$backup"; then
+      rm -f "$staged" "$backup"
+      echo "Error: could not back up $dest; leaving it as it is" >&2
+      return 1
+    fi
   fi
 
   # install(1) writes to a temp file and renames, so sudo never sees a
   # half-written drop-in.
-  install -o root -g root -m 0440 "$staged" "$dest"
+  #
+  # POSITIVE PROOF, not a return code. The caller uses this function's result to
+  # decide whether it is safe to quarantine the blanket `NOPASSWD: ALL` drop-in,
+  # and the `visudo -c` below cannot tell it: when `install` fails, visudo
+  # happily validates whatever is STILL on disk and answers 0. On a device whose
+  # only grant is the blanket one, that sequence ends with the narrow file never
+  # written and the blanket file removed — no working sudo at all, on an
+  # appliance with no console. So compare the bytes that actually landed.
+  if ! install -o root -g root -m 0440 "$staged" "$dest" 2>/dev/null || ! cmp -s "$staged" "$dest"; then
+    if [ -n "$backup" ]; then
+      # `install` may have left a partial/renamed file behind; put the previous
+      # content back rather than trusting that it never got that far.
+      install -o root -g root -m 0440 "$backup" "$dest" 2>/dev/null \
+        || echo "Error: could not restore $dest from its backup at $backup" >&2
+    else
+      rm -f "$dest"
+    fi
+    rm -f "$staged" "$backup"
+    echo "Error: could not install $name into $dest; leaving the existing grants alone" >&2
+    return 1
+  fi
   rm -f "$staged"
 
   # Re-check the WHOLE set: a fragment can be valid on its own and still collide
   # with another drop-in (duplicate alias, bad include order).
   if ! visudo -c >/dev/null 2>&1; then
     if [ -n "$backup" ]; then
-      install -o root -g root -m 0440 "$backup" "$dest"
-      echo "Error: installing $name broke /etc/sudoers validation; rolled $dest back" >&2
+      # The "rolled back" message used to print whether or not the rollback
+      # worked. Say what actually happened — a device that is now missing its
+      # drop-in entirely has to be distinguishable in the install log from one
+      # that is safely back on its previous rules.
+      if install -o root -g root -m 0440 "$backup" "$dest" 2>/dev/null; then
+        echo "Error: installing $name broke /etc/sudoers validation; rolled $dest back" >&2
+      else
+        rm -f "$dest"
+        echo "Error: installing $name broke /etc/sudoers validation AND the rollback failed; removed $dest" >&2
+      fi
     else
       rm -f "$dest"
       echo "Error: installing $name broke /etc/sudoers validation; removed $dest" >&2
@@ -2947,7 +2995,25 @@ step_systemd_services() {
   # the device" shape TASK-445 exists to close. step_systemd_services is the one
   # step both a fresh install and the in-app updater (step_post_update) always
   # run, unconditionally. TASK-445.
-  if install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox; then
+  #
+  # Called plainly, never as the tested command of an `if`: bash suspends
+  # `set -e` for the entire dynamic extent of a command run in a condition
+  # context, so that spelling disarmed every unchecked command inside the
+  # function body too. The function now checks its own steps, and the status
+  # comes back through an explicit variable.
+  local sudoers_status=0
+  set +e
+  install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox
+  sudoers_status=$?
+  set -e
+
+  # Two independent gates before the blanket grant is removed: the installer
+  # reported success, AND the bytes on the device are the allow-list we shipped.
+  # The second one is the load-bearing half — it is proof about the device, not
+  # about a code path, and it is what makes "installed the narrow rules" a
+  # precondition of "removed the wide ones" instead of an assumption.
+  if [ "$sudoers_status" -eq 0 ] \
+    && cmp -s "$PROJECT_DIR/config/clawbox-sudoers" "$SUDOERS_DIR/clawbox"; then
     echo "  Sudoers rules installed"
     # Gated on the PRIMARY allow-list only. That file is what keeps the box
     # operable (wizard, updater, power, hotspot); the ollama grant is one

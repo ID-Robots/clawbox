@@ -65,7 +65,7 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
     mockClearOpenclawPairing.mockResolvedValue();
     mockSetHermesToken.mockResolvedValue();
     mockClearHermesPairing.mockResolvedValue();
-    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system" });
+    mockEnsureGateway.mockResolvedValue({ installed: true, running: true, scope: "system", applied: true });
 
     POST = (await import("@/app/setup-api/telegram/configure/route")).POST;
   });
@@ -126,8 +126,25 @@ describe("POST /setup-api/telegram/configure — harness routing", () => {
       expect(body.warning).toBeTruthy();
     });
 
+    // The false success this route used to answer. A restart that sudo refused
+    // leaves the OLD gateway process up, and `hermes gateway status` runs
+    // unprivileged — so `running` was true, the route said {restarted: true},
+    // and the owner's new bot token silently kept not working.
+    it("does not claim restarted:true when the restart was refused", async () => {
+      mockEnsureGateway.mockResolvedValue({
+        installed: true,
+        running: true,
+        scope: "system",
+        applied: false,
+      });
+      const body = await (await POST(req({ botToken: TOKEN }))).json();
+
+      expect(body).toMatchObject({ success: true, restarted: false });
+      expect(body.warning).toBeTruthy();
+    });
+
     it("warns when the gateway install returned but nothing is running", async () => {
-      mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system" });
+      mockEnsureGateway.mockResolvedValue({ installed: true, running: false, scope: "system", applied: false });
       const body = await (await POST(req({ botToken: TOKEN }))).json();
 
       expect(body).toMatchObject({ success: true, restarted: false });

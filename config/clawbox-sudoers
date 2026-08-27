@@ -62,6 +62,36 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel
 
+# Hermes' messaging gateway. This is the unit `hermes gateway install --system`
+# writes, and it is the process that RECEIVES Telegram / WhatsApp / Discord /
+# Email — so every config save on a provisioned Hermes box restarts it
+# (src/lib/hermes-telegram.ts ensureHermesGateway). It is NOT install-time-only.
+#
+# This grant is a strict REDUCTION in privilege, not an addition:
+#
+#   * The unit is root-owned in /etc/systemd/system and runs `User=clawbox`
+#     (Hermes writes it that way — `gateway install --system --run-as-user
+#     clawbox`). Restarting it therefore starts a process the clawbox user could
+#     have started itself. That is less than the `restart clawbox-gateway` grant
+#     above, whose unit has no User= at all.
+#   * It REPLACES `sudo -n /home/clawbox/.local/bin/hermes gateway restart
+#     --system`. That binary, and every directory above it, is clawbox-owned and
+#     clawbox-writable — exactly the shape the optimize-ollama.sh grant was moved
+#     to /usr/local/libexec to avoid. It could never be granted; the coverage
+#     checker had to carry it in EXEMPT_CALLS instead, which meant the restart
+#     silently failed on a narrowed box and the route still answered "restarted".
+#
+# No `start`: the restart grant starts a stopped unit too. No `reset-failed`:
+# the generated unit sets StartLimitIntervalSec=0, so there is no start limit to
+# clear. No wildcard: profile units (hermes-gateway-<profile>.service) are a
+# different privilege question and ClawBox only ever runs the default profile.
+# The first-time `gateway install --system` stays deliberately UNGRANTED — it
+# writes into /etc/systemd/system and cannot be expressed safely against a
+# clawbox-writable binary; it fails fast under `sudo -n` and the route now says
+# so instead of reporting success. TASK-445 follow-up.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes-gateway
+
 # Ollama, for Settings -> Local Models. Ollama is a system unit and it holds
 # real RAM on an 8 GB box, so the owner has to be able to stop it and have it
 # stay stopped; until this grant existed nothing in the UI could. `--now` is

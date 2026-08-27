@@ -67,7 +67,10 @@ export async function POST(request: Request) {
       // failed save.
       try {
         const status = await ensureHermesGateway(request.signal);
-        if (!status.running) {
+        // `applied` and not just `running`: the status probe runs unprivileged
+        // and a refused restart leaves the OLD process up, so `running` alone
+        // reported the new token as live when it was not.
+        if (!status.running || !status.applied) {
           return NextResponse.json({
             success: true,
             reset: tokenChanged,

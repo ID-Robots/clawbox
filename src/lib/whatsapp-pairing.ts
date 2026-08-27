@@ -680,7 +680,9 @@ export function createRealDeps(): PairingDeps {
       // than reinvented: no new sudo rights are involved, and a box whose
       // gateway cannot be restarted from here reports the fact instead.
       const status = await ensureHermesGateway();
-      return status.running;
+      // `applied` too — a refused restart leaves the old process up and the
+      // unprivileged status probe would report it as a successful restart.
+      return status.running && status.applied;
     },
 
     spawnBridge() {
