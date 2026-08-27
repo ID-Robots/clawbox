@@ -50,8 +50,18 @@ export async function GET(request: Request) {
   }
   try {
     return NextResponse.json({ secrets: await hermesSecretsPresent(keys) });
-  } catch {
-    return NextResponse.json({ error: "Could not read stored keys" }, { status: 500 });
+  } catch (err) {
+    // A file that could not be read holds no answer about which keys are set,
+    // and reporting them all as unset is how a customer is shown an empty field
+    // for a credential that may well be there.
+    console.error("[hermes skills secrets] read failed", err);
+    return NextResponse.json(
+      {
+        error: "The device's environment file could not be read.",
+        code: err instanceof HermesEnvUnreadableError ? "env_unreadable" : undefined,
+      },
+      { status: 500 },
+    );
   }
 }
 

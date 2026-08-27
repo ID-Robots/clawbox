@@ -53,7 +53,7 @@ async function get(keys: string) {
   const res = await GET(
     new Request(`http://localhost/setup-api/hermes/skills/secrets?keys=${encodeURIComponent(keys)}`),
   );
-  return { status: res.status, body: (await res.json()) as { secrets?: Record<string, boolean> } };
+  return { status: res.status, body: (await res.json()) as { secrets?: Record<string, boolean>; code?: string } };
 }
 
 describe("skill secrets (TASK-452)", () => {
@@ -192,21 +192,55 @@ describe("skill secrets (TASK-452)", () => {
   // regular-file checks used to run against a stat of the path, then the read
   // ran against the path again. They now run against one open descriptor, and
   // the open is non-blocking so the regular-file check can still be reached.
-  it("reads nothing through a path that is not a regular file, and does not hang", async () => {
+  it("does not hang on a path that is not a regular file", async () => {
     const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
-    execFileSync("mkfifo", [envPath()]);
-    await expect(
-      Promise.race([
-        readHermesEnv(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error("readHermesEnv hung on a fifo")), 2000)),
-      ]),
-    ).resolves.toEqual(new Map());
+    try {
+      execFileSync("mkfifo", [envPath()]);
+      if (!(await fs.stat(envPath())).isFIFO()) return;
+    } catch {
+      return; // no real FIFOs here; CI runs on Linux, which has them
+    }
+    // Settling is the property under test: a non-blocking read of a
+    // writer-less FIFO gives EOF on some kernels and EAGAIN on others, and
+    // either is a fine answer. Parking the request forever is not.
+    let timer: ReturnType<typeof setTimeout>;
+    const hung = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error("readHermesEnv hung on a fifo")), 2000);
+    });
+    try {
+      await Promise.race([readHermesEnv().catch((err: unknown) => err), hung]);
+    } finally {
+      clearTimeout(timer!);
+    }
   });
 
-  it("reads nothing when the path is a directory", async () => {
-    const { readHermesEnv } = await import("@/lib/hermes-skill-secrets");
+  // Answering "nothing is set" for a file nobody could read is the wrong answer
+  // twice over: the owner is shown an empty field for a credential that may
+  // well be there, and a clear reports a key already gone that it never looked
+  // for.
+  it("raises rather than reporting an empty store when the path is a directory", async () => {
+    const { HermesEnvUnreadableError, readHermesEnv } = await import("@/lib/hermes-skill-secrets");
     await fs.mkdir(envPath());
-    expect(await readHermesEnv()).toEqual(new Map());
+    await expect(readHermesEnv()).rejects.toBeInstanceOf(HermesEnvUnreadableError);
+  });
+
+  it("answers the presence GET 500 rather than reporting every key unset", async () => {
+    await fs.mkdir(envPath());
+    const { status, body } = await get("BRAVE_API_KEY");
+    expect(status).toBe(500);
+    expect(body).toMatchObject({ code: "env_unreadable" });
+    expect(body.secrets).toBeUndefined();
+  });
+
+  // The one CodeRabbit found: clearHermesSecret read the file, got an empty map
+  // from the swallowed failure, concluded the key was already absent and
+  // answered 200 {set:false} for a secret it never removed.
+  it("does not report a key cleared when it could not read the file", async () => {
+    await fs.mkdir(envPath());
+    const { status, body } = await post({ key: "BRAVE_API_KEY", value: "" });
+    expect(status).toBe(500);
+    expect(body).toMatchObject({ code: "env_unreadable" });
+    expect(body).not.toMatchObject({ ok: true });
   });
 
   it("is 404 off Hermes, like the rest of the skills family", async () => {

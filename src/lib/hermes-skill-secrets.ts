@@ -29,6 +29,7 @@
 // `setHermesEnvValues` decides what happens to the file.
 
 import {
+  HermesEnvUnreadableError,
   clearHermesEnvValues,
   hermesEnvPath,
   readHermesEnv as readHermesEnvRecord,
@@ -66,15 +67,20 @@ export function isValidEnvValue(value: string): boolean {
   return typeof value === 'string' && ENV_VALUE_RE.test(value);
 }
 
-/** Every live assignment in ~/.hermes/.env, for lookup only. */
+/**
+ * Every live assignment in ~/.hermes/.env, for lookup only.
+ *
+ * An ABSENT file is an empty map — that is a box with nothing configured yet,
+ * and the shared reader already answers it that way. Anything else is a fault
+ * and is raised, because "no keys are set" is the wrong answer twice over: it
+ * has the customer retype a credential into a file nothing could read, and it
+ * makes `clearHermesSecret` report a key as already gone when it never looked.
+ */
 export async function readHermesEnv(): Promise<Map<string, string>> {
   try {
     return new Map(Object.entries(await readHermesEnvRecord()));
-  } catch {
-    // A file that cannot be read holds no keys this store can report. The WRITE
-    // path treats the same condition as a refusal; a read has nothing to
-    // destroy by answering "nothing is set".
-    return new Map();
+  } catch (err) {
+    throw err instanceof HermesEnvUnreadableError ? err : new HermesEnvUnreadableError('unreadable');
   }
 }
 
