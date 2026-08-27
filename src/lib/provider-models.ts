@@ -20,6 +20,19 @@ export interface ProviderModelOption {
   id: string;
   label: string;
   hint: string;
+  /**
+   * Whether a SUBSCRIPTION (OAuth sign-in) credential can route this model,
+   * as opposed to an API key. Anthropic ships two catalogues — the API one
+   * (9 models today, including Claude Mythos 5 and Claude Fable 5) and the
+   * Claude-subscription one (5 models, which has neither) — and a picker
+   * that renders the first while the customer is on the Subscription tab
+   * offers models their plan cannot run.
+   *
+   * `undefined` means UNKNOWN, not "yes": the device could not enumerate the
+   * subscription surface (cold start, CLI failure), so nothing is marked and
+   * the whole list stays pickable rather than the UI inventing a restriction.
+   */
+  availableOnSubscription?: boolean;
 }
 
 export interface ProviderCatalog {
@@ -113,6 +126,33 @@ export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
 // own /api/v1/models for the last). Single source of truth so the route's
 // allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
 // header dropdown all gate on the same set.
+/**
+ * What SUBSCRIPTION (OAuth sign-in) changes about the models a provider can
+ * run. Two shapes, because two different things happen:
+ *
+ *  * `catalogProvider` — the whole namespace moves. OpenAI's ChatGPT sign-in
+ *    routes through `codex`: different catalogue, different credential, and a
+ *    different `<provider>/<id>` written to config (see the configure route's
+ *    `subscriptionOverride`). The picker swaps catalogues wholesale.
+ *  * `surfaceProvider` — the namespace STAYS, the set narrows. Anthropic's
+ *    Claude sign-in still writes `anthropic/<id>`, but only the models the
+ *    openclaw anthropic plugin's second catalogue (`claude-cli`) carries
+ *    actually route. Claude Mythos 5 and Claude Fable 5 are API-key-only.
+ *    The picker keeps the API catalogue and marks the rest unavailable —
+ *    swapping wholesale here would drop rows silently, which is the same
+ *    lie in the other direction.
+ *
+ * One table because this is one fact. It used to be spelled three ways in
+ * three files, none of which knew about the others.
+ */
+export const SUBSCRIPTION_SURFACE: Readonly<Record<string, {
+  catalogProvider?: string;
+  surfaceProvider?: string;
+}>> = Object.freeze({
+  openai: { catalogProvider: "codex" },
+  anthropic: { surfaceProvider: "claude-cli" },
+});
+
 export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 
@@ -186,6 +226,7 @@ interface CatalogApiModel {
   hint?: string;
   contextWindow: number;
   input?: string;
+  availableOnSubscription?: boolean;
 }
 
 interface CatalogApiResponse {
@@ -231,12 +272,13 @@ export async function fetchProviderCatalog(
     }
     return {
       provider,
-      models: body.models.map(({ id, label, hint }) => ({
+      models: body.models.map(({ id, label, hint, availableOnSubscription }) => ({
         id,
         label: label || id,
         // OpenRouter sometimes ships long descriptions; trim so the
         // picker row doesn't blow up vertically.
         hint: typeof hint === "string" ? hint.slice(0, 120) : "",
+        availableOnSubscription,
       })),
       defaultModelId: body.defaultModelId
         || body.models[0].id

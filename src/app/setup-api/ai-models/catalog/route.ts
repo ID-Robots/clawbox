@@ -4,7 +4,12 @@ import { promises as fsp } from "fs";
 import path from "path";
 import { findOpenclawBin, openclawIsAbsent } from "@/lib/openclaw-config";
 import { DATA_DIR } from "@/lib/config-store";
-import { CATALOG_PROVIDERS, isCatalogProvider, PROVIDER_CATALOGS } from "@/lib/provider-models";
+import {
+  CATALOG_PROVIDERS,
+  isCatalogProvider,
+  PROVIDER_CATALOGS,
+  SUBSCRIPTION_SURFACE,
+} from "@/lib/provider-models";
 
 export const dynamic = "force-dynamic";
 
@@ -41,6 +46,8 @@ interface CatalogModel {
   hint?: string;
   contextWindow: number;
   input?: string;
+  /** See SUBSCRIPTION_SURFACE_PROVIDER below. `undefined` = not determined. */
+  availableOnSubscription?: boolean;
 }
 
 interface CatalogResponse {
@@ -143,6 +150,22 @@ interface OpenclawListResponse {
   }>;
 }
 
+// `openclaw models list` also returns an `available` boolean per model. It is
+// deliberately NOT read here: it answers "can THIS box's currently-configured
+// credentials route this model", and during setup no credential is written
+// yet, so every entry comes back false. Gating the picker on it would empty
+// the list at exactly the moment the customer needs it. The auth-mode surface
+// (SUBSCRIPTION_SURFACE.surfaceProvider) is the part that IS knowable in the
+// wizard, and it is what this route stamps instead.
+//
+// anthropic's surface, concretely: `openclaw models list --provider anthropic`
+// is the API-key catalogue (9 models on 2026.7.1, claude-mythos-5 and
+// claude-fable-5 among them). The Claude-subscription surface is the same
+// plugin's second catalogue, provider id `claude-cli` (5 models: opus-4-8/4-7/
+// 4-6, sonnet-5, sonnet-4-6) — no Mythos, no Fable, no Haiku. Verified on a
+// 2026.7.1-2 device against both `openclaw models list` outputs and
+// dist/extensions/anthropic/openclaw.plugin.json.
+
 interface OpenRouterListResponse {
   data: Array<{
     id: string;
@@ -211,6 +234,47 @@ const ALLOWED_MODEL_RE_BY_PROVIDER: Record<string, RegExp> = {
 function compareCatalogModels(a: CatalogModel, b: CatalogModel): number {
   if (a.contextWindow !== b.contextWindow) return b.contextWindow - a.contextWindow;
   return a.label.localeCompare(b.label);
+}
+
+/**
+ * Model ids the subscription surface carries, or null when it could not be
+ * enumerated. Null means UNKNOWN and every caller must treat it as "do not
+ * mark anything" — an empty set would silently strike out the whole list.
+ *
+ * The surface depends on the plugin's catalogue, not on the customer's
+ * credentials, so it rides the same mem+disk cache every other catalogue
+ * uses. It has to survive a restart: a process-local cache would leave the
+ * picker unmarked — i.e. back to the defect this stamp exists to fix — for
+ * the first three minutes after every reboot.
+ */
+async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string> | null> {
+  const surfaceProvider = SUBSCRIPTION_SURFACE[provider]?.surfaceProvider;
+  if (!surfaceProvider) return null;
+  const cached = memCache.get(surfaceProvider) ?? await readDiskCache(surfaceProvider);
+  if (cached && Date.now() - cached.fetchedAt < REFRESH_INTERVAL_MS && cached.models.length > 0) {
+    memCache.set(surfaceProvider, cached);
+    return new Set(cached.models.map((m) => m.id));
+  }
+  try {
+    const models = await fetchOpenclawCatalog(surfaceProvider);
+    if (models.length === 0) return null;
+    const payload: CatalogResponse = {
+      provider: surfaceProvider,
+      models,
+      defaultModelId: models[0].id,
+      allowCustom: false,
+      fetchedAt: Date.now(),
+    };
+    memCache.set(surfaceProvider, payload);
+    await writeDiskCache(surfaceProvider, payload);
+    return new Set(models.map((m) => m.id));
+  } catch (err) {
+    console.warn(
+      `[catalog] subscription surface (${surfaceProvider}) unavailable for ${provider}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
 }
 
 function transformOpenclawEntries(
@@ -325,12 +389,25 @@ function augmentWithStaticCatalog(provider: string, live: CatalogModel[]): Catal
   return augmented;
 }
 
-function buildPayload(provider: string, models: CatalogModel[]): CatalogResponse {
+function buildPayload(
+  provider: string,
+  models: CatalogModel[],
+  surfaceIds?: Set<string> | null,
+): CatalogResponse {
   // Do not trust old disk caches blindly. Earlier builds could persist
   // Codex/ChatGPT-account models like gpt-5.5-pro that the upstream
   // rejects at request time. Re-apply the current provider allowlist when
   // constructing every payload, including cached/stale ones.
-  const merged = sanitizeCatalogModels(provider, augmentWithStaticCatalog(provider, models));
+  let merged = sanitizeCatalogModels(provider, augmentWithStaticCatalog(provider, models));
+  // Stamped HERE, on the merged list, not on the live one: the curated
+  // entries `augmentWithStaticCatalog` appends exist precisely for the case
+  // where the live enumeration came back thin, and an unstamped curated entry
+  // (ANTHROPIC_MODELS carries claude-haiku-4-5, which the subscription
+  // surface does not) would be offered as pickable in exactly the scenario
+  // this stamp was built for.
+  if (surfaceIds) {
+    merged = merged.map((m) => ({ ...m, availableOnSubscription: surfaceIds.has(m.id) }));
+  }
   const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
   const defaultModelId = merged.find((m) => m.id === fallbackDefault)?.id
     ?? merged[0]?.id
@@ -459,12 +536,28 @@ export function refreshInBackground(provider: string): void {
     fetcher = fetchOpenclawCatalog(provider);
   }
 
+  // The two enumerations are independent — the surface list never reads the
+  // API list — and each costs minutes of Jetson CPU. Start both now, and
+  // publish the main catalogue the moment IT lands: making the picker wait on
+  // the surface would double the first-boot window the whole async-first
+  // design in this file's header exists to shrink.
+  const surface = fetchSubscriptionSurfaceIds(provider);
+
+  const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
+    const payload = buildPayload(provider, models, surfaceIds);
+    memCache.set(provider, payload);
+    await writeDiskCache(provider, payload);
+    console.log(
+      `[catalog] refreshed ${provider}: ${models.length} models`
+      + (surfaceIds ? ` (${surfaceIds.size} on the subscription surface)` : ""),
+    );
+  };
+
   fetcher
     .then(async (models) => {
-      const payload = buildPayload(provider, models);
-      memCache.set(provider, payload);
-      await writeDiskCache(provider, payload);
-      console.log(`[catalog] refreshed ${provider}: ${models.length} models`);
+      await publish(models, null);
+      const surfaceIds = await surface;
+      if (surfaceIds) await publish(models, surfaceIds);
     })
     .catch((err: unknown) => {
       console.error(`[catalog] refresh failed for ${provider}:`, err instanceof Error ? err.message : err);
