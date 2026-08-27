@@ -48,6 +48,29 @@ vi.mock("@/lib/hermes-config-cache", () => ({
 }));
 vi.mock("@/lib/hermes-skill-index", () => ({ getCatalogRecord: vi.fn(async () => undefined) }));
 
+/**
+ * `stat` passes straight through unless a test asks for one path to fail, which
+ * is how the difference between "not there" and "could not look" is exercised.
+ * A root-owned subtree is not hypothetical on this device family — it is the
+ * same tree that defeats the CLI's own `fs.rm` — and a real EACCES cannot be
+ * produced portably from a test running as the owner of its own tmp dir.
+ */
+const statFailure = vi.hoisted(() => ({ path: null as string | null, code: "EACCES" }));
+
+vi.mock("fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs/promises")>();
+  const stat = (async (target: Parameters<typeof actual.stat>[0], ...rest: unknown[]) => {
+    if (statFailure.path !== null && String(target) === statFailure.path) {
+      const err: NodeJS.ErrnoException = new Error(`${statFailure.code}: stat '${String(target)}'`);
+      err.code = statFailure.code;
+      throw err;
+    }
+    return await (actual.stat as (...a: unknown[]) => unknown)(target, ...rest);
+  }) as typeof actual.stat;
+  const patched = { ...actual, stat };
+  return { ...patched, default: patched };
+});
+
 import { runHermesCli } from "@/lib/hermes-cli";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
 import { saveEnv } from "../../helpers/env";
@@ -186,6 +209,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  statFailure.path = null;
   restoreEnv();
   await fs.rm(hermesHome, { recursive: true, force: true });
   await fs.rm(clawboxRoot, { recursive: true, force: true });
@@ -320,6 +344,25 @@ describe("a re-install of a skill the device already has removes nothing", () =>
       true,
     );
     expect(body.code).toBe("already_installed");
+  });
+
+  it("does not read a stat it could not answer as proof the files are gone", async () => {
+    // The directory is right there; the device just will not let this process
+    // look at it. ENOENT is the only error that proves absence — and reading
+    // EACCES as "gone" is how the phantom rule turns into the very deletion it
+    // was written to prevent, on the exact tree (root-owned) that produces the
+    // rollback failures this whole PR is about.
+    await seedFlagged("dangerous");
+    statFailure.path = path.join(skillsDir(), "creative", "simple-english");
+
+    const { body } = await install({ id: "official/creative/simple-english" });
+
+    expect(Object.keys(await readLock())).toEqual(["simple-english"]);
+    expect(await exists(path.join(skillsDir(), "creative", "simple-english", "SKILL.md"))).toBe(
+      true,
+    );
+    expect(body.code).toBe("already_installed");
+    expect(body.code).not.toBe("dangerous_skill");
   });
 
   it("still clears up a phantom entry whose files are provably gone", async () => {

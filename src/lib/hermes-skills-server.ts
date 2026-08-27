@@ -656,13 +656,24 @@ export interface SkillRemovalVerdict {
   dir: SkillRemovalDir;
 }
 
-/** fs.stat as a boolean. */
-export async function pathExists(p: string): Promise<boolean> {
+/**
+ * Is this path there? Three answers, because a failed `stat` has two meanings.
+ *
+ * ENOENT is the only one that proves absence. EACCES, ENOTDIR, EIO and a
+ * timed-out network mount all mean the question could not be answered — and on
+ * this device family that is not hypothetical: the root-owned subtree that
+ * defeats the CLI's own `fs.rm` is exactly the kind of tree a stat can fail on.
+ * Reading any of them as "not there" is how a caller ends up deleting an
+ * installation it could not see.
+ */
+export type PathState = 'present' | 'absent' | 'unknown';
+
+export async function pathState(p: string): Promise<PathState> {
   try {
     await fs.stat(p);
-    return true;
-  } catch {
-    return false;
+    return 'present';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unknown';
   }
 }
 
@@ -696,8 +707,13 @@ export async function verifySkillRemoval(
     // traverse, the root-owned subdirectory case this device family produces.
     const removed = await removeSkillDir(SKILLS_DIR, installPath);
     const abs = lockInstallDir(entry);
-    const stillThere = !removed || (abs !== null && (await pathExists(abs)));
-    dir = stillThere ? 'present' : 'absent';
+    if (!removed) {
+      dir = 'present';
+    } else if (abs !== null) {
+      // A stat that could not answer keeps `unknown`: it is the one honest
+      // label for "the removal claimed to work and nothing could confirm it".
+      dir = await pathState(abs);
+    }
   }
   invalidateInstalledCache();
   // Read the lock AFTER the CLI, never before: it is the only thing that says

@@ -19,7 +19,7 @@ import {
   isInHubLock,
   lockInstallDir,
   officialSkillDir,
-  pathExists,
+  pathState,
   readHubLock,
   readScanReport,
   readShadowableSkillNames,
@@ -224,12 +224,14 @@ export async function POST(request: Request) {
   //
   // The one pre-existing entry that IS still this route's to clear up is a
   // phantom a previous failed rollback left behind: an entry whose directory is
-  // PROVABLY gone. Everything else is left alone — including an entry that names
-  // no `install_path`, where nothing about the files could be checked at all,
-  // because "could not check" has never been a licence to delete.
+  // PROVABLY gone — an ENOENT, and nothing else. Everything else is left alone:
+  // an entry that names no `install_path`, and a stat that failed for any other
+  // reason (EACCES on the root-owned subtree this device family produces, EIO,
+  // a stalled mount). "Could not check" has never been a licence to delete.
   const preEntry = hubLockEntry(preLock, lockName);
   const preDir = lockInstallDir(preEntry);
-  const preInstalled = preEntry !== undefined && (preDir === null || (await pathExists(preDir)));
+  const preInstalled =
+    preEntry !== undefined && (preDir === null || (await pathState(preDir)) !== "absent");
 
   // ── 3. Did the scanner flag it? ──────────────────────────────────────────
   const report = scanReportFromLock(entry);
