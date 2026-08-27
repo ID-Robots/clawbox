@@ -29,6 +29,15 @@ export interface BackupSource {
    */
   readonly requiresExternalCli: boolean;
   /**
+   * Where this edition's state lives, for display.
+   *
+   * Used by the restore modal to name where the PREVIOUS contents are moved
+   * aside to. That footer used to say `~/.openclaw.bak-restore-*` on every
+   * box, which on Hermes points at a directory the agent does not use — the
+   * one line a customer would reach for if a restore went wrong.
+   */
+  readonly stateDir: string;
+  /**
    * True when the archive carries provider keys or platform tokens.
    *
    * Both editions do, and both must SAY so: the UI turns this into the warning
@@ -45,6 +54,7 @@ export interface BackupSource {
 
 const HERMES: BackupSource = {
   requiresExternalCli: false,
+  stateDir: "~/.hermes",
   containsCredentials: true,
   includesKeys: [
     "clawkeep.contents.hermes.config",
@@ -63,6 +73,7 @@ const HERMES: BackupSource = {
 
 const OPENCLAW: BackupSource = {
   requiresExternalCli: true,
+  stateDir: "~/.openclaw",
   containsCredentials: true,
   includesKeys: [
     "clawkeep.contents.openclaw.state",

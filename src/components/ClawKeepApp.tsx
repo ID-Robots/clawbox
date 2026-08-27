@@ -528,7 +528,10 @@ export default function ClawKeepApp() {
         },
       });
     },
-    [performRestore, t],
+    // `agent` is interpolated into the confirmation copy, so a stale closure
+    // would name the wrong agent in the one dialog that warns the customer
+    // their state is about to be replaced.
+    [performRestore, t, agent],
   );
 
   if (!status && !error) {
@@ -652,6 +655,7 @@ export default function ClawKeepApp() {
               onClose={() => setRestoreOpen(false)}
               onPick={(name) => onRestore(name)}
               onError={setError}
+              agent={status.agent === "hermes" ? "hermes" : "openclaw"}
             />
           )}
         </div>
@@ -2046,10 +2050,13 @@ function RestoreModal({
   onClose,
   onPick,
   onError,
+  agent,
 }: {
   onClose: () => void;
   onPick: (name: string) => void;
   onError: (msg: string) => void;
+  /** Which agent this box archives — decides where "moved aside to" points. */
+  agent: "openclaw" | "hermes";
 }) {
   const { t } = useT();
   const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
@@ -2401,7 +2408,13 @@ function RestoreModal({
           </span>
           <span>
             {t("clawkeep.restoreModal.footerPrefix")}{" "}
-            <code className="bg-black/40 px-1 rounded">~/.openclaw.bak-restore-*</code>.
+            {/* Per-edition: a Hermes box has no `~/.openclaw`, and this is the
+                one line a customer reads if a restore goes wrong. */}
+            {/* One expression, not `{...}/*...`: a `/*` sitting in JSX children
+                right after a closing brace opens a comment. */}
+            <code className="bg-black/40 px-1 rounded">
+              {`${backupSourceFor(agent).stateDir}/*.bak-restore-*`}
+            </code>.
           </span>
         </footer>
       </div>

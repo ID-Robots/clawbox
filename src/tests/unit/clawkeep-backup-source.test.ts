@@ -60,6 +60,15 @@ describe("backupSourceFor", () => {
     expect(backupSourceFor("hermes").requiresExternalCli).toBe(false);
   });
 
+  it("names each edition's own state directory", () => {
+    // The restore modal prints this as "where your previous contents went".
+    // It said `~/.openclaw` on every box, which on Hermes is a directory the
+    // agent does not use — and it is the one line a customer reads when a
+    // restore has gone wrong.
+    expect(backupSourceFor("hermes").stateDir).toBe("~/.hermes");
+    expect(backupSourceFor("openclaw").stateDir).toBe("~/.openclaw");
+  });
+
   it("says OpenClaw does", () => {
     expect(backupSourceFor("openclaw").requiresExternalCli).toBe(true);
   });

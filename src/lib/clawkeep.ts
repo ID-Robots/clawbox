@@ -512,6 +512,11 @@ async function getDaemonBin(): Promise<string | null> {
     // can. A bad override falls through to the normal probe rather than
     // failing outright, so a stale env var degrades to "look for it properly".
     try {
+      // isFile() as well as X_OK: a DIRECTORY passes the executable check
+      // (that is what the x bit means on a directory), and caching one would
+      // report the daemon as installed and the box as ready to back up.
+      const stat = await fs.stat(override);
+      if (!stat.isFile()) throw new Error("not a regular file");
       await fs.access(override, fsConstants.X_OK);
       daemonBinCache = override;
       return override;
