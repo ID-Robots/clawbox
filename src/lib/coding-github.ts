@@ -130,11 +130,26 @@ function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
     timer.unref();
     child.stdout.on("data", (c) => { stdout += String(c); });
     child.stderr.on("data", (c) => { stderr += String(c); });
+    // `error` is not proof the binary is missing. It also fires on a child
+    // that spawned perfectly well and whose kill() could not deliver its
+    // signal — so treating every error as "not installed" would reintroduce
+    // the exact false-failure this file exists to prevent, on the timeout path
+    // of all places. `spawn` fires only when the process really started, so it
+    // is what separates "never ran" from "ran and then something went wrong".
+    let spawned = false;
+    child.on("spawn", () => { spawned = true; });
     // A failed spawn emits `error` and THEN `close` with a null code; the
     // first resolve wins, so this is the one place startFailed is set.
     child.on("error", () => {
       clearTimeout(timer);
-      resolve({ code: null, stdout, stderr: "could not start", signal: null, timedOut, startFailed: true });
+      resolve({
+        code: null,
+        stdout,
+        stderr: spawned ? stderr.trim() : "could not start",
+        signal: null,
+        timedOut,
+        startFailed: !spawned,
+      });
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);

@@ -57,7 +57,9 @@ function hangingChild(): FakeChild {
 
 /**
  * A binary that is not there. Node emits `error` for the failed spawn and then
- * `close` with a null code and NO signal — nothing ever ran.
+ * `close` with a null code and NO signal — nothing ever ran. Critically it
+ * never emits `spawn`, which is the only thing that distinguishes it from the
+ * child below.
  */
 function missingBinary(): FakeChild {
   const child = baseChild();
@@ -65,6 +67,22 @@ function missingBinary(): FakeChild {
     child.emit("error", Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }));
     child.emit("close", null, null);
   });
+  return child;
+}
+
+/**
+ * A child that started fine but whose kill() cannot deliver the signal — Node
+ * reports that by emitting `error` on an ALREADY SPAWNED process. It looks
+ * identical to a failed spawn unless `spawn` is tracked, which is how the
+ * missing-gh lie could sneak back in through the timeout path itself.
+ */
+function unkillableChild(): FakeChild {
+  const child = baseChild();
+  setImmediate(() => child.emit("spawn"));
+  child.kill = () => {
+    setImmediate(() => child.emit("error", Object.assign(new Error("kill EPERM"), { code: "EPERM" })));
+    return false;
+  };
   return child;
 }
 
@@ -126,6 +144,19 @@ describe("a probe that timed out is not a missing gh", () => {
     expect(status.connected).toBe(false);
     expect(status.login).toBeNull();
     expect(status.reason).toBe("unreachable");
+  });
+
+  it("does not report a missing gh when the KILL fails on a running process", async () => {
+    // The regression that would undo this whole fix from the inside: `error`
+    // fires on a child that spawned fine, our timer's kill could not land, and
+    // reading that as "could not start" says gh is not installed again.
+    spawnMock.mockImplementation(() => unkillableChild());
+
+    const status = await withTimeoutFired(() => lib.githubStatus());
+
+    expect(status.installed).toBe(true);
+    expect(status.reason).toBe("unreachable");
+    expect(status.reason).not.toBe("not_installed");
   });
 
   it("still reports gh as MISSING when the binary genuinely cannot start", async () => {
