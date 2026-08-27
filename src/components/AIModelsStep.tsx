@@ -22,8 +22,10 @@ import {
   extractProviderModelId,
   isCatalogProvider,
   isValidModelId,
+  SUBSCRIPTION_SURFACE,
 } from "@/lib/provider-models";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
+import { HeaderDropdown, type HeaderDropdownOption } from "./HeaderDropdown";
 import { ButtonSpinner } from "./ButtonSpinner";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
@@ -567,8 +569,14 @@ export default function AIModelsStep({
   // the routeable namespace is `codex` (ChatGPT backend) rather
   // than `openai` (api.openai.com). Same swap the configure route applies.
   const catalogProvider = useMemo<string | null>(() => {
-    if (selectedProvider === "openai" && authMode === "subscription") {
-      return "codex";
+    if (authMode === "subscription" && selectedProvider) {
+      // SUBSCRIPTION_SURFACE is the one table for "what does signing in change
+      // about which models this provider can run". `catalogProvider` is its
+      // wholesale-swap column (openai -> codex); the narrowing column
+      // (anthropic -> claude-cli) is applied by the catalog route as a stamp,
+      // not by swapping, because the save namespace does not move with it.
+      const swap = SUBSCRIPTION_SURFACE[selectedProvider]?.catalogProvider;
+      if (swap) return swap;
     }
     return isCatalogProvider(selectedProvider) ? selectedProvider : null;
   }, [selectedProvider, authMode]);
@@ -1436,6 +1444,55 @@ export default function AIModelsStep({
   const isSubscription = currentAuthMode === "subscription";
   const useDeviceAuth = isSubscription && DEVICE_AUTH_PROVIDERS.has(selectedProvider ?? "");
 
+  // The one rule, named once. `availableOnSubscription === undefined` means
+  // the box could not enumerate the subscription surface — unknown is not
+  // "no", so an unstamped model stays usable and the customer keeps the full
+  // list rather than the UI inventing a restriction.
+  const isModelUsable = useCallback(
+    (model: { availableOnSubscription?: boolean }) =>
+      !isSubscription || model.availableOnSubscription !== false,
+    [isSubscription],
+  );
+
+  // Switching to the Subscription tab with an API-key-only model already
+  // picked (say Claude Mythos 5, chosen on the API Key tab moments earlier)
+  // used to leave that model selected AND saveable: nothing between the tab
+  // and the gateway checked, so the box shipped with a primary model the
+  // credential could never route. Move the pick back to something the
+  // subscription can actually run; the picker below still SHOWS the rest,
+  // greyed, with the reason.
+  useEffect(() => {
+    if (!activeCatalog || useCustomModel || !selectedModelId) return;
+    const picked = activeCatalog.models.find((m) => m.id === selectedModelId);
+    if (!picked || isModelUsable(picked)) return;
+    const usable = activeCatalog.models.filter(isModelUsable);
+    const fallback = usable.find((m) => m.id === activeCatalog.defaultModelId) ?? usable[0];
+    if (fallback) setSelectedModelId(fallback.id);
+  }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable]);
+
+  // A model the SUBSCRIPTION surface does not carry is SHOWN, not hidden, and
+  // it says why. `availableOnSubscription === undefined` means the box could
+  // not enumerate that surface — unknown is not "no", so nothing gets marked
+  // and the customer keeps the whole list.
+  const modelOptions: HeaderDropdownOption[] = useMemo(
+    () => (activeCatalog?.models ?? []).map((option) => {
+      const blocked = !isModelUsable(option);
+      return {
+        id: option.id,
+        label: option.label,
+        // The live catalog ships no hint for most providers, and the old
+        // `{label} — {hint}` template rendered a dangling em-dash on every one
+        // of those rows. Falling back to the model id also tells the two rows
+        // that both label themselves "Claude Haiku 4.5" apart.
+        hint: option.hint || option.id,
+        disabled: blocked,
+        unavailableReason: blocked ? t("ai.modelNeedsApiKey") : undefined,
+      };
+    }),
+    [activeCatalog, isModelUsable, t],
+  );
+  const hasBlockedModel = modelOptions.some((option) => option.disabled);
+
   const oauthLabels: Record<string, {
     button: string;
     description: string;
@@ -1492,14 +1549,14 @@ export default function AIModelsStep({
         >
           <span className="flex min-w-0 flex-col">
             <span className="text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)]">
-              Model
+              {t("ai.model")}
             </span>
             <span className="truncate text-[length:var(--t-4)] text-[var(--text-primary)]">
               {currentModelLabel}
             </span>
           </span>
           <span className="shrink-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)]">
-            Change
+            {t("ai.modelChange")}
           </span>
         </button>
       );
@@ -1510,24 +1567,25 @@ export default function AIModelsStep({
           htmlFor="ai-provider-model"
           className="block text-[length:var(--t-2)] font-semibold text-[var(--text-secondary)] mb-2"
         >
-          Model
+          {t("ai.model")}
         </label>
         {!useCustomModel ? (
-          <select
+          // NOT a native <select>. Its <option> list is painted by the browser
+          // — white ground, pale text, no way to theme it — so on this dark
+          // wizard the OPEN list was unreadable, and a native option cannot
+          // carry the second line that says why a row is unavailable.
+          <HeaderDropdown
             id="ai-provider-model"
+            variant="field"
+            hermes={edition === "hermes"}
+            ariaLabel={t("ai.model")}
             value={selectedModelId}
-            onChange={(e) => {
+            options={modelOptions}
+            onChange={(id) => {
               setModelTouched(true);
-              setSelectedModelId(e.target.value);
+              setSelectedModelId(id);
             }}
-            className="w-full min-h-[48px] px-4 py-3 bg-[var(--fill-2)] border border-[var(--hair-2)] rounded-[var(--r-2)] text-[length:var(--t-4)] text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)] transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)]"
-          >
-            {activeCatalog.models.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.label} — {option.hint}
-              </option>
-            ))}
-          </select>
+          />
         ) : (
           <input
             id="ai-provider-model"
@@ -1557,14 +1615,19 @@ export default function AIModelsStep({
             className="mt-2 bg-transparent p-0 text-[length:var(--t-2)] font-semibold text-[var(--coral-bright)] hover:text-orange-300 cursor-pointer border-none"
           >
             {useCustomModel
-              ? "Pick from curated list"
-              : "Enter a custom model ID…"}
+              ? t("ai.modelCuratedToggle")
+              : t("ai.modelCustomToggle")}
           </button>
+        )}
+        {hasBlockedModel && !useCustomModel && (
+          <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-secondary)]">
+            {t("ai.modelSubscriptionNote")}
+          </p>
         )}
         <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">
           {selected.id === "openrouter"
-            ? "OpenRouter exposes 340+ models. You can switch models later from the chat window."
-            : "You can switch between the curated models from the chat window anytime."}
+            ? t("ai.modelHelpOpenRouter")
+            : t("ai.modelHelp")}
         </p>
       </div>
     );
