@@ -6,8 +6,11 @@ import { CodingAgentError, getRun, stopRun } from "@/lib/coding-agent";
 export const dynamic = "force-dynamic";
 
 /**
- * POST { id } → ask a running coding run to stop; answers the run record.
- * Idempotent: a run that already finished is returned as it is.
+ * POST { runId } → ask a running coding run to stop; answers the run record.
+ * Idempotent: a run that already finished is returned as it is. `id` is
+ * accepted as an alias — the shape this route launched with — so nothing
+ * already calling it breaks; `runId` is the documented name, matching the
+ * run route's `resumeRunId`.
  *
  * Agent-callable with the in-handler gate every state-changing route carries:
  * the agent started its runs, the agent may end them. A run the OWNER started
@@ -19,13 +22,14 @@ export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
 
-  let body: { id?: unknown };
+  let body: { runId?: unknown; id?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  const id = typeof body?.id === "string" ? body.id.trim() : "";
+  const raw = typeof body?.runId === "string" ? body.runId : typeof body?.id === "string" ? body.id : "";
+  const id = raw.trim();
   if (!id) return NextResponse.json({ error: "A run id is required." }, { status: 400 });
 
   try {

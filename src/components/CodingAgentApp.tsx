@@ -405,7 +405,7 @@ export default function CodingAgentApp() {
       const res = await fetch("/setup-api/coding-agent/stop", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id }),
+        body: JSON.stringify({ runId: id }),
       });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.stopFailed")));
       await load();

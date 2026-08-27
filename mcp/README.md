@@ -287,12 +287,16 @@ shell tool, not less and not more:
 
 - edits inside the working folder are auto-approved (`--permission-mode
   acceptEdits`); anything else Claude Code would have asked for is silently
-  denied in `-p` mode and COUNTED, so a task that quietly could not finish
-  reports as such;
-- the built-in tool set is cut to files, search and Bash (`--tools`) — no
-  sub-agents, no web tools — and Bash runs only through an allow-list of
-  build/test/package tooling and read-only git, with explicit denials for
-  `sudo`, `rm`, `curl`, `git push`, `systemctl` and the device CLIs;
+  denied in `-p` mode and COUNTED on the final report, so a task that quietly
+  could not finish reports as such. The brief adds the matching rule of
+  conduct: a denied Read/Write/Edit is a decision, not a puzzle for Bash to
+  solve (bench run run-g6vwqr9y edited a denied path with `sed -i` and
+  reported success — that move is now named and forbidden);
+- the tool set is files, search, Bash and sub-agents (`--tools`, `--agents`) —
+  no web tools. Bash is full access (`Bash(*)`): the owner's switch IS the
+  consent for a delegated shell, and the brief holds it to one command per
+  call. Three sub-agents ship (explorer / tester / reviewer), all on the
+  flash model; the writing stays with the main loop on the tier model;
 - the credential folders `file-guard` protects, and every entry of this
   checkout's `data/` except the public subtrees (so `config.json` — the token
   the run is using — but never the run's own `data/code-projects/<id>`), are
@@ -307,13 +311,18 @@ shell tool, not less and not more:
   without `setpriv` reports not-ready rather than running with them;
 - the folder must be a code project or a directory inside the home that is
   neither protected nor the ClawBox checkout itself, so a prompt-injected
-  "fix the OS" cannot edit the running product in place;
-- one run at a time, twenty minutes, sixty turns, an explicit environment
-  (no session secret, no service tokens), `--setting-sources user` so the OS
-  checkout's own CLAUDE.md never steers a project that sits under it.
+  "fix the OS" cannot edit the running product in place. With no folder named
+  at all, the owner's stored default project folder is used — the same
+  fallback the run route documents;
+- one run at a time, thirty idle minutes before the device gives up on it,
+  150 turns by default (10–2000), an optional token ceiling the device itself
+  enforces, an explicit environment (no session secret, no service tokens),
+  `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
+  project that sits under it.
 
 `coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
-polling. The summary it returns is model-authored and labelled as information,
+polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`
+as an alias from its launch shape). The summary it returns is model-authored and labelled as information,
 not instructions. Finishing a run posts a desktop toast and, when a Telegram
 bot is connected, a template-only message — never the task or the summary —
 to the approved senders (`src/lib/coding-agent-notify.ts`).

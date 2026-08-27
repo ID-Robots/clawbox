@@ -182,7 +182,7 @@ async function main() {
       score, outcome, wallMs, commitLagMs: settled.commitLagMs, label: args.label ?? null,
     });
     spent += run.costUsd ?? 0;
-    console.log(`  ${outcome} in ${Math.round(wallMs / 1000)}s — score ${score ? `${score.score}/100` : "n/a"}, $${(run.costUsd ?? 0).toFixed(2)}, ${run.tokensUsed} tok, ${line.filesTouched} files, ${run.retries} retries`);
+    console.log(`  ${outcome} in ${Math.round(wallMs / 1000)}s — score ${score ? `${score.score}/100` : "n/a"}, ${run.costUsd == null ? "cost unreported" : `$${run.costUsd.toFixed(2)}`}, ${run.tokensUsed} tok, ${line.filesTouched} files, ${run.retries} retries`);
     if (score) for (const c of score.checks.filter((x) => !x.pass)) console.log(`    ✗ ${c.name}${c.detail ? ` — ${c.detail.slice(0, 90)}` : ""}`);
     summary.push({ task: task.id, rep, outcome, score: score?.score ?? null, costUsd: run.costUsd ?? null, wallMs });
   }

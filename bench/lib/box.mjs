@@ -110,7 +110,9 @@ export async function startRun({ task, directory, projectId, resumeRunId }) {
   });
 }
 
-export const stopRun = (id) => post("/setup-api/coding-agent/stop", { id });
+// Both names: `runId` is current, `id` keeps this working against a box
+// built before the rename.
+export const stopRun = (id) => post("/setup-api/coding-agent/stop", { runId: id, id });
 
 export const getRun = (id, waitSeconds = 0) =>
   get(`/setup-api/coding-agent/runs?id=${encodeURIComponent(id)}${waitSeconds > 0 ? `&wait=${waitSeconds}` : ""}`);

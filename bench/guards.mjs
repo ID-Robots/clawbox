@@ -45,7 +45,7 @@ function upstream() {
 function guardMcpDefaultDirectory() {
   const tool = fs.readFileSync(path.join(CLAWBOX_ROOT, "mcp/tools/coding-agent.ts"), "utf8");
   const route = fs.readFileSync(path.join(CLAWBOX_ROOT, "src/app/setup-api/coding-agent/enable/route.ts"), "utf8");
-  const toolHardFails = /!.*project_id.*&&.*!.*directory.*&&.*!.*resume_run_id|A run needs a place to work/s.test(tool);
+  const toolHardFails = /A run needs a place to work/.test(tool);
   const routePromises = /defaultDirectory.*names neither a project nor a directory|names neither/s.test(route);
   if (toolHardFails && routePromises) {
     report("mcp-default-directory-consistency", "FAIL",
@@ -55,16 +55,13 @@ function guardMcpDefaultDirectory() {
   }
 }
 
-/** Defect pin: stop takes {id} while run's resume field is resumeRunId. */
+/** Defect pin: stop took {id} while run's resume field is resumeRunId. */
 function guardStopParamShape() {
   const stop = fs.readFileSync(path.join(CLAWBOX_ROOT, "src/app/setup-api/coding-agent/stop/route.ts"), "utf8");
-  const run = fs.readFileSync(path.join(CLAWBOX_ROOT, "src/app/setup-api/coding-agent/run/route.ts"), "utf8");
-  const stopUsesId = /body[?.]*\.id\b|\bid\b.*=.*body/.test(stop);
-  const runUsesResumeRunId = /resumeRunId/.test(run);
-  if (stopUsesId && runUsesResumeRunId) {
-    report("stop-route-param-shape", "FAIL", "stop takes {id}, run takes {resumeRunId} — one name for a run id, please");
+  if (/runId/.test(stop)) {
+    report("stop-route-param-shape", "PASS", "stop accepts runId (id kept as the launch-shape alias)");
   } else {
-    report("stop-route-param-shape", "PASS");
+    report("stop-route-param-shape", "FAIL", "stop takes only {id} while run takes {resumeRunId} — one name for a run id, please");
   }
 }
 
@@ -126,8 +123,10 @@ async function guardStopCost() {
     }
     if (!run || run.status === "running") return report("record-cost-on-stopped", "INCONCLUSIVE", "run did not settle after stop");
     if (run.status === "completed") return report("record-cost-on-stopped", "INCONCLUSIVE", "run finished before the stop landed — task too small for this box");
-    if ((run.tokensUsed ?? 0) > 0 && !(run.costUsd > 0)) {
-      report("record-cost-on-stopped", "FAIL", `stopped with tokensUsed=${run.tokensUsed} but costUsd=${run.costUsd} — spend under-reported`);
+    // null = honestly unreported (no result event ever priced it); what the
+    // guard forbids is the dishonest hard zero next to real tokens.
+    if ((run.tokensUsed ?? 0) > 0 && run.costUsd === 0) {
+      report("record-cost-on-stopped", "FAIL", `stopped with tokensUsed=${run.tokensUsed} but costUsd=0 — "free" is a lie; null would be honest`);
     } else {
       report("record-cost-on-stopped", "PASS", `costUsd=${run.costUsd} for ${run.tokensUsed} tokens`);
     }

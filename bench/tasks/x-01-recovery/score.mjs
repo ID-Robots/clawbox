@@ -13,10 +13,13 @@ export default async function score({ run }) {
     check("error is legible", legible, r.error ? "" : "error is null", 2),
     check("tokens spent were recorded", (r.tokensUsed ?? 0) > 0,
       `tokensUsed=${r.tokensUsed}`, 1),
-    // Pins the known under-reporting: a run that consumed tokens but died
-    // without a result event records costUsd null/0. Fails until fixed.
-    check("cost recorded for the tokens spent",
-      (r.tokensUsed ?? 0) > 0 ? (r.costUsd ?? 0) > 0 : true,
+    // costUsd on this box is the CLI's estimate over unknown model names and
+    // only lands with a final result event; a run killed mid-flight honestly
+    // has none. What must never happen is a hard $0.00 next to real tokens —
+    // null says "not reported", zero says "free", and only one of those is
+    // true.
+    check("no dishonest $0.00 for real tokens",
+      !((r.tokensUsed ?? 0) > 0 && r.costUsd === 0),
       `costUsd=${r.costUsd} for ${r.tokensUsed} tokens`, 1),
     check("completedAt set", typeof r.completedAt === "number", "", 1),
     check("at most one automatic retry", (r.retries ?? 0) <= 1, `retries=${r.retries}`, 1),

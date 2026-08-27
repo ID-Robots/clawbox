@@ -97,7 +97,7 @@ solution (scores 100) and the untouched seed (scores low).
 
 | pin | where |
 |---|---|
-| stopped run with tokens reports $0.00 | `guards.mjs --live`, x-01 scorer |
+| stopped run with tokens reports a hard $0.00 (null = honestly unreported is fine; costUsd here is the CLI's estimate over unknown model names, so tokens are the real spend record) | `guards.mjs --live`, x-01 scorer |
 | permissionDenials stays 0 on a real refusal | s-02 scorer, `record-denials-on-refusal` guard |
 | MCP `coding_agent_run` refuses a bare task while the enable docstring promises the default folder | `mcp-default-directory-consistency` guard |
 | stop takes `{id}`, run takes `resumeRunId` | `stop-route-param-shape` guard |
