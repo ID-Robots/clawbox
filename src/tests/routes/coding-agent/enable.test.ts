@@ -20,10 +20,19 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 
 const setEnabled = vi.hoisted(() => vi.fn());
 const getStatus = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/coding-agent", () => ({
+const setEffort = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
   setCodingAgentEnabled: setEnabled,
   getCodingAgentStatus: getStatus,
+  setEffort,
 }));
+
+// The reload is mocked at its own seam rather than at the refresh helper's, so
+// this file pins the BEHAVIOUR the owner is owed — "the running agent is told" —
+// and not the name of the module that happens to tell it.
+const reloadMcp = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/hermes-mcp-reload", () => ({ reloadMcpServers: reloadMcp }));
 
 import { get as configGet } from "@/lib/config-store";
 
@@ -56,6 +65,8 @@ beforeEach(async () => {
   vi.mocked(configGet).mockImplementation(async () => undefined);
   getStatus.mockResolvedValue(STATUS);
   setEnabled.mockResolvedValue(undefined);
+  reloadMcp.mockResolvedValue(true);
+  setEffort.mockResolvedValue("low");
   const route = await import("@/app/setup-api/coding-agent/enable/route");
   POST = route.POST;
 });
@@ -113,5 +124,85 @@ describe("the body", () => {
   it("checks the session before it looks at the body", async () => {
     const res = await POST(request({ raw: "not json" }));
     expect(res.status).toBe(403);
+  });
+});
+
+/**
+ * Flipping the switch has to reach the RUNNING agent, not just the browser.
+ *
+ * The coding_agent_* family is registered behind a probe the ClawBox MCP server
+ * takes ONCE while it boots (`mcp/lib/context.ts` probeCodingAgent), and that
+ * server is a long-lived stdio child of the agent. Before this, the route wrote
+ * the setting, logged it and handed the browser a fresh status that said
+ * "ready" — while the agent still had no coding_agent_run, coding_agent_status
+ * or coding_agent_stop, until something unrelated respawned the child. Same
+ * shape, and the same fix, as #486 (email_list/email_read) and #503 (the image
+ * tools); this was the third call site of three and the only one left out.
+ */
+describe("telling the running agent", () => {
+  /** Status before the write, then after it — the pair the refresh compares. */
+  function readyGoes(before: boolean, after: boolean): void {
+    getStatus
+      .mockResolvedValueOnce({ ...STATUS, ready: before })
+      .mockResolvedValueOnce({ ...STATUS, ready: after });
+  }
+
+  it("reloads the MCP servers when the switch makes the family available", async () => {
+    readyGoes(false, true);
+    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true } }));
+    expect(res.status).toBe(200);
+    expect(reloadMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it("reloads them when the switch takes the family away", async () => {
+    // The other direction matters as much: tools left registered against a
+    // switch the owner turned off answer 409 forever, and a permanently-failing
+    // tool is what opens Hermes' per-server circuit breaker.
+    readyGoes(true, false);
+    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: false } }));
+    expect(res.status).toBe(200);
+    expect(reloadMcp).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT reload when the verdict did not move", async () => {
+    // A reload respawns every MCP child and invalidates the model's prompt
+    // cache. On a box with no harness installed the switch changes nothing the
+    // agent can see, and the owner must not pay for that.
+    readyGoes(false, false);
+    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true } }));
+    expect(res.status).toBe(200);
+    expect(reloadMcp).not.toHaveBeenCalled();
+  });
+
+  it("does NOT reload for the settings that leave the family alone", async () => {
+    // effort, step limit, token ceiling, default folder — none of them change
+    // WHICH tools exist, so none of them may cost a reload.
+    const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low" } }));
+    expect(res.status).toBe(200);
+    expect(reloadMcp).not.toHaveBeenCalled();
+  });
+
+  it("still saves the switch when the reload is refused", async () => {
+    // The recurring shape this guards: an error path that reports failure over
+    // something that actually succeeded. The write HAPPENED; a dashboard that
+    // will not reload (an OpenClaw box has none at all) must not turn the
+    // owner's save into an error.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    readyGoes(false, true);
+    reloadMcp.mockResolvedValue(false);
+    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: true } }));
+    expect(res.status).toBe(200);
+    expect(setEnabled).toHaveBeenCalledWith(true);
+    errorSpy.mockRestore();
+  });
+
+  it("still saves the switch when the reload throws", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    readyGoes(true, false);
+    reloadMcp.mockRejectedValue(new Error("socket exploded"));
+    const res = await POST(request({ cookie: ownerCookie(), body: { enabled: false } }));
+    expect(res.status).toBe(200);
+    expect(setEnabled).toHaveBeenCalledWith(false);
+    errorSpy.mockRestore();
   });
 });
