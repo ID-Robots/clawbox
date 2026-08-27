@@ -297,6 +297,26 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
     });
   });
 
+  it("judges one request against ONE snapshot of the surface", async () => {
+    // The two guard sites straddle the auto-extend's config write. If the
+    // catalog route's background refresh lands between them, the first guard
+    // sees UNKNOWN and allows, the write happens, and the second guard then
+    // refuses — a failure reported over an operation that already succeeded,
+    // leaving the id in `models.providers.anthropic.models` anyway.
+    //
+    // The surface is read once per request, so both guards agree. Either they
+    // both allow (write, report success) or they both refuse — and a refusal
+    // lands at the FIRST site, before the write.
+    vi.mocked(fsp.readFile)
+      .mockRejectedValueOnce(new Error("ENOENT") as never)
+      .mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
+
+    const response = await postModel(POST, "anthropic/claude-fable-5");
+
+    expect(response.status).toBe(200);
+    expect(vi.mocked(fsp.readFile)).toHaveBeenCalledTimes(1);
+  });
+
   it("re-reads the surface on every request instead of probing once", async () => {
     // The cache is refreshed by the catalog route on its own schedule. A
     // module-level memo here would pin this guard to whatever the surface

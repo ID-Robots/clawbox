@@ -174,16 +174,17 @@ function hasCodexOauthProfile(config: OpenClawConfig): boolean {
 async function refuseOffSurfaceClaudeModel(
   provider: string | null | undefined,
   modelId: string,
-  // A getter, not the config: the provider check comes first, so a switch to
-  // any other provider costs no openclaw.json read at all. On a Jetson that
-  // read is not free, and it is the caller's memoised one either way.
+  // Getters, not values: the provider check comes first, so a switch to any
+  // other provider costs no openclaw.json read and no cache read at all. On a
+  // Jetson neither is free, and both are the caller's per-request memo.
   getConfig: () => Promise<OpenClawConfig | null>,
+  getSurfaceIds: () => Promise<Set<string> | null>,
 ): Promise<NextResponse | null> {
   if (provider !== "anthropic") return null;
   const config = await getConfig();
   if (!config) return null;
   if (!subscriptionOnlyProviders(config.auth?.profiles).includes("anthropic")) return null;
-  const surfaceIds = await readSubscriptionSurfaceIds("anthropic");
+  const surfaceIds = await getSurfaceIds();
   if (!surfaceIds || surfaceIds.has(modelId)) return null;
   const surface = subscriptionSurfaceLabel("anthropic");
   return NextResponse.json({
@@ -409,6 +410,23 @@ export async function POST(request: Request) {
       }
       return authConfig;
     };
+    // ONE snapshot of the Claude subscription surface for this request. The
+    // two guard sites straddle the auto-extend's config write, and the catalog
+    // route refreshes that cache on its own schedule: read it twice and a
+    // refresh landing in between lets the first guard allow, the write happen,
+    // and the second guard refuse — a failure reported over an operation that
+    // already succeeded. Memoised per request, both guards agree, and a
+    // refusal always lands at the first site, before any write.
+    //
+    // Per REQUEST, not per process: a module-level memo would pin the guard to
+    // whatever the surface looked like after the last restart.
+    let surfaceIds: Set<string> | null | undefined;
+    const getSurfaceIds = async () => {
+      if (surfaceIds === undefined) {
+        surfaceIds = await readSubscriptionSurfaceIds("anthropic");
+      }
+      return surfaceIds;
+    };
 
     if (typeof body.model === "string" && body.model.trim()) {
       const requestedModel = body.model.trim();
@@ -464,6 +482,7 @@ export async function POST(request: Request) {
           effectiveProvider,
           effectiveModelId,
           getAuthConfig,
+          getSurfaceIds,
         );
         if (offSurface) return offSurface;
         // Normalize the parsed provider so the deepseek/clawai alias
@@ -585,6 +604,7 @@ export async function POST(request: Request) {
       targetParsed?.provider,
       targetParsed?.modelId ?? "",
       getAuthConfig,
+      getSurfaceIds,
     );
     if (targetOffSurface) return targetOffSurface;
 
