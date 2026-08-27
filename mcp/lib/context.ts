@@ -5,6 +5,8 @@
 // cannot work here (no screen grabber installed, no readable journal) is not
 // registered at all, rather than registered and failing.
 
+import { capabilitiesFor, type HarnessFacts } from "../../src/lib/harness/capabilities";
+import type { HarnessId } from "../../src/lib/harness/transport";
 import { hasBinary, spawnArgv } from "./guard";
 import { apiTry } from "./api";
 import type { Ed, Profile } from "./register";
@@ -78,6 +80,19 @@ export interface McpContext {
    * tools exist only when a run could actually start.
    */
   codingAgent: boolean;
+  /**
+   * Whether this box can actually make a picture — the agent has an image
+   * backend, or the box itself has a credential and a route to spend it on.
+   *
+   * The one probe here whose FALSE registers a tool instead of hiding one. An
+   * unlinked box has no image tool in any surface, and an agent asked for a
+   * picture with no tool to draw it does not stop: on the owner's box
+   * (2026-08-26) it reached for the shell, hand-wrote an SVG, installed
+   * cairosvg and rasterised it — producing a file the chat cannot serve and
+   * telling the customer nothing about why. Silence is what let that happen, so
+   * the absence gets a voice. See registerAiTools.
+   */
+  canGenerateImages: boolean;
 }
 
 const SCREEN_GRABBERS = ["scrot", "gnome-screenshot", "spectacle", "import"];
@@ -131,6 +146,32 @@ async function probeCodingAgent(): Promise<boolean> {
   return status?.enabled === true && status.ready === true;
 }
 
+interface ChatCapabilitiesBody {
+  harness?: HarnessId;
+  facts?: HarnessFacts;
+}
+
+/**
+ * Ask the device whether drawing is possible at all.
+ *
+ * The route answers FACTS and `capabilitiesFor` turns them into the flag, which
+ * is the same pair the browser uses — deliberately, so the tool the agent sees
+ * and the button the customer sees can never disagree about whether this box
+ * can draw. Restating the rule here would be a second copy of it, in the
+ * process least likely to be updated when the rule changes.
+ *
+ * Fails CLOSED like its neighbours, and closed here means the honest-refusal
+ * tool IS registered: a box we cannot ask about is a box we cannot promise a
+ * picture from.
+ */
+async function probeImageGeneration(): Promise<boolean> {
+  const body = await apiTry<ChatCapabilitiesBody>("/setup-api/chat/capabilities", {
+    timeoutMs: 5_000,
+  });
+  if (!body?.harness || !body.facts) return false;
+  return capabilitiesFor(body.harness, body.facts).canGenerateImages;
+}
+
 export async function buildContext(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual",
@@ -149,7 +190,11 @@ export async function buildContext(
     hasBinary("du"),
   ]);
 
-  const [emailCanRead, codingAgent] = await Promise.all([probeEmailRead(), probeCodingAgent()]);
+  const [emailCanRead, codingAgent, canGenerateImages] = await Promise.all([
+    probeEmailRead(),
+    probeCodingAgent(),
+    probeImageGeneration(),
+  ]);
 
   let providers: string[] = [];
   if (edition === "hermes") {
@@ -176,5 +221,6 @@ export async function buildContext(
     providers,
     emailCanRead,
     codingAgent,
+    canGenerateImages,
   };
 }

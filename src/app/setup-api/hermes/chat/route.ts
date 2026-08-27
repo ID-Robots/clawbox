@@ -40,7 +40,11 @@ import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
 import { readHermesTurn } from "@/lib/harness/hermes-turn-record";
-import { adoptHermesGeneratedImages, reclaimImageMentions } from "@/lib/harness/hermes-generated-media";
+import {
+  adoptHermesGeneratedImages,
+  reclaimImageMentions,
+  servableMediaRoot,
+} from "@/lib/harness/hermes-generated-media";
 import { capabilitiesFor, UNKNOWN_FACTS } from "@/lib/harness/capabilities";
 import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib/hermes-dashboard-turn";
 
@@ -448,17 +452,25 @@ async function settleTurn(
   const record = await readHermesTurn(threaded);
   const spoken = record?.text ?? consoleReply.text;
   // The model's own copy of the path comes OUT of the caption and INTO the
-  // adoption list. The backend tells the model where it saved the file and
-  // the model repeats it (a MEDIA: directive, an "[Image: ...]" aside);
-  // left in place, `splitAssistantMedia` below lifted that unservable cache
-  // path as a second image, and every generated picture rendered as a
-  // broken card beside the real one - one generation, two attachments, the
-  // first a 404.
-  const { text: caption, sources: mentioned } = reclaimImageMentions(spoken);
-  const drawn = await adoptHermesGeneratedImages([
-    ...(record?.generatedImages ?? []),
-    ...mentioned,
-  ]);
+  // adoption list, because `splitAssistantMedia` below lifts EVERY surviving
+  // MEDIA: line into a card without asking where it points. Left in, a path the
+  // model merely repeated became a second, unservable attachment beside the
+  // real one (#482), and a path the agent wrote itself became the only
+  // attachment and a dead one. Only what adoption actually copied is said
+  // again, so a card exists exactly when there is a picture behind it.
+  //
+  // The media root is handed in as the ONE exemption: paths the browser can
+  // already fetch stay in the caption for `splitAssistantMedia` to lift, which
+  // is how a picture the customer attached and the model echoed back keeps
+  // working. Everything else has to earn its card through adoption.
+  const servableRoot = await servableMediaRoot();
+  const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
+  const drawn = await adoptHermesGeneratedImages(
+    [...(record?.generatedImages ?? []), ...mentioned],
+    // The SAME root the caption was judged against, so the two halves cannot
+    // disagree about which tree is already servable.
+    servableRoot,
+  );
   // A picture the AGENT drew, said the way every other picture in this chat is
   // said. Hermes has no `MEDIA:` convention of its own — the backend saves the
   // file and the model writes prose about the path — so the reply reaches the

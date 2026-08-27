@@ -68,12 +68,23 @@ import { registerSkillTools } from "../../../mcp/tools/skills";
 import { buildContext } from "../../../mcp/lib/context";
 import { desktopDisplay, registerSystemTools } from "../../../mcp/tools/system";
 
-const ctx = (edition: "openclaw" | "hermes", providers: string[] = []): McpContext => ({
+const ctx = (
+  edition: "openclaw" | "hermes",
+  providers: string[] = [],
+  overrides: Partial<McpContext> = {},
+): McpContext => ({
   edition,
   install: edition,
   profile: "full",
   capabilities: { screenGrabber: null, imageConvert: false, journal: false, du: false },
   providers,
+  // The probe defaults, spelled out rather than left off: every one of these
+  // decides whether a tool is registered at all, and a helper that omitted them
+  // was a helper the type checker had already stopped believing.
+  emailCanRead: false,
+  codingAgent: false,
+  canGenerateImages: true,
+  ...overrides,
 });
 
 beforeEach(() => {
@@ -568,5 +579,69 @@ describe("ai_set_provider is not a one-way door", () => {
 
     const built = await buildContext("hermes", "hermes", "full");
     expect(built.providers).toEqual(["clawlocal"]);
+  });
+});
+
+// ── Drawing, on a box that cannot ────────────────────────────────────────────
+//
+// Image generation on this device is not a ClawBox MCP tool at all: on Hermes
+// it is a native plugin installed by LINKING ClawBox AI, on OpenClaw it is the
+// agent's own bundled tool spending the same credential. So an unlinked box has
+// no image tool anywhere, and an agent asked for a picture found nothing and
+// improvised — observed on the owner's box (2026-08-26): `write_file` an SVG
+// into its working directory, `pip install cairosvg`, rasterise, and hand back
+// a path the chat cannot serve. The customer got a broken thumbnail and no
+// explanation.
+//
+// So the absence gets a voice, the way `backup_status` gives one to ClawKeep's:
+// one tool, registered only where drawing is impossible, whose whole job is to
+// be found and to say why.
+
+describe("a box that cannot draw says so instead of improvising", () => {
+  function ai(edition: "openclaw" | "hermes", canGenerateImages: boolean) {
+    const h = captureRegistrar(edition);
+    registerAiTools(h.reg, ctx(edition, [], { canGenerateImages }));
+    return h;
+  }
+
+  it("registers nothing extra where the box CAN draw", () => {
+    // The harness's own image tool is present there, and a second tool beside
+    // it saying "you cannot" is worse than silence.
+    expect(ai("hermes", true).has("image_generate")).toBe(false);
+    expect(ai("openclaw", true).has("image_generate")).toBe(false);
+  });
+
+  it("offers the refusal on both editions when the box cannot draw", () => {
+    expect(ai("hermes", false).has("image_generate")).toBe(true);
+    expect(ai("openclaw", false).has("image_generate")).toBe(true);
+  });
+
+  it("survives the core profile, which is where it matters most", () => {
+    // `CLAWBOX_MCP_PROFILE=core` is the trimmed set a SMALL model gets, and a
+    // small model is the likeliest to answer "draw me a crab" with the shell.
+    // A tool that is dropped from core is missing from exactly those boxes.
+    expect(ai("hermes", false).get("image_generate").opts.profile).toBe("core");
+  });
+
+  it("names the reason, the fix, and closes the door the agent walked through", async () => {
+    const out = await ai("hermes", false).call("image_generate", {});
+    // Not an error: a tool that throws trips Hermes' circuit breaker, and this
+    // one has something true to say.
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/ClawBox AI/);
+    expect(out.text).toMatch(/Settings -> AI Providers/);
+    // The improvisation itself, named — this is the half that stops the
+    // hand-written-SVG answer coming back.
+    expect(out.text).toMatch(/terminal/i);
+    expect(out.text).toMatch(/SVG/i);
+  });
+
+  it("is discoverable from the description alone, before it is ever called", () => {
+    // A small model decides whether to call a tool from its description. If it
+    // does not read as "this is how you make a picture", the model never gets
+    // as far as the honest answer inside.
+    const { description } = ai("hermes", false).get("image_generate");
+    expect(description).toMatch(/picture|image/i);
   });
 });

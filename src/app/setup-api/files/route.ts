@@ -5,7 +5,7 @@ import path from "path";
 import { Readable } from "stream";
 import { pipeline } from "stream/promises";
 import Busboy from "busboy";
-import { isProtectedFilePath } from "@/lib/file-guard";
+import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -25,7 +25,7 @@ function getAvailableDiskBytes(dir: string): number {
 
 export const dynamic = "force-dynamic";
 
-const BASE_DIR = process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
+const BASE_DIR = filesBrowseRoot();
 
 function safePath(rel: string): string | null {
   const base = path.resolve(BASE_DIR);
