@@ -206,9 +206,12 @@ export async function readHermesEnv(): Promise<Record<string, string>> {
  * way parks until someone opens the write end — a request that never returns,
  * which is worse than any wrong answer. `O_NONBLOCK` makes that open return
  * immediately; it has no effect on a regular file, which is the only case that
- * matters here. Errors are left exactly as the OS raised them (a directory
- * still surfaces EISDIR), because the caller's ENOENT/ENOTDIR distinction is
- * what tells "not configured" apart from "broken".
+ * goes on to read.
+ *
+ * The OS's own errors are passed through unchanged, because `readHermesEnv`
+ * tells "not configured" apart from "broken" by their codes. The one thing
+ * added is a refusal for a path that is not a regular file and would otherwise
+ * read as nothing at all — see below.
  */
 async function readEnvText(envPath: string): Promise<string> {
   const handle = await fs.open(envPath, constants.O_RDONLY | constants.O_NONBLOCK);
