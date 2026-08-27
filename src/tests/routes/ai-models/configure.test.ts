@@ -81,6 +81,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
+  runOpenclawConfigUnset: vi.fn(),
   // Added by PR #83 — the configure route sweeps agent sessions so the
   // new primary provider takes effect on the open chat without a reset.
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
@@ -131,7 +132,7 @@ vi.mock("@/lib/local-ai-token", () => ({
 
 import { getAll, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
-import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
@@ -215,6 +216,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockSpawn.mockImplementation(() => createSuccessfulChildProcess());
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
     vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
+    vi.mocked(runOpenclawConfigUnset).mockResolvedValue(undefined);
     mockUnpairLocal.mockResolvedValue(undefined);
 
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
@@ -1034,6 +1036,137 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(writtenContent.profiles["anthropic:default"]).toEqual(
       expect.objectContaining({ type: "api_key", provider: "anthropic", key: "sk-ant-test123" })
     );
+  });
+
+  // ------------------------------------------------------------------
+  // Gap A1 — a Claude Pro/Max subscription 429'd on EVERY turn on the
+  // OpenClaw edition while the same sign-in worked on Hermes.
+  //
+  // Not a rate limit. `writeOpenAICompatProvider` is an API-key construction:
+  // it pins the provider to `api: "openai-completions"` and inlines the
+  // credential, so turns leave as `POST /v1/chat/completions` with a bearer
+  // token and none of the provider-native headers. Proven on a device against
+  // ONE token inside ONE minute: `/v1/chat/completions` -> 429;
+  // `/v1/messages` with `anthropic-beta: oauth-2025-04-20` -> 200 and a real
+  // completion; `/v1/messages` without that header -> 429. The override was
+  // the whole difference, and it was written for subscription sign-ins because
+  // the branch never looked at `authMode`.
+  //
+  // The credential here is a placeholder string, never a real token — this
+  // repository is public.
+  const ANTHROPIC_OAUTH_ACCESS = "anthropic-oauth-access-token-placeholder";
+
+  it("does not write the openai-compat override for a Claude subscription sign-in", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: ANTHROPIC_OAUTH_ACCESS,
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    expect(res.status).toBe(200);
+
+    // The override is what forces the openai-completions transport. Absent, the
+    // native anthropic plugin owns routing and sends /v1/messages with the
+    // oauth beta header.
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(false);
+
+    // ...and the rest of the save is unchanged: the subscription still becomes
+    // the primary, in merge mode, with an oauth auth profile.
+    expect(commands).toContain("config set agents.defaults.model.primary anthropic/claude-sonnet-4-6");
+    expect(commands).toContain("config set models.mode merge");
+
+    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
+    expect(writtenContent.profiles["anthropic:default"]).toEqual(
+      expect.objectContaining({ type: "oauth", provider: "anthropic", access: ANTHROPIC_OAUTH_ACCESS }),
+    );
+  });
+
+  it("removes a stale openai-compat override when a device switches from API key to subscription", async () => {
+    // The migration half. Boxes in the field are already in the broken state:
+    // they were set up with an `sk-ant-api03-…` key, which wrote the override,
+    // and then the owner signed in with their subscription. Nothing in this
+    // route ever deleted a provider entry, so the old override outlived the key
+    // that justified it and kept poisoning the transport. Not writing a NEW one
+    // does not repair those devices; only removing the old one does.
+    mockReadOpenClawConfig.mockResolvedValue({
+      models: {
+        providers: {
+          anthropic: {
+            baseUrl: "https://api.anthropic.com/v1",
+            api: "openai-completions",
+            apiKey: "previously-configured-api-key",
+          },
+        },
+      },
+    });
+
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: ANTHROPIC_OAUTH_ACCESS,
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    }));
+    expect(res.status).toBe(200);
+
+    expect(vi.mocked(runOpenclawConfigUnset)).toHaveBeenCalledWith(
+      "models.providers.anthropic",
+      expect.anything(),
+    );
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands.some((command) => command.includes("config set models.providers.anthropic"))).toBe(false);
+  });
+
+  it("leaves the openai-compat override alone for an anthropic API key", async () => {
+    // The guard is on `authMode`, not on the provider: an API key still needs
+    // the override, because the native plugin reads a sqlite auth store ClawBox
+    // does not populate and 401s at call time.
+    mockReadOpenClawConfig.mockResolvedValue({
+      models: { providers: { anthropic: { api: "openai-completions", apiKey: "old-key" } } },
+    });
+
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-ant-test123",
+    }));
+    expect(res.status).toBe(200);
+
+    expect(vi.mocked(runOpenclawConfigUnset)).not.toHaveBeenCalled();
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.anthropic");
+    expect(JSON.parse(providerCall?.value || "{}").api).toBe("openai-completions");
+  });
+
+  it("does not write an openai-compat override for any subscription sign-in", async () => {
+    // Sibling shape. `writeOpenAICompatProvider` has three call sites —
+    // openrouter, google, anthropic — and an OAuth credential is wrong on every
+    // one of them for the same reason. Only anthropic offers a subscription in
+    // the wizard today, but this route takes `authMode` from the request body,
+    // so the guard lives on the shared path rather than in the anthropic branch
+    // where the next provider to gain an OAuth flow would miss it.
+    for (const provider of ["google", "openrouter"] as const) {
+      vi.clearAllMocks();
+      mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
+      mockGetAll.mockResolvedValue({});
+      mockReadOpenClawConfig.mockResolvedValue({});
+      mockParseFullyQualifiedModel.mockImplementation(parseFullyQualifiedModelImpl);
+      mockApplyModelOverrideToAllAgentSessions.mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+
+      const res = await configurePost(jsonRequest({
+        provider,
+        apiKey: `${provider}-oauth-access-token-placeholder`,
+        authMode: "subscription",
+      }));
+      expect(res.status, provider).toBe(200);
+
+      const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+      expect(
+        commands.some((command) => command.includes(`config set models.providers.${provider}`)),
+        provider,
+      ).toBe(false);
+    }
   });
 
   it("seeds a user-picked non-curated model into the provider entry", async () => {

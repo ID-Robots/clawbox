@@ -40,6 +40,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
+  runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn((fq: string) => {
     const i = fq.indexOf("/");

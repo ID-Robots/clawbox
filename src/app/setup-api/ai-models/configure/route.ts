@@ -11,6 +11,7 @@ import {
   findOpenclawBin,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
   type OpenclawConfigSetArgs,
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
@@ -1031,6 +1032,81 @@ async function writeOpenAICompatProvider(opts: {
   await ensureFallbackModel(opts.defaultModel);
 }
 
+/**
+ * Take a `models.providers.<p>` openai-compat override back out.
+ *
+ * Only ever called on the subscription path, and only when the device actually
+ * has one: `openclaw config unset` exits 1 with "Config path not found" on an
+ * absent path (verified on 2026.7.1-2), and a removal that genuinely fails must
+ * stay loud — reporting success while the poisoned override is still on disk is
+ * the failure mode this whole fix exists to remove.
+ */
+async function clearOpenAICompatProvider(provider: string): Promise<void> {
+  const configPath = `models.providers.${provider}`;
+  const config = await readOpenClawConfig();
+  if (!config.models?.providers?.[provider]) return;
+  await runOpenclawConfigUnset(configPath, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+  console.log(`[AI Config] Removed stale openai-compat override ${configPath}`);
+}
+
+/**
+ * Decide how a cloud provider's turns leave the box, and write that decision.
+ *
+ * Every caller of {@link writeOpenAICompatProvider} goes through here, because
+ * that helper is an API-KEY construction and nothing in its signature says so:
+ * it pins the provider to `api: "openai-completions"` and inlines the
+ * credential, so each turn goes out as `POST <baseUrl>/chat/completions` with a
+ * bearer token and none of the provider-native headers.
+ *
+ * A Claude Pro/Max subscription credential is not an API key, and that surface
+ * does not accept one. Anthropic answers 429 to an OAuth access token on
+ * `/chat/completions` no matter how much quota is left — proven on a device
+ * against one token inside one minute: `/v1/chat/completions` 429,
+ * `/v1/messages` with `anthropic-beta: oauth-2025-04-20` 200 with a real
+ * completion, `/v1/messages` without that header 429. The override made the
+ * subscription look permanently rate-limited on the OpenClaw edition while the
+ * same sign-in worked on Hermes, which routes natively.
+ *
+ * So on a subscription save the override is not written, and any override the
+ * device already had is removed — the second half matters as much as the first,
+ * because a box configured with an API key and later switched to a
+ * subscription kept the old entry (nothing here ever deleted one) and stayed
+ * broken. Routing then belongs to the provider's native plugin, which is what
+ * `setProviderPlugins` enables a few steps later.
+ */
+async function applyCloudProviderTransport(opts: {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  authMode: string;
+  defaultModel: string;
+  curatedModels: readonly { id: string }[];
+}): Promise<void> {
+  if (opts.authMode !== "subscription") {
+    await writeOpenAICompatProvider(opts);
+    console.log(
+      `[AI Config] Set ${opts.provider} provider (openai-compat): ${logSafe(opts.defaultModel)}`,
+    );
+    return;
+  }
+
+  await clearOpenAICompatProvider(opts.provider);
+  // Same two writes the non-provider `else` branch below makes: cloud providers
+  // auto-detect their catalog in merge mode, and the primary still needs a
+  // fallback behind it.
+  await applyConfigSetGroups([
+    {
+      ops: [["models.mode", "merge"]],
+      // Non-fatal: merge is the default behavior anyway
+      onError: () => {},
+    },
+  ]);
+  await ensureFallbackModel(opts.defaultModel);
+  console.log(
+    `[AI Config] Set ${opts.provider} provider (native plugin, subscription auth): ${logSafe(opts.defaultModel)}`,
+  );
+}
+
 export async function POST(request: Request) {
   // Hoisted so the catch can classify the failure without re-parsing the body —
   // a local-model or wrong-edition failure must not be reported as a credential
@@ -1943,40 +2019,45 @@ export async function POST(request: Request) {
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
       // OpenRouter has no native OpenClaw adapter, so without this explicit
-      // provider entry the chat turn silently returns usage 0/0/0.
-      await writeOpenAICompatProvider({
+      // provider entry the chat turn silently returns usage 0/0/0. (API-key
+      // only today — the wizard offers OpenRouter no subscription sign-in.)
+      await applyCloudProviderTransport({
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      console.log(`[AI Config] Set openrouter provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
       // Google's OpenAI-compat endpoint instead.
-      await writeOpenAICompatProvider({
+      await applyCloudProviderTransport({
         provider: "google",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: GOOGLE_MODELS,
       });
-      console.log(`[AI Config] Set google provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else if (isAnthropic) {
-      // Native anthropic plugin reads a per-agent sqlite auth store that
-      // ClawBox's file auth profile doesn't populate, so it fails with
-      // "No API key found" at call time. Route through Anthropic's OpenAI-compat
-      // endpoint with the key inline instead.
-      await writeOpenAICompatProvider({
+      // With an API KEY: the native anthropic plugin reads a per-agent sqlite
+      // auth store that ClawBox's file auth profile doesn't populate, so it
+      // fails with "No API key found" at call time — route through Anthropic's
+      // OpenAI-compat endpoint with the key inline instead.
+      //
+      // With a Claude Pro/Max SUBSCRIPTION: that same override is what made
+      // every turn 429. applyCloudProviderTransport keeps the two apart; see
+      // its doc comment for the transport proof.
+      await applyCloudProviderTransport({
         provider: "anthropic",
         baseUrl: "https://api.anthropic.com/v1",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: ANTHROPIC_MODELS,
       });
-      console.log(`[AI Config] Set anthropic provider (openai-compat): ${logSafe(config.defaultModel)}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
