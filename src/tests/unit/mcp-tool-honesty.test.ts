@@ -279,12 +279,14 @@ describe("skill_uninstall — a 200 is not proof anything was removed", () => {
     });
 
     /**
-     * The edition gate answers 404 from the SAME route, with no `code`. The
-     * tool is registered off a probe taken once at startup, so a device that
-     * switched harness since then reaches this branch — and "no such skill is
-     * installed" would be a confident answer to a question nobody asked.
+     * A 404 from this route carrying NO code at all: not the edition gate,
+     * which labels its refusal `not_hermes` and is decoded as
+     * NOT_SUPPORTED_HERE in mcp-skills-edition-guard.test.ts, but anything
+     * else that answers 404 in front of the handler. "No such skill is
+     * installed" would be a confident answer to a question nobody asked, so
+     * this stays on the generic mapping.
      */
-    it("does not read the Hermes edition guard's 404 as a missing skill", async () => {
+    it("does not read an unlabelled 404 as a missing skill", async () => {
       blindfolded();
       routeSays(404, { error: "Not found" });
 
