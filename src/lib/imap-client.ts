@@ -90,6 +90,16 @@ const MAX_LITERAL_BYTES = 1024 * 1024;
 
 /** How much of one message body we ever ask the server for. */
 export const MAX_BODY_FETCH_BYTES = 128 * 1024;
+/**
+ * The higher ceiling the FULL VIEW may ask for.
+ *
+ * 128 KB is a generous budget for text a model is about to summarise, and a
+ * mean one for showing a person their actual mail: an HTML newsletter with its
+ * pictures base64'd inside it passes 128 KB routinely, and cutting there ends
+ * the message mid-tag. This bound is what `MAX_LITERAL_BYTES` already allows a
+ * single literal to be, so raising to it costs no new allocation ceiling.
+ */
+export const MAX_FULL_FETCH_BYTES = 1024 * 1024;
 /** How much of the decoded text we hand back. */
 export const MAX_BODY_TEXT_CHARS = 16_000;
 /** Upper bound on `limit` for a listing, whatever the caller asks for. */
@@ -247,7 +257,7 @@ function charsetOf(contentType: string): string {
   return m ? m[1] : "utf-8";
 }
 
-function decodePart(body: string, contentType: string, encoding: string): string {
+export function decodePart(body: string, contentType: string, encoding: string): string {
   const enc = encoding.trim().toLowerCase();
   const charset = charsetOf(contentType);
   // base64 and quoted-printable arrive as ASCII that SPELLS bytes, so those
@@ -1023,7 +1033,26 @@ export interface ReadOptions extends ImapOptions {
  * different the moment anything else touches the mailbox, so an agent that
  * listed and then read could open a different message than the one it named.
  */
-export async function readMessage(cfg: ImapConfig, uid: number, opts: ReadOptions = {}): Promise<MessageDetail> {
+/** One message as it arrived, before anything has been made of it. */
+export interface RawMessage {
+  uid: number;
+  /** The whole RFC 5322 message — headers, blank line, body. */
+  raw: string;
+  unread: boolean;
+  internalDate: string;
+  /** True when the fetch cap cut the message short. */
+  truncated: boolean;
+}
+
+/**
+ * One message's raw bytes by UID.
+ *
+ * Extracted from `readMessage` so the FULL VIEW and the agent's text summary
+ * fetch identically — same EXAMINE, same BODY.PEEK, same UID semantics — and
+ * differ only in what they then make of the result. Two copies of this fetch
+ * would be two places for the read-only guarantee to rot.
+ */
+export async function readRawMessage(cfg: ImapConfig, uid: number, opts: ReadOptions = {}): Promise<RawMessage> {
   if (!Number.isInteger(uid) || uid < 1 || uid > 4294967295) {
     throw new ImapError("protocol", "That is not a valid message id.");
   }
@@ -1031,7 +1060,7 @@ export async function readMessage(cfg: ImapConfig, uid: number, opts: ReadOption
   if (!isMailboxNameSafe(mailbox)) {
     throw new ImapError("mailbox", "That is not a usable mailbox name.");
   }
-  const maxBytes = Math.max(1024, Math.min(MAX_BODY_FETCH_BYTES, Math.floor(opts.maxBytes ?? MAX_BODY_FETCH_BYTES)));
+  const maxBytes = Math.max(1024, Math.min(MAX_FULL_FETCH_BYTES, Math.floor(opts.maxBytes ?? MAX_BODY_FETCH_BYTES)));
 
   return withSession(cfg, opts, async (session) => {
     await examine(session, mailbox);
@@ -1048,28 +1077,39 @@ export async function readMessage(cfg: ImapConfig, uid: number, opts: ReadOption
     if (!item || !item.body) {
       throw new ImapError("mailbox", `There is no message with id ${uid} in "${mailbox}".`);
     }
-
-    const raw = item.body.toString("utf8");
-    const split = raw.search(/\r?\n\r?\n/);
-    const headers = parseHeaders(split < 0 ? raw : raw.slice(0, split));
-    const rawBody = split < 0 ? "" : raw.slice(split).replace(/^\r?\n\r?\n/, "");
-
-    let text = extractText(rawBody, headers);
-    const cutByFetch = item.body.length >= maxBytes;
-    const cutByText = text.length > MAX_BODY_TEXT_CHARS;
-    if (cutByText) text = text.slice(0, MAX_BODY_TEXT_CHARS);
-
     return {
       uid: item.uid,
-      from: headers.from ?? "(unknown sender)",
-      to: headers.to ?? "",
-      subject: headers.subject ?? "(no subject)",
-      date: headers.date ?? item.internalDate,
+      raw: item.body.toString("utf8"),
       unread: !item.flags.some((f) => f.toLowerCase() === "\\seen"),
-      text: text.trim(),
-      truncated: cutByFetch || cutByText,
+      internalDate: item.internalDate,
+      truncated: item.body.length >= maxBytes,
     };
   });
+}
+
+export async function readMessage(cfg: ImapConfig, uid: number, opts: ReadOptions = {}): Promise<MessageDetail> {
+  // The agent's view: flattened, capped text. Unchanged by the full-message
+  // view, which parses the same bytes differently rather than replacing this.
+  const item = await readRawMessage(cfg, uid, opts);
+  const raw = item.raw;
+  const split = raw.search(/\r?\n\r?\n/);
+  const headers = parseHeaders(split < 0 ? raw : raw.slice(0, split));
+  const rawBody = split < 0 ? "" : raw.slice(split).replace(/^\r?\n\r?\n/, "");
+
+  let text = extractText(rawBody, headers);
+  const cutByText = text.length > MAX_BODY_TEXT_CHARS;
+  if (cutByText) text = text.slice(0, MAX_BODY_TEXT_CHARS);
+
+  return {
+    uid: item.uid,
+    from: headers.from ?? "(unknown sender)",
+    to: headers.to ?? "",
+    subject: headers.subject ?? "(no subject)",
+    date: headers.date ?? item.internalDate,
+    unread: item.unread,
+    text: text.trim(),
+    truncated: item.truncated || cutByText,
+  };
 }
 
 /** Connect + sign in, then hang up. Used to prove a read mode is actually usable. */

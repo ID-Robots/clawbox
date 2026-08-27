@@ -43,6 +43,8 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { HarnessError, type HarnessStatus, type TurnResult } from '@/lib/harness/transport'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
+import { splitEmailRefs } from '@/lib/chat-email-refs'
+import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -582,6 +584,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     open: preview !== null,
     onClose: closePreview,
   })
+  // The message the full-message panel is showing, or null when it is closed.
+  // Only the id lives here: the panel fetches the mail itself when it opens, so
+  // no message content is held in this component's state or in the transcript.
+  const [openEmailUid, setOpenEmailUid] = useState<number | null>(null)
+  const closeEmail = useCallback(() => setOpenEmailUid(null), [])
   // True from the image_generate tool call until the picture arrives (or the
   // wait times out). Drives the banner AND the history polling.
   const [generatingImage, setGeneratingImage] = useState(false)
@@ -1455,7 +1462,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const pushedAudio = boundedAudio(extractAudioAttachments(pushedMessage))
           if (pushedRole === 'assistant' && pushedAudio.length > 0
               && !isSentinel(pushedRaw) && !isInterSessionEnvelope(pushedRaw, pushedMessage)) {
-            const pushedText = splitMediaDirectives(pushedRaw).text
+            const pushedText = splitEmailRefs(splitMediaDirectives(pushedRaw).text).text
             setMessages(prev => {
               // Only a bubble after the latest user turn can own this event.
               // Otherwise a late supplement from the previous turn could be
@@ -1468,7 +1475,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }
               for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
                 const candidate = prev[i]
-                if (candidate.role !== 'assistant' || candidate.text !== pushedText) continue
+                // The STORED text still carries its `EMAIL:` lines — they are
+                // lifted at render, not at write — and a caption can carry a
+                // `MEDIA:` line too, while `pushedText` has had
+                // them taken out. Compare like with like, or a turn that named
+                // messages never matches its own spoken supplement and the
+                // audio is dropped.
+                if (candidate.role !== 'assistant') continue
+                if (splitEmailRefs(splitMediaDirectives(candidate.text).text).text !== pushedText) continue
                 if (candidate.audio?.length) return prev // duplicate push
                 const next = [...prev]
                 next[i] = { ...candidate, audio: pushedAudio }
@@ -1509,7 +1523,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (state === 'delta') {
             // Strip MEDIA: directives while streaming too, or the raw path
             // flashes in the bubble for the moment before `final` lands.
-            const text = splitMediaDirectives(extractText(msg)).text
+            // EMAIL: ids are stripped here for the same reason — the card is
+            // built from the finished reply, and the bare directive must not
+            // show while the answer is still arriving.
+            const text = splitEmailRefs(splitMediaDirectives(extractText(msg)).text).text
             // Sentinels would flash before the final-state filter drops them.
             if (text && !isSentinel(text) && !isInterSessionEnvelope(text, msg)) {
               setStreaming(text); setReloadingSkill(false)
@@ -3826,6 +3843,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const isSuccess = msg.variant === 'success';
           const systemBg = isSuccess ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
           const systemColor = isSuccess ? '#22c55e' : '#ef4444';
+          // Messages the agent pointed at, as `EMAIL:<uid>` lines in the reply.
+          // Derived at render rather than stored on the message: a replayed
+          // turn carries the same directive text a live one did, so deriving
+          // here makes history and live identical for free — and keeps the
+          // owner's mail out of the cached transcript, which is where it very
+          // deliberately does not belong.
+          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null;
+          const bodyText = emailRefs ? emailRefs.text : msg.text;
           return (
             <div key={i} style={{
               display: 'flex',
@@ -3899,7 +3924,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     })}
                   </div>
                 )}
-                {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text, t("chat.table"))) : null}
+                {bodyText ? (msg.role === 'user' ? bodyText : renderText(bodyText, t("chat.table"))) : null}
                 {msg.audio && msg.audio.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
                     {msg.audio.map((src) => (
@@ -3931,6 +3956,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                       >
                         <a href={src} download={mediaFileName(src)}>{t("chat.downloadAudio")}</a>
                       </audio>
+                    ))}
+                  </div>
+                )}
+                {/* A way back to the real message, for each one the reply
+                    referred to. The agent's summary is what the bubble says;
+                    this is the mail itself, opened on demand and fetched only
+                    then — see lib/chat-email-refs.ts. */}
+                {emailRefs && emailRefs.uids.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
+                    {emailRefs.uids.map(uid => (
+                      <EmailCard key={uid} uid={uid} onOpen={setOpenEmailUid} t={t} />
                     ))}
                   </div>
                 )}
@@ -4461,6 +4497,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           The component portals itself to <body> for the same containing-block
           reason as the image preview below. */}
       <VoiceTunnelDialog open={tunnelDialogOpen} onClose={() => setTunnelDialogOpen(false)} />
+
+      {/* The whole email, when one has been opened from a card in the
+          transcript. It portals itself to <body> for the same containing-block
+          reason as the image preview below, and brings its own dialog
+          behaviour — focus, Tab trap, Escape — from the shared hook. */}
+      {openEmailUid !== null && (
+        <EmailFullView key={openEmailUid} uid={openEmailUid} onClose={closeEmail} t={t} />
+      )}
 
       {/* Full-size image preview.
           Portalled to <body> rather than nested here: the popup root carries a
