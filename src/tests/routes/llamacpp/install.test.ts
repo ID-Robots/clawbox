@@ -8,6 +8,11 @@ import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 // asserting a filename the app no longer asks for.
 import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   spawn: vi.fn(),
   execFile: vi.fn(),

@@ -241,6 +241,28 @@ my %DECLARED_ARGV = (
     ],
     resolve => { systemctlAction => 'POWER_ACTIONS' },
   },
+  # src/lib/root-step-runner.ts — startRootStep() builds ["-n", LAUNCHER, ...].
+  # The step name is NOT enumerated here, and that is the design: the grant names
+  # the launcher with no argument spec, and the launcher decides which unit it
+  # will start by checking the step against its own WEB_ROOT_STEPS list, in
+  # root-owned code. src/tests/unit/root-steps.test.ts pins that list to
+  # src/lib/root-steps.ts. Enumerating 25 step names in a sudoers Cmnd_Spec would
+  # be 50 lines of string matching doing worse than one root-side check.
+  'src/lib/root-step-runner.ts :: "/usr/bin/sudo", argv' => {
+    argv => [
+      ['-n', '/usr/local/libexec/clawbox/clawbox-run-root-step.sh', 'chpasswd'],
+      ['-n', '/usr/local/libexec/clawbox/clawbox-run-root-step.sh', '--no-block', 'llamacpp_install'],
+    ],
+    unverified => {
+      argv => 'startRootStep() builds the list imperatively — `const argv = ["-n", '
+            . 'ROOT_STEP_LAUNCHER]`, then an optional `--no-block`, then the step — so it is '
+            . 'not one const array a symbol lookup could read back. Both shapes it can '
+            . 'produce are declared above. The STEP is deliberately not enumerated: the '
+            . 'grant names the launcher with no argument spec, and the launcher checks the '
+            . 'step against WEB_ROOT_STEPS in root-owned code (config/clawbox-run-root-step.sh), '
+            . 'which src/tests/unit/root-steps.test.ts pins to src/lib/root-steps.ts.',
+    },
+  },
 );
 
 # ── Sudo calls that are deliberately NOT in the allow-list ──────────────────
@@ -787,6 +809,20 @@ sub scan_ts {
     my ($argv, $why) = resolve_items($rel, $consts, [split_argv_items($args_src)]);
     if (!$argv) { add_unresolved($rel, $norm, $why); next; }
     push @calls, { file => $rel, argv => [$bin, @$argv] };
+  }
+
+  # 1b. spawn("sudo"|"/usr/bin/sudo", argv) where argv is a VARIABLE. The
+  #     literal-array form above cannot see this, and without it a helper that
+  #     builds its own argument list is invisible to the whole check — its grant
+  #     reads as unused and a new one would read as covered.
+  while ($raw =~ /$SPAWNERS\s*\(\s*"((?:\/usr\/bin\/)?sudo)"\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]/gs) {
+    my ($bin, $var) = ($1, $2);
+    my $norm = "\"$bin\", $var";
+    if (my $declared = declared_argv($rel, $norm, $raw, $consts)) {
+      push @calls, { file => $rel, argv => $_ } for @$declared;
+      next;
+    }
+    add_unresolved($rel, $norm, "argv is built at runtime in `$var`");
   }
 
   # 2. A variable that may hold "sudo", spawned with a non-literal argv. This is

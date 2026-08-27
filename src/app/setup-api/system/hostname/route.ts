@@ -7,6 +7,7 @@ import { promisify } from "util";
 import { get, set } from "@/lib/config-store";
 import { gatewayIsAbsent, restartGateway, setControlUiAllowedOrigins } from "@/lib/openclaw-config";
 import { getReachableIpv4 } from "@/lib/system-info";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const execFileAsync = promisify(execFile);
 
@@ -92,17 +93,8 @@ export async function POST(request: Request) {
     // systemd's start limit and every later start is refused until something
     // resets it — which used to be nothing on this path. The chpasswd and
     // llamacpp hand-offs already did this; these did not. TASK-445.
-    await execFileAsync("/usr/bin/sudo", [
-      "/usr/bin/systemctl",
-      "reset-failed",
-      "clawbox-root-update@set_hostname.service",
-    ]).catch(() => {});
   try {
-    await execFileAsync("/usr/bin/sudo", [
-      "/usr/bin/systemctl",
-      "start",
-      "clawbox-root-update@set_hostname.service",
-    ]);
+    await startRootStep("set_hostname");
   } catch (err) {
     console.warn("[hostname] Failed to trigger set_hostname service:", err);
     return NextResponse.json(

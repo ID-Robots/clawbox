@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { requireSession } from "@/lib/route-auth";
 import { UI_ROOT_STEPS } from "@/lib/root-steps";
+import { startRootStep } from "@/lib/root-step-runner";
 
 export const dynamic = "force-dynamic";
 
@@ -79,15 +80,13 @@ export async function POST(req: Request) {
 
   const serviceName = `clawbox-root-update@${step}.service`;
   try {
-    // reset-failed is best-effort: a previous failed run leaves the unit
-    // in "failed" state and `systemctl start` would refuse without it.
-    await execFileAsync("/usr/bin/systemctl", ["reset-failed", serviceName], {
-      timeout: 10_000,
-    }).catch(() => {});
-
-    await execFileAsync("/usr/bin/systemctl", ["start", serviceName], {
-      timeout: STEP_TIMEOUT_MS,
-    });
+    // Through the root-owned launcher, which clears a previous failure
+    // itself and builds the unit name from a step it validates. This used to
+    // be an UNPRIVILEGED `systemctl start`, authorised by the polkit
+    // `manage-units` grant with no unit condition -- the same action that
+    // authorises `systemd-run`, i.e. arbitrary root with no password.
+    // TASK-539.
+    await startRootStep(step, { timeoutMs: STEP_TIMEOUT_MS });
 
     return NextResponse.json(
       { ok: true, step },

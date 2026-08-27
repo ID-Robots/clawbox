@@ -3253,7 +3253,7 @@ install_root_libexec() {
   local src
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
-  for src in clawbox-root-manifest.sh; do
+  for src in clawbox-root-manifest.sh clawbox-run-root-step.sh; do
     if [ -f "$PROJECT_DIR/config/$src" ]; then
       install -o root -g root -m 0755 "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -4049,8 +4049,21 @@ step_polkit_rules() {
   local POLKIT_PKLA_DIR="/etc/polkit-1/localauthority/50-local.d"
   mkdir -p "$POLKIT_PKLA_DIR"
   cp "$PROJECT_DIR/config/49-clawbox-updates.pkla" "$POLKIT_PKLA_DIR/"
-  rm -f /etc/polkit-1/rules.d/49-clawbox-updates.rules
-  echo "  Polkit rule installed (allows clawbox to trigger root update steps)"
+  # Remove the manage-units authorisation from devices that already have it.
+  # The .pkla shipped above no longer contains that stanza, but `cp` only
+  # replaces the file — a box provisioned before TASK-539 keeps whatever polkit
+  # already cached until this runs, and there is no other remover.
+  #
+  # The scoped .rules twin is INSTALLED now rather than deleted. polkit 0.105
+  # (JetPack's) ignores rules.d entirely, so on the appliance it is inert
+  # documentation; on polkit >= 0.106 it is the correct narrow grant. Deleting
+  # it was how the unscoped .pkla ended up as the only authority.
+  local POLKIT_RULES_DIR="/etc/polkit-1/rules.d"
+  if [ -d "$POLKIT_RULES_DIR" ] && [ -f "$PROJECT_DIR/config/49-clawbox-updates.rules" ]; then
+    install -o root -g root -m 0644 "$PROJECT_DIR/config/49-clawbox-updates.rules" \
+      "$POLKIT_RULES_DIR/49-clawbox-updates.rules"
+  fi
+  echo "  Polkit rules installed (NetworkManager only; root steps go through sudo)"
 }
 
 step_start_services() {

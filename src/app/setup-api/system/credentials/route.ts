@@ -4,11 +4,12 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import { get, set } from "@/lib/config-store";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
 import { getSystemUsername, verifyPassword, isSafePasswordChars, bumpSessionGeneration, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 import { checkRateLimit, clientIp, resetRateLimit } from "@/lib/rate-limit";
 import { hasOwnerPassword } from "@/lib/system-password";
 import { requireSession } from "@/lib/route-auth";
+import { startRootStep } from "@/lib/root-step-runner";
 
 export const dynamic = "force-dynamic";
 
@@ -132,12 +133,11 @@ export async function POST(request: Request) {
       mode: 0o600,
     });
     try {
-      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "reset-failed", CHPASSWD_SERVICE_NAME], {
-        timeout: 10_000,
-      }).catch(() => {});
-      await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", CHPASSWD_SERVICE_NAME], {
-        timeout: 30_000,
-      });
+      // Through the root-owned launcher: it clears a previous failure itself
+      // and builds the unit name from a step it validates, so the allow-list
+      // needs one grant for the whole root-step surface instead of a pair per
+      // instance. TASK-539.
+      await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
     } catch (err) {
       // Clean up the input file on failure
       await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});

@@ -260,7 +260,7 @@ describe("updater", () => {
 
     it("uses the root step journal output when a root update step fails", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@apt_update.service": new Error("systemctl failed"),
+        "clawbox-run-root-step.sh apt_update": new Error("systemctl failed"),
         // The journal only overrides the error when the unit reports failed.
         "show clawbox-root-update@apt_update.service": { stdout: "failed\n", stderr: "" },
         "/usr/bin/journalctl": {
@@ -300,7 +300,7 @@ describe("updater", () => {
       // most recently and must NOT be presented as the failure.
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
-        "start clawbox-root-update@apt_update.service": timeoutErr,
+        "clawbox-run-root-step.sh apt_update": timeoutErr,
         "show clawbox-root-update@apt_update.service": { stdout: "success\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: "Linkdown routing sysctl installed\n",
@@ -338,7 +338,7 @@ describe("updater", () => {
       // re-runs everything) on a successful update.
       const timeoutErr = Object.assign(new Error("Command failed"), { killed: true });
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": timeoutErr,
+        "clawbox-run-root-step.sh post_update": timeoutErr,
         "show clawbox-root-update@post_update.service -p ActiveState": { stdout: "inactive\n", stderr: "" },
         "show clawbox-root-update@post_update.service -p Result": { stdout: "success\n", stderr: "" },
         ping: { stdout: "", stderr: "" },
@@ -424,7 +424,7 @@ describe("updater", () => {
 
     it("fails the continuation when gateway verification still finds no known recovery path", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "gateway crashed for an unrelated reason\n",
           stderr: "",
@@ -717,7 +717,7 @@ describe("updater", () => {
 
     it("quarantines known legacy gateway blockers and completes when the gateway recovers", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@post_update.service": { stdout: "", stderr: "" },
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
         "/usr/bin/journalctl -u clawbox-gateway.service": {
           stdout: "conflicting plugin install metadata\nopenclaw-agent.sqlite belongs to agent piper; requested agent carl_pir\n",
           stderr: "",
@@ -761,7 +761,7 @@ describe("updater", () => {
 
     it("stops the update sequence when bootstrap_updater fails", async () => {
       setupExecFileMock({
-        "start clawbox-root-update@bootstrap_updater.service": new Error("systemctl failed"),
+        "clawbox-run-root-step.sh bootstrap_updater": new Error("systemctl failed"),
         "show clawbox-root-update@bootstrap_updater.service": { stdout: "failed\n", stderr: "" },
         "/usr/bin/journalctl": {
           stdout: "fatal: invalid branch name in .update-branch\n",

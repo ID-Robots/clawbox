@@ -3,6 +3,11 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
   spawn: vi.fn(),
@@ -36,6 +41,7 @@ vi.mock("@/lib/auth", () => ({
 
 import { set } from "@/lib/config-store";
 import { getSystemUsername } from "@/lib/auth";
+import { startRootStep } from "@/lib/root-step-runner";
 
 const mockSet = vi.mocked(set);
 const mockGetSystemUsername = vi.mocked(getSystemUsername);
@@ -206,10 +212,8 @@ describe("POST /setup-api/system/credentials", () => {
     expect(body.error).toContain("control characters");
   });
 
-  it("returns 500 when systemctl fails", async () => {
-    setupExecFileMock({
-      systemctl: new Error("Service failed"),
-    });
+  it("returns 500 when the root step fails", async () => {
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("Service failed"));
 
     const res = await credentialsPost(jsonRequest({ password: "securepassword123" }));
     const body = await res.json();
@@ -218,10 +222,8 @@ describe("POST /setup-api/system/credentials", () => {
     expect(body.error).toBe("Service failed");
   });
 
-  it("cleans up input file on systemctl failure", async () => {
-    setupExecFileMock({
-      systemctl: new Error("Service failed"),
-    });
+  it("cleans up input file when the root step fails", async () => {
+    vi.mocked(startRootStep).mockRejectedValueOnce(new Error("Service failed"));
 
     await credentialsPost(jsonRequest({ password: "securepassword123" }));
 

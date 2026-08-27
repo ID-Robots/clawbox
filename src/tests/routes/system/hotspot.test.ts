@@ -2,6 +2,11 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import * as childProcess from "child_process";
 import fs from "fs/promises";
 
+vi.mock("@/lib/root-step-runner", () => ({
+  ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
+  startRootStep: vi.fn(async () => {}),
+}));
+
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
 }));

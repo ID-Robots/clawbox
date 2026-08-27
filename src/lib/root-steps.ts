@@ -16,9 +16,54 @@
  */
 
 /**
- * Steps a UI button may start. A subset of install.sh's DISPATCH_STEPS:
- * anything that reboots, rewrites networking or wipes state stays out, so a
- * one-tap escalation surface never exists.
+ * Every step the WEB SERVER can start as root, from anywhere — the UI buttons,
+ * the updater, the wizard's hand-offs. This is the outer bound of that surface,
+ * and it is deliberately narrower than install.sh's DISPATCH_STEPS (48) and than
+ * the root dispatcher's own allow-list: those two also cover steps only an
+ * operator ever runs by hand.
+ *
+ * It is enforced root-side by config/clawbox-run-root-step.sh, the single
+ * command config/clawbox-sudoers grants for this purpose. Adding a name here is
+ * adding a passwordless root entrypoint — review it as a privilege decision.
+ * The two lists are pinned together by src/tests/unit/root-steps.test.ts.
+ * TASK-539.
+ */
+export const WEB_ROOT_STEPS: readonly string[] = [
+  "ai_tools_install",
+  "apt_update",
+  "bootstrap_updater",
+  "chpasswd",
+  "chromium_install",
+  "clawkeep_install",
+  "cloudflared_install",
+  "ffmpeg_install",
+  "fix_git_perms",
+  "gateway_setup",
+  "hermes_edition",
+  "llamacpp_install",
+  "nvidia_jetpack",
+  "ollama_install",
+  "openclaw_config",
+  "openclaw_install",
+  "openclaw_patch",
+  "openclaw_setup",
+  "performance_mode",
+  "post_update",
+  "rebuild_reboot",
+  "restart_ap",
+  "set_hostname",
+  "vnc_install",
+  "vnc_refresh",
+];
+
+export function isWebRootStep(step: string): boolean {
+  return WEB_ROOT_STEPS.includes(step);
+}
+
+/**
+ * Steps a UI button may start. A subset of WEB_ROOT_STEPS: anything that
+ * reboots, rewrites networking or wipes state stays out, so a one-tap
+ * escalation surface never exists.
  */
 export const UI_ROOT_STEPS: readonly string[] = [
   "cloudflared_install",
