@@ -4,6 +4,7 @@ import fsp from "fs/promises";
 import type { ChildProcess } from "child_process";
 import { EventEmitter } from "events";
 import {
+  CLAWBOX_AI_LEGACY_VISION_MODEL_ID,
   CLAWBOX_AI_VISION_MODEL,
   CLAWBOX_AI_VISION_MODEL_ID,
   CLAWBOX_AI_VISION_MODEL_LABEL,
@@ -54,6 +55,16 @@ vi.mock("@/lib/clawkeep", () => ({
 // note in configure.test.ts.
 vi.mock("@/app/setup-api/ai-models/catalog/route", () => ({
   refreshInBackground: vi.fn(),
+}));
+
+// The vision id is RESOLVED against the proxy before the route writes it:
+// DeepSeek's model when served, the previous one until then. The resolver has
+// its own unit file; here it answers "preferred allowed" unless a test says
+// otherwise, so no route test touches the network.
+const resolveVisionMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  resolveVisionModelId: resolveVisionMock,
 }));
 
 const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() => ({
@@ -188,6 +199,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     vi.resetModules();
     vi.clearAllMocks();
 
+    resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_VISION_MODEL_ID, verified: true, reason: "proxy-allows" });
     mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();

@@ -146,15 +146,37 @@ export const CLAWBOX_AI_IMAGE_MODEL_LABEL = "ClawBox AI Images";
  * Env-overridable for the same reason the chat and image slugs are — the proxy
  * matches the BARE id against its allowlist, so this value must always name
  * something production already allows.
+ *
+ * Since 2026-08-27 the PREFERRED id is DeepSeek's own multimodal model,
+ * `deepseek-v4-flash-vision-exp` — vision from the same family the chat
+ * tiers run on. The proxy's allowlist may trail its release, so nothing
+ * writes this id unverified: every writer resolves through
+ * `resolveVisionModelId()` (src/lib/clawbox-ai-vision.ts), which asks the
+ * proxy and falls back to the previous vision model until the new one is
+ * served. An env override skips the probe — the operator's word is final.
  */
 export const CLAWBOX_AI_VISION_MODEL_ID =
-  process.env.CLAWBOX_AI_VISION_MODEL_ID?.trim() || "gpt-5.6-luna";
+  process.env.CLAWBOX_AI_VISION_MODEL_ID?.trim() || "deepseek-v4-flash-vision-exp";
+
+/**
+ * The vision model boxes ran before the DeepSeek one, and the fallback while
+ * the proxy does not yet allow the new id. Boxes in the field name this in
+ * `agents.defaults.imageModel` / `auxiliary.vision.model`; the writers treat
+ * a slot naming either OUR id as ours to move, and any other value as the
+ * owner's choice.
+ */
+export const CLAWBOX_AI_LEGACY_VISION_MODEL_ID = "gpt-5.6-luna";
 
 /** `name` on the model entry. Required by OpenClaw's schema — see the image label. */
 export const CLAWBOX_AI_VISION_MODEL_LABEL = "ClawBox AI Vision";
 
-/** Fully-qualified ref written to `agents.defaults.imageModel.primary`. */
-export const CLAWBOX_AI_VISION_MODEL = `${CLAWBOX_AI_PROVIDER}/${CLAWBOX_AI_VISION_MODEL_ID}`;
+/** Fully-qualified ref for a vision id, as `agents.defaults.imageModel.primary` wants it. */
+export function clawboxAiVisionModelRef(id: string): string {
+  return `${CLAWBOX_AI_PROVIDER}/${id}`;
+}
+
+/** Fully-qualified ref of the PREFERRED id — resolve before writing it anywhere. */
+export const CLAWBOX_AI_VISION_MODEL = clawboxAiVisionModelRef(CLAWBOX_AI_VISION_MODEL_ID);
 
 /**
  * Input modalities. `image` is the whole point of the entry: OpenClaw's

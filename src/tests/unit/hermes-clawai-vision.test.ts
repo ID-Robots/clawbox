@@ -30,6 +30,12 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),
 }));
+// The vision id is RESOLVED against the proxy (DeepSeek's model when served,
+// the previous one until then). The resolver has its own unit file
+// (`clawbox-ai-vision.test.ts`); here it answers "preferred allowed" unless a
+// test says otherwise, so no unit test touches the network.
+const resolveVisionMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/clawbox-ai-vision", () => ({ resolveVisionModelId: resolveVisionMock }));
 
 import {
   CLAWAI_PROVIDER,
@@ -37,7 +43,7 @@ import {
   applyClawaiToHermes,
   clawaiModelForTier,
 } from "@/lib/hermes-clawai";
-import { CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
+import { CLAWBOX_AI_LEGACY_VISION_MODEL_ID, CLAWBOX_AI_VISION_MODEL_ID } from "@/lib/clawbox-ai-models";
 
 /** Every `config set`, as "key=value", in the order they were issued. */
 function sets(): string[] {
@@ -56,12 +62,21 @@ describe("pointing Hermes at ClawBox AI", () => {
   beforeEach(() => {
     cliMock.mockReset();
     cliMock.mockResolvedValue({ code: 0, stdout: "", stderr: "" });
+    resolveVisionMock.mockReset();
+    resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_VISION_MODEL_ID, verified: true, reason: "proxy-allows" });
   });
 
   it("names a model that can see, so an attached picture is looked at", async () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets()).toContain(`auxiliary.vision.provider=${CLAWAI_PROVIDER}`);
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
+  });
+
+  it("writes the previous vision model while the proxy refuses the DeepSeek id", async () => {
+    resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, verified: true, reason: "proxy-refuses" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}`);
+    expect(sets()).not.toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
   });
 
   it("leaves the vision endpoint and key to be inherited from the provider block", async () => {

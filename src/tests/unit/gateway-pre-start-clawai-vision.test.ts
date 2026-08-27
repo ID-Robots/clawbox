@@ -12,6 +12,7 @@ import path from "node:path";
 const {
   CLAWBOX_AI_VISION_MODEL,
   CLAWBOX_AI_VISION_MODEL_ID,
+  CLAWBOX_AI_LEGACY_VISION_MODEL_ID,
   CLAWBOX_AI_VISION_MODEL_LABEL,
   CLAWBOX_AI_VISION_MAX_TOKENS,
 } = await (async () => {
@@ -80,7 +81,9 @@ function migrate(cfg: Config, env: Record<string, string> = {}): { cfg: Config; 
   ].join("\n");
   const out = execFileSync("python3", ["-c", program, file], {
     encoding: "utf-8",
-    env: { ...process.env, ...env },
+    // The probe is forced so no test touches the network, and a developer's
+    // own CLAWBOX_AI_VISION_MODEL_ID cannot leak into the block under test.
+    env: { ...process.env, CLAWBOX_AI_VISION_MODEL_ID: "", CLAWBOX_VISION_PROBE: "allowed", ...env },
   }).trim().split("\n");
   return JSON.parse(out[out.length - 1]);
 }
@@ -236,13 +239,71 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision migration",
     expect(imageModel(cfg)).toEqual({ primary: "deepseek/vision-staging-1" });
   });
 
-  it("keeps the model id, label and ceiling in step with the TS constants", () => {
+  it("keeps the model ids, label and ceiling in step with the TS constants", () => {
     // The .sh hardcodes them because a shell migration cannot import a TS
     // constant. The proxy matches the BARE id against its allowlist, so a drift
     // here silently breaks every vision request.
-    expect(POLICY).toContain(`or "${CLAWBOX_AI_VISION_MODEL_ID}"`);
+    expect(POLICY).toContain(`CLAWBOX_VISION_PREFERRED_ID = "${CLAWBOX_AI_VISION_MODEL_ID}"`);
+    expect(POLICY).toContain(`CLAWBOX_VISION_LEGACY_ID = "${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}"`);
     expect(POLICY).toContain(`CLAWBOX_VISION_MODEL_NAME = "${CLAWBOX_AI_VISION_MODEL_LABEL}"`);
     expect(POLICY).toContain(`CLAWBOX_VISION_MAX_TOKENS = ${CLAWBOX_AI_VISION_MAX_TOKENS}`);
     expect(CLAWBOX_AI_VISION_MODEL).toBe(`deepseek/${CLAWBOX_AI_VISION_MODEL_ID}`);
+  });
+
+  // ── The DeepSeek switch: resolved against the proxy, never assumed ──────
+
+  it("stays on the previous vision model while the proxy refuses the new id", () => {
+    const { cfg, changed } = migrate(pairedBox(), { CLAWBOX_VISION_PROBE: "not-allowed" });
+    expect(changed).toBe(true);
+    expect(dsModels(cfg).some((m) => m.id === CLAWBOX_AI_LEGACY_VISION_MODEL_ID)).toBe(true);
+    expect(dsModels(cfg).some((m) => m.id === CLAWBOX_AI_VISION_MODEL_ID)).toBe(false);
+    expect(imageModel(cfg)).toEqual({ primary: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` });
+  });
+
+  it("retargets a field box's legacy entry and slot the first boot the proxy says yes", () => {
+    const fieldBox = pairedBox({
+      models: [
+        { id: "deepseek-v4-flash", name: "ClawBox AI Flash", input: ["text"] },
+        { id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, name: CLAWBOX_AI_VISION_MODEL_LABEL, input: ["text", "image"], maxTokens: 128000 },
+      ],
+      defaults: { imageModel: { primary: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` } },
+    });
+    const { cfg, changed } = migrate(fieldBox);
+    expect(changed).toBe(true);
+    // Retargeted in place — one vision entry, not two stacked.
+    expect(dsModels(cfg).filter((m) => m.id === CLAWBOX_AI_VISION_MODEL_ID)).toHaveLength(1);
+    expect(dsModels(cfg).some((m) => m.id === CLAWBOX_AI_LEGACY_VISION_MODEL_ID)).toBe(false);
+    expect(imageModel(cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
+  });
+
+  it("moves only OUR slot value — an owner's model is never retargeted", () => {
+    const { cfg } = migrate(pairedBox({
+      defaults: { imageModel: { primary: "google/gemini-2.5-flash" } },
+    }));
+    expect(imageModel(cfg)).toEqual({ primary: "google/gemini-2.5-flash" });
+  });
+
+  it("keeps whatever the box already names when the probe cannot answer", () => {
+    const legacyBox = pairedBox({
+      models: [
+        { id: "deepseek-v4-flash", name: "ClawBox AI Flash", input: ["text"] },
+        { id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, name: CLAWBOX_AI_VISION_MODEL_LABEL, input: ["text", "image"], maxTokens: 128000 },
+      ],
+      defaults: { imageModel: { primary: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` } },
+    });
+    const { cfg, changed } = migrate(legacyBox, { CLAWBOX_VISION_PROBE: "unknown" });
+    // A bad network moment must not flap the config in either direction.
+    expect(changed).toBe(false);
+    expect(imageModel(cfg)).toEqual({ primary: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}` });
+
+    const upgradedBox = pairedBox({
+      models: [
+        { id: CLAWBOX_AI_VISION_MODEL_ID, name: CLAWBOX_AI_VISION_MODEL_LABEL, input: ["text", "image"], maxTokens: 128000 },
+      ],
+      defaults: { imageModel: { primary: CLAWBOX_AI_VISION_MODEL } },
+    });
+    const kept = migrate(upgradedBox, { CLAWBOX_VISION_PROBE: "unknown" });
+    expect(kept.changed).toBe(false);
+    expect(imageModel(kept.cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
   });
 });

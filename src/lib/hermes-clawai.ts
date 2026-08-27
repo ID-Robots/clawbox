@@ -17,6 +17,7 @@ import {
   CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
+import { resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -76,6 +77,10 @@ export async function applyClawaiToHermes(
   // chat asks it on every open — this costs nothing.
   const couldDrawBefore = await hermesAgentDrawsImages();
 
+  const vision = await resolveVisionModelId({ token: trimmed });
+  const visionModelId = vision.id;
+  console.log(`[Hermes ClawAI] Vision model resolved to ${visionModelId} (${vision.reason})`);
+
   const steps: string[][] = [
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
     ["config", "set", `providers.${CLAWAI_PROVIDER}.api_key`, trimmed],
@@ -113,7 +118,9 @@ export async function applyClawaiToHermes(
     // the OpenClaw side — one capability, two harnesses, no second provider to
     // credential.
     ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
-    ["config", "set", "auxiliary.vision.model", CLAWBOX_AI_VISION_MODEL_ID],
+    // Resolved, not assumed: the DeepSeek vision model when the proxy serves
+    // it, the previous one until then. See src/lib/clawbox-ai-vision.ts.
+    ["config", "set", "auxiliary.vision.model", visionModelId],
     // ── Naming the session titler, for the same reason ──────────────────────
     //
     // `auxiliary.title_generation` ships as `provider: auto`, and auto is not a

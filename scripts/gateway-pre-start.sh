@@ -506,11 +506,51 @@ if isinstance(deepseek_provider, dict) and deepseek_provider.get("baseUrl") in (
 # Honour the same env override CLAWBOX_AI_VISION_MODEL_ID gives the route, so a
 # box provisioned against a staging proxy with a different alias map is not
 # dragged back to the production slug at the next boot. Unset (the normal case)
-# means the shipped default, which the unit test pins to the TS constant.
-CLAWBOX_VISION_MODEL_ID = (os.environ.get("CLAWBOX_AI_VISION_MODEL_ID") or "").strip() or "gpt-5.6-luna"
+# means the shipped PREFERRED default — DeepSeek's own multimodal model — but
+# nothing writes it unverified: the proxy allowlists bare ids and answers 400
+# model_not_allowed for anything it does not serve yet, so the block below
+# probes first and stays on the previous vision model until the proxy says
+# yes. Boots re-resolve, so a box upgrades itself the first boot after the
+# proxy starts serving the new id — and heals back the same way. This mirrors
+# resolveVisionModelId() in src/lib/clawbox-ai-vision.ts; the two must stay
+# in step. CLAWBOX_VISION_PROBE=allowed|not-allowed|unknown forces the
+# verdict (the unit test runs these bytes without a network).
+CLAWBOX_VISION_PREFERRED_ID = "deepseek-v4-flash-vision-exp"
+CLAWBOX_VISION_LEGACY_ID = "gpt-5.6-luna"
+CLAWBOX_VISION_OVERRIDE_ID = (os.environ.get("CLAWBOX_AI_VISION_MODEL_ID") or "").strip()
 CLAWBOX_VISION_MODEL_NAME = "ClawBox AI Vision"
-CLAWBOX_VISION_MODEL_REF = "deepseek/" + CLAWBOX_VISION_MODEL_ID
 CLAWBOX_VISION_MAX_TOKENS = 128000
+
+def _clawbox_vision_probe(token):
+    forced = (os.environ.get("CLAWBOX_VISION_PROBE") or "").strip()
+    if forced in ("allowed", "not-allowed", "unknown"):
+        return forced
+    try:
+        import json as _vp_json
+        import urllib.request as _vp_rq
+        base = ((os.environ.get("CLAWBOX_AI_PROXY_URL") or "").strip() or "https://clawbox.com/api/ai").rstrip("/")
+        req = _vp_rq.Request(
+            base + "/chat/completions",
+            data=_vp_json.dumps({
+                "model": CLAWBOX_VISION_PREFERRED_ID,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ok"}],
+            }).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
+            method="POST",
+        )
+        with _vp_rq.urlopen(req, timeout=6) as resp:
+            resp.read(64)
+        return "allowed"
+    except Exception as err:  # noqa: BLE001 - any failure below is a verdict, not a crash
+        body = ""
+        try:
+            body = err.read().decode("utf-8", "replace") if hasattr(err, "read") else str(err)
+        except Exception:  # noqa: BLE001
+            body = str(err)
+        if "model_not_allowed" in body or "Model not allowed" in body:
+            return "not-allowed"
+        return "unknown"
 
 # The token is the entitlement, exactly as for images: only a box that actually
 # has ClawBox AI gets a vision model pointed at the ClawBox AI proxy. Read here
@@ -519,10 +559,42 @@ CLAWBOX_VISION_MAX_TOKENS = 128000
 _vision_models = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
 _vision_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
 if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _vision_token.startswith("claw_"):
+    # Resolve which of OUR ids this box may name. An operator override wins
+    # unprobed; otherwise the proxy's own answer decides, and an unanswered
+    # question keeps whatever the config already says rather than flapping.
+    if CLAWBOX_VISION_OVERRIDE_ID:
+        CLAWBOX_VISION_MODEL_ID = CLAWBOX_VISION_OVERRIDE_ID
+    else:
+        _vision_verdict = _clawbox_vision_probe(_vision_token)
+        if _vision_verdict == "allowed":
+            CLAWBOX_VISION_MODEL_ID = CLAWBOX_VISION_PREFERRED_ID
+        elif _vision_verdict == "not-allowed":
+            CLAWBOX_VISION_MODEL_ID = CLAWBOX_VISION_LEGACY_ID
+        else:
+            _vision_has_preferred = any(
+                isinstance(m, dict) and m.get("id") == CLAWBOX_VISION_PREFERRED_ID
+                for m in _vision_models
+            )
+            CLAWBOX_VISION_MODEL_ID = (
+                CLAWBOX_VISION_PREFERRED_ID if _vision_has_preferred else CLAWBOX_VISION_LEGACY_ID
+            )
+    CLAWBOX_VISION_MODEL_REF = "deepseek/" + CLAWBOX_VISION_MODEL_ID
+    _vision_our_ids = {CLAWBOX_VISION_PREFERRED_ID, CLAWBOX_VISION_LEGACY_ID, CLAWBOX_VISION_OVERRIDE_ID} - {""}
+
     _vision_entry = next(
         (m for m in _vision_models if isinstance(m, dict) and m.get("id") == CLAWBOX_VISION_MODEL_ID),
         None,
     )
+    if _vision_entry is None:
+        # A box carrying the OTHER of our ids is mid-migration: retarget that
+        # entry in place instead of stacking a second vision model beside it.
+        _vision_entry = next(
+            (m for m in _vision_models if isinstance(m, dict) and m.get("id") in _vision_our_ids),
+            None,
+        )
+        if _vision_entry is not None:
+            _vision_entry["id"] = CLAWBOX_VISION_MODEL_ID
+            changed = True
     if _vision_entry is None:
         _vision_models.append({
             "id": CLAWBOX_VISION_MODEL_ID,
@@ -566,7 +638,20 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
             and any(isinstance(ref, str) and ref.strip() for ref in _vision_fallbacks)
         )
     )
+    _vision_primary = (
+        _vision_model_cfg.get("primary") if isinstance(_vision_model_cfg, dict) else None
+    )
+    _vision_primary = _vision_primary.strip() if isinstance(_vision_primary, str) else ""
     if not _has_vision_model:
+        agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
+        changed = True
+    elif (
+        _vision_primary in {"deepseek/" + i for i in _vision_our_ids}
+        and _vision_primary != CLAWBOX_VISION_MODEL_REF
+    ):
+        # The slot names one of OUR vision ids — the previous default is ours
+        # to move to the resolved one, both directions. Anything else in the
+        # slot is the owner's choice and stays.
         agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
         changed = True
 
