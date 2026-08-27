@@ -15,14 +15,7 @@ import {
 export const dynamic = "force-dynamic";
 
 /**
- * POST { enabled: boolean } → flip the owner's switch.
- * POST { defaultDirectory: string | null } → set (or clear) the folder a run
- * works in when the assistant names neither a project nor a directory.
- * POST { effort: "low"|"medium"|"high"|"xhigh"|"max" } → how hard a run thinks.
- * POST { maxTurns: number } → how many steps a run gets.
- * POST { tokenLimit: number | null } → token ceiling, or null for none.
- * Either way the answer is the same payload as GET
- * /setup-api/coding-agent/status, re-read after the change.
+ * The one refusal this route has: no owner browser session, no change.
  *
  * OWNER ONLY — the one thing in this subtree the agent must never be able to
  * do to itself. Middleware admits every /setup-api/* call on the MCP bearer,
@@ -39,6 +32,30 @@ function forbidden() {
   );
 }
 
+/**
+ * Change one coding-agent setting, then answer with the whole status.
+ *
+ * POST { enabled: boolean } → flip the owner's switch.
+ * POST { defaultDirectory: string | null } → set (or clear) the folder a run
+ * works in when the assistant names neither a project nor a directory.
+ * POST { effort: "low"|"medium"|"high"|"xhigh"|"max" } → how hard a run thinks.
+ * POST { maxTurns: number } → how many steps a run gets.
+ * POST { tokenLimit: number | null } → token ceiling, or null for none.
+ * Either way the answer is the same payload as GET
+ * /setup-api/coding-agent/status, re-read after the change.
+ *
+ * Owner-only; see `forbidden` for why middleware is not trusted here.
+ *
+ * The switch branch does one thing the others do not: it tells the RUNNING
+ * agent. The coding_agent_* tools are registered behind a probe the MCP server
+ * takes once at boot, so a flip that only reaches the browser leaves the panel
+ * claiming "ready" over an agent that still cannot start a run — see
+ * `refreshCodingAgentToolsIfReadinessChanged`.
+ *
+ * @param request the owner's browser request, JSON body as above
+ * @returns 200 with the re-read status, 400 on a body this route cannot read,
+ *          or 403 without an owner session
+ */
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) return forbidden();
 
