@@ -135,10 +135,15 @@ function filterAndFacetRows(
     // answer with every skill in the registry.
     const okProvider = !wantProviders.length || wantProviders.includes(provider);
 
-    if (okTrust && okCategory && okProvider) bump(sources, sourceId);
+    // Same rule as the index path: a facet value this handler would reject is a
+    // checkbox that 400s the moment it is ticked, so it is never offered. The
+    // ROW still counts as a result — only its unusable facet value is dropped.
+    if (okTrust && okCategory && okProvider && isBrowsableSource(sourceId)) bump(sources, sourceId);
     if (okSource && okCategory && okProvider) bump(trust, bucket);
     if (okSource && okTrust && okProvider && category) bump(categories, category);
-    if (okSource && okTrust && okCategory && s.provider) bump(providers, s.provider);
+    if (okSource && okTrust && okCategory && s.provider && isValidMeta(s.provider)) {
+      bump(providers, s.provider);
+    }
 
     if (!okSource || !okTrust || !okCategory || !okProvider) continue;
     if (category) categoryCoverage++;

@@ -148,6 +148,10 @@ describe("browse facets with no index (the CLI fallback)", () => {
         { id: "clawhub/a", name: "a", source: "clawhub", trust: "community" },
         { id: "official/b", name: "b", source: "official", trust: "builtin" },
         { id: "NVIDIA/c", name: "c", source: "github", trust: "trusted", provider: "NVIDIA" },
+        // A registry this build has never heard of, and a publisher string the
+        // route's own validator rejects.
+        { id: "newreg/d", name: "d", source: "brand-new-registry", trust: "community" },
+        { id: "github/e", name: "e", source: "github", trust: "community", provider: "we/ird" },
       ],
     } as unknown as Awaited<ReturnType<typeof cliBrowse>>);
     mockCliSearch.mockResolvedValue([
@@ -159,7 +163,7 @@ describe("browse facets with no index (the CLI fallback)", () => {
     const { body } = await browse("page=1&size=24");
     expect(body.degraded).toBe(true);
     expect(body.facetScope).toBe("loaded");
-    expect(countOf(body.facets.trust, "community")).toBe(1);
+    expect(countOf(body.facets.trust, "community")).toBe(3);
   });
 
   it("still applies a rail selection the CLI flag cannot express", async () => {
@@ -184,7 +188,7 @@ describe("browse facets with no index (the CLI fallback)", () => {
     // zero over rows that plainly contain them.
     const { body } = await browse("trust=official");
     expect(body.skills.map((s) => s.id)).toEqual(["official/b"]);
-    expect(countOf(body.facets.trust, "community")).toBe(1);
+    expect(countOf(body.facets.trust, "community")).toBe(3);
     expect(countOf(body.facets.trust, "trusted")).toBe(1);
     // …while the other groups do narrow to what Official can reach.
     expect(countOf(body.facets.sources, "clawhub")).toBeUndefined();
@@ -197,6 +201,15 @@ describe("browse facets with no index (the CLI fallback)", () => {
     expect(body.skills.map((s) => s.id)).toEqual(["NVIDIA/c"]);
     expect(body.total).toBe(1);
     expect((await browse("source=clawhub&provider=nvidia")).body.total).toBe(0);
+  });
+
+  it("never offers a facet value it would then reject, but still lists the row", async () => {
+    const { body } = await browse("page=1&size=24");
+    expect(body.facets.sources.some((f) => f.id === "brand-new-registry")).toBe(false);
+    expect(body.facets.providers.some((f) => f.id === "we/ird")).toBe(false);
+    // The skills themselves are real answers and stay in the grid.
+    expect(body.skills.map((s) => s.id)).toContain("newreg/d");
+    expect(body.skills.map((s) => s.id)).toContain("github/e");
   });
 
   it("passes a query through to search and still filters it", async () => {
