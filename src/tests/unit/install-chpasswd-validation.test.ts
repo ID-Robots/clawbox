@@ -154,3 +154,115 @@ d("install.sh::step_chpasswd", () => {
     expect(body).not.toMatch(/\bgit\b|curl|wget|fetch/);
   });
 });
+
+/**
+ * The same defect class as GAP 2b, and it had two other live members.
+ *
+ * `$PROJECT_DIR/data` is written by the web server, i.e. by the clawbox user,
+ * and install.sh runs as root from a NOPASSWD grant. `source`ing anything in
+ * there is therefore arbitrary ROOT code execution for anything that can already
+ * run code as clawbox — and both of these were reachable:
+ *
+ *   * `data/hostname.env` was `.`-sourced by read_configured_hostname, which the
+ *     granted `clawbox-root-update@set_hostname.service` runs;
+ *   * `data/network.env` was sourced at the TOP of install.sh, i.e. on every
+ *     root run of the script, `--step chpasswd` included;
+ *   * `data/hotspot.env` was sourced by scripts/start-ap.sh, which
+ *     clawbox-ap.service runs with no `User=` and the granted
+ *     `clawbox-root-update@restart_ap.service` restarts.
+ *
+ * The rule is now: root parses these files, never evaluates them.
+ */
+d("root never evaluates a clawbox-writable data file", () => {
+  const PAYLOAD = "x=$(id -u > PWNFILE)";
+
+  function runHostname(fileBody: string) {
+    const script = [
+      "set -uo pipefail",
+      `PROJECT_DIR="${project}"`,
+      shellFunction("read_untrusted_env_value"),
+      shellFunction("validate_hostname"),
+      shellFunction("read_configured_hostname"),
+      "read_configured_hostname",
+    ].join("\n");
+    fs.mkdirSync(path.join(project, "data"), { recursive: true });
+    fs.writeFileSync(path.join(project, "data", "hostname.env"), fileBody);
+    return spawnSync("bash", ["-c", script], { encoding: "utf-8", cwd: tmp });
+  }
+
+  it("reads a plain HOSTNAME assignment", () => {
+    expect(runHostname("HOSTNAME=kitchen\n").stdout.trim()).toBe("kitchen");
+  });
+
+  it("does not execute a command substitution planted in hostname.env", () => {
+    const r = runHostname(`${PAYLOAD.replace("PWNFILE", path.join(tmp, "pwned"))}\nHOSTNAME=kitchen\n`);
+    expect(fs.existsSync(path.join(tmp, "pwned")), "root executed data/hostname.env").toBe(false);
+    expect(r.stdout.trim()).toBe("kitchen");
+  });
+
+  it("falls back to the default rather than taking a value it cannot vouch for", () => {
+    // The old code would have run this; the parser rejects the shape instead.
+    expect(runHostname("HOSTNAME=$(id -un)\n").stdout.trim()).toBe("clawbox");
+    expect(runHostname("HOSTNAME=`id -un`\n").stdout.trim()).toBe("clawbox");
+    expect(runHostname("HOSTNAME='kitchen; id'\n").stdout.trim()).toBe("clawbox");
+  });
+
+  it("ignores a symlinked env file", () => {
+    fs.mkdirSync(path.join(project, "data"), { recursive: true });
+    const target = path.join(tmp, "elsewhere.env");
+    fs.writeFileSync(target, "HOSTNAME=elsewhere\n");
+    const link = path.join(project, "data", "hostname.env");
+    fs.rmSync(link, { force: true });
+    fs.symlinkSync(target, link);
+    const script = [
+      "set -uo pipefail",
+      `PROJECT_DIR="${project}"`,
+      shellFunction("read_untrusted_env_value"),
+      shellFunction("validate_hostname"),
+      shellFunction("read_configured_hostname"),
+      "read_configured_hostname",
+    ].join("\n");
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    expect(r.stdout.trim()).toBe("clawbox");
+  });
+
+  it("install.sh sources nothing that lives under the clawbox-writable data/", () => {
+    // The root-owned /etc/clawbox/*.env files are still sourced, and that is
+    // fine — root owns them. What must never come back is `source` on anything
+    // resolving into $PROJECT_DIR.
+    const CLAWBOX_WRITABLE = ["$PROJECT_DIR", "$IFACE_ENV", "$hostname_env", "/home/clawbox/"];
+    for (const line of INSTALL_SH.split("\n")) {
+      const m = /^\s*(?:\.|source)\s+(\S.*)$/.exec(line);
+      if (!m) continue;
+      for (const needle of CLAWBOX_WRITABLE) {
+        expect(m[1], `install.sh sources a clawbox-writable path: ${line.trim()}`).not.toContain(needle);
+      }
+    }
+  });
+
+  it("start-ap.sh parses hotspot.env instead of sourcing it", () => {
+    // It runs as root: clawbox-ap.service and clawbox-ap-watchdog.service carry
+    // no `User=`, and clawbox-root-update@restart_ap.service is granted.
+    const startAp = fs.readFileSync(path.join(REPO, "scripts", "start-ap.sh"), "utf-8");
+    expect(startAp).not.toMatch(/source\s+"\$HOTSPOT_ENV"/);
+    expect(startAp).toContain("read_env_value");
+
+    const script = [
+      "set -uo pipefail",
+      fs.readFileSync(path.join(REPO, "scripts", "start-ap.sh"), "utf-8")
+        .split("read_env_value() {")[1]
+        .split("\n}")[0]
+        .replace(/^/, "read_env_value() {") + "\n}",
+      `read_env_value "${path.join(tmp, "hotspot.env").replace(/\\/g, "/")}" HOTSPOT_PASSWORD`,
+    ].join("\n");
+    fs.writeFileSync(
+      path.join(tmp, "hotspot.env"),
+      `x=$(id -u > ${path.join(tmp, "pwned-ap").replace(/\\/g, "/")})\nHOTSPOT_PASSWORD="p a$s w'ord"\n`,
+    );
+    const r = spawnSync("bash", ["-c", script], { encoding: "utf-8" });
+    expect(fs.existsSync(path.join(tmp, "pwned-ap")), "root executed data/hotspot.env").toBe(false);
+    // A WiFi PSK may contain almost anything, so the value is passed through
+    // whole — it is only ever an argv element for nmcli, never evaluated.
+    expect(r.stdout).toBe("p a$s w'ord");
+  });
+});

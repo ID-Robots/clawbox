@@ -25,12 +25,35 @@ CONFIG_FILE="/home/clawbox/clawbox/data/config.json"
 DNSMASQ_SHARED="/etc/NetworkManager/dnsmasq-shared.d"
 CAPTIVE_CONF="$DNSMASQ_SHARED/captive-portal.conf"
 
-# Read hotspot config if available
+# Read one KEY=VALUE out of a file this script must not trust with `source`.
+#
+# This script runs as ROOT — clawbox-ap.service and clawbox-ap-watchdog.service
+# have no User=, and install.sh's granted
+# clawbox-root-update@restart_ap.service restarts them — while
+# /home/clawbox/clawbox/data is written by the web server as the clawbox user.
+# `source`ing that file was therefore arbitrary root code execution for anything
+# with clawbox-level code execution: the web server, the in-UI terminal, the
+# agent's shell. Parse it instead; the values below are only ever passed to
+# nmcli as arguments, never evaluated. TASK-445.
+read_env_value() {
+  local file="$1" key="$2" line value
+  [ -f "$file" ] || return 0
+  [ -L "$file" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
+  value="${line#*=}"
+  # Strip one layer of matching quotes; a WiFi PSK may legitimately contain
+  # almost anything else, so nothing further is filtered here.
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
+}
+
 HOTSPOT_ENV="/home/clawbox/clawbox/data/hotspot.env"
-if [ -f "$HOTSPOT_ENV" ]; then
-  # shellcheck source=/dev/null
-  source "$HOTSPOT_ENV"
-fi
+HOTSPOT_SSID="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_SSID)"
+HOTSPOT_PASSWORD="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_PASSWORD)"
+HOTSPOT_DISABLED="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_DISABLED)"
 SSID="${HOTSPOT_SSID:-ClawBox-Setup}"
 CON_NAME="ClawBox-Setup"
 

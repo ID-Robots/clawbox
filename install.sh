@@ -524,12 +524,45 @@ if ! has_openclaw_harness; then
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
 
-# Load persisted WiFi interface if available
+# Read one KEY=VALUE out of a file this script does NOT trust.
+#
+# Everything under $PROJECT_DIR/data is written by the web server, i.e. by the
+# clawbox user — and install.sh runs as root, reached from a NOPASSWD grant. So
+# `source`ing anything in there is arbitrary root code execution for anything
+# with clawbox-level code execution: the web server, the in-UI terminal, the
+# agent's shell. `printf 'x() { :; }; id > /tmp/pwn\n' > data/hostname.env` plus
+# the granted `clawbox-root-update@set_hostname.service` was exactly that, and
+# data/network.env was worse still because it was sourced on EVERY root run of
+# this script, `--step chpasswd` included.
+#
+# Parse instead: first matching assignment, optional single or double quotes
+# stripped, and nothing containing a character that could not have come from the
+# writer we expect. The caller still validates the meaning of the value.
+# TASK-445.
+read_untrusted_env_value() {
+  local file="$1" key="$2" line value
+  [ -f "$file" ] || return 0
+  [ -L "$file" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
+  value="${line#*=}"
+  # Strip one layer of matching quotes.
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  case "$value" in
+    ""|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s' "$value"
+}
+
+# Load persisted WiFi interface if available.
 IFACE_ENV="$PROJECT_DIR/data/network.env"
-if [ -f "$IFACE_ENV" ]; then
-  # shellcheck disable=SC1090
-  source "$IFACE_ENV"
+_persisted_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_persisted_iface" ]; then
+  NETWORK_INTERFACE="$_persisted_iface"
 fi
+unset _persisted_iface
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1000,11 +1033,13 @@ validate_hostname() {
 # Falls back to "clawbox".
 read_configured_hostname() {
   local hostname_env="$PROJECT_DIR/data/hostname.env"
-  local name=""
-  if [ -f "$hostname_env" ]; then
-    # shellcheck source=/dev/null
-    name=$(. "$hostname_env" 2>/dev/null; printf '%s' "${HOSTNAME:-}")
-  fi
+  # PARSED, never sourced. data/ is clawbox-writable and this function runs as
+  # root from the granted clawbox-root-update@set_hostname.service, so `.` on
+  # this file was arbitrary root code execution for anything that can already
+  # run code as clawbox. validate_hostname below still decides whether the value
+  # is usable; this only decides that it is a value and not a program. TASK-445.
+  local name
+  name="$(read_untrusted_env_value "$hostname_env" HOSTNAME)"
   if [ -z "$name" ]; then
     name="clawbox"
   fi
@@ -4445,11 +4480,13 @@ step_validate_services() {
   # probe failures.
 
   # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
-  # export it, so on a fresh install our process still has it unset. Reload
-  # the file before probing.
-  if [ -f "$IFACE_ENV" ]; then
-    # shellcheck disable=SC1090
-    source "$IFACE_ENV"
+  # export it, so on a fresh install our process still has it unset. Reload the
+  # value before probing — PARSED from the clawbox-writable copy, sourced only
+  # from the root-owned one. See read_untrusted_env_value. TASK-445.
+  local _iface
+  _iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+  if [ -n "$_iface" ]; then
+    NETWORK_INTERFACE="$_iface"
   elif [ -f /etc/clawbox/network.env ]; then
     # shellcheck disable=SC1091
     source /etc/clawbox/network.env
@@ -4832,10 +4869,13 @@ step_validate_services || VALIDATE_RC=$?
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
-# Re-read persisted interface for summary
-if [ -f "$IFACE_ENV" ]; then
-  source "$IFACE_ENV"
+# Re-read the persisted interface for the summary. Parsed, not sourced — this
+# file is clawbox-writable and we are root. TASK-445.
+_summary_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_summary_iface" ]; then
+  NETWORK_INTERFACE="$_summary_iface"
 fi
+unset _summary_iface
 
 echo ""
 echo "=== ClawBox Setup Complete ==="
