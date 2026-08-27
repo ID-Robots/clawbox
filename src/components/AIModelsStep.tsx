@@ -1183,9 +1183,22 @@ export default function AIModelsStep({
     return usableDefaultModelId;
   }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable, usableDefaultModelId]);
 
-  /** The catalogue has models and this auth mode can run none of them. Not
-   * gated on `useCustomModel`: a blank custom field falls back to the catalogue
-   * too, so custom mode is not an exemption from the question. */
+  /**
+   * The catalogue HAS models and this auth mode can run none of them.
+   *
+   * Not gated on `useCustomModel`: a blank custom field falls back to the
+   * catalogue too, so custom mode is not an exemption from the question.
+   *
+   * `models.length > 0` is load-bearing, not an oversight. An EMPTY catalogue
+   * means the device could not enumerate one — that is "we do not know what
+   * this credential can run", not "it can run nothing", and refusing the
+   * sign-in on no data would be the same lie as offering Mythos was, pointing
+   * the other way. On that path the save simply sends no `model` and the
+   * server applies its own provider default, which is what it did before any
+   * of this. (`useProviderCatalog` always falls back to the curated arrays in
+   * provider-models.ts, so today this is unreachable — the condition is here
+   * to keep it unreachable for the right reason.)
+   */
   const noUsableCatalogModel = Boolean(
     activeCatalog && activeCatalog.models.length > 0 && !usableDefaultModelId,
   );
