@@ -57,10 +57,20 @@ async function deleteOllamaModels(): Promise<void> {
   // Ollama is routinely STOPPED at reset time (the Local AI exclusive-mode
   // runtime shuts it down while llama.cpp is active), and its models live
   // under /usr/share/ollama — out of reach of the home wipe. Start it
-  // best-effort so the API deletes below actually run; the polkit grant
-  // already allows the clawbox user to manage units.
+  // best-effort so the API deletes below actually run.
+  //
+  // Through sudo, and spelled `ollama.service`. This used to be a bare
+  // `systemctl start ollama` with no sudo, which worked only because of the
+  // unscoped polkit `manage-units` grant — the one thing that still makes the
+  // whole allow-list bypassable (TASK-539). The moment that grant goes, an
+  // unprivileged call here fails with "Interactive authentication required" and
+  // factory reset stops deleting models, silently. The sudoers rule is
+  // `start ollama.service`; sudoers matches arguments exactly, so the bare unit
+  // name would NOT have matched it either. TASK-445.
   try {
-    await execFile("/usr/bin/systemctl", ["start", "ollama"], { timeout: 30_000 });
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "start", "ollama.service"], {
+      timeout: 30_000,
+    });
   } catch {
     // Not installed / failed to start — the fetch below decides what's cleanable.
   }
