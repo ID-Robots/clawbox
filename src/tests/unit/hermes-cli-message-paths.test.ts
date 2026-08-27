@@ -88,6 +88,29 @@ describe("an on-device path in the line the parser keeps", () => {
   });
 
   /**
+   * Mismatched delimiters are the degradation the quoted rule is allowed to
+   * have, so it is pinned rather than left to chance.
+   *
+   * The character class excludes all three quote characters, so the closing
+   * backreference never matches and the quoted rule fails outright. The
+   * unquoted rule then redacts what it can — which is the whole path here,
+   * since this one holds no space — and the rest of the sentence is untouched.
+   * The failure mode that matters is the opposite one: a quoted rule that kept
+   * consuming would swallow the remedy along with the path.
+   */
+  it("falls back to the unquoted rule when the quotes do not match", () => {
+    const msg = hermesFailureMessage(
+      "",
+      `PermissionError: Permission denied: '/var/lib/hermes/state.db" — retry in 30s`,
+    );
+
+    expect(msg).not.toContain("/var/");
+    expect(msg).not.toContain("state.db");
+    expect(msg).toContain("retry in 30s");
+    expect(msg).toContain("Permission denied");
+  });
+
+  /**
    * The line that must NOT be redacted, and the reason the rule is scoped to
    * ABSOLUTE paths.
    *
