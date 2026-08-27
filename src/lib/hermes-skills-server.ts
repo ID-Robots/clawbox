@@ -33,10 +33,18 @@ import { isValidSkillName } from '@/lib/hermes-skills';
  * feature, so refuse when the active harness isn't Hermes. Returns a 404
  * response to return early, or null to proceed. (On a dual box Hermes is
  * installed, so without this the CLI would run even with the store UI hidden.)
+ *
+ * The body carries `code: 'not_hermes'` so a machine caller can tell this 404
+ * apart from the ones the handlers themselves raise for an id they could not
+ * find. Both are 404 with a JSON `error` string, and the MCP's generic mapping
+ * reads any such body as "the id was wrong" — advice that sends the agent
+ * round the same guard again, since every skills route sits behind it. The
+ * status and the human-readable string are unchanged: the browser and
+ * `src/middleware.ts` see exactly what they saw before.
  */
 export async function hermesSkillsGuard(): Promise<NextResponse | null> {
   if ((await getActiveHarness()) !== 'hermes') {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    return NextResponse.json({ error: 'Not found', code: 'not_hermes' }, { status: 404 });
   }
   return null;
 }
