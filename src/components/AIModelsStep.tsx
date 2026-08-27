@@ -1149,6 +1149,7 @@ export default function AIModelsStep({
       !isSubscription || model.availableOnSubscription !== false,
     [isSubscription],
   );
+
   /**
    * The curated model id the picker SHOWS and the save path SENDS — one value,
    * so the screen can never promise a model the request does not carry.
@@ -1244,16 +1245,17 @@ export default function AIModelsStep({
   const saveOAuthToken = useCallback(async (
     tokenData: { access_token?: string; id_token?: string; refresh_token?: string; expires_in?: number; projectId?: string; oauthHandoff?: boolean }
   ) => {
-    saveControllerRef.current?.abort();
-    const controller = new AbortController();
-    saveControllerRef.current = controller;
-
     if (noUsableCatalogModel) {
       // Every model in the catalogue sits outside this sign-in's surface. Say
       // so, rather than configuring the provider and letting the server's own
       // default — which comes from the same catalogue — fail at the first turn.
+      // Before the controller, so a refused save leaves no live one behind.
       return showError(t("ai.modelNoneAvailable"));
     }
+    saveControllerRef.current?.abort();
+    const controller = new AbortController();
+    saveControllerRef.current = controller;
+
     showConfiguring();
 
     try {

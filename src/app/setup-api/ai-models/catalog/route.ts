@@ -46,7 +46,8 @@ interface CatalogModel {
   hint?: string;
   contextWindow: number;
   input?: string;
-  /** See SUBSCRIPTION_SURFACE_PROVIDER below. `undefined` = not determined. */
+  /** Whether the provider's SUBSCRIPTION surface carries this model. See
+   * SUBSCRIPTION_SURFACE in provider-models.ts; `undefined` = not determined. */
   availableOnSubscription?: boolean;
 }
 

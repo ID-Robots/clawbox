@@ -367,7 +367,7 @@ export function HeaderDropdown({
         aria-expanded={open}
         aria-controls={open ? listboxId : undefined}
         disabled={disabled}
-        onClick={() => (open ? setOpen(false) : openList('active'))}
+        onClick={() => (open ? close() : openList('active'))}
         onKeyDown={handleTriggerKeyDown}
         className="header-dropdown-trigger"
         style={{
