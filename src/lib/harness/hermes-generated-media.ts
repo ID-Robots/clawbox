@@ -77,6 +77,21 @@ const FILE_MODE = 0o600;
  */
 const MAX_ADOPTED_PER_TURN = 4;
 
+/**
+ * How many sources one turn may TRY.
+ *
+ * The cap above bounds PICTURES, and a picture that fails is not a picture, so
+ * it bounds no work at all: a source that is refused costs the same two
+ * `realpath` calls and a `stat` and never counts against it. That was tolerable
+ * while only cache paths were reclaimed. It stopped being tolerable when every
+ * local image path the model names became a source, because the harness output
+ * a reply is read from is capped at megabytes, not at lines - a reply made of
+ * `MEDIA:` lines naming files that do not exist is tens of thousands of
+ * distinct sources, each doing filesystem work on the Jetson, inside the turn
+ * the customer is waiting on.
+ */
+const MAX_ADOPTION_ATTEMPTS = 32;
+
 /** Where every Hermes image backend writes — `save_b64_image` in the plugin ABC. */
 export function hermesImageCacheDir(): string {
   return path.join(hermesHome(), "cache", "images");
@@ -210,7 +225,12 @@ async function adoptionRoots(): Promise<AdoptionRoot[]> {
  */
 function containedIn(root: string, abs: string): string | null {
   const rel = path.relative(root, path.resolve(abs));
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  if (!rel || path.isAbsolute(rel)) return null;
+  // `..` is an escape only as a whole SEGMENT. A bare `startsWith("..")` also
+  // refuses a legitimate child called `..crab.png`, which is a real filename a
+  // real agent can write - and in `reclaimable` the same test misfires the
+  // other way, stripping a servable media-root path of its exemption.
+  if (rel === ".." || rel.startsWith(".." + path.sep)) return null;
   return path.join(root, rel);
 }
 
@@ -276,11 +296,14 @@ export async function adoptHermesGeneratedImages(
   // model's own sentence name the same file, and they do not always spell it
   // the same way ("/home/clawbox/./a.png" is the second card nobody asked for).
   const seen = new Set<string>();
+  let attempts = 0;
   for (const source of sources) {
     if (adopted.length >= MAX_ADOPTED_PER_TURN) break;
+    if (attempts >= MAX_ADOPTION_ATTEMPTS) break;
     const key = typeof source === "string" ? path.resolve(source) : String(source);
     if (seen.has(key)) continue;
     seen.add(key);
+    attempts++;
     const copied = await adoptOne(source, roots);
     if (copied) adopted.push(copied);
   }

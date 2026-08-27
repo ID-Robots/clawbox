@@ -346,6 +346,44 @@ MEDIA:${attached}`);
     expect(await adoptHermesGeneratedImages(sources)).toHaveLength(1);
   });
 
+  it("adopts a child whose NAME begins with two dots", async () => {
+    // `path.relative` returns a bare segment, so `..crab.png` inside the root
+    // yields rel === "..crab.png". A `startsWith("..")` test reads that as a
+    // traversal and refuses a file that is plainly inside the root.
+    const drawn = writeWorkspaceImage("..crab.png");
+    const { adoptHermesGeneratedImages } = await load();
+    expect(await adoptHermesGeneratedImages([drawn])).toHaveLength(1);
+  });
+
+  it("still refuses a real traversal, which is `..` as a whole segment", async () => {
+    const { adoptHermesGeneratedImages } = await load();
+    const climbing = path.join(cacheDir(), "..", "..", "..", "escape.png");
+    expect(await adoptHermesGeneratedImages([climbing])).toEqual([]);
+  });
+
+  it("bounds the WORK a turn can be made to do, not just the pictures it yields", async () => {
+    // Nothing here can ever be adopted, so a cap counting successes never
+    // trips and every invented path still pays for a realpath and a stat on
+    // the box. The reply these come from is capped in megabytes, not lines.
+    const invented = Array.from({ length: 500 }, (_, i) =>
+      path.join(home, `invented_${i}.png`),
+    );
+    const { adoptHermesGeneratedImages } = await load();
+    const before = Date.now();
+    expect(await adoptHermesGeneratedImages(invented)).toEqual([]);
+    // The bound is the assertion; the timing is only here to say why it exists.
+    expect(Date.now() - before).toBeLessThan(4000);
+  });
+
+  it("still reaches a real picture that follows a run of misses", async () => {
+    // The attempt cap must not be so tight that a reply with a few dead paths
+    // in front of a real one loses the real one.
+    const good = writeWorkspaceImage("after_misses.png");
+    const misses = Array.from({ length: 8 }, (_, i) => path.join(home, `gone_${i}.png`));
+    const { adoptHermesGeneratedImages } = await load();
+    expect(await adoptHermesGeneratedImages([...misses, good])).toHaveLength(1);
+  });
+
   it("still stops at four however many the agent wrote", async () => {
     const files = ["a", "b", "c", "d", "e", "f"].map((n) =>
       writeWorkspaceImage(`spam_${n}.png`),
