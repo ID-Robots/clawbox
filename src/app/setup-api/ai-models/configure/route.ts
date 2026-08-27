@@ -61,6 +61,10 @@ import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
+import {
+  isClaudeSubscriptionOnly,
+  offSurfaceClaudeModelMessage,
+} from "@/lib/subscription-surface";
 // The model name on this route arrives in the request body. For a local
 // provider it is the whole of `apiKey`, which nothing further constrains, and
 // it reaches the lines below both directly and inside a subprocess error that
@@ -1527,6 +1531,60 @@ export async function POST(request: Request) {
           return NextResponse.json({ error: err.message }, { status: 502 });
         }
         throw err; // unexpected — fall to the outer catch, which classifies it
+      }
+    }
+
+    // ── The Claude subscription surface ─────────────────────────────────────
+    // This route is the SECOND write path to `agents.defaults.model.primary`;
+    // /setup-api/chat/model is the first, and the guard there exists "for ids
+    // that arrive some other way". This is that other way. The shape check
+    // above deliberately does not consult the curated list ("users can type
+    // newer model IDs we haven't added yet"), and the wizard's picker exempts
+    // a typed custom id from its own greying-out rule, so without this a
+    // Claude-subscription box can be pinned from Settings to exactly the model
+    // the chat header refuses — one the `claude-cli` surface cannot route.
+    //
+    // Judged on the SETTLED `config.defaultModel`, after every branch above
+    // has had its say, so the PROVIDERS-table default is covered as well as a
+    // typed id: one check for every value this save can write to primary.
+    //
+    // AFTER the Hermes branch, because the question it asks is about
+    // `openclaw.json` and a Hermes box has none — and that branch refuses a
+    // subscription save outright anyway. BEFORE `writeAuthProfiles` below,
+    // because a refusal that has already persisted a credential is not a
+    // refusal, it is a half-applied save. Nothing between here and there
+    // writes anything (the OAuth handoff file is consumed only on success).
+    {
+      const slash = config.defaultModel.indexOf("/");
+      const offSurface = await offSurfaceClaudeModelMessage(
+        slash > 0 ? config.defaultModel.slice(0, slash) : null,
+        config.defaultModel.slice(slash + 1),
+        async () => {
+          // Ask about the profiles this save is ABOUT TO leave behind, not the
+          // ones on disk: a first Claude sign-in writes the OAuth profile that
+          // makes the box subscription-only, and an API-key save writes the
+          // key that stops it being. Reading disk alone gets BOTH of those
+          // backwards — it would wave the sign-in through and then refuse the
+          // very switch the refusal message recommends.
+          let existing: OpenClawConfig | null = null;
+          try {
+            existing = await readOpenClawConfig();
+          } catch {
+            // No readable config yet (fresh box). The projected profile below
+            // still answers the question on its own.
+          }
+          return isClaudeSubscriptionOnly({
+            ...(existing?.auth?.profiles ?? {}),
+            // Exactly what `baseOps` writes for this profile key below.
+            [config.profileKey]: {
+              provider: ocProvider,
+              mode: authMode === "subscription" ? "oauth" : "api_key",
+            },
+          });
+        },
+      );
+      if (offSurface) {
+        return NextResponse.json({ error: offSurface }, { status: 400 });
       }
     }
 
