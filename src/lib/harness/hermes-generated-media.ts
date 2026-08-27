@@ -182,7 +182,7 @@ interface AdoptionRoot {
  * path the model simply invented — is refused, and a refused picture costs a
  * card, never the reply.
  */
-async function adoptionRoots(): Promise<AdoptionRoot[]> {
+async function adoptionRoots(mediaRoot: string | null): Promise<AdoptionRoot[]> {
   const roots: AdoptionRoot[] = [];
   const add = async (dir: string, guarded: boolean) => {
     if (!dir) return;
@@ -209,7 +209,7 @@ async function adoptionRoots(): Promise<AdoptionRoot[]> {
   // DATA_DIR guard would then refuse it and the customer would lose a picture
   // that works today. Unguarded for the same reason as the cache: `chat/media`
   // already serves this exact tree to this exact session.
-  await add((await servableMediaRoot()) ?? "", false);
+  await add(mediaRoot ?? "", false);
   await add(filesBrowseRoot(), true);
   // Where a shell-improvising agent writes when it does not write beside itself.
   await add(os.tmpdir(), true);
@@ -273,9 +273,17 @@ async function resolveInAdoptionRoot(
  */
 export async function adoptHermesGeneratedImages(
   sources: readonly string[],
+  mediaRoot?: string | null,
 ): Promise<string[]> {
   if (!sources.length) return [];
-  const roots = await adoptionRoots();
+  // Resolved ONCE per turn, by the caller, and threaded through. Resolving it
+  // again here would let the two halves disagree: `reclaimImageMentions` takes
+  // an echoed attachment OUT of the caption on the strength of the first
+  // lookup, and a second lookup that failed would then drop the root that is
+  // the only thing able to adopt it — the path gone from the sentence and no
+  // card in its place. A caller with no root of its own says so, and gets one.
+  const resolved = mediaRoot === undefined ? await servableMediaRoot() : mediaRoot;
+  const roots = await adoptionRoots(resolved);
   // No root resolves on this box, so there is nowhere a picture could be.
   if (!roots.length) return [];
 

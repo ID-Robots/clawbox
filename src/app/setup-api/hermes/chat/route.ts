@@ -465,10 +465,12 @@ async function settleTurn(
   // working. Everything else has to earn its card through adoption.
   const servableRoot = await servableMediaRoot();
   const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
-  const drawn = await adoptHermesGeneratedImages([
-    ...(record?.generatedImages ?? []),
-    ...mentioned,
-  ]);
+  const drawn = await adoptHermesGeneratedImages(
+    [...(record?.generatedImages ?? []), ...mentioned],
+    // The SAME root the caption was judged against, so the two halves cannot
+    // disagree about which tree is already servable.
+    servableRoot,
+  );
   // A picture the AGENT drew, said the way every other picture in this chat is
   // said. Hermes has no `MEDIA:` convention of its own — the backend saves the
   // file and the model writes prose about the path — so the reply reaches the

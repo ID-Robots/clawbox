@@ -324,7 +324,13 @@ describe("adopting a picture the agent drew", () => {
     // The dedupe used to key on the raw string, and the model does not always
     // write the path back exactly as the tool gave it.
     const drawn = writeWorkspaceImage("same.png");
-    const wordy = path.join(home, ".", "same.png");
+    // Built by concatenation on purpose. `path.join` would normalise the `.`
+    // away here in the TEST, handing the code under test two identical strings
+    // that raw-string keying would also collapse - a case that cannot fail.
+    const wordy = `${home}${path.sep}.${path.sep}same.png`;
+    // So the premise is asserted rather than assumed: if a future Node ever
+    // normalises this, the test says so instead of quietly proving nothing.
+    expect(wordy).not.toBe(drawn);
     const { adoptHermesGeneratedImages } = await load();
     expect(await adoptHermesGeneratedImages([drawn, wordy])).toHaveLength(1);
   });
@@ -382,6 +388,31 @@ MEDIA:${attached}`);
     const misses = Array.from({ length: 8 }, (_, i) => path.join(home, `gone_${i}.png`));
     const { adoptHermesGeneratedImages } = await load();
     expect(await adoptHermesGeneratedImages([...misses, good])).toHaveLength(1);
+  });
+
+  it("judges the caption and the adoption against the SAME media root", async () => {
+    // `settleTurn` resolves the root once and threads it through both halves.
+    // When adoption resolved its own, the two could disagree: the caption gave
+    // an echoed attachment up on the strength of the first lookup while the
+    // second dropped the only root able to adopt it — the path gone from the
+    // sentence and no card in its place.
+    const attached = writeImage(
+      path.join(home, "data", "chat-media", "chat-attachments", "threaded.png"),
+    );
+    const mediaRoot = path.join(home, "data", "chat-media");
+    const { adoptHermesGeneratedImages, reclaimImageMentions } = await load();
+
+    // With the root, the exemption fires and the path stays in the caption.
+    const kept = reclaimImageMentions(`Got it.
+MEDIA:${attached}`, mediaRoot);
+    expect(kept.sources).toEqual([]);
+
+    // Without it, the path is reclaimed — and the SAME root, handed to
+    // adoption, is what keeps it renderable.
+    const taken = reclaimImageMentions(`Got it.
+MEDIA:${attached}`, null);
+    expect(taken.sources).toEqual([attached]);
+    expect(await adoptHermesGeneratedImages(taken.sources, mediaRoot)).toHaveLength(1);
   });
 
   it("still stops at four however many the agent wrote", async () => {
