@@ -91,6 +91,18 @@ function approve(entries: { id: string; fingerprint: string }[], init: { cookie?
   return POST(request({ ...init, body: { action: "approve_batch", drafts: entries } }));
 }
 
+/** The owner's tab went away before the batch got going. */
+function abortedRequest(entries: { id: string; fingerprint: string }[]): Request {
+  const controller = new AbortController();
+  controller.abort();
+  return new Request("http://localhost/setup-api/email/pending", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", cookie: ownerCookie() },
+    body: JSON.stringify({ action: "approve_batch", drafts: entries }),
+    signal: controller.signal,
+  });
+}
+
 /** The store as it really behaves: a draft is claimable once, and only unchanged. */
 function liveStore(drafts: PendingEmail[]) {
   const queue = new Map(drafts.map((d) => [d.id, d]));
@@ -147,7 +159,7 @@ describe("one approval, every message", () => {
     const res = await approve(entriesFor(DRAFTS), { cookie: ownerCookie() });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toMatchObject({ success: true, sent: 3, failed: 0 });
+    expect(body).toMatchObject({ success: true, sent: 3, failed: 0, skipped: 0 });
     expect(body.results.every((r: { ok: boolean }) => r.ok)).toBe(true);
     expect(mockSend).toHaveBeenCalledTimes(3);
 
@@ -257,6 +269,21 @@ describe("what actually happened, per draft", () => {
     expect(joined).not.toContain("person1@example.com");
     expect(joined).not.toContain("Subject 1");
     expect(joined).not.toContain("The body of message 1.");
+  });
+
+  it("does not call an abandoned batch a success when it sent nothing", async () => {
+    // With no entries attempted, `failed` is 0 — and a verdict resting on that
+    // alone would report a batch that did nothing as a clean send. That is the
+    // `{ restarted: true }` shape again, so the count of what was never reached
+    // has to be part of the answer.
+    const res = await POST(abortedRequest(entriesFor(DRAFTS)));
+    expect(res.status).toBe(207);
+    const body = await res.json();
+    expect(body).toMatchObject({ success: false, sent: 0, failed: 0, skipped: 3 });
+    expect(body.results).toEqual([]);
+    expect(mockSend).not.toHaveBeenCalled();
+    // Nothing was claimed, so every draft is still waiting.
+    expect(mockClaimIfUnchanged).not.toHaveBeenCalled();
   });
 
   it("says a draft is gone rather than sending something else in its place", async () => {

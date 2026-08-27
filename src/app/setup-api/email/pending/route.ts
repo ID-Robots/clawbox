@@ -290,11 +290,18 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
 
   const sent = results.filter((r) => r.ok).length;
   const failed = results.length - sent;
+  // Entries the loop never reached, because the request was abandoned partway.
+  // Counted rather than ignored: with an empty `results` — an abort before the
+  // FIRST send — `failed === 0` is true and nothing was sent, so a verdict
+  // resting on `failed` alone would call a batch that did nothing a success.
+  // That is the precise bug this route exists not to have.
+  const skipped = parsed.entries.length - results.length;
+  const everythingWent = failed === 0 && skipped === 0;
   // 207 for anything short of everything. A caller that reads only the status
   // line must not be able to mistake "six of eight" for success — which is
   // precisely the reading a 200 invites.
   return NextResponse.json(
-    { success: failed === 0, approved: true, sent, failed, results },
-    { status: failed === 0 ? 200 : 207 },
+    { success: everythingWent, approved: true, sent, failed, skipped, results },
+    { status: everythingWent ? 200 : 207 },
   );
 }
