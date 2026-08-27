@@ -4,6 +4,7 @@
 // answers 404 "Not found", which a small model reads as "no such app" and
 // retries forever — and a chronically-404ing tool is exactly what trips
 // Hermes' per-server circuit breaker and takes EVERY ClawBox tool offline.
+// STORE_EDITION_RULE below is what turns that 404 into "stop".
 
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
@@ -53,6 +54,21 @@ const CODE_RULES: ErrorRule[] = [
     next: "Call code_project_list for the ids that exist here, or create one with code_project_init.",
   },
 ];
+
+// openclawAppsGuard() answers 404 `{"error":"Not found","code":"not_openclaw"}`
+// from every store route. Matched on the CODE, not the status: the store routes
+// also 404 for an app id that does not exist, and the two need opposite advice.
+// The tools are registered off an edition probe taken once when the MCP child
+// spawned, so the window is a device whose harness changed since then.
+const STORE_EDITION_RULE: ErrorRule = {
+  status: 404,
+  match: /"code"\s*:\s*"not_openclaw"/,
+  code: "NOT_SUPPORTED_HERE",
+  message: "This ClawBox is not running the OpenClaw harness, so it has no app store.",
+  next:
+    "Do not retry and do not call the app store tools again this session. "
+    + "Call device_status and tell the user which harness the device is on.",
+};
 
 const WEBAPP_RULES: ErrorRule[] = [
   {
@@ -164,6 +180,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
       const body = await apiGet("/setup-api/apps/store", {
         query: { ...(query ? { q: query } : {}), limit },
         timeoutMs: 20_000,
+        rules: [STORE_EDITION_RULE],
       });
       return json(body);
     },
@@ -175,7 +192,11 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     { app_id: zSlug("App id from app_search") },
     { editions: ["openclaw"], readOnly: false },
     async ({ app_id }: { app_id: string }) => {
-      await apiPost("/setup-api/apps/install", { appId: app_id }, { timeoutMs: 120_000 });
+      await apiPost(
+        "/setup-api/apps/install",
+        { appId: app_id },
+        { timeoutMs: 120_000, rules: [STORE_EDITION_RULE] },
+      );
       return text(`Installed "${app_id}". Open it with ui_open_app using "installed-${app_id}".`);
     },
   );

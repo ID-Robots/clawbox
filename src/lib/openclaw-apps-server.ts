@@ -23,9 +23,16 @@
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 
+// Labelled for the same reason hermesSkillsGuard's 404 is: a 404 whose JSON
+// carries an `error` string is what the MCP's generic mapping reads as "the id
+// you passed does not exist", and the recovery it advises — list the ids and
+// call again — comes straight back through this guard. The header comment
+// above already recorded that a chronically-404ing tool trips the agent's
+// circuit breaker; the `code` is what lets the tool stop instead. Status and
+// human-readable string unchanged.
 export async function openclawAppsGuard(): Promise<NextResponse | null> {
   if ((await getActiveHarness()) !== "openclaw") {
-    return NextResponse.json({ error: "Not found" }, { status: 404 });
+    return NextResponse.json({ error: "Not found", code: "not_openclaw" }, { status: 404 });
   }
   return null;
 }

@@ -17,7 +17,7 @@ import {
   isValidQuery,
   isValidSkillName,
 } from "../../src/lib/hermes-skills";
-import { apiGet, apiPost } from "../lib/api";
+import { type ApiOptions, apiGet, apiPost } from "../lib/api";
 import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zText } from "../lib/schema";
@@ -57,6 +57,56 @@ interface InstalledBody {
   counts?: Record<string, number>;
 }
 
+/**
+ * EVERY /setup-api/hermes/skills/* route opens with hermesSkillsGuard(), which
+ * answers 404 `{"error":"Not found","code":"not_hermes"}` when the device is
+ * not on the Hermes harness. Without a rule for it that body is indistinguish-
+ * able, to the generic mapping, from a handler saying it could not find an id:
+ * both are a 404 whose JSON carries an `error` string, so hasJsonErrorBody()
+ * classifies it RESOURCE-level and the agent is told to list what exists and
+ * call again with a real id. It cannot recover that way — skill_list goes
+ * through the same guard and 404s too — and errors.ts names exactly this
+ * confusion, in the other direction, as the thing that branch must never do.
+ *
+ * These tools are registered off an edition probe taken ONCE when the MCP child
+ * spawned, so the window is a device whose harness changed since then.
+ */
+const EDITION_RULE: ErrorRule = {
+  status: 404,
+  match: /"code"\s*:\s*"not_hermes"/,
+  code: "NOT_SUPPORTED_HERE",
+  message: "This ClawBox is not running the Hermes harness, so it has no skill store.",
+  next:
+    "Do not retry and do not call the skill_* tools again this session. "
+    + "Call device_status and tell the user which harness the device is on.",
+};
+
+// The guard is per-ROUTE, so decoding it has to be per-CALL, not per-tool: the
+// bug this closes existed because rules were attached at three call sites and
+// omitted at the other four. Going through these two wrappers is what makes
+// that impossible to get wrong again — `apiGet`/`apiPost` are not called
+// directly anywhere else in this module, and a test asserts it.
+//
+// The edition rule is PREPENDED. Every other 404 rule here is `match`-gated on
+// its own `code`, so the two cannot shadow each other; the exception is
+// skill_info's status-only 404, which the edition rule must precede or an
+// off-Hermes device would be told its id does not exist.
+type SkillsApiOptions = Omit<ApiOptions, "method" | "body">;
+
+const withEditionRule = (options: SkillsApiOptions): SkillsApiOptions => ({
+  ...options,
+  rules: [EDITION_RULE, ...(options.rules ?? [])],
+});
+
+const skillsGet = <T>(path: string, options: SkillsApiOptions = {}): Promise<T> =>
+  apiGet<T>(path, withEditionRule(options));
+
+const skillsPost = <T>(
+  path: string,
+  body: Record<string, unknown>,
+  options: SkillsApiOptions = {},
+): Promise<T> => apiPost<T>(path, body, withEditionRule(options));
+
 // Only the failures whose body says nothing useful. Every install refusal the
 // route describes in JSON is decoded in refusalToToolError() instead — an
 // ErrorRule is applied inside api() and would otherwise win first, which is how
@@ -88,12 +138,13 @@ const BUILTIN_NEXT =
  * pre-condition does.
  *
  * The 404 and 409 rules are matched on the route's `code` field and not on the
- * status alone. The Hermes edition gate answers 404 from this same route with
- * no code, and these tools are registered off an edition probe taken once at
- * startup — so on a device that changed harness since then, "no such skill is
- * installed" would be a confident answer to a question nobody asked. An
- * unlabelled status falls through to the generic mapping, which is the honest
- * outcome when we cannot tell which failure it was.
+ * status alone. The Hermes edition gate answers 404 from this same route, and
+ * these tools are registered off an edition probe taken once at startup — so on
+ * a device that changed harness since then, "no such skill is installed" would
+ * be a confident answer to a question nobody asked. That gate's own 404 is
+ * decoded by EDITION_RULE, which skillsPost() prepends; a 404 carrying neither
+ * code still falls through to the generic mapping, which is the honest outcome
+ * when we cannot tell which failure it was.
  */
 const uninstallRules = (name: string): ErrorRule[] => [
   {
@@ -143,7 +194,7 @@ const CATALOG_RULES: ErrorRule[] = [
  * was the only thing the agent ever saw.
  */
 async function installedSkills(): Promise<InstalledSkill[] | null> {
-  const body = await apiGet<InstalledBody>("/setup-api/hermes/skills/installed", {
+  const body = await skillsGet<InstalledBody>("/setup-api/hermes/skills/installed", {
     timeoutMs: 15_000,
   }).catch(() => null);
   return body?.skills ?? null;
@@ -393,7 +444,7 @@ export function registerSkillTools(reg: Registrar): void {
           "Search with plain words, 1 to 128 characters, not starting with a dash.",
         );
       }
-      const body = await apiGet<BrowseBody>("/setup-api/hermes/skills/browse", {
+      const body = await skillsGet<BrowseBody>("/setup-api/hermes/skills/browse", {
         query: { q: query, source, sort, size: limit, page: 1 },
         timeoutMs: 30_000,
         rules: CATALOG_RULES,
@@ -419,7 +470,7 @@ export function registerSkillTools(reg: Registrar): void {
     {},
     { editions: ["hermes"], readOnly: true, profile: "core", maxChars: 6_000 },
     async () => {
-      const body = await apiGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
+      const body = await skillsGet<InstalledBody>("/setup-api/hermes/skills/installed", { timeoutMs: 15_000 });
       // A device ships ~77 built-in skills. One terse line each — pretty-printed
       // JSON of the full records is four times the size and no clearer, and this
       // list has to fit a 4-8B model's context alongside everything else.
@@ -459,7 +510,7 @@ export function registerSkillTools(reg: Registrar): void {
       // remote documentation. Asking for docs=1 alone gets you no metadata at
       // all, so the second call is made only when the first says it would add
       // something.
-      const phase1 = await apiGet<{ skill?: Record<string, unknown>; ambiguous?: boolean; candidates?: BrowseSkill[] }>(
+      const phase1 = await skillsGet<{ skill?: Record<string, unknown>; ambiguous?: boolean; candidates?: BrowseSkill[] }>(
         "/setup-api/hermes/skills/inspect",
         {
           query: { id },
@@ -495,7 +546,7 @@ export function registerSkillTools(reg: Registrar): void {
       let description = typeof detail.description === "string" ? detail.description : "";
       let documentation = typeof detail.body === "string" ? detail.body : "";
       if (detail.needsRemoteDocs === true) {
-        const phase2 = await apiGet<{ delta?: { description?: string; body?: string } }>(
+        const phase2 = await skillsGet<{ delta?: { description?: string; body?: string } }>(
           "/setup-api/hermes/skills/inspect",
           { query: { id, docs: 1 }, timeoutMs: 30_000 },
         ).catch(() => null);
@@ -576,7 +627,7 @@ export function registerSkillTools(reg: Registrar): void {
       }
       let body: { ok?: boolean; name?: string; files?: { repaired?: string[] } };
       try {
-        body = await apiPost<{ ok?: boolean; name?: string; files?: { repaired?: string[] } }>(
+        body = await skillsPost<{ ok?: boolean; name?: string; files?: { repaired?: string[] } }>(
           "/setup-api/hermes/skills/install",
           confirm ? { id, confirmDangerous: true } : { id },
           { timeoutMs: 180_000, rules: INSTALL_RULES },
@@ -634,7 +685,7 @@ export function registerSkillTools(reg: Registrar): void {
       // The route's field is `id`, but it means the lock NAME — the MCP
       // parameter is called `name` so the model cannot confuse it with the
       // store id that skill_install takes.
-      await apiPost(
+      await skillsPost(
         "/setup-api/hermes/skills/uninstall",
         { id: name },
         { timeoutMs: 60_000, rules: uninstallRules(name) },
