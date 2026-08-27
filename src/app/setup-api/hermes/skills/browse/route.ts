@@ -91,35 +91,74 @@ function facetParam(
   return out;
 }
 
-/** Facets for the CLI fallback: the only honest scope is what came back. */
-function facetsOfRows(
-  skills: HermesSkill[],
-  selected: { sources: string[]; trust: string[]; categories: string[] },
-): { facets: CatalogFacets; categoryCoverage: number } {
+interface FacetSelection {
+  sources: string[];
+  providers: string[];
+  trust: string[];
+  categories: string[];
+}
+
+/**
+ * The CLI fallback's filter and facet counts, in one pass over the rows the CLI
+ * returned.
+ *
+ * Same two rules as `queryCatalog`, because the rail cannot tell which path
+ * answered it: a group is counted with the OTHER groups' filters applied and
+ * its own ignored, and only the fully-filtered rows are returned. What differs
+ * is the SCOPE — there is no index here, so every number describes this answer
+ * alone and the response says so with `facetScope: "loaded"`.
+ */
+function filterAndFacetRows(
+  fetched: HermesSkill[],
+  selection: FacetSelection,
+): { skills: HermesSkill[]; facets: CatalogFacets; categoryCoverage: number } {
+  const wantProviders = selection.providers.map((p) => p.toLowerCase());
   const sources = new Map<string, number>();
   const trust = new Map<string, number>();
   const categories = new Map<string, number>();
+  const providers = new Map<string, number>();
+  const skills: HermesSkill[] = [];
   let categoryCoverage = 0;
-  for (const s of skills) {
+
+  for (const s of fetched) {
     const sourceId = sourceFlagValue(s.source || "unknown");
-    sources.set(sourceId, (sources.get(sourceId) || 0) + 1);
     const bucket = trustBucket(s.trust);
-    trust.set(bucket, (trust.get(bucket) || 0) + 1);
     const category = normalizeCategory(s.category)?.key;
-    if (category) {
-      categories.set(category, (categories.get(category) || 0) + 1);
-      categoryCoverage++;
-    }
+    const provider = (s.provider || "").toLowerCase();
+
+    const okSource = !selection.sources.length || selection.sources.includes(sourceId);
+    const okTrust = !selection.trust.length || selection.trust.includes(bucket);
+    const okCategory =
+      !selection.categories.length || (!!category && selection.categories.includes(category));
+    // A row whose publisher is unknown is DROPPED, not kept: the CLI's own rows
+    // carry no `provider` at all, and keeping them would let a publisher filter
+    // answer with every skill in the registry.
+    const okProvider = !wantProviders.length || wantProviders.includes(provider);
+
+    if (okTrust && okCategory && okProvider) bump(sources, sourceId);
+    if (okSource && okCategory && okProvider) bump(trust, bucket);
+    if (okSource && okTrust && okProvider && category) bump(categories, category);
+    if (okSource && okTrust && okCategory && s.provider) bump(providers, s.provider);
+
+    if (!okSource || !okTrust || !okCategory || !okProvider) continue;
+    if (category) categoryCoverage++;
+    skills.push(s);
   }
+
   return {
+    skills,
     facets: {
-      sources: rankFacets(sources, selected.sources, sourceLabel, MAX_FACET_VALUES),
-      providers: [],
-      trust: fixedFacets(TRUST_BUCKETS, trust, selected.trust, (id: TrustBucket) => id),
-      categories: rankFacets(categories, selected.categories, categoryLabelFromKey, MAX_FACET_VALUES),
+      sources: rankFacets(sources, selection.sources, sourceLabel, MAX_FACET_VALUES),
+      providers: rankFacets(providers, selection.providers, (id) => id, MAX_FACET_VALUES),
+      trust: fixedFacets(TRUST_BUCKETS, trust, selection.trust, (id: TrustBucket) => id),
+      categories: rankFacets(categories, selection.categories, categoryLabelFromKey, MAX_FACET_VALUES),
     },
     categoryCoverage,
   };
+}
+
+function bump(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) || 0) + 1);
 }
 
 export async function GET(request: Request) {
@@ -158,6 +197,7 @@ export async function GET(request: Request) {
   // Both spellings of skills.sh reach this handler; the facet ids the response
   // carries — and therefore the ones the rail sends back — are the flag ones.
   const wantSources = sources.map(sourceFlagValue);
+  const githubReachable = wantSources.length === 0 || wantSources.includes("github");
 
   const state = await loadCatalog();
   if (state) {
@@ -189,11 +229,10 @@ export async function GET(request: Request) {
         // are their own normal form by construction; a registry's source or
         // publisher string is not.
         sources: result.sources.filter((f) => isBrowsableSource(f.id)),
-        // The publisher facet exists only for GitHub-sourced skills, so it is
-        // offered only while GitHub is one of the selected sources.
-        providers: wantSources.includes("github")
-          ? result.providers.filter((f) => isValidMeta(f.id))
-          : [],
+        // The publisher facet describes GitHub rows only, so it is offered
+        // exactly while GitHub rows are reachable: no source filter at all, or
+        // GitHub among the ticked ones.
+        providers: githubReachable ? result.providers.filter((f) => isValidMeta(f.id)) : [],
         trust: result.trust,
         categories: result.categories,
       },
@@ -235,22 +274,9 @@ export async function GET(request: Request) {
       : (await cliBrowse(page, Math.min(pageSize, 50), flagSource, request.signal)).skills;
     // Whatever the flag could not express is applied here, so a rail selection
     // never appears to be ignored just because the index is still building.
-    const wantProviders = providers.map((p) => p.toLowerCase());
-    const skills = fetched.filter((s) => {
-      if (wantSources.length && !wantSources.includes(sourceFlagValue(s.source || "unknown"))) return false;
-      if (trust.length && !trust.includes(trustBucket(s.trust))) return false;
-      if (categories.length) {
-        const key = normalizeCategory(s.category)?.key;
-        if (!key || !categories.includes(key)) return false;
-      }
-      // A row whose publisher is unknown is DROPPED, not kept: the CLI's own
-      // rows carry no `provider` at all, and keeping them would let a publisher
-      // filter answer with every skill in the registry.
-      if (wantProviders.length && !wantProviders.includes((s.provider || "").toLowerCase())) return false;
-      return true;
-    });
-    const { facets, categoryCoverage } = facetsOfRows(skills, {
+    const { skills, facets, categoryCoverage } = filterAndFacetRows(fetched, {
       sources: wantSources,
+      providers,
       trust,
       categories,
     });

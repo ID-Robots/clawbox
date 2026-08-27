@@ -38,14 +38,18 @@ const EMPTY_SELECTION: FacetSelection = { trust: [], source: [], category: [], p
 const EMPTY_FACETS: CatalogFacets = { sources: [], providers: [], trust: [], categories: [] };
 
 /**
- * The one invariant a selection has to keep: the publisher facet exists only for
- * GitHub skills, so a publisher left ticked after GitHub is unticked would
- * silently filter every other source down to nothing. Applied in the state
- * updater rather than in an effect — an effect would fire a request for the
- * inconsistent state first and correct it afterwards.
+ * The one invariant a selection has to keep: the publisher facet describes
+ * GitHub rows only, so a publisher left ticked once GitHub rows are out of
+ * reach would silently filter every other source down to nothing. GitHub is
+ * reachable while NO source is ticked as well as while GitHub itself is, which
+ * is why this is not simply `includes('github')`.
+ *
+ * Applied in the state updater rather than in an effect — an effect would fire
+ * a request for the inconsistent state first and correct it afterwards.
  */
 function reconcile(selection: FacetSelection): FacetSelection {
-  if (selection.source.includes('github') || selection.provider.length === 0) return selection;
+  const githubReachable = selection.source.length === 0 || selection.source.includes('github');
+  if (githubReachable || selection.provider.length === 0) return selection;
   return { ...selection, provider: [] };
 }
 

@@ -108,9 +108,13 @@ describe("browse facets over the offline index", () => {
     expect(body.total).toBe(1);
   });
 
-  it("only offers the publisher group while GitHub is selected", async () => {
-    expect((await browse("page=1")).body.facets.providers).toEqual([]);
+  it("offers the publisher group exactly while GitHub rows are reachable", async () => {
+    // No source filter at all: GitHub rows are in the answer, so its publishers
+    // are a filter the customer can actually use.
+    expect(countOf((await browse("page=1")).body.facets.providers, "NVIDIA")).toBe(1);
     expect(countOf((await browse("source=github")).body.facets.providers, "NVIDIA")).toBe(1);
+    // A source filter that excludes GitHub takes the group away with it.
+    expect((await browse("source=clawhub")).body.facets.providers).toEqual([]);
   });
 
   it("filters on trust, which is the one facet every row has", async () => {
@@ -172,6 +176,18 @@ describe("browse facets with no index (the CLI fallback)", () => {
     mockCliBrowse.mockClear();
     await browse("source=github&source=clawhub");
     expect(mockCliBrowse.mock.calls[0][2]).toBeUndefined();
+  });
+
+  it("counts a group WITHOUT its own filter here too", async () => {
+    // The rail cannot tell which path answered it, so the counting rule has to
+    // be the same: ticking Official must not make the other trust buckets read
+    // zero over rows that plainly contain them.
+    const { body } = await browse("trust=official");
+    expect(body.skills.map((s) => s.id)).toEqual(["official/b"]);
+    expect(countOf(body.facets.trust, "community")).toBe(1);
+    expect(countOf(body.facets.trust, "trusted")).toBe(1);
+    // …while the other groups do narrow to what Official can reach.
+    expect(countOf(body.facets.sources, "clawhub")).toBeUndefined();
   });
 
   it("applies a publisher selection too, and drops the rows that cannot answer", async () => {
