@@ -58,6 +58,36 @@ describe("an on-device path in the line the parser keeps", () => {
   });
 
   /**
+   * A path component may contain a space, and CPython quotes the path it
+   * failed on. Redacting only up to the space left the tail on screen:
+   *
+   *   "… No such file or directory: '<path> Files/credentials.json'"
+   *
+   * — which still names a directory and a filename. Inside quotes the closing
+   * quote is the real end of the path, so that is what bounds the match.
+   */
+  it("consumes a quoted path with a space in it, leaving no tail", () => {
+    const msg = hermesFailureMessage(
+      "",
+      "FileNotFoundError: [Errno 2] No such file or directory: '/home/alice/Private Files/credentials.json'",
+    );
+
+    expect(msg).not.toContain("/home/");
+    expect(msg).not.toContain("Files/");
+    expect(msg).not.toContain("credentials.json");
+    expect(msg).not.toContain("Private");
+    expect(msg).toContain("No such file or directory");
+  });
+
+  it.each(['"', "'", "`"])("consumes a path quoted with %s", (q) => {
+    const msg = hermesFailureMessage("", `PermissionError: Permission denied: ${q}/var/lib/hermes/My State/state.db${q}`);
+
+    expect(msg).not.toContain("/var/");
+    expect(msg).not.toContain("state.db");
+    expect(msg).toContain("Permission denied");
+  });
+
+  /**
    * The line that must NOT be redacted, and the reason the rule is scoped to
    * ABSOLUTE paths.
    *

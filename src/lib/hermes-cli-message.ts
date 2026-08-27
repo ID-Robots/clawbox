@@ -186,7 +186,31 @@ function withoutTracebackFrames(lines: string[]): string[] {
  * tilde would replace the one actionable fact in that message with `<path>`.
  * Anchored on a preceding boundary so "2/3 of the files" is not a path.
  */
-const DEVICE_PATH = /(?<![\w~])\/(?:home|root|usr|opt|var|etc|tmp|srv|mnt|snap)(?:\/[\w.@+-]+)+/g;
+const SYSTEM_ROOT = "(?:home|root|usr|opt|var|etc|tmp|srv|mnt|snap)";
+
+/**
+ * A QUOTED absolute path, matched first and to its closing quote.
+ *
+ * POSIX components may contain spaces, and CPython quotes the path it failed
+ * on, so the unquoted rule below — which stops at the first character no path
+ * component is allowed to contain — left the tail of one on screen:
+ *
+ *   No such file or directory: '<path> Files/credentials.json'
+ *
+ * Still a directory and a filename. Inside quotes the closing quote is the real
+ * end of the path, so that is what bounds this match; any other quote character
+ * ends the class first and the match simply fails, falling through to the
+ * unquoted rule rather than swallowing the rest of the line.
+ */
+const QUOTED_DEVICE_PATH = new RegExp(`(['"\`])\\/${SYSTEM_ROOT}\\/[^'"\`\\n]*\\1`, "g");
+
+/** The same path unquoted, bounded by the first character a component cannot hold. */
+const DEVICE_PATH = new RegExp(`(?<![\\w~])\\/${SYSTEM_ROOT}(?:\\/[\\w.@+-]+)+`, "g");
+
+/** Both forms, quoted first so a space inside quotes cannot cut the match short. */
+function redactDevicePaths(line: string): string {
+  return line.replace(QUOTED_DEVICE_PATH, "<path>").replace(DEVICE_PATH, "<path>");
+}
 
 /** Bookkeeping and stack noise, dropped before we look for a cause. */
 function usefulLines(stream: string): string[] {
@@ -205,7 +229,7 @@ function usefulLines(stream: string): string[] {
   // said, and BEFORE the cap, so the truncation counts the text a person will
   // see rather than a path they never will.
   return (named.length ? named : paragraphs)
-    .map((l) => l.replace(DEVICE_PATH, "<path>"))
+    .map(redactDevicePaths)
     .map((l) => l.length > MAX_MESSAGE_CHARS ? `${l.slice(0, MAX_MESSAGE_CHARS - 1)}…` : l);
 }
 
