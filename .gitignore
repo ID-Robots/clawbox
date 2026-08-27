@@ -41,3 +41,4 @@ scripts/nm-dispatcher-failover.sh
 # Python bytecode (scripts/ has .py helpers; the cache is never shipped)
 __pycache__/
 *.pyc
+bench/results/

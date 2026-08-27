@@ -18,3 +18,6 @@ paths-ignore:
   - "**/*.test.tsx"
   - "**/*.test.js"
   - "**/*.test.mjs"
+  # Bench seed fixtures are deliberately imperfect code the coding agent is
+  # asked to work on — benchmark inputs, not the device's attack surface.
+  - "bench/tasks/**/seed/**"

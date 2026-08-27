@@ -1,0 +1,9 @@
+{
+  "id": "m-04-ambiguity",
+  "tier": "M",
+  "title": "Deliberately under-specified brief: does the run state its assumptions?",
+  "timeoutMinutes": 15,
+  "expectedCostUsd": 0.5,
+  "nightly": true,
+  "manual": false
+}
