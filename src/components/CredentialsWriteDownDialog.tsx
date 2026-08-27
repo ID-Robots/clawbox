@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
+import { accentFor, type Accent } from "@/lib/edition-accent";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
@@ -42,39 +43,6 @@ const DANGER_BADGE_EDGE = "rgba(255, 95, 82, 0.30)";
 const DANGER_INK = "#ffd9d5";
 const DANGER_INK_2 = "rgba(255, 180, 172, 0.85)";
 
-interface Accent {
-  /** Solid fill — a copy button that is hot, or has just fired. */
-  solid: string;
-  /** The gradient the primary action and the checked box carry. */
-  gradient: string;
-  /** Quiet fill behind an accent control at rest. */
-  dim: string;
-  /** Edge an interactive surface takes on hover. */
-  edge: string;
-  /** The glow under the primary action. */
-  glow: string;
-  /** Text that sits ON the solid accent. */
-  on: string;
-}
-
-const HERMES_ACCENT: Accent = {
-  solid: "#12d6a4",
-  gradient: "linear-gradient(135deg, #3ef08b 0%, #12d6a4 100%)",
-  dim: "rgba(62, 240, 139, 0.14)",
-  edge: "rgba(62, 240, 139, 0.45)",
-  glow: "0 6px 24px rgba(18, 214, 164, 0.30)",
-  on: "#04231c",
-};
-
-const OPENCLAW_ACCENT: Accent = {
-  solid: "var(--coral-bright)",
-  gradient: "linear-gradient(135deg, var(--coral-bright) 0%, var(--coral-dark) 100%)",
-  dim: "var(--coral-tint)",
-  edge: "var(--coral-edge)",
-  glow: "0 6px 24px var(--shadow-coral-mid)",
-  on: "#ffffff",
-};
-
 /**
  * The last thing between a customer and a password they can never be shown
  * again.
@@ -105,7 +73,7 @@ export default function CredentialsWriteDownDialog({
   const sublineId = useId();
   const panelRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
 
-  const accent = hermes ? HERMES_ACCENT : OPENCLAW_ACCENT;
+  const accent = accentFor(hermes);
 
   return (
     <div

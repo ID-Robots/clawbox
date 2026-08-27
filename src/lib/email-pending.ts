@@ -26,7 +26,7 @@
 
 import fs from "fs";
 import path from "path";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { EMAIL_ADDRESS_RE } from "@/lib/smtp-client";
 
@@ -103,11 +103,53 @@ export interface PendingEmailView {
   preview: string;
   body: string;
   createdAt: number;
+  /** See draftFingerprint. Travels with the draft so a surface can send it back. */
+  fingerprint: string;
 }
 
 export type QueueResult =
   | { ok: true; draft: PendingEmail }
   | { ok: false; error: string; reason: "full" | "invalid" };
+
+/**
+ * What `claimPendingIfUnchanged` can say. "changed" is not "gone": the draft is
+ * still queued and untouched, it simply is not the one the owner read.
+ */
+export type ClaimResult =
+  | { ok: true; draft: PendingEmail }
+  | { ok: false; reason: "gone" | "changed" };
+
+/**
+ * A short, stable name for exactly this draft's CONTENT.
+ *
+ * WHY IT EXISTS. The batch approval card in chat shows the owner every
+ * recipient, subject and body and then asks for one click. Between the card
+ * rendering and that click there is a human-length pause — the whole point of
+ * the card is that he READS it — and the agent is still running. Anything that
+ * treats "approved" as "send whatever is in the queue now" would send messages
+ * that were never on screen. That is the shape of the bug found in #492, where
+ * device state moved during exactly such a dialog pause.
+ *
+ * So approval names the drafts it means. The id list alone already fixes the
+ * "eight became twelve" case, because a draft queued during the pause is not in
+ * it. This fingerprint closes the other half: an id that still exists but no
+ * longer holds the text the owner read. The store has no update path today, so
+ * that cannot happen yet — which is the reason to nail it down now rather than
+ * after someone adds an edit button.
+ *
+ * SHA-256 over a canonical array, not over the object: `JSON.stringify` of an
+ * object follows insertion order, so two equal drafts built by different code
+ * paths could fingerprint differently. The array fixes the order at the one
+ * place that defines it. Truncated to 32 hex characters — this is a change
+ * detector, not a MAC, and nothing about it is a secret the owner does not
+ * already have on screen.
+ */
+export function draftFingerprint(
+  draft: Pick<PendingEmail, "id" | "to" | "subject" | "body" | "createdAt">,
+): string {
+  const canonical = JSON.stringify([draft.id, draft.to, draft.subject, draft.body, draft.createdAt]);
+  return createHash("sha256").update(canonical, "utf8").digest("hex").slice(0, 32);
+}
 
 function readAll(): PendingEmail[] {
   try {
@@ -243,6 +285,7 @@ export function listPending(): PendingEmailView[] {
       preview: d.body.slice(0, PREVIEW_CHARS),
       body: d.body,
       createdAt: d.createdAt,
+      fingerprint: draftFingerprint(d),
     }));
 }
 
@@ -276,6 +319,57 @@ export function claimPending(id: string): PendingEmail | null {
   if (!found) return null;
   writeAll(drafts.filter((d) => d.id !== id));
   return found;
+}
+
+/**
+ * `claimPending`, but only if the draft is still the one the owner was shown.
+ *
+ * The read, the comparison and the write are one synchronous run for the same
+ * reason `claimPending` is — see the note there. An await between the check and
+ * the removal would put back the window this function exists to close, and
+ * would also let two approvals of one id both pass the check.
+ *
+ * A mismatch leaves the draft IN the queue. It has not been consented to, and
+ * quietly deleting the thing the owner did not approve would lose text he never
+ * asked to lose.
+ */
+export function claimPendingIfUnchanged(id: string, fingerprint: string): ClaimResult {
+  const drafts = readAll();
+  const found = drafts.find((d) => d.id === id);
+  if (!found) return { ok: false, reason: "gone" };
+  if (draftFingerprint(found) !== fingerprint) return { ok: false, reason: "changed" };
+  writeAll(drafts.filter((d) => d.id !== id));
+  return { ok: true, draft: found };
+}
+
+/**
+ * Put a claimed draft back, unchanged.
+ *
+ * WHAT IT IS FOR, and the one case it may be used in. `claimPendingIfUnchanged`
+ * removes a draft BEFORE the SMTP client is handed it, so a retry cannot put
+ * one message on the wire twice. The cost is that a claimed draft whose send
+ * then fails is out of the queue — acceptable when a person is watching, since
+ * the failure hands the whole message back to them, and NOT acceptable when the
+ * request has been abandoned and nobody will read that response.
+ *
+ * So this exists for exactly one caller: a batch that has claimed a draft and
+ * then discovers, BEFORE anything has touched the network, that it must stop.
+ * At that instant no duplicate is possible, because no message was sent.
+ *
+ * It must never be used to put back a draft whose send already began. Once
+ * bytes have gone to a mail server, "it failed" and "it was accepted and the
+ * connection dropped before it said so" are indistinguishable from here, and
+ * requeueing the second one mails a stranger the same message twice.
+ *
+ * `id` and `createdAt` come back untouched, so the draft fingerprints exactly
+ * as it did before — an approval card still on screen stays valid.
+ */
+export function restorePending(draft: PendingEmail): void {
+  const drafts = readAll();
+  // Already there: nothing to do, and re-adding would duplicate the draft in
+  // the owner's queue.
+  if (drafts.some((d) => d.id === draft.id)) return;
+  writeAll([...drafts, draft]);
 }
 
 /** Reject. Returns false when there was nothing with that id. */
