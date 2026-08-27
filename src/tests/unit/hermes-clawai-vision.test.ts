@@ -86,6 +86,28 @@ describe("pointing Hermes at ClawBox AI", () => {
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
   });
 
+  it("writes no vision model at all when neither the proxy nor the config answers", async () => {
+    resolveVisionMock.mockResolvedValue({ id: "gpt-5.6-luna", verified: false, reason: "probe-failed" });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "auxiliary.vision.model"
+        ? { code: 1, stdout: "", stderr: "permission denied" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    // An unreadable config is not an empty one — nothing may be overwritten.
+    // (sets(), not keys(): the read probe itself legitimately touches the key.)
+    expect(sets().some((kv) => kv.startsWith("auxiliary.vision."))).toBe(false);
+  });
+
+  it("still treats an unset key as unset — the conservative default applies", async () => {
+    resolveVisionMock.mockResolvedValue({ id: "gpt-5.6-luna", verified: false, reason: "probe-failed" });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "auxiliary.vision.model"
+        ? { code: 1, stdout: "", stderr: "config key not set" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    expect(sets()).toContain("auxiliary.vision.model=gpt-5.6-luna");
+  });
+
   it("writes the previous vision model while the proxy refuses the DeepSeek id", async () => {
     resolveVisionMock.mockResolvedValue({ id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, verified: true, reason: "proxy-refuses" });
     await applyClawaiToHermes("claw_token_abc", "flash");

@@ -78,16 +78,23 @@ export async function applyClawaiToHermes(
   const couldDrawBefore = await hermesAgentDrawsImages();
 
   const vision = await resolveVisionModelId({ token: trimmed });
-  let visionModelId = vision.id;
+  let visionModelId: string | null = vision.id;
   if (vision.reason === "probe-failed") {
     // The QUESTION failed — not a refusal. If the box already runs one of
     // OUR vision ids, keep it: a bad network moment must not downgrade a
-    // box the proxy already upgraded.
+    // box the proxy already upgraded. And when the current value cannot even
+    // be READ (as opposed to being unset), write nothing at all — an
+    // unreadable config is not an empty one.
     const current = await runHermesCli(["config", "get", "auxiliary.vision.model"], { timeoutMs: 15_000 });
-    const currentId = current.code === 0 ? (current.stdout ?? "").trim() : "";
-    if (currentId && isClawboxAiVisionId(currentId)) visionModelId = currentId;
+    const listing = `${current.stdout ?? ""}\n${current.stderr ?? ""}`;
+    if (current.code === 0) {
+      const currentId = (current.stdout ?? "").trim();
+      if (currentId && isClawboxAiVisionId(currentId)) visionModelId = currentId;
+    } else if (!/config key not set/i.test(listing)) {
+      visionModelId = null;
+    }
   }
-  console.log(`[Hermes ClawAI] Vision model resolved to ${visionModelId} (${vision.reason})`);
+  console.log(`[Hermes ClawAI] Vision model ${visionModelId === null ? "left untouched (probe and read both failed)" : `resolved to ${visionModelId} (${vision.reason})`}`);
 
   const steps: string[][] = [
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
@@ -125,10 +132,13 @@ export async function applyClawaiToHermes(
     // This is the Hermes spelling of what `agents.defaults.imageModel` does on
     // the OpenClaw side — one capability, two harnesses, no second provider to
     // credential.
-    ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
     // Resolved, not assumed: the DeepSeek vision model when the proxy serves
-    // it, the previous one until then. See src/lib/clawbox-ai-vision.ts.
-    ["config", "set", "auxiliary.vision.model", visionModelId],
+    // it, the previous one until then (src/lib/clawbox-ai-vision.ts) — and
+    // written not at all when neither the proxy nor the config would answer.
+    ...(visionModelId === null ? [] : [
+      ["config", "set", "auxiliary.vision.provider", CLAWAI_PROVIDER],
+      ["config", "set", "auxiliary.vision.model", visionModelId],
+    ]),
     // ── Naming the session titler, for the same reason ──────────────────────
     //
     // `auxiliary.title_generation` ships as `provider: auto`, and auto is not a
