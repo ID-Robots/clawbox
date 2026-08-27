@@ -6,6 +6,7 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
+import { I18nProvider } from "@/lib/i18n";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
 const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false });
@@ -146,20 +147,24 @@ export default function StandaloneAppPage() {
     }
   };
 
+  // Every app rendered here reads its copy through `t()`. Without a provider
+  // `useT()` falls back to returning the KEY, so this route — the one behind
+  // "Open in new tab" — painted `skills.facetTrust` and `settings.security.…`
+  // at the customer while the desktop showed sentences.
   return (
-    <div className="h-dvh w-full bg-[#0a0f1a] text-white flex flex-col">
-      {/* Minimal title bar */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
-        <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
-        <span className="text-xs font-medium text-white/70">{APP_TITLES[id ?? ""] ?? id}</span>
-        <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
-          Back to Desktop
-        </Link>
+    <I18nProvider>
+      <div className="h-dvh w-full bg-[#0a0f1a] text-white flex flex-col">
+        {/* Minimal title bar */}
+        <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
+          <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
+          <span className="text-xs font-medium text-white/70">{APP_TITLES[id ?? ""] ?? id}</span>
+          <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
+            Back to Desktop
+          </Link>
+        </div>
+        {/* App content */}
+        <div className="flex-1 overflow-hidden">{renderApp()}</div>
       </div>
-      {/* App content */}
-      <div className="flex-1 overflow-hidden">
-        {renderApp()}
-      </div>
-    </div>
+    </I18nProvider>
   );
 }
