@@ -16,7 +16,7 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli }));
 /** The mtime-keyed memo around `hermes config get <key>`. */
 const hermesConfigGet = vi.fn();
 /** Did the memo SERVE that value, or hand back a placeholder it will replace? */
-const hermesConfigReadPending = vi.fn(() => false);
+const hermesConfigReadPending = vi.fn((_key: string) => false);
 vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGet,
   hermesConfigReadPending,
