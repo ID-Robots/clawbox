@@ -40,6 +40,12 @@ KOKORO_STAMP="$CLAWBOX_HOME/.cache/clawbox/kokoro-installed"
 #    defect. The cost of the bump is one repeat of a ~4 minute install.
 KOKORO_STAMP_VERSION="2"
 
+# Where this script publishes its Kokoro verdict for readers that are NOT
+# tailing its stdout: install.sh's health check, the flash host, an operator,
+# the next update. Overridable so tests — and any run that is not root — can
+# point it somewhere writable instead of /etc.
+TTS_STATUS_FILE="${CLAWBOX_TTS_STATUS_FILE:-/etc/clawbox/tts-status}"
+
 # ── The CUDA loader path ────────────────────────────────────────────────────
 # libcusparseLt.so.0 ships INSIDE the nvidia-cusparselt-cu12 wheel, under the
 # clawbox user's site-packages, where no loader looks by default, so without
@@ -307,15 +313,48 @@ pip_as_clawbox() {
 }
 
 # Run a python3 snippet as the clawbox user with the CUDA library path set.
-# "present": these commands run here and now. The export is skipped entirely
-# when nothing resolved, because `LD_LIBRARY_PATH=:$LD_LIBRARY_PATH` hands the
-# loader an empty leading entry — the current directory.
+#
+# The snippet travels on STDIN (`python3 -`) and never inside the -c string, and
+# the -c string itself is assembled from single-quoted literals with $ld spliced
+# in as its own word — no backslash escapes, and no ${...} nested inside another
+# ${...}. Both rules exist because breaking either one broke every call:
+#
+#   su - "$CLAWBOX_USER" -c "
+#     ${ld:+export LD_LIBRARY_PATH=\"$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"}
+#     python3 -c \"$1\""
+#
+# The trap is the ESCAPED `\${`. Genuine nesting is fine — bash matches braces
+# through it, which is why `${CLAWBOX_HOME:-/home/${CLAWBOX_USER}}` above is
+# correct and must not be "fixed". But `\$` is an escaped dollar, so bash never
+# saw a nested expansion there at all: it saw a literal `$` followed by a plain
+# `{`. Its `}` was left unescaped, so THAT brace closed the OUTER ${ld:+...},
+# and the trailing `\"}` was emitted as literal text after the expansion. The
+# quote and the brace came out in the wrong order —
+#   LD_LIBRARY_PATH="…:$LD_LIBRARY_PATH"}   instead of   "…:$LD_LIBRARY_PATH}"
+# — and the stray quote swallowed the rest of the line. Every payload this
+# function produced was then a syntax error:
+#   -bash: -c: line 7: unexpected EOF while looking for matching `"'
+#   -bash: -c: line 8: syntax error: unexpected end of file
+# on every box where $ld resolved, which is every box that has CUDA. The model
+# pre-download was charged with the failure, the Piper fallback absorbed it, and
+# the flash still reported success — so shipped hardware ran CPU TTS while the
+# install said "Kokoro GPU". `import torch` on such a box fails with
+# `ImportError: libcusparseLt.so.0`, the exact library this export exists to
+# find, which is how the missing export was confirmed on device.
 clawbox_python() {
-  local ld
+  local ld payload='exec python3 -'
   ld=$(kokoro_ld_path present)
-  su - "$CLAWBOX_USER" -c "
-    ${ld:+export LD_LIBRARY_PATH=\"$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"}
-    python3 -c \"$1\""
+  # "present": these commands run here and now, and the export is skipped
+  # entirely when nothing resolved — `LD_LIBRARY_PATH=:$LD_LIBRARY_PATH` hands
+  # the loader an empty leading entry, which means the current directory.
+  #
+  # Built by concatenating a single-quoted literal, "$ld", and another
+  # single-quoted literal. Nothing is escaped and nothing nests, so $ld cannot
+  # end a quote and the ${LD_LIBRARY_PATH:+...} reaches the remote shell intact.
+  if [ -n "$ld" ]; then
+    payload='export LD_LIBRARY_PATH="'"$ld"'${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; exec python3 -'
+  fi
+  printf '%s\n' "$1" | su - "$CLAWBOX_USER" -c "$payload"
 }
 
 install_cuda_torch() {
@@ -440,6 +479,41 @@ activate_user_units() {
   " 2>/dev/null || true
 }
 
+# Publish the Kokoro verdict — on stdout, as before, AND to $TTS_STATUS_FILE so
+# it outlives the run.
+#
+# The three states are a contract, and two of them used to be indistinguishable
+# to every reader downstream:
+#
+#   ready       requested, installed, usable.
+#   skipped:*   NOT applicable to this board (no CUDA, no Jetson build for this
+#               architecture). Nothing was asked for and nothing is missing.
+#   failed:*    requested and NOT delivered. The owner asked for GPU TTS, the
+#               box is answering speech on the Piper CPU fallback instead, and
+#               something is broken that a human has to fix.
+#
+# `failed:*` reaching only stdout is precisely how a hard failure shipped as a
+# soft fallback: the step logged an ERROR line, returned, and the flash printed
+# success. A verdict nobody can read after the fact is not a report.
+kokoro_report() {
+  local state="$1" dir
+  echo "CLAWBOX_TTS_KOKORO=$state"
+  dir=$(dirname "$TTS_STATUS_FILE")
+  # Best-effort on the WRITE, never on the SILENCE: a verdict that cannot be
+  # published is itself something install.sh has to hear about, because its
+  # health check treats a missing verdict as a failed check rather than as a
+  # pass.
+  if { mkdir -p "$dir" \
+      && printf 'KOKORO=%s\nTIMESTAMP=%s\n' \
+           "$state" "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" \
+           > "$TTS_STATUS_FILE"; } 2>/dev/null; then
+    chmod 644 "$TTS_STATUS_FILE" 2>/dev/null || true
+  else
+    echo "  Warning: could not publish the TTS verdict ($state) to $TTS_STATUS_FILE —" >&2
+    echo "           install.sh cannot health-check a result it cannot read" >&2
+  fi
+}
+
 # Install the GPU Kokoro stack. NEVER fatal: every exit path leaves Piper and
 # the deployed scripts untouched, because a box that lost its voice to a failed
 # GPU install is strictly worse than a box on the CPU fallback. The return code
@@ -457,12 +531,12 @@ install_kokoro_tts() {
     # to guess for other arches. Installing "something" here and reporting
     # Kokoro is the exact lie TASK-420 removes.
     echo "  Skipping Kokoro: no Jetson CUDA build for $arch (ClawBox ships aarch64)"
-    echo "CLAWBOX_TTS_KOKORO=skipped:arch-$arch"
+    kokoro_report "skipped:arch-$arch"
     return 11
   fi
   if ! detect_cuda; then
     echo "  Skipping Kokoro: no CUDA toolkit (no nvcc on PATH, none at $CUDA_HOME_DIR/bin/nvcc)"
-    echo "CLAWBOX_TTS_KOKORO=skipped:no-cuda"
+    kokoro_report "skipped:no-cuda"
     return 10
   fi
   echo "  CUDA detected: $("$NVCC" --version 2>/dev/null | tail -1)"
@@ -472,17 +546,17 @@ install_kokoro_tts() {
   else
     if ! install_cuda_torch; then
       echo "  ERROR: CUDA PyTorch install failed — leaving TTS on the Piper fallback" >&2
-      echo "CLAWBOX_TTS_KOKORO=failed:torch"
+      kokoro_report "failed:torch"
       return 12
     fi
     if ! install_kokoro_packages; then
       echo "  ERROR: Kokoro package install failed — leaving TTS on the Piper fallback" >&2
-      echo "CLAWBOX_TTS_KOKORO=failed:packages"
+      kokoro_report "failed:packages"
       return 12
     fi
     if ! kokoro_predownload_model; then
       echo "  ERROR: Kokoro model pre-download failed — leaving TTS on the Piper fallback" >&2
-      echo "CLAWBOX_TTS_KOKORO=failed:model"
+      kokoro_report "failed:model"
       return 12
     fi
     # Only now: every step above landed. Stamping earlier is what would turn a
@@ -495,11 +569,11 @@ install_kokoro_tts() {
   # stops working after an update.
   if ! write_kokoro_unit; then
     echo "  ERROR: could not write $SYSTEMD_USER/kokoro-server.service" >&2
-    echo "CLAWBOX_TTS_KOKORO=failed:unit"
+    kokoro_report "failed:unit"
     return 12
   fi
   activate_user_units
-  echo "CLAWBOX_TTS_KOKORO=ready"
+  kokoro_report "ready"
 }
 
 # --tts-only installs exactly what on-device TTS needs: the Piper CPU fallback,

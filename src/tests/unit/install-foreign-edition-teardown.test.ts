@@ -446,6 +446,13 @@ function runValidator(
   edition: string,
   units: Record<string, string>,
 ): { status: number; stdout: string } {
+  // Stubbed healthy for the same reason systemctl and curl are: this file's
+  // subject is the foreign-unit checks, and a validator that also reads the
+  // on-device TTS verdict would otherwise fail every case here for a reason
+  // that has nothing to do with editions.
+  const ttsStatus = path.join(tmp, "tts-status");
+  fs.writeFileSync(ttsStatus, "KOKORO=ready\n");
+
   const script = [
     "set -uo pipefail",
     `CLAWBOX_EDITION=${edition}`,
@@ -470,7 +477,10 @@ function runValidator(
 
   const r = spawnSync("bash", ["-c", script], {
     encoding: "utf-8",
-    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV },
+    // TTS_STATUS_FILE travels as an environment variable rather than as an
+    // interpolated shell assignment: JSON quoting is not shell quoting, and a
+    // path is data, not script.
+    env: { PATH: process.env.PATH ?? "", NODE_ENV: process.env.NODE_ENV, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, stdout: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -534,6 +544,6 @@ d("the validator now says what to run, not just what is wrong", () => {
     // The teardown adds no checks — the healthy line must not move.
     const r = runValidator("openclaw", healthyOpenclaw());
     expect(r.status).toBe(0);
-    expect(r.stdout).toMatch(/All 15 checks healthy/);
+    expect(r.stdout).toMatch(/All 16 checks healthy/);
   });
 });
