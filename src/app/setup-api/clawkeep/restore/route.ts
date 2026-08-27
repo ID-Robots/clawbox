@@ -27,6 +27,21 @@ const exec = promisify(execFile);
 // Names use the .service suffix so they match the NOPASSWD sudoers rules in
 // config/clawbox-sudoers verbatim — sudoers Cmnd_Spec is exact-string, so
 // "clawbox-gateway" would NOT match "clawbox-gateway.service".
+//
+// NOTE on the Hermes side: there is deliberately NO sudoers grant for
+// `clawbox-hermes-dashboard`, and this route does not add one. `systemctl
+// restart` starts a stopped unit, so such a grant would let a customer on an
+// OPENCLAW box resurrect the Hermes dashboard that the foreign-edition
+// teardown just stopped and disabled — the exact resurrection the gateway's
+// mask exists to prevent, in the other direction.
+// `install-foreign-edition-teardown.test.ts` guards that invariant.
+//
+// So the restart is ATTEMPTED (it succeeds on devices whose sudoers policy
+// allows it) and, where it is refused, the failure travels back in
+// `restartErrors` and the result card tells the owner to restart the agent
+// themselves. An unrestarted dashboard keeps serving pre-restore state from
+// the file handles it already holds, so the one thing we must not do is stay
+// quiet about it.
 function restartServicesFor(edition: string): string[] {
   return edition === "hermes"
     ? ["clawbox-hermes-dashboard.service"]

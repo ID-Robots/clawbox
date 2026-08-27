@@ -116,6 +116,8 @@ interface RestoreResponse {
   archiveBytes: number;
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
   restartErrors: string[];
+  /** Members the daemon could not recreate. Absent from older servers. */
+  skippedMembers?: string[];
 }
 
 interface PairStartResponse {
@@ -1933,6 +1935,15 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
   );
 }
 
+/** The unit named by the first restart failure (`"<unit>: <detail>"`), so the
+ *  remedy we print is the one that actually failed rather than a guess that is
+ *  wrong on half the fleet. Falls back to the OpenClaw unit only when the
+ *  string is not in the expected shape. */
+function restartUnit(errors: string[]): string {
+  const unit = errors[0]?.split(":")[0]?.trim();
+  return unit && unit.length > 0 ? unit : "clawbox-gateway.service";
+}
+
 function RestoreResultCard({ result }: { result: RestoreResponse }) {
   const { t } = useT();
   return (
@@ -1958,8 +1969,23 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
       {result.restartErrors.length > 0 && (
         <p className="text-xs text-amber-300">
           ⚠️ {t("clawkeep.result.restartFailed", { count: result.restartErrors.length })}{" "}
-          <code className="bg-black/30 px-1 rounded">sudo systemctl restart clawbox-gateway</code>{" "}
+          {/* The unit is READ OFF the failure, not hardcoded. Each entry is
+              `<unit>: <detail>`, and which unit holds the restored state is
+              per-edition — `clawbox-gateway` does not exist on Hermes, so
+              printing it there told the owner to run a command that cannot
+              work. Naming the unit that actually failed cannot drift. */}
+          <code className="bg-black/30 px-1 rounded">
+            sudo systemctl restart {restartUnit(result.restartErrors)}
+          </code>{" "}
           {t("clawkeep.result.manually")}
+        </p>
+      )}
+      {(result.skippedMembers?.length ?? 0) > 0 && (
+        <p className="text-xs text-amber-300">
+          {/* A restore that could not recreate part of the archive is NOT a
+              clean success. Saying so here is the whole point of carrying
+              `skippedMembers` out of the daemon. */}
+          ⚠️ {t("clawkeep.result.skipped", { count: result.skippedMembers!.length })}
         </p>
       )}
     </div>
