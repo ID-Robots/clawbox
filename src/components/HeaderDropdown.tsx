@@ -297,8 +297,12 @@ export function HeaderDropdown({
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
       switch (e.key) {
         case 'Tab':
-          // Let focus leave, but don't leave a menu hanging over the page.
-          close()
+          // Let focus leave, but don't leave a menu hanging over the page — and
+          // put focus on the TRIGGER first. The focused row is about to be
+          // unmounted with the portal, and the browser resolves the next tab
+          // stop from wherever focus is standing; without this it falls back to
+          // <body> and a keyboard user restarts from the top of the wizard.
+          close(true)
           return
         case 'ArrowDown':
           e.preventDefault()

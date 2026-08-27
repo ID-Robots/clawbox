@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "events";
 import * as childProcess from "child_process";
+import fs from "fs";
+import path from "path";
 
 // Owner-reported from a live first-boot run: "some models like Mythos are not
 // available", on step 4's Anthropic → Subscription tab.
@@ -24,6 +26,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => false,
 }));
 
+const DATA_DIR = "/tmp/clawbox-catalog-surface-test";
 vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/tmp/clawbox-catalog-surface-test" }));
 
 import { refreshInBackground } from "@/app/setup-api/ai-models/catalog/route";
@@ -70,6 +73,10 @@ function providerOf(call: unknown[]): string {
 describe("catalog refresh — subscription surface", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The route persists every catalogue it enumerates, surface included, so a
+    // cache left by an earlier run would (correctly) suppress the spawn these
+    // tests are counting.
+    fs.rmSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true, force: true });
   });
 
   it("enumerates the Claude-subscription surface alongside the Anthropic API catalogue", async () => {

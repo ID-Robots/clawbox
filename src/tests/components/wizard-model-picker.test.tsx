@@ -167,6 +167,27 @@ describe("wizard model picker", () => {
     });
   });
 
+  it("never shows or sends a model the subscription cannot run, even the catalog default", async () => {
+    // The id the picker displays is the id the save posts, so a default the
+    // credential cannot route must not survive to either. Here the catalogue's
+    // own default is off the subscription surface.
+    stubFetch({ ...CATALOG, defaultModelId: "claude-mythos-5" });
+    await renderAnthropicSubscription();
+    // The collapsed summary is the first thing the customer reads, and it is
+    // fed by the same derived id the save posts.
+    const summary = await screen.findByRole("button", { name: /^Model/ });
+    await waitFor(() => {
+      expect(summary.textContent).toContain("Claude Opus 4.8");
+    });
+    expect(summary.textContent).not.toContain("Mythos");
+
+    // And the open list agrees.
+    const listbox = await openModelList();
+    const active = within(listbox).getAllByRole("option", { selected: true });
+    expect(active).toHaveLength(1);
+    expect(active[0].textContent).toContain("Claude Opus 4.8");
+  });
+
   it("leaves the whole list pickable when the surface could not be enumerated", async () => {
     // No `availableOnSubscription` anywhere: the device could not ask. Unknown
     // is not "no" — inventing a restriction here would be the same defect

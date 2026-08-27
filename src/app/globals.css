@@ -506,9 +506,9 @@ h6 {
 }
 /* An unavailable row is not dimmed into illegibility — it carries the REASON
    it cannot be picked, and a reason nobody can read is the same as no reason.
-   White at 0.40 over the popover ground measures 3.5:1; 0.68 measures 7.2:1,
-   so the row still reads as inert (no hover, no pointer) while staying past
-   WCAG AA. Rows are marked with aria-disabled, never the `disabled` attribute
+   Measured on-device against both popover grounds: white at 0.40 gives
+   3.6:1 (field) / 3.5:1 (pill) and fails AA; 0.68 gives 7.6:1 / 8.2:1. The
+   row still reads as inert — no hover, no pointer — while staying readable. Rows are marked with aria-disabled, never the `disabled` attribute
    — a disabled button is unfocusable, which would hide the reason from the
    users least able to see the greying. */
 .header-dropdown-option.is-unavailable {

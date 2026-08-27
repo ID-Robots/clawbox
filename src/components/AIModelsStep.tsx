@@ -1121,11 +1121,73 @@ export default function AIModelsStep({
     }
   }, [configureScope, extractError, showConfiguring, showError, showSuccessAndContinue]);
 
+  const selected = allowedProviders.find((p) => p.id === selectedProvider);
+  // Filter out subscription option for providers whose OAuth isn't configured on the backend
+  const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
+    if (opt.mode === "subscription" && availableOAuth !== null && selected.id !== "clawai") {
+      // ClawBox AI's Subscription tab routes through our own
+      // /clawai/start + /clawai/poll endpoints — there's no third-party
+      // OAuth client to gate on, so the upstream `availableOAuth` list
+      // doesn't apply. Other providers stay gated by it because their
+      // subscription flow needs configured OAuth client credentials.
+      return availableOAuth.includes(selected.id);
+    }
+    return true;
+  }) ?? [];
+  const activeAuth =
+    effectiveAuthOptions.find((a) => a.mode === authMode) ??
+    effectiveAuthOptions[0];
+  const currentAuthMode = activeAuth?.mode ?? authMode;
+  const isSubscription = currentAuthMode === "subscription";
+
+  // The one rule, named once. `availableOnSubscription === undefined` means
+  // the box could not enumerate the subscription surface — unknown is not
+  // "no", so an unstamped model stays usable and the customer keeps the full
+  // list rather than the UI inventing a restriction.
+  const isModelUsable = useCallback(
+    (model: { availableOnSubscription?: boolean }) =>
+      !isSubscription || model.availableOnSubscription !== false,
+    [isSubscription],
+  );
+  /**
+   * The curated model id the picker SHOWS and the save path SENDS — one value,
+   * so the screen can never promise a model the request does not carry.
+   *
+   * Derived rather than corrected by an effect: reaching the Subscription tab
+   * with an API-key-only model already picked (Claude Mythos 5, chosen on the
+   * API Key tab moments earlier) used to leave it selected AND saveable, and a
+   * state write from an effect would still leave one render where the blocked
+   * id was live. `""` means the catalogue holds nothing this auth mode can run;
+   * every caller below treats that as "send no model" rather than sending one
+   * the customer has just been told is unavailable.
+   */
+  const effectiveModelId = useMemo(() => {
+    const requested = selectedModelId.trim();
+    if (!activeCatalog || useCustomModel) return requested;
+    const picked = activeCatalog.models.find((m) => m.id === requested);
+    if (picked && isModelUsable(picked)) return picked.id;
+    const usable = activeCatalog.models.filter(isModelUsable);
+    return (usable.find((m) => m.id === activeCatalog.defaultModelId) ?? usable[0])?.id ?? "";
+  }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable]);
+
+  /** The catalogue has models and this auth mode can run none of them. */
+  const noUsableCatalogModel = Boolean(
+    activeCatalog && !useCustomModel && activeCatalog.models.length > 0 && !effectiveModelId,
+  );
+
   const getRequestedCatalogModelId = useCallback((fallbackToDefault = false) => {
     if (!activeCatalog) return "";
-    const requestedId = useCustomModel ? customModelId.trim() : selectedModelId.trim();
-    return requestedId || (fallbackToDefault ? activeCatalog.defaultModelId : "");
-  }, [activeCatalog, customModelId, selectedModelId, useCustomModel]);
+    if (useCustomModel) {
+      const typed = customModelId.trim();
+      return typed || (fallbackToDefault ? activeCatalog.defaultModelId : "");
+    }
+    // No `fallbackToDefault` on the curated path: `effectiveModelId` already
+    // resolves to the catalog default when this credential can route it, so
+    // the only way it is empty is that NOTHING in the catalogue can — and
+    // falling back to the default there would post the very model the picker
+    // has just greyed out.
+    return effectiveModelId;
+  }, [activeCatalog, customModelId, effectiveModelId, useCustomModel]);
 
   const saveModel = async () => {
     if (!selectedProvider) return showError(t("ai.selectProvider"));
@@ -1138,6 +1200,9 @@ export default function AIModelsStep({
     if (selectedProvider === "clawai") {
       payload.clawaiTier = clawaiTier;
     } else if (activeCatalog) {
+      if (noUsableCatalogModel) {
+        return showError(t("ai.modelNoneAvailable"));
+      }
       const requestedId = getRequestedCatalogModelId();
       if (!requestedId) {
         return showError(`Please choose a model for ${selectedProvider}`);
@@ -1183,6 +1248,12 @@ export default function AIModelsStep({
     const controller = new AbortController();
     saveControllerRef.current = controller;
 
+    if (noUsableCatalogModel) {
+      // Every model in the catalogue sits outside this sign-in's surface. Say
+      // so, rather than configuring the provider and letting the server's own
+      // default — which comes from the same catalogue — fail at the first turn.
+      return showError(t("ai.modelNoneAvailable"));
+    }
     showConfiguring();
 
     try {
@@ -1238,7 +1309,7 @@ export default function AIModelsStep({
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [configureScope, extractError, getRequestedCatalogModelId, selectedProvider, showConfiguring, showError, showSuccessAndContinue]);
+  }, [configureScope, extractError, getRequestedCatalogModelId, noUsableCatalogModel, selectedProvider, showConfiguring, showError, showSuccessAndContinue, t]);
 
   // --- Device auth flow (OpenAI, Google) ---
 
@@ -1424,51 +1495,7 @@ export default function AIModelsStep({
     llamacpp: "GGUF + llama.cpp for 8GB devices",
   };
 
-  const selected = allowedProviders.find((p) => p.id === selectedProvider);
-  // Filter out subscription option for providers whose OAuth isn't configured on the backend
-  const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
-    if (opt.mode === "subscription" && availableOAuth !== null && selected.id !== "clawai") {
-      // ClawBox AI's Subscription tab routes through our own
-      // /clawai/start + /clawai/poll endpoints — there's no third-party
-      // OAuth client to gate on, so the upstream `availableOAuth` list
-      // doesn't apply. Other providers stay gated by it because their
-      // subscription flow needs configured OAuth client credentials.
-      return availableOAuth.includes(selected.id);
-    }
-    return true;
-  }) ?? [];
-  const activeAuth =
-    effectiveAuthOptions.find((a) => a.mode === authMode) ??
-    effectiveAuthOptions[0];
-  const currentAuthMode = activeAuth?.mode ?? authMode;
-  const isSubscription = currentAuthMode === "subscription";
   const useDeviceAuth = isSubscription && DEVICE_AUTH_PROVIDERS.has(selectedProvider ?? "");
-
-  // The one rule, named once. `availableOnSubscription === undefined` means
-  // the box could not enumerate the subscription surface — unknown is not
-  // "no", so an unstamped model stays usable and the customer keeps the full
-  // list rather than the UI inventing a restriction.
-  const isModelUsable = useCallback(
-    (model: { availableOnSubscription?: boolean }) =>
-      !isSubscription || model.availableOnSubscription !== false,
-    [isSubscription],
-  );
-
-  // Switching to the Subscription tab with an API-key-only model already
-  // picked (say Claude Mythos 5, chosen on the API Key tab moments earlier)
-  // used to leave that model selected AND saveable: nothing between the tab
-  // and the gateway checked, so the box shipped with a primary model the
-  // credential could never route. Move the pick back to something the
-  // subscription can actually run; the picker below still SHOWS the rest,
-  // greyed, with the reason.
-  useEffect(() => {
-    if (!activeCatalog || useCustomModel || !selectedModelId) return;
-    const picked = activeCatalog.models.find((m) => m.id === selectedModelId);
-    if (!picked || isModelUsable(picked)) return;
-    const usable = activeCatalog.models.filter(isModelUsable);
-    const fallback = usable.find((m) => m.id === activeCatalog.defaultModelId) ?? usable[0];
-    if (fallback) setSelectedModelId(fallback.id);
-  }, [activeCatalog, selectedModelId, useCustomModel, isModelUsable]);
 
   // A model the SUBSCRIPTION surface does not carry is SHOWN, not hidden, and
   // it says why. `availableOnSubscription === undefined` means the box could
@@ -1536,8 +1563,8 @@ export default function AIModelsStep({
     if (!activeCatalog || !selected) return null;
     const modelPickerExpanded = modelPickerOpen || useCustomModel;
     const currentModelLabel =
-      activeCatalog.models.find((option) => option.id === selectedModelId)?.label
-      || selectedModelId
+      activeCatalog.models.find((option) => option.id === effectiveModelId)?.label
+      || effectiveModelId
       || activeCatalog.defaultModelId;
     if (!modelPickerExpanded) {
       return (
@@ -1579,7 +1606,7 @@ export default function AIModelsStep({
             variant="field"
             hermes={edition === "hermes"}
             ariaLabel={t("ai.model")}
-            value={selectedModelId}
+            value={effectiveModelId}
             options={modelOptions}
             onChange={(id) => {
               setModelTouched(true);

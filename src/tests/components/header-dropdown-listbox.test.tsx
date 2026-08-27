@@ -126,6 +126,18 @@ describe("HeaderDropdown open list", () => {
       expect(document.activeElement?.textContent).toContain("Claude Mythos 5");
     });
 
+    it("Tab closes the list from the trigger, not from nowhere", () => {
+      // The focused row is about to be unmounted with the portal, and the
+      // browser resolves the next tab stop from wherever focus is standing.
+      // Without moving focus first it lands on <body> and a keyboard user
+      // restarts from the top of the page.
+      renderPicker();
+      const listbox = openList();
+      fireEvent.keyDown(listbox, { key: "Tab" });
+      expect(screen.queryByRole("listbox")).toBeNull();
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: /^Model:/ }));
+    });
+
     it("Escape closes the list and hands focus back to the trigger", () => {
       renderPicker();
       const listbox = openList();
