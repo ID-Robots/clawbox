@@ -47,13 +47,14 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Browser**: `browser/` — Chromium automation via CDP (launch, navigate, click, type, screenshot)
 - **Gateway**: `gateway/`, `gateway/health`, `gateway/ws-config` — gateway proxying with HTML injection
 - **Telegram**: `telegram/configure`, `telegram/status` — Telegram bot config
-- **Email**: `email/configure`, `email/status`, `email/test`, `email/send`, `email/messages`, `email/pending` — a mail account (any provider; Gmail app-password guide in the UI) with ONE of three modes: send only, read on demand (`email/messages` backs the `email_list`/`email_read` MCP tools over ClawBox's own IMAP client — no polling, EXAMINE + BODY.PEEK so reading never marks mail seen), or answer senders (Hermes' native adapter, allowlist-only). A separate "ask me before sending" gate turns `email/send` into a queued draft; `email/pending` approves or deletes it and is the one route that refuses the MCP bearer, because the agent is the party it gates.
+- **Email**: `email/configure`, `email/status`, `email/test`, `email/send`, `email/messages`, `email/pending` — a mail account (any provider; Gmail app-password guide in the UI) with ONE of three modes: send only, read on demand (`email/messages` backs the `email_list`/`email_read` MCP tools over ClawBox's own IMAP client — no polling, EXAMINE + BODY.PEEK so reading never marks mail seen), or answer senders (Hermes' native adapter, allowlist-only). A separate "ask me before sending" gate turns `email/send` into a queued draft; `email/pending` approves or deletes it and refuses the MCP bearer, because the agent is the party it gates (`coding-agent/enable` refuses it for the same reason). Its `approve_batch` action is what the chat's batch card posts: one consent for a NAMED set of drafts, each carrying the content fingerprint it was shown with, so nothing queued while the owner was reading can ride along — and it answers per draft, 207 unless every one of them went.
 - **Discord**: `discord/configure`, `discord/status`, `discord/members` — Discord bot config (token validated live against the Discord API before it is saved), gateway connection state, and the guild-member allowlist picker
 - **Setup**: `setup/status`, `setup/complete`, `setup/reset` — setup flow state, factory reset
 - **Update**: `update/run`, `update/status` — git-based system updates
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
 - **KV Store**: `kv/` — key-value store for UI state
 - **Code**: `code/` — code project management (init, file ops, search, build/deploy)
+- **Coding agent**: `coding-agent/status`, `coding-agent/enable`, `coding-agent/run`, `coding-agent/runs`, `coding-agent/stop` — a headless Claude Code run (`claude-ds -p`) the assistant delegates a whole task to; runs live in the web server and persist in `data/coding-agent-runs.json`. `enable` is owner-only (refuses the MCP bearer) because it is the consent for a delegated shell; `run` answers 409 while the switch is off.
 - **Other**: `vnc/`, `code-server/`, `webapps/`, `mascot-lines/`
 
 All dynamic API routes use `export const dynamic = "force-dynamic"` to prevent caching.
@@ -79,6 +80,9 @@ Handles two concerns:
 - **`imap-client.ts`** — dependency-free, READ-ONLY IMAP client (implicit TLS 993, STARTTLS, LOGIN). EXAMINE and BODY.PEEK only; it contains no verb that can modify a mailbox. Never authenticates over an unencrypted connection.
 - **`email-pending.ts`** — outgoing drafts waiting for the owner's approval (`data/email-pending.json`, 0600, capped; a full queue refuses rather than evicting).
 - **`owner-session.ts`** — "is the PERSON asking, or the agent?". Accepts a session cookie only, and is what stops the MCP bearer from opening the approval gate.
+- **`coding-harness.ts`** — the one name for the `claude-ds` wrapper (Claude Code on the box's ClawBox AI plan) and where install.sh puts it.
+- **`coding-agent.ts`** — the coding agent runner: spawns `claude-ds -p` with an explicit environment, `acceptEdits`, a Bash allow/deny-list and file deny rules, parses the `stream-json` output into a persisted run record, enforces the owner's switch, readiness, one-run-at-a-time and the working-folder rules, settles runs lost to a restart.
+- **`coding-agent-notify.ts`** — the finish notice: desktop toast plus a template-only Telegram message to approved senders. Never the task or the summary.
 - **`hermes-env.ts`** — writes `~/.hermes/.env` with Hermes' own `save_env_value` semantics. Needed because `hermes config set` routes no `EMAIL_*` key to `.env` and would put a mailbox password in `config.yaml` instead.
 - **`hermes-email.ts`** — Hermes' native inbound email adapter (opt-in, allowlist-only).
 - **`gateway-proxy.ts`** — fetch gateway HTML, inject ClawBox nav bar + auth token.
@@ -120,6 +124,8 @@ Handles two concerns:
 - **`AppStore.tsx`** — discover and install apps from clawbox.com
 - **`SettingsApp.tsx`** — appearance, WiFi, AI provider, Telegram, Email, system settings
 - **`OllamaModelPanel.tsx`** — local model pull, search, delete
+- **`CodingAgentApp.tsx`** — the Coding Agent desktop app: the owner's switch for delegated Claude Code runs, harness readiness, recent runs (this icon used to open an interactive `claude-ds` terminal) with summaries
+- **`ToastHost.tsx`** — the desktop's toast surface; the only listener for the `clawbox:toast` event every server-side owner notice ends in
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper
 
 #### Hooks
@@ -140,7 +146,8 @@ of them kept failing.
 
 - **`clawbox-mcp.ts`** — server entry: resolve edition → probe capabilities →
   register → connect. Tool families live in `mcp/tools/` (`orientation`,
-  `skills`, `ai`, `system`, `desktop`, `browser`, `email`, `coding`) and the shared
+  `skills`, `ai`, `system`, `desktop`, `browser`, `email`, `coding`,
+  `coding-agent`) and the shared
   machinery in `mcp/lib/` (`edition`, `guard`, `api`, `errors`, `schema`,
   `register`, `context`, `jobs`, `web`).
   - **Both editions**: `device_status`, `clawbox_health`, `clawbox_context`,
@@ -149,7 +156,9 @@ of them kept failing.
     `telegram_status`, `email_send`, `wifi_scan`, `wifi_status`, `vnc_status`,
     `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
-    `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`
+    `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`,
+    `coding_agent_run/status/stop` (registered only while the owner's switch is on
+    and the `claude-ds` harness is ready — probed at startup like `email_list`)
   - **Hermes only**: `skill_search`, `skill_list`, `skill_info`, `skill_install`,
     `skill_uninstall`, `ai_list_models`, `ai_set_provider`, `ai_set_model`
   - **OpenClaw only**: `app_search`, `app_install`, `backup_list`, `backup_now`,

@@ -4,6 +4,7 @@ import {
   fillCredentialsStep,
   installClawboxMocks,
   pickAiProvider,
+  submitCredentialsStep,
 } from "./helpers/clawbox";
 
 test("setup skips the Local AI step and goes straight from AI provider to Telegram", async ({ page }) => {
@@ -20,7 +21,7 @@ test("setup skips the Local AI step and goes straight from AI provider to Telegr
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await fillCredentialsStep(page);
-  await page.getByRole("button", { name: /^Connect$/ }).click();
+  await submitCredentialsStep(page);
 
   const providerStep = page.getByTestId("setup-step-ai-models");
   const providerGroup = providerStep.getByRole("radiogroup", { name: "AI Provider" });

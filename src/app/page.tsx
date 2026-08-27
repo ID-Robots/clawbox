@@ -19,17 +19,18 @@ import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
 import TerminalApp from "@/components/TerminalApp";
+import CodingAgentApp from "@/components/CodingAgentApp";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup from "@/components/ChatPopup";
+import ToastHost from "@/components/ToastHost";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
 import { fetchHarness } from "@/lib/client-harness";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
-import { CODING_HARNESS_COMMAND } from "@/lib/coding-harness";
 import {
   layoutIcons,
   layoutsEqual,
@@ -66,11 +67,13 @@ const apps: AppDef[] = [
   // HERMES_ONLY_APP_IDS / harnessHiddenAppIds, same mechanism as `hermes`).
   { id: "hermes-skills", name: "Skills", color: "#1a1230", type: "hermes_skills", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "terminal", name: "app.terminal", color: "#1a1a2e", type: "terminal" as const, pinned: false, defaultWidth: 900, defaultHeight: 600 },
-  // The coding harness (TASK-378): a terminal that opens straight into
-  // `claude-ds`, Claude Code driven by this box's own ClawBox AI plan. Pinned
-  // like OpenClaw because it is a headline capability, not a power-user
-  // shortcut, and it is shown on both harnesses — the wrapper needs only the
-  // portal token and the CLI, both of which every edition installs.
+  // The coding agent: the owner's switch for letting the assistant delegate a
+  // whole task to a headless `claude-ds` run, what such a run needs, and the
+  // recent runs. Pinned like OpenClaw because it is a headline capability, not
+  // a power-user shortcut, and shown on both harnesses — the harness needs only
+  // the portal token and the CLI, both of which every edition installs. (It
+  // used to open an interactive terminal running the harness; that is still a
+  // `claude-ds` away in the Terminal app.)
   { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
@@ -1022,7 +1025,7 @@ function ChromeDesktopInner() {
   // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
     setInstalledApps((prev) => prev.includes(app.id) ? prev : [...prev, app.id]);
-    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl } }));
+    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl, developer: app.developer } }));
     setHiddenInstalledApps((prev) => prev.filter((id) => id !== app.id));
     setRecentlyInstalled(app.id);
     setTimeout(() => setRecentlyInstalled(null), 1000);
@@ -1074,7 +1077,7 @@ function ChromeDesktopInner() {
       // or any openApp(id) path either, not just the desktop grid.
       if (meta && isInstalledAppVisible(meta, activeHarness)) {
         const isWebapp = !!meta.webappUrl;
-        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl };
+        const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl, developer: meta.developer };
         installedAppDefs.push({
           id: `installed-${appId}`,
           name: meta.name,
@@ -1188,6 +1191,17 @@ function ChromeDesktopInner() {
     const handlePrimaryAiConfigured = () => {
       void syncSetupStatus().catch(() => {});
     };
+    // The Coding Agent app asks for a terminal on a specific run: a live tail
+    // while it works, or `claude-ds --resume` once it has finished.
+    const handleOpenTerminal = (e: Event) => {
+      const command = (e as CustomEvent<{ command?: string }>).detail?.command;
+      if (typeof command !== "string" || !command) return;
+      // forceNew: a second run must get its own terminal rather than typing
+      // into one already busy following the first.
+      setTerminalCommand(command);
+      openApp("terminal", true);
+    };
+    window.addEventListener("clawbox:open-terminal", handleOpenTerminal);
     window.addEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
     return () => window.removeEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
   }, [syncSetupStatus]);
@@ -1236,6 +1250,11 @@ function ChromeDesktopInner() {
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
   }, []);
 
+  /** Finished coding runs waiting to be seen, newest first. */
+  // Typed into the next terminal window that opens — see clawbox:open-terminal.
+  const [terminalCommand, setTerminalCommand] = useState<string | null>(null);
+  const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
+
   useEffect(() => {
     let active = true;
     let lastProcessedTs = 0;
@@ -1276,6 +1295,16 @@ function ChromeDesktopInner() {
                 },
               }));
               setHiddenInstalledApps(prev => prev.includes(action.appId) ? prev.filter(id => id !== action.appId) : prev);
+            } else if (action.type === "coding_agent" && action.runId) {
+              // A finished coding run is something the owner may want to act
+              // on, so it becomes a top-right CARD with a button rather than a
+              // toast that slides away. Newest first, deduped by run id — the
+              // slot is single-consumer but a reload can replay one.
+              setCodingNotices(prev => (
+                prev.some(n => n.runId === action.runId)
+                  ? prev
+                  : [{ runId: action.runId as string, status: String(action.status ?? ""), projectId: (action.projectId as string | null) ?? null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
+              ));
             } else if (action.type === "notify" && action.message) {
               window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
             }
@@ -1562,9 +1591,9 @@ function ChromeDesktopInner() {
           </div>
         );
       case "terminal":
-        return <TerminalApp />;
+        return <TerminalApp initialCommand={terminalCommand ?? undefined} />;
       case "coding":
-        return <TerminalApp initialCommand={CODING_HARNESS_COMMAND} />;
+        return <CodingAgentApp />;
       case "store":
         return (
           <AppStore
@@ -1793,7 +1822,11 @@ function ChromeDesktopInner() {
           )}
         </div>
       )}
-      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0) && (
+      {/* Renders the `clawbox:toast` events the pending-action poll above and
+          the pairing flow dispatch. Without it ui_notify, `clawbox notify`
+          and every server-side owner notice were fired and never shown. */}
+      <ToastHost />
+      {(updateAvailable || showClawAiOfferNotification || pairingRequests.length > 0 || codingNotices.length > 0) && (
         <div className="pointer-events-none fixed top-4 right-4 z-[99998] flex w-[320px] flex-col gap-3">
           {/* New version available notification */}
           {updateAvailable && (() => {
@@ -1907,6 +1940,59 @@ function ChromeDesktopInner() {
           )}
 
           {/* New Telegram access request popup(s) */}
+          {/* A finished coding run. Same shape as the pairing card above,
+              because it is the same kind of thing: a notice the owner may want
+              to act on. The button opens the Coding Agent app, where the run's
+              summary and what it changed are — the card itself carries only
+              ClawBox-authored text, never the model's. */}
+          {codingNotices.map((notice) => {
+            const failed = notice.status === "failed";
+            const stopped = notice.status === "stopped";
+            const accent = failed ? "#f87171" : stopped ? "#cbd5e1" : "#4ade80";
+            const glyph = failed ? "error" : stopped ? "stop_circle" : "task_alt";
+            const title = failed
+              ? t("codingAgent.chatFailed")
+              : stopped ? t("codingAgent.chatStopped") : t("codingAgent.chatFinished");
+            return (
+              <div
+                key={notice.runId}
+                className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                role="status"
+                aria-live="polite"
+                data-testid="coding-agent-notice"
+              >
+                <div className="flex items-start gap-3 px-4 py-3">
+                  <div className="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style={{ background: `${accent}26`, border: `1px solid ${accent}4d` }}>
+                    <span className="material-symbols-rounded" style={{ fontSize: 20, color: accent }}>{glyph}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-white">{title}</div>
+                    {notice.projectId && <div className="text-xs text-white/60 mt-0.5 truncate">{notice.projectId}</div>}
+                    <div className="text-[11px] text-white/40 font-mono mt-0.5 truncate">{notice.runId}</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId))}
+                    className="pointer-events-auto w-7 h-7 flex items-center justify-center rounded-md text-white/40 hover:text-white hover:bg-white/10 transition-colors shrink-0 bg-transparent border-none cursor-pointer"
+                    aria-label={t("codingAgent.noticeDismiss")}
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 18 }}>close</span>
+                  </button>
+                </div>
+                <div className="pointer-events-auto flex items-center gap-2 px-4 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => { openApp("coding"); setCodingNotices(prev => prev.filter(n => n.runId !== notice.runId)); }}
+                    className="flex-1 px-3 py-1.5 rounded-md bg-white/10 hover:bg-white/15 text-white text-xs font-semibold transition-colors cursor-pointer border-none inline-flex items-center justify-center gap-1.5"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }}>smart_toy</span>
+                    {t("codingAgent.noticeOpen")}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+
           {pairingRequests.map((req) => {
             const label = req.name || req.id || "A Telegram user";
             const code = req.code || "";

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
+import { requireSession } from "@/lib/route-auth";
 
 // Shared plumbing for the wizard-driven Hermes provider-OAuth routes
 // (start / submit / poll / cancel). These exist so the browser NEVER has to
@@ -92,6 +93,39 @@ export async function hermesGate(): Promise<NextResponse | null> {
 }
 
 /**
+ * Edition gate plus the owner's session — what the three OAuth routes that
+ * CHANGE something (start / submit / cancel) run before anything else.
+ *
+ * Middleware is the primary gate and already refuses these paths without a
+ * session: the bootstrap allow-list in `@/lib/setup-api-gate` names only what
+ * wizard steps 1-3 call, and this flow belongs to step 4 — AIModelsStep runs
+ * after CredentialsStep has set the password and been handed a session cookie,
+ * so it is authenticated by the time it gets here. The wizard needs no
+ * carve-out and does not get one.
+ *
+ * This is the second line, on the same argument `@/lib/route-auth` makes for
+ * the destructive handlers: one gate maintained by hand in front of a ~100-route
+ * surface is one `startsWith` away from serving a route it meant to refuse, and
+ * these three are worth refusing twice. `start` opens a provider sign-in session
+ * against the owner's own dashboard, `submit` hands that session an
+ * authorization code, `cancel` destroys one — all while the device may still be
+ * broadcasting the open `ClawBox-Setup` AP. TASK-527.
+ *
+ * No `allowBootstrap`: nothing in this flow has a first-boot role, so it fails
+ * closed on a device with no password rather than opening a window.
+ *
+ * The edition check stays first deliberately. It answers from
+ * `getActiveHarness()`, which the wizard already reads pre-auth through the
+ * allow-listed `/setup-api/harness/active`, so ordering it ahead of the session
+ * check tells an anonymous caller nothing it could not already ask for.
+ */
+export async function ownerGate(request: Request): Promise<NextResponse | null> {
+  const wrongEdition = await hermesGate();
+  if (wrongEdition) return wrongEdition;
+  return requireSession(request);
+}
+
+/**
  * Relay a dashboard response to the browser: same status, but only the listed
  * keys. A whitelist rather than a blanket passthrough because the dashboard's
  * responses are its own API surface — if it ever grows a field carrying
@@ -99,13 +133,22 @@ export async function hermesGate(): Promise<NextResponse | null> {
  * FastAPI signals errors as `detail`; surface that as `error` so the panel's
  * existing error handling reads it.
  */
-export async function relayJson(res: Response, keys: readonly string[]): Promise<NextResponse> {
+export async function relayJson(
+  res: Response,
+  keys: readonly string[],
+  // Called with the parsed body and the HTTP-level ok BEFORE the whitelist is
+  // applied, so a route can react to a terminal dashboard result (e.g. an OAuth
+  // sign-in that just landed) without re-reading a body that can only be read
+  // once. Purely observational — it cannot change what is relayed.
+  onData?: (data: Record<string, unknown>, ok: boolean) => void,
+): Promise<NextResponse> {
   let data: Record<string, unknown> = {};
   try {
     data = (await res.json()) as Record<string, unknown>;
   } catch {
     // Non-JSON body (dashboard mid-restart); relay the status alone.
   }
+  onData?.(data, res.ok);
   const out: Record<string, unknown> = {};
   for (const key of keys) {
     if (data[key] !== undefined) out[key] = data[key];

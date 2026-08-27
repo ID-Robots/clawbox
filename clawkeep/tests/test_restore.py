@@ -17,9 +17,27 @@ from unittest.mock import patch
 
 import pytest
 
+from clawkeep import agent as agent_mod
 from clawkeep import restore
 from clawkeep.api import Credentials
 from clawkeep.config import Config, HeartbeatConfig, OpenclawConfig
+
+
+@pytest.fixture(autouse=True)
+def _pin_device_edition(tmp_path_factory, monkeypatch):
+    """Pin the device edition for every test in this module.
+
+    `restore_snapshot` now asks `clawkeep.agent` which agent this device runs,
+    and that reads the ROOT-OWNED /etc/clawbox/edition.env. Left alone, these
+    tests would pass on a laptop (no such file, so the default "openclaw"
+    matches the OpenClaw-shaped fixtures) and FAIL on a Hermes device running
+    its own suite — the worst kind of test, one whose result depends on the
+    machine rather than the code.
+    """
+    empty = tmp_path_factory.mktemp("edition") / "edition.env"
+    empty.write_text("CLAWBOX_EDITION=openclaw\n", encoding="utf-8")
+    monkeypatch.setattr(agent_mod, "EDITION_FILE", str(empty))
+    monkeypatch.delenv("CLAWBOX_EDITION", raising=False)
 
 
 CREDS = Credentials(
@@ -205,7 +223,7 @@ def test_restore_snapshot_end_to_end(tmp_path: Path) -> None:
     with (
         patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
         patch("clawkeep.restore.s3.download", side_effect=fake_download),
-        patch("clawkeep.restore.openclaw.verify_archive"),
+        patch("clawkeep.restore.agent.verify_archive"),
     ):
         result = restore.restore_snapshot(cfg, "claw_x", "snap-root.tar.gz")
 
@@ -252,7 +270,7 @@ def test_restore_snapshot_propagates_verify_failure(tmp_path: Path) -> None:
         patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
         patch("clawkeep.restore.s3.download", side_effect=fake_download),
         patch(
-            "clawkeep.restore.openclaw.verify_archive",
+            "clawkeep.restore.agent.verify_archive",
             side_effect=openclaw.OpenclawError("manifest mismatch"),
         ),
     ):

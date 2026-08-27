@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
-import { verifyPassword } from "@/lib/auth";
 import { requireSession } from "@/lib/route-auth";
+import { padResponseTime } from "@/lib/login-rate-limit";
 import {
-  checkLockout,
-  recordFailure,
-  recordSuccess,
-  padResponseTime,
-  SHARED_BUCKET_MAX_LOCK_MS,
-} from "@/lib/login-rate-limit";
+  checkReproveLockout,
+  lockoutBuckets,
+  reproveOwnerPassword,
+} from "@/lib/password-reprove";
 
 export const dynamic = "force-dynamic";
 
@@ -22,29 +20,9 @@ export const dynamic = "force-dynamic";
  * controls. An attacker who could reach it therefore had a fast, effectively
  * unthrottled oracle sitting next to a carefully throttled login. TASK-444b.
  *
- * Now it shares /login-api's machinery outright: the same persisted escalating
- * lockout, the same shared-bucket cap, and the same MIN_RESPONSE_MS pad on
- * every exit path — including the 400s, so "malformed request" and "wrong
- * password" are indistinguishable by timing too.
+ * The throttling that fixed it now lives in `@/lib/password-reprove`, shared
+ * with the factory-reset route, which is the other oracle of this shape.
  */
-
-/** Same dual-bucket keying as /login-api — see the comment there. */
-function lockoutBuckets(req: Request): Array<{ key: string; maxLockMs?: number }> {
-  const buckets: Array<{ key: string; maxLockMs?: number }> = [
-    { key: "global", maxLockMs: SHARED_BUCKET_MAX_LOCK_MS },
-  ];
-  const cf = req.headers.get("cf-connecting-ip")?.trim();
-  if (cf) buckets.unshift({ key: `cf:${cf}` });
-  return buckets;
-}
-
-function lockoutResponse(retryAfterSeconds: number): NextResponse {
-  return NextResponse.json(
-    { error: "Too many attempts. Please try again later.", retryAfterSeconds },
-    { status: 429, headers: { "Retry-After": String(retryAfterSeconds) } },
-  );
-}
-
 export async function POST(request: Request) {
   const startedAt = Date.now();
 
@@ -58,13 +36,8 @@ export async function POST(request: Request) {
   }
 
   const buckets = lockoutBuckets(request);
-  for (const bucket of buckets) {
-    const lock = await checkLockout(bucket.key);
-    if (lock.locked) {
-      await padResponseTime(startedAt);
-      return lockoutResponse(lock.retryAfterSeconds);
-    }
-  }
+  const locked = await checkReproveLockout(buckets, startedAt);
+  if (locked) return locked;
 
   let body: { password?: string };
   try {
@@ -74,25 +47,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const password = body.password ?? "";
-  if (!password) {
-    await padResponseTime(startedAt);
-    return NextResponse.json({ error: "Password is required" }, { status: 400 });
-  }
-
-  const ok = await verifyPassword(password);
-  if (!ok) {
-    let worst = 0;
-    for (const bucket of buckets) {
-      const after = await recordFailure(bucket.key, { maxLockMs: bucket.maxLockMs });
-      if (after.locked) worst = Math.max(worst, after.retryAfterSeconds);
-    }
-    await padResponseTime(startedAt);
-    if (worst > 0) return lockoutResponse(worst);
-    return NextResponse.json({ error: "Incorrect password" }, { status: 401 });
-  }
-
-  for (const bucket of buckets) await recordSuccess(bucket.key);
+  const refused = await reproveOwnerPassword(body.password ?? "", buckets, startedAt);
+  if (refused) return refused;
 
   await padResponseTime(startedAt);
   return NextResponse.json({ ok: true });

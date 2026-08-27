@@ -1,11 +1,18 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
+import { padResponseTime } from "@/lib/login-rate-limit";
+import {
+  checkReproveLockout,
+  lockoutBuckets,
+  reproveOwnerPassword,
+} from "@/lib/password-reprove";
 import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
+import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { readEdition } from "@/lib/edition-source";
 import { startOllamaService } from "@/lib/local-ai-runtime";
 import { execFile as execFileCb } from "child_process";
@@ -396,6 +403,8 @@ function scheduleReboot(): void {
 }
 
 export async function POST(request: Request) {
+  const startedAt = Date.now();
+
   // Factory reset wipes data/, ~/.openclaw, ~/.hermes and reboots. It has no
   // onboarding role whatsoever, so it never gets the bootstrap carve-out: no
   // session, no reset, on any device state. This handler USED to be
@@ -403,7 +412,43 @@ export async function POST(request: Request) {
   // cookie even in principle — and an unauthenticated POST really did wipe the
   // QA box on 2026-08-22T00:04Z. TASK-443.
   const unauthorized = await requireSession(request);
-  if (unauthorized) return unauthorized;
+  if (unauthorized) {
+    await padResponseTime(startedAt);
+    return unauthorized;
+  }
+
+  // A session is what stops a stranger; it is not what stops the owner losing
+  // the box to one misdirected click, and a stolen or shared browser carries a
+  // live session too. So the request also has to re-prove the OS password and
+  // carry the typed confirmation — the rest of TASK-443's ask.
+  //
+  // The password check makes this route a right/wrong oracle, so it runs on
+  // exactly the same throttle and response-time pad as /login-api. The typed
+  // token is checked FIRST and cheaply: a caller who cannot spell it never
+  // reaches the oracle, and never burns a lockout attempt on the owner's
+  // behalf.
+  const buckets = lockoutBuckets(request);
+  const locked = await checkReproveLockout(buckets, startedAt);
+  if (locked) return locked;
+
+  let body: { password?: string; confirm?: string };
+  try {
+    body = await request.json();
+  } catch {
+    await padResponseTime(startedAt);
+    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+  }
+
+  if (!isFactoryResetConfirmed(body.confirm)) {
+    await padResponseTime(startedAt);
+    return NextResponse.json(
+      { error: `Type ${FACTORY_RESET_CONFIRMATION} to confirm the factory reset` },
+      { status: 400 },
+    );
+  }
+
+  const refused = await reproveOwnerPassword(body.password ?? "", buckets, startedAt);
+  if (refused) return refused;
 
   try {
     resetUpdateState();

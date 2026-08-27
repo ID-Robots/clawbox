@@ -500,4 +500,30 @@ describe("spoken replies in the mascot chat", () => {
     expect(document.body.textContent).not.toContain("MEDIA:");
     expect(document.body.textContent).not.toContain("voice-1787291821763");
   });
+  it("folds the spoken supplement into a turn that named emails", async () => {
+    // A reply that points at mail keeps its `EMAIL:` lines in the STORED text
+    // — they are lifted at render, not at write — while the pushed supplement
+    // arrives already stripped. Comparing the two raw would never match, and
+    // the audio would be dropped or land in a bubble of its own.
+    const summary = "Jane sent the Wednesday plan.";
+    const withRefs = `${summary}
+EMAIL:4471`;
+
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(socket()).not.toBeNull());
+    await screen.findByRole("textbox");
+
+    deliver(assistantMessage(withRefs, 1787291821899));
+    // Generous waits: this suite drives a fake socket through real timers, and
+    // a cold run here is slower than the 1s default allows for.
+    await screen.findByText(summary, {}, { timeout: 5000 });
+    expect(await screen.findAllByTestId("chat-email-card", {}, { timeout: 5000 })).toHaveLength(1);
+
+    deliverSessionMessage(assistantMessage(withRefs, 1787291825743, VOICE));
+
+    await waitFor(() => expect(players()).toHaveLength(1), { timeout: 5000 });
+    // One answer with a player, not the answer twice.
+    expect(screen.getAllByText(summary)).toHaveLength(1);
+    expect(screen.getAllByTestId("chat-email-card")).toHaveLength(1);
+  });
 });

@@ -16,6 +16,7 @@ import PetSprite, { PET_BODY_PX } from "@/components/PetSprite";
 import { invalidatePetStatus } from "@/lib/pet-client";
 import { CODEX_STATE_ROWS, LEGACY_STATE_ROWS } from "@/lib/pet-state-map";
 import type { PetRowMetrics } from "@/lib/pet-sheet-metrics";
+import { CURATED_PETS } from "@/lib/pet-curated";
 
 /** A row with `frames` real frames, each drawn `bottom` px above the cell floor. */
 function row(frames: number, bottom: number, head = 148): PetRowMetrics {
@@ -53,6 +54,9 @@ const CODEX_PET = {
   framesPerState: 6,
   loopMs: 1100,
 };
+
+/** A fresh Hermes box: pets supported, none picked — the state that wears the egg. */
+const FRESH_HERMES = { supported: true, edition: "hermes", enabled: false, active: null };
 
 /** The shape every installed Petdex sheet really has: `waving` (row 3) draws
  *  four frames, `jumping` (row 4) five, and every row insets its art. */
@@ -141,12 +145,15 @@ describe("edition gating", () => {
     expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeNull();
   });
 
-  it("shows no mascot at all on a Hermes box with no pet picked yet", async () => {
+  it("wears the egg, and never the crab, on a Hermes box with no pet picked yet", async () => {
     // A fresh Hermes device installs no pet (the first one is a ~2.2 MB
-    // download), and the crab is not a stand-in for it.
-    stubPetsRoute({ supported: true, edition: "hermes", enabled: false, active: null });
+    // download). The crab is not a stand-in for it — it is ClawBox's own brand
+    // and is not worn on someone else's harness — so the empty state is an egg,
+    // which says "pick one" where a blank shelf said "something is broken".
+    stubPetsRoute(FRESH_HERMES);
     const { container } = render(<Mascot />);
-    await waitFor(() => expect(container.querySelector("[data-pet]")).toBeNull());
+    await waitFor(() => expect(container.querySelector('[data-mascot="egg"]')).toBeTruthy());
+    expect(container.querySelector("[data-pet]")).toBeNull();
     expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeNull();
   });
 
@@ -168,6 +175,10 @@ describe("edition gating", () => {
     vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("boom"))));
     const { container } = render(<Mascot />);
     await waitFor(() => expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    // And specifically NOT the egg. The fail-open answers `supported: false`,
+    // which is the same answer OpenClaw gives — an OpenClaw desktop that lost
+    // the route for a moment must not sprout a Hermes egg.
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
   });
 
   it("keeps the ClawBox prop for the crab and takes it away from a pet", async () => {
@@ -333,14 +344,277 @@ describe("edition gating", () => {
   });
 
   it("re-reads the pet when Settings announces a pick", async () => {
-    stubPetsRoute({ supported: true, edition: "hermes", enabled: false, active: null });
+    stubPetsRoute(FRESH_HERMES);
     const { container } = render(<Mascot />);
-    await waitFor(() => expect(container.querySelector("[data-pet]")).toBeNull());
+    await waitFor(() => expect(container.querySelector('[data-mascot="egg"]')).toBeTruthy());
 
     invalidatePetStatus();
     stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
     window.dispatchEvent(new Event("clawbox-pet-changed"));
     await waitFor(() => expect(container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    // The egg is a placeholder for exactly one thing, and that thing arrived.
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+  });
+
+  // ── The fresh-box egg ──
+  //
+  // Hermes + pets supported + nothing picked. It is a placeholder, not a
+  // mascot: no speech, no ClawBox prop, no roaming, and one job — get the
+  // owner into Settings → Appearance.
+  it("stands the egg on the bottom bar's top edge, not the desktop floor", async () => {
+    const removeShelf = installShelf();
+    try {
+      stubPetsRoute(FRESH_HERMES);
+      const { container } = render(<Mascot />);
+      // Same ground line the pet uses: innerHeight 800 − the bar's top 700.
+      await waitFor(() => {
+        const egg = container.querySelector('[data-mascot="egg"]') as HTMLElement | null;
+        expect(egg?.style.bottom).toBe("100px");
+      });
+    } finally {
+      removeShelf();
+    }
+  });
+
+  it("draws the egg from the bundled sheet, never from the Petdex CDN", async () => {
+    stubPetsRoute(FRESH_HERMES);
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-egg-sprite]")).toBeTruthy());
+    const sprite = container.querySelector("[data-egg-sprite]") as HTMLElement;
+    expect(sprite.style.backgroundImage).toContain("/pet-egg-sheet.png");
+    const styled = Array.from(container.querySelectorAll("[style]"))
+      .map((el) => el.getAttribute("style") ?? "")
+      .join(" ");
+    expect(styled).not.toContain("petdex");
+  });
+
+  it("never shows a cracked shell — the pet is not hatching yet", async () => {
+    stubPetsRoute(FRESH_HERMES);
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-egg-sprite]")).toBeTruthy());
+    // Frames 9-11 are the crack and the burst. At 56px a cell, any offset at
+    // or beyond -504px is one of them, and a cracking egg on a box where
+    // nothing is hatching would be a lie about the device's state.
+    const css = Array.from(container.querySelectorAll("style"))
+      .map((el) => el.textContent ?? "")
+      .join(" ");
+    const offsets = Array.from(css.matchAll(/background-position-y:(-?\d+)px/g)).map((m) => Number(m[1]));
+    expect(offsets.length).toBeGreaterThan(0);
+    for (const offset of offsets) {
+      expect(Math.abs(offset) / 56).toBeLessThanOrEqual(5);
+    }
+  });
+
+  it("hatches a random curated pet on click — the picker no longer opens", async () => {
+    let active: unknown = null;
+    const selected: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        const u = String(url);
+        if (u.startsWith("/setup-api/pets/select")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { slug?: string };
+          selected.push(body.slug ?? "");
+          active = { ...CODEX_PET, slug: body.slug, displayName: body.slug };
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, active }) } as Response);
+        }
+        if (u.startsWith("/setup-api/pets")) {
+          const payload = active
+            ? { supported: true, edition: "hermes", enabled: true, active }
+            : FRESH_HERMES;
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) } as Response);
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${u}`));
+      }),
+    );
+    const rand = vi.spyOn(Math, "random").mockReturnValue(0);
+    const opened: string[] = [];
+    const onOpenApp = (e: Event) => opened.push((e as CustomEvent).detail?.appId);
+    window.addEventListener("clawbox:open-app", onOpenApp);
+    try {
+      const { container } = render(<Mascot />);
+      await waitFor(() => expect(container.querySelector("[data-egg-hatch]")).toBeTruthy());
+      fireEvent.click(container.querySelector("[data-egg-hatch]") as HTMLElement);
+      // The pick persists through the SAME route the Settings picker uses.
+      await waitFor(() => expect(selected).toEqual([CURATED_PETS[0].slug]));
+      // The burst steps into the crack frames the idle loop must never reach.
+      await waitFor(
+        () => {
+          const sprite = container.querySelector("[data-egg-sprite]") as HTMLElement;
+          expect(["-504px", "-560px", "-616px"]).toContain(sprite.style.backgroundPositionY);
+        },
+        { timeout: 2000 },
+      );
+      // The chosen pet takes the shelf, and the egg is gone.
+      await waitFor(
+        () => expect(container.querySelector(`[data-pet="${CURATED_PETS[0].slug}"]`)).toBeTruthy(),
+        { timeout: 3000 },
+      );
+      expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+      // Hatching REPLACED the picker shortcut; Settings did not open.
+      expect(opened).toEqual([]);
+    } finally {
+      window.removeEventListener("clawbox:open-app", onOpenApp);
+      rand.mockRestore();
+    }
+  });
+
+  it("draws from the whole curated list — the top of the range lands the last pet, never 'none'", async () => {
+    const selected: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        const u = String(url);
+        if (u.startsWith("/setup-api/pets/select")) {
+          selected.push((JSON.parse(String(init?.body ?? "{}")) as { slug?: string }).slug ?? "");
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) } as Response);
+        }
+        if (u.startsWith("/setup-api/pets")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(FRESH_HERMES) } as Response);
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${u}`));
+      }),
+    );
+    const rand = vi.spyOn(Math, "random").mockReturnValue(0.999999);
+    try {
+      const { container } = render(<Mascot />);
+      await waitFor(() => expect(container.querySelector("[data-egg-hatch]")).toBeTruthy());
+      fireEvent.click(container.querySelector("[data-egg-hatch]") as HTMLElement);
+      await waitFor(() => expect(selected).toEqual([CURATED_PETS[CURATED_PETS.length - 1].slug]));
+      // Every outcome is a real curated pet; "no pet" is not in the pool.
+      expect(CURATED_PETS.some((p) => p.slug === selected[0])).toBe(true);
+      expect(selected[0]).not.toBe("");
+    } finally {
+      rand.mockRestore();
+    }
+  });
+
+  it("falls back to a plain fade swap under prefers-reduced-motion", async () => {
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      onchange: null,
+    })) as unknown as typeof window.matchMedia;
+    let active: unknown = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string, init?: RequestInit) => {
+        const u = String(url);
+        if (u.startsWith("/setup-api/pets/select")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { slug?: string };
+          active = { ...CODEX_PET, slug: body.slug, displayName: body.slug };
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true, active }) } as Response);
+        }
+        if (u.startsWith("/setup-api/pets")) {
+          const payload = active
+            ? { supported: true, edition: "hermes", enabled: true, active }
+            : FRESH_HERMES;
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(payload) } as Response);
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${u}`));
+      }),
+    );
+    const rand = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const { container } = render(<Mascot />);
+      await waitFor(() => expect(container.querySelector("[data-egg-hatch]")).toBeTruthy());
+      fireEvent.click(container.querySelector("[data-egg-hatch]") as HTMLElement);
+      // No crack frames: the egg fades instead of stepping the hatch cells.
+      await waitFor(() => {
+        expect(container.querySelector('[data-mascot="egg"]')?.getAttribute("data-egg-phase")).toBe("fading");
+      });
+      const sprite = container.querySelector("[data-egg-sprite]") as HTMLElement;
+      expect(sprite.style.backgroundPositionY).toBe("0px");
+      await waitFor(
+        () => expect(container.querySelector(`[data-pet="${CURATED_PETS[0].slug}"]`)).toBeTruthy(),
+        { timeout: 2000 },
+      );
+    } finally {
+      rand.mockRestore();
+    }
+  });
+
+  it("puts the egg back and says why when the install fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const u = String(url);
+        if (u.startsWith("/setup-api/pets/select")) {
+          return Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({ error: "x" }) } as Response);
+        }
+        if (u.startsWith("/setup-api/pets")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(FRESH_HERMES) } as Response);
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${u}`));
+      }),
+    );
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-egg-hatch]")).toBeTruthy());
+    fireEvent.click(container.querySelector("[data-egg-hatch]") as HTMLElement);
+    await waitFor(() => {
+      expect(container.querySelector('[data-mascot="egg"]')?.getAttribute("data-egg-phase")).toBe("idle");
+      expect(container.querySelector("[data-egg-hint]")?.textContent).toBe("settings.mascot.petInstallFailed");
+    });
+  });
+
+  it("labels the egg from the locale, and shows the hint on hover", async () => {
+    stubPetsRoute(FRESH_HERMES);
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector("[data-egg-hatch]")).toBeTruthy());
+    const button = container.querySelector("[data-egg-hatch]") as HTMLElement;
+    // The i18n mock answers with the key, so this asserts the key is the one
+    // the parity test guards rather than a hardcoded English string.
+    expect(button.getAttribute("aria-label")).toBe("settings.mascot.eggHatch");
+
+    expect(container.querySelector("[data-egg-hint]")).toBeNull();
+    fireEvent.mouseEnter(button);
+    await waitFor(() => expect(container.querySelector("[data-egg-hint]")?.textContent).toBe("settings.mascot.eggHatch"));
+    fireEvent.mouseLeave(button);
+    await waitFor(() => expect(container.querySelector("[data-egg-hint]")).toBeNull());
+  });
+
+  it("gives the egg no speech bubble and no ClawBox prop", async () => {
+    stubPetsRoute(FRESH_HERMES);
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('[data-mascot="egg"]')).toBeTruthy());
+    // The prop is the CRAB's, and an egg has nothing to say until it is one.
+    // The speech bubble, the drag hit box and the physics all live inside the
+    // mascot shell, so asserting the shell itself never renders covers the lot.
+    expect(container.querySelector('img[src="/clawbox-box.png"]')).toBeNull();
+    expect(container.querySelector('[data-mascot="crab"]')).toBeNull();
+    expect(container.querySelector('[data-mascot="pet"]')).toBeNull();
+    expect(container.querySelector("[data-mascot-hit]")).toBeNull();
+  });
+
+  it("keeps the egg off OpenClaw entirely", async () => {
+    stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+  });
+
+  it("keeps the egg away once a pet is active", async () => {
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('[data-pet="boba"]')).toBeTruthy());
+    expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
+  });
+
+  it("brings the egg back if the active pet goes away", async () => {
+    stubPetsRoute({ supported: true, edition: "hermes", enabled: true, active: CODEX_PET });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('[data-pet="boba"]')).toBeTruthy());
+
+    invalidatePetStatus();
+    stubPetsRoute(FRESH_HERMES);
+    window.dispatchEvent(new Event("clawbox-pet-changed"));
+    await waitFor(() => expect(container.querySelector('[data-mascot="egg"]')).toBeTruthy());
+    expect(container.querySelector("[data-pet]")).toBeNull();
   });
 });
 

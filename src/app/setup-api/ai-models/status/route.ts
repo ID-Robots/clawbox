@@ -3,11 +3,7 @@ import { readConfig } from "@/lib/openclaw-config";
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import {
   normalizeClawboxAiTier,
-  dailyImageLimitForPlan,
-  CLAWBOX_AI_IMAGE_MODEL_ID,
-  CLAWBOX_AI_PLAN_LABEL,
   type ClawboxAiTier,
-  type ClawboxAiPlan,
 } from "@/lib/clawbox-ai-models";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesConfigGetMany } from "@/lib/hermes-config-cache";
@@ -169,16 +165,6 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
 
   let clawaiAccountTier: ClawboxAiTier | null = null;
   let accountTierSource: "portal" | "picker" = "picker";
-  // Only ever set from a live portal answer. There is no local fallback on
-  // purpose: the stored `clawai_tier` is a device tier, and inferring a plan
-  // back out of it cannot distinguish Free from "we never asked", so a guess
-  // here would put a wrong image allowance in front of the user.
-  let clawaiPlan: ClawboxAiPlan | null = null;
-  // Live usage, when the portal sent it. Null means "we do not know", never
-  // "zero" — an older portal has no `meters` block at all, and rendering its
-  // silence as 0 would tell an owner who had spent the day's allowance that
-  // they had spent none of it.
-  let clawaiImageMeter: { used: number; limit: number } | null = null;
   if (state.hasClawaiProfile) {
     clawaiAccountTier = localTier;
     // Ask the portal whenever a clawai token is paired, regardless
@@ -190,8 +176,6 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
       const lookup = await fetchPortalTier(state.clawaiToken);
       if (lookup.source === "portal") {
         clawaiAccountTier = lookup.tier;
-        clawaiPlan = lookup.plan;
-        clawaiImageMeter = lookup.imageMeter;
         accountTierSource = "portal";
         // Persist the portal-confirmed tier so the portal-unreachable
         // fallback reflects the last *confirmed* tier, not a stale
@@ -227,37 +211,6 @@ async function buildStatusResponse(state: ResolvedAiState): Promise<NextResponse
     // prompts independently of paid-tier checks.
     clawaiConfigured: state.hasClawaiProfile,
     tierSource,
-    // DAILY image allowance, and the day's usage, so a user learns the cap
-    // exists *before* they run into it rather than only from a failed request.
-    // Daily since TASK-485; this block said `monthlyLimit` for as long as the
-    // meter was monthly and nothing rendered it, which is how the wrong word
-    // survived a re-period.
-    //
-    // WHERE `used` COMES FROM, because the device still has no counter of its
-    // own and must not grow one. The cloud proxy is the only counter. It
-    // reports live usage in the `X-ClawBox-Images-*` headers of the images
-    // endpoint, which the GATEWAY calls directly — those headers never reach
-    // this process. So the number here comes back through
-    // `/api/clawbox-ai/device-info`, off the same Redis counter the reservation
-    // path enforces against (TASK-469). One counter, two readers.
-    //
-    // Every field is null when we genuinely do not know: `dailyLimit` when the
-    // portal did not answer this cycle, `used` additionally when it answered
-    // but sent no meters (an older portal). Callers must render nothing rather
-    // than a default — any default is a guess at somebody's subscription, and
-    // a `used: 0` default is a guess that always reads as good news.
-    //
-    // `dailyLimit` prefers the LIVE limit over the compiled-in table: the table
-    // is a snapshot of what the cloud believed on release day, and it was a
-    // release behind reality for the whole of TASK-485.
-    clawaiImages: {
-      supported: state.hasClawaiProfile,
-      model: CLAWBOX_AI_IMAGE_MODEL_ID,
-      plan: clawaiPlan,
-      planLabel: clawaiPlan ? CLAWBOX_AI_PLAN_LABEL[clawaiPlan] : null,
-      dailyLimit: clawaiImageMeter?.limit ?? dailyImageLimitForPlan(clawaiPlan),
-      used: clawaiImageMeter?.used ?? null,
-    },
   }, {
     headers: {
       "Cache-Control": "no-store",
@@ -280,7 +233,6 @@ export async function GET() {
       {
         connected: false, provider: null, providerLabel: null, mode: null, model: null,
         clawaiTier: null, clawaiAccountTier: null, clawaiConfigured: false, tierSource: "picker",
-        clawaiImages: { supported: false, model: CLAWBOX_AI_IMAGE_MODEL_ID, plan: null, planLabel: null, dailyLimit: null, used: null },
       },
       {
         headers: {

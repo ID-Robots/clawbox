@@ -1213,6 +1213,27 @@ export async function fillCredentialsStep(page: Page) {
 }
 
 /**
+ * Submit the credentials step, through the write-down confirmation.
+ *
+ * Connect no longer saves: both secrets this step sets are write-only
+ * afterwards, so the wizard reads them back and waits for a deliberate
+ * acknowledgement first (CredentialsWriteDownDialog.tsx). Asserting the
+ * dialog here means every setup path that walks past step 3 also proves the
+ * interposition is still there.
+ */
+export async function submitCredentialsStep(page: Page) {
+  await page.getByRole("button", { name: /^Connect$/ }).click();
+  const writeDown = page.getByTestId("credentials-writedown-dialog");
+  await expect(writeDown).toBeVisible({ timeout: 10_000 });
+  // The acknowledgement input is visually replaced, so its own label sits over
+  // it — clicking the label is both what a customer does and the only thing
+  // Playwright can land on.
+  await writeDown.getByTestId("writedown-ack-label").click();
+  await expect(writeDown.getByTestId("writedown-ack")).toBeChecked();
+  await writeDown.getByTestId("writedown-continue").click();
+}
+
+/**
  * Choose an AI provider from the wizard's provider list.
  *
  * The list shows the provider currently in play and keeps the rest behind its
@@ -1280,7 +1301,7 @@ export async function completeSetupWizard(page: Page) {
   await expect(credentialsStep).toBeVisible({ timeout: 10_000 });
 
   await fillCredentialsStep(page);
-  await page.getByRole("button", { name: /^Connect$/ }).click();
+  await submitCredentialsStep(page);
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await pickAiProvider(page, "OpenAI GPT");

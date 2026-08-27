@@ -35,6 +35,20 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   startOllamaService: vi.fn(async () => {}),
 }));
 
+// The confirmation gate has its own file (`reset-confirmation.test.ts`), which
+// exercises the real one on real timers. Here it is stubbed open: this file is
+// about what the wipe does once it has been allowed to start, and the real gate
+// pads its responses with a timer these fake-timer tests would never advance.
+vi.mock("@/lib/password-reprove", () => ({
+  lockoutBuckets: vi.fn(() => [{ key: "global" }]),
+  checkReproveLockout: vi.fn(async () => null),
+  reproveOwnerPassword: vi.fn(async () => null),
+}));
+
+vi.mock("@/lib/login-rate-limit", () => ({
+  padResponseTime: vi.fn(async () => {}),
+}));
+
 import { resetUpdateState } from "@/lib/updater";
 import { getSystemUsername } from "@/lib/auth";
 import { startOllamaService } from "@/lib/local-ai-runtime";
@@ -112,12 +126,13 @@ describe("POST /setup-api/setup/reset", () => {
 
     session = installSessionFixture();
     const mod = await import("@/app/setup-api/setup/reset/route");
-    // The handler now requires a session (TASK-443), so every call in this
-    // file goes through an authenticated request. `reset-requires-auth.test.ts`
-    // covers the unauthenticated case.
+    // The handler requires a session, the owner's password and the typed word
+    // (TASK-443), so every call in this file carries all three. The gate itself
+    // is covered by `reset-confirmation.test.ts`.
     resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
       method: "POST",
-      headers: { Cookie: session.cookie },
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
     }));
   });
 
@@ -538,12 +553,13 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
 
     session = installSessionFixture();
     const mod = await import("@/app/setup-api/setup/reset/route");
-    // The handler now requires a session (TASK-443), so every call in this
-    // file goes through an authenticated request. `reset-requires-auth.test.ts`
-    // covers the unauthenticated case.
+    // The handler requires a session, the owner's password and the typed word
+    // (TASK-443), so every call in this file carries all three. The gate itself
+    // is covered by `reset-confirmation.test.ts`.
     resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
       method: "POST",
-      headers: { Cookie: session.cookie },
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
     }));
   });
 

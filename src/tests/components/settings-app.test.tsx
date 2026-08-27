@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
+import { resetHarnessCache } from "@/lib/client-harness";
 
 // Every test in this file mounts the WHOLE settings app — every panel, every
 // status fetch, and now the pet picker as well. On a Jetson under full-suite
@@ -89,8 +90,9 @@ function jsonResponse(data: unknown) {
 }
 
 describe("SettingsApp factory reset overlay", () => {
-  beforeEach(() => {
-    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+  /** The whole settings app mounts here, so every panel's status call needs an
+   *  answer. A test that wants one route to behave differently wraps this. */
+  function defaultFetch(input: string | URL, init?: RequestInit) {
       const url = input.toString();
 
       if (url === "/setup-api/preferences" && init?.method === "POST") return jsonResponse({ ok: true });
@@ -115,6 +117,17 @@ describe("SettingsApp factory reset overlay", () => {
         });
       }
       if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
+      if (url === "/setup-api/providers/status") {
+        return jsonResponse({
+          harness: "openclaw",
+          defaultProvider: "clawai",
+          degraded: false,
+          providers: [
+            { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai" },
+            { id: "anthropic", label: "Anthropic Claude", state: "disconnected", isDefault: false, section: "ai" },
+          ],
+        });
+      }
       if (url === "/setup-api/setup/status") return jsonResponse({ setup_complete: false });
       if (url === "/setup-api/llamacpp/status") return jsonResponse({ installed: false });
       if (url === "/setup-api/ollama/status") return jsonResponse({ installed: false });
@@ -122,7 +135,10 @@ describe("SettingsApp factory reset overlay", () => {
       if (url === "/setup-api/setup/reset") return jsonResponse({ ok: true });
 
       return jsonResponse({});
-    }));
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(defaultFetch));
   });
 
   afterEach(() => {
@@ -137,10 +153,23 @@ describe("SettingsApp factory reset overlay", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
     fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
-    fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+
+    const confirmButton = screen.getByRole("button", { name: "settings.reset" });
+    // TASK-443: the wipe cannot start on the dialog opening alone.
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+    fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+    expect(confirmButton).toBeEnabled();
+
+    fireEvent.click(confirmButton);
 
     await waitFor(() => {
-      expect(fetch).toHaveBeenCalledWith("/setup-api/setup/reset", { method: "POST" });
+      expect(fetch).toHaveBeenCalledWith("/setup-api/setup/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+      });
     });
 
     const overlay = await screen.findByRole("status");
@@ -150,6 +179,51 @@ describe("SettingsApp factory reset overlay", () => {
     expect(within(overlay).getAllByText("settings.erasingSettings")).toHaveLength(2);
     expect(within(overlay).getByText("settings.waitingOnline")).toBeInTheDocument();
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
+  });
+
+  it("keeps the dialog up and shows why when the box refuses the reset", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/setup/reset") {
+        return Promise.resolve(new Response(JSON.stringify({ error: "Incorrect password" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    render(<SettingsApp ui={defaultUi} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "wrong" } });
+    fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+    fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+
+    // The old flow went straight to the "erasing..." overlay without reading
+    // the response, so a refusal was indistinguishable from a wipe in progress.
+    expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect password");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
+  });
+
+  it("closes the reset dialog on Escape and clears what was typed", async () => {
+    render(<SettingsApp ui={defaultUi} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    await waitFor(() => {
+      expect(document.getElementById("factory-reset-confirm")).not.toBeInTheDocument();
+    });
+
+    // Reopening must not hand the next caller the last password typed.
+    fireEvent.click(screen.getByRole("button", { name: /factoryReset/ }));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(document.getElementById("factory-reset-password")).toHaveValue("");
   });
 
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {
@@ -394,5 +468,102 @@ describe("SettingsApp desktop nav overflow contract", () => {
     expect(content.className).toContain("flex-1");
     expect(content.className).toContain("overflow-y-auto");
     expect(content.className).toContain("min-w-0");
+  });
+});
+
+/**
+ * TASK follow-up: the AI section's own "Status" card duplicated the new AI
+ * Providers hero on the Hermes edition — same provider, same model, same
+ * "connected", stacked directly above it. The owner's goal this round was to
+ * kill redundant provider sections, so the card is suppressed on hermes (the
+ * hero is the single source there) and kept verbatim on openclaw and dual,
+ * which have no hero.
+ */
+describe("SettingsApp — AI section Status card is not doubled on Hermes", () => {
+  function stubForEdition(edition: "hermes" | "openclaw") {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = input.toString();
+        if (url === "/setup-api/harness/active") {
+          return jsonResponse({ active: edition, edition });
+        }
+        if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+        if (url === "/setup-api/setup/status") {
+          return jsonResponse({ setup_complete: true, ai_model_configured: true });
+        }
+        if (url === "/setup-api/ai-models/status") {
+          return jsonResponse({
+            connected: true,
+            provider: edition === "hermes" ? "anthropic" : "clawai",
+            providerLabel: edition === "hermes" ? "Anthropic" : "ClawBox AI",
+            mode: null,
+            model: edition === "hermes" ? "claude-fable-5" : "deepseek-v4-flash",
+            clawaiTier: null,
+          });
+        }
+        if (url === "/setup-api/ai-models/oauth/providers") return jsonResponse({ providers: [] });
+        if (url === "/setup-api/providers/status") {
+          return jsonResponse({
+            harness: edition,
+            defaultProvider: edition === "hermes" ? "anthropic" : "clawai",
+            degraded: false,
+            providers: [
+              {
+                id: edition === "hermes" ? "anthropic" : "clawai",
+                label: edition === "hermes" ? "Anthropic" : "ClawBox AI",
+                state: "connected",
+                isDefault: true,
+                section: "ai",
+              },
+            ],
+          });
+        }
+        // HermesProviderConfig's own reads (only exercised on the hermes path).
+        if (url === "/setup-api/hermes/clawai") {
+          return jsonResponse({ hasToken: false, tier: "flash", tierStored: null, active: false, model: "" });
+        }
+        if (url === "/setup-api/hermes/oauth") return jsonResponse({ providers: [] });
+        if (url.startsWith("/setup-api/hermes/models")) {
+          return jsonResponse({ provider: "anthropic", current: "claude-fable-5", models: [] });
+        }
+        if (url === "/setup-api/llamacpp/status") return jsonResponse({ installed: false });
+        if (url === "/setup-api/ollama/status") return jsonResponse({ installed: false });
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    resetHarnessCache();
+    const pending = window as Window & { __clawboxPendingSettingsSection?: string };
+    pending.__clawboxPendingSettingsSection = "ai";
+  });
+
+  afterEach(() => {
+    resetHarnessCache();
+    vi.unstubAllGlobals();
+  });
+
+  it("hides the Status card on hermes — the hero carries it instead", async () => {
+    stubForEdition("hermes");
+    render(<SettingsApp ui={defaultUi} />);
+
+    // The hero is the single source of "what is running" on this edition.
+    expect(await screen.findByTestId("provider-default-hero")).toBeInTheDocument();
+    // And the old Status card, which named the same provider and model right
+    // above it, is gone.
+    await waitFor(() => {
+      expect(screen.queryByText("settings.status")).not.toBeInTheDocument();
+    });
+  });
+
+  it("keeps the Status card on openclaw — there is no hero there", async () => {
+    stubForEdition("openclaw");
+    render(<SettingsApp ui={defaultUi} />);
+
+    // OpenClaw renders the picker, not the hero, so its Status card must stay.
+    expect(await screen.findByText("settings.status")).toBeInTheDocument();
+    expect(screen.queryByTestId("provider-default-hero")).not.toBeInTheDocument();
   });
 });

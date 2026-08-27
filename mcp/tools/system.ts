@@ -211,6 +211,19 @@ export async function desktopDisplay(): Promise<string> {
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
+/** What /setup-api/wifi/status answers. Only the fields wifi_status reasons about. */
+interface WifiStatusPayload {
+  connected?: boolean;
+  ssid?: string | null;
+}
+
+/** What /setup-api/wifi/ethernet answers. */
+interface EthernetStatusPayload {
+  connected?: boolean;
+  cable?: boolean;
+  iface?: string | null;
+}
+
 export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "system_stats",
@@ -442,10 +455,31 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "wifi_status",
-    "Report whether the ClawBox is online and which network it is on. Call this first whenever another tool fails with a network or catalogue error.",
+    "Report whether the ClawBox is online and how it is connected — WiFi, Ethernet, or both. Call this first whenever another tool fails with a network or catalogue error. Read `online`, not `wifi.connected`: a box on a cable is online with WiFi switched off.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
-    async () => json(await apiGet("/setup-api/wifi/status", { timeoutMs: 10_000 })),
+    async () => {
+      // WiFi alone does not answer "is this box online?". A ClawBox on a cable
+      // reports wifi.connected === false and reaches the whole internet, and an
+      // agent told only about WiFi reads that as "offline" and misdiagnoses
+      // every upstream failure that follows. Ethernet lives behind its own
+      // route, so ask both and state the conclusion outright.
+      const [wifi, ethernet] = await Promise.all([
+        apiGet<WifiStatusPayload>("/setup-api/wifi/status", { timeoutMs: 10_000 }),
+        // Best-effort: a box with no ethernet route still gets a WiFi answer.
+        apiGet<EthernetStatusPayload>("/setup-api/wifi/ethernet", { timeoutMs: 10_000 })
+          .catch(() => null),
+      ]);
+      const via: string[] = [];
+      if (wifi?.connected) via.push("wifi");
+      if (ethernet?.connected) via.push("ethernet");
+      return json({
+        online: via.length > 0,
+        connectedVia: via,
+        wifi,
+        ethernet: ethernet ?? { connected: false, cable: false, iface: null, unknown: true },
+      });
+    },
   );
 
   reg.tool(

@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import type { HarnessFacts } from "@/lib/harness/capabilities";
-import { hermesHasVisionRoute, hermesSupportsImages } from "@/lib/harness/hermes-features";
+import {
+  hermesAgentDrawsImages,
+  hermesHasVisionRoute,
+  hermesSupportsImages,
+} from "@/lib/harness/hermes-features";
+import { clawaiImageRouteReachable } from "@/lib/harness/clawai-images";
 import { hermesCanStreamTurns } from "@/lib/hermes-dashboard-turn";
 
 export const dynamic = "force-dynamic";
@@ -22,8 +27,9 @@ export const dynamic = "force-dynamic";
  */
 export async function GET() {
   const harness = await getActiveHarness();
+  const linked = await hasClawaiToken();
   const facts: HarnessFacts = {
-    hasClawaiToken: await hasClawaiToken(),
+    hasClawaiToken: linked,
     // Whether the installed `hermes` understands `chat --image` — PROBED, once
     // per process, and only where the answer can matter. An attach button shown
     // on a guess would stage files into a turn that ignores them, which is
@@ -50,6 +56,27 @@ export async function GET() {
     // Not asked on an OpenClaw box: it has its own socket and its own streaming,
     // and `hermes` may not be installed there at all.
     hermesStreamsTurns: harness === "hermes" ? await hermesCanStreamTurns() : false,
+    // Whether the ClawBox AI proxy is up and still serving the image model this
+    // box would ask for. The one fact here that leaves the device, so it is
+    // asked only where the answer can matter — on Hermes, whose picture button
+    // is the thing it gates, and only once there is a credential to spend on a
+    // picture at all. An unlinked box is already `canGenerateImages: false` and
+    // would be spending a network round trip to stay that way.
+    //
+    // Cheap and cached (0.32 s measured, 10 minutes on a yes), so a chat opened
+    // twice pays for it once. It is a plain metadata read: no generation is
+    // started and no daily allowance is spent.
+    hasClawaiImageRoute:
+      harness === "hermes" && linked ? await clawaiImageRouteReachable() : false,
+    // Whether the agent has an image backend selected — the Hermes spelling of
+    // "can this box draw". Read from `image_gen.provider` through the same
+    // mtime-keyed memo as the vision route, so it flips on the model-state
+    // event the moment ClawBox AI is linked rather than at the next restart.
+    //
+    // Not asked on an OpenClaw box: it makes pictures through its own bundled
+    // plugin and reads the credential instead, and `hermes` may not be
+    // installed there at all.
+    hermesAgentDrawsImages: harness === "hermes" ? await hermesAgentDrawsImages() : false,
   };
   return NextResponse.json({ harness, facts });
 }

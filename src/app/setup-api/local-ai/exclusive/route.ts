@@ -4,7 +4,12 @@ import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
-import { readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
+import {
+  gatewayIsAbsent,
+  readConfig,
+  restartGateway,
+  runOpenclawConfigSet,
+} from "@/lib/openclaw-config";
 
 const SAVED_PRIMARY_KEY = "local_only_saved_primary";
 const SAVED_FALLBACKS_KEY = "local_only_saved_fallbacks";
@@ -194,12 +199,37 @@ async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
   }
 }
 
+// Local-only mode is built entirely out of OpenClaw CLI calls: it flips
+// `agents.defaults.model.primary`, empties `fallbacks`, and sweeps
+// `~/.openclaw/agents/*/sessions/sessions.json`. Hermes has none of those —
+// `hermes-local-ai.ts` can install and remove a local provider but has no
+// fallback chain to make exclusive, so there is nothing here to port.
+//
+// Ungated, every call reached `runOpenclawConfigSet`, which throws
+// `OpenclawUnavailableError`, which the catch-all turned into a 500 whose body
+// SettingsApp painted verbatim into a red banner: "The OpenClaw CLI is not
+// available on this edition." That is the product telling a Hermes owner about
+// our internals, in an error colour, for a control we chose to show them.
+//
+// Refusing with `supported: false` lets the UI hide the card instead — and the
+// refusal is stated the same way `whatsapp/configure` states its own.
+const UNSUPPORTED = {
+  error: "Local-only mode is an OpenClaw feature; this edition does not have it.",
+  supported: false,
+} as const;
+
 export async function GET() {
+  if (gatewayIsAbsent()) {
+    return NextResponse.json({ enabled: false, ...UNSUPPORTED });
+  }
   const enabled = !!(await get(MODE_KEY));
   return NextResponse.json({ enabled });
 }
 
 export async function POST(request: Request) {
+  if (gatewayIsAbsent()) {
+    return NextResponse.json(UNSUPPORTED, { status: 501 });
+  }
   let body: { enabled?: boolean };
   try {
     body = await request.json();

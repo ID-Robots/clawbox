@@ -65,6 +65,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Capability store | `app_search`, `app_install` | `skill_search`, `skill_info`, `skill_install`, `skill_list`, `skill_uninstall` |
 | AI configuration | in Settings (gateway-owned) | `ai_list_models`, `ai_set_provider`, `ai_set_model` |
 | Coding family (`bash`, file tools, web tools) | yes | **no** — Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
+| Coding agent (`coding_agent_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Everything else | yes | yes |
 
@@ -102,6 +103,32 @@ prompt-injection payload with a financial outcome. The plan is reported by
 `device_status`; changing it is one click in Settings → AI.
 
 There is also no thinking/reasoning setter yet — see "Work owned by others".
+
+### Pictures
+
+`image_generate` (both editions, **only where the box CANNOT draw**)
+
+The inverse of every other gate here: this one is registered when the probe says
+NO. On a box that can draw, the harness already has its own `image_generate` and
+a second one beside it would contradict it; on a box that cannot, there is no
+image tool at all — and an agent asked for a picture with no tool to draw it does
+not stop. Measured on a customer's device: it reached for the shell, hand-wrote
+an SVG, installed `cairosvg`, rasterised it, and then wrote itself a SKILL to do
+it again — producing files the chat cannot serve and telling the customer nothing
+about why. So the absence gets a voice: one tool, empty schema, whose whole job
+is to name the reason (ClawBox AI is not connected) and the fix (Settings → AI
+Providers) and to forbid improvising around it.
+
+The probe is `canGenerateImages` off `/setup-api/chat/capabilities`, resolved
+once at startup like the rest — so the same staleness the email tools had applies
+here, in both directions: after linking, the refusal must go, and the harness's
+own image tool must actually appear. Linking asks for both
+(`src/lib/hermes-image-refresh.ts`): `reload.env`, because the backend's
+credential lives in `~/.hermes/.env` and only reaches a running agent that way;
+then `reload.mcp`, which drops the refusal. Where the backend was installed into
+an agent that had already scanned its plugins — nothing reachable over the socket
+re-scans them — the dashboard is bounced instead, and only when its unit promises
+to come back.
 
 ### Device
 `system_stats` · `system_info` · `system_power` (needs `confirm: true` + a
@@ -158,6 +185,17 @@ answer 409 is a tool that trips Hermes' circuit breaker and takes every ClawBox
 tool offline. The route enforces the gate independently, because the two live on
 opposite sides of a process boundary and the owner can change the mode under a
 running server.
+
+Because the probe is startup-only, a mode or credential change would otherwise
+leave a long-lived server with the tool list it built at boot — a mailbox
+connected under a running server stayed invisible to the agent until something
+respawned the server. So `/setup-api/email/configure` now asks Hermes to reload
+its MCP servers (`reload.mcp` on the dashboard socket, `confirm: true`) whenever
+a save or a disconnect **flips** `canRead`; the server starts again and re-probes
+the gate, and live sessions pick the new list up at their next turn boundary.
+Only on a flip: a reload respawns every MCP child process and invalidates the
+model's prompt cache, so it is not free and must not fire on an ordinary save.
+See `src/lib/email-mcp-refresh.ts`.
 
 Both read tools ARE `readOnly`, and that claim is literal rather than polite: the
 mailbox is opened with `EXAMINE` (read-only at the protocol level) and every
@@ -219,6 +257,67 @@ types passwords.
 `bash` · `job_status` · `job_stop` · `read_file` · `write_file` · `edit_file` ·
 `list_directory` · `glob` · `grep` · `notebook_edit` · `web_fetch` · `web_search`
 
+### Coding agent (both editions, only while the owner's switch is on)
+
+`coding_agent_run` · `coding_agent_status` · `coding_agent_stop`
+
+A different thing from the coding family above. Instead of editing files
+itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude
+Code running on the box's own ClawBox AI plan (`scripts/claude-ds`) — which
+works in the background inside one folder and reports back with a summary.
+The run lives in the web server (`src/lib/coding-agent.ts`,
+`/setup-api/coding-agent/*`), not in this process: OpenClaw reaps the MCP
+after ten idle minutes and a run routinely outlives that. Run ids therefore
+stay valid across sessions, unlike `job-N` ids, and a run the web server lost
+to a restart is settled as failed at the next boot rather than reported as
+running forever.
+
+**Registered only when `GET /setup-api/coding-agent/status` answers
+`enabled && ready` at startup** (`mcp/lib/context.ts`): the owner's switch in
+the Coding Agent desktop app is on AND Claude Code, the wrapper and a
+ClawBox AI token are all present. Same rule as `email_list`, for the same
+circuit-breaker reason. The run route enforces the switch again — 409, which
+the tool maps to CONFLICT / do-not-retry — because the owner can flip it under
+a live server. `POST /setup-api/coding-agent/enable` is the second route in
+the API that **refuses the MCP bearer** (`src/lib/owner-session.ts`): the
+agent must not be able to grant itself a delegated shell.
+
+What a run may do is bounded to what the agent already has through its own
+shell tool, not less and not more:
+
+- edits inside the working folder are auto-approved (`--permission-mode
+  acceptEdits`); anything else Claude Code would have asked for is silently
+  denied in `-p` mode and COUNTED, so a task that quietly could not finish
+  reports as such;
+- the built-in tool set is cut to files, search and Bash (`--tools`) — no
+  sub-agents, no web tools — and Bash runs only through an allow-list of
+  build/test/package tooling and read-only git, with explicit denials for
+  `sudo`, `rm`, `curl`, `git push`, `systemctl` and the device CLIs;
+- the credential folders `file-guard` protects, and every entry of this
+  checkout's `data/` except the public subtrees (so `config.json` — the token
+  the run is using — but never the run's own `data/code-projects/<id>`), are
+  denied to Claude Code's own Read/Edit/Write. A guard rail, not a sandbox —
+  the same caveat as `bash`;
+- the run holds **no Linux capabilities**. `clawbox-setup.service` gives the web
+  server `CAP_NET_BIND_SERVICE`, `CAP_NET_ADMIN` and `CAP_NET_RAW` ambiently for
+  WiFi management and port 80, and ambient capabilities are inherited across
+  `execve` — so a run used to start with all three while the agent's own shell
+  tool, spawned by the gateway, had none. The wrapper is now spawned through
+  `setpriv --ambient-caps=-all --inh-caps=-all --no-new-privs`, and a box
+  without `setpriv` reports not-ready rather than running with them;
+- the folder must be a code project or a directory inside the home that is
+  neither protected nor the ClawBox checkout itself, so a prompt-injected
+  "fix the OS" cannot edit the running product in place;
+- one run at a time, twenty minutes, sixty turns, an explicit environment
+  (no session secret, no service tokens), `--setting-sources user` so the OS
+  checkout's own CLAUDE.md never steers a project that sits under it.
+
+`coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
+polling. The summary it returns is model-authored and labelled as information,
+not instructions. Finishing a run posts a desktop toast and, when a Telegram
+bot is connected, a template-only message — never the task or the summary —
+to the approved senders (`src/lib/coding-agent-notify.ts`).
+
 ## Safety rules every tool follows
 
 1. **One secret denylist**: `isProtectedFilePath` from `src/lib/file-guard.ts`,
@@ -269,6 +368,8 @@ mcp/lib/context.ts     startup-resolved device facts and capability probes
 mcp/lib/jobs.ts        background shell jobs for `bash`
 mcp/lib/web.ts         SSRF-guarded fetch and HTML→text
 mcp/tools/*.ts         one module per tool family
+mcp/tools/coding-agent.ts
+                       delegation to the claude-ds harness; runs live in the web server
 ```
 
 **Import rule for `mcp/**`:** a `src/lib` module may be imported only if its

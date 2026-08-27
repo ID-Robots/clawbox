@@ -1,6 +1,6 @@
 import { exec as execCb, execFile as execFileCb } from "child_process";
 import { promisify } from "util";
-import { readFile, writeFile } from "fs/promises";
+import { readFile, rm, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import path from "path";
 import { get, set, setMany } from "./config-store";
@@ -223,8 +223,9 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
 /**
  * Determine which branch to update to, in priority order:
  * 1. `.update-branch` file in project root (survives factory reset + git reset)
- * 2. Current branch if it tracks a remote
- * 3. "main" as the default fallback
+ * 2. Current branch if it tracks a remote (or if origin carries it)
+ * 3. DETACHED HEAD: the branch the device can be shown to have come from
+ * 4. "main", only where main is not a guess about somebody else's device
  *
  * Rule 1 survives a factory reset because the reset route wipes `data/`,
  * `~/.openclaw`, `~/.clawkeep` and a list of home dotfiles — never the project
@@ -238,52 +239,190 @@ async function startRootServiceFireAndForget(stepId: string): Promise<void> {
  * branch's upstream *link* does not survive a re-clone even though the branch
  * does, and an unpinned device then falls silently through to `main`.
  *
- * Rules 2 and 3 are why a rejected pin is worse than no pin: an unreadable or
+ * Rules 2 and 4 are why a rejected pin is worse than no pin: an unreadable or
  * malformed value does not fail the update, it quietly becomes `main`. The
  * validator is therefore shared with the Settings route and mirrored by
  * install.sh's `is_safe_git_ref` — see src/lib/update-branch.ts.
+ *
+ * RULE 3 exists because `main` is the fleet release channel, so resolving to it
+ * without evidence is not an update — it is a channel change, and the auto-repin
+ * then makes it permanent. `git symbolic-ref HEAD` FAILS on a detached HEAD,
+ * which is what a support engineer leaves behind after `git checkout <sha>`, and
+ * that failure used to land straight on the `main` default: one debugging
+ * checkout silently retargeted (and, since PR #463, permanently repinned) a beta
+ * device onto main (hwtest-round1, 2026-08-24). A detached device is now
+ * resolved from what it can prove about itself, and refuses the update if it can
+ * prove nothing — a refusal an operator can fix in one click is better than a
+ * silent move nobody sees.
  */
-interface ResolvedBranch {
+export type BranchSource =
+  /** `.update-branch` — the operator's/installer's explicit record. */
+  | "pin-file"
+  /** `git symbolic-ref HEAD` — the branch the checkout is on. */
+  | "checkout-branch"
+  /** Detached HEAD, resolved from the build stamp / refs that contain HEAD. */
+  | "detached-recovered"
+  /** Nothing said otherwise: `main`. Never auto-pinned. */
+  | "default";
+
+export interface ResolvedBranch {
   /** Local branch to checkout */
   local: string;
   /** Full upstream ref to reset to (e.g. "origin/feature/foo") */
   upstream: string;
+  /** How the answer was reached. Only evidence-backed sources may be pinned. */
+  source: BranchSource;
 }
 
-async function resolveUpdateBranch(gitCmd: string): Promise<ResolvedBranch> {
-  const main: ResolvedBranch = { local: "main", upstream: "origin/main" };
+/**
+ * Thrown when the device cannot say which branch it belongs to and the only
+ * remaining answer would be a guess. Fails the update step with a message the
+ * owner can act on, instead of moving the device to another channel.
+ */
+export class UnresolvableUpdateBranchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnresolvableUpdateBranchError";
+  }
+}
+
+/**
+ * git output, or null when the command failed OR answered nothing. Every caller
+ * here wants a ref name, so an empty answer is as useless as a failure.
+ *
+ * execFile with an argument array, never a shell string — `projectDir` and the
+ * branch names below are interpolated into git refs.
+ */
+async function gitRef(projectDir: string, ...args: string[]): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "git",
+      ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args],
+      { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function originHasBranch(projectDir: string, branch: string): Promise<boolean> {
+  return !!(await gitRef(projectDir, "rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`));
+}
+
+/** The branch the DEPLOYED build was compiled from, per its own stamp. */
+async function stampedBuildBranch(projectDir: string): Promise<string | null> {
+  for (const dir of [path.join(projectDir, ".next", "standalone", ".next"), path.join(projectDir, ".next")]) {
+    try {
+      const raw: unknown = JSON.parse(await readFile(path.join(dir, "build-info.json"), "utf-8"));
+      const branch = (raw as { branch?: unknown })?.branch;
+      if (typeof branch === "string" && branch.trim() && branch.trim() !== "HEAD") return branch.trim();
+    } catch {
+      // No stamp in this tree — try the next one.
+    }
+  }
+  return null;
+}
+
+/**
+ * Which branch does a detached checkout belong to? Three independent kinds of
+ * evidence, best first:
+ *
+ *   1. the build stamp — what the running build was compiled from. Written at
+ *      build time on this device, so it survives the checkout that detached
+ *      HEAD and describes what the box has actually been serving;
+ *   2. local branches that CONTAIN HEAD — git's own record that this commit is
+ *      on that branch;
+ *   3. `git name-rev` against origin's refs — the same question asked of the
+ *      remote-tracking refs, which is all a re-clone leaves.
+ *
+ * `main` is accepted only when it appears as evidence, never as a fallback, and
+ * is ordered last so a box that carries any other candidate keeps its channel.
+ * A candidate is only used when origin actually carries the branch: resolving
+ * to a branch that has no upstream would fail the update at
+ * `reset --hard origin/<branch>` instead of at this readable message.
+ */
+async function recoverDetachedBranch(projectDir: string): Promise<string | null> {
+  const candidates: string[] = [];
+
+  const stamped = await stampedBuildBranch(projectDir);
+  if (stamped) candidates.push(stamped);
+
+  const contains = await gitRef(
+    projectDir, "for-each-ref", "--format=%(refname:short)", "--contains", "HEAD", "refs/heads",
+  );
+  if (contains) candidates.push(...contains.split("\n").map((l) => l.trim()).filter(Boolean));
+
+  const named = await gitRef(projectDir, "name-rev", "--name-only", "--refs=refs/remotes/origin/*", "HEAD");
+  if (named && named !== "undefined") {
+    const cleaned = named.replace(/^remotes\//, "").replace(/^origin\//, "").replace(/[~^].*$/, "").trim();
+    if (cleaned) candidates.push(cleaned);
+  }
+
+  const ordered = [
+    ...candidates.filter((c) => c !== "main"),
+    ...candidates.filter((c) => c === "main"),
+  ];
+
+  for (const candidate of ordered) {
+    if (!isSafeBranch(candidate) || candidate === "HEAD") continue;
+    if (await originHasBranch(projectDir, candidate)) return candidate;
+  }
+  return null;
+}
+
+export async function resolveUpdateBranch(projectDir: string = PROJECT_DIR): Promise<ResolvedBranch> {
+  const main: ResolvedBranch = { local: "main", upstream: "origin/main", source: "default" };
 
   // 1. Check .update-branch file
   try {
-    const pinned = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+    const pinned = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
     if (pinned && isSafeBranch(pinned)) {
-      return { local: pinned, upstream: `origin/${pinned}` };
+      return { local: pinned, upstream: `origin/${pinned}`, source: "pin-file" };
     }
   } catch { /* file doesn't exist */ }
 
-  // 2. Check current branch's configured upstream via git
-  try {
-    const { stdout: branchOut } = await execShell(
-      `${gitCmd} symbolic-ref --short HEAD`,
-      { timeout: 10_000 },
-    );
-    const current = branchOut.trim();
-    if (!current || current === "main" || !isSafeBranch(current)) return main;
+  const current = await gitRef(projectDir, "symbolic-ref", "--short", "HEAD");
 
-    const { stdout: upstreamOut } = await execShell(
-      `${gitCmd} rev-parse --abbrev-ref ${current}@{u}`,
-      { timeout: 10_000 },
-    );
-    const upstream = upstreamOut.trim();
+  // 2. On a branch: its configured upstream, else origin's copy of it.
+  if (current) {
+    // Sitting on main IS evidence — it just happens to agree with the default.
+    // Distinguished from it so the fleet's main devices do not each report a
+    // "could not tell which branch this is" warning every update.
+    if (current === "main") return { ...main, source: "checkout-branch" };
+    if (!isSafeBranch(current)) return main;
+
+    const upstream = await gitRef(projectDir, "rev-parse", "--abbrev-ref", `${current}@{u}`);
     if (upstream && isSafeBranch(upstream)) {
-      return { local: current, upstream };
+      return { local: current, upstream, source: "checkout-branch" };
     }
-  } catch {
-    // No upstream configured — fall back to main
+    // The upstream LINK does not survive a re-clone even though the branch
+    // does. origin/<current> existing is the same evidence by another route,
+    // and using it keeps a re-cloned beta box on beta instead of main.
+    if (await originHasBranch(projectDir, current)) {
+      return { local: current, upstream: `origin/${current}`, source: "checkout-branch" };
+    }
+    // A branch origin does not carry: updating to it would fail at the reset.
+    return main;
   }
 
-  // 3. Default
-  return main;
+  // Not a git checkout at all (a fresh install about to clone) — main is the
+  // repository's default branch, not a guess about a device.
+  if (!(await gitRef(projectDir, "rev-parse", "--git-dir"))) return main;
+
+  // 3. Detached HEAD — resolve from evidence, or refuse.
+  const recovered = await recoverDetachedBranch(projectDir);
+  if (recovered) {
+    return { local: recovered, upstream: `origin/${recovered}`, source: "detached-recovered" };
+  }
+
+  throw new UnresolvableUpdateBranchError(
+    "This device is not on a branch (detached HEAD), carries no update pin, and nothing on it "
+    + "records which branch it was built from. Refusing to update, because the only remaining "
+    + "answer is \"main\" — the fleet release channel — and moving this device there would be a "
+    + "channel change, not an update. Set the update branch in System Update → Advanced options "
+    + "(or check out the branch this device belongs to) and run the update again.",
+  );
 }
 
 /**
@@ -343,11 +482,31 @@ async function restoreWarnings(): Promise<UpdateWarning[]> {
  *
  * `projectDir` is a parameter for that reason alone; every caller passes
  * PROJECT_DIR.
+ *
+ * `source` is the load-bearing argument: a pin is a RECORD, so it may only be
+ * written from evidence. A branch reached by falling through to the default is
+ * a guess, and pinning a guess makes it permanent — that is how one
+ * `git checkout <sha>` on a beta device turned into "pinned to main forever"
+ * (hwtest-round1, 2026-08-24). `main` itself is never auto-pinned even when it
+ * IS the evidence: it is already the fallback, so a pin changes nothing today
+ * and would only freeze a device an operator later moves by hand — the same
+ * rule install.sh's adoptable_checkout_branch applies.
  */
 export async function repinUpdateBranch(
   resolved: string,
   projectDir: string = PROJECT_DIR,
+  source: BranchSource = "checkout-branch",
 ): Promise<UpdateWarning[]> {
+  if (source === "default") {
+    return [{
+      code: "repin-skipped",
+      message:
+        `This box carries no update pin and nothing on it records which branch it belongs to — `
+        + `updating from "${resolved}" this once, without pinning a guess.`,
+    }];
+  }
+  if (resolved === "main") return [];
+
   const pinFile = path.join(projectDir, ".update-branch");
   let existing: string | null = null;
   try {
@@ -401,6 +560,59 @@ export async function collectDriftWarnings(
     // Never fail an update because the diagnosis failed.
     console.warn("[Updater] Could not read build identity before sync:", err);
     return [];
+  }
+}
+
+/**
+ * Take the drift diagnosis BEFORE the first step touches the repository.
+ *
+ * The warnings used to be collected inside the `restart` step — step 7 of 9 —
+ * on the assumption that nothing before it moved the tree. Step 1
+ * (`bootstrap_updater` → install.sh `sync_repo_to_update_target`) does exactly
+ * that: `fetch`, `reset --hard HEAD`, `checkout`, `reset --hard <upstream>`. By
+ * the time step 7 asked, the customer's tree was clean and at the remote head,
+ * so the WARN named the POST-sync commit and a whole class of drift reported
+ * nothing at all: a tracked-file modification (discarded by step 1) and
+ * `checkout-behind-pin` (resolved by step 1) both arrived invisible. A box 71
+ * commits behind its own pin completed an update without one word about it
+ * (hwtest-round1, 2026-08-24).
+ *
+ * So the diagnosis is taken here, first, and persisted immediately — the run
+ * reboots halfway through and only persisted warnings survive it. The step-7
+ * collection stays as a second sample; `warnUpdate` de-duplicates by code, so
+ * the FIRST observation — this one, the customer's actual state — is the one
+ * that reaches the log.
+ */
+async function captureDriftBaseline(): Promise<void> {
+  for (const w of await collectDriftWarnings()) warnUpdate(w.code, w.message);
+  await persistWarnings();
+}
+
+/**
+ * Delete the orphan `.deployed-sha` marker if this device carries one.
+ *
+ * Nothing in this repository writes or reads it — it is left over from the
+ * pre-3.9 hand-deploy method — but an untracked file in the project root makes
+ * `git status --porcelain` non-empty, which the drift engine reads as "the code
+ * on disk matches no commit". A QA box therefore raised the About-screen drift
+ * banner while its build, checkout and BUILD_ID all agreed, and it cost two
+ * rounds of QA a false lead (hwtest-round1, 2026-08-24).
+ *
+ * It is also in .gitignore now, which stops it faking drift — and stops
+ * `git clean -fd` from removing it, since -fd spares ignored paths. So the
+ * updater removes it explicitly, after the baseline diagnosis above has already
+ * recorded what the box looked like on arrival.
+ *
+ * Never throws: a device that cannot delete a stale marker still updates.
+ */
+export async function removeOrphanDeployedSha(projectDir: string = PROJECT_DIR): Promise<boolean> {
+  const marker = path.join(projectDir, ".deployed-sha");
+  try {
+    await rm(marker, { force: true });
+    return true;
+  } catch (err) {
+    console.warn(`[Updater] Could not remove stale .deployed-sha: ${err instanceof Error ? err.message : err}`);
+    return false;
   }
 }
 
@@ -462,16 +674,25 @@ async function updateClawBoxAndReboot(): Promise<void> {
   await execAsRoot("fix_git_perms", 30_000);
 
   const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
-  const { local, upstream } = await resolveUpdateBranch(gitCmd);
+  // Throws UnresolvableUpdateBranchError rather than retargeting a device that
+  // cannot say which branch it belongs to; this step is failFast, so the owner
+  // gets the message instead of a silent channel change.
+  const { local, upstream, source } = await resolveUpdateBranch(PROJECT_DIR);
 
-  console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream})`);
+  console.log(`[Updater] Updating to branch: ${local} (upstream: ${upstream}, resolved from: ${source})`);
 
-  // WARN + AUTO-REPIN, in that order and before the sync destroys the
-  // evidence: say what was wrong with this box, then pin it so the next
-  // update is repeatable. Neither step can stop the update.
+  // WARN + AUTO-REPIN, in that order. The WARN is a SECOND sample — the one
+  // that carries the diagnosis was taken by captureDriftBaseline() before step
+  // 1 moved the tree, and warnUpdate keeps the first observation of each code.
+  // Neither step can stop the update.
   for (const w of await collectDriftWarnings()) warnUpdate(w.code, w.message);
-  for (const w of await repinUpdateBranch(local)) warnUpdate(w.code, w.message);
+  // Only pin what the device can prove about itself — see repinUpdateBranch.
+  for (const w of await repinUpdateBranch(local, PROJECT_DIR, source)) warnUpdate(w.code, w.message);
   await persistWarnings();
+
+  // The orphan marker fakes a dirty tree; drop it now that the baseline
+  // diagnosis has already recorded the state the box arrived in.
+  await removeOrphanDeployedSha(PROJECT_DIR);
 
   // Hard-sync to upstream. The device is an appliance — the working tree
   // must always match what we ship, period. Local edits made via SSH /
@@ -1283,6 +1504,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     state.error = "No internet connection. Check your WiFi and try again.";
     state.currentStepIndex = -1;
     return;
+  }
+
+  // Diagnose the box BEFORE step 1 refreshes the repo — step 1 is what erases
+  // the evidence. Only on a fresh run of the full flow: a continuation restores
+  // the warnings this call persisted, and the OpenClaw-only flow never syncs
+  // the repo, so there is nothing for it to observe.
+  if (startFrom === 0 && steps.some((s) => s.id === RESTART_STEP_ID)) {
+    await captureDriftBaseline();
   }
 
   let failed = false;

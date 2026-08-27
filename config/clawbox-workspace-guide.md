@@ -51,13 +51,29 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 | Tool | Purpose |
 |---|---|
-| `ui_open_app` | Open a built-in ClawBox desktop app. Known app IDs: `chat`, `files`, `settings`, `store`, `vnc`, `terminal`, and `browser` (the Browser *Setup* panel — not for real web browsing; use `browser_*` tools instead, see Browser section above) |
+| `ui_open_app` | Open a built-in ClawBox desktop app. Known app IDs: `chat`, `files`, `settings`, `store`, `vnc`, `terminal`, `coding` (the Coding Agent app — see below), and `browser` (the Browser *Setup* panel — not for real web browsing; use `browser_*` tools instead, see Browser section above) |
 | `ui_list_apps` | Enumerate installed desktop apps |
 | `ui_notify` | Show a toast notification on the ClawBox desktop |
 | `app_search` | Search the ClawBox App Store |
 | `app_install` | Install a skill or webapp from the Store (see Skills section above) |
 | `app_uninstall` | Uninstall a skill or webapp |
 | `webapp_create` / `webapp_update` | Build and register a custom webapp on the desktop |
+
+---
+
+## Coding agent (delegate a whole task)
+
+Three more tools are registered when your session starts, and only if the owner had it switched on in the **Coding Agent app** on the desktop AND that app reported the harness ready (Claude Code, `claude-ds` and ClawBox AI all present):
+
+| Tool | Purpose |
+|---|---|
+| `coding_agent_run` | Hand a task to a separate Claude Code session that works in the background inside one folder (a `code_project_*` project, usually) on the box's ClawBox AI plan. Returns a run id at once. |
+| `coding_agent_status` | Follow a run; `wait_seconds` blocks up to two minutes instead of polling. When finished it carries the summary to relay to the user. |
+| `coding_agent_stop` | End a run early. Its files stay. |
+
+Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself.
+
+Registration happens once, at startup. A switch turned off mid-session leaves the tools listed, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same app.
 
 ---
 

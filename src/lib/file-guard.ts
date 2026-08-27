@@ -15,24 +15,38 @@ import { DATA_DIR } from "./config-store";
 // Two shapes of rule: named credential stores elsewhere in the home directory
 // are listed below, and the ClawBox data directory is covered by containment.
 
-const PROTECTED_DIR_RES: RegExp[] = [
-  /(^|\/)\.ssh(\/|$)/,
-  /(^|\/)\.openclaw(\/|$)/,
+/**
+ * Credential stores in the home directory, as folder names relative to it.
+ * Exported so the coding agent (src/lib/coding-agent.ts) denies exactly these
+ * folders to Claude Code's own file tools — one list, so a store added here
+ * can never be silently left open there.
+ */
+export const PROTECTED_HOME_DIRS: readonly string[] = [
+  ".ssh",
+  ".openclaw",
   // Hermes edition: ~/.hermes holds config.yaml (the ClawBox AI billing token,
   // the dashboard signing secret and its scrypt password hash), .env (provider
   // keys) and auth.json (OAuth tokens) — the Hermes equivalent of ~/.openclaw.
-  /(^|\/)\.hermes(\/|$)/,
-  /(^|\/)\.codex(\/|$)/,
+  ".hermes",
+  ".codex",
   // ClawKeep keeps its portal token and the device's backup-encryption
   // passphrase in ~/.clawkeep. Its API route is already classed as sensitive
   // in middleware.ts; this is the same rule applied to the store behind it.
-  /(^|\/)\.clawkeep(\/|$)/,
-  /(^|\/)\.gnupg(\/|$)/,
-  /(^|\/)\.aws(\/|$)/,
-  /(^|\/)\.kube(\/|$)/,
-  /(^|\/)\.docker(\/|$)/,
-  /(^|\/)\.config\/(gcloud|gh|rclone)(\/|$)/,
+  ".clawkeep",
+  ".gnupg",
+  ".aws",
+  ".kube",
+  ".docker",
+  ".config/gcloud",
+  ".config/gh",
+  ".config/rclone",
 ];
+
+// Each folder matched as a whole path segment (or segments), anywhere in the
+// path — the same shape the hand-written patterns had.
+const PROTECTED_DIR_RES: RegExp[] = PROTECTED_HOME_DIRS.map(
+  (dir) => new RegExp(`(^|\\/)${dir.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}(\\/|$)`),
+);
 
 // Credential files matched by basename anywhere under the browse root — common
 // on a dev box (git/npm/pip/postgres tokens). Blocking the whole file is fine:
@@ -78,7 +92,7 @@ const PROTECTED_FILE_RES: RegExp[] = [
 // file — may only import modules whose whole graph is relative paths and node
 // builtins. Read the import rule at the top of mcp/lib/guard.ts before changing
 // this: an import here breaks the MCP server at startup, not at build time.
-const DATA_DIR_PUBLIC_SUBTREES = new Set([
+export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "webapps",       // built desktop webapps, also served by the webapps route
   "icons",         // installed-app icons, also served by the icon route
   "catalog-cache", // cached copies of the providers' public model catalogues
@@ -114,10 +128,45 @@ function isProtectedDataDirPath(abs: string): boolean {
   return !DATA_DIR_PUBLIC_SUBTREES.has(top);
 }
 
+/**
+ * The separator the patterns above are written in.
+ *
+ * Every rule in this file spells its separator `/`, so on Windows — where a
+ * resolved path arrives with backslashes — the name-shaped half of this guard
+ * matched nothing at all and `~/.ssh` was not protected. The appliance is Linux
+ * and never took that branch, but the tests run on developer machines, and a
+ * security rule that quietly no-ops on the platform it is TESTED on is a rule
+ * nobody is really testing.
+ *
+ * Rewritten only where the separator actually differs: on POSIX a backslash is
+ * a legal character in a filename, and normalising there would invent matches
+ * rather than find them. (`isProtectedDataDirPath` needs none of this — it
+ * compares with `path.sep` throughout.)
+ */
+const toPatternPath: (abs: string) => string =
+  path.sep === "/" ? (abs) => abs : (abs) => abs.replace(/\\/g, "/");
+
 function isProtected(abs: string): boolean {
   if (isProtectedDataDirPath(abs)) return true;
-  if (PROTECTED_FILE_RES.some((re) => re.test(abs))) return true;
-  return PROTECTED_DIR_RES.some((re) => re.test(abs));
+  const p = toPatternPath(abs);
+  if (PROTECTED_FILE_RES.some((re) => re.test(p))) return true;
+  return PROTECTED_DIR_RES.some((re) => re.test(p));
+}
+
+/**
+ * The tree the box lets an authenticated session browse: the customer's home
+ * directory, and also the agent's own working directory — on the appliance they
+ * are the same place.
+ *
+ * Lives beside the guard rather than in the routes because the root and the
+ * rule that carves secrets out of it are one decision, and it was written out
+ * three times before this: both Files API routes and, now, the adoption of a
+ * picture the agent wrote outside its image cache. A root defined in one file
+ * and guarded in another is how a fourth caller ends up browsing a tree nobody
+ * remembered to protect.
+ */
+export function filesBrowseRoot(): string {
+  return process.env.FILES_ROOT ?? (process.env.HOME || "/home/clawbox");
 }
 
 /**

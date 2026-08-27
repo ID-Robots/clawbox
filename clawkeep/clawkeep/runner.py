@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import api, crypto, openclaw, passphrase, s3, state, token
+from . import agent, api, crypto, openclaw, passphrase, s3, state, token
 from .api import ApiError
 from .config import Config
 
@@ -36,7 +36,7 @@ EXIT_AUTH_REVOKED = 3
 EXIT_TIER = 4
 EXIT_SERVER = 5
 EXIT_NETWORK = 6
-EXIT_OPENCLAW = 7   # `openclaw backup create` failed
+EXIT_OPENCLAW = 7   # building the archive failed (either edition's backend)
 EXIT_UPLOAD = 8     # S3 PUT failed
 EXIT_NEED_PASSPHRASE = 9  # encryption is mandatory but no passphrase set on device
 EXIT_ENCRYPTION_FAILED = 10  # openssl enc returned non-zero (corrupt openssl, disk full, …)
@@ -258,17 +258,16 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
     try:
         _stamp_step(st, STEP_ARCHIVING)
         try:
-            archive = openclaw.create_archive(
-                cfg.openclaw.binary,
-                output_dir=staging,
-                include_workspace=cfg.openclaw.include_workspace,
-                only_config=cfg.openclaw.only_config,
-                verify=cfg.openclaw.verify,
-            )
-        except openclaw.OpenclawError as e:
-            log.error("openclaw backup create failed: %s", e)
+            # WHICH backend builds the archive is the device's edition's
+            # business, not this function's: OpenClaw shells out to
+            # `openclaw backup create`, Hermes packs `~/.hermes` itself. Both
+            # return the same `Archive`, so everything below is identical.
+            archive = agent.create_archive(cfg, output_dir=staging)
+        except agent.ARCHIVE_ERRORS as e:
+            which = agent.device_agent()
+            log.error("%s backup create failed: %s", which, e)
             ok = _heartbeat_safe(
-                cfg.server, token, status="error", error=f"openclaw: {e}"[:500],
+                cfg.server, token, status="error", error=f"{which}: {e}"[:500],
             )
             _stamp_heartbeat(st, ok, "error")
             state.save(st)

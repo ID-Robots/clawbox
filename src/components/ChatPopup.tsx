@@ -11,9 +11,22 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
+import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
-import { describeChatFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, CHAT_MODEL_STATE_EVENT, buildFixErrorPrompt, type FixErrorContext } from '@/lib/ui-events'
+import { ClarifyPrompt, expireClarifyCard, upsertClarifyCard, type ClarifyCardState } from '@/lib/chat-clarify'
+import {
+  EmailBatchCard,
+  batchFromPending,
+  shownDraftIds,
+  updateBatchCard,
+  type EmailBatchApproval,
+  type EmailBatchCardState,
+  type EmailBatchDraft,
+  type EmailBatchOutcome,
+} from '@/lib/chat-email-batch'
+import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
+import { FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -30,6 +43,8 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
 import { HarnessError, type HarnessStatus, type TurnResult } from '@/lib/harness/transport'
 import { splitMediaDirectives, splitAssistantMedia, mediaFileName, mediaUrl, isImageMedia, extractAudioAttachments, boundedAudio } from '@/lib/chat-media'
+import { splitEmailRefs } from '@/lib/chat-email-refs'
+import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import {
   IDLE_STATUS,
   MAX_RECORDING_MS,
@@ -195,7 +210,7 @@ import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // get mixed. The MODEL list is scoped by the same server contract the Hermes
 // settings panel uses (GET /setup-api/hermes/models?provider=…) — no parallel
 // client-side filtering exists.
-import { HERMES_MODEL_STATE_EVENT, useHermesModelOptions } from '@/hooks/useHermesModelOptions'
+import { useHermesModelOptions } from '@/hooks/useHermesModelOptions'
 import {
   hermesProviderLabel,
   hermesProviderPillLabel,
@@ -408,6 +423,21 @@ const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
 // narrower instead of smashing the pills.
 const MIN_CHAT_WIDTH = 340
 
+/**
+ * Is this tool call the one that queues outgoing mail?
+ *
+ * Matched on the SUFFIX rather than on equality because the name that reaches
+ * this surface is the host's, not ours: the MCP tool is registered as
+ * `email_send`, and a gateway is free to hand it over namespaced
+ * (`clawbox_email_send`, `mcp__clawbox__email_send`). Anchored at the end and
+ * fenced by a separator so a future `email_send_bulk` does not silently inherit
+ * this behaviour — and getting it wrong is cheap in one direction only: a miss
+ * means the owner approves in Settings → Email exactly as before.
+ */
+export function isEmailSendTool(name: string): boolean {
+  return /(?:^|[^A-Za-z0-9])email_send$/.test(name)
+}
+
 function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t } = useT()
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
@@ -485,6 +515,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const queuedSendsRef = useRef<{ id: string; text: string; attachments: ChatAttachment[] }[]>([])
   useEffect(() => { queuedSendsRef.current = queuedSends }, [queuedSends])
   const { toolCalls, applyToolEvent, clearToolCalls } = useChatToolCalls()
+  // A delegated coding run outlives the tool call that started it, so this is
+  // driven by the device's run record rather than the tool pills. Only probed
+  // while the chat is open, and only polled while a run is actually in flight.
+  const { runs: codingRuns, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
+  // The questions the agent is currently parked on, newest last.
+  //
+  // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
+  // its pictures, its tool steps, its reasoning — is written into `ChatMessage`
+  // and comes back from `chat-history-cache` after a refresh, because it is a
+  // RECORD. A clarify is not: it is a control that only works while the agent
+  // is still parked on that `requestId`, and the moment the page reloads that
+  // wait is over. A card replayed from the cache would be an interactive-
+  // looking widget inviting an answer that no route could deliver, which is
+  // worse than no card at all. So it lives here, in transient state, and
+  // `chat-history-cache.ts` gains no field for it.
+  const [clarifies, setClarifies] = useState<ClarifyCardState[]>([])
+  const clearClarifies = useCallback(() => {
+    setClarifies(prev => (prev.length === 0 ? prev : []))
+  }, [])
+  // Outgoing mail the agent has queued and the owner has not agreed to yet.
+  //
+  // ONE CARD, however many drafts — see chat-email-batch.tsx for why the
+  // reading is the safety mechanism and the click is only the gesture.
+  //
+  // NOT cleared when the turn ends, and that is the difference from
+  // `clarifies` above: a clarify is a question the agent is PARKED on, so it
+  // dies with the turn, while this card appears precisely BECAUSE the turn
+  // finished and left mail waiting. Nothing here is lost if it goes anyway —
+  // every draft is on disk and Settings → Email lists all of them.
+  const [emailBatches, setEmailBatches] = useState<EmailBatchCardState[]>([])
+  // Did this turn ask to send mail? Set from the tool stream and read once the
+  // turn is over, so the approval queue is only consulted when there is a
+  // reason to think something landed in it — rather than on every turn the box
+  // ever answers.
+  const emailSendSeenRef = useRef(false)
   const [isBootstrappingHistory, setIsBootstrappingHistory] = useState(false)
   const [errorMsg, setErrorMsg] = useState('')
   const [chatModelState, setChatModelState] = useState<ChatModelState | null>(null)
@@ -519,6 +584,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     open: preview !== null,
     onClose: closePreview,
   })
+  // The message the full-message panel is showing, or null when it is closed.
+  // Only the id lives here: the panel fetches the mail itself when it opens, so
+  // no message content is held in this component's state or in the transcript.
+  const [openEmailUid, setOpenEmailUid] = useState<number | null>(null)
+  const closeEmail = useCallback(() => setOpenEmailUid(null), [])
   // True from the image_generate tool call until the picture arrives (or the
   // wait times out). Drives the banner AND the history polling.
   const [generatingImage, setGeneratingImage] = useState(false)
@@ -526,6 +596,20 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // landed once that count goes up. A count beats a timestamp here: the browser
   // may be a phone whose clock disagrees with the device's.
   const imageBaselineRef = useRef(0)
+  // The COMPOSER's own picture wait, kept apart from `generatingImage` above.
+  //
+  // Two waits because they end in two different ways. `generatingImage` covers
+  // a picture the AGENT is drawing: nothing hands the media back, so it polls
+  // the transcript until the image count goes up. This one covers a picture the
+  // BOX is fetching, where the call itself resolves with the media — so it ends
+  // when the promise does, and sharing the other flag would start that poll and
+  // let a history read paint the same picture the promise is about to.
+  const [drawing, setDrawing] = useState(false)
+  // Guards re-entry from the render-time state, which lags a rapid second
+  // click, and carries the abort so closing the popup can end a wait nobody is
+  // watching any more.
+  const drawingRef = useRef(false)
+  const drawingAbortRef = useRef<AbortController | null>(null)
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -867,6 +951,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const dispatchTurnRef = useRef<(text: string, attachments: ChatAttachment[], key: string) => Promise<void>>(
     async () => {},
   )
+  /**
+   * `settleEmailDrafts`, reachable from the gateway socket handler.
+   *
+   * A ref for the same reason `dispatchTurnRef` is one: `connect` is a
+   * `useCallback([])` on purpose, and adding a dependency to it would tear the
+   * socket down and rebuild it every time this callback's identity changed.
+   */
+  const settleEmailDraftsRef = useRef<() => Promise<void>>(async () => {})
   // Timer for the ack-only `chat.history` refetch — single-flight so a
   // burst of "Sent."-acked turns doesn't pile up overlapping fetches, and
   // cancellable on unmount.
@@ -1321,6 +1413,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (payload.stream === 'tool') {
             const toolData = payload.data as Record<string, unknown> | undefined
             applyToolEvent(toolData)
+            // The moment a coding-agent tool goes by, ask the device what is
+            // running. Cheaper and more certain than polling on a timer: the
+            // one event that means "a run may have just started" is right here.
+            if (typeof toolData?.name === 'string' && isCodingAgentTool(toolData.name)) nudgeCodingAgent()
+            // The gateway's own tool stream is where an OpenClaw-edition turn
+            // reports `email_send`; the adapter callback never sees it,
+            // because that harness only ACKs the turn.
+            if (typeof toolData?.name === 'string' && isEmailSendTool(toolData.name)) {
+              emailSendSeenRef.current = true
+            }
             // ONLY `start` opens a wait. `image_generate` reports `result`
             // ~200ms later (the job is merely queued), and that event can be
             // delivered after the picture has already landed and closed the
@@ -1360,7 +1462,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const pushedAudio = boundedAudio(extractAudioAttachments(pushedMessage))
           if (pushedRole === 'assistant' && pushedAudio.length > 0
               && !isSentinel(pushedRaw) && !isInterSessionEnvelope(pushedRaw, pushedMessage)) {
-            const pushedText = splitMediaDirectives(pushedRaw).text
+            const pushedText = splitEmailRefs(splitMediaDirectives(pushedRaw).text).text
             setMessages(prev => {
               // Only a bubble after the latest user turn can own this event.
               // Otherwise a late supplement from the previous turn could be
@@ -1373,7 +1475,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }
               for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
                 const candidate = prev[i]
-                if (candidate.role !== 'assistant' || candidate.text !== pushedText) continue
+                // The STORED text still carries its `EMAIL:` lines — they are
+                // lifted at render, not at write — and a caption can carry a
+                // `MEDIA:` line too, while `pushedText` has had
+                // them taken out. Compare like with like, or a turn that named
+                // messages never matches its own spoken supplement and the
+                // audio is dropped.
+                if (candidate.role !== 'assistant') continue
+                if (splitEmailRefs(splitMediaDirectives(candidate.text).text).text !== pushedText) continue
                 if (candidate.audio?.length) return prev // duplicate push
                 const next = [...prev]
                 next[i] = { ...candidate, audio: pushedAudio }
@@ -1414,7 +1523,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (state === 'delta') {
             // Strip MEDIA: directives while streaming too, or the raw path
             // flashes in the bubble for the moment before `final` lands.
-            const text = splitMediaDirectives(extractText(msg)).text
+            // EMAIL: ids are stripped here for the same reason — the card is
+            // built from the finished reply, and the bare directive must not
+            // show while the answer is still arriving.
+            const text = splitEmailRefs(splitMediaDirectives(extractText(msg)).text).text
             // Sentinels would flash before the final-state filter drops them.
             if (text && !isSentinel(text) && !isInterSessionEnvelope(text, msg)) {
               setStreaming(text); setReloadingSkill(false)
@@ -1484,6 +1596,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
+            // The turn is over on this harness too, so mail it queued is now
+            // waiting and gets its one card.
+            void settleEmailDraftsRef.current()
             // OpenClaw can ack a turn with "Sent." (delivery-mirror persona
             // pipeline / internal-source-reply) while the real reply is
             // generated server-side a moment later — persisted but never
@@ -1510,6 +1625,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
+            // Same as the failing adapter path: a turn that died may still
+            // have left a draft on disk before it did.
+            void settleEmailDraftsRef.current()
             if (state === 'error') {
               // Never render the gateway's own error text. It is written for
               // an operator reading a log and has carried an absolute device
@@ -1613,13 +1731,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     refreshChatModelState()
   }, [isOpen, refreshChatModelState])
 
+  // Re-read the provider/model list the moment anything reports a provider
+  // change, so a provider connected in Settings while this popup is open is
+  // offered here without a reload. Through the shared subscriber, which spans
+  // both harnesses' signal names and debounces the burst a single save emits.
   useEffect(() => {
     if (!isOpen) return
-    const handleModelStateChanged = () => {
-      refreshChatModelState()
-    }
-    window.addEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
-    return () => window.removeEventListener(CHAT_MODEL_STATE_EVENT, handleModelStateChanged)
+    return onProvidersChanged(() => { refreshChatModelState() })
   }, [isOpen, refreshChatModelState])
 
   // Load chat history, auto-greet if empty
@@ -1728,10 +1846,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // a live turn beats all three, which left the previous turn's pills sitting
     // under an empty conversation.
     clearToolCalls()
+    // And the same for a question the previous turn was parked on: the thread
+    // it belonged to is gone, so answering it now would push a reply into a
+    // conversation the agent has been told to forget.
+    clearClarifies()
+    // And the approval card, for a narrower reason: nothing is lost by taking
+    // it away — every draft is still on disk and Settings → Email lists them —
+    // but a card left under a blanked conversation refers to a turn that is no
+    // longer on screen, which is a consent form with its context deleted.
+    setEmailBatches([])
     // The auto-greet opens a FIRST conversation; re-arming it here would drop
     // an unasked-for "hi" into the chat the moment it was cleared.
     greetedRef.current = true
-  }, [clearToolCalls])
+  }, [clearToolCalls, clearClarifies])
 
   const resetSession = useCallback(async () => {
     await adapter.resetSession()
@@ -2258,6 +2385,158 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     setVoice(IDLE_STATUS)
   }, [caps.canTranscribe, voice.state, abandonRecording])
 
+  // Deliver one clarify answer.
+  //
+  // The gateway unblocks the agent only once EVERY question in the request has
+  // been answered, so a batch is one POST per question rather than one POST
+  // carrying them all — and `questionId` is what tells the two apart.
+  const answerClarify = useCallback(async (requestId: string, qid: string, answer: string) => {
+    // Locked optimistically, so the question collapses at once and a second
+    // answer cannot be sent while the first is still in flight. The catch below
+    // puts it back: a control that looks answered but never reached the agent
+    // is the one failure a customer cannot see and cannot recover from.
+    setClarifies(prev => prev.map(card => (card.requestId === requestId
+      ? { ...card, answered: { ...card.answered, [qid]: answer }, failed: false }
+      : card)))
+    try {
+      const res = await fetch('/setup-api/hermes/chat/clarify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // `questionId` rides along only for a BATCH. A single clarify arrives
+        // with an empty qid and the route wants the field omitted, not empty.
+        body: JSON.stringify({ requestId, answer, ...(qid ? { questionId: qid } : {}) }),
+      })
+      if (!res.ok) throw new Error(`clarify answer refused with ${res.status}`)
+      const body = await res.json().catch(() => ({})) as { status?: unknown }
+      // Expiry is not a failure: the agent simply stopped waiting. The card
+      // says so and goes quiet, because a red "could not send" would invite a
+      // retry that can never succeed.
+      if (body.status === 'expired') setClarifies(prev => expireClarifyCard(prev, requestId))
+    } catch {
+      // Same polite `role="status"` treatment the attachment and voice rows
+      // use — the message renders inside the card, next to the control that
+      // came back.
+      setClarifies(prev => prev.map(card => {
+        if (card.requestId !== requestId) return card
+        const answered = { ...card.answered }
+        delete answered[qid]
+        return { ...card, answered, failed: true }
+      }))
+    }
+  }, [])
+
+  // ── Outgoing mail, approved once for the whole batch ──────────────────────
+
+  /**
+   * If this turn asked to send mail, read the approval queue and put anything
+   * new on screen as ONE card.
+   *
+   * Guarded by the turn's own flag rather than run on a timer: the drafts are
+   * written by `email_send` and by nothing else this surface can see, so
+   * polling would be asking a question whose answer only changes for a reason
+   * we already know about. Check-and-clear, so a turn collects exactly once.
+   *
+   * Drafts already inside a live card are left alone (`shownDraftIds`). That is
+   * what stops a second turn's mail from being folded into a card the owner is
+   * part-way through reading — it gets its own card, with its own consent.
+   */
+  const settleEmailDrafts = useCallback(async () => {
+    if (!emailSendSeenRef.current) return
+    emailSendSeenRef.current = false
+    try {
+      // `no-store`, and not because the route is slow to change: the route's
+      // `dynamic = "force-dynamic"` governs Next's own render cache and does
+      // NOT put `Cache-Control: no-store` on the wire, so the browser is free
+      // to hand back a reply from an earlier turn. Stale drafts here are not a
+      // cosmetic problem — the card would carry fingerprints the queue has
+      // moved past, and every one of them would come back refused.
+      const res = await fetch('/setup-api/email/pending', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      })
+      // 403 is the ordinary answer on a surface with no owner session, and 409
+      // on a box with no mail account. Neither is worth a line in the
+      // transcript: the customer did not ask for this, the agent did.
+      if (!res.ok) return
+      const body = await res.json().catch(() => ({})) as { pending?: unknown }
+      if (!Array.isArray(body.pending)) return
+      const drafts: EmailBatchDraft[] = body.pending.flatMap((row): EmailBatchDraft[] => {
+        if (typeof row !== 'object' || row === null) return []
+        const d = row as Record<string, unknown>
+        // A draft with no fingerprint could not be checked against what was on
+        // screen, so it is not offered for one-click approval at all — it stays
+        // in Settings → Email where each one is approved on its own.
+        if (typeof d.id !== 'string' || typeof d.fingerprint !== 'string') return []
+        if (typeof d.subject !== 'string' || typeof d.body !== 'string') return []
+        if (!Array.isArray(d.to)) return []
+        return [{
+          id: d.id,
+          to: d.to.filter((r): r is string => typeof r === 'string'),
+          subject: d.subject,
+          body: d.body,
+          createdAt: typeof d.createdAt === 'number' ? d.createdAt : 0,
+          fingerprint: d.fingerprint,
+        }]
+      })
+      if (drafts.length === 0) return
+      setEmailBatches(prev => {
+        const card = batchFromPending(drafts, shownDraftIds(prev))
+        return card ? [...prev, card] : prev
+      })
+    } catch {
+      // The queue could not be read. Nothing is waiting as far as this surface
+      // is concerned, and Settings → Email is unaffected.
+    }
+  }, [])
+  useEffect(() => { settleEmailDraftsRef.current = settleEmailDrafts }, [settleEmailDrafts])
+
+  /**
+   * Send the drafts the owner ticked — one request, whatever N is.
+   *
+   * `approval.entries` comes off the CARD's own frozen state, so what is posted
+   * is the set that was read. The route re-checks each fingerprint before it
+   * claims a draft, so the guarantee does not depend on this component being
+   * the only caller.
+   */
+  const approveEmailBatch = useCallback(async (approval: EmailBatchApproval) => {
+    const { batchId, entries } = approval
+    if (entries.length === 0) return
+    setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'sending', requestError: '' }))
+    try {
+      const res = await fetch('/setup-api/email/pending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'approve_batch', drafts: entries }),
+      })
+      const body = await res.json().catch(() => ({})) as { results?: unknown }
+      // A 200 and a 207 both carry per-draft results and both are read the same
+      // way. Anything with no results at all is a failure of the REQUEST, and
+      // is reported as one rather than as an empty success.
+      if (!Array.isArray(body.results)) throw new Error(`batch approval refused with ${res.status}`)
+      const outcomes: EmailBatchOutcome[] = body.results.flatMap((row): EmailBatchOutcome[] => {
+        if (typeof row !== 'object' || row === null) return []
+        const r = row as Record<string, unknown>
+        if (typeof r.id !== 'string') return []
+        return [{ id: r.id, ok: r.ok === true, ...(typeof r.error === 'string' ? { error: r.error } : {}) }]
+      })
+      setEmailBatches(prev => updateBatchCard(prev, batchId, { status: 'settled', outcomes }))
+    } catch {
+      // Back to `waiting`, with the reason next to the button: the drafts were
+      // either never claimed or are reported in a response we could not read,
+      // and either way telling the owner "sent" here would be the false success
+      // this whole card exists to avoid.
+      setEmailBatches(prev => updateBatchCard(prev, batchId, {
+        status: 'waiting',
+        requestError: t('chat.emailBatch.requestFailed'),
+      }))
+    }
+  }, [t])
+
+  /** Send nothing. The drafts stay queued — Settings → Email still lists them. */
+  const cancelEmailBatch = useCallback((batchId: string) => {
+    setEmailBatches(prev => prev.filter(card => card.batchId !== batchId))
+  }, [])
+
   // ONE send path.
   //
   // Which harness answers, whether the reply streams or lands whole, and
@@ -2297,12 +2576,50 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // must not reopen the caret, so a delta is only painted while this run
         // is still the live one.
         if (event.kind === 'delta' && runIdRef.current !== null) setStreaming(event.text)
+        // Live tool steps, through the SAME pills the gateway harness already
+        // feeds. A hermes turn used to reach this callback with nothing but
+        // text, so a turn that spent its time in `web_search` — measured at up
+        // to four minutes on the box — showed an empty bubble and no reason to
+        // believe anything was happening. `applyToolEvent` reads `toolCallId`,
+        // so the transport's stable `id` is handed over under that name.
+        else if (event.kind === 'tool' && runIdRef.current !== null) {
+          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+          if (isCodingAgentTool(event.name)) nudgeCodingAgent()
+          // Remember that this turn asked to send mail. Noted on `start` as
+          // well as on `result` because a tool that never reported a result —
+          // a wedged turn, a dropped socket — may still have reached the route
+          // and left a draft on disk, and a draft nobody is shown is exactly
+          // the state this card exists to end.
+          if (isEmailSendTool(event.name)) emailSendSeenRef.current = true
+        }
+        // The agent has parked on a question. Held by `requestId`, so a
+        // reconnect's REPLAY of a prompt still being waited on folds into the
+        // card already on screen instead of drawing a second one beside it —
+        // and gated on the live run for the reason a delta is: a prompt that
+        // arrives after the turn ended belongs to nothing anyone can answer.
+        else if (event.kind === 'clarify' && runIdRef.current !== null) {
+          setClarifies(prev => upsertClarifyCard(prev, event))
+        }
+        // NOT gated on the run: an expiry is precisely the frame that can
+        // arrive once everything else has stopped, and a card left looking
+        // answerable after it would take an answer nothing could deliver.
+        else if (event.kind === 'clarifyExpire') {
+          setClarifies(prev => expireClarifyCard(prev, event.requestId))
+        }
       })
     } catch (err) {
       // Nothing is coming on either path, so the run ends here.
       sendingRef.current = false
       setSending(false)
       setStreaming('')
+      clearToolCalls()
+      // The agent is no longer parked on anything, so neither is the customer.
+      // A card outliving its turn is a control with nowhere to post to.
+      clearClarifies()
+      // A turn that failed may still have queued mail before it did. The
+      // drafts are on disk either way, so the card is offered on this path too
+      // rather than only on the happy one.
+      void settleEmailDrafts()
       runIdRef.current = null
       // A user-initiated Stop shows nothing, not an error line.
       if (err instanceof HarnessError && err.code === 'aborted') return
@@ -2341,8 +2658,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     sendingRef.current = false
     setSending(false)
     setStreaming('')
+    // The live pills have done their job. The finished message carries the
+    // agent's OWN record of the steps (`result.toolCalls`) and renders it as
+    // summary chips, so leaving the running ones up would show the same turn's
+    // tools twice — once as a guess from the wire, once as the record.
+    clearToolCalls()
+    // Same reason as the failure path: the turn is over, so any question it was
+    // parked on is over too.
+    clearClarifies()
+    // The turn is done and anything it wanted to post is now waiting. This is
+    // where the batch card appears.
+    void settleEmailDrafts()
     runIdRef.current = null
-  }, [adapter])
+  }, [adapter, applyToolEvent, nudgeCodingAgent, clearToolCalls, clearClarifies, settleEmailDrafts])
   useEffect(() => { dispatchTurnRef.current = dispatchTurn }, [dispatchTurn])
 
   const startRun = useCallback((text: string, sendAttachments: ChatAttachment[]) => {
@@ -2414,6 +2742,67 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // CURRENT `sending`.
   const enqueueRunRef = useRef(enqueueRun)
   useEffect(() => { enqueueRunRef.current = enqueueRun }, [enqueueRun])
+
+  /**
+   * Draw the composer's text, on a harness whose agent cannot.
+   *
+   * The whole feature the customer sees, and it is short because the decisions
+   * are elsewhere: whether to offer it at all is `imageGenerationTrigger`, and
+   * where the picture comes from is the adapter's. What is left here is what
+   * this component has always owned — putting the exchange on screen.
+   *
+   * The prompt is drawn as a user bubble before the call so the wait has
+   * something to sit under, and the box records the same two lines in the
+   * durable transcript, so closing the tab mid-generation still leaves the
+   * picture waiting on the next visit.
+   */
+  const generatePicture = useCallback(async () => {
+    const prompt = input.trim()
+    // Re-entry is decided from the ref, not from `drawing`: a second click can
+    // land in the window before the state commit, and two generations would be
+    // two charges against the customer's daily allowance for one intent.
+    if (!prompt || drawingRef.current) return
+    setInput('')
+    const controller = new AbortController()
+    drawingAbortRef.current = controller
+    drawingRef.current = true
+    setDrawing(true)
+    setMessages(prev => [...prev, { role: 'user', text: prompt, timestamp: Date.now() }])
+    try {
+      const { media } = await adapter.generateImage(prompt, controller.signal)
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        // A picture with no caption is the whole reply here — there is no model
+        // writing one, so '(no response)' would be describing the absence of
+        // something nobody asked for.
+        text: '',
+        timestamp: Date.now(),
+        images: [...media],
+      }])
+    } catch (err) {
+      // Stopping is not failing, and must not leave a red bubble behind.
+      if (err instanceof HarnessError && err.code === 'aborted') return
+      setMessages(prev => [...prev, {
+        role: 'system',
+        // The same leak rules a failed turn goes through. Everything this path
+        // can report was written by us for a customer, but the layers under it
+        // are a proxy and a filesystem, and both quote what they were handed.
+        text: describeImageFailure(err instanceof Error ? err.message : undefined),
+        timestamp: Date.now(),
+      }])
+    } finally {
+      drawingRef.current = false
+      setDrawing(false)
+      drawingAbortRef.current = null
+    }
+  }, [input, adapter])
+
+  // A wait nobody is watching is a paid generation still running. Closing the
+  // popup ends it, the same way it drops the agent's image wait just above.
+  useEffect(() => {
+    if (isOpen) return
+    drawingAbortRef.current?.abort()
+  }, [isOpen])
 
   const sendMessage = useCallback(() => {
     const text = input.trim()
@@ -2708,11 +3097,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (harnessId !== 'hermes') return
     const controller = new AbortController()
-    const onChanged = () => { void seedHermesHeader(controller.signal) }
-    window.addEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
+    const unsubscribe = onProvidersChanged(() => { void seedHermesHeader(controller.signal) })
     return () => {
       controller.abort()
-      window.removeEventListener(HERMES_MODEL_STATE_EVENT, onChanged)
+      unsubscribe()
     }
   }, [harnessId, seedHermesHeader])
 
@@ -3455,6 +3843,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const isSuccess = msg.variant === 'success';
           const systemBg = isSuccess ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
           const systemColor = isSuccess ? '#22c55e' : '#ef4444';
+          // Messages the agent pointed at, as `EMAIL:<uid>` lines in the reply.
+          // Derived at render rather than stored on the message: a replayed
+          // turn carries the same directive text a live one did, so deriving
+          // here makes history and live identical for free — and keeps the
+          // owner's mail out of the cached transcript, which is where it very
+          // deliberately does not belong.
+          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null;
+          const bodyText = emailRefs ? emailRefs.text : msg.text;
           return (
             <div key={i} style={{
               display: 'flex',
@@ -3528,7 +3924,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     })}
                   </div>
                 )}
-                {msg.text ? (msg.role === 'user' ? msg.text : renderText(msg.text, t("chat.table"))) : null}
+                {bodyText ? (msg.role === 'user' ? bodyText : renderText(bodyText, t("chat.table"))) : null}
                 {msg.audio && msg.audio.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: msg.text ? 8 : 0 }}>
                     {msg.audio.map((src) => (
@@ -3563,6 +3959,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                     ))}
                   </div>
                 )}
+                {/* A way back to the real message, for each one the reply
+                    referred to. The agent's summary is what the bubble says;
+                    this is the mail itself, opened on demand and fetched only
+                    then — see lib/chat-email-refs.ts. */}
+                {emailRefs && emailRefs.uids.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
+                    {emailRefs.uids.map(uid => (
+                      <EmailCard key={uid} uid={uid} onOpen={setOpenEmailUid} t={t} />
+                    ))}
+                  </div>
+                )}
                 {/* What the agent DID and what it was thinking, under the
                     answer and never inside it. Both come off the stored
                     message, so a replayed turn shows exactly what the live one
@@ -3581,10 +3988,57 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
         {!reloadingSkill && <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />}
 
+        {/* Not tool pills: `coding_agent_run` returns its run id in
+            milliseconds while the run itself works for minutes, so these are
+            fed by the device's run record. They stay after the run ends and
+            report the outcome — a badge that vanished with the run was gone
+            before the owner had read the message above it, since runs here
+            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
+        {codingRuns.map(run => (
+          <CodingAgentActivityPill
+            key={run.id}
+            run={run}
+            labels={{
+              running: t("codingAgent.chatWorking"),
+              runningOwner: t("codingAgent.chatWorkingOwner"),
+              completed: t("codingAgent.chatFinished"),
+              failed: t("codingAgent.chatFailed"),
+              stopped: t("codingAgent.chatStopped"),
+            }}
+            openLabel={t("codingAgent.chatOpenApp")}
+            onOpen={() => dispatchOpenApp("coding")}
+          />
+        ))}
+
+        {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
+            message: see the note on `clarifies` above for why this is the one
+            thing a turn produces that is deliberately not persisted. */}
+        {!reloadingSkill && clarifies.map(card => (
+          <ClarifyPrompt key={card.requestId} card={card} onAnswer={answerClarify} />
+        ))}
+
+        {/* Outgoing mail, one card per batch. Below the clarifies and above the
+            image banner, i.e. at the bottom of the transcript where the turn
+            that produced it just ended — this is a decision about what the
+            agent has ALREADY done, so it belongs after the answer rather than
+            beside the composer. */}
+        {!reloadingSkill && emailBatches.map(card => (
+          <EmailBatchCard
+            key={card.batchId}
+            card={card}
+            hermes={harnessId === 'hermes'}
+            onApprove={approveEmailBatch}
+            onCancel={cancelEmailBatch}
+          />
+        ))}
+
         {/* The picture outlives the turn that asked for it, so this banner is
             the only thing on screen during the 20-40s wait — the tool pill has
             already gone green and `sending` is back to false. */}
-        {!reloadingSkill && generatingImage && (
+        {/* One banner, both waits — the agent drawing on its own and the box
+            fetching on the composer's behalf look identical to the person
+            waiting, and should. */}
+        {!reloadingSkill && (generatingImage || drawing) && (
           <div
             role="status"
             aria-live="polite"
@@ -3919,6 +4373,40 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </button>
           )
         )}
+        {/* Making a picture, where the AGENT cannot.
+            Shown on the trigger and not on `canGenerateImages`, because the two
+            answer different questions: the flag says a picture can be made
+            here, the trigger says who makes it. On OpenClaw the customer simply
+            asks and the agent's own tool draws — a button there would be a
+            second way to ask for something the chat already does, and the
+            adapter refuses it outright. */}
+        {caps.imageGenerationTrigger === 'composer' && (
+          <button
+            onClick={() => { void generatePicture() }}
+            // Disabled with nothing typed, because the composer's text IS the
+            // prompt and an empty one would spend a generation on silence. The
+            // title says which of the two reasons applies rather than going
+            // blank, so a customer is never left guessing at a dead control.
+            disabled={status !== 'connected' || drawing || input.trim().length === 0}
+            title={input.trim().length === 0 ? t("chat.generatePictureEmpty") : t("chat.generatePicture")}
+            aria-label={t("chat.generatePicture")}
+            data-testid="generate-image"
+            style={{
+              width: 36, height: 36, borderRadius: 10, border: 'none',
+              background: 'rgba(255,255,255,0.06)',
+              color: drawing ? '#f97316' : 'rgba(255,255,255,0.4)',
+              cursor: status === 'connected' && !drawing && input.trim().length > 0 ? 'pointer' : 'default',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 0.15s',
+            }}
+            onMouseEnter={(e) => { if (status === 'connected' && !drawing && input.trim().length > 0) { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' } }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; if (!drawing) e.currentTarget.style.color = 'rgba(255,255,255,0.4)' }}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 20 }}>
+              {drawing ? 'hourglass_top' : 'imagesmode'}
+            </span>
+          </button>
+        )}
         <textarea
           ref={inputRef}
           value={input}
@@ -4009,6 +4497,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           The component portals itself to <body> for the same containing-block
           reason as the image preview below. */}
       <VoiceTunnelDialog open={tunnelDialogOpen} onClose={() => setTunnelDialogOpen(false)} />
+
+      {/* The whole email, when one has been opened from a card in the
+          transcript. It portals itself to <body> for the same containing-block
+          reason as the image preview below, and brings its own dialog
+          behaviour — focus, Tab trap, Escape — from the shared hook. */}
+      {openEmailUid !== null && (
+        <EmailFullView key={openEmailUid} uid={openEmailUid} onClose={closeEmail} t={t} />
+      )}
 
       {/* Full-size image preview.
           Portalled to <body> rather than nested here: the popup root carries a

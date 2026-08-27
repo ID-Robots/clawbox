@@ -154,7 +154,7 @@ export CLAWBOX_MCP_ENTRY="$MCP_ENTRY"
 export CLAWBOX_MCP_API_BASE="$API_BASE"
 
 python3 - <<'PY'
-import os, sys, tempfile
+import ast, os, sys, tempfile
 
 try:
     import yaml
@@ -207,11 +207,91 @@ if not isinstance(servers, dict):
     servers = {}
     cfg["mcp_servers"] = servers
 
-if servers.get("clawbox") == desired:
+changed = False
+if servers.get("clawbox") != desired:
+    servers["clawbox"] = desired
+    changed = True
+
+# ── Retire the bundled email-skill distractors. ─────────────────────────────
+# Hermes seeds a bundled skills library into ~/.hermes/skills, and its `email`
+# category (the `himalaya` CLI skill plus `email-inbox-triage`, which routes to
+# it) teaches the agent to drive a mailbox from the terminal. On a ClawBox that
+# is the wrong tool in exactly the way the built-in browser toolset was (§4):
+# the himalaya CLI is not configured on this image, and the device's actual
+# email capability is the ClawBox MCP tools — email_send / email_list /
+# email_read — wired to the account the owner connected in Settings (#424).
+#
+# Observed on a live Hermes device: "Can you read my last 5 emails?" went
+# skill_view(himalaya) → two failing himalaya terminal calls → a clarify
+# question no dashboard turn can deliver an answer to → a wedged turn — with
+# email_list registered and working in the very same tool list. The skills
+# index entry ("sending, receiving, searching, and managing email") outbids the
+# MCP tool descriptions for any mailbox request, so the trap re-arms on every
+# reseed.
+#
+# `skills.disabled` in config.yaml IS the supported surface here, unlike §4's
+# toolsets: agent/skill_utils.py get_disabled_skill_names() reads this exact
+# key (globally, unioned with skills.platform_disabled per platform), there is
+# no `hermes skills disable` CLI to prefer, and a disabled skill drops out of
+# the prompt's skills index and skills_list. Global rather than per-platform,
+# because himalaya is unprovisioned for every platform of this device.
+#
+# APPEND, never overwrite: an owner's own disabled entries survive, and hermes'
+# own JSON-string list form ('["a","b"]', how `hermes config set` stores lists)
+# is parsed the same way skill_utils.parse_config_string_list does. A `skills`
+# key that is not a mapping is left alone — repairing it is not this script's
+# call — and the MCP registration above must still land.
+# google-workspace joined the list after the second live incident: with
+# himalaya hidden, the index still advertised "Gmail, Calendar, Drive ... via
+# gws CLI", and the same mailbox question went skill_view(google-workspace) ->
+# its setup.py -> a clarify question nothing could answer. Same shape of trap:
+# a connector CLI that is not provisioned on this image, outbidding the
+# device's own email tools.
+DISTRACTOR_SKILLS = ["himalaya", "email-inbox-triage", "google-workspace"]
+skills_cfg = cfg.get("skills")
+if skills_cfg is None:
+    skills_cfg = {}
+    cfg["skills"] = skills_cfg
+if isinstance(skills_cfg, dict):
+    raw_disabled = skills_cfg.get("disabled")
+    if isinstance(raw_disabled, str):
+        parsed = None
+        stripped = raw_disabled.strip()
+        if stripped.startswith("["):
+            try:
+                parsed = ast.literal_eval(stripped)
+            except (ValueError, SyntaxError):
+                parsed = None
+        if isinstance(parsed, list):
+            names = [str(item) for item in parsed]
+        else:
+            names = [raw_disabled] if raw_disabled else []
+    elif isinstance(raw_disabled, (list, tuple)):
+        names = [str(item) for item in raw_disabled]
+    elif raw_disabled is None:
+        names = []
+    else:
+        # A mapping, a bool, a number: a shape this script does not understand,
+        # left alone for the same reason a non-mapping `skills` key is. Reading
+        # it as "nothing is disabled" and writing the distractors over it would
+        # discard whatever the owner meant by it, and the MCP registration
+        # above still has to land.
+        names = None
+        print("[register-mcp] WARNING: skills.disabled is not a list or a string; "
+              "leaving the bundled email skills enabled.", file=sys.stderr)
+    missing = [] if names is None else [n for n in DISTRACTOR_SKILLS if n not in names]
+    if missing:
+        skills_cfg["disabled"] = names + missing
+        changed = True
+        print("[register-mcp] disabled bundled email skills: " + ", ".join(missing)
+              + " — mailbox requests go through the ClawBox email_* tools")
+else:
+    print("[register-mcp] WARNING: skills is not a mapping; "
+          "leaving the bundled email skills enabled.", file=sys.stderr)
+
+if not changed:
     print("[register-mcp] Hermes MCP registration already current, skipping write")
     sys.exit(0)
-
-servers["clawbox"] = desired
 
 directory = os.path.dirname(cfg_path) or "."
 os.makedirs(directory, exist_ok=True)

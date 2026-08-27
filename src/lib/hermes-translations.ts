@@ -4,6 +4,7 @@ import { providerEn } from "./hermes-translations/en-provider";
 import { skillsEn } from "./hermes-translations/en-skills";
 import { localModelsEn } from "./hermes-translations/en-local-models";
 import { systemProfileEn } from "./hermes-translations/en-system-profile";
+import { codingAgentEn } from "./hermes-translations/en-coding-agent";
 import { bg } from "./hermes-translations/bg";
 import { de } from "./hermes-translations/de";
 import { es } from "./hermes-translations/es";
@@ -17,7 +18,8 @@ import { zh } from "./hermes-translations/zh";
 /**
  * The surfaces that used to bypass `t()` entirely: the system-password card,
  * the Hermes provider picker, the Skills store and the Local Models tab
- * (TASK-458), joined by the Desktop & power card (TASK-455). They are grouped here rather than appended to
+ * (TASK-458), joined by the Desktop & power card (TASK-455) and the Coding
+ * agent card. They are grouped here rather than appended to
  * `desktop-translations` because they arrived as one i18n pass and a reviewer
  * should be able to read that pass as one diff.
  *
@@ -36,6 +38,7 @@ export const hermesEn: Record<string, string> = {
   ...skillsEn,
   ...localModelsEn,
   ...systemProfileEn,
+  ...codingAgentEn,
 };
 
 const overrides: Record<Exclude<Locale, "en">, Record<string, string>> = {

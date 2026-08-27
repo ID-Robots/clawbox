@@ -24,14 +24,16 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import api, crypto, openclaw, passphrase, s3
+from . import agent, api, crypto, passphrase, s3
 from .config import Config
 
 log = logging.getLogger(__name__)
@@ -50,6 +52,10 @@ class RestoreResult:
     archive_name: str
     archive_size_bytes: int
     assets: list[RestoredAsset]
+    #: Members deliberately NOT recreated (unsafe absolute symlinks). Almost
+    #: always empty. Carried out to the caller rather than left in the log so
+    #: a restore that dropped something can never present itself as complete.
+    skipped_members: list[str] = field(default_factory=list)
 
 
 class RestoreError(Exception):
@@ -72,6 +78,22 @@ class PassphraseMissingError(RestoreError):
     """
 
 
+def _find_manifest_member(tf: tarfile.TarFile) -> str | None:
+    """The archive's own `<root>/manifest.json`, found by looking.
+
+    The root is normally derivable from the snapshot NAME, but not always: a
+    plaintext `.tar.gz` that `crypto.is_likely_encrypted()` misreads gets run
+    through the decrypt path and renamed to `<name>.decrypted.tar.gz`, and the
+    name-derived lookup then asks for a root that was never in the tarball and
+    fails with "archive missing manifest.json" on an archive that is perfectly
+    good. Looking costs one pass and cannot be wrong.
+    """
+    for member in tf:
+        if member.name.endswith("/manifest.json") and member.name.count("/") == 1:
+            return member.name
+    return None
+
+
 def _read_manifest_from_open(tf: tarfile.TarFile, archive_root: str) -> dict:
     """Pull `<root>/manifest.json` out of an already-open tarball.
 
@@ -82,8 +104,15 @@ def _read_manifest_from_open(tf: tarfile.TarFile, archive_root: str) -> dict:
     member_name = f"{archive_root}/manifest.json"
     try:
         m = tf.getmember(member_name)
-    except KeyError as e:
-        raise RestoreError(f"archive missing manifest.json (looked for {member_name!r})") from e
+    except KeyError:
+        # Fall back to whatever root the tarball actually has — see
+        # `_find_manifest_member` for the case that makes the name unreliable.
+        found = _find_manifest_member(tf)
+        if found is None:
+            raise RestoreError(
+                f"archive missing manifest.json (looked for {member_name!r})",
+            ) from None
+        m = tf.getmember(found)
     extracted = tf.extractfile(m)
     if extracted is None:
         raise RestoreError("manifest.json is not a regular file in the archive")
@@ -122,6 +151,42 @@ def _member_name_unsafe(member: tarfile.TarInfo, prefix: str) -> bool:
     return any(p == ".." for p in parts if p)
 
 
+# Python 3.12 warns about an unset extraction filter and 3.14 DEFAULTS to
+# `data`, which refuses absolute symlinks — exactly the ones
+# `_link_target_allowed` exists to permit, so a restore that works on the
+# device's 3.10 today would start silently dropping the identity bridge on a
+# newer interpreter. `fully_trusted` restores the historical behaviour, and it
+# is safe HERE specifically because this module does its own vetting first:
+# every member passes `_member_name_unsafe` (no absolute paths, no `..`) and
+# every link passes `_member_link_unsafe` / `_link_target_allowed`, on a
+# tarball whose integrity was already verified. The keyword does not exist
+# before 3.12, hence the version gate rather than passing it unconditionally.
+_EXTRACT_KWARGS: dict[str, str] = (
+    {"filter": "fully_trusted"} if sys.version_info >= (3, 12) else {}
+)
+
+
+def _link_target_allowed(link: str, allowed_roots: tuple[str, ...]) -> bool:
+    """May an ABSOLUTE symlink target be recreated?
+
+    Yes when it points inside something this very archive declares it owns.
+    The Hermes shared-identity bridge is exactly that shape:
+    `~/.hermes/SOUL.md` and `~/.hermes/memories/{MEMORY,USER}.md` are absolute
+    symlinks into `~/.clawbox/agent-identity/`, which the manifest lists as its
+    own `identity` asset. Refusing them meant a restore quietly dropped the
+    agent's memory pointers and still reported success -- observed on the QA
+    box, where `memories/` came back holding nothing but a stale lock file.
+
+    Everything else absolute stays refused. A link to /etc/shadow is not made
+    safe by being inside a verified tarball.
+    """
+    target = os.path.normpath(link)
+    return any(
+        target == root or target.startswith(root.rstrip("/") + "/")
+        for root in allowed_roots
+    )
+
+
 def _member_link_unsafe(member: tarfile.TarInfo) -> bool:
     """True for symlinks/hardlinks whose target is absolute. Relative `..`
     targets are allowed: openclaw plugin-runtime-deps legitimately ship
@@ -136,11 +201,58 @@ def _member_link_unsafe(member: tarfile.TarInfo) -> bool:
     return link.startswith("/")
 
 
+def _extract_file_from_open(
+    tf: tarfile.TarFile,
+    *,
+    archive_subpath: str,
+    staging_root: Path,
+) -> Path:
+    """Extract a SINGLE-FILE asset: the one member whose name is exactly
+    `archive_subpath`.
+
+    The directory extractor below cannot do this. It computes each member's
+    path relative to `archive_subpath` and skips the empty result, so an asset
+    that IS the subpath extracts nothing and then fails with "no members
+    under …". OpenClaw never hit that, because every asset it declares is a
+    directory; Hermes' `config.yaml`, `.env` and `state.db` are files, and they
+    are the three most important things in its archive.
+
+    Returns the PATH it wrote, rather than a byte count, so the caller never
+    has to re-derive the name. It used to look for `staging_root/<sourcePath
+    basename>` while this wrote `staging_root/<archivePath basename>` — the two
+    agree only because the Hermes layout embeds one inside the other, and a
+    manifest that broke that coincidence would move the live target aside and
+    then fail to rename anything into place.
+
+    (There is no `allowed_roots` here on purpose: a single-file asset is one
+    regular file, checked below, so there is no link-target policy to apply.)
+    """
+    staging_root.mkdir(parents=True, exist_ok=True)
+    name = archive_subpath.rsplit("/", 1)[-1]
+    try:
+        for member in tf:
+            if member.name != archive_subpath:
+                continue
+            if not member.isfile():
+                raise RestoreError(
+                    f"{archive_subpath!r} is declared as a file asset but is "
+                    "not a regular file in the archive",
+                )
+            member.name = name
+            tf.extract(member, path=staging_root, **_EXTRACT_KWARGS)
+            return staging_root / name
+    except (tarfile.TarError, OSError) as e:
+        raise RestoreError(f"extraction failed for {archive_subpath}: {e}") from e
+    raise RestoreError(f"no member at {archive_subpath} in archive")
+
+
 def _extract_asset_from_open(
     tf: tarfile.TarFile,
     *,
     archive_subpath: str,
     staging_root: Path,
+    allowed_roots: tuple[str, ...] = (),
+    skipped: list[str] | None = None,
 ) -> int:
     """Extract every member under `archive_subpath/` into `staging_root/`.
 
@@ -169,20 +281,49 @@ def _extract_asset_from_open(
                     raise RestoreError(
                         f"archive contains an unsafe member: {member.name!r}"
                     )
-                if _member_link_unsafe(member):
-                    # Absolute symlink target — skip rather than abort the
-                    # restore; the file isn't critical (openclaw rebuilds
-                    # plugin metadata on next launch) and the alternative
-                    # is failing the entire restore over a single bad link.
+                if _member_link_unsafe(member) and not _link_target_allowed(
+                    member.linkname or "", allowed_roots,
+                ):
+                    # An absolute symlink pointing OUTSIDE anything this
+                    # archive owns. Skipped rather than aborting the whole
+                    # restore over one bad link — but RECORDED, so the caller
+                    # can say what did not come back. Dropping members and
+                    # then reporting success is the exact failure this file
+                    # is otherwise so careful about.
                     log.warning(
                         "skipping unsafe link %r → %r", member.name, member.linkname,
                     )
+                    if skipped is not None:
+                        skipped.append(f"{member.name} → {member.linkname}")
                     continue
                 relative = member.name[len(prefix):] if member.name != archive_subpath else ""
                 if not relative:
+                    if not member.isdir():
+                        # The asset root is in the archive but is not a
+                        # directory — a symlink, most likely. Treating it as
+                        # proof of presence would hand `_swap_into_place` an
+                        # empty staging directory to move over live data.
+                        raise RestoreError(
+                            f"{archive_subpath!r} is declared as a directory asset "
+                            f"but the archive holds it as {member.type!r}",
+                        )
+                    # The asset's own root directory. There is nothing to
+                    # extract for it -- `staging_root` already exists -- but
+                    # seeing it PROVES the asset is present in the archive,
+                    # which for an EMPTY directory is the only proof there
+                    # will ever be.
+                    #
+                    # Not counting it was a restore-stopping bug: `~/.hermes`
+                    # ships `hooks/` and `pairing/` empty on a real box, so
+                    # the loop below found no children, `extracted_any` stayed
+                    # False, and the whole restore aborted on "no members
+                    # under ..." -- after earlier assets had already been
+                    # swapped, so the customer got a rollback instead of their
+                    # data. Observed on the Hermes QA box, not theorised.
+                    extracted_any = True
                     continue
                 member.name = relative
-                tf.extract(member, path=staging_root)
+                tf.extract(member, path=staging_root, **_EXTRACT_KWARGS)
                 if member.isfile():
                     bytes_extracted += member.size
                 extracted_any = True
@@ -199,17 +340,54 @@ def _extract_asset(
     *,
     archive_subpath: str,
     staging_root: Path,
-) -> int:
-    """Standalone variant — opens the tarball just for one asset. Kept for
-    tests; the orchestrator uses `_extract_asset_from_open` to share a
-    single TarFile across all assets."""
+    entry: str = "dir",
+    allowed_roots: tuple[str, ...] = (),
+    skipped: list[str] | None = None,
+) -> tuple[int, Path]:
+    """Extract one asset. Returns `(bytes_extracted, path_to_swap_into_place)`.
+
+    The second element is what removes the old coupling: a directory asset
+    swaps `staging_root` itself, a file asset swaps the file the extractor
+    actually wrote, and only the extractor decides which.
+    """
     try:
         with tarfile.open(archive_path, "r:gz") as tf:
-            return _extract_asset_from_open(
-                tf, archive_subpath=archive_subpath, staging_root=staging_root,
+            if entry == "file":
+                written = _extract_file_from_open(
+                    tf, archive_subpath=archive_subpath, staging_root=staging_root,
+                )
+                return written.stat().st_size, written
+            extracted = _extract_asset_from_open(
+                tf,
+                archive_subpath=archive_subpath,
+                staging_root=staging_root,
+                allowed_roots=allowed_roots,
+                skipped=skipped,
             )
+            return extracted, staging_root
+    except RestoreError:
+        # Already a typed, human-readable failure from the extractor — do not
+        # re-wrap it as "extraction failed" and lose the reason.
+        raise
     except (tarfile.TarError, OSError) as e:
         raise RestoreError(f"extraction failed for {archive_subpath}: {e}") from e
+
+
+def _staging_beside(target: Path, *, kind: str, ts: int) -> Path:
+    """Where an asset is built before it is swapped in: a hidden SIBLING of the
+    live target, not a child of the downloaded-archive tmpdir.
+
+    `Path.rename` is `rename(2)`, which refuses to cross filesystems (EXDEV).
+    Staging under `tempfile.mkdtemp()` and then renaming onto `~/.hermes/…`
+    is a restore that dies at the very last step on any box where /tmp is its
+    own mount — a tmpfs, which is the norm on a Jetson image. A sibling is
+    always on the target's own filesystem, so the swap is both possible AND
+    atomic, and atomicity is the property this whole design rests on.
+
+    (The module docstring has said "a sibling staging directory next to the
+    live target" since the first version. The code did not do it.)
+    """
+    return target.with_name(f".clawkeep-restore-{kind}-{ts}-{target.name}")
 
 
 def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
@@ -250,6 +428,34 @@ def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
         ) from e
 
     return backup
+
+
+def _retire_sqlite_sidecars(target: Path, *, ts: int) -> None:
+    """Move a restored database's stale `-wal` / `-shm` files aside.
+
+    A sqlite database in WAL mode keeps its most recent writes in a `-wal`
+    sidecar — 2.6 MB of them on the QA box, against a 2.8 MB `state.db`. The
+    copy in the archive came through `Connection.backup()`, so it is already
+    fully checkpointed and complete on its own. The sidecars sitting next to
+    it belong to the database we just moved OUT of the way, and sqlite decides
+    whether to replay a WAL by looking for the file, not by asking whether it
+    matches: leaving them is how a correct restore turns into a corrupt or
+    silently-stale history on the next open.
+
+    Moved aside rather than deleted, and beside the same `.bak-restore-<ts>`
+    suffix as the database itself, so a restore stays fully reversible by
+    hand. Failures are logged, not raised — the data is already in place, and
+    the caller finding out about a `-shm` it could not rename is not worth
+    rolling back a good restore.
+    """
+    for suffix in ("-wal", "-shm"):
+        sidecar = target.with_name(target.name + suffix)
+        if not sidecar.exists():
+            continue
+        try:
+            sidecar.rename(sidecar.with_name(f"{sidecar.name}.bak-restore-{ts}"))
+        except OSError as e:  # pragma: no cover — best effort
+            log.warning("could not move sqlite sidecar %s aside: %s", sidecar, e)
 
 
 def _rollback_swaps(done: list[RestoredAsset], *, ts: int) -> list[str]:
@@ -384,6 +590,11 @@ def restore_snapshot(
     creds = api.mint_credentials(cfg.server, token)
 
     staging_dir = Path(tempfile.mkdtemp(prefix="clawkeep-restore-"))
+    # Asset staging happens beside each live target (see `_staging_beside`),
+    # which is outside `staging_dir` and so outside its cleanup. Track them so
+    # a failure part-way through does not leave `.clawkeep-restore-*` litter in
+    # the customer's state directory.
+    sibling_stagings: list[Path] = []
     archive_path = staging_dir / snapshot_name
     try:
         log.info("downloading snapshot %s", snapshot_name)
@@ -429,24 +640,44 @@ def restore_snapshot(
             # readers below — they expect the plaintext form.
             snapshot_name = archive_path.name
 
-        log.info("verifying %s (%d bytes)", archive_path, size)
-        try:
-            openclaw.verify_archive(cfg.openclaw.binary, archive_path)
-        except openclaw.OpenclawError as e:
-            raise RestoreError(f"archive verify failed: {e}") from e
-
-        ts = int(time.time())
-        results: list[RestoredAsset] = []
-
-        # Read the manifest with one tarball open. We re-open per asset
-        # below because gzip framing makes seek-back expensive — streaming
-        # forward from a fresh handle is cheaper than rewinding a shared
-        # one across multi-hundred-MB archives.
+        # The manifest is read BEFORE the integrity check, because WHICH
+        # verifier to run is a property of the ARCHIVE rather than of this box:
+        # an OpenClaw snapshot is verified by `openclaw backup verify` and a
+        # Hermes one by our own reader. Reading it first costs one tarball open
+        # and buys a plain-language refusal for the cross-edition case instead
+        # of a raw "verify failed (rc=1)". Nothing on disk is touched until
+        # after the verify either way, so the guarantee is unchanged.
+        #
+        # We re-open per asset below because gzip framing makes seek-back
+        # expensive — streaming forward from a fresh handle is cheaper than
+        # rewinding a shared one across multi-hundred-MB archives.
         try:
             with tarfile.open(archive_path, "r:gz") as tf:
                 manifest = _read_manifest_from_open(tf, snapshot_name[: -len(".tar.gz")])
         except (tarfile.TarError, OSError) as e:
             raise RestoreError(f"could not read manifest from {archive_path}: {e}") from e
+
+        # One portal account gets ONE R2 prefix, shared by every device paired
+        # to it — so this snapshot list legitimately holds other devices'
+        # backups, including this box's own from before it was converted to the
+        # other edition (a converted box keeps its `~/.clawkeep` pairing, and
+        # its stale `~/.openclaw` alongside the live `~/.hermes`). Swapping an
+        # OpenClaw snapshot onto a Hermes box would restore state the running
+        # agent never reads and report success. Refuse by name, before anything
+        # is verified or moved.
+        try:
+            agent.assert_archive_matches_device(manifest)
+        except agent.AgentMismatchError as e:
+            raise RestoreError(str(e)) from e
+
+        log.info("verifying %s (%d bytes)", archive_path, size)
+        try:
+            agent.verify_archive(cfg, archive_path, agent=agent.archive_agent(manifest))
+        except agent.ARCHIVE_ERRORS as e:
+            raise RestoreError(f"archive verify failed: {e}") from e
+
+        ts = int(time.time())
+        results: list[RestoredAsset] = []
 
         archive_root = str(manifest.get("archiveRoot", "")).strip()
         if not archive_root:
@@ -454,6 +685,18 @@ def restore_snapshot(
         assets = manifest.get("assets", [])
         if not isinstance(assets, list) or not assets:
             raise RestoreError("manifest declares no assets to restore")
+
+        # Everything this archive declares as its own. An absolute symlink may
+        # point inside these and nowhere else.
+        allowed_roots = tuple(
+            os.path.normpath(str(a.get("sourcePath")))
+            for a in assets
+            if isinstance(a, dict) and a.get("sourcePath")
+        )
+        skipped_members: list[str] = []
+        # sqlite targets whose stale `-wal`/`-shm` need retiring, applied after
+        # every asset has landed. See the note at the call site.
+        pending_sqlite: list[Path] = []
 
         for asset in assets:
             if not isinstance(asset, dict):
@@ -466,16 +709,40 @@ def restore_snapshot(
             if not isinstance(archive_subpath, str) or not archive_subpath:
                 raise RestoreError(f"manifest asset missing archivePath: {asset!r}")
 
+            # `entry` is new with the Hermes manifest and absent from every
+            # archive written before it, so "dir" is the default — that is all
+            # OpenClaw has ever declared.
+            entry = str(asset.get("entry") or "dir")
+            if entry not in ("dir", "file"):
+                raise RestoreError(f"manifest asset {kind!r} has unknown entry {entry!r}")
+
             target = Path(source_path)
-            asset_staging = staging_dir / f"asset-{kind}-{ts}"
+            asset_staging = _staging_beside(target, kind=kind, ts=ts)
+            sibling_stagings.append(asset_staging)
             log.info("extracting asset %s → %s", kind, asset_staging)
             try:
-                bytes_restored = _extract_asset(
+                bytes_restored, swap_source = _extract_asset(
                     archive_path,
                     archive_subpath=archive_subpath,
                     staging_root=asset_staging,
+                    entry=entry,
+                    allowed_roots=allowed_roots,
+                    skipped=skipped_members,
                 )
-                backup = _swap_into_place(asset_staging, target, ts=ts)
+                backup = _swap_into_place(swap_source, target, ts=ts)
+                if asset.get("sqlite"):
+                    # DEFERRED, not done here. Retiring the sidecars is the one
+                    # step in this loop that `_rollback_swaps` cannot reverse,
+                    # and the thing it would destroy is the newest data on the
+                    # box: a WAL database keeps its most recent writes in the
+                    # sidecar — 2.6 MB of them against a 2.8 MB `state.db` on
+                    # the QA box. Retiring them here and then failing on a
+                    # LATER asset would roll the old database back into place
+                    # with its WAL renamed away, silently losing every
+                    # conversation that had not been checkpointed. So the
+                    # target is remembered and dealt with only once the whole
+                    # restore has succeeded.
+                    pending_sqlite.append(target)
             except Exception as primary:
                 # An asset failure after earlier assets already swapped would
                 # leave the device with a mixed restore (some new content,
@@ -494,16 +761,30 @@ def restore_snapshot(
                 bytes_restored=bytes_restored,
             ))
 
+        # Every asset is in place and no rollback can happen from here, so the
+        # one irreversible step is finally safe to take.
+        for db_target in pending_sqlite:
+            _retire_sqlite_sidecars(db_target, ts=ts)
+
         return RestoreResult(
             archive_name=snapshot_name,
             archive_size_bytes=size,
             assets=results,
+            skipped_members=skipped_members,
         )
     finally:
         # Best-effort cleanup of the staging tree. The swap moved any
         # asset-staging children out, so what's left is the downloaded
         # archive + empty asset dirs. Don't raise from here — the restore
         # itself succeeded.
+        for leftover in sibling_stagings:
+            try:
+                if leftover.is_dir():
+                    shutil.rmtree(leftover, ignore_errors=True)
+                else:
+                    leftover.unlink(missing_ok=True)
+            except Exception as e:  # noqa: BLE001 — cleanup never fails a restore
+                log.warning("could not clean up asset staging at %s: %s", leftover, e)
         try:
             shutil.rmtree(staging_dir, ignore_errors=True)
         except Exception as e:  # noqa: BLE001 — never let cleanup fail the restore

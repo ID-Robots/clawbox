@@ -6,9 +6,9 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
-import { CODING_HARNESS_COMMAND } from "@/lib/coding-harness";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
+const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false });
 const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false });
 const BrowserApp = dynamic(() => import("@/components/BrowserApp"), { ssr: false });
 const VNCApp = dynamic(() => import("@/components/VNCApp"), { ssr: false });
@@ -74,7 +74,7 @@ export default function StandaloneAppPage() {
       case "terminal":
         return <TerminalApp />;
       case "coding":
-        return <TerminalApp initialCommand={CODING_HARNESS_COMMAND} />;
+        return <CodingAgentApp />;
       case "files":
         return <FilesApp />;
       case "browser":

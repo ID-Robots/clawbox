@@ -3,10 +3,38 @@
 import { useState, useEffect, useRef, type ReactNode } from "react";
 import StatusMessage from "./StatusMessage";
 import CredentialsHandoffOverlay from "./CredentialsHandoffOverlay";
+import CredentialsWriteDownDialog from "./CredentialsWriteDownDialog";
 import { useT } from "@/lib/i18n";
 
 interface CredentialsStepProps {
   onNext: () => void;
+  /** Hermes edition: the save/AP-handoff overlay takes the agent's palette. */
+  hermes?: boolean;
+}
+
+/**
+ * One submit, frozen at the moment it validated.
+ *
+ * The step's fields are not the only writers of its state: the mount-time reads
+ * of `/setup-api/system/hotspot` and `/setup-api/system/hostname` also set the
+ * device name, the hotspot's name and whether the hotspot is on at all. The
+ * write-down confirmation puts a human-length pause between "these are your
+ * passwords" and the request that applies them, and a late read landing inside
+ * that pause could otherwise change the SSID — or switch the hotspot off —
+ * between the values the customer wrote down and the values actually saved.
+ *
+ * So the submit carries its own values. What was validated is what is shown,
+ * and what is shown is what is sent.
+ */
+interface CredentialsSubmission {
+  /** Normalized, without the `.local` suffix. */
+  hostname: string;
+  password: string;
+  hotspotEnabled: boolean;
+  /** Trimmed. Falls back to the product default when the hotspot is off. */
+  hotspotName: string;
+  /** Empty when the hotspot is off — nothing to set. */
+  hotspotPassword: string;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -76,7 +104,7 @@ function FieldLabel({ htmlFor, children }: { htmlFor: string; children: ReactNod
   );
 }
 
-export default function CredentialsStep({ onNext }: CredentialsStepProps) {
+export default function CredentialsStep({ onNext, hermes = false }: CredentialsStepProps) {
   const { t } = useT();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -91,6 +119,13 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
   const [hotspotEnabled, setHotspotEnabled] = useState(true);
   const [touched, setTouched] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Both passwords on this screen are write-only once saved: nothing on the box
+  // can read either back, and a customer who forgets one is locked out of sudo
+  // and SSH with only a factory reset to recover. So the save is interposed —
+  // the values are read back in full and acknowledged before anything is sent.
+  // Non-null means the confirmation is up, and holds the exact values it is
+  // showing, which are the exact values Continue will send.
+  const [pending, setPending] = useState<CredentialsSubmission | null>(null);
   // Purely presentational disclosure state. Both fields behind them already
   // carry a working default read back from the device, so the screen opens on
   // what the customer must supply and keeps what they may rename one tap away.
@@ -141,54 +176,89 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     };
   }, []);
 
-  const save = async () => {
+  /**
+   * Everything the save used to check before it sent anything. Split out so the
+   * write-down confirmation can stand between a VALID form and the first
+   * request: an invalid form still fails where it always did, at the field,
+   * with no dialog in the way.
+   */
+  const validate = (): CredentialsSubmission | null => {
     setTouched(true);
     // Validate hostname
-    const normalizedHostname = hostname.trim().toLowerCase().replace(/\.local$/, "");
-    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedHostname)) {
+    const normalized = hostname.trim().toLowerCase().replace(/\.local$/, "");
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(normalized)) {
       setStatus({ type: "error", message: t("credentials.hostnameInvalid") });
-      return;
+      return null;
     }
     // Validate system password (required)
     if (!password) {
       setStatus({ type: "error", message: t("credentials.passwordRequired") });
-      return;
+      return null;
     }
     if (password.length < 8) {
       setStatus({
         type: "error",
         message: t("credentials.passwordMinLength"),
       });
-      return;
+      return null;
     }
     if (password !== confirmPassword) {
       setStatus({ type: "error", message: t("credentials.passwordsDontMatch") });
-      return;
+      return null;
     }
 
     // Validate hotspot fields (only when enabled)
     if (hotspotEnabled) {
       if (!hotspotName.trim()) {
         setStatus({ type: "error", message: t("credentials.hotspotNameRequired") });
-        return;
+        return null;
       }
       if (!hotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordRequired") });
-        return;
+        return null;
       }
       if (hotspotPassword.length < 8) {
         setStatus({
           type: "error",
           message: t("credentials.hotspotPasswordMinLength"),
         });
-        return;
+        return null;
       }
       if (hotspotPassword !== confirmHotspotPassword) {
         setStatus({ type: "error", message: t("credentials.hotspotPasswordsDontMatch") });
-        return;
+        return null;
       }
     }
+    return {
+      hostname: normalized,
+      password,
+      hotspotEnabled,
+      hotspotName: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
+      hotspotPassword: hotspotEnabled ? hotspotPassword : "",
+    };
+  };
 
+  /** The button's (and Enter's) action: validate, then ask before saving. */
+  const requestSave = () => {
+    if (saving || pending) return;
+    const submission = validate();
+    if (!submission) return;
+    setStatus(null);
+    setPending(submission);
+  };
+
+  /**
+   * Apply the step: device name, then the system password, then the hotspot.
+   *
+   * Unchanged by the write-down confirmation — it still sends exactly these
+   * three requests, in this order, and still hands off to the reconnect
+   * overlay when the save takes the connection down with it. What moved is
+   * where its values come from: the confirmed submission, not the live fields,
+   * so a late device read cannot change them out from under the customer
+   * between the acknowledgement and the request.
+   */
+  const save = async (submission: CredentialsSubmission) => {
+    const normalizedHostname = submission.hostname;
     saveControllerRef.current?.abort();
     const controller = new AbortController();
     saveControllerRef.current = controller;
@@ -222,11 +292,11 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
       if (controller.signal.aborted) return;
 
       // Save system password if provided
-      if (password) {
+      if (submission.password) {
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password }),
+          body: JSON.stringify({ password: submission.password }),
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
@@ -245,9 +315,9 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ssid: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
-          password: hotspotEnabled ? (hotspotPassword || undefined) : undefined,
-          enabled: hotspotEnabled,
+          ssid: submission.hotspotName,
+          password: submission.hotspotPassword || undefined,
+          enabled: submission.hotspotEnabled,
         }),
         signal: controller.signal,
       });
@@ -278,7 +348,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             ? newSetupUrl.toString()
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
-          hotspotSsid: apRestarted && hotspotEnabled ? hotspotName.trim() : null,
+          hotspotSsid: apRestarted && submission.hotspotEnabled ? submission.hotspotName : null,
         });
         return;
       }
@@ -305,7 +375,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
             ? newSetupUrl.toString()
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
-          hotspotSsid: hotspotEnabled ? hotspotName.trim() : null,
+          hotspotSsid: submission.hotspotEnabled ? submission.hotspotName : null,
         });
         return;
       }
@@ -375,10 +445,25 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
     <div className="w-full max-w-[520px]" data-testid="setup-step-credentials">
       {handoff && (
         <CredentialsHandoffOverlay
+          hermes={hermes}
           targetUrl={handoff.targetUrl}
           sameOrigin={handoff.sameOrigin}
           hotspotSsid={handoff.hotspotSsid}
           onContinue={onNext}
+        />
+      )}
+      {pending && !handoff && (
+        <CredentialsWriteDownDialog
+          hermes={hermes}
+          systemPassword={pending.password}
+          hotspotPassword={pending.hotspotEnabled ? pending.hotspotPassword : null}
+          hotspotSsid={pending.hotspotName}
+          onCancel={() => setPending(null)}
+          onConfirm={() => {
+            const submission = pending;
+            setPending(null);
+            void save(submission);
+          }}
         />
       )}
       <div className="card-surface rounded-[var(--r-3)] p-[var(--s-5)] sm:p-[var(--s-7)]">
@@ -447,7 +532,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   type="text"
                   value={hostname}
                   onChange={(e) => setHostname(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") save(); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") requestSave(); }}
                   maxLength={63}
                   placeholder="clawbox"
                   autoComplete="off"
@@ -484,7 +569,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") save();
+                if (e.key === "Enter") requestSave();
               }}
               placeholder={t("credentials.minChars")}
               autoComplete="new-password"
@@ -511,7 +596,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
               value={confirmPassword}
               onChange={(e) => setConfirmPassword(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") save();
+                if (e.key === "Enter") requestSave();
               }}
               placeholder={t("credentials.reenterPassword")}
               autoComplete="new-password"
@@ -607,7 +692,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                 value={hotspotName}
                 onChange={(e) => setHotspotName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") save();
+                  if (e.key === "Enter") requestSave();
                 }}
                 maxLength={32}
                 className={`${FIELD} ${FIELD_PAD} ${inputBorder(touched && !hotspotName.trim())}`}
@@ -688,7 +773,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                   value={hotspotPassword}
                   onChange={(e) => setHotspotPassword(e.target.value)}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter") save();
+                    if (e.key === "Enter") requestSave();
                   }}
                   placeholder={t("credentials.minChars")}
                   className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
@@ -715,7 +800,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
                     value={confirmHotspotPassword}
                     onChange={(e) => setConfirmHotspotPassword(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") save();
+                      if (e.key === "Enter") requestSave();
                     }}
                     placeholder={t("credentials.reenterHotspot")}
                     className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
@@ -745,7 +830,7 @@ export default function CredentialsStep({ onNext }: CredentialsStepProps) {
         <div className="mt-[var(--s-6)]">
           <button
             type="button"
-            onClick={save}
+            onClick={requestSave}
             disabled={blocked}
             className={`w-full sm:w-auto inline-flex items-center justify-center gap-[var(--s-2)] min-h-[48px] px-[var(--s-6)] rounded-[var(--r-1)] ${
               incomplete

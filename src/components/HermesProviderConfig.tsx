@@ -5,10 +5,14 @@ import AIProviderIcon from "./AIProviderIcon";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
+import ProviderConnectionLabel from "./ProviderConnectionLabel";
+import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import { useProviderStatus } from "@/hooks/useProviderStatus";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
+import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import {
   HERMES_PANEL_PROVIDERS,
   CLAWAI_PROVIDER,
@@ -22,9 +26,27 @@ import {
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
 
-// Hermes-edition AI-provider panel. Mirrors the OpenClaw AI-models UI (provider
-// radio-cards with logos, and the SAME ClawBox AI card — literally the same
-// components, see ClawboxAi*.tsx) but drives Hermes' OWN native switching:
+// The AI Providers section — Hermes edition. ONE section that answers all three
+// provider questions: what is running, what else is connected, and how to
+// change either.
+//
+// IT USED TO BE TWO. A "Connections" chip strip sat above this panel listing
+// every provider's state with a star on the default, and this panel listed the
+// same providers again as radio rows with none of that state on them. Two lists
+// of the same eight vendors, a hand's breadth apart, disagreeing about what
+// they were for — and the strip's star meant "make default" while the panel's
+// radio meant "configure", which is two different verbs on one noun. The owner
+// picked the merge: a HERO card naming the current default (vendor, model,
+// connection) over the radio list everyone already knows, each row now honest
+// about its own connection. The strip is gone; its data hook is what feeds this.
+//
+// The radio therefore carries BOTH verbs, resolved by the row's own state:
+//   • a CONNECTED provider     → becomes the default (POST /providers/default)
+//   • a not-yet-connected one  → opens its sign-in/key flow first, as before
+// which is the honest reading of "pick this one" in each case.
+//
+// Everything below the list is unchanged, and still drives Hermes' OWN native
+// switching:
 //   • model + provider  → POST /setup-api/hermes/models  (hermes config set)
 //   • provider API key  → POST /setup-api/hermes/provider-key (hermes auth add)
 //   • ClawBox AI        → POST /setup-api/hermes/clawai (custom provider through Hermes)
@@ -83,13 +105,26 @@ interface Props {
   embedded?: boolean;
   onNext?: () => void;
   testId?: string;
+  /**
+   * Select this provider's row, so a deep-link into Settings lands on the panel
+   * that configures it rather than merely on the section.
+   */
+  requestedProviderId?: string | null;
+  /**
+   * Bumped by the caller on every request. A counter rather than watching the
+   * id, so asking for the SAME provider again re-selects it after the customer
+   * has moved to another row in the meantime.
+   */
+  providerSelectionRequest?: number;
 }
 
-// The OpenClaw AI-models step advances the wizard ~900 ms after a successful
-// configure (AIModelsStep's handleConfiguringDone), which is long enough for the
-// "connected" state to register and short enough not to feel stalled. This panel
-// is the SAME step on a Hermes device, so it advances the same way.
-const AUTO_ADVANCE_DELAY_MS = 900;
+// The OpenClaw AI-models step advances the wizard after a successful configure
+// (AIModelsStep's handleConfiguringDone), long enough for the "connected" state
+// to register and short enough not to feel stalled. This panel is the SAME step
+// on a Hermes device, so it advances the same way — and holds for one second so
+// the cyan "Connected" affirmation (see the wizard overlay below) draws and is
+// read as a deliberate beat rather than a jarring jump to the next step.
+const AUTO_ADVANCE_DELAY_MS = 1000;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
 // imports it), so it cannot call `t` — but a row's `description` is copy, not
@@ -108,7 +143,13 @@ const PROVIDER_DESCRIPTION_KEYS: Record<string, string> = {
   nous: "hermesProvider.row.desc.nous",
 };
 
-export default function HermesProviderConfig({ embedded, onNext, testId }: Props) {
+export default function HermesProviderConfig({
+  embedded,
+  onNext,
+  testId,
+  requestedProviderId,
+  providerSelectionRequest = 0,
+}: Props) {
   const { t } = useT();
   const uid = useId();
 
@@ -168,7 +209,12 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   // login or through Hermes' own OAuth is exactly the case where the user
   // expects to switch straight to it in chat.
   const notifyChatHeader = useCallback(() => {
+    // Both names. The Hermes-specific one because listeners predating the
+    // shared signal still key on it, and the edition-neutral one so a listener
+    // written since — the connection strip, the capability probe — does not
+    // have to know which harness it happens to be mounted on.
     notifyHermesModelState();
+    notifyProvidersChanged();
   }, []);
 
   // ── Inline provider OAuth ──────────────────────────────────────────────────
@@ -223,6 +269,48 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     resetSignin();
   }, [resetSignin]);
 
+  // ── Connection state, for the hero and every row ───────────────────────────
+  //
+  // The same hook the removed connection strip used, unchanged: one call to
+  // /setup-api/providers/status for every provider at once, re-read on the
+  // shared providers-changed signal. Owning it here is what lets one section do
+  // what two used to.
+  const {
+    summary,
+    error: statusError,
+    settingDefault,
+    defaultError,
+    setDefault,
+  } = useProviderStatus();
+
+  const statusById = useMemo(
+    () => new Map((summary?.providers ?? []).map((row) => [row.id, row])),
+    [summary],
+  );
+  const defaultRow = useMemo(
+    () => summary?.providers.find((row) => row.isDefault) ?? null,
+    [summary],
+  );
+
+  /**
+   * Pick a row.
+   *
+   * A connected provider is one the box could switch to right now, so choosing
+   * it MEANS "make this the default" and is written through immediately — the
+   * hero repaints from the server's answer a moment later, never from an
+   * assumption that the write landed. Anything else can only be chosen in the
+   * aspirational sense: it selects the row and lets the sign-in / API-key
+   * controls below do their work first, exactly as this picker always did.
+   *
+   * Selecting the provider that is ALREADY the default writes nothing — there
+   * is nothing to change, and a POST would still cost the box a config write.
+   */
+  const choose = useCallback((id: string) => {
+    pickProvider(id);
+    const row = statusById.get(id);
+    if (row?.state === "connected" && !row.isDefault) void setDefault(id);
+  }, [pickProvider, statusById, setDefault]);
+
   const isClawaiSelected = selectedProvider === CLAWAI_PROVIDER;
 
   // ClawBox AI — a managed provider that still runs THROUGH Hermes.
@@ -276,40 +364,144 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     }
   }, [fetchClawai]);
 
-  /** The provider the DEVICE is configured for, from the unscoped GET. */
-  const fetchDeviceProvider = useCallback(async (): Promise<string> => {
+  /**
+   * The pairing the DEVICE is configured for, from the unscoped GET.
+   *
+   * The model half is what the hero names. It cannot come from `scope`, which
+   * is deliberately scoped to the SELECTED row — the moment a customer clicks
+   * another vendor to look at it, `scope.current` stops describing what the box
+   * is running, which is the one thing the hero must never get wrong.
+   */
+  const fetchDevicePairing = useCallback(async (): Promise<{ provider: string; model: string } | null> => {
     try {
       const res = await fetch("/setup-api/hermes/models", { cache: "no-store" });
-      if (!res.ok) return "";
-      const data = (await res.json()) as { provider?: unknown };
-      return typeof data.provider === "string" ? data.provider : "";
+      if (!res.ok) return null;
+      const data = (await res.json()) as { provider?: unknown; current?: unknown };
+      return {
+        provider: typeof data.provider === "string" ? data.provider : "",
+        model: typeof data.current === "string" ? data.current : "",
+      };
     } catch {
-      return "";
+      // Null, never a blank pairing. Callers keep the last good answer instead
+      // of blanking the hero'''s model line on a transient failure — the same
+      // rule the status hook already follows, for the same reason.
+      return null;
     }
   }, []);
+
+  /** The model the box's default provider resolves to. "" until we know. */
+  const [deviceModel, setDeviceModel] = useState("");
 
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const [data, deviceProvider] = await Promise.all([fetchClawai(), fetchDeviceProvider()]);
+      const [data, pairing] = await Promise.all([fetchClawai(), fetchDevicePairing()]);
       if (!alive) return;
       if (data) {
         setClawai(data);
         setUiTier(resolveUiTier(data.hasToken, data.tierStored));
         setAppliedUiTier(data.active ? resolveUiTier(data.hasToken, data.tierStored) : null);
       }
+      if (pairing) setDeviceModel(pairing.model);
       // Both reads are async, so a user can already have clicked a row by now —
       // silently bouncing them back would discard their pick and the scoped
       // fetch it started.
       if (userPickedProviderRef.current) return;
       if (data?.active) {
         setSelectedProvider(CLAWAI_PROVIDER);
-      } else if (deviceProvider && HERMES_PANEL_PROVIDERS.some((p) => p.id === deviceProvider)) {
-        setSelectedProvider(deviceProvider);
+      } else if (pairing?.provider && HERMES_PANEL_PROVIDERS.some((p) => p.id === pairing.provider)) {
+        setSelectedProvider(pairing.provider);
       }
     })();
     return () => { alive = false; };
-  }, [fetchClawai, fetchDeviceProvider]);
+  }, [fetchClawai, fetchDevicePairing]);
+
+  // The hero's model has to keep up with the same signal its provider does, or
+  // choosing a new default would swap the vendor name above a model id that
+  // belongs to the vendor just replaced. Deliberately re-reads only the pairing:
+  // re-running the mount effect would also re-seed the selection, yanking the
+  // row out from under a customer who had moved on.
+  useEffect(() => {
+    let alive = true;
+    const unsubscribe = onProvidersChanged(() => {
+      void fetchDevicePairing().then((pairing) => {
+        if (alive && pairing) setDeviceModel(pairing.model);
+      });
+    });
+    return () => { alive = false; unsubscribe(); };
+  }, [fetchDevicePairing]);
+
+  // ── The hero ───────────────────────────────────────────────────────────────
+
+  /**
+   * The DEVICE PAIRING wins, for every provider including ClawBox AI.
+   *
+   * Caught on the live box: ClawBox AI's own read derives its model from the
+   * stored tier, so a Pro account reported `deepseek-v4-pro` while the pairing
+   * a bare "make default" had just written said `deepseek-v4-flash`. Both are
+   * real values; only one of them is what the box will actually run, and the
+   * hero's whole claim is to name that one. ClawBox AI's report is kept as a
+   * FALLBACK, for the window before the pairing read has landed.
+   */
+  const heroModel = deviceModel
+    || (defaultRow?.id === CLAWAI_PROVIDER ? (clawai?.model ?? "") : "");
+
+  /** True when this panel has a row for the default — see `changeModel`. */
+  const defaultHasRow = defaultRow !== null && (
+    defaultRow.id === CLAWAI_PROVIDER
+    || HERMES_PANEL_PROVIDERS.some((p) => p.id === defaultRow.id)
+  );
+
+  // "Change model" sends the customer to the model UI they already know rather
+  // than growing a second one in the hero. Bumped as a counter, not a boolean,
+  // so pressing it again re-focuses the dropdown after they have clicked away.
+  const [focusModelRequest, setFocusModelRequest] = useState(0);
+  const modelSelectRef = useRef<HTMLSelectElement>(null);
+
+  const changeModel = useCallback(() => {
+    if (!defaultRow) return;
+    if (defaultRow.id !== selectedProvider) pickProvider(defaultRow.id);
+    setFocusModelRequest((n) => n + 1);
+  }, [defaultRow, selectedProvider, pickProvider]);
+
+  useEffect(() => {
+    if (!focusModelRequest) return;
+    // Re-runs as the row switches and its scope lands, because the dropdown
+    // does not exist until both have happened. ClawBox AI has no dropdown at
+    // all — its plan picker is the model UI — so there is simply nothing to
+    // focus, and scrolling the row into view is the whole gesture.
+    const el = modelSelectRef.current;
+    if (!el) return;
+    el.focus();
+    // Optional-called: focusing is the part that must happen, scrolling is the
+    // courtesy, and not every environment this renders in implements it.
+    el.scrollIntoView?.({ block: "nearest" });
+  }, [focusModelRequest, selectedProvider, loading]);
+
+  // A chip in the connection strip was clicked. Treated exactly like a click on
+  // this panel's own radio row — including setting `userPickedProviderRef`, so
+  // the mount seed above (which may still be in flight) cannot bounce the
+  // selection back to the device's current provider a beat later.
+  //
+  // Keyed on the request counter alone: re-running when the id changes as well
+  // would re-apply a stale request after the customer had moved on.
+  useEffect(() => {
+    if (!providerSelectionRequest) return;
+    const requested = requestedProviderId?.trim();
+    if (!requested) return;
+    const known = requested === CLAWAI_PROVIDER
+      || HERMES_PANEL_PROVIDERS.some((p) => p.id === requested);
+    // A provider this panel has no row for cannot be selected in it. Silently
+    // ignored rather than written into state, which would leave the radio group
+    // with nothing checked and the scoped model list asking for a provider the
+    // customer cannot see.
+    if (!known) return;
+    userPickedProviderRef.current = true;
+    setSelectedProvider(requested);
+    // The remembered model belongs to whichever provider was selected before.
+    setPicked("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerSelectionRequest]);
 
   const loadOauth = useCallback(async (): Promise<void> => {
     try {
@@ -354,6 +546,28 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     return () => window.removeEventListener("focus", onFocus);
   }, [loadOauth, refreshModels, notifyChatHeader]);
 
+  // In the WIZARD, a connected provider is all the step needs: pin it as the
+  // device's pairing with its OWN recommended default model (omit `model` → the
+  // server writes that provider's recommended id) so chat works out of the box,
+  // then let the auto-advance effect carry the wizard forward. Best-effort: the
+  // provider is already connected, so the step is DONE whether or not this
+  // pairing write lands — a slow catalogue must never strand the owner on a step
+  // they have finished. Settings never calls this: there the owner picks a
+  // default deliberately and there is nowhere to advance to.
+  const commitWizardDefault = useCallback(async (providerId: string) => {
+    try {
+      const res = await fetch("/setup-api/hermes/models", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: providerId }),
+      });
+      if (res.ok) notifyChatHeader();
+    } catch {
+      // Non-fatal — see above. Chat falls back to the provider's own default.
+    }
+    setConfigured(true);
+  }, [notifyChatHeader]);
+
   // A finished sign-in is a credential appearing server-side — the panel, the
   // model cache and the chat header all have to re-read, same as the old
   // return-from-dashboard-tab case. Flip the local flag first so Connected
@@ -366,7 +580,10 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
     void loadOauth();
     refreshModels();
     notifyChatHeader();
-  }, [loadOauth, refreshModels, notifyChatHeader]);
+    // First-boot: connecting a provider completes the step. Auto-set its
+    // recommended default and advance — no model-picking or Save click required.
+    if (!embedded) void commitWizardDefault(providerId);
+  }, [loadOauth, refreshModels, notifyChatHeader, embedded, commitWizardDefault]);
 
   async function startOauth(providerId: string) {
     resetSignin();
@@ -716,10 +933,30 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   const selectCls =
     "w-full rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]";
   const labelCls = "block text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-1.5";
-  const rowCls = (isSelected: boolean) =>
+  // The default row's cyan tint OUTRANKS the coral selection wash. They are
+  // usually the same row; when they are not — the customer has clicked a
+  // provider they have yet to sign into — "what is running" is the more useful
+  // of the two to be able to find again.
+  const rowCls = (isSelected: boolean, isDefault: boolean) =>
     `flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-      isSelected ? "bg-orange-500/5" : "hover:bg-[var(--surface-card)]"
+      isDefault
+        ? "bg-[var(--cyan-veil)]"
+        : isSelected
+          ? "bg-orange-500/5"
+          : "hover:bg-[var(--surface-card)]"
     }`;
+
+  /** A row's connection state, pulsing while its "make default" call is out. */
+  const rowStatus = (id: string) => {
+    const row = statusById.get(id);
+    if (!row) return null;
+    return (
+      <ProviderConnectionLabel
+        state={row.state}
+        className={`shrink-0 ${settingDefault === id ? "animate-pulse" : ""}`}
+      />
+    );
+  };
 
   function statusLine(s: Status) {
     if (!s) return null;
@@ -736,15 +973,77 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
   }
 
 
+  // The wizard's success beat: once a provider is connected (`configured`) a
+  // cyan check draws over the card for the auto-advance second, so the jump to
+  // the next step reads as a deliberate confirmation. Settings never advances,
+  // so it never shows this. `--cyan-bright` is the product's DONE colour.
+  const showConnectedAffirmation = !embedded && configured;
+
   return (
     <div className={`w-full ${embedded ? "" : "max-w-[520px]"}`} data-testid={testId}>
-      <div className="card-surface rounded-2xl p-5 sm:p-8">
+      <div className="card-surface rounded-2xl p-5 sm:p-8 relative overflow-hidden">
+        {showConnectedAffirmation && (
+          <>
+            <style>{`
+              @keyframes hpc-connected-draw { to { stroke-dashoffset: 0 } }
+              @keyframes hpc-connected-fade { from { opacity: 0 } to { opacity: 1 } }
+              @keyframes hpc-connected-rise { from { opacity: 0; transform: translateY(6px) } to { opacity: 1; transform: translateY(0) } }
+              .hpc-connected-overlay { animation: hpc-connected-fade 0.2s ease-out both }
+              .hpc-connected-circle { animation: hpc-connected-draw 0.5s ease-out 0.05s forwards }
+              .hpc-connected-tick { animation: hpc-connected-draw 0.35s ease-out 0.45s forwards }
+              .hpc-connected-label { animation: hpc-connected-rise 0.3s ease-out 0.55s both }
+              @media (prefers-reduced-motion: reduce) {
+                .hpc-connected-overlay, .hpc-connected-label { animation: none }
+                .hpc-connected-circle, .hpc-connected-tick { animation: none; stroke-dashoffset: 0 }
+              }
+            `}</style>
+            <div
+              className="hpc-connected-overlay absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-[var(--bg-deep)]/92 backdrop-blur-sm text-center px-6"
+              role="status"
+              aria-live="polite"
+              data-testid="hermes-connected-affirmation"
+            >
+              <svg width="72" height="72" viewBox="0 0 56 56" fill="none" aria-hidden="true">
+                <circle
+                  cx="28" cy="28" r="25"
+                  stroke="var(--cyan-bright)" strokeWidth="3"
+                  strokeDasharray="157" strokeDashoffset="157"
+                  className="hpc-connected-circle"
+                />
+                <path
+                  d="M17 28l7 7 15-15"
+                  stroke="var(--cyan-bright)" strokeWidth="3"
+                  strokeLinecap="round" strokeLinejoin="round"
+                  strokeDasharray="35" strokeDashoffset="35"
+                  className="hpc-connected-tick"
+                />
+              </svg>
+              <span className="hpc-connected-label text-[var(--cyan-bright)] font-semibold text-sm">
+                {t("hermesProvider.connected.affirmation")}
+              </span>
+            </div>
+          </>
+        )}
         <h1 className="text-xl sm:text-2xl font-bold font-display mb-1">{t("hermesProvider.title")}</h1>
         <p id={`${uid}-intro`} className="text-[var(--text-secondary)] mb-5 leading-relaxed text-sm">
           {t("hermesProvider.intro")}
         </p>
 
-        {/* Provider radio-cards (OpenClaw-style) */}
+        {/* THE HERO — what is answering right now. Absent until the box has a
+            default at all, which is the honest state during first-run setup. */}
+        {defaultRow && (
+          <ProviderDefaultHero
+            row={defaultRow}
+            model={heroModel}
+            // "Change model" scrolls to the model dropdown — which the wizard
+            // hides (default-model picking is a post-setup, Settings concern).
+            // Offer it only where that dropdown exists.
+            onChangeModel={embedded && defaultHasRow ? changeModel : undefined}
+          />
+        )}
+
+        {/* Provider radio-cards (OpenClaw-style), now each carrying its own
+            connection state on the right. */}
         <div
           role="radiogroup"
           aria-label={t("hermesProvider.radioGroupLabel")}
@@ -755,24 +1054,27 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
           <ClawboxAiProviderRow
             radioName="hermes-ai-provider"
             selected={isClawaiSelected}
-            onSelect={() => pickProvider(CLAWAI_PROVIDER)}
+            isDefault={statusById.get(CLAWAI_PROVIDER)?.isDefault ?? false}
+            onSelect={() => choose(CLAWAI_PROVIDER)}
             trailingBadge={clawai?.active ? (
               <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide rounded bg-emerald-500/15 text-emerald-400 leading-none">
                 {t("hermesProvider.clawai.activeBadge")}
               </span>
             ) : null}
+            statusSlot={rowStatus(CLAWAI_PROVIDER)}
           />
           {HERMES_PANEL_PROVIDERS.map((provider) => {
             const isSelected = selectedProvider === provider.id;
             const descriptionKey = PROVIDER_DESCRIPTION_KEYS[provider.id];
+            const isDefault = statusById.get(provider.id)?.isDefault ?? false;
             return (
-              <label key={provider.id} className={rowCls(isSelected)}>
+              <label key={provider.id} className={rowCls(isSelected, isDefault)}>
                 <input
                   type="radio"
                   name="hermes-ai-provider"
                   value={provider.id}
                   checked={isSelected}
-                  onChange={() => pickProvider(provider.id)}
+                  onChange={() => choose(provider.id)}
                   className="sr-only"
                 />
                 <span
@@ -794,10 +1096,30 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                     {descriptionKey ? t(descriptionKey) : provider.description}
                   </span>
                 </div>
+                {rowStatus(provider.id)}
               </label>
             );
           })}
         </div>
+
+        {summary?.degraded && (
+          <p className="mt-3 text-[11px] text-[var(--amber-ink)] opacity-80">
+            {t("settings.providers.degraded")}
+          </p>
+        )}
+        {statusError && !summary && (
+          <p className="mt-3 text-[11px] text-[var(--text-muted)]">
+            {t("settings.providers.loadFailed")}
+          </p>
+        )}
+        {defaultError && (
+          <output
+            aria-live="polite"
+            className="mt-3 block rounded-lg border border-[var(--red-edge)] bg-[var(--red-wash)] px-3 py-2 text-xs text-[var(--red-ink)]"
+          >
+            {t("settings.providers.defaultFailed", { message: defaultError })}
+          </output>
+        )}
 
         {/* Contextual controls for the selection. The min-height keeps the card
             from resizing under the cursor while the user arrows down the list. */}
@@ -1012,10 +1334,17 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   </div>
                 );
               })()}
+              {/* Default-model dropdown — a post-setup, Settings concern. The
+                  wizard hides it: connecting a provider auto-pins that
+                  provider's recommended default (commitWizardDefault on OAuth,
+                  saveModelProvider on a key), so first-boot never asks the owner
+                  to choose a model. Shown only when embedded in Settings. */}
+              {embedded && (
               <div>
                 <label className={labelCls} htmlFor={`${uid}-model`}>{t("hermesProvider.model.label")}</label>
                 <select
                   id={`${uid}-model`}
+                  ref={modelSelectRef}
                   className={selectCls}
                   value={model}
                   disabled={loading || !scope?.models.length}
@@ -1063,6 +1392,7 @@ export default function HermesProviderConfig({ embedded, onNext, testId }: Props
                   </p>
                 )}
               </div>
+              )}
 
               {selectedDef?.keyProvider && (
                 <div>

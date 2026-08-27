@@ -23,11 +23,26 @@ const spawnMock = vi.hoisted(() => vi.fn());
 const appendMock = vi.hoisted(() => vi.fn());
 const readTurnMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/lib/hermes-dashboard-turn", () => ({ openDashboardTurn: openTurnMock }));
+// Only the OPENING is faked. The rest of the module — `isQuietStreamError` and
+// the error class it recognises — is the real thing, because the route's
+// recovery path turns on that predicate and a hand-written stand-in would let
+// the two drift: a mock that answered `true` for every failure would prove the
+// route recovers from errors it must still report.
+vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-dashboard-turn")>()),
+  openDashboardTurn: openTurnMock,
+}));
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesTurn: readTurnMock }));
-vi.mock("@/lib/harness/media-root", () => ({ resolveInMediaRoot: vi.fn(async (p: string) => p) }));
+// `chatMediaRoot` is named here as well as `resolveInMediaRoot` because the
+// settle path asks for it now. Left out, the CALL throws synchronously rather
+// than rejecting, which `servableMediaRoot` survives — but then every case in
+// this file would be exercising that fallback instead of the real path.
+vi.mock("@/lib/harness/media-root", () => ({
+  resolveInMediaRoot: vi.fn(async (p: string) => p),
+  chatMediaRoot: vi.fn(async () => "/tmp/clawbox-streaming-media"),
+}));
 vi.mock("@/lib/hermes-model-options", () => ({
   // No catalogue: the route falls back to its static allowlist and lets hermes
   // itself judge the pair, which is the path a box takes before the header has
@@ -39,23 +54,35 @@ vi.mock("@/lib/hermes-model-options", () => ({
 }));
 
 import { POST } from "@/app/setup-api/hermes/chat/route";
+import { DashboardStreamQuietError, type DashboardActivity } from "@/lib/hermes-dashboard-turn";
 
 /** A turn handle that emits the given fragments and then settles. */
 function fakeTurn(opts: {
   sessionId?: string;
   deltas?: string[];
+  /** What the turn reports it is DOING, emitted before the answer text. */
+  activities?: DashboardActivity[];
   text?: string;
   reasoning?: string;
   status?: string;
   error?: string;
   fail?: Error;
+  model?: string;
+  provider?: string;
 }) {
   const closed = { value: false };
   return {
     handle: {
       sessionId: opts.sessionId ?? "20260823_190319_3e9e35",
-      async run(onDelta: (chunk: string) => void) {
+      // What the transport says this session will actually run. The route
+      // records it with the turn, so a switch that did not take is visible.
+      model: opts.model ?? "",
+      provider: opts.provider ?? "",
+      async run(onDelta: (chunk: string) => void, onActivity?: (activity: DashboardActivity) => void) {
         if (opts.fail) throw opts.fail;
+        // The order a real turn takes: the tool runs, and only then is there
+        // anything to say about it.
+        for (const activity of opts.activities ?? []) onActivity?.(activity);
         for (const chunk of opts.deltas ?? []) onDelta(chunk);
         return {
           text: opts.text ?? (opts.deltas ?? []).join(""),
@@ -265,5 +292,214 @@ describe("when the box cannot stream", () => {
     const res = await POST(post({ message: "Hey" }, "application/json"));
     expect(openTurnMock).not.toHaveBeenCalled();
     expect(res.headers.get("content-type")).toContain("application/json");
+  });
+});
+
+describe("saying which model actually answered", () => {
+  it("records the model the transport ran, not the one the pills asked for", async () => {
+    // The pills are a request. When a mid-conversation switch is refused the
+    // session keeps its old model, and the ONLY way that was ever noticed was
+    // by asking the model directly -- nothing in the reply said which had
+    // answered. Now the turn carries it.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({ deltas: ["ok"], model: "deepseek-v4-flash", provider: "clawai" }).handle,
+    );
+    const events = await readEvents(
+      await POST(post({ message: "Hey", model: "claude-fable-5", provider: "anthropic" })),
+    );
+    const [, done] = events[events.length - 1];
+    expect(done).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+    // ...and the same goes into the durable transcript, per record, because one
+    // conversation can be answered by several models.
+    const assistant = appendMock.mock.calls
+      .map(([record]) => record as Record<string, unknown>)
+      .find((record) => record.role === "assistant");
+    expect(assistant).toMatchObject({ model: "deepseek-v4-flash", provider: "clawai" });
+  });
+
+  it("omits the field entirely when the transport named no model", async () => {
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["ok"] }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).not.toHaveProperty("model");
+    expect(done).not.toHaveProperty("provider");
+  });
+});
+
+describe("a turn whose model did no reasoning", () => {
+  it("ends with no reasoning field rather than an empty disclosure", async () => {
+    // Measured on the box: claude-fable-5 answered with real reasoning empty
+    // while the agent spinner still ticked, so the disclosure showed a kaomoji
+    // and nothing else. An absent field is what closes the disclosure.
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["one"], reasoning: "" }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).not.toHaveProperty("reasoning");
+  });
+
+  it("drops a status frame that reached reasoning by any other route", async () => {
+    // The transport drops `thinking.delta` at the source, so this stands for
+    // the paths with no channel to separate: an older record, or the CLI
+    // printing its spinner to stdout.
+    readTurnMock.mockResolvedValue({
+      text: "one",
+      // A face from the agent's own vocabulary (agent/display.py KAWAII_THINKING).
+      reasoning: "⊙_⊙ cogitating...",
+    });
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["one"] }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).not.toHaveProperty("reasoning");
+  });
+
+  it("keeps real reasoning untouched", async () => {
+    readTurnMock.mockResolvedValue({ text: "one", reasoning: "The user asked for one word." });
+    openTurnMock.mockResolvedValue(fakeTurn({ deltas: ["one"] }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [, done] = events[events.length - 1];
+    expect(done).toMatchObject({ reasoning: "The user asked for one word." });
+  });
+});
+
+describe("showing the work while the turn is still doing it", () => {
+  it("sends the tool step as its own event, before the turn is done", async () => {
+    // The blank-bubble bug, measured: a `terminal` call on the live box ran
+    // 240.3 seconds, emitting `tool.start` at t+3.7s and `tool.complete` at
+    // t+244.0s with nothing in between. For four minutes the customer had a
+    // reply that had not started and no reason given. These frames are that
+    // reason, and they have to reach the client while the turn is still
+    // running — a `done` frame that listed the same steps afterwards would be
+    // a receipt, not progress.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        activities: [
+          { kind: "tool", phase: "start", id: "call_7", name: "terminal", detail: "uname -r" },
+          { kind: "tool", phase: "result", id: "call_7", name: "terminal", detail: "5.15.185-tegra", status: "ok" },
+        ],
+        deltas: ["The kernel is 5.15.185-tegra."],
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "kernel?" })));
+    expect(events.map(([name]) => name)).toEqual(["tool", "tool", "delta", "done"]);
+    expect(events[0][1]).toMatchObject({ kind: "tool", phase: "start", id: "call_7", name: "terminal" });
+    // The same id on both, so a surface updates the pill it already drew.
+    expect(events[1][1]).toMatchObject({ kind: "tool", phase: "result", id: "call_7", name: "terminal" });
+    expect(events.findIndex(([name]) => name === "tool")).toBeLessThan(
+      events.findIndex(([name]) => name === "done"),
+    );
+  });
+
+  it("keeps the delta channel to answer text and nothing else", async () => {
+    // The delta channel paints the bubble. A status line or a tool name that
+    // leaked onto it would be typed out as though the agent had said it —
+    // which is how `(⊙_⊙) musing...` reached a customer once already.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        activities: [
+          { kind: "status", text: "(⌐■_■) computing..." },
+          { kind: "tool", phase: "start", id: "call_7", name: "web_search", detail: "clawbox docs" },
+        ],
+        deltas: ["Here ", "they are."],
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "find the docs" })));
+    const deltas = events.filter(([name]) => name === "delta");
+    expect(deltas).toHaveLength(2);
+    for (const [, payload] of deltas) {
+      expect(Object.keys(payload)).toEqual(["text"]);
+      expect(JSON.stringify(payload)).not.toContain("computing");
+      expect(JSON.stringify(payload)).not.toContain("web_search");
+    }
+    // And the spinner still reaches the client — on its own channel.
+    expect(events.some(([name, payload]) => name === "status" && payload.text === "(⌐■_■) computing...")).toBe(true);
+  });
+
+  it("sends a question the agent stopped to ask on its OWN event, never as a status", async () => {
+    // The forwarding used to be "tool, or else status", and a clarify took the
+    // `else`: the customer's question went out as `event: status` with
+    // `text: undefined` — a blank spinner caption where a form should have
+    // been, while the agent sat parked on the answer for its full hour.
+    openTurnMock.mockResolvedValue(
+      fakeTurn({
+        activities: [
+          {
+            kind: "clarify",
+            requestId: "9f2a1c04",
+            questions: [
+              { qid: "q1", question: "Which branch?", choices: ["beta", "main"], multiSelect: false },
+              { qid: "q2", question: "Which tests?", choices: ["unit", "routes"], multiSelect: true },
+            ],
+            answered: { q1: "beta" },
+          },
+          { kind: "clarifyExpire", requestId: "9f2a1c04" },
+        ],
+        deltas: ["Going with beta."],
+      }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "ship it" })));
+    expect(events.map(([name]) => name)).toEqual(["clarify", "clarifyExpire", "delta", "done"]);
+    expect(events.some(([name]) => name === "status")).toBe(false);
+    // The request id is the whole of the answer's address — `clarify.respond`
+    // takes no session — so a client that never received it could not answer.
+    expect(events[0][1]).toMatchObject({
+      requestId: "9f2a1c04",
+      questions: [
+        { qid: "q1", question: "Which branch?", choices: ["beta", "main"], multiSelect: false },
+        { qid: "q2", question: "Which tests?", choices: ["unit", "routes"], multiSelect: true },
+      ],
+      // A half-finished batch comes back with what is already locked in, so a
+      // reconnecting surface restores the form instead of re-asking.
+      answered: { q1: "beta" },
+    });
+    // And the take-it-down frame, so nobody is left typing into a prompt that
+    // can no longer be answered.
+    expect(events[1][1]).toEqual({ requestId: "9f2a1c04" });
+  });
+});
+
+describe("when the stream goes quiet on a turn that already finished", () => {
+  /**
+   * The customer's own transcript, timestamped: the question was asked at
+   * 20:10:44, the agent ran two tools and wrote its 582-character answer to
+   * `state.db` at 20:11:12, and the `message.complete` frame never reached this
+   * socket. The route waited out the idle window and wrote "Error: dashboard
+   * stream went quiet" into their transcript at 20:14:13 — a finished answer
+   * discarded and replaced with a failure, three minutes after it was ready.
+   */
+  it("reads the answer out of the record rather than writing an error over it", async () => {
+    readTurnMock.mockResolvedValue({
+      text: "The kernel is 5.15.185-tegra, and the box has 7.4 GB of RAM.",
+      toolCalls: [{ name: "terminal", detail: "uname -r", status: "ok" }],
+    });
+    openTurnMock.mockResolvedValue(
+      fakeTurn({ fail: new DashboardStreamQuietError(41, "tool.complete") }).handle,
+    );
+    const events = await readEvents(await POST(post({ message: "kernel and RAM?" })));
+    const [name, payload] = events[events.length - 1];
+    expect(name).toBe("done");
+    expect(payload).toMatchObject({ text: "The kernel is 5.15.185-tegra, and the box has 7.4 GB of RAM." });
+    expect(events.some(([event]) => event === "error")).toBe(false);
+    // Nothing may say the turn failed: the transcript is what a refresh shows,
+    // and an "Error:" row beside a perfectly good answer is the artefact the
+    // customer reported.
+    const rows = appendMock.mock.calls.map(([record]) => record as Record<string, unknown>);
+    expect(rows.some((row) => row.variant === "error")).toBe(false);
+    expect(rows.some((row) => typeof row.text === "string" && row.text.startsWith("Error:"))).toBe(false);
+    expect(rows.some((row) => row.role === "assistant")).toBe(true);
+  });
+
+  it("still reports the failure when the record has no answer either", async () => {
+    // The other side of the same branch, and the reason the recovery is safe:
+    // a turn that really did die leaves no assistant row after the question, so
+    // `readHermesTurn` returns null and the customer is told. Losing this would
+    // turn every dead turn into a silent one.
+    readTurnMock.mockResolvedValue(null);
+    openTurnMock.mockResolvedValue(fakeTurn({ fail: new DashboardStreamQuietError(2, "message.start") }).handle);
+    const events = await readEvents(await POST(post({ message: "Hey" })));
+    const [name, payload] = events[events.length - 1];
+    expect(name).toBe("error");
+    expect(payload).toEqual({ error: "dashboard stream went quiet" });
+    const rows = appendMock.mock.calls.map(([record]) => record as Record<string, unknown>);
+    expect(rows.some((row) => row.variant === "error")).toBe(true);
   });
 });

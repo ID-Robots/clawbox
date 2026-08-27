@@ -12,7 +12,8 @@ import { MASCOT_KEYFRAMES } from '@/lib/mascot-styles'
 import { fetchPetStatus, PET_CHANGED_EVENT, type PetStatus } from '@/lib/pet-client'
 import { PET_NEUTRAL_PACK, petSafePhrasesSync } from '@/lib/mascot-pet-voice'
 import PetSprite from '@/components/PetSprite'
-import { petLayout, widestFreeSpan, PET_BODY_PX, type PetLayout, type Span } from '@/lib/pet-layout'
+import EggMascot from '@/components/EggMascot'
+import { petLayout, widestFreeSpan, PET_BODY_PX, MASCOT_SHELF_Z_INDEX, type PetLayout, type Span } from '@/lib/pet-layout'
 
 // ── ClawBox Mascot — lazy, sarcastic, scandalous ──
 //
@@ -81,15 +82,12 @@ const BUBBLE_EDGE_MARGIN_PX = 8
 /**
  * Where the mascot paints.
  *
- * The crab sits above the shelf (10000) and always has — it is ClawBox's own
- * decoration and OpenClaw's rendering does not move. A pet lives BELOW the
- * window layer: windows start at z 100 (page.tsx `useState(100)`), and a pet
- * walking the shelf's top edge is exactly where a window dragged low ends up,
- * so at 10001 it painted over window content — over the Settings sidebar and
- * over its own dock. 50 keeps it above the desktop surface (z 1) and its icons
- * and below every window.
+ * The pet's layer (`MASCOT_SHELF_Z_INDEX`, shared with the fresh-box egg) is
+ * defined in `pet-layout.ts` next to `PET_BODY_PX`. The crab keeps its own:
+ * it sits above the shelf (10000) and always has — it is ClawBox's own
+ * decoration and OpenClaw's rendering does not move.
  */
-const PET_Z_INDEX = 50
+const PET_Z_INDEX = MASCOT_SHELF_Z_INDEX
 const CRAB_Z_INDEX = 10001
 
 /**
@@ -221,10 +219,12 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   // decoration that idles for two seconds before its first move anyway.
   //
   // A fresh Hermes box has no pet installed (upstream installs none, and the
-  // first one is a ~2.2 MB download), so `supported && !active` means "no
-  // mascot at all until you pick one in Settings → Appearance". That is the
-  // deliberate answer to "the crab is OpenClaw-only": no crab, no empty
-  // silhouette, and a picker one click away.
+  // first one is a ~2.2 MB download), so `supported && !active` wears the
+  // fresh-box egg (`EggMascot`) instead — a placeholder that sits on the shelf
+  // and hatches a random curated pet when clicked (the picker still changes it). Still no crab: that is
+  // ClawBox's own brand, not a stand-in on someone else's harness. The body
+  // choice itself is the guard ladder just above the render (search
+  // `EggMascot`).
   const [petStatus, setPetStatus] = useState<PetStatus | null>(null)
   const petStatusRef = useRef<PetStatus | null>(null)
   petStatusRef.current = petStatus
@@ -513,6 +513,9 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const [facing, setFacing] = useState<'left' | 'right'>('right')
   const [state, setState] = useState<MascotState>('idle')
   const [frenzy, setFrenzy] = useState(false)
+  // Read by `doAction`, which is a stable callback and would otherwise close
+  // over a stale `frenzy`. See the bail-out there.
+  const frenzyRef = useRef(false)
   const [moneyParticles, setMoneyParticles] = useState<{id: number; x: number; delay: number; duration: number; emoji: string}[]>([])
   const [damageFloaters, setDamageFloaters] = useState<{id: number; dmg: number; x: number}[]>([])
   const stateTimeout = useRef<ReturnType<typeof setTimeout>>(null)
@@ -1176,6 +1179,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   const doAction = useCallback(() => {
     if (frozenRef.current) return // Don't start new actions while frozen
     if (isSleepingRef.current) return // No random actions while sleeping
+    // A frenzy owns the crab for its whole 60 s — its own rAF run, its quote
+    // cycle, its jumps. `handleNewOrder` cancels the pending `stateTimeout`,
+    // but not the mount's own first-action timer, so the ambient loop used to
+    // wake up mid-celebration: it cleared the frenzy's walk rAF (the crab
+    // stopped dead and strolled off) and dropped an idle/sleep line — "💤" —
+    // into the bubble between two frenzy quotes. Skipping without rescheduling
+    // is safe: the 60 s end-timer calls `doAction` again, and so does an
+    // unfreeze.
+    if (frenzyRef.current) return
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current) }
 
     // The lane comes from live geometry — the bar, and the desktop icons that
@@ -1377,6 +1389,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
 
       // FRENZY MODE — 60 seconds of excited running + quotes + money
       setFrenzy(true)
+      frenzyRef.current = true
       setState('frenzy')
       setCrabOnBox(false)
       onBoxRef.current = false
@@ -1545,6 +1558,7 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
     frenzyIntervalsRef.current = []
     if (walkInterval.current) { cancelAnimationFrame(walkInterval.current as unknown as number); clearInterval(walkInterval.current); walkInterval.current = null }
     setFrenzy(false)
+    frenzyRef.current = false
     setMoneyParticles([])
     setJumpY(0)
   }, [])
@@ -1625,8 +1639,15 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
   if (hidden) return null
   // Waiting on /setup-api/pets — see the petStatus comment above.
   if (petStatus === null) return null
-  // Hermes edition with nothing picked yet: no crab, no placeholder.
-  if (petStatus.supported && !pet) return null
+  // Hermes edition with nothing picked yet: no crab — that is ClawBox's own
+  // brand and is not worn on someone else's harness — but an egg, so a fresh
+  // box does not read as a broken one and the picker is one click away.
+  //
+  // This is the ONLY way `EggMascot` is reached, which is what keeps it off
+  // OpenClaw: `supported` is true only when the server confirmed a Hermes
+  // harness, and every fail-open path in `pet-client.ts` answers
+  // `supported: false` — an unreachable pets route keeps the crab.
+  if (petStatus.supported && !pet) return <EggMascot />
 
   /** The body box this mascot occupies. Every offset below is relative to it. */
   const bodyPx = pet ? PET_BODY_PX : CRAB_BODY_PX

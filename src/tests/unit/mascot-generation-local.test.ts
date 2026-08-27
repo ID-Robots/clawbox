@@ -39,8 +39,17 @@ vi.mock("@/lib/llamacpp", () => ({
 // Devices configured with a non-default model alias exist; the request must
 // name the SAME one `ensureLocalAiReady` starts the server with.
 let configuredAlias: string | null = null;
+// Whether the configured model's GGUF is on disk. A background refresh must
+// only ever WAKE a model — `provisioningThrows` simulates not even being able
+// to ask, which has to count as "not on disk" for the same reason.
+let modelOnDisk = true;
+let provisioningThrows = false;
 vi.mock("@/lib/llamacpp-server", () => ({
   resolveConfiguredLlamaCppAlias: vi.fn(async () => configuredAlias),
+  getLlamaCppProvisioningStatus: vi.fn(async (alias: string) => {
+    if (provisioningThrows) throw new Error("stat failed");
+    return { alias, modelAvailable: modelOnDisk, binaryAvailable: true, installed: modelOnDisk };
+  }),
 }));
 
 import {
@@ -81,7 +90,12 @@ beforeEach(() => {
   runtime.begin = [];
   runtime.end = [];
   runtime.ensureThrows = null;
-  configuredAlias = null;
+  // The common case for these tests: a box whose owner enabled Local AI and
+  // whose weights are installed. The gate that refuses anything less has its
+  // own describe block below.
+  configuredAlias = "gemma4-e2b-it-q4_0";
+  modelOnDisk = true;
+  provisioningThrows = false;
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -126,8 +140,47 @@ describe("model alias", () => {
     expect(body.model).toBe("gemma4-e4b-it-q4_0");
   });
 
-  it("falls back to the default when nothing is configured", async () => {
+  it("does not run at all when nothing is configured", async () => {
+    // The old behaviour substituted the DEFAULT alias here — which is exactly
+    // how a desktop page load on a box that never enabled Local AI could hand
+    // the launcher a model to provision (~3 GB, unattended). Nothing
+    // configured now means nothing attempted.
     configuredAlias = null;
+    fetchMock.mockResolvedValue(completion(JSON.stringify(GOOD_BATCH)));
+
+    const outcome = await generatePhrasesLocally({ prompt: "p", locale: "de" });
+
+    expect(outcome).toEqual({ status: "failed", failure: "unavailable" });
+    expect(runtime.ensureCalls).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never wakes the launcher for a configured model whose weights are gone", async () => {
+    // Configured-but-not-on-disk is the interrupted-provisioning box. The
+    // launcher would DOWNLOAD the GGUF on start, so a background refresh must
+    // refuse; consent to (re)download lives in the enable path.
+    modelOnDisk = false;
+
+    const outcome = await generatePhrasesLocally({ prompt: "p", locale: "de" });
+
+    expect(outcome).toEqual({ status: "failed", failure: "unavailable" });
+    expect(runtime.ensureCalls).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("treats an unanswerable provisioning check as not-on-disk", async () => {
+    // "Cannot verify the weights exist" must never launch a process that
+    // downloads them.
+    provisioningThrows = true;
+
+    const outcome = await generatePhrasesLocally({ prompt: "p", locale: "de" });
+
+    expect(outcome).toEqual({ status: "failed", failure: "unavailable" });
+    expect(runtime.ensureCalls).toEqual([]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("wakes and asks for the configured model when it is installed", async () => {
     fetchMock.mockResolvedValue(completion(JSON.stringify(GOOD_BATCH)));
 
     await generatePhrasesLocally({ prompt: "p", locale: "de" });

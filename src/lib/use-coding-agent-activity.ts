@@ -1,0 +1,166 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+/**
+ * The coding runs this conversation has seen, and what became of them.
+ *
+ * WHY THE TOOL PILLS ARE NOT ENOUGH
+ *
+ * `coding_agent_run` returns as soon as the device has SPAWNED the run — the
+ * route answers 202 in milliseconds, by design, because an MCP call must not
+ * hold a connection open for twenty minutes. So the chat's tool pill goes
+ * "🔧 coding agent run" → "✓" within a second, while the actual work carries
+ * on. The pill is telling the truth about the tool call and the wrong thing
+ * about the box.
+ *
+ * WHY A BADGE STAYS AFTER THE RUN ENDS
+ *
+ * The first version of this dropped the badge the moment the run finished, and
+ * on a real box that made it nearly invisible: measured runs here take 9-15
+ * seconds, so it appeared and vanished while the owner was still reading the
+ * agent's previous message. A delegated run is a thing that HAPPENED in this
+ * conversation — the same class of fact as the tool-summary chips, which stay
+ * attached to their message — so the badge stays too, and changes tone to
+ * report the outcome.
+ *
+ * WHAT IT ADOPTS, AND WHAT IT LEAVES ALONE
+ *
+ * Only runs that belong to THIS conversation: one that is in flight right now,
+ * or one that started around the time the chat opened (see RECENT_MS).
+ * Yesterday's finished runs are history and belong in the Coding Agent app,
+ * not in today's transcript.
+ *
+ * WHY IT COSTS ALMOST NOTHING
+ *
+ * No steady-state timer. It probes once when the chat opens, again whenever
+ * `nudge()` is called (which the chat does the moment a coding-agent tool call
+ * goes past), and polls only while a run is actually in flight. An idle box is
+ * asked once per chat open and then left alone.
+ */
+
+export type CodingRunStatus = "running" | "completed" | "failed" | "stopped";
+
+export interface CodingAgentActivity {
+  id: string;
+  projectId: string | null;
+  task: string;
+  startedAt: number;
+  completedAt: number | null;
+  status: CodingRunStatus;
+  source: "agent" | "owner";
+}
+
+interface RunPayload {
+  id: string;
+  projectId: string | null;
+  task: string;
+  status: string;
+  startedAt: number;
+  completedAt: number | null;
+  source: string;
+}
+
+/** How often to re-ask while a run is actually in flight. */
+const POLL_MS = 5_000;
+/** Enough to catch a run even if a couple of others finished meanwhile. */
+const LOOK_BACK = 5;
+/** Badges kept in one conversation, oldest dropped first. */
+const MAX_BADGES = 6;
+/**
+ * How far back a finished run still counts as "this conversation".
+ *
+ * Not zero: a run that ended in the seconds before the chat opened is the one
+ * the owner is about to ask about, and hiding its badge would be the same
+ * disappearing act this whole file exists to fix. Not unbounded either —
+ * yesterday's runs are history and belong in the Coding Agent app.
+ */
+const RECENT_MS = 120_000;
+
+const STATUSES: CodingRunStatus[] = ["running", "completed", "failed", "stopped"];
+
+function toActivity(r: RunPayload): CodingAgentActivity {
+  return {
+    id: r.id,
+    projectId: r.projectId,
+    task: r.task,
+    startedAt: r.startedAt,
+    completedAt: typeof r.completedAt === "number" ? r.completedAt : null,
+    status: (STATUSES as string[]).includes(r.status) ? r.status as CodingRunStatus : "completed",
+    source: r.source === "owner" ? "owner" : "agent",
+  };
+}
+
+/** True when the tool the chat just saw is one of the coding-agent family. */
+export function isCodingAgentTool(name: string): boolean {
+  return /coding_agent/i.test(name);
+}
+
+export function useCodingAgentActivity(active: boolean): {
+  runs: CodingAgentActivity[];
+  nudge: () => void;
+} {
+  const [runs, setRuns] = useState<CodingAgentActivity[]>([]);
+  // Bumped by nudge(); the effect below re-runs and probes immediately.
+  const [probe, setProbe] = useState(0);
+  // When this conversation started caring. A run older than this belongs to a
+  // previous conversation and is not adopted.
+  const openedAtRef = useRef(0);
+
+  const nudge = useCallback(() => setProbe((n) => n + 1), []);
+
+  useEffect(() => {
+    if (!active) {
+      setRuns([]);
+      openedAtRef.current = 0;
+      return;
+    }
+    if (openedAtRef.current === 0) openedAtRef.current = Date.now();
+
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const read = async () => {
+      try {
+        const res = await fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}`, { cache: "no-store" });
+        if (!res.ok) throw new Error("runs");
+        const data = await res.json() as { runs?: RunPayload[] };
+        if (!alive) return;
+        const fetched = data.runs ?? [];
+
+        setRuns((prev) => {
+          const byId = new Map(prev.map((r) => [r.id, r]));
+          for (const raw of fetched) {
+            const run = toActivity(raw);
+            // Adopt what belongs to this conversation: in flight now, or
+            // started around the time the chat opened (a 9-second run can
+            // begin and end between two polls, and it still happened here).
+            const mine = byId.has(run.id)
+              || run.status === "running"
+              || run.startedAt >= openedAtRef.current - RECENT_MS;
+            if (mine) byId.set(run.id, run);
+          }
+          const next = [...byId.values()].sort((a, b) => a.startedAt - b.startedAt);
+          return next.slice(-MAX_BADGES);
+        });
+
+        // Keep asking only while there is something to ask about.
+        if (fetched.some((r) => r.status === "running")) {
+          timer = setTimeout(() => { void read(); }, POLL_MS);
+        }
+      } catch {
+        // The device is the source of truth and it did not answer. Leave the
+        // badges already on screen alone rather than rewriting history from a
+        // failed request — and do not schedule another.
+      }
+    };
+
+    void read();
+    return () => {
+      alive = false;
+      if (timer) clearTimeout(timer);
+    };
+  }, [active, probe]);
+
+  return { runs, nudge };
+}

@@ -10,7 +10,7 @@ import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
-import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT } from "@/lib/ui-events";
+import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
@@ -19,10 +19,11 @@ import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
+import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
-import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
+import { cachedActiveHarness, cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
 import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
@@ -300,6 +301,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const navLabel = useCallback((item: { labelKey: string }) => t(item.labelKey), [t]);
   const notifyChatModelStateChanged = useCallback(() => {
     window.dispatchEvent(new Event(CHAT_MODEL_STATE_EVENT));
+    // And in the edition-neutral vocabulary, so that "every path that changes
+    // the providers emits `clawbox:providers-changed`" is literally true and a
+    // listener written against that one name alone is never left deaf.
+    notifyProvidersChanged();
   }, []);
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
@@ -1207,7 +1212,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     // provider the ACTIVE harness is really set to, which is what separates
     // "the on-device model is installed" from "it is what answers".
     if (section !== "ai" && section !== "localAi" && !isMobile) return;
-    fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    const load = () => {
+      fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
+    };
+    load();
+    // And again whenever the providers change. This card names the ACTIVE
+    // provider and its model, so a default chosen from the strip directly above
+    // it made the two disagree on screen — the strip showing the new default
+    // while the card underneath still named the old one — until the section was
+    // left and re-entered. Seen on a live box, in the same window.
+    return onProvidersChanged(load);
   }, [section, isMobile]);
   // Which agent consumes the local model. Named the harness outright, and said
   // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
@@ -1221,6 +1235,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     });
     return () => { alive = false; };
   }, []);
+
+  // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
+  // tracks its own copy — seeded from the immutable cache, then confirmed once.
+  // It gates exactly one thing here: whether the AI section's own Status card is
+  // drawn. On the Hermes edition that card is the hero's twin (same provider,
+  // same model, same "connected"), so it is suppressed there and the hero is the
+  // single source. On openclaw and dual there is no hero — AIModelsStep renders
+  // the OpenClaw picker — so the card stays and is unchanged. Keyed on edition,
+  // not the active harness: a dual box's active harness can be hermes while its
+  // AI panel is still the OpenClaw picker, which needs the card.
+  const [edition, setEdition] = useState<string | null>(() => cachedEdition());
+  useEffect(() => {
+    if (edition !== null) return;
+    let alive = true;
+    void fetchHarness().then((d) => {
+      if (alive) setEdition(d?.edition || "openclaw");
+    });
+    return () => { alive = false; };
+  }, [edition]);
 
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
   const [localAiDisabling, setLocalAiDisabling] = useState(false);
@@ -2384,25 +2417,84 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── Factory Reset ── */
   const [resetConfirm, setResetConfirm] = useState(false);
   const [resetting, setResetting] = useState(false);
-
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetTyped, setResetTyped] = useState("");
+  const [resetError, setResetError] = useState<string | null>(null);
+  const [resetSubmitting, setResetSubmitting] = useState(false);
 
   const [resetPhase, setResetPhase] = useState<"waiting" | "reconnecting" | "done" | null>(null);
   const [resetDots, setResetDots] = useState(0);
   const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const resetSetup = async () => {
-    setResetting(true);
+  const factoryResetCancelRef = useRef<HTMLButtonElement | null>(null);
+
+  const closeResetConfirm = () => {
     setResetConfirm(false);
+    setResetPassword("");
+    setResetTyped("");
+    setResetError(null);
+  };
+
+  // Same treatment the password-change dialog already gets: land on Cancel,
+  // leave on Escape, hand focus back where it came from. It matters more here —
+  // this dialog is the one standing in front of the wipe.
+  useEffect(() => {
+    if (!resetConfirm || resetting) return;
+    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
+    factoryResetCancelRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || resetSubmitting) return;
+      setResetConfirm(false);
+      setResetPassword("");
+      setResetTyped("");
+      setResetError(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus?.();
+    };
+  }, [resetConfirm, resetting, resetSubmitting]);
+
+  const resetSetup = async () => {
+    if (resetSubmitting) return;
+    setResetSubmitting(true);
+    setResetError(null);
+
+    // The wipe only starts once the box has accepted the password and the typed
+    // word. Until then this stays a plain dialog: the old flow fired the request
+    // and went straight to the "erasing…" overlay without ever reading the
+    // response, so a refusal looked exactly like a reset in progress.
+    let accepted = false;
+    try {
+      const res = await fetch("/setup-api/setup/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: resetPassword, confirm: resetTyped }),
+      });
+      accepted = res.ok;
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        setResetError(detail.error || t("settings.factoryResetRefused"));
+      }
+    } catch {
+      // The box wipes and reboots mid-request, so a dropped connection is the
+      // normal success path, not a failure.
+      accepted = true;
+    } finally {
+      setResetSubmitting(false);
+    }
+
+    if (!accepted) return;
+
+    setResetting(true);
+    closeResetConfirm();
     setResetPhase("waiting");
     setResetDots(0);
 
     // Animate dots
     resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
-
-    try {
-      await fetch("/setup-api/setup/reset", { method: "POST" });
-    } catch { /* device reboots, connection drops */ }
 
     // Wait for device to go down, then poll for reconnect
     setTimeout(() => {
@@ -2538,6 +2630,70 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         document.body
       )
     : null;
+
+  // One dialog, rendered from both the mobile and the desktop tree below. It
+  // used to be copy-pasted into each, which is how the two could have drifted.
+  const factoryResetDialog = resetConfirm && !resetting && (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="factory-reset-title"
+        className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]"
+      >
+        <h3 id="factory-reset-title" className="text-lg font-bold text-[var(--text-primary)] mb-2">
+          {t("settings.factoryResetTitle")}
+        </h3>
+        <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
+
+        <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-password">
+          {t("settings.security.currentPassword")}
+        </label>
+        <input
+          id="factory-reset-password"
+          type="password"
+          autoComplete="current-password"
+          value={resetPassword}
+          onChange={e => { setResetPassword(e.target.value); setResetError(null); }}
+          className="w-full mb-4 px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+        />
+
+        <label className="block text-xs font-semibold text-[var(--text-secondary)] mb-1.5" htmlFor="factory-reset-confirm">
+          {t("settings.factoryResetTypeToConfirm", { word: FACTORY_RESET_CONFIRMATION })}
+        </label>
+        <input
+          id="factory-reset-confirm"
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          value={resetTyped}
+          onChange={e => { setResetTyped(e.target.value); setResetError(null); }}
+          placeholder={FACTORY_RESET_CONFIRMATION}
+          className="w-full px-3 py-2.5 bg-white/5 border border-[var(--border-subtle)] rounded-xl text-base text-[var(--text-primary)] outline-none focus:border-[#fe6e00]"
+        />
+
+        {resetError && <p className="mt-3 text-xs text-red-400" role="alert">{resetError}</p>}
+
+        <div className="flex gap-3 mt-5">
+          <button
+            ref={factoryResetCancelRef}
+            onClick={closeResetConfirm}
+            disabled={resetSubmitting}
+            className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-40"
+          >
+            {t("cancel")}
+          </button>
+          <button
+            onClick={resetSetup}
+            disabled={resetSubmitting || !resetPassword || !isFactoryResetConfirmed(resetTyped)}
+            className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors disabled:opacity-40 disabled:hover:bg-red-500 disabled:cursor-not-allowed"
+          >
+            {resetSubmitting ? `${t("settings.resetting")}…` : t("settings.reset")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 
   const renderContent = () => (
     <>
@@ -3193,7 +3349,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Provider status card */}
+            {/* Provider status card — suppressed on the Hermes edition, where the
+                AI Providers hero below already names the active provider, its
+                model and its connection. Kept verbatim on openclaw/dual, which
+                have no hero. */}
+            {edition !== "hermes" && (
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
                 <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
@@ -3278,6 +3438,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 </div>
               )}
             </div>
+            )}
 
             <I18nProvider><AIModelsStep
               embedded
@@ -3377,7 +3538,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
-            {localAiStatus?.configured && (
+            {/* Local AI itself works on Hermes (see HERMES_LOCAL_PROVIDER_ID
+                above) — Local-ONLY mode does not. It is built from OpenClaw CLI
+                calls against a fallback chain Hermes has no equivalent of, so
+                this is the one control in the section that cannot work here.
+                Its route now refuses with `supported:false`; hiding the card
+                keeps the owner from discovering that through a red banner
+                quoting our internals at them. */}
+            {localAiStatus?.configured && edition !== "hermes" && (
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0 flex-1">
@@ -3533,6 +3701,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {t("settings.openInTelegram", { name: `@${tgBotInfo.username}` })}
                     </a>
                   )}
+                  {/* Progress streaming is the OpenClaw gateway's Telegram
+                      channel setting. Hermes runs Telegram from ~/.hermes/.env
+                      and has no streaming mode at all, so this switch rendered
+                      itself ON (a missing config file reads as "not off") over
+                      a route that answered {restarted:true} for a gateway that
+                      does not exist. Telegram ITSELF works on Hermes — only
+                      this sub-setting does not, so only this row goes. */}
+                  {edition !== "hermes" && (
                   <div className="flex items-center justify-between gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 mb-4">
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.telegramProgress")}</div>
@@ -3558,6 +3734,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       </button>
                     </div>
                   </div>
+                  )}
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"
@@ -5549,22 +5726,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {/* Factory Reset confirmation modal */}
-      {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                {t("cancel")}
-              </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                {t("settings.reset")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {factoryResetDialog}
 
       {/* Hotspot enable confirmation — single-radio collision warning */}
       {hotspotConfirmEnable && (
@@ -5741,22 +5903,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {/* Factory Reset confirmation modal */}
-      {resetConfirm && !resetting && (
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.factoryResetTitle")}</h3>
-            <p className="text-sm text-[var(--text-muted)] mb-5">{t("settings.factoryResetDesc")}</p>
-            <div className="flex gap-3">
-              <button onClick={() => setResetConfirm(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors">
-                {t("cancel")}
-              </button>
-              <button onClick={resetSetup} className="flex-1 py-2.5 bg-red-500 text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-red-600 transition-colors">
-                {t("settings.reset")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {factoryResetDialog}
 
       {/* Hostname confirmation modal */}
       {hostnameConfirm && (

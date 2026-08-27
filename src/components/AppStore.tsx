@@ -152,7 +152,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   const [search, setSearch] = useState("");
   const [installProgress, setInstallProgress] = useState<Record<string, InstallProgress>>({});
   const [category, setCategory] = useState<string>("All");
-  const [sortBy, setSortBy] = useState<SortBy>("popular");
+  // Top rated on open: an unranked list of 9,000 skills is a list nobody can
+  // act on, and rating is the signal a first-time visitor actually wants.
+  const [sortBy, setSortBy] = useState<SortBy>("rating");
   const [apps, setApps] = useState<StoreApp[]>([]);
   const [categories, setCategories] = useState<ApiCategory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -503,10 +505,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // and otherwise fall back to the list's bucketed "2800+" string. One value
     // feeds both the header and the Downloads stat so they can't disagree.
     const installDisplay = detail?.installsAllTime && detail.installsAllTime > 0 ? detail.installsAllTime.toLocaleString() : selectedApp.installs;
-    // The API's own `clawhubUrl` omits the publisher segment, so it points at
-    // a page ClawHub does not serve; build the canonical one and keep the API's
-    // links only as a fallback for listings with no publisher.
-    const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || detail?.clawhubUrl || selectedApp.url;
+    // Built from publisher + slug rather than taken from the API: its own
+    // `clawhubUrl` omits the publisher segment and lands on a page ClawHub does
+    // not serve, so it is not worth falling back to. See src/lib/clawhub-url.ts.
+    const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || selectedApp.url;
+
     return (
       <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
         {confirmModal}
@@ -610,10 +613,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             </div>
           )}
 
-          {/* Store link — prefer the canonical ClawHub page (full write-up).
-              Built from publisher + slug, not from the API's `clawhubUrl`:
-              that field omits the publisher segment and lands on a page that
-              does not exist. See src/lib/clawhub-url.ts. */}
+          {/* Store link — the canonical ClawHub page (full write-up). */}
           {hubUrl && (
             <a href={hubUrl} target="_blank" rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 text-xs transition-colors"
@@ -628,7 +628,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   }
 
   return (
-    <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
+    // @container on the root so the header can size itself to the WINDOW, not
+    // the viewport — this is a desktop window the owner can resize freely.
+    <div className="h-full flex flex-col bg-[#0f1219] text-white @container" data-testid="app-store">
       {confirmModal}
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-white/10">
@@ -642,40 +644,43 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           </div>
         </div>
 
-        <div className="relative mb-3">
-          <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/40" style={{ fontSize: 16 }}>search</span>
-          <input
-            type="text"
-            placeholder={t("store.searchApps")}
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full h-9 pl-9 pr-3 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/40 focus:outline-none"
-            style={{ ["--tw-ring-color" as string]: BRAND_ORANGE }}
-            onFocus={(e) => (e.currentTarget.style.borderColor = `${BRAND_ORANGE}80`)}
-            onBlur={(e) => (e.currentTarget.style.borderColor = "")}
-          />
-        </div>
-
-        <div className="flex items-center justify-end gap-2 mb-2">
-          <span className="text-xs text-white/40">{t("store.sort")}</span>
+        {/* Search and sort share one row: the sort had a whole line to itself
+            and a label the select already says. */}
+        <div className="flex items-center gap-2 mb-2">
+          <div className="relative flex-1 min-w-0">
+            <span className="material-symbols-rounded absolute left-3 top-1/2 -translate-y-1/2 text-white/40" style={{ fontSize: 16 }}>search</span>
+            <input
+              type="text"
+              placeholder={t("store.searchApps")}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full h-9 pl-9 pr-3 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-white/40 focus:outline-none"
+              style={{ ["--tw-ring-color" as string]: BRAND_ORANGE }}
+              onFocus={(e) => (e.currentTarget.style.borderColor = `${BRAND_ORANGE}80`)}
+              onBlur={(e) => (e.currentTarget.style.borderColor = "")}
+            />
+          </div>
           <select
             value={sortBy}
             onChange={(e) => setSortBy(e.target.value as SortBy)}
             aria-label={t("store.sort")}
-            className="h-7 px-2 bg-white/5 border border-white/10 rounded-md text-xs text-white/80 focus:outline-none cursor-pointer"
+            className="h-9 px-2 shrink-0 bg-white/5 border border-white/10 rounded-lg text-xs text-white/80 focus:outline-none cursor-pointer"
           >
-            <option value="popular" className="bg-[#1a1e2e]">{t("store.sortPopular")}</option>
             <option value="rating" className="bg-[#1a1e2e]">{t("store.sortRating")}</option>
+            <option value="popular" className="bg-[#1a1e2e]">{t("store.sortPopular")}</option>
             <option value="name" className="bg-[#1a1e2e]">{t("store.sortName")}</option>
           </select>
         </div>
 
-        <div className="flex flex-wrap gap-1.5 pb-1">
+        {/* Fourteen categories wrapped to three rows on a phone and pushed the
+            apps off the screen. Narrow: one row that scrolls sideways. Wide:
+            wrap as before, since there is room. */}
+        <div className="flex gap-1.5 pb-1 overflow-x-auto @2xl:flex-wrap @2xl:overflow-x-visible [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {["Installed", ...categoryTabs].map((cat) => (
             <button
               key={cat}
               onClick={() => handleCategoryClick(cat)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer ${
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer shrink-0 ${
                 activeCategoryLabel === cat
                   ? "text-white"
                   : "bg-white/5 text-white/60 hover:bg-white/10"

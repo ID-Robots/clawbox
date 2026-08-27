@@ -49,6 +49,19 @@ const MODEL_LIMIT = 40;
 // count.
 const PROVIDER_LIMIT = 12;
 
+/**
+ * "unknown" for anything the route did not actually report.
+ *
+ * `??` was not enough: /setup-api/hermes/models answers with EMPTY STRINGS, not
+ * null, on a device where no provider or model has been chosen yet, so the
+ * fallback never fired and the tool returned `{"provider":"","model":""}`. A
+ * small model reading two blanks is far likelier to fill them in with a
+ * plausible-sounding model name than one reading "unknown".
+ */
+function reported(value: unknown): string {
+  return typeof value === "string" && value.trim() ? value : "unknown";
+}
+
 const SET_RULES: ErrorRule[] = [
   {
     status: 409,
@@ -91,7 +104,43 @@ const SET_RULES: ErrorRule[] = [
   },
 ];
 
+/**
+ * What an unlinked box says when it is asked for a picture.
+ *
+ * Two jobs, and the second is the one that was missing. It names the reason and
+ * the fix, so the agent can say something true instead of nothing; and it
+ * closes the door the agent walked through when nothing was there — writing an
+ * SVG with the file tool and rasterising it from the shell produced a real
+ * 1024x1024 PNG that the chat still could not display, because a picture only
+ * renders when it comes from a path the chat can serve.
+ *
+ * Told to the AGENT, not shown to the customer, so it is deliberately in
+ * English and deliberately unlocalised: the agent writes the customer's own
+ * sentence, in the customer's own language, out of it.
+ */
+const IMAGE_GEN_UNAVAILABLE =
+  "Picture generation is not available on this ClawBox. It runs on ClawBox AI and this device is not connected to one. Tell the user that in their own language, and that they can connect it in Settings -> AI Providers. Do NOT try to make the picture some other way — not with the terminal, not by writing an SVG or HTML and converting it, not with a Python imaging library. A file made that way cannot be displayed in this chat, so the user would get a broken image instead of an answer.";
+
 export function registerAiTools(reg: Registrar, ctx: McpContext): void {
+  // Registered only where the box CANNOT draw. On a linked box the harness's
+  // own image tool is present and this would be a second, contradicting tool
+  // beside it; on an unlinked one there is no image tool at all, and this is
+  // the only thing standing between the customer and an improvised answer.
+  if (!ctx.canGenerateImages) {
+    reg.tool(
+      "image_generate",
+      "Generate a picture from a text description. Call this whenever the user asks for an image, a picture, a drawing or a logo. On this device it will tell you why it cannot run and what the user should do — say that, and do not attempt to make the picture by any other means.",
+      {},
+      // CORE, and not as an afterthought: `CLAWBOX_MCP_PROFILE=core` is the
+      // trimmed tool set a SMALL model gets, and a small model is the one most
+      // likely to answer "draw me a crab" by reaching for the shell. Dropping
+      // this tool from the profile would remove the guidance from exactly the
+      // boxes that need it most. It costs an empty schema and two sentences.
+      { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
+      async () => text(IMAGE_GEN_UNAVAILABLE),
+    );
+  }
+
   reg.tool(
     "ai_list_models",
     "List the AI providers configured on this device and the models each one serves, plus which provider and model are in use right now. Call this before ai_set_provider or ai_set_model so you use ids that exist here.",
@@ -146,8 +195,8 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
               asked_about: provider,
               in_use: "not reported for a filtered query — call ai_list_models with no arguments to see what this device is using",
             }
-          : { in_use: { provider: body.provider ?? "unknown", model: body.current ?? "unknown" } }),
-        thinking: body.reasoning ?? "unknown",
+          : { in_use: { provider: reported(body.provider), model: reported(body.current) } }),
+        thinking: reported(body.reasoning),
         models,
         models_truncated: (body.models ?? []).length > MODEL_LIMIT,
         catalogue_stale: body.stale === true,

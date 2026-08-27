@@ -19,6 +19,13 @@ next-env.d.ts
 # and is removed if any step fails, but a run killed mid-write must not leave
 # the device's working tree dirty forever.
 .update-branch.*
+# Orphan deploy marker from the pre-3.9 deploy method: nothing in this repo
+# writes or reads it, but boxes that were deployed by hand still carry one. Left
+# untracked it counted as a dirty working tree, so the About screen accused a
+# healthy box of "not running the code on its disk" and every build stamped
+# itself `dirty: true` (hwtest-round1, 2026-08-24). Ignored here so the artifact
+# cannot fake drift; the updater deletes any it finds.
+.deployed-sha
 claude-code-source-code/
 code-source-code/
 .omx/

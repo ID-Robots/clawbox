@@ -28,6 +28,24 @@ const nextConfig: NextConfig = {
   // Nothing imported sharp before, so nothing noticed. The pet thumbnail route
   // does, so name the .so explicitly. Both libc variants are listed because the
   // trace is resolved at build time and a musl image would need the other one.
+  // Never trace the runtime data directory into the standalone bundle.
+  //
+  // data/ holds the owner's live state — config, code projects, built webapps
+  // — and it CHANGES WHILE THE BUILD RUNS. On 2026-08-26 a build died with
+  // ENOENT on data/webapps/3d-shooter/index.html because the webapp was
+  // deleted between the trace and the copy, and the box was left with no
+  // standalone output at all: the site went down until the next build.
+  //
+  // Nothing needs it there. Every reader resolves data/ from CLAWBOX_ROOT as
+  // an absolute path at runtime, so a copy inside .next/standalone would be a
+  // stale duplicate even when the copy succeeded.
+  outputFileTracingExcludes: {
+    // No "./" prefix: Next matches these globs relative to the tracing root,
+    // and "./data/**" silently matched nothing — the build kept dying on
+    // data/webapps/<app>/index.html whenever a webapp was created or removed
+    // while it ran.
+    "*": ["data/**", "**/data/webapps/**", "**/data/code-projects/**"],
+  },
   outputFileTracingIncludes: {
     "/setup-api/pets/thumb": [
       "./node_modules/@img/sharp-libvips-linux*/lib/**",

@@ -2,11 +2,12 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
+import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import {
   dashboardUnreachable,
-  hermesGate,
   isValidProviderId,
   isValidSessionId,
+  ownerGate,
   readJsonBody,
   relayJson,
 } from "../shared";
@@ -24,7 +25,7 @@ const SUBMIT_KEYS = ["ok", "status", "message"] as const;
 const CODE_RE = /^[!-~]{4,2048}$/;
 
 export async function POST(request: Request) {
-  const gate = await hermesGate();
+  const gate = await ownerGate(request);
   if (gate) return gate;
 
   const body = await readJsonBody(request);
@@ -48,7 +49,16 @@ export async function POST(request: Request) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ session_id: body.sessionId, code }),
     });
-    return await relayJson(res, SUBMIT_KEYS);
+    // A completed PKCE exchange flips this provider's `authenticated` flag on
+    // the dashboard, so our cached catalogue is now wrong. Drop it — exactly as
+    // the API-key route does after `hermes auth add` — so the very next
+    // /setup-api/providers/status read (the wizard fires one on connect) sees
+    // the provider as connected instead of serving a stale "not connected" for
+    // up to FRESH_MS. This was the row-vs-card mismatch: the OAuth card flipped
+    // to Connected from local state while the row kept reading the stale cache.
+    return await relayJson(res, SUBMIT_KEYS, (data, ok) => {
+      if (ok && data.ok !== false) invalidateModelOptions();
+    });
   } catch {
     return dashboardUnreachable();
   }

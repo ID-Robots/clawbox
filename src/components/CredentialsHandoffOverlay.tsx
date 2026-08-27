@@ -22,6 +22,8 @@ interface CredentialsHandoffOverlayProps {
   hotspotSsid: string | null;
   /** Advance to the next step once the box is reachable again (same-origin only). */
   onContinue: () => void;
+  /** Hermes edition: the overlay waits in the agent's green, not coral. */
+  hermes?: boolean;
   /** Grace period before probing — the AP needs a moment to actually drop. */
   graceMs?: number;
 }
@@ -39,6 +41,7 @@ export default function CredentialsHandoffOverlay({
   sameOrigin,
   hotspotSsid,
   onContinue,
+  hermes = false,
   graceMs = 4000,
 }: CredentialsHandoffOverlayProps) {
   const { t } = useT();
@@ -82,9 +85,14 @@ export default function CredentialsHandoffOverlay({
 
   return (
     <ReconnectStage
+      hermes={hermes}
       steps={[t("credentials.handoffApplying"), rejoinLabel, t("settings.backOnline")]}
       phaseIndex={phaseIndex}
       completed={completed}
+      // Step 3 lives inside the wizard, so its handoff success marks use the
+      // wizard's DONE colour (--cyan-bright) rather than the generic emerald the
+      // shared overlay defaults to on the desktop.
+      doneTone="cyan"
       title={completed ? t("settings.backOnline") : t("credentials.handoffTitle")}
       description={completed ? t("ai.almostReady") : t("credentials.handoffDesc")}
       instruction={completed || !hotspotSsid ? undefined : rejoinLabel}

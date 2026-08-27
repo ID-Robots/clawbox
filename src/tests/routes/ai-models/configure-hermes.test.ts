@@ -80,6 +80,19 @@ vi.mock("@/lib/llamacpp", () => ({
 
 vi.mock("@/lib/local-ai-runtime", () => ({
   getLocalAiProxyBaseUrl: vi.fn((p: string) => `http://127.0.0.1/setup-api/local-ai/${p}`),
+  // The enable path brings the runtime up before anything is registered; here
+  // it must simply succeed, or every Ollama save would 503 on the mock.
+  activateLocalAiProvider: vi.fn(async () => {}),
+}));
+
+// The save-time probe (TASK-448). Mocked so no test opens a socket; each test
+// states what Ollama would have answered about the requested model. The floor
+// constant stays the REAL one — a hand-copied 64_000 would silently keep
+// testing the old number if the agent's floor ever moved.
+const probeMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/ollama-model-context", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ollama-model-context")>()),
+  probeOllamaModel: probeMock,
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({
@@ -144,6 +157,15 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     HermesCloudApplyError = cloudMod.HermesCloudApplyError as new (msg?: string) => Error;
     mockApplyCloudProviderKeyToHermes = vi.mocked(cloudMod.applyCloudProviderKeyToHermes) as unknown as ReturnType<typeof vi.fn>;
     mockApplyCloudProviderKeyToHermes.mockResolvedValue({ provider: "anthropic", model: "claude-sonnet-4-6", activated: true });
+
+    // A healthy default: the requested model exists and its window clears the
+    // 64K floor, so only the tests ABOUT the gate have to say otherwise.
+    probeMock.mockResolvedValue({ status: "ok", contextLength: 128_000 });
+
+    // mockReset strips every factory-time mockResolvedValue, so the harness —
+    // like openclawIsAbsent above — is re-established per test.
+    const harness = await import("@/lib/harness");
+    vi.mocked(harness.getActiveHarness).mockResolvedValue("hermes");
 
     ({ POST } = await import("@/app/setup-api/ai-models/configure/route"));
   });
@@ -224,6 +246,118 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expect(body.success).toBe(true);
     expect(mockApplyClawaiToHermes).toHaveBeenCalled();
     expectNoOpenclawSpawn();
+  });
+
+  it("refuses an Ollama model under the 64K floor before anything is written", async () => {
+    // qwen2.5:3b reports a 32K window; Hermes refuses to start a session below
+    // 64K, so saving it used to produce a device that said "configured" and
+    // 502'd every chat turn. The refusal must come BEFORE the config-store
+    // write and the Hermes registration — a half-saved dead model is the bug.
+    probeMock.mockResolvedValue({ status: "ok", contextLength: 32_768 });
+
+    const res = await POST(jsonRequest({ provider: "ollama", apiKey: "qwen2.5:3b", scope: "local" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(String(body.error)).toContain("32,768");
+    expect(String(body.error)).toContain("64,000");
+    expect(mockSetMany).not.toHaveBeenCalled();
+    expect(mockApplyLocalAiToHermes).not.toHaveBeenCalled();
+  });
+
+  it("refuses an Ollama id the device does not have", async () => {
+    // configure({model:"qwen2.5:3b"}) with the model absent used to answer
+    // {success:true}; the first chat turn then 404'd upstream.
+    probeMock.mockResolvedValue({ status: "not-installed" });
+
+    const res = await POST(jsonRequest({ provider: "ollama", apiKey: "ghost:7b", scope: "local" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(String(body.error)).toContain('"ghost:7b"');
+    expect(mockSetMany).not.toHaveBeenCalled();
+    expect(mockApplyLocalAiToHermes).not.toHaveBeenCalled();
+  });
+
+  it("honours the model FIELD for Ollama, not only the apiKey slot", async () => {
+    // The wizard sends the id through `apiKey`; every cloud provider sends its
+    // pick through `model`. An API caller who used `model` had the field
+    // silently ignored and llama3.2:3b saved in its place.
+    const res = await POST(jsonRequest({ provider: "ollama", model: "qwen3:8b", scope: "local" }));
+
+    expect(res.status).toBe(200);
+    expect(probeMock).toHaveBeenCalledWith("qwen3:8b");
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "ollama", model: "qwen3:8b" }),
+    );
+  });
+
+  it("honours the model FIELD for llama.cpp too", async () => {
+    // Same two slots as Ollama, same reason: a caller naming a model must
+    // never have a different one saved in its place.
+    const res = await POST(jsonRequest({ provider: "llamacpp", model: "gemma4-e4b-it-q4_0", scope: "local" }));
+
+    expect(res.status).toBe(200);
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "llamacpp", model: "gemma4-e4b-it-q4_0" }),
+    );
+  });
+
+  it("saves a 64K-capable Ollama model and registers it with Hermes", async () => {
+    const res = await POST(jsonRequest({ provider: "ollama", apiKey: "qwen3:8b", scope: "local" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+      local_ai_configured: true,
+      local_ai_provider: "ollama",
+      local_ai_model: "ollama/qwen3:8b",
+    }));
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "ollama", model: "qwen3:8b", makeDefault: true }),
+    );
+    expectNoOpenclawSpawn();
+  });
+
+  it("never reads a handoff-filled apiKey slot as a local model id", async () => {
+    // The `apiKey` slot carries the MODEL id for a local provider, and on the
+    // OAuth-handoff path it is filled from a token file on disk. A handoff
+    // that records no provider leaves `body.provider` as the caller sent it,
+    // so a body saying `ollama` would have made the access token the model id
+    // — and put it in an outbound request body. `model` still names the model.
+    const fsp = (await import("fs/promises")).default;
+    vi.mocked(fsp.readFile).mockResolvedValue(
+      JSON.stringify({ access_token: "handoff-access-token-placeholder", createdAt: Date.now() }) as never,
+    );
+
+    const res = await POST(jsonRequest({
+      provider: "ollama",
+      scope: "local",
+      oauthHandoff: true,
+      model: "qwen3:8b",
+    }));
+
+    expect(res.status).toBe(200);
+    expect(probeMock).toHaveBeenCalledWith("qwen3:8b");
+    expect(probeMock).not.toHaveBeenCalledWith(expect.stringContaining("handoff-access-token"));
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "qwen3:8b" }),
+    );
+  });
+
+  it("still saves when Ollama cannot be asked about the model", async () => {
+    // Fail-open by design: on the primary-scope path the runtime starts Ollama
+    // on demand, so "the probe could not connect" is not a verdict about the
+    // model — refusing here would brick a legitimate flow.
+    probeMock.mockResolvedValue({ status: "unreachable" });
+
+    const res = await POST(jsonRequest({ provider: "ollama", apiKey: "qwen3:8b", scope: "local" }));
+
+    expect(res.status).toBe(200);
+    expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "ollama", model: "qwen3:8b" }),
+    );
   });
 
   it("does not blame credentials when the local-model setup fails on Hermes", async () => {

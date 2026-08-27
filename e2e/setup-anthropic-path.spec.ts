@@ -1,5 +1,10 @@
 import { expect, test } from "./helpers/coverage";
-import { fillCredentialsStep, installClawboxMocks, pickAiProvider } from "./helpers/clawbox";
+import {
+  fillCredentialsStep,
+  installClawboxMocks,
+  pickAiProvider,
+  submitCredentialsStep,
+} from "./helpers/clawbox";
 
 // AIModelsStep coverage was at ~12% because the existing setup-openai-path
 // test only commits the OpenAI-via-API-key flow, leaving every other
@@ -18,7 +23,7 @@ test("setup commits an Anthropic API-key flow through to the desktop", async ({ 
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await fillCredentialsStep(page);
-  await page.getByRole("button", { name: /^Connect$/ }).click();
+  await submitCredentialsStep(page);
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await pickAiProvider(page, "Anthropic Claude");
@@ -43,7 +48,7 @@ test("setup commits a Google Gemini API-key flow after expanding more providers"
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await fillCredentialsStep(page);
-  await page.getByRole("button", { name: /^Connect$/ }).click();
+  await submitCredentialsStep(page);
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
 

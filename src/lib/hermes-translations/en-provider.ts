@@ -10,11 +10,14 @@
  */
 export const providerEn: Record<string, string> = {
   // === Panel chrome ===
-  "hermesProvider.title": "Hermes models",
+  "hermesProvider.title": "AI Providers",
   "hermesProvider.intro":
-    "This device runs on Hermes. Choose an inference provider and default model — they switch through Hermes natively, no dashboard needed.",
+    "This device runs on Hermes. Connect providers and pick the default — status, sign-in and switching all live here.",
   "hermesProvider.radioGroupLabel": "AI Provider",
+  "hermesProvider.hero.nativeSwitch": "switches natively through Hermes",
+  "hermesProvider.hero.changeModel": "Change model",
   "hermesProvider.continue": "Continue",
+  "hermesProvider.connected.affirmation": "Connected",
 
   // === Provider rows ===
   // The registry (hermes-providers.ts) is shared with server routes and cannot

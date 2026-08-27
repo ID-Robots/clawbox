@@ -1,5 +1,10 @@
 import { expect, test } from "./helpers/coverage";
-import { fillCredentialsStep, installClawboxMocks, pickAiProvider } from "./helpers/clawbox";
+import {
+  fillCredentialsStep,
+  installClawboxMocks,
+  pickAiProvider,
+  submitCredentialsStep,
+} from "./helpers/clawbox";
 
 test("setup supports the OpenAI API-key path and telegram configuration", async ({ page }) => {
   await installClawboxMocks(page);
@@ -11,7 +16,7 @@ test("setup supports the OpenAI API-key path and telegram configuration", async 
 
   await expect(page.getByTestId("setup-step-credentials")).toBeVisible();
   await fillCredentialsStep(page);
-  await page.getByRole("button", { name: /^Connect$/ }).click();
+  await submitCredentialsStep(page);
 
   await expect(page.getByTestId("setup-step-ai-models")).toBeVisible();
   await pickAiProvider(page, "OpenAI GPT");

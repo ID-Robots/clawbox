@@ -9,6 +9,12 @@ import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import { readFile, writeFile, unlink, mkdir } from "fs/promises";
 import { join } from "path";
+import {
+  type TunnelUnitState,
+  getTunnelServiceState,
+  readTunnelUrl,
+  readTunnelUrlFromJournal,
+} from "@/lib/cloudflared";
 
 const execAsync = promisify(exec);
 
@@ -36,6 +42,10 @@ export interface TunnelStatus {
   running: boolean;
   tunnelUrl: string | null;
   error: string | null;
+  /** systemd state of clawbox-tunnel.service. */
+  service: TunnelUnitState;
+  /** Which tunnel this describes — null when nothing is running. */
+  managedBy: "systemd" | "spawned" | null;
 }
 
 async function ensureDataDir() {
@@ -104,17 +114,49 @@ export async function isCloudflaredInstalled(): Promise<boolean> {
   }
 }
 
-// Get full tunnel status
+/**
+ * Full tunnel status — for EITHER tunnel this device can be running.
+ *
+ * There are two, and this module only ever knew about one of them. This file
+ * spawns `cloudflared` itself and records the child's pid in data/tunnel.pid;
+ * the shipped device instead runs clawbox-tunnel.service, whose
+ * scripts/run-tunnel.sh writes no pid file at all and publishes its URL to
+ * data/cloudflared/tunnel.url. So on a real box — the QA device on
+ * 2026-08-24 — this answered `{enabled:false, running:false, tunnelUrl:null}`
+ * while `systemctl is-active clawbox-tunnel` said `active` and the whole
+ * desktop was being served to the public internet behind one password. Telling
+ * an owner that remote access is off when it is on is a support-grade lie, and
+ * it is the one state in which they most need the URL and the off switch.
+ *
+ * The unit is consulted first because it is the one an installed device uses.
+ */
 export async function getTunnelStatus(): Promise<TunnelStatus> {
-  const state = await readState();
-  const running = await isTunnelRunning();
-  const tunnelUrl = running ? await getTunnelUrl() : null;
+  const [state, spawnedRunning, service] = await Promise.all([
+    readState(),
+    isTunnelRunning(),
+    getTunnelServiceState(),
+  ]);
+  // "activating" counts as up: cloudflared is already dialling out, and a
+  // status that flickers to "off" mid-start is what makes the panel look broken.
+  const serviceRunning = service === "active" || service === "activating";
+  const running = serviceRunning || spawnedRunning;
+
+  let tunnelUrl: string | null = null;
+  if (serviceRunning) {
+    tunnelUrl = (await readTunnelUrl()) ?? (await readTunnelUrlFromJournal());
+  }
+  if (!tunnelUrl && spawnedRunning) tunnelUrl = await getTunnelUrl();
 
   return {
-    enabled: state.enabled && running,
+    // `state.enabled` is only ever written by startTunnel/stopTunnel in this
+    // file, so it cannot speak for the unit. A running unit IS remote access
+    // enabled, whoever turned it on.
+    enabled: serviceRunning || (state.enabled && spawnedRunning),
     running,
     tunnelUrl,
     error: null,
+    service,
+    managedBy: serviceRunning ? "systemd" : spawnedRunning ? "spawned" : null,
   };
 }
 
@@ -128,7 +170,15 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
     };
   }
 
-  // Check if already running
+  // Check if already running — EITHER tunnel. Without the unit check this
+  // spawned a second cloudflared alongside clawbox-tunnel.service, publishing a
+  // second public hostname for the same box that nothing then tracked or
+  // stopped.
+  const service = await getTunnelServiceState();
+  if (service === "active" || service === "activating") {
+    const url = (await readTunnelUrl()) ?? (await readTunnelUrlFromJournal());
+    return { success: true, tunnelUrl: url || undefined };
+  }
   if (await isTunnelRunning()) {
     const url = await getTunnelUrl();
     return { success: true, tunnelUrl: url || undefined };
@@ -199,6 +249,20 @@ export async function startTunnel(): Promise<{ success: boolean; error?: string;
 }
 
 export async function stopTunnel(): Promise<{ success: boolean; error?: string }> {
+  // This function can only kill a child THIS module spawned. On an installed
+  // device the tunnel is clawbox-tunnel.service, and reporting success for a
+  // unit that is still running would tell the owner the box is off the public
+  // internet when it is not — the exact failure getTunnelStatus() had. Say so
+  // and name the control that does work.
+  const service = await getTunnelServiceState();
+  if (service === "active" || service === "activating") {
+    return {
+      success: false,
+      error:
+        "Remote access is running as the clawbox-tunnel system service, which this endpoint cannot stop. Turn it off in Settings > Remote Control (POST /setup-api/portal/stop).",
+    };
+  }
+
   const pid = await getTunnelPid();
 
   if (pid) {

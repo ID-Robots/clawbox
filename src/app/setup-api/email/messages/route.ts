@@ -25,12 +25,16 @@
 
 import { NextResponse } from "next/server";
 import { getEmailCredentials, modeAllowsReading, toImapConfig } from "@/lib/email-config";
+import { buildFullMessage, remoteImageUrls } from "@/lib/email-mime";
+import { fetchRemoteImages } from "@/lib/email-image-fetch";
 import {
   ImapError,
   isImapConfigUsable,
   listMessages,
+  MAX_FULL_FETCH_BYTES,
   MAX_LIST_LIMIT,
   readMessage,
+  readRawMessage,
 } from "@/lib/imap-client";
 import { checkRateLimit } from "@/lib/rate-limit";
 
@@ -95,6 +99,44 @@ export async function GET(request: Request) {
       if (!Number.isInteger(uid) || uid < 1) {
         return NextResponse.json({ error: "That is not a valid message id" }, { status: 400 });
       }
+
+      // ?view=full — the OWNER's view, for the dashboard's full-message panel:
+      // the header block, and the body with its structure intact. The agent's
+      // `email_read` never asks for this and still gets flattened text.
+      if (url.searchParams.get("view") === "full") {
+        // Only ever ONE fetch of the message itself. The consent path re-uses
+        // these same bytes to find the image URLs, so pressing "load images"
+        // cannot be turned into a second trip to the mail server.
+        const fetched = await readRawMessage(cfg, uid, {
+          signal: request.signal,
+          maxBytes: MAX_FULL_FETCH_BYTES,
+        });
+
+        // Remote images are loaded only when the request says the owner asked.
+        // The URLs come from the MESSAGE, never from the query string, which is
+        // what stops this from being a proxy the caller can aim (see
+        // email-image-fetch.ts).
+        let loaded: Map<string, string> | undefined;
+        if (url.searchParams.get("images") === "1") {
+          // The owner's request signal rides along: closing the panel must
+          // stop the outbound fetches too, rather than leaving them running
+          // against their own 12s deadline on a device with little to spare.
+          loaded = await fetchRemoteImages(remoteImageUrls(fetched.raw), request.signal);
+        }
+
+        const message = buildFullMessage(
+          fetched.raw,
+          fetched,
+          loaded ? (src) => loaded.get(src) : undefined,
+        );
+        return NextResponse.json(
+          { message },
+          // The owner's mail must not sit in any cache between here and the
+          // browser, and must never be treated as a document in its own right.
+          { headers: { "Cache-Control": "no-store, private", "X-Content-Type-Options": "nosniff" } },
+        );
+      }
+
       const message = await readMessage(cfg, uid, { signal: request.signal });
       return NextResponse.json({ message });
     }

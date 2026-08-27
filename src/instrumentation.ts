@@ -54,6 +54,17 @@ export async function register() {
     console.error('[instrumentation] Could not load the chat transcript sweep:', err instanceof Error ? err.message : err)
   }
   try {
+    // Coding runs the previous web server was still babysitting died with it
+    // (systemd kills the whole cgroup on restart). Settle them now so the
+    // agent's next status question is not answered with "still running".
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const codingAgent = require('./lib/coding-agent')
+    const stale: number = codingAgent.reconcileAfterRestart()
+    if (stale > 0) console.log(`[instrumentation] ${stale} coding run(s) left running by the previous server were marked failed`)
+  } catch (err) {
+    console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Memory indexing is armed the same way, from its own persisted schedule.
     // Rebuilding the timer at every boot is what makes the schedule survive a
     // reboot and an update without a crontab entry to duplicate or orphan.

@@ -4,6 +4,7 @@ import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-provider
 import {
   asHarnessError,
   HarnessError,
+  type ClarifyQuestion,
   type FetchLike,
   type HarnessAdapter,
   type HarnessCapabilities,
@@ -42,6 +43,7 @@ export interface HermesTurnContext {
 
 const CHAT_ROUTE = "/setup-api/hermes/chat";
 const TRANSCRIPT_ROUTE = "/setup-api/chat/history";
+const IMAGES_ROUTE = "/setup-api/chat/images";
 
 /**
  * How long a transcript call may take before it is abandoned.
@@ -74,6 +76,56 @@ function toToolSummaries(value: unknown): ChatToolSummary[] {
     calls.push({ name, ...(detail ? { detail } : {}), ...(status ? { status } : {}) });
   }
   return calls;
+}
+
+/**
+ * The questions a clarify frame carries, re-validated rather than trusted.
+ *
+ * Same posture as `toToolSummaries` above and for a sharper reason: these
+ * become CONTROLS. A malformed entry rendered anyway would be a button with no
+ * label, or a question with no text and a submit that posts an answer to a qid
+ * the agent never asked about — so an entry with nothing to ask is dropped
+ * here, and a frame left with no askable question is not forwarded at all.
+ *
+ * `choices` is coerced to an array of strings rather than passed through: a
+ * non-string choice would render as `[object Object]` on a real button.
+ */
+function toClarifyQuestions(value: unknown): ClarifyQuestion[] {
+  if (!Array.isArray(value)) return [];
+  const questions: ClarifyQuestion[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== "object") continue;
+    const row = entry as Record<string, unknown>;
+    const question = typeof row.question === "string" ? row.question.trim() : "";
+    if (!question) continue;
+    const choices = Array.isArray(row.choices)
+      ? row.choices.filter((c): c is string => typeof c === "string" && c.length > 0)
+      : [];
+    questions.push({
+      // A single clarify legitimately carries an empty qid — see ClarifyQuestion.
+      qid: typeof row.qid === "string" ? row.qid : "",
+      question,
+      choices,
+      multiSelect: row.multiSelect === true,
+    });
+  }
+  return questions;
+}
+
+/**
+ * The `answered` map off a reconnect replay, string keys to string values only.
+ *
+ * An already-locked answer decides whether a question renders as a control or
+ * as a read-only summary, so a value of the wrong type here would put an
+ * un-answerable question back in front of the customer.
+ */
+function toAnsweredMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const answered: Record<string, string> = {};
+  for (const [qid, answer] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof answer === "string") answered[qid] = answer;
+  }
+  return answered;
 }
 
 /**
@@ -157,6 +209,52 @@ async function readStreamedTurn(
       if (!chunk) return;
       answer += chunk;
       onEvent?.({ kind: "delta", text: answer });
+    } else if (name === "tool") {
+      // Live progress. Forwarded only when it names a tool and a phase the
+      // surface can act on — a malformed frame must not be able to draw a pill
+      // with no name, and the authoritative list still arrives on `done`.
+      const toolName = typeof payload.name === "string" ? payload.name : "";
+      const phase = payload.phase === "result" ? "result" : "start";
+      const id = typeof payload.id === "string" && payload.id ? payload.id : toolName;
+      if (!toolName) return;
+      const detail = typeof payload.detail === "string" ? payload.detail : "";
+      const status = payload.status === "error" ? "error" : payload.status === "ok" ? "ok" : undefined;
+      onEvent?.({
+        kind: "tool",
+        phase,
+        id,
+        name: toolName,
+        ...(detail ? { detail } : {}),
+        ...(status ? { status } : {}),
+      });
+    } else if (name === "clarify") {
+      // The agent has parked on a question. Forwarded only when it names the
+      // request it belongs to AND has something askable: without `requestId`
+      // no answer could ever be routed back, and a card with no question is a
+      // dead control the customer cannot dismiss. Unlike `tool`, nothing later
+      // in the turn repairs a dropped clarify — the turn simply waits — so the
+      // validation is about not rendering a prompt that cannot work, not about
+      // deferring to a better copy on `done`.
+      const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+      if (!requestId) return;
+      const questions = toClarifyQuestions(payload.questions);
+      if (!questions.length) return;
+      const answered = toAnsweredMap(payload.answered);
+      onEvent?.({
+        kind: "clarify",
+        requestId,
+        questions,
+        // Omitted rather than sent empty: `answered` present-but-empty and
+        // absent mean the same thing to a renderer, and the optional field
+        // reads as "this is a replay" where it appears.
+        ...(Object.keys(answered).length ? { answered } : {}),
+      });
+    } else if (name === "clarifyExpire") {
+      const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
+      if (requestId) onEvent?.({ kind: "clarifyExpire", requestId });
+    } else if (name === "status") {
+      const text = typeof payload.text === "string" ? payload.text : "";
+      if (text) onEvent?.({ kind: "status", text });
     } else if (name === "done") {
       settled = payload;
     } else if (name === "error") {
@@ -210,16 +308,6 @@ export class HermesAdapter implements HarnessAdapter {
    * conversation memory.
    */
   private sessionId = "";
-  /**
-   * What the LAST turn actually ran on. A resumed session keeps the system
-   * prompt it was created with, so after a switch the agent would still answer
-   * "What model are you?" with the old one (and echo its earlier claims from
-   * the transcript) even though the turn is genuinely routed to the new
-   * provider. Comparing against these lets the next turn state the change
-   * rather than discarding the conversation to get a fresh system prompt.
-   */
-  private sentProvider = "";
-  private sentModel = "";
   /** The in-flight turn, so Stop can abort it. */
   private inFlight: AbortController | null = null;
   private readonly statusListeners = new Set<(s: HarnessStatus, detail?: string) => void>();
@@ -294,19 +382,21 @@ export class HermesAdapter implements HarnessAdapter {
             : `Still loading ${hermesProviderLabel(provider)}'s models — try again in a moment.`,
         );
       }
-      // Announce a mid-conversation switch. Only when we are RESUMING (a fresh
-      // session already gets a correct system prompt) and only when something
-      // actually changed, so a normal turn carries no extra text.
-      const switched =
-        Boolean(this.sessionId) &&
-        (this.sentProvider !== provider || this.sentModel !== model) &&
-        Boolean(this.sentProvider || this.sentModel);
-      const outbound = switched
-        ? `[System note: this conversation has just been switched to model "${model || "the provider default"}" ` +
-          `via provider "${hermesProviderLabel(provider)}". You are now that model — disregard any earlier ` +
-          `statement in this conversation about which model you are. Keep the conversation and its context.]\n\n` +
-          req.text
-        : req.text;
+      // A mid-conversation switch is a TRANSPORT concern, and it is now handled
+      // as one: the chat route re-points the live session at the new
+      // model/provider before submitting the prompt (`/model … --session` on
+      // the dashboard socket — see hermes-dashboard-turn).
+      //
+      // This used to prepend a "[System note: this conversation has just been
+      // switched to model …]" paragraph to the customer's own message instead.
+      // It was never true. Nothing was switched — the resume call dropped the
+      // override — so the note asked the model to claim a change that had not
+      // happened, and the model, being asked in the message body rather than
+      // told by its harness, correctly refused: "That 'system note' arrived
+      // inside your chat message, not from my actual harness — my real session
+      // configuration still says claude-fable-5." Configuration is never
+      // message content; the message is now exactly what the customer typed.
+      const outbound = req.text;
       const res = await this.fetchImpl(CHAT_ROUTE, {
         method: "POST",
         headers: {
@@ -317,10 +407,6 @@ export class HermesAdapter implements HarnessAdapter {
         },
         body: JSON.stringify({
           message: outbound,
-          // Only when the two differ, so the ordinary turn carries no extra
-          // field: the switch note is written for the AGENT and must not be
-          // replayed out of the transcript as something the user typed.
-          ...(switched ? { displayText: req.text } : {}),
           // Staged absolute paths. The route re-resolves every one of them
           // against the staging root before any of it reaches argv — this side
           // is a convenience, not a check.
@@ -366,11 +452,6 @@ export class HermesAdapter implements HarnessAdapter {
       if (typeof data.sessionId === "string" && data.sessionId) {
         this.sessionId = data.sessionId;
       }
-      // Record what this turn ran on, so the NEXT one only announces a switch
-      // if something really changed. Set after success: a failed turn didn't
-      // establish anything, and the announcement should survive to be made.
-      this.sentProvider = provider;
-      this.sentModel = model;
       // Same MEDIA: split as the gateway path, so a picture renders the same
       // way whichever edition answered.
       const reply = splitAssistantMedia(typeof data.text === "string" ? data.text : "");
@@ -417,8 +498,6 @@ export class HermesAdapter implements HarnessAdapter {
    */
   async resetSession(): Promise<void> {
     this.sessionId = "";
-    this.sentProvider = "";
-    this.sentModel = "";
     // …and the replay log with it. Clearing only the session id would make the
     // agent forget while the screen refilled with the old conversation on the
     // next refresh — the worst of both, and exactly the split the durable
@@ -474,6 +553,75 @@ export class HermesAdapter implements HarnessAdapter {
     } catch (err) {
       throw asHarnessError(err, "upstream");
     }
+  }
+
+  /**
+   * Draw one picture through the box's own images route.
+   *
+   * This is the half of image generation that OpenClaw gets from its agent and
+   * Hermes could not: its image-generation provider slot ships EMPTY, so before
+   * this a request for a picture reached no provider and the turn ran until it
+   * timed out. The trigger moves to the composer and the box makes the call —
+   * see `imageGenerationTrigger`, which is also where a box whose slot HAS been
+   * filled goes back to being asked in plain words instead.
+   *
+   * NOT threaded through `sessionId`, and that is a deliberate limit rather
+   * than an oversight: the picture is fetched from the proxy without the agent
+   * being involved, so the conversation the agent remembers does not contain
+   * it and a follow-up like "make it bluer" cannot work. The transcript the
+   * SCREEN replays does contain it, which is what keeps the two honest — the
+   * customer sees exactly what the box did.
+   *
+   * The route writes both transcript records itself, before and after the
+   * upstream call, so a customer who closes the tab on a 15-second generation
+   * still finds the picture waiting on their next visit.
+   */
+  async generateImage(prompt: string, signal?: AbortSignal): Promise<{ media: readonly string[] }> {
+    if (this.capabilities.imageGenerationTrigger !== "composer") {
+      throw new HarnessError("unsupported", "This box cannot generate pictures.");
+    }
+    let res: Response;
+    try {
+      res = await this.fetchImpl(IMAGES_ROUTE, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+        ...(signal ? { signal } : {}),
+      });
+    } catch (err) {
+      throw asHarnessError(err, "upstream");
+    }
+    // The customer hit Stop. Not a failure, and it must not become a red
+    // bubble — same contract as a stopped turn.
+    if (res.status === 499 || signal?.aborted) {
+      throw new HarnessError("aborted", "Stopped.");
+    }
+    const data = await readJsonBody(res);
+    if (!res.ok) {
+      const message = typeof data.error === "string" && data.error
+        ? data.error
+        : "Could not generate the picture.";
+      // The route's own statuses, mapped to the affordance each one wants: 503
+      // is "link this box" and belongs on `not-configured`, a 4xx is the
+      // prompt, and everything else is the far side having a bad day.
+      throw new HarnessError(
+        res.status === 503
+          ? "not-configured"
+          : res.status >= 400 && res.status < 500
+            ? "invalid-input"
+            : "upstream",
+        message,
+      );
+    }
+    const media = Array.isArray(data.media)
+      ? data.media.filter((ref): ref is string => typeof ref === "string" && ref.length > 0)
+      : [];
+    if (media.length === 0) {
+      // A 200 with nothing in it would otherwise end the wait with an empty
+      // bubble, which reads as "the box drew nothing" rather than as a fault.
+      throw new HarnessError("upstream", "ClawBox AI returned no picture.");
+    }
+    return { media };
   }
 
   async patchSessionDefaults(_patch: { thinkingLevel?: string | null }): Promise<void> {

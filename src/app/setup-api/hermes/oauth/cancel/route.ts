@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
-import { dashboardUnreachable, hermesGate, isValidSessionId, readJsonBody, relayJson } from "../shared";
+import { dashboardUnreachable, isValidSessionId, ownerGate, readJsonBody, relayJson } from "../shared";
 
 // Abandon an in-flight OAuth session (panel unmounted, user hit Start over).
 // Best-effort on the panel's side, but routed anyway so the dashboard doesn't
@@ -10,7 +10,7 @@ import { dashboardUnreachable, hermesGate, isValidSessionId, readJsonBody, relay
 const CANCEL_KEYS = ["ok", "status", "message"] as const;
 
 export async function DELETE(request: Request) {
-  const gate = await hermesGate();
+  const gate = await ownerGate(request);
   if (gate) return gate;
 
   const body = await readJsonBody(request);
