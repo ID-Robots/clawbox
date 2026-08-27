@@ -153,6 +153,40 @@ export const SUBSCRIPTION_SURFACE: Readonly<Record<string, {
   anthropic: { surfaceProvider: "claude-cli" },
 });
 
+/**
+ * Can this credential run this model? The one greying-out rule, named once.
+ *
+ * `availableOnSubscription === undefined` means the box could not enumerate
+ * the subscription surface — unknown is not "no", so an unstamped model stays
+ * usable and the customer keeps the full list rather than the UI inventing a
+ * restriction it never verified.
+ *
+ * It lives here, next to the table it reads, because BOTH model pickers have
+ * to obey it: the setup wizard's (AIModelsStep) and the chat header's
+ * (ChatPopup). It used to be a closure inside the wizard, so the header — the
+ * surface the wizard's own help line points the customer at ("switch between
+ * the curated models from the chat window anytime") — offered every
+ * API-key-only model as an ordinary pickable row.
+ */
+export function isModelUsableOnSubscription(
+  model: { availableOnSubscription?: boolean },
+  isSubscription: boolean,
+): boolean {
+  return !isSubscription || model.availableOnSubscription !== false;
+}
+
+/**
+ * The provider id of the narrowed catalogue a subscription puts `provider` on,
+ * or null when its subscription does not narrow this catalogue (OpenAI swaps
+ * the whole namespace instead — see `catalogProvider` above).
+ *
+ * Exists so a refusal can NAME the surface it is refusing against, rather than
+ * telling the customer their provider is misconfigured when it is not.
+ */
+export function subscriptionSurfaceLabel(provider: string): string | null {
+  return SUBSCRIPTION_SURFACE[provider]?.surfaceProvider ?? null;
+}
+
 export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 

@@ -22,6 +22,7 @@ import {
   extractProviderModelId,
   isCatalogProvider,
   isValidModelId,
+  isModelUsableOnSubscription,
   SUBSCRIPTION_SURFACE,
 } from "@/lib/provider-models";
 import { useProviderCatalog } from "@/hooks/useProviderCatalog";
@@ -1140,13 +1141,12 @@ export default function AIModelsStep({
   const currentAuthMode = activeAuth?.mode ?? authMode;
   const isSubscription = currentAuthMode === "subscription";
 
-  // The one rule, named once. `availableOnSubscription === undefined` means
-  // the box could not enumerate the subscription surface — unknown is not
-  // "no", so an unstamped model stays usable and the customer keeps the full
-  // list rather than the UI inventing a restriction.
+  // The one rule, named once — and now named in provider-models.ts, next to
+  // the SUBSCRIPTION_SURFACE table it reads, because the chat header's inline
+  // model switcher has to apply the same rule to the same catalogue.
   const isModelUsable = useCallback(
     (model: { availableOnSubscription?: boolean }) =>
-      !isSubscription || model.availableOnSubscription !== false,
+      isModelUsableOnSubscription(model, isSubscription),
     [isSubscription],
   );
 

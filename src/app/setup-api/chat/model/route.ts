@@ -16,7 +16,11 @@ import {
   CLAWBOX_AI_DEFAULT_TIER,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
+import { isValidModelId, parseModelSlug, subscriptionSurfaceLabel } from "@/lib/provider-models";
+import {
+  readSubscriptionSurfaceIds,
+  subscriptionOnlyProviders,
+} from "@/lib/subscription-surface";
 
 export const dynamic = "force-dynamic";
 
@@ -107,6 +111,26 @@ function defaultModelForProvider(provider: string | null): string | null {
   return DEFAULT_PROVIDER_MODELS[normalized]
     ?? DEFAULT_PROVIDER_MODELS[normalizeProvider(provider) ?? ""]
     ?? null;
+}
+
+/**
+ * Providers this box authenticates to by subscription only, normalized to the
+ * ids the UI uses (deepseek → clawai) so the browser can match them against
+ * the provider on its own header pill.
+ *
+ * The catalogue the pickers render is stamped with `availableOnSubscription`
+ * per model, but that stamp is a property of the PROVIDER's plugin, not of
+ * this device — nothing in it says whether this box is on a subscription. The
+ * setup wizard knew because the customer was standing on the Subscription tab;
+ * the chat header had no such context and so applied no rule at all. This is
+ * that missing half, delivered on the state the header already refetches
+ * whenever the provider changes.
+ */
+function subscriptionProvidersForUi(config: OpenClawConfig): string[] {
+  const ids = subscriptionOnlyProviders(config.auth?.profiles)
+    .map((provider) => normalizeProvider(provider))
+    .filter((provider): provider is string => !!provider);
+  return [...new Set(ids)].sort();
 }
 
 function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
@@ -309,6 +333,7 @@ async function loadChatModelState() {
       label: localLabel,
       model: localModel,
     },
+    subscriptionProviders: subscriptionProvidersForUi(openclawConfig),
   };
 }
 
@@ -386,6 +411,35 @@ export async function POST(request: Request) {
             return NextResponse.json({
               error: `${parsed.modelId} requires OpenAI API-key mode. ChatGPT subscription auth supports GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, and GPT-5.4 Mini.`,
             }, { status: 400 });
+          }
+        }
+        // The Claude equivalent of the Codex branch above. Anthropic's
+        // subscription keeps the `anthropic/` namespace but narrows the set:
+        // only the plugin's `claude-cli` catalogue actually routes, so
+        // claude-mythos-5 / claude-fable-5 / the Haikus are API-key-only.
+        //
+        // Without this, an id from a stale tab (or any browser that never
+        // received the catalogue stamp) fell through to the openai-compat
+        // auto-extend below, which either wrote it to
+        // `models.providers.anthropic.models` and pinned the box to a model
+        // that cannot route, or — when the providerDef was thin — answered
+        // 409 "isn't fully configured. Re-save it in Settings", which is the
+        // wrong next step for a box whose settings are fine.
+        if (effectiveProvider === "anthropic") {
+          const openclawConfig = await getAuthConfig();
+          const onSubscription = !!openclawConfig
+            && subscriptionOnlyProviders(openclawConfig.auth?.profiles).includes("anthropic");
+          if (onSubscription) {
+            // Null = the surface could not be read. UNKNOWN is not "no": the
+            // pickers keep an unstamped model usable, and refusing here where
+            // the UI allowed would be a rejection over something that works.
+            const surfaceIds = await readSubscriptionSurfaceIds("anthropic");
+            if (surfaceIds && !surfaceIds.has(effectiveModelId)) {
+              const surface = subscriptionSurfaceLabel("anthropic");
+              return NextResponse.json({
+                error: `${effectiveModelId} is not on the Claude subscription surface (${surface}). Pick one of ${[...surfaceIds].sort().join(", ")}, or switch Anthropic to API-key mode for the API-only models.`,
+              }, { status: 400 });
+            }
           }
         }
         // Normalize the parsed provider so the deepseek/clawai alias
