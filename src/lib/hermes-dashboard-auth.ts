@@ -11,6 +11,17 @@ import path from "path";
 // the Host header to that authority automatically, satisfying the dashboard's
 // DNS-rebind guard.
 
+/**
+ * The systemd unit that RUNS the dashboard this module talks to.
+ *
+ * Exported and named once because two unrelated callers spell it — a ClawKeep
+ * restore, which has to bounce it so the restored `state.db` is the one served,
+ * and the image refresh, which has to bounce it so a newly installed backend is
+ * discovered. A rename that reached only one of them would be a feature that
+ * half works, silently.
+ */
+export const HERMES_DASHBOARD_UNIT = "clawbox-hermes-dashboard.service";
+
 const DASH_HOST = process.env.HERMES_DASH_HOST || "127.0.0.2";
 const DASH_PORT = process.env.HERMES_PORT || "9119";
 const DASH_ORIGIN = `http://${DASH_HOST}:${DASH_PORT}`;

@@ -1,5 +1,7 @@
 import { setMany } from "@/lib/config-store";
+import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { setHermesEnvValues } from "@/lib/hermes-env";
 import {
@@ -67,6 +69,12 @@ export async function applyClawaiToHermes(
     throw new ClawaiApplyError("Sign in to ClawBox AI first to get a device token.");
   }
   const model = clawaiModelForTier(tier);
+
+  // Read BEFORE anything is written, because the refresh at the bottom needs to
+  // know whether this call is what turned drawing on. `hermesConfigGet` is keyed
+  // on config.yaml's mtime, so on a box that has been asked this recently — the
+  // chat asks it on every open — this costs nothing.
+  const couldDrawBefore = await hermesAgentDrawsImages();
 
   const steps: string[][] = [
     ["config", "set", `providers.${CLAWAI_PROVIDER}.base_url`, CLAWBOX_AI_PROXY_URL],
@@ -172,6 +180,28 @@ export async function applyClawaiToHermes(
 
   // The device's provider/model just changed — don't serve the old selection.
   invalidateModelOptions();
+
+  // Everything above wrote to DISK. The agent that will serve the next turn is
+  // a process that has been running since long before any of it, and two of the
+  // things just written — the credential in `~/.hermes/.env` and the backend in
+  // `~/.hermes/plugins/` — are read once, at ITS startup. Without this the
+  // owner links, the chat reports `canGenerateImages: true` off the config, and
+  // the agent still has no `image_generate` to reach for. See
+  // hermes-image-refresh.ts for the measurement that found it.
+  //
+  // AWAITED rather than left floating: this call can restart the very dashboard
+  // the caller may talk to next, so it wants to be ordered rather than racing —
+  // and a floating promise here would outlive the response with nothing
+  // watching it. It cannot fail the link: the helper swallows everything and
+  // returns void.
+  //
+  // The AFTER value is re-READ rather than assumed from the try/catch above, so
+  // the refresh follows exactly the fact `/setup-api/chat/capabilities` serves
+  // — including the case where a customer had already selected a backend of
+  // their own by hand and our write failing changes nothing about what the box
+  // can do. `hermesConfigGet` is keyed on config.yaml's mtime, which the writes
+  // above just moved, so this sees the new value rather than a memo of the old.
+  await refreshHermesImageTools(couldDrawBefore, await hermesAgentDrawsImages());
 
   return { provider: CLAWAI_PROVIDER, model, tier };
 }
