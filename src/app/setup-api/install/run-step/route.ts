@@ -21,10 +21,10 @@ const execFileAsync = promisify(execFile);
 // that would reboot, modify networking, or wipe state stays out — we don't want
 // a one-tap escalation surface.
 //
-// This list is advisory-in-depth: the sudoers grant is
-// `clawbox-root-update@*.service`, so the authoritative check is the one the
-// root-owned dispatcher does (config/clawbox-root-step.sh). Keeping both in
-// src/lib/root-steps.ts is what lets a test pin them together. TASK-445.
+// This list is advisory-in-depth: systemd starts whatever instance name it is
+// handed, so the authoritative check is the one the root-owned dispatcher does
+// (config/clawbox-root-step.sh). Keeping both in src/lib/root-steps.ts is what
+// lets a test pin them together. TASK-445.
 const ALLOWED_STEPS = new Set(UI_ROOT_STEPS);
 
 // Most install steps complete in ~30-120s on a warm Jetson. vnc_install /

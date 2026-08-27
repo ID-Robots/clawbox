@@ -95,6 +95,15 @@ if [ -z "${CLAWBOX_INSTALL_BOOTSTRAPPED:-}" ] \
     git -C "$_b" -c safe.directory="$_b" fetch origin --quiet 2>/dev/null || true
     if git -C "$_b" -c safe.directory="$_b" reset --hard "origin/${_br}" --quiet 2>/dev/null; then
       chown -R clawbox:clawbox "$_b" 2>/dev/null || true
+      # Re-record what root is allowed to run, BEFORE re-exec'ing into it. The
+      # reset just replaced install.sh, scripts/ and config/ wholesale, so the
+      # manifest the root dispatcher checks is now stale by construction — and a
+      # stale manifest fails every subsequent step of this very update. Paths are
+      # literal because the constants block has not been parsed yet.
+      _mf=/usr/local/libexec/clawbox/clawbox-root-manifest.sh
+      if [ "$_b" = "/home/clawbox/clawbox" ] && [ -x "$_mf" ]; then
+        "$_mf" --write || echo "[bootstrap] WARN: could not re-record the root-exec manifest" >&2
+      fi
       echo "[bootstrap] Re-executing as $(git -C "$_b" -c safe.directory="$_b" rev-parse --short HEAD)..."
       exec env CLAWBOX_INSTALL_BOOTSTRAPPED=1 bash "$_b/install.sh" "$@"
     fi
@@ -541,12 +550,45 @@ if ! has_openclaw_harness; then
   FOREIGN_EDITION_UNITS+=(clawbox-gateway.service)
 fi
 
-# Load persisted WiFi interface if available
+# Read one KEY=VALUE out of a file this script does NOT trust.
+#
+# Everything under $PROJECT_DIR/data is written by the web server, i.e. by the
+# clawbox user — and install.sh runs as root, reached from a NOPASSWD grant. So
+# `source`ing anything in there is arbitrary root code execution for anything
+# with clawbox-level code execution: the web server, the in-UI terminal, the
+# agent's shell. `printf 'x() { :; }; id > /tmp/pwn\n' > data/hostname.env` plus
+# the granted `clawbox-root-update@set_hostname.service` was exactly that, and
+# data/network.env was worse still because it was sourced on EVERY root run of
+# this script, `--step chpasswd` included.
+#
+# Parse instead: first matching assignment, optional single or double quotes
+# stripped, and nothing containing a character that could not have come from the
+# writer we expect. The caller still validates the meaning of the value.
+# TASK-445.
+read_untrusted_env_value() {
+  local file="$1" key="$2" line value
+  [ -f "$file" ] || return 0
+  [ -L "$file" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
+  value="${line#*=}"
+  # Strip one layer of matching quotes.
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  case "$value" in
+    ""|*[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s' "$value"
+}
+
+# Load persisted WiFi interface if available.
 IFACE_ENV="$PROJECT_DIR/data/network.env"
-if [ -f "$IFACE_ENV" ]; then
-  # shellcheck disable=SC1090
-  source "$IFACE_ENV"
+_persisted_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_persisted_iface" ]; then
+  NETWORK_INTERFACE="$_persisted_iface"
 fi
+unset _persisted_iface
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1017,11 +1059,13 @@ validate_hostname() {
 # Falls back to "clawbox".
 read_configured_hostname() {
   local hostname_env="$PROJECT_DIR/data/hostname.env"
-  local name=""
-  if [ -f "$hostname_env" ]; then
-    # shellcheck source=/dev/null
-    name=$(. "$hostname_env" 2>/dev/null; printf '%s' "${HOSTNAME:-}")
-  fi
+  # PARSED, never sourced. data/ is clawbox-writable and this function runs as
+  # root from the granted clawbox-root-update@set_hostname.service, so `.` on
+  # this file was arbitrary root code execution for anything that can already
+  # run code as clawbox. validate_hostname below still decides whether the value
+  # is usable; this only decides that it is a value and not a program. TASK-445.
+  local name
+  name="$(read_untrusted_env_value "$hostname_env" HOSTNAME)"
   if [ -z "$name" ]; then
     name="clawbox"
   fi
@@ -1478,6 +1522,10 @@ sync_repo_to_update_target() {
   fi
   git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" reset --hard "$upstream_branch"
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR"
+  # The tree root is allowed to execute just changed. Re-record it here, in the
+  # same function that changed it, so no later step of this update runs against
+  # a manifest describing the previous checkout.
+  refresh_root_exec_manifest
 }
 
 step_bootstrap_updater() {
@@ -2776,11 +2824,32 @@ step_persistent_journal() {
 # TASK-445.
 ROOT_LIBEXEC_DIR="/usr/local/libexec/clawbox"
 
+ROOT_EXEC_MANIFEST_HELPER="$ROOT_LIBEXEC_DIR/clawbox-root-manifest.sh"
+
+# Record the tree root is allowed to execute. Strict: a non-zero return means
+# the record is NOT current, and the caller must treat that as a failure.
+write_root_exec_manifest() {
+  [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 1
+  "$ROOT_EXEC_MANIFEST_HELPER" --write
+}
+
+# Best-effort variant for the update paths that legitimately change the tree. A
+# device that has not installed the helper yet has no manifest to keep in step,
+# and warning about that on every sync would be noise; a helper that IS present
+# and fails is worth a line, because the next root step refuses until the record
+# is current again.
+refresh_root_exec_manifest() {
+  [ -x "$ROOT_EXEC_MANIFEST_HELPER" ] || return 0
+  write_root_exec_manifest || echo "  Warning: could not re-record the root-exec manifest; root steps will refuse until an operator runs 'sudo bash $PROJECT_DIR/install.sh --step systemd_services'" >&2
+}
+
 install_root_libexec() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
   local src
-  for src in clawbox-root-step.sh; do
+  # The integrity helper first: the dispatcher installed at the END of this
+  # function refuses to run any step unless the manifest this writes verifies.
+  for src in clawbox-root-manifest.sh; do
     if [ -f "$PROJECT_DIR/config/$src" ]; then
       install -o root -g root -m 0755 "$PROJECT_DIR/config/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
@@ -2799,6 +2868,278 @@ install_root_libexec() {
     install -o root -g root -m 0644 "$PROJECT_DIR/config/clawbox-resource-limits.env" \
       /etc/clawbox/resource-limits.env
   fi
+
+  # Manifest, THEN dispatcher — never the other way round. The dispatcher fails
+  # closed on a missing or stale manifest, so installing it first would leave a
+  # window (and, if the manifest write failed, a permanent state) in which every
+  # root step refuses: no password change, no hostname change, no hotspot
+  # restart, on an appliance with no console. If the record cannot be written we
+  # keep whatever dispatcher is already installed and say so — the same rule
+  # install_sudoers_dropin follows for the allow-list. TASK-445.
+  if write_root_exec_manifest; then
+    if [ -f "$PROJECT_DIR/config/clawbox-root-step.sh" ]; then
+      install -o root -g root -m 0755 "$PROJECT_DIR/config/clawbox-root-step.sh" \
+        "$ROOT_LIBEXEC_DIR/clawbox-root-step.sh"
+    fi
+  else
+    echo "  Warning: could not record the root-exec manifest; leaving the existing root dispatcher in place" >&2
+    record_provision_failure "root_exec_manifest"
+  fi
+}
+
+# ── sudoers ────────────────────────────────────────────────────────────────
+SUDOERS_DIR="/etc/sudoers.d"
+# Copies of drop-ins we removed, kept so a device can be forensically explained
+# (and a removal undone by hand) instead of the file simply vanishing. Root-only:
+# the clawbox user must not be able to read a rule back out and re-plant it.
+SUDOERS_QUARANTINE_DIR="/var/lib/clawbox/sudoers-quarantine"
+# Where a candidate drop-in is staged while it is validated. Root-owned and
+# NOT under /etc/sudoers.d — see install_sudoers_dropin().
+#
+# A subdirectory of its own, not /var/lib/clawbox itself: that directory is
+# shared (clawbox-power-mode.sh keeps its clock snapshot there, the first-boot
+# VNC marker lives there), and install_sudoers_dropin creates its staging dir
+# 0700 root:root. Applying that to the shared parent would stop every non-root
+# reader from even traversing it.
+SUDOERS_STAGING_DIR="/var/lib/clawbox/sudoers-staging"
+# The drop-ins this installer owns. Nothing else in /etc/sudoers.d is ours, and
+# quarantine_overbroad_sudoers() below is the only code that touches the rest.
+CLAWBOX_SUDOERS_MANAGED=(clawbox clawbox-ollama)
+
+# Install a sudoers drop-in only if it VALIDATES FIRST.
+#
+# The old order was cp -> visudo -cf -> rm + exit 1 on failure, which turned a
+# typo in the repo into a device with no drop-in at all: every systemctl the web
+# server needs (updater, power, wifi hand-off, factory reset, desktop toggle)
+# then fails on a password prompt nobody can answer, on an appliance with no
+# console. So: validate a staged copy, install only if it parses, and on failure
+# leave whatever is already installed exactly where it is and say so. TASK-445.
+#
+# The staging copy deliberately does NOT live in /etc/sudoers.d — sudo parses
+# every file in that directory, so a candidate staged there is live the moment
+# it lands, valid or not.
+install_sudoers_dropin() {
+  local src="$1" name="$2"
+  local dest="$SUDOERS_DIR/$name"
+
+  if [ ! -f "$src" ]; then
+    echo "  Warning: $src is missing; leaving $dest as it is" >&2
+    return 1
+  fi
+
+  install -d -o root -g root -m 0755 "$SUDOERS_DIR" || return 1
+  install -d -o root -g root -m 0700 "$SUDOERS_STAGING_DIR" || return 1
+
+  local staged
+  staged="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-candidate.XXXXXX")" || return 1
+  # Checked, not assumed. Both call sites invoke this function in a CONDITION
+  # context (`if install_sudoers_dropin …`, `… || echo`), and bash disables
+  # `set -e` for the whole dynamic extent of a command being tested. So every
+  # step in here has to carry its own `|| return 1`: an unchecked failure does
+  # not abort the script, it falls through to the next line and reports success.
+  # A truncated-but-parseable candidate — a `cat` that hit ENOSPC halfway down
+  # the allow-list — validates under visudo and installs cleanly. TASK-445.
+  if ! cat "$src" > "$staged"; then
+    rm -f "$staged"
+    echo "Error: could not stage $src; keeping the existing $dest" >&2
+    return 1
+  fi
+  if ! cmp -s "$src" "$staged"; then
+    rm -f "$staged"
+    echo "Error: staged copy of $src is truncated; keeping the existing $dest" >&2
+    return 1
+  fi
+  chown root:root "$staged" || { rm -f "$staged"; return 1; }
+  chmod 0440 "$staged" || { rm -f "$staged"; return 1; }
+
+  if ! visudo -cf "$staged" >/dev/null 2>&1; then
+    rm -f "$staged"
+    echo "Error: $src failed visudo validation; keeping the existing $dest" >&2
+    return 1
+  fi
+
+  # Byte-identical to what is already installed: nothing to do. Keeps repeat
+  # updates from opening a window where the file is momentarily replaced.
+  if [ -f "$dest" ] && cmp -s "$staged" "$dest"; then
+    rm -f "$staged"
+    return 0
+  fi
+
+  local backup=""
+  if [ -f "$dest" ]; then
+    backup="$(mktemp "$SUDOERS_STAGING_DIR/.sudoers-previous.XXXXXX")" || { rm -f "$staged"; return 1; }
+    if ! cat "$dest" > "$backup" || ! cmp -s "$dest" "$backup"; then
+      rm -f "$staged" "$backup"
+      echo "Error: could not back up $dest; leaving it as it is" >&2
+      return 1
+    fi
+  fi
+
+  # install(1) writes to a temp file and renames, so sudo never sees a
+  # half-written drop-in.
+  #
+  # POSITIVE PROOF, not a return code. The caller uses this function's result to
+  # decide whether it is safe to quarantine the blanket `NOPASSWD: ALL` drop-in,
+  # and the `visudo -c` below cannot tell it: when `install` fails, visudo
+  # happily validates whatever is STILL on disk and answers 0. On a device whose
+  # only grant is the blanket one, that sequence ends with the narrow file never
+  # written and the blanket file removed — no working sudo at all, on an
+  # appliance with no console. So compare the bytes that actually landed.
+  if ! install -o root -g root -m 0440 "$staged" "$dest" 2>/dev/null || ! cmp -s "$staged" "$dest"; then
+    if [ -n "$backup" ]; then
+      # `install` may have left a partial/renamed file behind; put the previous
+      # content back rather than trusting that it never got that far.
+      install -o root -g root -m 0440 "$backup" "$dest" 2>/dev/null \
+        || echo "Error: could not restore $dest from its backup at $backup" >&2
+    else
+      rm -f "$dest"
+    fi
+    rm -f "$staged" "$backup"
+    echo "Error: could not install $name into $dest; leaving the existing grants alone" >&2
+    return 1
+  fi
+  rm -f "$staged"
+
+  # Re-check the WHOLE set: a fragment can be valid on its own and still collide
+  # with another drop-in (duplicate alias, bad include order).
+  if ! visudo -c >/dev/null 2>&1; then
+    if [ -n "$backup" ]; then
+      # The "rolled back" message used to print whether or not the rollback
+      # worked. Say what actually happened — a device that is now missing its
+      # drop-in entirely has to be distinguishable in the install log from one
+      # that is safely back on its previous rules.
+      if install -o root -g root -m 0440 "$backup" "$dest" 2>/dev/null; then
+        echo "Error: installing $name broke /etc/sudoers validation; rolled $dest back" >&2
+      else
+        rm -f "$dest"
+        echo "Error: installing $name broke /etc/sudoers validation AND the rollback failed; removed $dest" >&2
+      fi
+    else
+      rm -f "$dest"
+      echo "Error: installing $name broke /etc/sudoers validation; removed $dest" >&2
+    fi
+    rm -f "$backup"
+    return 1
+  fi
+
+  rm -f "$backup"
+  return 0
+}
+
+# Does this drop-in hand the clawbox service user unrestricted passwordless root?
+#
+# Deliberately narrow. Only a rule whose user spec is `clawbox` or `%clawbox`
+# AND whose Cmnd is a bare `ALL` under an active NOPASSWD tag counts. An
+# operator's own `%sudo`/`%admin` rule, and the distro default in /etc/sudoers,
+# are never inspected and never touched: removing those could lock the only
+# administrator out of a device that is 3000 km away.
+#
+# ACCEPTED RESIDUAL, recorded so the next reader does not mistake it for an
+# oversight. Three shapes are knowingly out of scope, all for the same reason —
+# each would mean this installer silently rewriting rules a human wrote:
+#
+#   1. A blanket line inside /etc/sudoers itself. Only /etc/sudoers.d is walked.
+#      e2e-install/06-sudoers.spec.ts catches this behaviourally instead: it runs
+#      `sudo -n` probes for commands no grant names and requires DENIED.
+#   2. A grant that reaches clawbox through a User_Alias rather than by name.
+#   3. Over-broad but not blanket — e.g. `clawbox ALL=(ALL) NOPASSWD: /bin/bash`,
+#      which is root in one move but is not a bare `ALL`.
+#
+# Widening the detector to any of these means an installer that can delete an
+# operator's deliberate rule on an appliance with no console; the behavioural
+# probes in CI are the compensating control. TASK-445.
+sudoers_grants_blanket_nopasswd() {
+  local file="$1"
+  [ -f "$file" ] || return 1
+  awk '
+    function check(l,   eq, rest, n, parts, i, item, tag, nopass) {
+      if (l !~ /^[ \t]*(clawbox|%clawbox)[ \t]/) return 0
+      eq = index(l, "=")
+      if (eq == 0) return 0
+      rest = substr(l, eq + 1)
+      nopass = 0
+      n = split(rest, parts, ",")
+      for (i = 1; i <= n; i++) {
+        item = parts[i]
+        gsub(/^[ \t]+|[ \t]+$/, "", item)
+        sub(/^\([^)]*\)[ \t]*/, "", item)
+        while (match(item, /^(NOPASSWD|PASSWD|NOEXEC|EXEC|SETENV|NOSETENV|LOG_INPUT|NOLOG_INPUT|LOG_OUTPUT|NOLOG_OUTPUT|MAIL|NOMAIL|FOLLOW|NOFOLLOW|INTERCEPT|NOINTERCEPT):[ \t]*/)) {
+          tag = substr(item, 1, RLENGTH)
+          if (tag ~ /^NOPASSWD:/) nopass = 1
+          else if (tag ~ /^PASSWD:/) nopass = 0
+          item = substr(item, RLENGTH + 1)
+          gsub(/^[ \t]+|[ \t]+$/, "", item)
+        }
+        if (nopass && item == "ALL") return 1
+      }
+      return 0
+    }
+    {
+      line = $0
+      sub(/#.*$/, "", line)
+      if (line ~ /\\[ \t]*$/) { sub(/\\[ \t]*$/, "", line); pending = pending line; next }
+      line = pending line
+      pending = ""
+      if (check(line)) { found = 1; exit }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$file"
+}
+
+# Move any /etc/sudoers.d drop-in that hands clawbox unrestricted passwordless
+# root out of sudo's way.
+#
+# Why the installer has to do this rather than just shipping a narrow file: sudo
+# takes the UNION of every drop-in. QA and factory provisioning left
+# `/etc/sudoers.d/90-clawbox-nopasswd` containing `clawbox ALL=(ALL) NOPASSWD: ALL`
+# on shipped devices, and while that file exists every narrowing in
+# config/clawbox-sudoers is decorative — the revalidation of TASK-445 measured
+# exactly that on the QA box. Narrowing what we ship without removing what is
+# already there changes nothing on a device that has both. TASK-445 round 2.
+quarantine_overbroad_sudoers() {
+  [ -d "$SUDOERS_DIR" ] || return 0
+
+  local f base m managed
+  local -a moved_from=() moved_to=()
+  for f in "$SUDOERS_DIR"/*; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    managed=0
+    for m in "${CLAWBOX_SUDOERS_MANAGED[@]}"; do
+      [ "$base" = "$m" ] && managed=1 && break
+    done
+    [ "$managed" = "1" ] && continue
+    sudoers_grants_blanket_nopasswd "$f" || continue
+
+    install -d -o root -g root -m 0700 "$SUDOERS_QUARANTINE_DIR"
+    local stamp dest
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+    dest="$SUDOERS_QUARANTINE_DIR/$base.$stamp"
+    if mv "$f" "$dest" 2>/dev/null; then
+      chown root:root "$dest"
+      chmod 0400 "$dest"
+      moved_from+=("$f")
+      moved_to+=("$dest")
+      echo "  Removed over-broad sudoers drop-in $base (clawbox had passwordless root on everything); copy kept at $dest"
+    else
+      echo "  Warning: could not remove over-broad sudoers drop-in $base" >&2
+    fi
+  done
+
+  [ "${#moved_to[@]}" -eq 0 ] && return 0
+
+  # Removing a file can still break the set — a quarantined drop-in may have
+  # defined an alias another one uses. Put everything back rather than leave a
+  # device where sudo refuses every command.
+  if ! visudo -c >/dev/null 2>&1; then
+    local i
+    for i in "${!moved_to[@]}"; do
+      mv "${moved_to[$i]}" "${moved_from[$i]}" 2>/dev/null || true
+    done
+    echo "Error: removing the over-broad sudoers drop-in(s) broke /etc/sudoers validation; restored them" >&2
+    return 1
+  fi
+  return 0
 }
 
 step_systemd_services() {
@@ -2897,18 +3238,50 @@ step_systemd_services() {
   # Root-owned copies of everything root executes on clawbox's behalf. Must run
   # BEFORE the sudoers drop-in, which points at them.
   install_root_libexec
-  # Install sudoers rules so the clawbox user can manage services (systemctl restart, reboot, etc.)
-  if [ -f "$PROJECT_DIR/config/clawbox-sudoers" ]; then
-    cp "$PROJECT_DIR/config/clawbox-sudoers" /etc/sudoers.d/clawbox
-    chmod 0440 /etc/sudoers.d/clawbox
-    chown root:root /etc/sudoers.d/clawbox
-    if ! visudo -cf /etc/sudoers.d/clawbox >/dev/null; then
-      rm -f /etc/sudoers.d/clawbox
-      echo "Error: sudoers drop-in failed visudo validation; removed to keep sudo functional" >&2
-      exit 1
-    fi
+  # Install the narrow allow-list FIRST, then remove any blanket grant. In that
+  # order the device is never, even briefly, without the rules the web server
+  # needs: if the drop-in fails to validate we keep the old one and skip the
+  # quarantine entirely rather than strand the box with neither.
+  # The ollama optimiser grant is a SECOND drop-in and it belongs here, next to
+  # the first one — not in step_performance_mode where it used to live. That
+  # step returns early under CLAWBOX_TEST_MODE and is Jetson-only in spirit, so
+  # the grant silently never landed on any box that took the early return: the
+  # e2e-install container installed cleanly and still had no
+  # `optimize-ollama.sh` grant, which is the same "the narrowing is invisible on
+  # the device" shape TASK-445 exists to close. step_systemd_services is the one
+  # step both a fresh install and the in-app updater (step_post_update) always
+  # run, unconditionally. TASK-445.
+  #
+  # Called plainly, never as the tested command of an `if`: bash suspends
+  # `set -e` for the entire dynamic extent of a command run in a condition
+  # context, so that spelling disarmed every unchecked command inside the
+  # function body too. The function now checks its own steps, and the status
+  # comes back through an explicit variable.
+  local sudoers_status=0
+  set +e
+  install_sudoers_dropin "$PROJECT_DIR/config/clawbox-sudoers" clawbox
+  sudoers_status=$?
+  set -e
+
+  # Two independent gates before the blanket grant is removed: the installer
+  # reported success, AND the bytes on the device are the allow-list we shipped.
+  # The second one is the load-bearing half — it is proof about the device, not
+  # about a code path, and it is what makes "installed the narrow rules" a
+  # precondition of "removed the wide ones" instead of an assumption.
+  if [ "$sudoers_status" -eq 0 ] \
+    && cmp -s "$PROJECT_DIR/config/clawbox-sudoers" "$SUDOERS_DIR/clawbox"; then
     echo "  Sudoers rules installed"
+    # Gated on the PRIMARY allow-list only. That file is what keeps the box
+    # operable (wizard, updater, power, hotspot); the ollama grant is one
+    # feature's tuning. Letting a missing feature grant block the quarantine
+    # would leave a device on blanket passwordless root to protect a KV-cache
+    # setting — the wrong trade in the wrong direction.
+    quarantine_overbroad_sudoers || true
+  else
+    echo "  Warning: sudoers rules NOT updated; leaving the existing grants alone" >&2
   fi
+  install_sudoers_dropin "$PROJECT_DIR/config/sudoers-clawbox-ollama" clawbox-ollama || \
+    echo "  Warning: clawbox-ollama sudoers rules NOT updated; leaving the existing grant alone" >&2
   echo "  Services installed and enabled"
 }
 
@@ -3309,15 +3682,18 @@ step_performance_mode() {
   fi
   # snapd is kept running — required for snap-based Chromium on Ubuntu 22.04
   # Optimize Ollama for 8GB Jetson
-  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
-  cp "$PROJECT_DIR/config/sudoers-clawbox-ollama" /etc/sudoers.d/clawbox-ollama
-  chmod 440 /etc/sudoers.d/clawbox-ollama
-  chown root:root /etc/sudoers.d/clawbox-ollama
-  if ! visudo -cf /etc/sudoers.d/clawbox-ollama >/dev/null; then
-    rm -f /etc/sudoers.d/clawbox-ollama
-    echo "Error: clawbox-ollama sudoers drop-in failed visudo validation; removed" >&2
-    exit 1
-  fi
+  # Run the ROOT-OWNED copy, not the one in the clawbox-writable project tree:
+  # it is the copy the sudoers grant points at, so running it here is also the
+  # check that install_root_libexec actually put it there. A device whose
+  # /usr/local/libexec/clawbox/optimize-ollama.sh is missing is a device where
+  # saving a local Ollama model silently skips the q8_0 KV-cache / flash-attention
+  # tuning, which is exactly what the TASK-445 revalidation found. TASK-445.
+  #
+  # The grant that names this path is installed by step_systemd_services, not
+  # here: everything below this point is behind the is_test_mode early return
+  # above, so installing a sudoers drop-in here meant it never landed on a box
+  # that took that return. TASK-445.
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
   # The cgroup memory guards. Deliberately AFTER the ollama optimiser, so the
   # unit it just restarted picks the limits up on the daemon-reload below.
   step_resource_limits
@@ -3384,8 +3760,12 @@ step_ollama_install() {
   # Ensure the service is enabled and running
   systemctl enable ollama 2>/dev/null || true
   systemctl start ollama 2>/dev/null || true
-  # Apply Jetson memory optimizations
-  bash "$PROJECT_DIR/scripts/optimize-ollama.sh"
+  # Apply Jetson memory optimizations. Root-owned copy again, same reason as in
+  # step_performance_mode: this runs as root, and /home/clawbox/clawbox/scripts
+  # is clawbox-writable, so sourcing the repo copy here would be a root path
+  # through a file the web server can rewrite. TASK-445.
+  install_root_libexec
+  "$ROOT_LIBEXEC_DIR/optimize-ollama.sh"
   echo "  Ollama installed and running"
 
   # Local embedding model for semantic memory. OpenClaw's memory search
@@ -3633,14 +4013,78 @@ step_llamacpp_install() {
   echo "  llama.cpp runtime ready"
 }
 
+# Set the appliance owner's system password.
+#
+# The record arrives in a file the web server wrote, and the web server runs as
+# the clawbox user — so $PROJECT_DIR/data is clawbox-writable and this input is
+# attacker-choosable by anything with clawbox-level code execution. Until
+# TASK-445 every guard on the record lived on the UNPRIVILEGED side, in
+# src/lib/chpasswd.ts; the root side piped whatever it found straight into
+# chpasswd. Dropping `root:<new>` into that path and starting the granted unit
+# therefore set ROOT's password.
+#
+# So validate here, where the boundary actually is. chpasswd's format is
+# `<user>:<password>` per line and it happily takes a list, so all three of
+# "which user", "how many records" and "what may the record contain" have to be
+# pinned:
+#
+#   * exactly one record, so a second line cannot smuggle in another account;
+#   * the user field is exactly $CLAWBOX_USER — never root, never anything else;
+#   * a non-empty password with no CR or NUL, matching the checks the route
+#     already makes (src/lib/chpasswd.ts::chpasswdRecord).
+#
+# Residual, recorded deliberately: clawbox is in the `sudo` group, so being able
+# to set the CLAWBOX user's own password is still a route from clawbox code
+# execution to an interactive root shell. That is the owner's own administrator
+# account and removing it would lock the only administrator out of a console-less
+# appliance (see config/clawbox-sudoers and e2e-install/06-sudoers.spec.ts). What
+# this closes is the part that was never intended: changing a DIFFERENT account's
+# password, root's included.
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
+  # -f follows symlinks; -L rejects the link itself. A symlink here would be a
+  # way to make root read a file the clawbox user could not otherwise feed in.
+  if [ -L "$INPUT_FILE" ]; then
+    rm -f "$INPUT_FILE"
+    echo "Error: password input file is a symlink; refusing" >&2
+    exit 64
+  fi
   if [ ! -f "$INPUT_FILE" ]; then
     echo "Error: password input file not found" >&2
     exit 1
   fi
-  /usr/sbin/chpasswd < "$INPUT_FILE"
+
+  # Read the file ONCE and validate the value actually used — re-reading it
+  # after the checks would leave a window to swap the contents. Command
+  # substitution strips trailing newlines, so a well-formed single record has no
+  # embedded newline left and a second record is visible as one. It also drops
+  # NUL bytes, and it is the stripped value that is piped to chpasswd below, so
+  # no NUL can reach it either.
+  local record user
+  record="$(cat "$INPUT_FILE")"
   rm -f "$INPUT_FILE"
+
+  case "$record" in
+    *$'\n'*)
+      echo "Error: password input must be exactly one record" >&2
+      exit 64
+      ;;
+    *$'\r'*)
+      echo "Error: password input contains a carriage return" >&2
+      exit 64
+      ;;
+  esac
+  user="${record%%:*}"
+  if [ "$user" != "$CLAWBOX_USER" ]; then
+    echo "Error: password input names '$user'; only $CLAWBOX_USER may be changed here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "${record#*:}" ]; then
+    echo "Error: password input has no password" >&2
+    exit 64
+  fi
+
+  printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
 step_rebuild() {
@@ -4191,11 +4635,13 @@ step_validate_services() {
   # probe failures.
 
   # step_network_setup persists NETWORK_INTERFACE to network.env but doesn't
-  # export it, so on a fresh install our process still has it unset. Reload
-  # the file before probing.
-  if [ -f "$IFACE_ENV" ]; then
-    # shellcheck disable=SC1090
-    source "$IFACE_ENV"
+  # export it, so on a fresh install our process still has it unset. Reload the
+  # value before probing — PARSED from the clawbox-writable copy, sourced only
+  # from the root-owned one. See read_untrusted_env_value. TASK-445.
+  local _iface
+  _iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+  if [ -n "$_iface" ]; then
+    NETWORK_INTERFACE="$_iface"
   elif [ -f /etc/clawbox/network.env ]; then
     # shellcheck disable=SC1091
     source /etc/clawbox/network.env
@@ -4578,10 +5024,13 @@ step_validate_services || VALIDATE_RC=$?
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
-# Re-read persisted interface for summary
-if [ -f "$IFACE_ENV" ]; then
-  source "$IFACE_ENV"
+# Re-read the persisted interface for the summary. Parsed, not sourced — this
+# file is clawbox-writable and we are root. TASK-445.
+_summary_iface="$(read_untrusted_env_value "$IFACE_ENV" NETWORK_INTERFACE)"
+if [ -n "$_summary_iface" ]; then
+  NETWORK_INTERFACE="$_summary_iface"
 fi
+unset _summary_iface
 
 echo ""
 echo "=== ClawBox Setup Complete ==="

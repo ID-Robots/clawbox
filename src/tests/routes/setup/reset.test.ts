@@ -30,6 +30,11 @@ vi.mock("@/lib/auth", () => ({
   getSystemUsername: vi.fn(() => "clawbox"),
 }));
 
+vi.mock("@/lib/local-ai-runtime", () => ({
+  getOllamaBaseUrl: vi.fn(() => "http://127.0.0.1:11434"),
+  startOllamaService: vi.fn(async () => {}),
+}));
+
 // The confirmation gate has its own file (`reset-confirmation.test.ts`), which
 // exercises the real one on real timers. Here it is stubbed open: this file is
 // about what the wipe does once it has been allowed to start, and the real gate
@@ -46,6 +51,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
 
 import { resetUpdateState } from "@/lib/updater";
 import { getSystemUsername } from "@/lib/auth";
+import { startOllamaService } from "@/lib/local-ai-runtime";
 
 type ReaddirResult = Awaited<ReturnType<typeof fs.readdir>>;
 
@@ -220,12 +226,20 @@ describe("POST /setup-api/setup/reset", () => {
     // Local AI exclusive mode routinely leaves Ollama STOPPED, and its models
     // live under /usr/share/ollama — unreachable by the home wipe. The reset
     // must start the service so the API deletes can actually run.
+    //
+    // Through the shared startOllamaService(), not a hand-rolled systemctl call:
+    // that helper is the one place the argv is pinned to the `start
+    // ollama.service` Cmnd_Spec in config/clawbox-sudoers, and it is the only
+    // caller that passes `-n` and keeps the unprivileged dev fallback. The bare
+    // `systemctl start ollama` this used to issue matched no sudoers rule and
+    // worked only through the unscoped polkit grant. TASK-445.
     await resetPost();
 
-    const call = mockExecFile.mock.calls.find(
-      ([cmd, args]) => cmd === "/usr/bin/systemctl" && args?.[0] === "start" && args?.[1] === "ollama",
+    expect(vi.mocked(startOllamaService)).toHaveBeenCalled();
+    const bareCall = mockExecFile.mock.calls.find(
+      ([cmd, args]) => typeof cmd === "string" && cmd.endsWith("systemctl") && args?.includes("ollama"),
     );
-    expect(call).toBeDefined();
+    expect(bareCall, "the reset must not talk to systemd about ollama itself").toBeUndefined();
   });
 
   it("deletes WiFi connections", async () => {

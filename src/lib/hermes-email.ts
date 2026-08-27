@@ -111,7 +111,9 @@ export async function hermesEmailState(): Promise<{
 /** Restart Hermes' messaging gateway so the adapter picks up the new .env. */
 export async function restartHermesForEmail(signal?: AbortSignal): Promise<boolean> {
   const status = await ensureHermesGateway(signal);
-  return status.running;
+  // Both halves: a restart that was refused leaves the gateway running on the
+  // PREVIOUS .env, which is exactly the state this function exists to rule out.
+  return status.running && status.applied;
 }
 
 /**
@@ -121,8 +123,15 @@ export async function restartHermesForEmail(signal?: AbortSignal): Promise<boole
  *   "stopped"      — the service was restarted and has dropped the adapter.
  *   "unmanaged"    — a gateway is running that this device did not install,
  *                    and it is STILL RECEIVING. See below.
+ *   "restart-failed" — the restart was attempted and refused (no grant, systemd
+ *                    error). Same user-visible consequence as "unmanaged": the
+ *                    old process is still polling the old mailbox.
  */
-export type EmailPollingStop = "none-running" | "stopped" | "unmanaged";
+export type EmailPollingStop =
+  | "none-running"
+  | "stopped"
+  | "unmanaged"
+  | "restart-failed";
 
 /**
  * Restart the gateway ONLY if one is already up, and report what that did.
@@ -147,6 +156,8 @@ export async function stopHermesEmailPolling(signal?: AbortSignal): Promise<Emai
   const before = await hermesGatewayStatus(signal);
   if (!before.running) return "none-running";
   if (!before.installed) return "unmanaged";
-  await ensureHermesGateway(signal);
-  return "stopped";
+  const after = await ensureHermesGateway(signal);
+  // runHermesCli resolves on non-zero and the status probe is unprivileged, so
+  // an unchecked await here reported "stopped" for a restart that was refused.
+  return after.applied ? "stopped" : "restart-failed";
 }

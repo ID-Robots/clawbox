@@ -52,15 +52,37 @@ fi
 # back up. It then stayed up until the next reboot, when setup_complete was
 # finally true and start-ap.sh skipped correctly.
 #
-# Sourced rather than grepped so a quoted SSID with a `#` in it cannot be
-# misread, and in a subshell so a malformed file cannot take the watchdog's own
-# variables with it. Missing file, unset flag, or anything other than 1 all mean
-# "not disabled" — the failure direction that keeps a box reachable.
-if [ -f "$HOTSPOT_ENV" ]; then
-  hotspot_disabled="$( ( set +u; . "$HOTSPOT_ENV" >/dev/null 2>&1; printf '%s' "${HOTSPOT_DISABLED:-}" ) 2>/dev/null )"
-  if [ "$hotspot_disabled" = "1" ]; then
-    exit 0
-  fi
+# PARSED, never sourced.
+#
+# This used to be `. "$HOTSPOT_ENV"` in a subshell — the subshell protected this
+# script's variables and nothing else. clawbox-ap-watchdog.service carries no
+# `User=`, so this runs as ROOT on a timer, while $ROOT/data is written by the
+# web server as the clawbox user. Sourcing it was therefore arbitrary root code
+# execution on a schedule for anything that could already run code as clawbox:
+# plant the payload, wait twenty seconds. TASK-445.
+#
+# The parse keeps the property the sourcing was chosen for — a quoted SSID with
+# a `#` in it cannot be misread, because only the named key's own line is read
+# and one layer of quotes is stripped. Missing file, unset flag, or anything
+# other than 1 all still mean "not disabled": the failure direction that keeps a
+# box reachable.
+read_env_value() {
+  local file="$1" key="$2" line value
+  [ -f "$file" ] || return 0
+  [ -L "$file" ] && return 0
+  line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
+  value="${line#*=}"
+  value="${value%$'\r'}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+hotspot_disabled="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_DISABLED)"
+if [ "$hotspot_disabled" = "1" ]; then
+  exit 0
 fi
 
 # A deliberate client-connect owns the radio right now — leave it alone so we

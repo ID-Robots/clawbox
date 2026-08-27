@@ -75,10 +75,20 @@ RUN systemctl enable NetworkManager avahi-daemon dbus
 
 # Create the clawbox user — install.sh does this too, but pre-creating it lets
 # us bake volume permissions correctly on first boot.
+# Two blanket drop-ins, on purpose. `90-clawbox-nopasswd` is the file the flash
+# pipeline bakes into the image, so a freshly flashed device is born with it —
+# nothing in this repo writes it, which is why it survives every install.sh run
+# and why quarantine_overbroad_sudoers is the only thing that can clear it.
+# `clawbox-nopasswd` is the second name seen in the field. The two lines are
+# also spelled differently on purpose — `NOPASSWD:ALL` and `NOPASSWD: ALL` —
+# because sudoers_grants_blanket_nopasswd parses the rule rather than matching
+# text, and both spellings are real. Seeding both proves the detector is
+# content-based, not name- or format-based.
 RUN useradd -m -s /bin/bash -u 1000 clawbox && \
     usermod -aG sudo clawbox && \
     echo 'clawbox ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/clawbox-nopasswd && \
-    chmod 0440 /etc/sudoers.d/clawbox-nopasswd
+    printf 'clawbox ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/90-clawbox-nopasswd && \
+    chmod 0440 /etc/sudoers.d/clawbox-nopasswd /etc/sudoers.d/90-clawbox-nopasswd
 
 # Pre-create project dir so volume mounts land on the right owner.
 RUN mkdir -p /home/clawbox/clawbox && chown -R clawbox:clawbox /home/clawbox

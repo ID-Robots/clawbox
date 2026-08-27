@@ -87,6 +87,16 @@ export async function POST(request: Request) {
     }
   }
 
+    // Clear a previous failure first. clawbox-root-update@.service does not
+    // set StartLimitIntervalSec=0, so a step that failed a few times hits
+    // systemd's start limit and every later start is refused until something
+    // resets it — which used to be nothing on this path. The chpasswd and
+    // llamacpp hand-offs already did this; these did not. TASK-445.
+    await execFileAsync("/usr/bin/sudo", [
+      "/usr/bin/systemctl",
+      "reset-failed",
+      "clawbox-root-update@set_hostname.service",
+    ]).catch(() => {});
   try {
     await execFileAsync("/usr/bin/sudo", [
       "/usr/bin/systemctl",

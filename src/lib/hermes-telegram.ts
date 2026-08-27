@@ -20,10 +20,14 @@
 //
 // Everything here goes through runHermesCli (argv only, never a shell).
 
+import { execFile } from "child_process";
 import fs from "fs/promises";
 import path from "path";
+import { promisify } from "util";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { PAIRING_TOKEN_RE, normalizePairingToken } from "@/lib/telegram-pairing-token";
+
+const execFileAsync = promisify(execFile);
 
 const PLATFORM = "telegram";
 
@@ -419,6 +423,93 @@ export async function hermesGatewayStatus(signal?: AbortSignal): Promise<HermesG
 /** Unix user the gateway system service should run as. */
 const GATEWAY_SERVICE_USER = process.env.CLAWBOX_USER || "clawbox";
 
+/** The system unit `hermes gateway install --system` writes. */
+const HERMES_GATEWAY_UNIT = "hermes-gateway.service";
+const SYSTEMCTL_BIN = "/usr/bin/systemctl";
+
+/**
+ * What `ensureHermesGateway` observed, plus whether the change it tried to make
+ * actually took.
+ *
+ * `running` alone is not an answer. The status probe runs `hermes gateway
+ * status` UNPRIVILEGED, so after a restart that was refused it still sees the
+ * OLD process — up, serving the PREVIOUS config — and reports `running: true`.
+ * Callers that keyed on that answered `{ restarted: true }` for a restart that
+ * never happened, and the user's new Telegram token silently did nothing.
+ */
+export interface HermesGatewayEnsureResult extends HermesGatewayStatus {
+  /**
+   * The restart (or first-time install) reported success. When false, the
+   * process serving right now may still be the one from before the config
+   * change, so the caller must degrade to "saved — applies on next restart"
+   * rather than claiming the change is live.
+   */
+  applied: boolean;
+}
+
+/**
+ * Restart the gateway's SYSTEM unit through systemctl.
+ *
+ * Not `sudo hermes gateway restart --system`: that execs
+ * /home/clawbox/.local/bin/hermes, which the clawbox user owns and can rewrite,
+ * so it is a file we must never hand passwordless root — and consequently one
+ * that could not be allow-listed, which is why the restart silently failed on a
+ * narrowed box. The unit is root-owned and runs `User=clawbox`, so restarting it
+ * through systemctl grants nothing the clawbox user did not already have.
+ *
+ * `-n` so a box without the grant fails in milliseconds instead of waiting on a
+ * password prompt no appliance can answer.
+ *
+ * Trade-off worth naming: the CLI's restart first attempts a SIGUSR1 graceful
+ * drain of in-flight turns. systemd sends SIGTERM instead, which the unit
+ * already handles (KillSignal=SIGTERM, KillMode=mixed, TimeoutStopSec). The CLI
+ * falls back to the same forced `systemctl restart` whenever the drain does not
+ * finish in budget, so this is the CLI's own fallback path, taken directly.
+ */
+async function restartHermesGatewayUnit(signal?: AbortSignal): Promise<boolean> {
+  try {
+    // argv[0] spelled as a literal, like every other privileged exec in the
+    // tree: scripts/check-sudoers-coverage.sh can only resolve a call site whose
+    // sudo binary is written out, and a grant it cannot see is a grant nobody
+    // notices going stale.
+    await execFileAsync("/usr/bin/sudo", ["-n", SYSTEMCTL_BIN, "restart", HERMES_GATEWAY_UNIT], {
+      timeout: GATEWAY_TIMEOUT_MS,
+      signal,
+    });
+    return true;
+  } catch (err) {
+    console.error("[hermes] gateway restart failed:", err);
+    return false;
+  }
+}
+
+/**
+ * Restart a USER-scope gateway service. Stays on the CLI (systemctl --user from
+ * a system service would be aimed at root's session bus, not clawbox's), and no
+ * sudo is involved, so there is nothing to allow-list.
+ *
+ * The exit code is checked rather than assumed: runHermesCli RESOLVES on a
+ * non-zero exit — it only rejects on spawn failure, timeout or abort — so an
+ * unchecked `await` here reads as success for every kind of failure the CLI
+ * reports properly.
+ */
+async function restartHermesGatewayUserService(signal?: AbortSignal): Promise<boolean> {
+  try {
+    const res = await runHermesCli(["gateway", "restart"], {
+      timeoutMs: GATEWAY_TIMEOUT_MS,
+      signal,
+    });
+    if (res.code !== 0) {
+      console.error(`[hermes] gateway restart exited ${res.code}: ${res.stderr || res.stdout}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error("[hermes] gateway restart failed:", err);
+    return false;
+  }
+}
+
 /**
  * Make sure Hermes' messaging gateway is installed and running, so Telegram
  * messages are actually received.
@@ -429,40 +520,51 @@ const GATEWAY_SERVICE_USER = process.env.CLAWBOX_USER || "clawbox";
  * ClawBox user, and Hermes resolves that user's home for HERMES_HOME itself, so
  * the unit is correct even though the install runs through sudo.
  */
-export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesGatewayStatus> {
+export async function ensureHermesGateway(signal?: AbortSignal): Promise<HermesGatewayEnsureResult> {
   const before = await hermesGatewayStatus(signal);
 
   if (before.installed) {
     // A system unit can only be controlled by root; a user unit must NOT be,
     // or systemctl --user would be aimed at root's session bus.
-    const systemScope = before.scope === "system";
-    await runHermesCli(["gateway", "restart", ...(systemScope ? ["--system"] : [])], {
-      timeoutMs: GATEWAY_TIMEOUT_MS,
-      signal,
-      sudo: systemScope,
-    });
-    return hermesGatewayStatus(signal);
+    const applied = before.scope === "system"
+      ? await restartHermesGatewayUnit(signal)
+      : await restartHermesGatewayUserService(signal);
+    return { ...(await hermesGatewayStatus(signal)), applied };
   }
 
   // A gateway running without a service unit is somebody's foreground
   // `hermes gateway run`. It is already receiving, and `gateway restart` would
   // fall through to running the next one in the FOREGROUND — which from a route
   // handler means blocking until the timeout kills it. Leave it alone.
-  if (before.running) return before;
+  //
+  // Nothing was applied here either: that process is still serving the config it
+  // started with, so the caller must not claim the change is live.
+  if (before.running) return { ...before, applied: false };
 
-  await runHermesCli(
-    [
-      "gateway",
-      "install",
-      "--system",
-      "--run-as-user",
-      GATEWAY_SERVICE_USER,
-      "--start-now",
-      "--start-on-login",
-    ],
-    { timeoutMs: GATEWAY_TIMEOUT_MS, signal, sudo: true },
-  );
-  return hermesGatewayStatus(signal);
+  // First-time provisioning only, and deliberately ungranted in sudoers: this
+  // writes a unit into /etc/systemd/system, and the only way to allow-list it
+  // would be a NOPASSWD grant on a clawbox-writable binary. `sudo -n` fails in
+  // milliseconds on a narrowed box; the `applied` flag carries that outward
+  // instead of it disappearing into a status probe.
+  let applied = false;
+  try {
+    const res = await runHermesCli(
+      [
+        "gateway",
+        "install",
+        "--system",
+        "--run-as-user",
+        GATEWAY_SERVICE_USER,
+        "--start-now",
+        "--start-on-login",
+      ],
+      { timeoutMs: GATEWAY_TIMEOUT_MS, signal, sudo: true },
+    );
+    applied = res.code === 0;
+  } catch (err) {
+    console.error("[hermes] gateway install failed:", err);
+  }
+  return { ...(await hermesGatewayStatus(signal)), applied };
 }
 
 /**

@@ -21,6 +21,13 @@ const SUDOERS = [
 
 const read = (p: string) => fs.readFileSync(p, "utf-8");
 
+/** The Cmnd_Spec of every `clawbox … NOPASSWD:` rule in a drop-in. */
+const grantsIn = (file: string): string[] =>
+  read(file)
+    .split("\n")
+    .filter((l) => l.trim().startsWith("clawbox ") && l.includes("NOPASSWD:"))
+    .map((l) => l.split("NOPASSWD:")[1].trim());
+
 /** Pull a whitespace-separated shell list assigned as NAME="..." . */
 function shellList(source: string, name: string): string[] {
   const m = new RegExp(`^${name}="([^"]*)"`, "m").exec(source);
@@ -99,12 +106,7 @@ describe("root-executed paths are outside clawbox's write access", () => {
 
   it("grants NOPASSWD root only on paths clawbox cannot write", () => {
     for (const file of SUDOERS) {
-      const grants = read(file)
-        .split("\n")
-        .filter((l) => l.trim().startsWith("clawbox ") && l.includes("NOPASSWD:"))
-        .map((l) => l.split("NOPASSWD:")[1].trim());
-
-      for (const grant of grants) {
+      for (const grant of grantsIn(file)) {
         expect(
           grant.includes("/home/clawbox"),
           `sudoers grants root on a clawbox-writable path: ${grant}`,
@@ -114,13 +116,42 @@ describe("root-executed paths are outside clawbox's write access", () => {
   });
 
   it("does not hand over the whole systemd unit namespace", () => {
-    const grants = read(SUDOERS[0]);
-    // `reset-failed *` / `start --no-block *` took ANY unit name. Every real
-    // caller passes a clawbox-* unit.
-    expect(grants).not.toMatch(/systemctl reset-failed \*/);
-    expect(grants).not.toMatch(/systemctl start --no-block \*\s*$/m);
-    expect(grants).toContain("systemctl reset-failed clawbox-*");
-    expect(grants).toContain("systemctl start --no-block clawbox-*");
+    // A `clawbox-*` PREFIX was not a scope. sudoers matches arguments as one
+    // concatenated string, so `*` spans whitespace and `systemctl start` takes a
+    // LIST of units: `start clawbox-root-update@chpasswd.service ssh.service`
+    // matched. Every grant is therefore an exact command now.
+    for (const file of SUDOERS) {
+      const grants = grantsIn(file);
+      expect(grants.length).toBeGreaterThan(0);
+      for (const grant of grants) {
+        expect(grant, `sudoers grant still uses a wildcard: ${grant}`).not.toMatch(/[*?]/);
+      }
+    }
+
+    // The instances the web server really starts, spelled out.
+    const primary = read(SUDOERS[0]);
+    for (const step of ["chpasswd", "set_hostname", "restart_ap", "llamacpp_install"]) {
+      expect(primary).toContain(`clawbox-root-update@${step}.service`);
+    }
+    // The update family runs through the updater's own root chain, not through
+    // a sudo grant the web server can reach.
+    for (const step of SELF_UPDATING_ROOT_STEPS) {
+      expect(primary, `${step} must not be startable through sudo`)
+        .not.toContain(`clawbox-root-update@${step}.service`);
+    }
+  });
+
+  it("verifies what root is about to run before it runs it", () => {
+    // GAP 2: the dispatcher is root-owned, but the file it exec'd was not.
+    // install.sh records everything root runs on clawbox's behalf and the
+    // dispatcher refuses a tree that no longer matches that record.
+    const dispatcher = read(DISPATCHER);
+    expect(dispatcher).toContain("clawbox-root-manifest.sh");
+    expect(dispatcher).toMatch(/--verify/);
+    const verifyAt = dispatcher.indexOf("--verify");
+    const execAt = dispatcher.indexOf("exec /bin/bash");
+    expect(execAt, "the dispatcher must still exec install.sh").toBeGreaterThan(-1);
+    expect(verifyAt, "the verification must happen BEFORE the exec").toBeLessThan(execAt);
   });
 
   it("installs the root-owned copies before the sudoers rules that point at them", () => {
@@ -128,8 +159,17 @@ describe("root-executed paths are outside clawbox's write access", () => {
     expect(sh).toContain("install_root_libexec");
     // The ollama grant's target must be the installed copy, not the repo one.
     expect(read(SUDOERS[1])).toContain("/usr/local/libexec/clawbox/optimize-ollama.sh");
-    const libexecAt = sh.indexOf("  install_root_libexec\n  # Install sudoers rules");
-    expect(libexecAt, "install_root_libexec must run before the sudoers drop-in").toBeGreaterThan(0);
+    // Asserted as an ORDER inside step_systemd_services rather than as one
+    // literal line, so the check survives the surrounding text changing (it did
+    // not, before TASK-445 round 2 rewrote the sudoers install).
+    const step = sh.slice(sh.indexOf("step_systemd_services() {"));
+    const body = step.slice(0, step.indexOf("\n}"));
+    const libexecAt = body.indexOf("install_root_libexec");
+    const grantAt = body.indexOf("install_sudoers_dropin");
+    expect(libexecAt, "install_root_libexec must be called by step_systemd_services").toBeGreaterThan(-1);
+    expect(grantAt, "the sudoers drop-in must be installed by step_systemd_services").toBeGreaterThan(-1);
+    expect(libexecAt, "install_root_libexec must run before the sudoers drop-in that points at it")
+      .toBeLessThan(grantAt);
   });
 
   it("gates install.sh's self-update on an explicit opt-in", () => {

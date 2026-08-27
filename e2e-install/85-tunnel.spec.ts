@@ -44,17 +44,24 @@ test.describe.configure({ mode: "serial" });
 test.describe("tunnel happy path", () => {
   test.beforeAll(async () => {
     // Drop the stub. Pass the script via base64 so newlines survive the
-    // double-shell hop (`docker exec` → `bash -lc` → `sudo tee`). echo with
+    // double-shell hop (`docker exec` → `bash -lc` → `tee`). echo with
     // unescaped \n would otherwise produce a one-line file with literal
     // backslash-n bytes, leaving cloudflared not actually executable.
+    //
+    // Runs as ROOT, not as clawbox-with-sudo. Planting a binary in
+    // /usr/local/bin is harness setup, not something the product ever does, and
+    // since TASK-445 the installer quarantines the container's blanket
+    // `clawbox ALL=(ALL) NOPASSWD: ALL` drop-in — as it does on a real device —
+    // so `sudo tee` from the clawbox user would (correctly) hit a password
+    // prompt here.
     const b64 = Buffer.from(STUB_SCRIPT).toString("base64");
     await dockerExec(
       [
         "bash",
         "-lc",
-        `echo ${b64} | base64 -d | sudo tee /usr/local/bin/cloudflared > /dev/null && sudo chmod +x /usr/local/bin/cloudflared`,
+        `echo ${b64} | base64 -d | tee /usr/local/bin/cloudflared > /dev/null && chmod +x /usr/local/bin/cloudflared`,
       ],
-      { user: "clawbox", timeoutMs: 15_000 },
+      { timeoutMs: 15_000 },
     );
   });
 
@@ -65,9 +72,9 @@ test.describe("tunnel happy path", () => {
       [
         "bash",
         "-lc",
-        "sudo rm -f /usr/local/bin/cloudflared || true; sudo pkill -f 'cloudflared' || true; sudo pkill -f 'sleep 600' || true",
+        "rm -f /usr/local/bin/cloudflared || true; pkill -f 'cloudflared' || true; pkill -f 'sleep 600' || true",
       ],
-      { user: "clawbox", timeoutMs: 15_000 },
+      { timeoutMs: 15_000 },
     ).catch(() => {});
   });
 

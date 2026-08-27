@@ -20,8 +20,11 @@
 # `--runtime unmask` grant further down cannot undo a persistent /etc mask.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-gateway
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-gateway
+# No `start` grant for clawbox-gateway, clawbox-setup or clawbox-tunnel. All three
+# are only ever brought up through the `restart` grants here — and restart starts a
+# stopped unit too — so `start` was a second spelling of a privilege nothing in the
+# tree exercised. clawbox-browser keeps its `start` because the Browser app really
+# does call it (src/app/setup-api/browser/route.ts). TASK-445 round 2.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-gateway
 # Mask/unmask: factory reset masks the gateway before wiping ~/.openclaw
@@ -37,18 +40,14 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gatewa
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-ap.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-ap
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-ap.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-ap
+# clawbox-ap deliberately has NO grant. Settings -> Hotspot restarts the AP
+# through clawbox-root-update@restart_ap.service (covered by the template grant
+# below), scripts/stop-ap.sh runs unprivileged, and every other AP restart is
+# inside install.sh, which is already root.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-browser.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-browser
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-browser.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-browser
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-tunnel.service
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-tunnel.service
@@ -62,6 +61,36 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl enable  clawbox-tunnel
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl disable clawbox-tunnel
+
+# Hermes' messaging gateway. This is the unit `hermes gateway install --system`
+# writes, and it is the process that RECEIVES Telegram / WhatsApp / Discord /
+# Email — so every config save on a provisioned Hermes box restarts it
+# (src/lib/hermes-telegram.ts ensureHermesGateway). It is NOT install-time-only.
+#
+# This grant is a strict REDUCTION in privilege, not an addition:
+#
+#   * The unit is root-owned in /etc/systemd/system and runs `User=clawbox`
+#     (Hermes writes it that way — `gateway install --system --run-as-user
+#     clawbox`). Restarting it therefore starts a process the clawbox user could
+#     have started itself. That is less than the `restart clawbox-gateway` grant
+#     above, whose unit has no User= at all.
+#   * It REPLACES `sudo -n /home/clawbox/.local/bin/hermes gateway restart
+#     --system`. That binary, and every directory above it, is clawbox-owned and
+#     clawbox-writable — exactly the shape the optimize-ollama.sh grant was moved
+#     to /usr/local/libexec to avoid. It could never be granted; the coverage
+#     checker had to carry it in EXEMPT_CALLS instead, which meant the restart
+#     silently failed on a narrowed box and the route still answered "restarted".
+#
+# No `start`: the restart grant starts a stopped unit too. No `reset-failed`:
+# the generated unit sets StartLimitIntervalSec=0, so there is no start limit to
+# clear. No wildcard: profile units (hermes-gateway-<profile>.service) are a
+# different privilege question and ClawBox only ever runs the default profile.
+# The first-time `gateway install --system` stays deliberately UNGRANTED — it
+# writes into /etc/systemd/system and cannot be expressed safely against a
+# clawbox-writable binary; it fails fast under `sudo -n` and the route now says
+# so instead of reporting success. TASK-445 follow-up.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes-gateway.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart hermes-gateway
 
 # Ollama, for Settings -> Local Models. Ollama is a system unit and it holds
 # real RAM on an 8 GB box, so the owner has to be able to stop it and have it
@@ -86,13 +115,37 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    ollama.service
 
 # Update / power / install paths.
 #
-# `reset-failed *` and `start --no-block *` used to take ANY unit name. Both are
-# only ever called with a clawbox-* unit (src/lib/updater.ts, the llamacpp
-# installer, the credentials chpasswd path, install/run-step), so scope them to
-# that prefix rather than handing over the whole unit namespace. TASK-445.
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-*
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-*
-clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@*.service
+# NO WILDCARDS, DELIBERATELY. These were three prefix rules — `reset-failed
+# clawbox-*`, `start --no-block clawbox-*` and `start
+# clawbox-root-update@*.service` — and a prefix is not a scope here. sudoers(5)
+# matches a command's arguments as one CONCATENATED string, so `*` spans
+# whitespace; `systemctl start` takes a LIST of units. That made
+#
+#     sudo /usr/bin/systemctl start clawbox-root-update@chpasswd.service ssh.service
+#
+# a match, i.e. the three rules together read "start, or reset-failed, ANY unit
+# as root without a password, as long as the first word begins with clawbox-".
+# Reproduced against sudo 1.9.9 — the Ubuntu 22.04 vintage the appliance runs —
+# with `sudo -U clawbox -l <cmd>`, which tests matching without executing.
+#
+# Regex Cmnd arguments would express the intent directly, but they arrived in
+# sudo 1.9.10, after the version on the device. So: enumeration, one exact rule
+# per (verb, unit) pair the product actually issues. The list is short because
+# only four `clawbox-root-update@` instances are reachable from the web server;
+# every other step is an operator path (`sudo bash install.sh --step …`) or runs
+# inside the updater's own root chain.
+#
+# Adding an instance here adds a root entrypoint — the granted step runs as root
+# through /usr/local/libexec/clawbox/clawbox-root-step.sh — so review it as a
+# privilege boundary, not as a config line. TASK-445.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@chpasswd.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@chpasswd.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@set_hostname.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@set_hostname.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@restart_ap.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@restart_ap.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@llamacpp_install.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-root-update@llamacpp_install.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff
 # apt is granted ONLY for the exact commands the Browser-app chromium recovery
