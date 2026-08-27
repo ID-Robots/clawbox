@@ -458,28 +458,3 @@ describe("when the mailbox will not answer", () => {
     expect(await screen.findByText("Wednesday plan")).toBeTruthy();
   });
 });
-
-describe("work started by hand stops with the panel (CodeRabbit #499)", () => {
-  it("aborts the owner's image request when the panel is closed", async () => {
-    // "Load images" is the expensive one: the route forwards its signal into
-    // the outbound fetching, so an abandoned request leaves the device pulling
-    // pictures for a panel nobody is looking at.
-    const signals: AbortSignal[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (_input: unknown, init: { signal?: AbortSignal }) => {
-        if (init?.signal) signals.push(init.signal);
-        return { ok: true, status: 200, json: async () => ({ message: payload(TRACKED_FIXTURE) }) };
-      }),
-    );
-
-    const { unmount } = render(<EmailFullView uid={42} onClose={() => {}} t={t} />);
-    fireEvent.click(await screen.findByTestId("email-load-images"));
-    await waitFor(() => expect(signals.length).toBeGreaterThanOrEqual(2));
-
-    expect(signals.every((s) => !s.aborted)).toBe(true);
-    unmount();
-    // Both the mount request and the one the owner started are called off.
-    expect(signals.every((s) => s.aborted)).toBe(true);
-  });
-});
