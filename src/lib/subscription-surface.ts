@@ -1,7 +1,7 @@
 import { promises as fsp } from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
-import { SUBSCRIPTION_SURFACE } from "@/lib/provider-models";
+import { SUBSCRIPTION_SURFACE, subscriptionSurfaceLabel } from "@/lib/provider-models";
 
 /**
  * Server-side reads of the SUBSCRIPTION facts the UI already gets stamped into
@@ -102,4 +102,69 @@ export function subscriptionOnlyProviders(
     else if (KEY_MODES.has(mode)) keyed.add(provider);
   }
   return [...oauth].filter((provider) => !keyed.has(provider)).sort();
+}
+
+/** Auth-profile entries as `openclaw.json` carries them under `auth.profiles`. */
+export type AuthProfileEntries =
+  Record<string, { provider?: string; mode?: string } | undefined> | undefined;
+
+/**
+ * Does this profile set mean the box reaches Claude by SUBSCRIPTION only?
+ *
+ * Named once because two routes ask it and both must get the same answer. It
+ * is deliberately a question about a profile SET rather than about a config
+ * object: the wizard save has to ask it about the profiles it is *about to*
+ * write, which no file on disk carries yet.
+ */
+export function isClaudeSubscriptionOnly(
+  profiles: AuthProfileEntries,
+  normalize?: (provider: string) => string | null,
+): boolean {
+  return subscriptionOnlyProviders(profiles, normalize).includes("anthropic");
+}
+
+/**
+ * The refusal for a Claude model id the box's subscription surface does not
+ * carry, as a message — or null when the target is fine (not Claude, not a
+ * Claude-subscription box, or the surface could not be read).
+ *
+ * Anthropic's subscription keeps the `anthropic/` namespace but narrows the
+ * set: only the plugin's `claude-cli` catalogue routes, so claude-mythos-5 /
+ * claude-fable-5 / the Haikus are API-key-only.
+ *
+ * It lives here, not in a route, because there are TWO write paths to
+ * `agents.defaults.model.primary` and each of them has more than one door:
+ *
+ *   * `/setup-api/chat/model` — the custom-model branch, an id that already
+ *     matches `state.options`, and `{"source":"primary"}`.
+ *   * `/setup-api/ai-models/configure` — a typed custom id from the wizard or
+ *     Settings, and the PROVIDERS-table default the same save writes when
+ *     nothing is typed.
+ *
+ * A second copy of this rule in the second route is a copy that can drift, and
+ * drift is precisely how the first route ended up guarded and the second not.
+ *
+ * `null` from `readSubscriptionSurfaceIds` means UNKNOWN, not "no": refusing
+ * where the pickers allow would be a rejection over something that works.
+ *
+ * `isClaudeSubscription` and `getSurfaceIds` are GETTERS, not values. The
+ * provider check comes first, so a save or a switch aimed at any other
+ * provider costs no config read and no cache read at all — on a Jetson
+ * neither is free.
+ */
+export async function offSurfaceClaudeModelMessage(
+  provider: string | null | undefined,
+  modelId: string,
+  isClaudeSubscription: () => boolean | Promise<boolean>,
+  getSurfaceIds: () => Promise<Set<string> | null> = () =>
+    readSubscriptionSurfaceIds("anthropic"),
+): Promise<string | null> {
+  if (provider !== "anthropic") return null;
+  if (!(await isClaudeSubscription())) return null;
+  const surfaceIds = await getSurfaceIds();
+  if (!surfaceIds || surfaceIds.has(modelId)) return null;
+  const surface = subscriptionSurfaceLabel("anthropic");
+  return `${modelId} is not on the Claude subscription surface (${surface}). `
+    + `Pick one of ${[...surfaceIds].sort().join(", ")}, `
+    + "or switch Anthropic to API-key mode for the API-only models.";
 }

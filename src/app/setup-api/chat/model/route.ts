@@ -16,8 +16,10 @@ import {
   CLAWBOX_AI_DEFAULT_TIER,
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
-import { isValidModelId, parseModelSlug, subscriptionSurfaceLabel } from "@/lib/provider-models";
+import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
 import {
+  isClaudeSubscriptionOnly,
+  offSurfaceClaudeModelMessage,
   readSubscriptionSurfaceIds,
   subscriptionOnlyProviders,
 } from "@/lib/subscription-surface";
@@ -158,9 +160,11 @@ function hasCodexOauthProfile(config: OpenClawConfig): boolean {
  * null when the target is fine (or is not Claude, or the box is not on a
  * Claude subscription, or the surface could not be read).
  *
- * Anthropic's subscription keeps the `anthropic/` namespace but narrows the
- * set: only the plugin's `claude-cli` catalogue routes, so claude-mythos-5 /
- * claude-fable-5 / the Haikus are API-key-only.
+ * A thin wrapper over `offSurfaceClaudeModelMessage`, which owns the rule and
+ * the wording. The rule is shared with the wizard/Settings save
+ * (/setup-api/ai-models/configure), the OTHER write path to
+ * `agents.defaults.model.primary` — a second copy of it there would be a copy
+ * that can drift, and drift is how one path ended up guarded and the other not.
  *
  * A helper rather than an inline block because there are THREE ways a model id
  * becomes the target and only one of them is the custom-model branch: an id
@@ -169,9 +173,6 @@ function hasCodexOauthProfile(config: OpenClawConfig): boolean {
  * exactly where the old unguarded auto-extend wrote, so a box already broken
  * by this defect could re-arm itself through either door. The OpenAI guard is
  * applied at both sites for the same reason.
- *
- * `null` from `readSubscriptionSurfaceIds` means UNKNOWN, not "no": refusing
- * where the pickers allow would be a rejection over something that works.
  */
 async function refuseOffSurfaceClaudeModel(
   provider: string | null | undefined,
@@ -182,18 +183,20 @@ async function refuseOffSurfaceClaudeModel(
   getConfig: () => Promise<OpenClawConfig | null>,
   getSurfaceIds: () => Promise<Set<string> | null>,
 ): Promise<NextResponse | null> {
-  if (provider !== "anthropic") return null;
-  const config = await getConfig();
-  if (!config) return null;
-  if (!subscriptionOnlyProviders(config.auth?.profiles, normalizeProvider).includes("anthropic")) {
-    return null;
-  }
-  const surfaceIds = await getSurfaceIds();
-  if (!surfaceIds || surfaceIds.has(modelId)) return null;
-  const surface = subscriptionSurfaceLabel("anthropic");
-  return NextResponse.json({
-    error: `${modelId} is not on the Claude subscription surface (${surface}). Pick one of ${[...surfaceIds].sort().join(", ")}, or switch Anthropic to API-key mode for the API-only models.`,
-  }, { status: 400 });
+  const message = await offSurfaceClaudeModelMessage(
+    provider,
+    modelId,
+    async () => {
+      const config = await getConfig();
+      // `normalizeProvider` goes IN, not around the outside — see
+      // `subscriptionProvidersForUi` for why the alias has to collapse before
+      // the credentials are counted.
+      return !!config && isClaudeSubscriptionOnly(config.auth?.profiles, normalizeProvider);
+    },
+    getSurfaceIds,
+  );
+  if (!message) return null;
+  return NextResponse.json({ error: message }, { status: 400 });
 }
 
 function sortPrimaryOptions(options: ChatModelOption[]) {
