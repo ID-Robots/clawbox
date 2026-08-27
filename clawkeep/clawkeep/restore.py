@@ -24,11 +24,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import tarfile
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import agent, api, crypto, passphrase, s3
@@ -50,6 +51,10 @@ class RestoreResult:
     archive_name: str
     archive_size_bytes: int
     assets: list[RestoredAsset]
+    #: Members deliberately NOT recreated (unsafe absolute symlinks). Almost
+    #: always empty. Carried out to the caller rather than left in the log so
+    #: a restore that dropped something can never present itself as complete.
+    skipped_members: list[str] = field(default_factory=list)
 
 
 class RestoreError(Exception):
@@ -122,6 +127,27 @@ def _member_name_unsafe(member: tarfile.TarInfo, prefix: str) -> bool:
     return any(p == ".." for p in parts if p)
 
 
+def _link_target_allowed(link: str, allowed_roots: tuple[str, ...]) -> bool:
+    """May an ABSOLUTE symlink target be recreated?
+
+    Yes when it points inside something this very archive declares it owns.
+    The Hermes shared-identity bridge is exactly that shape:
+    `~/.hermes/SOUL.md` and `~/.hermes/memories/{MEMORY,USER}.md` are absolute
+    symlinks into `~/.clawbox/agent-identity/`, which the manifest lists as its
+    own `identity` asset. Refusing them meant a restore quietly dropped the
+    agent's memory pointers and still reported success -- observed on the QA
+    box, where `memories/` came back holding nothing but a stale lock file.
+
+    Everything else absolute stays refused. A link to /etc/shadow is not made
+    safe by being inside a verified tarball.
+    """
+    target = os.path.normpath(link)
+    return any(
+        target == root or target.startswith(root.rstrip("/") + "/")
+        for root in allowed_roots
+    )
+
+
 def _member_link_unsafe(member: tarfile.TarInfo) -> bool:
     """True for symlinks/hardlinks whose target is absolute. Relative `..`
     targets are allowed: openclaw plugin-runtime-deps legitimately ship
@@ -141,6 +167,7 @@ def _extract_file_from_open(
     *,
     archive_subpath: str,
     staging_root: Path,
+    allowed_roots: tuple[str, ...] = (),
 ) -> int:
     """Extract a SINGLE-FILE asset: the one member whose name is exactly
     `archive_subpath`.
@@ -180,6 +207,8 @@ def _extract_asset_from_open(
     *,
     archive_subpath: str,
     staging_root: Path,
+    allowed_roots: tuple[str, ...] = (),
+    skipped: list[str] | None = None,
 ) -> int:
     """Extract every member under `archive_subpath/` into `staging_root/`.
 
@@ -208,17 +237,37 @@ def _extract_asset_from_open(
                     raise RestoreError(
                         f"archive contains an unsafe member: {member.name!r}"
                     )
-                if _member_link_unsafe(member):
-                    # Absolute symlink target — skip rather than abort the
-                    # restore; the file isn't critical (openclaw rebuilds
-                    # plugin metadata on next launch) and the alternative
-                    # is failing the entire restore over a single bad link.
+                if _member_link_unsafe(member) and not _link_target_allowed(
+                    member.linkname or "", allowed_roots,
+                ):
+                    # An absolute symlink pointing OUTSIDE anything this
+                    # archive owns. Skipped rather than aborting the whole
+                    # restore over one bad link — but RECORDED, so the caller
+                    # can say what did not come back. Dropping members and
+                    # then reporting success is the exact failure this file
+                    # is otherwise so careful about.
                     log.warning(
                         "skipping unsafe link %r → %r", member.name, member.linkname,
                     )
+                    if skipped is not None:
+                        skipped.append(f"{member.name} → {member.linkname}")
                     continue
                 relative = member.name[len(prefix):] if member.name != archive_subpath else ""
                 if not relative:
+                    # The asset's own root directory. There is nothing to
+                    # extract for it -- `staging_root` already exists -- but
+                    # seeing it PROVES the asset is present in the archive,
+                    # which for an EMPTY directory is the only proof there
+                    # will ever be.
+                    #
+                    # Not counting it was a restore-stopping bug: `~/.hermes`
+                    # ships `hooks/` and `pairing/` empty on a real box, so
+                    # the loop below found no children, `extracted_any` stayed
+                    # False, and the whole restore aborted on "no members
+                    # under ..." -- after earlier assets had already been
+                    # swapped, so the customer got a rollback instead of their
+                    # data. Observed on the Hermes QA box, not theorised.
+                    extracted_any = True
                     continue
                 member.name = relative
                 tf.extract(member, path=staging_root)
@@ -239,6 +288,8 @@ def _extract_asset(
     archive_subpath: str,
     staging_root: Path,
     entry: str = "dir",
+    allowed_roots: tuple[str, ...] = (),
+    skipped: list[str] | None = None,
 ) -> int:
     """Standalone variant — opens the tarball just for one asset. Kept for
     tests; the orchestrator uses `_extract_asset_from_open` to share a
@@ -246,8 +297,12 @@ def _extract_asset(
     extract = _extract_file_from_open if entry == "file" else _extract_asset_from_open
     try:
         with tarfile.open(archive_path, "r:gz") as tf:
+            kwargs = {"allowed_roots": allowed_roots}
+            if extract is _extract_asset_from_open:
+                kwargs["skipped"] = skipped
             return extract(
                 tf, archive_subpath=archive_subpath, staging_root=staging_root,
+                **kwargs,
             )
     except RestoreError:
         # Already a typed, human-readable failure from the extractor — do not
@@ -312,6 +367,34 @@ def _swap_into_place(staging: Path, target: Path, *, ts: int) -> Path:
         ) from e
 
     return backup
+
+
+def _retire_sqlite_sidecars(target: Path, *, ts: int) -> None:
+    """Move a restored database's stale `-wal` / `-shm` files aside.
+
+    A sqlite database in WAL mode keeps its most recent writes in a `-wal`
+    sidecar — 2.6 MB of them on the QA box, against a 2.8 MB `state.db`. The
+    copy in the archive came through `Connection.backup()`, so it is already
+    fully checkpointed and complete on its own. The sidecars sitting next to
+    it belong to the database we just moved OUT of the way, and sqlite decides
+    whether to replay a WAL by looking for the file, not by asking whether it
+    matches: leaving them is how a correct restore turns into a corrupt or
+    silently-stale history on the next open.
+
+    Moved aside rather than deleted, and beside the same `.bak-restore-<ts>`
+    suffix as the database itself, so a restore stays fully reversible by
+    hand. Failures are logged, not raised — the data is already in place, and
+    the caller finding out about a `-shm` it could not rename is not worth
+    rolling back a good restore.
+    """
+    for suffix in ("-wal", "-shm"):
+        sidecar = target.with_name(target.name + suffix)
+        if not sidecar.exists():
+            continue
+        try:
+            sidecar.rename(sidecar.with_name(f"{sidecar.name}.bak-restore-{ts}"))
+        except OSError as e:  # pragma: no cover — best effort
+            log.warning("could not move sqlite sidecar %s aside: %s", sidecar, e)
 
 
 def _rollback_swaps(done: list[RestoredAsset], *, ts: int) -> list[str]:
@@ -542,6 +625,15 @@ def restore_snapshot(
         if not isinstance(assets, list) or not assets:
             raise RestoreError("manifest declares no assets to restore")
 
+        # Everything this archive declares as its own. An absolute symlink may
+        # point inside these and nowhere else.
+        allowed_roots = tuple(
+            os.path.normpath(str(a.get("sourcePath")))
+            for a in assets
+            if isinstance(a, dict) and a.get("sourcePath")
+        )
+        skipped_members: list[str] = []
+
         for asset in assets:
             if not isinstance(asset, dict):
                 raise RestoreError(f"manifest asset is not an object: {asset!r}")
@@ -570,6 +662,8 @@ def restore_snapshot(
                     archive_subpath=archive_subpath,
                     staging_root=asset_staging,
                     entry=entry,
+                    allowed_roots=allowed_roots,
+                    skipped=skipped_members,
                 )
                 # A file asset landed at `<staging>/<basename>`; a directory
                 # asset IS the staging directory.
@@ -577,6 +671,8 @@ def restore_snapshot(
                     asset_staging if entry == "dir" else asset_staging / target.name
                 )
                 backup = _swap_into_place(swap_source, target, ts=ts)
+                if asset.get("sqlite"):
+                    _retire_sqlite_sidecars(target, ts=ts)
             except Exception as primary:
                 # An asset failure after earlier assets already swapped would
                 # leave the device with a mixed restore (some new content,
@@ -599,6 +695,7 @@ def restore_snapshot(
             archive_name=snapshot_name,
             archive_size_bytes=size,
             assets=results,
+            skipped_members=skipped_members,
         )
     finally:
         # Best-effort cleanup of the staging tree. The swap moved any

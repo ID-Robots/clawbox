@@ -277,3 +277,146 @@ def test_restore_refuses_an_openclaw_snapshot_on_a_hermes_box(
     assert (home / ".hermes" / "config.yaml").read_text() == live
     assert (target / "openclaw.json").read_text() == "{}"
     assert not list(home.glob(".openclaw.bak-restore-*"))
+
+
+def test_a_wal_database_restores_without_its_stale_sidecars(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live agent keeps `state.db` in WAL mode — 2.6 MB of pending writes
+    in a `-wal` sidecar next to a 2.8 MB database, measured on the QA box.
+
+    The archived copy comes through `Connection.backup()`, so it is already
+    checkpointed and complete on its own. What must NOT survive the restore is
+    the OLD database's `-wal`/`-shm` pair: sqlite decides whether to replay a
+    WAL by finding the file, not by checking that it belongs, so leaving them
+    turns a correct restore into a corrupt or silently-stale history the next
+    time anything opens the database.
+    """
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    _seed(home)
+    db = home / ".hermes" / "state.db"
+
+    # Put the database into WAL mode and leave uncommitted-to-main writes in
+    # the sidecar, exactly as the running dashboard does.
+    conn = sqlite3.connect(db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("INSERT INTO turns (body) VALUES ('in the wal')")
+    conn.commit()
+    assert db.with_name("state.db-wal").exists()  # the sidecar is real
+    # `backup()` reads THROUGH the wal, so both rows land in the archive even
+    # though the second one is only in the sidecar at this moment.
+    made = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
+    conn.close()
+
+    # Closing the last handle checkpoints and removes the sidecars, so put the
+    # stale pair back explicitly: leftovers beside a swapped-in database are
+    # precisely the state being defended against, and fabricating them makes
+    # the test independent of when sqlite happens to checkpoint.
+    db.with_name("state.db-wal").write_bytes(b"stale wal")
+    db.with_name("state.db-shm").write_bytes(b"stale shm")
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(made.path.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        restore.restore_snapshot(_cfg(), "claw_x", made.path.name)
+
+    # The stale sidecars are gone from beside the restored database...
+    assert not db.with_name("state.db-wal").exists()
+    assert not db.with_name("state.db-shm").exists()
+    # ...moved aside, not destroyed, so the restore stays reversible by hand.
+    assert list(db.parent.glob("state.db-wal.bak-restore-*"))
+
+    conn = sqlite3.connect(db)
+    try:
+        rows = {r[0] for r in conn.execute("SELECT body FROM turns")}
+    finally:
+        conn.close()
+    assert rows == {"remember this", "in the wal"}
+
+
+def test_the_shared_identity_symlinks_come_back(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`~/.hermes/SOUL.md` and `memories/{MEMORY,USER}.md` are ABSOLUTE
+    symlinks into `~/.clawbox/agent-identity/` — the shared identity bridge.
+
+    Restore used to refuse every absolute link as unsafe, so it dropped all
+    three, left `memories/` holding nothing but a stale lock file, and
+    reported success. That is the false-success shape the brief forbids, and
+    it was found by running the real restore on a real box rather than by
+    reading the code.
+    """
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    _seed(home)
+
+    bridge = home / ".clawbox" / "agent-identity"
+    (bridge / "MEMORY.md").write_text("owner likes tea\n", encoding="utf-8")
+    link = home / ".hermes" / "memories" / "MEMORY.md"
+    link.unlink()
+    try:
+        link.symlink_to(bridge / "MEMORY.md")  # absolute, like the real bridge
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform will not let the test create a symlink")
+
+    made = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
+    link.unlink()
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(made.path.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        result = restore.restore_snapshot(_cfg(), "claw_x", made.path.name)
+
+    assert link.is_symlink(), "the identity link was dropped"
+    assert link.read_text() == "owner likes tea\n"
+    # And nothing was quietly discarded on the way.
+    assert result.skipped_members == []
+
+
+def test_a_link_out_of_the_archives_own_roots_is_refused_and_reported(
+    edition_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half: a link to somewhere the archive does not own is still
+    refused — but it is now REPORTED rather than only logged, so a restore
+    that dropped something can never look complete."""
+    edition_file.write_text("CLAWBOX_EDITION=hermes\n", encoding="utf-8")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("HERMES_HOME", str(home / ".hermes"))
+    monkeypatch.setenv("CLAWBOX_HOME", str(home / ".clawbox"))
+    _seed(home)
+
+    outsider = home / ".hermes" / "memories" / "escape.md"
+    try:
+        outsider.symlink_to(tmp_path / "somewhere-else" / "secret")
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform will not let the test create a symlink")
+
+    made = agent.create_archive(_cfg(), output_dir=tmp_path / "out")
+
+    def fake_download(creds: Credentials, *, object_name: str, dest_path: Path) -> None:
+        dest_path.write_bytes(made.path.read_bytes())
+
+    with (
+        patch("clawkeep.restore.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.restore.s3.download", side_effect=fake_download),
+    ):
+        result = restore.restore_snapshot(_cfg(), "claw_x", made.path.name)
+
+    assert not (home / ".hermes" / "memories" / "escape.md").exists()
+    assert any("escape.md" in m for m in result.skipped_members)

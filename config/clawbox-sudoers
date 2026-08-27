@@ -35,6 +35,13 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime mask    clawbox-gatewa
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime mask    clawbox-gateway
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl --runtime unmask  clawbox-gateway
+# The Hermes SKU's server. It holds ~/.hermes/state.db open, so a ClawKeep
+# restore has to bounce it for the restored history to be the one served —
+# clawbox-gateway does not exist on this edition. Restart only: nothing needs
+# to be able to stop the box's own web server and leave it down.
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-hermes-dashboard.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-hermes-dashboard
+
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart clawbox-setup
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start   clawbox-setup.service

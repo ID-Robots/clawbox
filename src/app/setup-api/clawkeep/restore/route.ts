@@ -4,20 +4,34 @@ import { promisify } from "node:util";
 import { NextRequest, NextResponse } from "next/server";
 
 import { ClawKeepError, RestoreNeedsPassphraseError, runRestore } from "@/lib/clawkeep";
+import { getEdition } from "@/lib/harness";
 
 export const dynamic = "force-dynamic";
 
 const exec = promisify(execFile);
 
-// Services that hold ~/.openclaw open while running. After we swap the
-// directory atomically, their existing file handles still see the OLD
-// inodes, so we restart them so user-facing behaviour reflects the
-// restored state. clawbox-gateway is the only known consumer today;
-// add more here as we discover them. Names use the .service suffix so
-// they match the NOPASSWD sudoers rules in config/clawbox-sudoers
-// verbatim (sudoers Cmnd_Spec is exact-string, so "clawbox-gateway"
-// would NOT match "clawbox-gateway.service").
-const RESTART_SERVICES = ["clawbox-gateway.service"];
+// Services that hold the restored state open while running. After we swap a
+// directory (or file) atomically, their existing handles still see the OLD
+// inodes, so they have to be restarted for user-facing behaviour to reflect
+// the restored state.
+//
+// WHICH service is per-edition, and getting it wrong is not a cosmetic bug.
+// install.sh's step_edition_gateway_state REMOVES the clawbox-gateway unit
+// file on Hermes and persistently masks it, so restarting it there fails
+// twice over — while `clawbox-hermes-dashboard`, which is the process
+// actually holding `~/.hermes/state.db` open, is never touched. The restore
+// then reports success and the agent keeps serving pre-restore state until
+// something else happens to restart it. That is the same false-success shape
+// this codebase has already been bitten by twice.
+//
+// Names use the .service suffix so they match the NOPASSWD sudoers rules in
+// config/clawbox-sudoers verbatim — sudoers Cmnd_Spec is exact-string, so
+// "clawbox-gateway" would NOT match "clawbox-gateway.service".
+function restartServicesFor(edition: string): string[] {
+  return edition === "hermes"
+    ? ["clawbox-hermes-dashboard.service"]
+    : ["clawbox-gateway.service"];
+}
 
 // POST /setup-api/clawkeep/restore
 // Body: { name: "<timestamp>-openclaw-backup.tar.gz" }
@@ -50,7 +64,7 @@ export async function POST(request: NextRequest) {
     // restore itself succeeded, and a manual `systemctl restart` is a
     // recoverable follow-up.
     const restartErrors: string[] = [];
-    for (const svc of RESTART_SERVICES) {
+    for (const svc of restartServicesFor(getEdition())) {
       try {
         await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", svc], {
           timeout: 30_000,
@@ -70,6 +84,10 @@ export async function POST(request: NextRequest) {
         archive: result.archive,
         archiveBytes: result.archiveBytes,
         assets: result.assets,
+        // Passed through rather than dropped: a restore that could not
+        // recreate part of the archive is not a clean success, and the card
+        // has to be able to say which part.
+        skippedMembers: result.skippedMembers ?? [],
         restartErrors,
       },
       { headers: { "Cache-Control": "no-store" } },

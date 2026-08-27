@@ -242,6 +242,20 @@ def _sqlite_snapshot(src: Path, dest: Path) -> None:
         raise HermesError(f"could not snapshot sqlite database {src}: {e}") from e
 
 
+#: Transient files that must not travel even when they sit inside an
+#: allowlisted directory. The allowlist picks whole trees, so without this a
+#: stale `USER.md.lock` and `skills/.usage.json.lock` rode along and were
+#: restored as locks nothing holds -- seen in the first live round trip.
+TRANSIENT_SUFFIXES = (".lock", ".pyc", ".pyo")
+TRANSIENT_NAMES = ("__pycache__", ".DS_Store")
+
+
+def _is_transient(rel: Path) -> bool:
+    if any(part in TRANSIENT_NAMES for part in rel.parts):
+        return True
+    return rel.name.endswith(TRANSIENT_SUFFIXES)
+
+
 def _add_tree(tf: tarfile.TarFile, *, src: Path, arcname: str) -> int:
     """Add `src` (a directory) under `arcname`, returning bytes of regular
     files added. Symlinks are stored as links, not followed — following them
@@ -251,6 +265,8 @@ def _add_tree(tf: tarfile.TarFile, *, src: Path, arcname: str) -> int:
     tf.add(src, arcname=arcname, recursive=False)
     for entry in sorted(src.rglob("*")):
         rel = entry.relative_to(src)
+        if _is_transient(rel):
+            continue
         name = f"{arcname}/{rel.as_posix()}"
         try:
             tf.add(entry, arcname=name, recursive=False)
@@ -331,6 +347,14 @@ def create_archive(
                     "archivePath": arcname,
                     "entry": asset.entry,
                     "credentialBearing": asset.credential_bearing,
+                    # Declared so RESTORE knows to clear the stale WAL
+                    # sidecars. The archived copy came through
+                    # `Connection.backup()` and is fully checkpointed, i.e.
+                    # self-contained; a `-wal`/`-shm` pair left behind from
+                    # the OLD database beside it is not just useless but
+                    # actively dangerous, because sqlite will try to replay
+                    # it against a database it does not belong to.
+                    "sqlite": asset.sqlite,
                 })
 
             if not manifest_assets:

@@ -773,6 +773,11 @@ interface RestoreOk {
   ok: true;
   archive: string;
   archiveBytes: number;
+  /** Members the daemon deliberately did not recreate — unsafe absolute
+   *  symlinks. Normally empty; when it is not, the restore is INCOMPLETE and
+   *  the UI has to say so rather than showing a clean success. Optional
+   *  because a daemon predating the field simply omits it. */
+  skippedMembers?: string[];
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
 }
 

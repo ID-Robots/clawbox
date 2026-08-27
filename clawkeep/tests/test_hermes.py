@@ -231,7 +231,10 @@ def test_verify_rejects_a_manifest_declaring_payload_that_is_absent(
         for member in src:
             if member.name.endswith("manifest.json"):
                 continue
-            handle = src.extractfile(member)
+            # Only regular files carry a payload stream. Asking a symlink or a
+            # directory for one makes tarfile chase the link inside the
+            # archive and raise KeyError.
+            handle = src.extractfile(member) if member.isfile() else None
             dst.addfile(member, handle)
         info = tarfile.TarInfo(f"{root}/manifest.json")
         info.size = len(blob)
@@ -264,3 +267,29 @@ def test_created_at_is_real_iso_and_the_stem_is_path_safe(
     assert out.archive_root == "2026-08-26T09-30-00.000Z-hermes-backup"
     assert ":" not in out.path.name
     assert _manifest(out.path)["createdAt"] == "2026-08-26T09:30:00.000Z"
+
+
+def test_an_empty_directory_asset_survives_the_round_trip(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`~/.hermes` ships `hooks/` and `pairing/` EMPTY on a real box.
+
+    An empty directory has no members under its prefix, only the directory
+    entry itself -- which the extractor used to skip. `extracted_any` stayed
+    False, the asset failed "no members under ...", and because that happens
+    part-way down the asset list the customer got a cross-asset rollback
+    instead of their restore. Found by running the real thing against a real
+    Hermes box, so it is pinned here.
+    """
+    from clawkeep import restore as restore_mod
+
+    home = box / ".hermes"
+    assert not any((home / "hooks").iterdir())  # the shape that broke it
+
+    out = hermes.create_archive(output_dir=tmp_path / "out")
+    sub = next(a["archivePath"] for a in _manifest(out.path)["assets"]
+               if a["kind"] == "hooks")
+    staging = tmp_path / "staged"
+    assert restore_mod._extract_asset(out.path, archive_subpath=sub,
+                                      staging_root=staging) == 0
+    assert staging.is_dir() and not any(staging.iterdir())
