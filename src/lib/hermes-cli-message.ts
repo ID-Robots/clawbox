@@ -13,7 +13,13 @@
  */
 
 /**
- * Turn `chat -q`'s stderr into something worth showing a person.
+ * Turn a `hermes` subcommand's stderr into something worth showing a person.
+ *
+ * The evidence below was captured from `chat -q`, the subcommand that shaped
+ * these rules. Nothing here is specific to it: each rule either fires on a
+ * shape the other subcommands also produce (a traceback, a wrapped sentence) or
+ * matches nothing in their output at all (the session banner), so applying it
+ * to `auth add` and `config set` changes only the cases it was written for.
  *
  * The first thing on stderr is always the `session_id:` banner, so a failed run
  * used to surface as "Error: session_id: 20260810_221825_609d1e" — the one line
