@@ -60,7 +60,18 @@ export function buildFixErrorPrompt(ctx: FixErrorContext): string {
   if (ctx.details) lines.push("", "Extra context:", ctx.details);
   lines.push(
     "",
-    "Steps: read relevant logs (e.g. `journalctl -u clawbox-setup -u clawbox-gateway -n 200`), check the failing command directly, and apply a concrete fix. Report back what you found and what you changed.",
+    // Deliberately does NOT name units. It used to say `journalctl -u
+    // clawbox-setup -u clawbox-gateway`, and clawbox-gateway does not exist on
+    // Hermes — install removes and masks it — so on that edition the command
+    // read an empty log and never mentioned clawbox-hermes-dashboard, which is
+    // the one holding the answer. This module is bundled into the browser, so
+    // it cannot read the root-owned edition file to pick the right list.
+    //
+    // It does not need to: the agent has `logs_tail`, whose unit enum is
+    // already built per edition in mcp/tools/system.ts. Pointing at the tool
+    // instead of at a guessed command is both shorter and incapable of going
+    // stale the next time the unit set changes.
+    "Steps: read the relevant service logs with the `logs_tail` tool (it lists the services this device actually runs), check the failing command directly, and apply a concrete fix. Report back what you found and what you changed.",
   );
   return lines.join("\n");
 }
