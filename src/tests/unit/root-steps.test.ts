@@ -123,6 +123,19 @@ describe("root-executed paths are outside clawbox's write access", () => {
     expect(grants).toContain("systemctl start --no-block clawbox-*");
   });
 
+  it("verifies what root is about to run before it runs it", () => {
+    // GAP 2: the dispatcher is root-owned, but the file it exec'd was not.
+    // install.sh records everything root runs on clawbox's behalf and the
+    // dispatcher refuses a tree that no longer matches that record.
+    const dispatcher = read(DISPATCHER);
+    expect(dispatcher).toContain("clawbox-root-manifest.sh");
+    expect(dispatcher).toMatch(/--verify/);
+    const verifyAt = dispatcher.indexOf("--verify");
+    const execAt = dispatcher.indexOf("exec /bin/bash");
+    expect(execAt, "the dispatcher must still exec install.sh").toBeGreaterThan(-1);
+    expect(verifyAt, "the verification must happen BEFORE the exec").toBeLessThan(execAt);
+  });
+
   it("installs the root-owned copies before the sudoers rules that point at them", () => {
     const sh = read(INSTALL_SH);
     expect(sh).toContain("install_root_libexec");
