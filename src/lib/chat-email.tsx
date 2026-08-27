@@ -26,38 +26,16 @@
 // agent, never used to choose what the app does, and never treated as anything
 // but text to look at.
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useModalDialog } from '@/hooks/useModalDialog'
 import type { EmailNode } from '@/lib/email-html'
+import type { EmailAddress, FullMessage } from '@/lib/email-mime'
 
-/** One address, as the device parsed it out of a header. */
-export interface EmailAddress {
-  name: string
-  address: string
-}
-
-export interface EmailAttachment {
-  filename: string
-  contentType: string
-  size: number
-}
-
-/** The payload `?view=full` returns. Already sanitised on the device. */
-export interface FullMessage {
-  uid: number
-  from: EmailAddress
-  to: EmailAddress[]
-  cc: EmailAddress[]
-  subject: string
-  date: string
-  unread: boolean
-  format: 'html' | 'text'
-  body: EmailNode[]
-  attachments: EmailAttachment[]
-  blockedImages: number
-  truncated: boolean
-}
+// The shapes come from the module that BUILDS them, as types only — erased at
+// build time, so this pulls in none of that module's server-side code and the
+// two cannot drift into disagreeing about the payload.
+export type { EmailAddress, EmailAttachment, FullMessage } from '@/lib/email-mime'
 
 type Translate = (key: string, vars?: Record<string, string | number>) => string
 
@@ -129,6 +107,11 @@ function renderNode(node: EmailNode, key: number, t: Translate): React.ReactNode
   if (node.type === 'image') {
     if (node.src) {
       return (
+        // next/image optimises through a loader that expects a real URL it
+        // may re-fetch. This src is a `data:` URI built from the message's own
+        // bytes (or from one fetch the owner already consented to), so there is
+        // nothing to re-fetch and nothing that should touch the network again.
+        // eslint-disable-next-line @next/next/no-img-element
         <img
           key={key}
           src={node.src}
@@ -202,7 +185,7 @@ function renderNode(node: EmailNode, key: number, t: Translate): React.ReactNode
   )
 }
 
-export function EmailBody({ nodes, t }: { nodes: EmailNode[]; t: Translate }): React.ReactElement {
+function EmailBody({ nodes, t }: { nodes: EmailNode[]; t: Translate }): React.ReactElement {
   return <>{nodes.map((node, i) => renderNode(node, i, t))}</>
 }
 
@@ -251,7 +234,7 @@ const ROW_VALUE: React.CSSProperties = {
 }
 
 /** Bytes as something a person reads. */
-export function formatBytes(size: number): string {
+function formatBytes(size: number): string {
   if (!Number.isFinite(size) || size < 0) return ''
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`
@@ -259,11 +242,6 @@ export function formatBytes(size: number): string {
 }
 
 // ── The card in the transcript ───────────────────────────────────────────────
-
-/** What the transcript knows about a message before the panel is opened. */
-export interface EmailCardRef {
-  uid: number
-}
 
 /**
  * The compact row under the reply.
@@ -358,9 +336,6 @@ export function EmailFullView({
   const [loadingImages, setLoadingImages] = useState(false)
   const titleId = useId()
   const panelRef = useModalDialog<HTMLDivElement>({ onClose })
-  // The body scroller, so asking for images returns the reader to the top of
-  // the message rather than wherever the re-render left them.
-  const bodyRef = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(
     async (images: boolean, signal?: AbortSignal) => {
@@ -508,7 +483,6 @@ export function EmailFullView({
             Its own scroller with a minimum height, so a long message scrolls
             inside the panel and can never stretch the chat behind it. */}
         <div
-          ref={bodyRef}
           data-testid="email-full-body"
           role="region"
           aria-label={t('chat.email.bodyRegion')}

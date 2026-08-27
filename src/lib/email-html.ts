@@ -188,7 +188,7 @@ export function isSafeHref(href: string): boolean {
   return /^(?:https?|mailto):/i.test(value);
 }
 
-export function decodeEntities(text: string): string {
+function decodeEntities(text: string): string {
   return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z][a-z0-9]*);/gi, (whole, body: string) => {
     const named = NAMED_ENTITIES.get(body.toLowerCase());
     if (named !== undefined) return named;

@@ -155,14 +155,9 @@ function param(header: string, name: string): string {
 
 interface MimePart {
   headers: Record<string, string>;
-  /** The part's body, already decoded from its transfer encoding. */
-  body: string;
-  /** The raw, still-encoded body — needed to measure and to re-encode. */
+  /** The body as it arrived, still in its transfer encoding. */
   raw: string;
   contentType: string;
-  disposition: string;
-  filename: string;
-  contentId: string;
 }
 
 interface Walked {
@@ -212,15 +207,7 @@ function walkParts(rawBody: string, headers: Record<string, string>, found: Walk
     return;
   }
 
-  const part: MimePart = {
-    headers,
-    body: "",
-    raw: rawBody,
-    contentType,
-    disposition,
-    filename,
-    contentId,
-  };
+  const part: MimePart = { headers, raw: rawBody, contentType };
 
   const isAttachment = /^attachment/i.test(disposition) || (filename !== "" && !/^inline/i.test(disposition));
 
