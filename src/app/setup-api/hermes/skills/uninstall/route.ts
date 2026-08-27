@@ -142,16 +142,35 @@ export async function POST(request: Request) {
     // Only now: deleting the files under a lock entry that survived would
     // manufacture the half-removed state this is here to detect.
     const left = await verifySkillRemoval(id, entry);
-    if (left.dir === "present") {
-      console.error("[hermes skills uninstall] directory survived", JSON.stringify(id));
+    // The whole verdict, not one field of it. `stillLocked` above was read
+    // before the directory removal, and nothing serialises this route against a
+    // concurrent install of the same name — so an entry that reappeared in the
+    // meantime has to be answered too, and `clean` is the answer that carries
+    // both halves.
+    if (!left.clean) {
+      console.error(
+        "[hermes skills uninstall] removal incomplete",
+        JSON.stringify(id),
+        "lockEntry:",
+        left.lockEntry,
+        "dir:",
+        left.dir,
+      );
+      // Say only what was established, and give the next step that state
+      // actually has: a leftover the store cannot see is a leftover the store
+      // cannot remove.
+      const leftover = left.lockEntry
+        ? left.dir === "present"
+          ? `it is listed in the Skills store again and its files are on the device`
+          : `it is listed in the Skills store again`
+        : `it is no longer listed in the Skills store, but its files are still on the device, `
+          + `so the agent would still load it`;
+      const nextStep = left.lockEntry
+        ? `Check Settings -> Skills, and remove it again if it is still there.`
+        : `The leftover folder has to be deleted on the device.`;
       return NextResponse.json(
         {
-          // The store no longer lists it, so "remove it from the Skills store"
-          // is advice that cannot be followed — say the one thing that can.
-          error:
-            `"${id}" is no longer listed in the Skills store, but its files are still on the `
-            + `device, so the agent would still load it. The leftover folder has to be deleted `
-            + `on the device.`,
+          error: `"${id}" was not fully removed: ${leftover}. ${nextStep}`,
           code: "removal_incomplete",
           name: id,
           leftover: { lockEntry: left.lockEntry, directory: left.dir },

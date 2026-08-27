@@ -45,11 +45,20 @@ vi.mock("@/lib/hermes-config-cache", () => ({
   hermesConfigGetMany: vi.fn(async () => ({})),
   invalidateHermesConfigCache: vi.fn(),
 }));
+// Passed straight through by default. One test below replaces it for a single
+// call, because the directory removal is the one point inside the route where a
+// concurrent write can be made to land deterministically.
+vi.mock("@/lib/hermes-skill-manifest", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/hermes-skill-manifest")>();
+  return { ...actual, removeSkillDir: vi.fn(actual.removeSkillDir) };
+});
 
 import { runHermesCli } from "@/lib/hermes-cli";
+import { removeSkillDir } from "@/lib/hermes-skill-manifest";
 import { saveEnv } from "../../helpers/env";
 
 const mockCli = vi.mocked(runHermesCli);
+const mockRemoveDir = vi.mocked(removeSkillDir);
 
 const NAME = "oo-terraform";
 const DIR = "oo-terraform";
@@ -198,6 +207,35 @@ describe("POST …/skills/uninstall — a clean lock is only half a removal", ()
     // loads, now with an origin the store will not offer to remove.
     expect(listed).toMatchObject({ origin: "local" });
     expect(res.body.ok).not.toBe(true);
+  });
+
+  it("does not report success when the entry came back while the files were going", async () => {
+    // Nothing serialises this route against an install of the same name — not
+    // here, not in the install route's rollback, not in the CLI. So the answer
+    // has to be the WHOLE verdict, not the directory half of it: an entry read
+    // as gone before the removal and present after it is not a removal.
+    await seed(DIR);
+    mockRemoveDir.mockImplementationOnce(async (root: string, installPath: string) => {
+      await writeLock({
+        [NAME]: { install_path: DIR, files: ["SKILL.md"], identifier: NAME, source: "clawhub" },
+      });
+      const { removeSkillDir: real } =
+        await vi.importActual<typeof import("@/lib/hermes-skill-manifest")>(
+          "@/lib/hermes-skill-manifest",
+        );
+      return await real(root, installPath);
+    });
+
+    const res = await uninstall(NAME);
+
+    expect(res.body.ok).not.toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe("removal_incomplete");
+    expect(res.body.leftover).toMatchObject({ lockEntry: true });
+    // …and the advice matches THAT state: the store lists it, so the store is
+    // where it can be dealt with.
+    expect(String(res.body.error)).toMatch(/Skills/i);
+    expect(String(res.body.error)).not.toMatch(/deleted on the device/i);
   });
 
   it("removes the directory the CLI left behind when the recorded path allows it", async () => {

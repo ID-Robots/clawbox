@@ -290,6 +290,68 @@ describe("a re-install of a skill the device already has removes nothing", () =>
     expect(String(body.error)).toMatch(/left in place|left alone|already/i);
   });
 
+  it("leaves an entry alone when nothing about its files could be checked", async () => {
+    // A pre-existing lock entry that names no `install_path`: `lockInstallDir`
+    // resolves nothing, so the files can be neither confirmed nor ruled out.
+    // "Could not check" is not "this request created it", and the entry itself
+    // proves the request did not.
+    await writeSkill("creative/simple-english", "---\nname: simple-english\n---\nplain english\n");
+    await writeLock({
+      "simple-english": {
+        files: ["SKILL.md"],
+        identifier: "official/creative/simple-english",
+        source: "official",
+        trust_level: "builtin",
+        scan_verdict: "dangerous",
+        scan_provenance: DANGEROUS_SCAN,
+      },
+    });
+    fakeHermes({
+      defaultName: "simple-english",
+      installPath: "creative/simple-english",
+      files: { "SKILL.md": "---\nname: simple-english\n---\nplain english\n" },
+      lock: { identifier: "official/creative/simple-english", scan_verdict: "dangerous" },
+    });
+
+    const { body } = await install({ id: "official/creative/simple-english" });
+
+    expect(Object.keys(await readLock())).toEqual(["simple-english"]);
+    expect(await exists(path.join(skillsDir(), "creative", "simple-english", "SKILL.md"))).toBe(
+      true,
+    );
+    expect(body.code).toBe("already_installed");
+  });
+
+  it("still clears up a phantom entry whose files are provably gone", async () => {
+    // The pre-existing entry that IS this route's to remove: one a previous
+    // failed rollback left behind, with an install_path that resolves and
+    // nothing at the end of it. Preserving that would strand the customer with
+    // a store row for a skill that is not there.
+    await writeLock({
+      "simple-english": {
+        install_path: "creative/simple-english",
+        files: ["SKILL.md"],
+        identifier: "official/creative/simple-english",
+        source: "official",
+        trust_level: "builtin",
+        scan_verdict: "dangerous",
+        scan_provenance: DANGEROUS_SCAN,
+      },
+    });
+    fakeHermes({
+      defaultName: "simple-english",
+      installPath: "creative/simple-english",
+      files: { "SKILL.md": "---\nname: simple-english\n---\nplain english\n" },
+      lock: { identifier: "official/creative/simple-english", scan_verdict: "dangerous" },
+    });
+
+    const { body } = await install({ id: "official/creative/simple-english" });
+
+    expect(await readLock()).toEqual({});
+    expect(body.code).toBe("dangerous_skill");
+    expect(body.code).not.toBe("already_installed");
+  });
+
   it("still rolls back an install this request DID make", async () => {
     // The guard against over-correcting: with nothing pre-existing, a flagged
     // first install is still undone and still answered `dangerous_skill`.

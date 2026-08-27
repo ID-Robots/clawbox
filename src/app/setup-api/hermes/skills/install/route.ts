@@ -217,13 +217,19 @@ export async function POST(request: Request) {
   const lockName = (await resolveLockKey(id)) || (cliId !== id ? await resolveLockKey(cliId) : null) || fallbackName;
   const entry = hubLockEntry(await readHubLock(), lockName);
 
-  // Was this install already on the device before the request, with its files
-  // where the agent reads them? Then it is not this route's to remove. Asked
-  // about the KEY the install landed under, against the PRE-request lock, so
-  // neither a phantom entry a previous failed rollback left (entry, no files)
-  // nor a second copy under another key can be mistaken for it.
-  const preDir = lockInstallDir(hubLockEntry(preLock, lockName));
-  const preInstalled = preDir !== null && (await pathExists(preDir));
+  // Was this install already on the device before the request? Then it is not
+  // this route's to remove. Asked about the KEY the install landed under,
+  // against the PRE-request lock, so a second copy of the same id under another
+  // key cannot be mistaken for it.
+  //
+  // The one pre-existing entry that IS still this route's to clear up is a
+  // phantom a previous failed rollback left behind: an entry whose directory is
+  // PROVABLY gone. Everything else is left alone — including an entry that names
+  // no `install_path`, where nothing about the files could be checked at all,
+  // because "could not check" has never been a licence to delete.
+  const preEntry = hubLockEntry(preLock, lockName);
+  const preDir = lockInstallDir(preEntry);
+  const preInstalled = preEntry !== undefined && (preDir === null || (await pathExists(preDir)));
 
   // ── 3. Did the scanner flag it? ──────────────────────────────────────────
   const report = scanReportFromLock(entry);
