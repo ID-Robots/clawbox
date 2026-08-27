@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { requireSession } from "@/lib/route-auth";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
@@ -222,10 +223,23 @@ export async function POST(request: Request) {
 
   // Only text WE produced is safe to echo back — a raw spawn rejection can
   // carry the hermes binary path.
+  //
+  // `r.stderr` is not that text. It is the CLI's, and when `hermes config set`
+  // CRASHES it is a CPython traceback: frames naming /home/clawbox/.hermes and
+  // the `raise` line above the summary, all of it landing verbatim in the
+  // Settings save banner through `saveErrorMessage`. That is the same input PR
+  // #515 cleaned out of the chat bubble, arriving through the panel instead —
+  // so it goes through the same parser. The raw stream still reaches the
+  // journal, which is where a path is a diagnosis rather than a disclosure.
   class ConfigSetError extends Error {}
   const setKey = async (key: string, value: string) => {
     const r = await runHermesCli(["config", "set", key, value]);
-    if (r.code !== 0) throw new ConfigSetError(r.stderr || `Failed to set ${key}`);
+    if (r.code !== 0) {
+      console.error("[hermes models] config set exit", r.code, r.stderr);
+      throw new ConfigSetError(
+        safeHermesFailureMessage(r.stdout, r.stderr) || `Failed to set ${key}`,
+      );
+    }
   };
 
   try {
