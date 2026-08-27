@@ -7,7 +7,7 @@ import { getSystemUsername } from "@/lib/auth";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, chpasswdRecord } from "@/lib/chpasswd";
 import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
 import { readEdition } from "@/lib/edition-source";
-import { getOllamaBaseUrl, startOllamaService } from "@/lib/local-ai-runtime";
+import { startOllamaService } from "@/lib/local-ai-runtime";
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -54,7 +54,11 @@ const HERMES_KEEP = new Set(["hermes-agent"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
-  const OLLAMA = getOllamaBaseUrl();
+  // Deliberately the loopback address, not getOllamaBaseUrl(): that one honours
+  // OLLAMA_HOST, and a factory reset must never issue /api/delete against
+  // somebody else's Ollama server. What this cleans is the models this device
+  // downloaded, which live under /usr/share/ollama on the device itself.
+  const OLLAMA = "http://127.0.0.1:11434";
   // Ollama is routinely STOPPED at reset time (the Local AI exclusive-mode
   // runtime shuts it down while llama.cpp is active), and its models live
   // under /usr/share/ollama — out of reach of the home wipe. Start it
@@ -509,6 +513,12 @@ export async function POST(request: Request) {
     // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
     // already wiped, so clawbox-root-update@set_hostname.service will read the
     // default and apply it before the reboot.
+    // reset-failed first — see the same note in system/hostname/route.ts.
+    await execFile("/usr/bin/sudo", [
+      "/usr/bin/systemctl",
+      "reset-failed",
+      "clawbox-root-update@set_hostname.service",
+    ], { timeout: 10_000 }).catch(() => {});
     try {
       await execFile("/usr/bin/sudo", [
         "/usr/bin/systemctl",

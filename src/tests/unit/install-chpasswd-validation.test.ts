@@ -240,6 +240,45 @@ d("root never evaluates a clawbox-writable data file", () => {
     }
   });
 
+  it("no root-capable script sources anything under the clawbox-writable data/", () => {
+    // The whole class, asserted once. Every one of these runs as root somewhere:
+    // start-ap.sh and ap-watchdog.sh from units with no `User=`, both reachable
+    // through the granted clawbox-root-update@restart_ap.service.
+    //
+    // launch-browser.sh is deliberately NOT here: its state file is under
+    // $HOME/.cache, so the root path reads /root's copy, not clawbox's, and the
+    // clawbox path is the clawbox user reading its own file.
+    for (const name of ["start-ap.sh", "ap-watchdog.sh", "stop-ap.sh"]) {
+      const file = path.join(REPO, "scripts", name);
+      if (!fs.existsSync(file)) continue;
+      for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
+        if (/^\s*#/.test(line)) continue;
+        const m = /(?:^|[;&|(]|\s)(?:\.|source)\s+(\S+)/.exec(line);
+        if (!m) continue;
+        expect(m[1], `${name} sources a clawbox-writable path: ${line.trim()}`)
+          .not.toMatch(/data\/|HOTSPOT_ENV|CONFIG_FILE|\$ROOT/);
+      }
+    }
+  });
+
+  it("ap-watchdog.sh reads the disable flag without executing the file", () => {
+    // It runs as ROOT on a timer (clawbox-ap-watchdog.service has no User=), so
+    // `. "$HOTSPOT_ENV"` was arbitrary root code execution on a schedule: plant
+    // the payload as clawbox, wait for the next tick.
+    const script = fs.readFileSync(path.join(REPO, "scripts", "ap-watchdog.sh"), "utf-8");
+    const body = script.split("read_env_value() {")[1].split("\n}")[0];
+    const envFile = path.join(tmp, "hotspot.env");
+    const pwned = path.join(tmp, "pwned-watchdog").replace(/\\/g, "/");
+    fs.writeFileSync(envFile, `x=$(id -u > ${pwned})\nHOTSPOT_DISABLED=1\n`);
+    const r = spawnSync("bash", ["-c", [
+      "set -uo pipefail",
+      `read_env_value() {${body}\n}`,
+      `read_env_value "${envFile.replace(/\\/g, "/")}" HOTSPOT_DISABLED`,
+    ].join("\n")], { encoding: "utf-8" });
+    expect(fs.existsSync(pwned), "root executed data/hotspot.env").toBe(false);
+    expect(r.stdout).toBe("1");
+  });
+
   it("start-ap.sh parses hotspot.env instead of sourcing it", () => {
     // It runs as root: clawbox-ap.service and clawbox-ap-watchdog.service carry
     // no `User=`, and clawbox-root-update@restart_ap.service is granted.

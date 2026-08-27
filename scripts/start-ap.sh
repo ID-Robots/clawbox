@@ -41,6 +41,9 @@ read_env_value() {
   [ -L "$file" ] && return 0
   line="$(grep -m1 -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$file" 2>/dev/null)" || return 0
   value="${line#*=}"
+  # A CRLF-terminated file leaves the CR on the value, and it would travel into
+  # the SSID or the PSK as an argv byte — an AP nothing can associate with.
+  value="${value%$'\r'}"
   # Strip one layer of matching quotes; a WiFi PSK may legitimately contain
   # almost anything else, so nothing further is filtered here.
   case "$value" in

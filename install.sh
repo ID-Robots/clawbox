@@ -2746,7 +2746,13 @@ SUDOERS_DIR="/etc/sudoers.d"
 SUDOERS_QUARANTINE_DIR="/var/lib/clawbox/sudoers-quarantine"
 # Where a candidate drop-in is staged while it is validated. Root-owned and
 # NOT under /etc/sudoers.d — see install_sudoers_dropin().
-SUDOERS_STAGING_DIR="/var/lib/clawbox"
+#
+# A subdirectory of its own, not /var/lib/clawbox itself: that directory is
+# shared (clawbox-power-mode.sh keeps its clock snapshot there, the first-boot
+# VNC marker lives there), and install_sudoers_dropin creates its staging dir
+# 0700 root:root. Applying that to the shared parent would stop every non-root
+# reader from even traversing it.
+SUDOERS_STAGING_DIR="/var/lib/clawbox/sudoers-staging"
 # The drop-ins this installer owns. Nothing else in /etc/sudoers.d is ours, and
 # quarantine_overbroad_sudoers() below is the only code that touches the rest.
 CLAWBOX_SUDOERS_MANAGED=(clawbox clawbox-ollama)

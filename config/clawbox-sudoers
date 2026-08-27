@@ -140,7 +140,9 @@ clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl stop    ollama.service
 # privilege boundary, not as a config line. TASK-445.
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@chpasswd.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@chpasswd.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@set_hostname.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@set_hostname.service
+clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@restart_ap.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start clawbox-root-update@restart_ap.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl reset-failed clawbox-root-update@llamacpp_install.service
 clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl start --no-block clawbox-root-update@llamacpp_install.service

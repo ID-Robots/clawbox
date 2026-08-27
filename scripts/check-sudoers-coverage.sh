@@ -109,6 +109,16 @@ sub check_grant_shape {
     . "  secure_path, which is a convenience, not a privilege boundary. Use an absolute path.\n")
     unless $path =~ m{^/};
 
+  # sudo matches the command PATH as a string and does not canonicalise it, so
+  # `/usr/bin/../home/clawbox/clawbox/payload` would sail past the prefix test
+  # below while naming a file in the clawbox-writable tree. Only canonical paths
+  # can be reasoned about here.
+  fatal("$rel:$lineno grants `$path`, which contains a `.` or `..` component.\n"
+    . "  sudo compares the command path as a string and never canonicalises it, so a\n"
+    . "  traversal like /usr/bin/../home/clawbox/... would pass the root-owned prefix\n"
+    . "  check below while naming a file clawbox can write. Use the canonical path.\n")
+    if grep { $_ eq '.' || $_ eq '..' } split m{/}, $path;
+
   return if grep { index($path, $_) == 0 } @ROOT_OWNED_PREFIXES;
   fatal("$rel:$lineno grants `$path`, which is outside every root-owned prefix\n"
     . "  (" . join(', ', @ROOT_OWNED_PREFIXES) . ").\n"

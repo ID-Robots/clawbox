@@ -47,6 +47,7 @@ set -euo pipefail
 PROJECT_DIR="/home/clawbox/clawbox"
 ENTRYPOINT="$PROJECT_DIR/install.sh"
 MANIFEST_HELPER="/usr/local/libexec/clawbox/clawbox-root-manifest.sh"
+RUN_DIR="/run/clawbox"
 
 step="${1:-}"
 
@@ -143,6 +144,41 @@ else
     echo "clawbox-root-step: local change, re-record it as the operator: sudo bash $ENTRYPOINT --step systemd_services" >&2
     exit 65
   fi
+
+  # COPY, then check the copy, then run the copy.
+  #
+  # Verifying $ENTRYPOINT and then exec'ing $ENTRYPOINT is a race: bash opens
+  # the file after the check returns, and the clawbox user can replace it in
+  # between — a rewrite loop wins that window easily. Hashing a copy that
+  # clawbox cannot reach removes the window for the one file this script
+  # executes directly.
+  #
+  # /run is tmpfs and root-owned, so the copy cannot survive a reboot and cannot
+  # be touched by clawbox. The name is fixed rather than mktemp'd because `exec`
+  # replaces this shell and no EXIT trap would ever fire to clean it up.
+  STAGED_ENTRYPOINT="$RUN_DIR/root-step-install.sh"
+  if ! install -d -o root -g root -m 0700 "$RUN_DIR"; then
+    echo "clawbox-root-step: cannot create $RUN_DIR" >&2
+    exit 66
+  fi
+  rm -f "$STAGED_ENTRYPOINT"
+  if ! install -o root -g root -m 0500 "$ENTRYPOINT" "$STAGED_ENTRYPOINT"; then
+    echo "clawbox-root-step: cannot stage $ENTRYPOINT for execution" >&2
+    exit 66
+  fi
+  if ! "$MANIFEST_HELPER" --verify-file install.sh "$STAGED_ENTRYPOINT"; then
+    rm -f "$STAGED_ENTRYPOINT"
+    echo "clawbox-root-step: refusing '$step' — install.sh changed between the check and the copy." >&2
+    exit 65
+  fi
+  ENTRYPOINT="$STAGED_ENTRYPOINT"
+
+  # Residual, recorded rather than implied: the scripts install.sh goes on to run
+  # as root (scripts/start-ap.sh, launch-browser.sh, setup-hermes-edition.sh, …)
+  # are covered by the --verify above but are opened LATER, by install.sh itself,
+  # so the same window exists for them. Closing it means the tree install.sh
+  # reads from being root-owned too — the follow-up this design is pointed at,
+  # and a bigger change than a copy of one file. TASK-445.
 fi
 
 exec /bin/bash "$ENTRYPOINT" --step "$step"

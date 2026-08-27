@@ -98,6 +98,7 @@ beforeEach(() => {
   retarget(DISPATCHER_SRC, dispatcher, [
     [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
     [/^MANIFEST_HELPER=.*$/m, `MANIFEST_HELPER="${helper}"`],
+    [/^RUN_DIR=.*$/m, `RUN_DIR="${path.join(tmp, "run")}"`],
   ]);
 });
 
@@ -200,6 +201,25 @@ d("clawbox-root-manifest.sh", () => {
     expect(sh(`"${helper}" --verify`).status).toBe(0);
   });
 
+  it("checks one already-opened copy against what it recorded for a path", () => {
+    // --verify answers a question about the tree and is stale the moment it
+    // returns; the dispatcher copies the file it will run somewhere clawbox
+    // cannot reach and asks about the COPY. Same bytes it execs.
+    sh(`"${helper}" --write`);
+    const copy = path.join(tmp, "copy.sh");
+    fs.copyFileSync(path.join(project, "install.sh"), copy);
+    expect(sh(`"${helper}" --verify-file install.sh "${copy}"`).status).toBe(0);
+
+    fs.appendFileSync(copy, "\n# swapped\n");
+    const r = sh(`"${helper}" --verify-file install.sh "${copy}"`);
+    expect(r.status).toBe(65);
+    expect(r.stderr).toMatch(/does not match/);
+
+    // A path that was never recorded is refused, not silently accepted.
+    expect(sh(`"${helper}" --verify-file scripts/nope.sh "${copy}"`).status).toBe(65);
+    expect(sh(`"${helper}" --verify-file install.sh "${tmp}/missing"`).status).toBe(66);
+  });
+
   it("rejects an unknown mode instead of doing something", () => {
     expect(sh(`"${helper}" --whatever`).status).toBe(64);
   });
@@ -211,6 +231,34 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
     const r = sh(`"${dispatcher}" chpasswd`);
     expect(r.status).toBe(0);
     expect(ran()).toContain("--step chpasswd");
+  });
+
+  it("execs a copy it holds, not the path it checked", () => {
+    // Verifying $ENTRYPOINT and then exec'ing $ENTRYPOINT is a race: bash opens
+    // the file after the check returns. The dispatcher copies it into a
+    // root-only directory, hashes the copy, and runs that.
+    sh(`"${helper}" --write`);
+    expect(sh(`"${dispatcher}" chpasswd`).status).toBe(0);
+    const staged = path.join(tmp, "run", "root-step-install.sh");
+    expect(fs.existsSync(staged), "the dispatcher did not stage the entrypoint").toBe(true);
+    expect(fs.readFileSync(staged, "utf-8")).toBe(fs.readFileSync(path.join(project, "install.sh"), "utf-8"));
+    expect(ran()).toContain("--step chpasswd");
+  });
+
+  it("refuses when the staged copy does not match the record", () => {
+    // The window the copy closes: install.sh is replaced after --verify passed.
+    // Simulated by breaking the manifest entry for it, which is the same
+    // mismatch the copy would surface.
+    sh(`"${helper}" --write`);
+    const line = fs.readFileSync(manifest, "utf-8")
+      .split("\n")
+      .find((l) => l.endsWith("install.sh"))!;
+    fs.writeFileSync(
+      manifest,
+      fs.readFileSync(manifest, "utf-8").replace(line, line.replace(/^[0-9a-f]{4}/, "dead")),
+    );
+    expect(sh(`"${dispatcher}" chpasswd`).status).toBe(65);
+    expect(ran()).toBe("");
   });
 
   it("refuses the step, and never execs, once install.sh is rewritten", () => {

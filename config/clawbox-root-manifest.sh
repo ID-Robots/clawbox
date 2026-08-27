@@ -160,11 +160,45 @@ verify_manifest() {
     || die "$PROJECT_DIR does not match $MANIFEST_FILE (a covered file changed or is gone)"
 }
 
+# Check ONE already-opened copy against what the manifest recorded for a path.
+#
+# `--verify` answers a question about the project tree, and the answer is stale
+# the moment it returns: the clawbox user can replace a file between the check
+# and the exec, and a tight rewrite loop wins that race. So the root dispatcher
+# copies the file it is going to run into a root-only directory FIRST and then
+# asks about the copy — which is the same bytes it will execute, and which
+# clawbox cannot touch.
+#
+#   clawbox-root-manifest.sh --verify-file <recorded path> <file to hash>
+verify_file() {
+  local rel="$1" actual="$2" want="" got h p
+  [ -n "$rel" ] && [ -n "$actual" ] || die "usage: $0 --verify-file <recorded path> <file>" 64
+  [ -f "$MANIFEST_FILE" ] || die "no manifest at $MANIFEST_FILE"
+  [ -f "$actual" ] || die "$actual is missing" 66
+
+  # Read the recorded hash out of the sha256sum-format manifest by exact path
+  # match. write_manifest refuses names it would have to escape, so the path
+  # column is the plain name (with a leading `*` in binary mode).
+  while read -r h p; do
+    p="${p#\*}"
+    if [ "$p" = "$rel" ]; then
+      want="$h"
+      break
+    fi
+  done < "$MANIFEST_FILE"
+  [ -n "$want" ] || die "$rel is not in $MANIFEST_FILE"
+
+  got="$(sha256sum < "$actual")"
+  got="${got%% *}"
+  [ "$want" = "$got" ] || die "$actual does not match what $MANIFEST_FILE recorded for $rel"
+}
+
 case "${1:-}" in
   --write)  write_manifest ;;
   --verify) verify_manifest ;;
+  --verify-file) verify_file "${2:-}" "${3:-}" ;;
   *)
-    echo "usage: $0 --write|--verify" >&2
+    echo "usage: $0 --write|--verify|--verify-file <recorded path> <file>" >&2
     exit 64
     ;;
 esac
