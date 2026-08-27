@@ -367,7 +367,10 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     // 1. The caller's status. Under `set -e` this is what makes
     //    `install.sh --step openclaw_tts` — the form the in-app updater runs —
     //    exit non-zero instead of announcing a clean update.
-    expect(res.status, "a requested engine that did not install still exited 0").not.toBe(0);
+    // The exact code, not merely non-zero: spawnSync reports status null on a
+    // timeout, and `null` satisfies not.toBe(0) — a hung harness would score as
+    // a pass for the very assertion this test exists to make.
+    expect(res.status, "a requested engine that did not install still exited 0").toBe(12);
     // 2. The provisioning record: summary + exit status + the marker file the
     //    flash host reads instead of parsing stdout.
     expect(res.provisionFailures).toContain("openclaw_tts");
@@ -389,7 +392,7 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     // retreads the one above.
     const res = runStep(12, "tts-local-cli");
     expect(res.stdout, "the preserve branch was never reached").toContain("preserved");
-    expect(res.status).not.toBe(0);
+    expect(res.status).toBe(12);
     expect(res.provisionFailures).toContain("openclaw_tts");
   });
 
@@ -917,7 +920,10 @@ describe.skipIf(!hasBash)("the openclaw setup step weighs the TTS result", () =>
     // `set -e` carries this out of step_openclaw_setup and aborts the install,
     // which is exactly what it did before the Kokoro tolerance was added.
     const res = runOpenclawSetup(code as number);
-    expect(res.status, `a hard TTS failure was swallowed:\n${res.out}`).not.toBe(0);
+    // The exact code, not merely non-zero: `set -e` exits with the failing
+    // command's own status, and asserting it rules out a null from a spawn
+    // timeout quietly standing in for a propagated failure.
+    expect(res.status, `a hard TTS failure was swallowed:\n${res.out}`).toBe(code);
     expect(res.out).not.toContain("SETUP_COMPLETED=");
   });
 });
