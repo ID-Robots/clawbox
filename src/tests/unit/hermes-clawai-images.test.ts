@@ -30,6 +30,13 @@ vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: cliMock }));
 // with it has its own suite (hermes-image-refresh.test.ts).
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: drawsMock }));
 vi.mock("@/lib/hermes-image-refresh", () => ({ refreshHermesImageTools: refreshMock }));
+// `hermes-clawai` now reads the coding-agent verdict either side of the writes,
+// and that module owns a runs store keyed off DATA_DIR. Only the verdict is
+// wanted here; `checkReadiness` has its own suite.
+vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));
+vi.mock("@/lib/coding-agent-mcp-refresh", () => ({
+  refreshCodingAgentToolsIfReadinessChanged: vi.fn(),
+}));
 vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
 vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: envMock }));

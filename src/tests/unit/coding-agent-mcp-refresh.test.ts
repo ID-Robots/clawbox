@@ -15,17 +15,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: vi.fn() }));
+// The mechanism this helper has is HERMES' dashboard socket, and only a Hermes
+// box has one — so the edition decides what a refused reload MEANS. Most cases
+// below are a Hermes box; the OpenClaw ones say so.
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
+import { getActiveHarness } from "@/lib/harness";
 
 const mockRpc = vi.mocked(dashboardRpc);
+const mockHarness = vi.mocked(getActiveHarness);
 let errorSpy: ReturnType<typeof vi.spyOn>;
 let logSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   mockRpc.mockReset();
   mockRpc.mockResolvedValue({ status: "ok" });
+  mockHarness.mockReset();
+  mockHarness.mockResolvedValue("hermes");
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
   logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -81,6 +89,50 @@ describe("refreshCodingAgentToolsIfReadinessChanged", () => {
     mockRpc.mockRejectedValue(new Error("socket exploded"));
     await expect(refreshCodingAgentToolsIfReadinessChanged(true, false)).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("does not report an OpenClaw box as broken for having no dashboard", async () => {
+    // The coding_agent_* family is registered on BOTH editions
+    // (mcp/tools/coding-agent.ts), but the only mechanism here is Hermes'
+    // dashboard JSON-RPC. An OpenClaw box has none BY DESIGN, so `reload.mcp`
+    // can never succeed there — and nothing is wrong: OpenClaw spawns the
+    // ClawBox MCP server per session and reaps it after ten idle minutes, so
+    // the probe re-runs and the tool list catches up on its own. An ERROR line
+    // over an operation that needed no repair is the recurring false-alarm
+    // shape, not a diagnosis.
+    mockHarness.mockResolvedValue("openclaw");
+    mockRpc.mockResolvedValue(null);
+    await refreshCodingAgentToolsIfReadinessChanged(false, true);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalled();
+    expect(String(logSpy.mock.calls[0][0])).toMatch(/re-probes|next spawned/i);
+  });
+
+  it("still reports a HERMES box whose dashboard refused", async () => {
+    // The one case a human should act on: a box that HAS a dashboard and it
+    // said no. Softening this one too would trade a false alarm for a silence.
+    mockHarness.mockResolvedValue("hermes");
+    mockRpc.mockResolvedValue(null);
+    await refreshCodingAgentToolsIfReadinessChanged(false, true);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("keeps the error when the edition cannot be read at all", async () => {
+    // Unknown is not "OpenClaw". A harness lookup that throws must not be the
+    // thing that quiets a real Hermes failure.
+    mockHarness.mockRejectedValue(new Error("no config"));
+    mockRpc.mockResolvedValue(null);
+    await refreshCodingAgentToolsIfReadinessChanged(false, true);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("does not ask the dashboard twice when something already respawned the MCP children", async () => {
+    // Linking ClawBox AI can move drawing AND the coding agent in one request.
+    // The reload is global, so the second family must not pay for a second
+    // prompt-cache invalidation.
+    await refreshCodingAgentToolsIfReadinessChanged(false, true, { alreadyReloaded: true });
+    expect(mockRpc).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalled();
   });
 
   it("does not claim success when the dashboard refused", async () => {

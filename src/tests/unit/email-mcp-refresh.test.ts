@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * The narrow trigger that keeps `email_list`/`email_read` in step with the
@@ -13,15 +13,32 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: vi.fn() }));
+// `email_list`/`email_read` are registered on BOTH editions, but the only
+// mechanism here is Hermes' dashboard socket — so the edition decides what a
+// refused reload MEANS. Hermes unless a case says otherwise.
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 
 import { refreshEmailToolsIfReadabilityChanged } from "@/lib/email-mcp-refresh";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
+import { getActiveHarness } from "@/lib/harness";
 
 const mockRpc = vi.mocked(dashboardRpc);
+const mockHarness = vi.mocked(getActiveHarness);
+let errorSpy: ReturnType<typeof vi.spyOn>;
+let logSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   mockRpc.mockReset();
   mockRpc.mockResolvedValue({ status: "ok" });
+  mockHarness.mockReset();
+  mockHarness.mockResolvedValue("hermes");
+  errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  errorSpy.mockRestore();
+  logSpy.mockRestore();
 });
 
 describe("refreshEmailToolsIfReadabilityChanged", () => {
@@ -70,6 +87,25 @@ describe("refreshEmailToolsIfReadabilityChanged", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     mockRpc.mockRejectedValue(new Error("socket exploded"));
     await expect(refreshEmailToolsIfReadabilityChanged(true, false)).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("does not report an OpenClaw box as broken for having no dashboard", async () => {
+    // Same rule as the coding-agent sibling, and for the same reason: an
+    // OpenClaw box has no dashboard BY DESIGN, so a refusal there is the
+    // edition, not a fault. Its MCP server is spawned per session and reaped
+    // when idle, so the tool list catches up on its own.
+    mockHarness.mockResolvedValue("openclaw");
+    mockRpc.mockResolvedValue(null);
+    await refreshEmailToolsIfReadabilityChanged(false, true);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(logSpy).toHaveBeenCalled();
+  });
+
+  it("still reports a HERMES box whose dashboard refused", async () => {
+    mockHarness.mockResolvedValue("hermes");
+    mockRpc.mockResolvedValue(null);
+    await refreshEmailToolsIfReadabilityChanged(false, true);
     expect(errorSpy).toHaveBeenCalled();
   });
 });

@@ -16,7 +16,16 @@ const reloadMcpMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
 vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: bounceMock }));
-vi.mock("@/lib/hermes-mcp-reload", () => ({ reloadMcpServers: reloadMcpMock }));
+// Only the ASK is faked. `reportMcpReloadRefused` is the real one, because the
+// rule it owns — an OpenClaw box has no dashboard and needs no repair, a Hermes
+// box that refused does — is part of what this file pins.
+vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-mcp-reload")>()),
+  reloadMcpServers: reloadMcpMock,
+}));
+// This helper's only caller (`applyClawaiToHermes`) is gated on a Hermes box by
+// all three of its entry points, so that is the box every case below runs on.
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
 
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 
@@ -175,14 +184,36 @@ describe("refreshHermesImageTools", () => {
     rpcMock.mockResolvedValue(null);
     bounceMock.mockResolvedValue(false);
 
-    await expect(refreshHermesImageTools(false, true)).resolves.toBeUndefined();
+    // …and the answer is an honest "nothing was respawned", which is what keeps
+    // the coding-agent family on the same path from skipping its own reload.
+    await expect(refreshHermesImageTools(false, true)).resolves.toBe(false);
   });
 
   it("does not throw when the RPC helper itself rejects", async () => {
     rpcMock.mockRejectedValue(new Error("socket exploded"));
     bounceMock.mockResolvedValue(false);
 
-    await expect(refreshHermesImageTools(false, true)).resolves.toBeUndefined();
-    await expect(refreshHermesImageTools(true, false)).resolves.toBeUndefined();
+    await expect(refreshHermesImageTools(false, true)).resolves.toBe(false);
+    await expect(refreshHermesImageTools(true, false)).resolves.toBe(true);
+  });
+
+  it("reports the respawn so a second family does not pay for a second one", async () => {
+    // The reload is GLOBAL — it rebuilds every family's tool list, not just the
+    // image one. Linking ClawBox AI can move drawing and the coding agent in one
+    // request, and the second must be able to see that the first already paid.
+    await expect(refreshHermesImageTools(false, true)).resolves.toBe(true);
+
+    // A bounce counts too: it takes the MCP children down with the dashboard and
+    // brings them back.
+    reloadMcpMock.mockResolvedValue(false);
+    agentSaysItCanDraw(false);
+    bounceMock.mockResolvedValue(true);
+    await expect(refreshHermesImageTools(false, true)).resolves.toBe(true);
+  });
+
+  it("says nothing was respawned when the box was already drawing", async () => {
+    // Re-linking with a fresh token. The credential is reloaded, but no MCP
+    // child was respawned, so a caller must not skip its own reload on it.
+    await expect(refreshHermesImageTools(true, true)).resolves.toBe(false);
   });
 });

@@ -26,6 +26,13 @@ vi.mock("@/lib/config-store", () => ({ setMany: vi.fn() }));
 // Neither belongs in a unit test's blast radius, and both have their own file
 // (`hermes-clawai-images.test.ts`).
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
+// `hermes-clawai` now reads the coding-agent verdict either side of the writes,
+// and that module owns a runs store keyed off DATA_DIR. Only the verdict is
+// wanted here; `checkReadiness` has its own suite.
+vi.mock("@/lib/coding-agent", () => ({ getCodingAgentStatus: vi.fn(async () => ({ ready: false })) }));
+vi.mock("@/lib/coding-agent-mcp-refresh", () => ({
+  refreshCodingAgentToolsIfReadinessChanged: vi.fn(),
+}));
 vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
   installHermesImagePlugin: vi.fn(),

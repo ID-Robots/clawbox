@@ -1,4 +1,4 @@
-import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
+import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
  * Ask the agent to rebuild its MCP tool list when the coding agent becomes
@@ -29,6 +29,18 @@ import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
  * paying for, below.
  */
 
+/** @see refreshCodingAgentToolsIfReadinessChanged */
+export interface CodingAgentRefreshOptions {
+  /**
+   * True when something else in THIS request already respawned the box's MCP
+   * children — the image reconciler on the ClawBox AI connect path, which
+   * reloads or bounces for its own family and takes every other family's tool
+   * list with it. The reload is global, so a second one would buy nothing and
+   * cost a second prompt-cache invalidation.
+   */
+  alreadyReloaded?: boolean;
+}
+
 /**
  * Reload the MCP servers, but ONLY if this request flipped whether the coding
  * agent family would be registered at all.
@@ -54,29 +66,43 @@ import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
  * next restart — which is exactly the behaviour of every box before this
  * existed.
  *
+ * BOTH WRITE PATHS, not just the switch. `ready` is `enabled` AND the harness
+ * installed AND ClawBox AI connected, and the owner can move the third one on
+ * its own: `applyClawaiToHermes` is what writes `clawai_token`, and every Hermes
+ * connect entry point funnels through it. A box whose switch is already on goes
+ * ready:false → ready:true the moment the AI is connected — which is exactly the
+ * order the readiness text sends the owner in ("ClawBox AI is not connected.
+ * Open Settings → AI Models and sign in to ClawBox AI first."). So this helper
+ * hangs off the connect path too; see `hermes-clawai.ts`.
+ *
  * @param before what `getCodingAgentStatus().ready` said BEFORE the write
  * @param after  what it says after — the same field the panel is shown, so the
  *               agent's tools and the owner's panel cannot disagree.
+ * @param options see `CodingAgentRefreshOptions`
  */
-export async function refreshCodingAgentToolsIfReadinessChanged(before: boolean, after: boolean): Promise<void> {
+export async function refreshCodingAgentToolsIfReadinessChanged(
+  before: boolean,
+  after: boolean,
+  options: CodingAgentRefreshOptions = {},
+): Promise<void> {
   if (before === after) return;
+  const became = `the coding agent became ${after ? "available" : "unavailable"}`;
+  if (options.alreadyReloaded) {
+    // Nothing to ask for: the respawn that already happened in this request
+    // rebuilt EVERY family's tool list, this one included.
+    console.log(`[coding-agent/mcp-refresh] ${became}; the MCP servers were already reloaded for this change`);
+    return;
+  }
   // `.catch` even though `reloadMcpServers` documents that it never throws: the
   // "never throws" above is a promise made to the OWNER'S SAVE, which has
   // already been written to disk by the time this runs, and it must not depend
   // on a neighbouring module keeping its own promise.
   if (!(await reloadMcpServers().catch(() => false))) {
-    // Logged, not surfaced. Worth a line because "I turned it on and the
-    // assistant still cannot start a run" is otherwise invisible from the
-    // outside, and this is the one place that knows the refresh was wanted and
-    // did not happen.
-    console.error(
-      `[coding-agent/mcp-refresh] the coding agent became ${after ? "available" : "unavailable"}, `
-        + "but the agent would not reload its MCP servers",
-    );
+    // Logged, not surfaced, and in the words that are true for this edition —
+    // an OpenClaw box has no dashboard to ask and needs no repair. See
+    // `reportMcpReloadRefused` for why that distinction is worth making.
+    await reportMcpReloadRefused("coding-agent/mcp-refresh", became);
     return;
   }
-  console.log(
-    `[coding-agent/mcp-refresh] the coding agent became ${after ? "available" : "unavailable"}; `
-      + "asked the agent to reload its MCP servers",
-  );
+  console.log(`[coding-agent/mcp-refresh] ${became}; asked the agent to reload its MCP servers`);
 }

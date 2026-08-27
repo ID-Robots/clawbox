@@ -1,0 +1,98 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+/**
+ * Pasting a ClawBox AI token has to re-advertise the coding-agent tools.
+ *
+ * This route is the one connect entry point that persists the token ITSELF,
+ * before it hands it to `applyClawaiToHermes` — so a "was the coding agent
+ * runnable before this request" snapshot taken inside the apply reads the token
+ * this route just wrote and is already true. The guard then sees
+ * before === after, skips the reload, and the box ends up exactly where it was
+ * without the fix: panel says ready, running MCP child still has no
+ * `coding_agent_run`. The snapshot has to be taken here, ahead of the write.
+ */
+
+const store: Record<string, unknown> = {};
+const rpcMock = vi.hoisted(() => vi.fn());
+const statusMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@/lib/config-store", () => ({
+  get: vi.fn(async (key: string) => store[key] ?? null),
+  setMany: vi.fn(async (values: Record<string, unknown>) => {
+    for (const [key, value] of Object.entries(values)) store[key] = value;
+  }),
+}));
+vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn(async () => "hermes") }));
+vi.mock("@/lib/hermes-config-cache", () => ({ hermesConfigGet: vi.fn(async () => "clawai") }));
+vi.mock("@/lib/hermes-cli", () => ({
+  runHermesCli: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+}));
+// The box already draws, so the image family cannot be what asks for a reload
+// below — anything this test counts belongs to the coding-agent family.
+vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => true) }));
+vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
+vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
+vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
+  installHermesImagePlugin: vi.fn(),
+}));
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  resolveVisionModelId: vi.fn(async () => ({ id: "vision", verified: true, reason: "proxy-allows" })),
+}));
+// `ready` is `enabled AND harness installed AND ClawBox AI connected`, and the
+// third of those is the config-store key this route writes. Modelling it off the
+// same store is what makes the ordering trap reproducible.
+vi.mock("@/lib/coding-agent", () => ({
+  getCodingAgentStatus: statusMock,
+}));
+vi.mock("@/lib/hermes-dashboard-rpc", () => ({ dashboardRpc: rpcMock }));
+vi.mock("@/lib/hermes-dashboard-control", () => ({ bounceHermesDashboard: vi.fn(async () => true) }));
+
+import { POST } from "@/app/setup-api/hermes/clawai/route";
+
+/** A well-formed pasted token: charset+length is all the route checks. */
+const PASTED = "claw_abcdef0123456789";
+
+function post(body: unknown): Request {
+  return new Request("http://localhost/setup-api/hermes/clawai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/** How many GLOBAL MCP respawns this request asked the agent for. */
+function reloadCount(): number {
+  return rpcMock.mock.calls.filter((call) => call[0] === "reload.mcp").length;
+}
+
+beforeEach(() => {
+  for (const key of Object.keys(store)) delete store[key];
+  rpcMock.mockReset();
+  statusMock.mockReset();
+  rpcMock.mockImplementation(async (method: string) =>
+    method === "image.generate" ? { available: true } : { status: "ok" },
+  );
+  // The owner's switch is on; connecting is the only thing left.
+  statusMock.mockImplementation(async () => ({
+    ready: typeof store.clawai_token === "string" && store.clawai_token !== "",
+  }));
+});
+
+describe("POST /setup-api/hermes/clawai", () => {
+  it("re-advertises the coding-agent tools when a pasted token is what connected the box", async () => {
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+    expect(response.status).toBe(200);
+    expect(reloadCount()).toBe(1);
+  });
+
+  it("does not reload when the box was already connected and already ready", async () => {
+    // Re-applying a tier. Nothing about the tool list moved, and a reload
+    // invalidates the model's prompt cache.
+    store.clawai_token = PASTED;
+    const response = await POST(post({ tier: "pro" }));
+    expect(response.status).toBe(200);
+    expect(reloadCount()).toBe(0);
+  });
+});
