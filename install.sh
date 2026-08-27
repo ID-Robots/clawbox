@@ -4859,39 +4859,41 @@ step_validate_services() {
         tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
         piper_state=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
       fi
-      case "$tts_state" in
-        ready|skipped:*) ;;
-        "")
-          failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has the GPU engine cannot be asserted either way. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
-          ;;
-        *)
-          failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box answers speech on the Piper CPU fallback. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
-          ;;
-      esac
-      # The CPU half, under the same rule the GPU half already carried: an
-      # ABSENT verdict fails. The TTS step runs before this check on both the
-      # install and the update path and publishes both keys, so nothing here can
-      # assert "Piper is fine" from a line that is not there.
-      case "$piper_state" in
-        ready|skipped:*) ;;
-        "")
-          failed_probe+=("TTS: no Piper verdict at $TTS_STATUS_FILE — the CPU fallback left no record, so whether this box can speak at all cannot be asserted either way. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
-          ;;
-        *)
-          failed_probe+=("TTS: the Piper CPU fallback was requested and did NOT install ($piper_state) — this box has no fallback behind its GPU engine. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
-          ;;
-      esac
-      # And the one that matters most, stated on its own rather than inferred
-      # from the two above: `skipped:*` is a PASS for each engine separately,
-      # because a board with no CUDA and a board with no pinned aarch64 artifact
-      # were each never going to run that engine. Both skipped at once on an
-      # aarch64 box is not that — it is a box with no voice.
-      if [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]; then
-        case "$tts_state$piper_state" in
-          *failed:*)
-            failed_probe+=("TTS: this box has NO working TTS engine (Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}) — it will answer every spoken request with silence. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
-            ;;
-        esac
+      # `ready` is the only verdict that means "this engine can speak".
+      # `skipped:*` is a board that was never going to run it, `failed:*` is one
+      # that was asked and could not, and an EMPTY string is an engine that
+      # reported nothing at all — which fails, exactly as the Kokoro half
+      # already did. The TTS step runs before this check on both the install and
+      # the update path and publishes both keys, so nothing here has to assert
+      # an engine is fine from a line that is not there.
+      local kokoro_failed=false piper_failed=false
+      case "$tts_state" in failed:*) kokoro_failed=true ;; esac
+      case "$piper_state" in failed:*) piper_failed=true ;; esac
+      # ONE verdict about this box's speech, most severe first, so the check
+      # that probe_count counts as one contributes at most one line. Reporting
+      # "Kokoro failed" and "Piper failed" and "no engine" as three separate
+      # failures for one question would make the failure list longer than the
+      # number of checks that ran.
+      local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
+      if [ -z "$tts_state" ] && [ -z "$piper_state" ]; then
+        failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
+      elif [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]         && { [ "$kokoro_failed" = true ] || [ "$piper_failed" = true ]; }; then
+        # The defect this probe was rewritten for. Note what does NOT land here:
+        # both engines `skipped:*` is a board that runs neither by design (no
+        # Jetson CUDA build AND no pinned aarch64 artifact), and failing every
+        # install-x64.sh run would only teach everyone to ignore this check.
+        failed_probe+=("TTS: this box has NO working TTS engine — Kokoro was requested and did NOT install (${tts_state:-unreported}) or is unavailable, and there is no usable Piper fallback (${piper_state:-unreported}). It will answer every spoken request with SILENCE. $tts_fix")
+      elif [ "$kokoro_failed" = true ]; then
+        failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box answers speech on the Piper CPU fallback. $tts_fix")
+      elif [ -z "$tts_state" ]; then
+        failed_probe+=("TTS: no on-device TTS verdict for Kokoro at $TTS_STATUS_FILE — the GPU half left no record, so whether this box has the engine it asked for cannot be asserted either way. $tts_fix")
+      elif [ "$piper_failed" = true ]; then
+        # Reached only with Kokoro ready: every case where the GPU engine is
+        # missing too was answered above. So the box speaks, with nothing behind
+        # the engine it speaks on.
+        failed_probe+=("TTS: the Piper CPU fallback was requested and did NOT install ($piper_state) — this box has no fallback behind its GPU engine. $tts_fix")
+      elif [ -z "$piper_state" ]; then
+        failed_probe+=("TTS: no Piper verdict at $TTS_STATUS_FILE — the CPU half left no record, so whether this box has a fallback cannot be asserted either way. $tts_fix")
       fi
     fi
 

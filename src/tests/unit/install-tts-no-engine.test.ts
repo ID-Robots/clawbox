@@ -382,8 +382,7 @@ describe.skipIf(!hasBash)("step_openclaw_tts records the failures it is handed",
     // MUTE box that is the same false success in a smaller font — a Piper the
     // box does not have, named in the summary line an operator actually reads.
     const res = runStep(13);
-    expect(res.out, `a mute box was told it speaks on Piper:
-${res.out}`).not.toContain("Piper CPU only");
+    expect(res.out, `a mute box was told it speaks on Piper:\n${res.out}`).not.toContain("Piper CPU only");
     expect(res.out).not.toContain("Kokoro GPU, Piper fallback");
     expect(res.out).toMatch(/SILENCE/);
   });
@@ -395,8 +394,7 @@ ${res.out}`).not.toContain("Piper CPU only");
     // over a working engine is a failure report over something that succeeded.
     const degraded = runStep(1);
     const mute = runStep(13);
-    expect(degraded.stepRc, `a degraded box was reported as a mute one:
-${degraded.out}`).toBe("14");
+    expect(degraded.stepRc, `a degraded box was reported as a mute one:\n${degraded.out}`).toBe("14");
     expect(mute.stepRc).toBe("13");
     expect(degraded.stepRc).not.toBe(mute.stepRc);
     expect(degraded.out).not.toMatch(/SILENCE/);
