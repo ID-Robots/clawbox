@@ -111,8 +111,9 @@ SSH to the device's listener.
 Restore from the device UI (ClawKeep → Restore) or the CLI:
 
 ```bash
-clawkeep snapshots                 # list what is in the cloud, as JSON
-clawkeep restore <snapshot-name>   # download, decrypt, verify, swap into place
+clawkeep snapshots                  # list what is in the cloud, as JSON
+SNAPSHOT="2026-08-27T07-42-11.000Z-ab12cd34-hermes-backup.tar.gz.enc"
+clawkeep restore "$SNAPSHOT"        # download, decrypt, verify, swap into place
 ```
 
 `restore` handles the whole path: it mints credentials, downloads, decrypts with
@@ -144,11 +145,15 @@ ENDPOINT=$(jq -r .endpoint "$CREDS_FILE")
 BUCKET=$(jq -r .bucket "$CREDS_FILE"); PREFIX=$(jq -r .prefix "$CREDS_FILE")
 
 aws --endpoint-url "$ENDPOINT" s3 ls "s3://$BUCKET/$PREFIX"
-aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/$PREFIX<snapshot>" ./snap.tar.gz.enc
+SNAPSHOT="<paste one name from the listing above>"
+aws --endpoint-url "$ENDPOINT" s3 cp "s3://$BUCKET/$PREFIX$SNAPSHOT" ./snap.tar.gz.enc
 
 # Decrypt with the device passphrase (the same one `clawkeep set-passphrase` took).
 # See clawkeep/crypto.py for the exact cipher and KDF parameters.
-openssl enc -d -aes-256-cbc -pbkdf2 -in snap.tar.gz.enc -out snap.tar.gz -pass file:<passphrase-file>
+PASSPHRASE_FILE=$(mktemp); chmod 600 "$PASSPHRASE_FILE"
+printf '%s' 'your-device-passphrase' > "$PASSPHRASE_FILE"
+openssl enc -d -aes-256-cbc -pbkdf2   -in snap.tar.gz.enc -out snap.tar.gz -pass "file:$PASSPHRASE_FILE"
+shred -u "$PASSPHRASE_FILE"
 
 tar -tzf snap.tar.gz | head            # <root>/manifest.json + <root>/payload/posix/...
 tar -xOzf snap.tar.gz '*/manifest.json' | jq .agent   # "hermes" or absent (openclaw)

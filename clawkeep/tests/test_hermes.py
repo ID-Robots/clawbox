@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import tarfile
 from datetime import datetime, timezone
@@ -325,3 +326,58 @@ def test_an_empty_directory_asset_survives_the_round_trip(
     assert swap_source == staging
     # ...and it exists and is empty, which is the whole point.
     assert staging.is_dir() and not any(staging.iterdir())
+
+
+def test_a_symlinked_directory_source_is_refused_not_archived(
+    box: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directory asset whose SOURCE is a symlink.
+
+    `Path.exists()` follows symlinks, so the archiver would have added a single
+    symlink member as the asset root. Restore finds that member, takes it as
+    proof the asset is there, and swaps the empty staging directory over the
+    live one — deleting exactly what it was asked to restore. Refused at
+    archive time instead, and recorded so the manifest is honest about it.
+    """
+    home = box / ".hermes"
+    real = box / "skills-elsewhere"
+    real.mkdir()
+    (real / "SKILL.md").write_text("moved\n", encoding="utf-8")
+    shutil.rmtree(home / "skills")
+    try:
+        (home / "skills").symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this platform will not let the test create a symlink")
+
+    out = hermes.create_archive(output_dir=tmp_path / "out")
+    manifest = _manifest(out.path)
+
+    assert "skills" not in {a["kind"] for a in manifest["assets"]}
+    reason = next(s["reason"] for s in manifest["skipped"] if s["kind"] == "skills")
+    assert "symlink" in reason
+    # And nothing under that name rode along in the payload.
+    assert not any(n.endswith("/.hermes/skills") for n in _names(out.path))
+
+
+def test_restore_refuses_a_non_directory_asset_root(tmp_path: Path) -> None:
+    """The other half of the same defect, defended independently.
+
+    Even if some other producer wrote an archive whose directory-asset root is
+    a symlink, restore must refuse rather than accept the empty staging
+    directory as a successful extraction.
+    """
+    from clawkeep import restore as restore_mod
+
+    root = "snap-root"
+    sub = f"{root}/payload/posix/home/clawbox/.hermes/skills"
+    archive = tmp_path / "snap.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        info = tarfile.TarInfo(sub)
+        info.type = tarfile.SYMTYPE
+        info.linkname = "../elsewhere"
+        tf.addfile(info)
+
+    with pytest.raises(restore_mod.RestoreError, match="declared as a directory asset"):
+        restore_mod._extract_asset(
+            archive, archive_subpath=sub, staging_root=tmp_path / "staged",
+        )
