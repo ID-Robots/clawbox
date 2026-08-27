@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { hermesFailureMessage } from "@/lib/hermes-cli-message";
+import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { requireSession } from "@/lib/route-auth";
 import { reconcileLocalAiWithHermes } from "@/lib/hermes-local-ai";
 import {
@@ -237,7 +237,7 @@ export async function POST(request: Request) {
     if (r.code !== 0) {
       console.error("[hermes models] config set exit", r.code, r.stderr);
       throw new ConfigSetError(
-        hermesFailureMessage(r.stdout, r.stderr) || `Failed to set ${key}`,
+        safeHermesFailureMessage(r.stdout, r.stderr) || `Failed to set ${key}`,
       );
     }
   };

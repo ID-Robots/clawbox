@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { hermesFailureMessage } from "@/lib/hermes-cli-message";
+import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
@@ -74,7 +74,7 @@ export async function POST(request: Request) {
       //    the input PR #515 cleaned out of the chat bubble; the same parser
       //    cleans it here.
       console.error("[hermes provider-key] auth add exit", r.code, redactKey(r.stderr, apiKey));
-      const reported = hermesFailureMessage(redactKey(r.stdout, apiKey), redactKey(r.stderr, apiKey));
+      const reported = safeHermesFailureMessage(redactKey(r.stdout, apiKey), redactKey(r.stderr, apiKey));
       return NextResponse.json({ error: reported || "Failed to save API key" }, { status: 502 });
     }
   } catch (err) {

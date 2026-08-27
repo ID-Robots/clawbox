@@ -11,6 +11,7 @@
  * The grep that says the surfaces are all accounted for:
  *   grep -rn "stderr" src/app/setup-api/hermes --include=route.ts
  */
+import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 
 /**
  * Turn a `hermes` subcommand's stderr into something worth showing a person.
@@ -191,6 +192,30 @@ function usefulLines(stream: string): string[] {
  */
 export function hermesFailureMessage(stdout: string, stderr: string): string {
   return errorFromStderr(stderr) || (usefulLines(stdout)[0] ?? "");
+}
+
+/**
+ * The same message, but only if it is safe to render to a customer.
+ *
+ * `hermesFailureMessage` answers "what did the CLI say went wrong". That is a
+ * different question from "may this be shown to a person", and conflating them
+ * is how the panel would keep leaking after the frames were stripped: a CLI
+ * needs no traceback to name the install layout, and the ordinary one-line
+ * EACCES shape —
+ *
+ *   Error: cannot write /home/clawbox/.hermes/config.yaml: permission denied
+ *
+ * — survives every rule above, because it genuinely IS the cause and it
+ * genuinely does name a failure.
+ *
+ * So the last word belongs to `sanitizeErrorMessage`, the repo's existing
+ * whitelist-by-shape ("one place that decides whether a message produced by a
+ * failing layer may be shown"), which already drops paths, URLs, credentials,
+ * stack frames and internal handles. Returning "" rather than the unsafe text
+ * lets each caller fall back to the fixed sentence it already has.
+ */
+export function safeHermesFailureMessage(stdout: string, stderr: string): string {
+  return sanitizeErrorMessage(hermesFailureMessage(stdout, stderr)) ?? "";
 }
 
 /**
