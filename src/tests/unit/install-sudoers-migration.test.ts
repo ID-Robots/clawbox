@@ -521,7 +521,12 @@ describe("the root-owned helper scripts the grants point at", () => {
     expect(granted).toContain("optimize-ollama.sh");
     for (const script of new Set(granted)) {
       expect(libexec, `install_root_libexec must install ${script}`).toContain(script);
-      expect(fs.existsSync(path.join(REPO, "scripts", script)), `scripts/${script} must exist`).toBe(true);
+      // The feature helpers live in scripts/; the root-side entrypoints
+      // (clawbox-root-step.sh, clawbox-root-manifest.sh, clawbox-run-root-step.sh)
+      // live in config/ next to the units and the allow-list they belong to.
+      const inScripts = fs.existsSync(path.join(REPO, "scripts", script));
+      const inConfig = fs.existsSync(path.join(REPO, "config", script));
+      expect(inScripts || inConfig, `${script} must exist in scripts/ or config/`).toBe(true);
     }
   });
 
@@ -625,14 +630,16 @@ d("the allow-list a device ends up with", () => {
     "disable --now ollama.service",
     "start ollama.service",
     "stop ollama.service",
-    "reset-failed clawbox-root-update@chpasswd.service",
-    "start clawbox-root-update@chpasswd.service",
-    "reset-failed clawbox-root-update@set_hostname.service",
-    "start clawbox-root-update@set_hostname.service",
-    "reset-failed clawbox-root-update@restart_ap.service",
-    "start clawbox-root-update@restart_ap.service",
-    "reset-failed clawbox-root-update@llamacpp_install.service",
-    "start --no-block clawbox-root-update@llamacpp_install.service",
+    // No `clawbox-root-update@` instance appears here any more. Removing the
+    // unscoped polkit `manage-units` grant meant the web server had to start
+    // ~25 of those units through sudo rather than four, and enumerating them
+    // twice over (start + reset-failed) would be 50 lines of string matching
+    // nobody reviews — while the wildcard that would compress them is exactly
+    // what TASK-445 removed. The grant names a root-owned LAUNCHER instead,
+    // which is not a systemctl command and so is deliberately outside this
+    // list; `the root-step launcher` describe block below covers it, and
+    // src/tests/unit/root-steps.test.ts asserts no grant names one of these
+    // units again. TASK-539.
     "reboot",
     "poweroff",
   ];
@@ -676,7 +683,8 @@ d("the allow-list a device ends up with", () => {
     //   clawbox-ap
     //     scripts/ap-watchdog.sh (clawbox-ap-watchdog.service, root) and
     //     install.sh itself. The UI path goes through
-    //     clawbox-root-update@restart_ap.service, which IS granted above.
+    //     clawbox-root-update@restart_ap.service, which the web server starts
+    //     through the root-owned launcher rather than a grant of its own.
     //   clawbox-hermes-dashboard-proxy
     //     scripts/setup-hermes-edition.sh, which install.sh runs as root.
     const grants = systemctlGrants(install());

@@ -7,6 +7,7 @@ import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
 // Imported rather than spelled out so a GGUF swap cannot leave this suite
 // asserting a filename the app no longer asks for.
 import { DEFAULT_LLAMACPP_HF_FILE, DEFAULT_LLAMACPP_HF_REPO } from "@/lib/llamacpp";
+import { startRootStep } from "@/lib/root-step-runner";
 
 vi.mock("@/lib/root-step-runner", () => ({
   ROOT_STEP_LAUNCHER: "/usr/local/libexec/clawbox/clawbox-run-root-step.sh",
@@ -390,13 +391,12 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(text).toContain("Repairing the llama.cpp runtime");
     expect(text).toContain("runtime repaired");
     expect(text).toContain("\"success\":true");
-    expect(mockExecFile).toHaveBeenCalledWith(
-      "/usr/bin/sudo",
-      // --no-block: we poll systemd ourselves so the wizard can stream progress
-      // instead of sitting silent for the whole install.
-      ["/usr/bin/systemctl", "start", "--no-block", "clawbox-root-update@llamacpp_install.service"],
-      expect.any(Object),
-      expect.any(Function),
+    // --no-block: we poll systemd ourselves so the wizard can stream progress
+    // instead of sitting silent for the whole install. Through the root-owned
+    // launcher, which also clears a previous failure itself. TASK-539.
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith(
+      "llamacpp_install",
+      expect.objectContaining({ noBlock: true }),
     );
     expect(mockSpawn).toHaveBeenCalledTimes(2);
 

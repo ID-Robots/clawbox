@@ -96,7 +96,10 @@ describe("sudoers grants", () => {
     const granted = sudoers
       .split("\n")
       .filter((l) => l.startsWith("clawbox ") && l.includes(LIBEXEC))
-      .map((l) => l.slice(l.indexOf(LIBEXEC)).trim());
+      .map((l) => l.slice(l.indexOf(LIBEXEC)).trim())
+      // Other root-owned entrypoints live under the same directory now — the
+      // root-step launcher (TASK-539) — and are not this file's business.
+      .filter((c) => /(desktop|power)-mode\.sh/.test(c));
     expect(granted.sort()).toEqual([
       `${LIBEXEC}/clawbox-desktop-mode.sh --disable`,
       `${LIBEXEC}/clawbox-desktop-mode.sh --enable`,
