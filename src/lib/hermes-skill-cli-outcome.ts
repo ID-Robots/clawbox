@@ -288,3 +288,56 @@ export function parseInstallOutcome(stdout: string, stderr = ''): InstallOutcome
   }
   return { ...empty, kind: 'unknown' };
 }
+
+// ── Uninstall ───────────────────────────────────────────────────────────────
+//
+// TASK-547 — `hermes skills uninstall` has the same habit: it exits 0 whether
+// it removed the skill or refused to. `do_uninstall`
+// (hermes_cli/skills_hub.py:1222) prints `uninstall_skill`'s message
+// (tools/skills_hub.py:4081) and returns, so the printed sentence is the only
+// record of what happened. Same discipline as parseInstallOutcome: match a
+// whitespace-collapsed copy (the 80-column wrap again), recognise only the
+// CLI's own templated sentences, and never keep a free-text exception string,
+// which can carry on-device paths.
+
+export type UninstallOutcomeKind =
+  /** `Uninstalled '<name>' from <path>` — printed after the lock entry is dropped. */
+  | 'uninstalled'
+  /** `'<name>' is not a hub-installed skill (may be a builtin)`. */
+  | 'not-installed'
+  /**
+   * `Refusing to uninstall '<name>': <exception>` — the lock-path validator
+   * rejected the entry's install_path. The tail is a raw exception string and
+   * is deliberately not kept.
+   */
+  | 'refused'
+  /** `Cancelled.` — the confirmation prompt was not answered with yes. */
+  | 'cancelled'
+  /** The uninstaller said something this parser does not recognise. */
+  | 'unknown';
+
+export interface UninstallOutcome {
+  kind: UninstallOutcomeKind;
+}
+
+const UNINSTALL_REFUSED_RE = /Refusing to uninstall '[^']*':/i;
+const UNINSTALL_NOT_INSTALLED_RE = /'[^']*' is not a hub-installed skill/i;
+const UNINSTALL_OK_RE = /Uninstalled '[^']*' from /i;
+const UNINSTALL_CANCELLED_RE = /\bCancelled\./;
+
+/**
+ * Classify one `hermes skills uninstall` run that exited 0.
+ *
+ * The two refusals are checked before the success sentence so a refusal that
+ * happens to contain the word "uninstall" can never be read as a removal.
+ */
+export function parseUninstallOutcome(stdout: string, stderr = ''): UninstallOutcome {
+  const flat = `${stdout || ''}\n${stderr || ''}`
+    .slice(0, MAX_OUTPUT_CHARS)
+    .replace(/\s+/g, ' ');
+  if (UNINSTALL_REFUSED_RE.test(flat)) return { kind: 'refused' };
+  if (UNINSTALL_NOT_INSTALLED_RE.test(flat)) return { kind: 'not-installed' };
+  if (UNINSTALL_OK_RE.test(flat)) return { kind: 'uninstalled' };
+  if (UNINSTALL_CANCELLED_RE.test(flat)) return { kind: 'cancelled' };
+  return { kind: 'unknown' };
+}

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseAmbiguousSkills, parseInstallOutcome } from '@/lib/hermes-skill-cli-outcome';
+import {
+  parseAmbiguousSkills,
+  parseInstallOutcome,
+  parseUninstallOutcome,
+} from '@/lib/hermes-skill-cli-outcome';
 
 /**
  * TASK-453 round 3 — `hermes skills install` exits 0 on every refusal, so the
@@ -294,5 +298,91 @@ describe('parseAmbiguousSkills — the real table', () => {
     ].join('\n');
 
     expect(parseAmbiguousSkills(many, 5)).toHaveLength(5);
+  });
+});
+
+/**
+ * TASK-547 — `hermes skills uninstall` has the same habit as install: it exits
+ * 0 whether it removed the skill or refused to. `do_uninstall`
+ * (hermes_cli/skills_hub.py:1222) prints `uninstall_skill`'s message
+ * (tools/skills_hub.py:4081) and returns, so the ONLY record of what happened
+ * is the sentence itself:
+ *
+ *   Uninstalled '<name>' from <install_path>                     — it worked
+ *   Error: '<name>' is not a hub-installed skill (may be a builtin)
+ *   Error: Refusing to uninstall '<name>': <free-text exception>
+ *   Cancelled.                                                   — no confirm
+ *
+ * The transcripts below reproduce those verbatim, including the `Confirm
+ * [y/N]:` prompt that `input()` writes to stdout ahead of the answer, and the
+ * 80-column wrap a `rich` console applies when stdout is a pipe.
+ */
+
+const UNINSTALL_OK = [
+  '',
+  "Uninstall 'oo-terraform'?",
+  "Confirm [y/N]: Uninstalled 'oo-terraform' from oo-terraform",
+  '',
+].join('\n');
+
+const UNINSTALL_NOT_INSTALLED = [
+  '',
+  "Uninstall 'pdf'?",
+  "Confirm [y/N]: Error: 'pdf' is not a hub-installed skill (may be a builtin)",
+  '',
+].join('\n');
+
+// The lock-path validator's refusal. The tail after the colon is a raw
+// exception string and can carry on-device paths.
+const UNINSTALL_REFUSED = [
+  '',
+  "Uninstall 'helm'?",
+  "Confirm [y/N]: Error: Refusing to uninstall 'helm': lock entry install_path ",
+  "'../../.ssh' escapes the skills directory",
+  '',
+].join('\n');
+
+describe('parseUninstallOutcome — what the uninstaller actually said', () => {
+  it('reads the success sentence as uninstalled', () => {
+    expect(parseUninstallOutcome(UNINSTALL_OK).kind).toBe('uninstalled');
+  });
+
+  it('reads the builtin/unknown-name refusal as not-installed, not as success', () => {
+    expect(parseUninstallOutcome(UNINSTALL_NOT_INSTALLED).kind).toBe('not-installed');
+  });
+
+  it('still classifies the refusal when the 80-column wrap splits the sentence', () => {
+    const wrapped = [
+      "Confirm [y/N]: Error: 'a-skill-with-a-rather-long-name' is not a ",
+      'hub-installed skill (may be a builtin)',
+    ].join('\n');
+
+    expect(parseUninstallOutcome(wrapped).kind).toBe('not-installed');
+  });
+
+  it('reads the lock-path validator refusal as refused', () => {
+    expect(parseUninstallOutcome(UNINSTALL_REFUSED).kind).toBe('refused');
+  });
+
+  it('never carries the refusal’s free-text exception, which can name on-device paths', () => {
+    const out = parseUninstallOutcome(UNINSTALL_REFUSED);
+
+    expect(JSON.stringify(out)).not.toContain('.ssh');
+    expect(JSON.stringify(out)).not.toContain('escapes the skills directory');
+  });
+
+  it('reads an unconfirmed prompt as cancelled', () => {
+    expect(
+      parseUninstallOutcome("\nUninstall 'pdf'?\nConfirm [y/N]: Cancelled.\n").kind,
+    ).toBe('cancelled');
+  });
+
+  it('does not guess when the uninstaller says something it has never seen', () => {
+    expect(parseUninstallOutcome('a sentence from a future CLI\n').kind).toBe('unknown');
+  });
+
+  it('does not read the confirmation prompt itself as an outcome', () => {
+    // A timed-out run can die with only the prompt written.
+    expect(parseUninstallOutcome("\nUninstall 'pdf'?\nConfirm [y/N]: ").kind).toBe('unknown');
   });
 });
