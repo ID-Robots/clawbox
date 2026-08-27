@@ -57,16 +57,11 @@ describe("backupSourceFor", () => {
   it("says Hermes needs no second binary installed", () => {
     // The whole reason ClawKeep was dead on Hermes: the UI gated the backup
     // button on an `openclaw` CLI that edition will never have.
-    const hermes = backupSourceFor("hermes");
-    expect(hermes.requiresExternalCli).toBe(false);
-    expect(hermes.cliName).toBe("");
-    expect(hermes.stateDir).toBe("~/.hermes");
+    expect(backupSourceFor("hermes").requiresExternalCli).toBe(false);
   });
 
   it("says OpenClaw does", () => {
-    const openclaw = backupSourceFor("openclaw");
-    expect(openclaw.requiresExternalCli).toBe(true);
-    expect(openclaw.cliName).toBe("openclaw");
+    expect(backupSourceFor("openclaw").requiresExternalCli).toBe(true);
   });
 
   it("gives every edition a non-empty contents list to render", () => {

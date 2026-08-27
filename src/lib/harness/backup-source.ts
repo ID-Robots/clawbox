@@ -28,10 +28,6 @@ export interface BackupSource {
    * there is no second thing to install and no remedy to print.
    */
   readonly requiresExternalCli: boolean;
-  /** The binary name, when there is one. Empty when the archiver is built in. */
-  readonly cliName: string;
-  /** The root the archive is taken from, for display. */
-  readonly stateDir: string;
   /**
    * True when the archive carries provider keys or platform tokens.
    *
@@ -49,8 +45,6 @@ export interface BackupSource {
 
 const HERMES: BackupSource = {
   requiresExternalCli: false,
-  cliName: "",
-  stateDir: "~/.hermes",
   containsCredentials: true,
   includesKeys: [
     "clawkeep.contents.hermes.config",
@@ -69,8 +63,6 @@ const HERMES: BackupSource = {
 
 const OPENCLAW: BackupSource = {
   requiresExternalCli: true,
-  cliName: "openclaw",
-  stateDir: "~/.openclaw",
   containsCredentials: true,
   includesKeys: [
     "clawkeep.contents.openclaw.state",
