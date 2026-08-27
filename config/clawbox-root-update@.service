@@ -14,10 +14,12 @@ EnvironmentFile=-/etc/clawbox/edition.env
 # Root-owned entrypoint, outside every clawbox-writable directory. Pointing
 # ExecStart straight at /home/clawbox/clawbox/install.sh meant the clawbox user
 # — who the web server, the in-UI terminal and the agent's shell all run as —
-# could edit the file root was about to execute, turning the scoped
-# `clawbox-root-update@*.service` sudoers grant into a one-step local root. The
-# dispatcher also validates %i (that grant accepts ANY instance name) and only
-# lets the update family run install.sh's git-fetch/reset self-update. TASK-445.
+# could edit the file root was about to execute, turning a scoped
+# clawbox-root-update@ sudoers grant into a one-step local root. The dispatcher
+# closes that: it verifies a root-owned sha256 manifest of everything root runs
+# on clawbox's behalf before it execs anything. It also validates %i (systemd
+# starts whatever instance name it is handed, whoever reached it) and only lets
+# the update family run install.sh's git-fetch/reset self-update. TASK-445.
 ExecStart=/usr/local/libexec/clawbox/clawbox-root-step.sh %i
 # 30 min was not enough for llamacpp_install on a cold box: that step builds
 # llama.cpp from source with CUDA on a 6-core Jetson Orin AND downloads the

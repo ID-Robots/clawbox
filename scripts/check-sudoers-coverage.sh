@@ -484,15 +484,11 @@ sub normalize_argv {
 # ones that let `clawbox-*` swallow a second unit name — cannot apply here.
 sub grant_matches {
   my ($grant, $argv) = @_;
-  my @g = split /\s+/, $grant;
-  my $gpath = shift @g;
+  my ($gpath, @gargs) = split /\s+/, $grant;
   return 0 unless $gpath eq $argv->[0];
   # sudoers(5): a Cmnd listed without arguments may be run with any arguments.
-  return 1 unless @g;
-  my @a = @$argv[1 .. $#$argv];
-  return 0 unless scalar(@g) == scalar(@a);
-  $g[$_] eq $a[$_] or return 0 for 0 .. $#g;
-  return 1;
+  return 1 unless @gargs;
+  return "@gargs" eq "@{$argv}[1 .. $#$argv]" ? 1 : 0;
 }
 
 my (@uncovered, %seen);

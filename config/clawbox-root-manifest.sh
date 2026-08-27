@@ -63,6 +63,14 @@ MANIFEST_FILE="/etc/clawbox/root-exec.manifest"
 # would turn every build into a manifest mismatch.
 COVERED_PATHS="install.sh scripts config"
 
+# Generated content that lives INSIDE a covered path, and must not be recorded.
+# `scripts/__pycache__/` is the one that bites: gateway-pre-start.sh imports
+# scripts/gateway_origins.py, so CPython writes a .pyc there the first time the
+# gateway starts — after the manifest was written, and again under a different
+# name after any python3 minor-version bump. Recording those would make an
+# ordinary first boot, or an ordinary distro upgrade, refuse every root step.
+PRUNE_DIRS="__pycache__ node_modules .venv venv"
+
 die() {
   echo "clawbox-root-manifest: $1" >&2
   exit "${2:-65}"
@@ -71,38 +79,46 @@ die() {
 # Covered files, relative to PROJECT_DIR, NUL-delimited and byte-sorted.
 # Callers must already be in PROJECT_DIR.
 #
-# `-type f` excludes symlinks deliberately: a symlink is a way to make a
-# recorded name resolve to unrecorded content, so one appearing under a covered
-# path shows up as a missing file and fails verification rather than passing it.
+# `-type f` excludes symlinks deliberately: what gets RECORDED is a real file
+# and its real content. Verification then re-opens the recorded path, so
+# replacing one of these with a symlink to something else changes the hash and
+# fails — which is the answer we want, rather than recording the link.
 covered_files() {
   local p
-  local -a args=()
+  local -a args=() prune=()
   for p in $COVERED_PATHS; do
     [ -e "$p" ] && args+=("$p")
   done
   [ "${#args[@]}" -gt 0 ] || return 1
-  find "${args[@]}" -type f -print0 | LC_ALL=C sort -z
-}
-
-# The path column of a sha256sum-format manifest. write_manifest refuses names
-# sha256sum would have to escape, so stripping the fixed-width prefix is exact.
-# The separator is two spaces in text mode and " *" in binary mode; coreutils on
-# the device emits the former, but accept both so the manifest stays readable
-# wherever it was generated.
-manifest_paths() {
-  sed -n 's/^[0-9a-f]\{64\} [ *]//p' "$MANIFEST_FILE"
+  for p in $PRUNE_DIRS; do
+    prune+=(-name "$p" -prune -o)
+  done
+  find "${args[@]}" "${prune[@]}" -type f -print0 | LC_ALL=C sort -z
 }
 
 write_manifest() {
   cd "$PROJECT_DIR" || die "$PROJECT_DIR is missing" 66
 
-  local f bad=0
+  # ONE walk, so the names that are checked are exactly the names that are
+  # hashed. Walking twice — once to check, once to hash — leaves a window in
+  # which a file that appears in between is recorded without ever having been
+  # checked.
+  #
+  # The check itself: sha256sum ESCAPES a filename containing a backslash or a
+  # newline (it prefixes the line with `\` and re-encodes them), and
+  # verify_manifest reads the path column back with a fixed-width strip. Refuse
+  # to record such a name rather than record one this file cannot parse.
+  local f
+  local -a files=()
   while IFS= read -r -d '' f; do
     case "$f" in
-      *$'\n'*|*\*) bad=1; break ;;
+      *\\*|*$'\n'*)
+        die "refusing to record a path containing a backslash or a newline"
+        ;;
     esac
+    files+=("$f")
   done < <(covered_files)
-  [ "$bad" -eq 0 ] || die "refusing to record a path containing a backslash or a newline"
+  [ "${#files[@]}" -gt 0 ] || die "nothing to record under $PROJECT_DIR" 66
 
   install -d -o root -g root -m 0755 "$MANIFEST_DIR" || die "cannot create $MANIFEST_DIR" 66
 
@@ -110,7 +126,7 @@ write_manifest() {
   # staging directory is one more place to race the file root ends up trusting.
   local tmp
   tmp="$(mktemp "$MANIFEST_FILE.XXXXXX")" || die "cannot stage a manifest" 66
-  if ! covered_files | xargs -0 -r sha256sum > "$tmp"; then
+  if ! printf '%s\0' "${files[@]}" | xargs -0 sha256sum > "$tmp"; then
     rm -f "$tmp"
     die "cannot hash $PROJECT_DIR" 66
   fi
@@ -128,17 +144,20 @@ verify_manifest() {
   [ -f "$MANIFEST_FILE" ] || die "no manifest at $MANIFEST_FILE"
   cd "$PROJECT_DIR" || die "$PROJECT_DIR is missing" 66
 
-  # Content: every recorded file must still hash to what was recorded.
+  # Every recorded file must still be there and still hash to what was recorded.
+  # That covers the three things that matter: an edited file, a deleted file, and
+  # a file replaced by a symlink (sha256sum opens the path, so it hashes what the
+  # link resolves to and the content stops matching).
+  #
+  # A file ADDED under a covered path is deliberately NOT an error, even though
+  # `sha256sum -c` cannot see it. Root only ever executes files install.sh names
+  # explicitly, and all of those are recorded — so an unrecorded file is not
+  # something root can be made to run. Treating additions as tampering, on the
+  # other hand, turns any stray file under scripts/ into a device that refuses
+  # every root step for good: no password change, no hostname change, no hotspot
+  # restart, on an appliance with no console. That trade is the wrong way round.
   sha256sum --status --strict -c "$MANIFEST_FILE" \
     || die "$PROJECT_DIR does not match $MANIFEST_FILE (a covered file changed or is gone)"
-
-  # Membership: a file ADDED under a covered path is invisible to `sha256sum -c`,
-  # so compare the sets too.
-  local want have
-  want="$(manifest_paths | LC_ALL=C sort)"
-  have="$(covered_files | tr '\0' '\n' | LC_ALL=C sort)"
-  [ "$want" = "$have" ] \
-    || die "the set of files under $PROJECT_DIR/{${COVERED_PATHS// /,}} no longer matches $MANIFEST_FILE"
 }
 
 case "${1:-}" in

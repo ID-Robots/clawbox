@@ -40,6 +40,14 @@ let etc: string;
 let manifest: string;
 let helper: string;
 let dispatcher: string;
+let marker: string;
+
+/**
+ * `install -o root -g root` is what the shipped scripts really run, and it
+ * fails with EPERM for a normal user. Drop the ownership flags so the copy
+ * still happens under a test runner; everything else is executed verbatim.
+ */
+const unroot = (text: string) => text.replace(/install (-d )?-o root -g root /g, "install $1");
 
 /** Rewrite a shipped script's hard-coded constants onto the temp tree. */
 function retarget(src: string, dest: string, subs: Array<[RegExp, string]>) {
@@ -48,17 +56,14 @@ function retarget(src: string, dest: string, subs: Array<[RegExp, string]>) {
     if (!re.test(text)) throw new Error(`constant ${re} not found in ${src}`);
     text = text.replace(re, val);
   }
-  // The helper runs as root on the device; the tests do not.
-  text = text.replace(/install -d -o root -g root /g, "install -d ");
-  fs.writeFileSync(dest, text, { mode: 0o755 });
+  fs.writeFileSync(dest, unroot(text), { mode: 0o755 });
 }
 
 function sh(script: string) {
   return spawnSync("bash", ["-c", script], { encoding: "utf-8" });
 }
 
-const RAN_MARKER = () => path.join(tmp, "ran");
-const ran = () => (fs.existsSync(RAN_MARKER()) ? fs.readFileSync(RAN_MARKER(), "utf-8") : "");
+const ran = () => (fs.existsSync(marker) ? fs.readFileSync(marker, "utf-8") : "");
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-manifest-"));
@@ -68,6 +73,7 @@ beforeEach(() => {
   manifest = path.join(etc, "root-exec.manifest");
   helper = path.join(libexec, "clawbox-root-manifest.sh");
   dispatcher = path.join(libexec, "clawbox-root-step.sh");
+  marker = path.join(tmp, "ran");
 
   fs.mkdirSync(path.join(project, "scripts"), { recursive: true });
   fs.mkdirSync(path.join(project, "config"), { recursive: true });
@@ -75,10 +81,9 @@ beforeEach(() => {
   fs.mkdirSync(etc, { recursive: true });
 
   // A stand-in install.sh that records that it ran, and under which pinning.
-  const marker = RAN_MARKER();
   const stub = [
     "#!/usr/bin/env bash",
-    `echo "args=$* allow=[${"${CLAWBOX_ALLOW_SELF_UPDATE:-}"}] pinned=[${"${CLAWBOX_INSTALL_BOOTSTRAPPED:-}"}]" > "${marker}"`,
+    `echo "args=$* allow=[\${CLAWBOX_ALLOW_SELF_UPDATE:-}] pinned=[\${CLAWBOX_INSTALL_BOOTSTRAPPED:-}]" > "${marker}"`,
     "",
   ].join("\n");
   fs.writeFileSync(path.join(project, "install.sh"), stub, { mode: 0o755 });
@@ -123,12 +128,29 @@ d("clawbox-root-manifest.sh", () => {
     expect(sh(`"${helper}" --verify`).status).toBe(65);
   });
 
-  it("refuses a file ADDED under a covered path, which `sha256sum -c` alone cannot see", () => {
+  it("does NOT treat an added file as tampering", () => {
+    // Deliberate, and the reason is availability. Root only ever executes files
+    // install.sh names explicitly, and all of those are recorded — so a file
+    // nobody runs is not a way to make root run it. Failing on additions, on the
+    // other hand, means any stray file under scripts/ refuses every root step
+    // for good on a console-less appliance. `scripts/__pycache__` alone would do
+    // it: the gateway's ExecStartPre imports scripts/gateway_origins.py, so
+    // CPython writes a .pyc there the first time the gateway starts.
     sh(`"${helper}" --write`);
     fs.writeFileSync(path.join(project, "scripts", "extra.sh"), "#!/bin/sh\n");
-    const r = sh(`"${helper}" --verify`);
-    expect(r.status).toBe(65);
-    expect(r.stderr).toMatch(/no longer matches/);
+    expect(sh(`"${helper}" --verify`).status).toBe(0);
+  });
+
+  it("never records generated content that lives inside a covered path", () => {
+    fs.mkdirSync(path.join(project, "scripts", "__pycache__"), { recursive: true });
+    fs.writeFileSync(path.join(project, "scripts", "__pycache__", "x.cpython-310.pyc"), "old");
+    sh(`"${helper}" --write`);
+    expect(fs.readFileSync(manifest, "utf-8")).not.toContain("__pycache__");
+    // A python minor-version bump renames it and rewrites the bytes. Neither may
+    // turn an ordinary distro upgrade into a device that cannot set its password.
+    fs.rmSync(path.join(project, "scripts", "__pycache__", "x.cpython-310.pyc"));
+    fs.writeFileSync(path.join(project, "scripts", "__pycache__", "x.cpython-312.pyc"), "new");
+    expect(sh(`"${helper}" --verify`).status).toBe(0);
   });
 
   it("refuses a file removed from under a covered path", () => {
@@ -155,6 +177,29 @@ d("clawbox-root-manifest.sh", () => {
     expect(sh(`"${helper}" --verify`).status).toBe(0);
   });
 
+  it("refuses to record a name sha256sum would have to escape", () => {
+    // sha256sum escapes a filename containing a backslash or a newline: it
+    // prefixes the line with `\` and re-encodes them. The manifest's path column
+    // is read back with a fixed-width strip, so recording such a name would
+    // produce a manifest this script cannot parse — and, because re-recording
+    // reproduces it, a device that refuses every root step for good. Refuse to
+    // write it instead.
+    fs.writeFileSync(path.join(project, "scripts", "back\\slash.sh"), "#!/bin/sh\n");
+    const r = sh(`"${helper}" --write`);
+    expect(r.status).toBe(65);
+    expect(r.stderr).toMatch(/backslash or a newline/);
+    expect(fs.existsSync(manifest), "no manifest may be left behind").toBe(false);
+  });
+
+  it("records a name containing an asterisk, which needs no escaping", () => {
+    // The guard above is about sha256sum's escaping rules, not about "unusual
+    // characters" — getting it wrong in the other direction would refuse a
+    // perfectly ordinary file and brick the same steps.
+    fs.writeFileSync(path.join(project, "scripts", "star*.sh"), "#!/bin/sh\n");
+    expect(sh(`"${helper}" --write`).status).toBe(0);
+    expect(sh(`"${helper}" --verify`).status).toBe(0);
+  });
+
   it("rejects an unknown mode instead of doing something", () => {
     expect(sh(`"${helper}" --whatever`).status).toBe(64);
   });
@@ -177,11 +222,29 @@ d("clawbox-root-step.sh — the gate in front of the exec", () => {
     expect(ran()).toBe("");
   });
 
-  it("refuses an update step too — an update re-records from inside install.sh, after this gate", () => {
+  it("lets an update step through a stale record, because an update is what makes it stale", () => {
+    // src/lib/updater.ts does its own fetch/reset/clean as the clawbox user
+    // before it starts the rebuild step, and scripts/force-update.sh does the
+    // same by hand. Verifying here would fail those flows at their next step and
+    // leave the device refusing every root step afterwards. The update family
+    // re-records instead, as its first action, which is also what heals a tree
+    // replaced from the outside. This is not a hole in the allow-list: TASK-445
+    // removed every sudo grant for a self-updating instance.
+    sh(`"${helper}" --write`);
+    fs.appendFileSync(path.join(project, "install.sh"), "\n# replaced by an update\n");
+    expect(sh(`"${dispatcher}" git_pull`).status).toBe(0);
+    expect(ran()).toContain("allow=[1]");
+  });
+
+  it("still refuses every step a foothold can actually reach", () => {
+    // The four instances config/clawbox-sudoers grants, and the rest of the
+    // pinned family. None of them is supposed to change the covered files.
     sh(`"${helper}" --write`);
     fs.appendFileSync(path.join(project, "install.sh"), "\n# tampered\n");
-    expect(sh(`"${dispatcher}" git_pull`).status).toBe(65);
-    expect(ran()).toBe("");
+    for (const step of ["chpasswd", "set_hostname", "restart_ap", "llamacpp_install", "recover"]) {
+      expect(sh(`"${dispatcher}" ${step}`).status, `${step} ran against a tampered tree`).toBe(65);
+      expect(ran()).toBe("");
+    }
   });
 
   it("fails closed when the verifier itself is missing", () => {
@@ -224,9 +287,9 @@ function libexecBlock(): string {
 
 d("install.sh::install_root_libexec", () => {
   function runBlock(extra = "") {
-    const block = libexecBlock()
+    const block = unroot(libexecBlock())
       .replace(/\/usr\/local\/libexec\/clawbox/g, libexec)
-      .replace(/\/usr\/local\/libexec(?!\/)/g, path.dirname(libexec))
+      .replace(/\/usr\/local\/libexec/g, path.dirname(libexec))
       .replace(/\/etc\/clawbox/g, etc);
     return sh([
       "set -uo pipefail",
@@ -239,17 +302,33 @@ d("install.sh::install_root_libexec", () => {
   }
 
   beforeEach(() => {
-    // The block installs from the project tree, so the real sources have to be
-    // in it — this is exactly what a device copies.
-    fs.copyFileSync(MANIFEST_SRC, path.join(project, "config", "clawbox-root-manifest.sh"));
-    fs.copyFileSync(DISPATCHER_SRC, path.join(project, "config", "clawbox-root-step.sh"));
+    // install_root_libexec copies out of the project tree, so the sources have
+    // to be in it — retargeted, because the copies it installs are then RUN
+    // (write_root_exec_manifest calls the one it just placed in libexec) and the
+    // shipped constants point at /home/clawbox/clawbox.
+    retarget(MANIFEST_SRC, path.join(project, "config", "clawbox-root-manifest.sh"), [
+      [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
+      [/^MANIFEST_DIR=.*$/m, `MANIFEST_DIR="${etc}"`],
+      [/^MANIFEST_FILE=.*$/m, `MANIFEST_FILE="${manifest}"`],
+    ]);
+    retarget(DISPATCHER_SRC, path.join(project, "config", "clawbox-root-step.sh"), [
+      [/^PROJECT_DIR=.*$/m, `PROJECT_DIR="${project}"`],
+      [/^MANIFEST_HELPER=.*$/m, `MANIFEST_HELPER="${helper}"`],
+    ]);
   });
 
   it("writes the manifest and installs the dispatcher", () => {
+    // Both files already exist here — the outer beforeEach put retargeted copies
+    // there — so assert on the CONTENT. Otherwise the test passes whether or not
+    // install_root_libexec copied anything.
     const r = runBlock();
     expect(r.stdout + r.stderr).not.toMatch(/Warning/);
-    expect(fs.existsSync(path.join(libexec, "clawbox-root-manifest.sh"))).toBe(true);
-    expect(fs.existsSync(path.join(libexec, "clawbox-root-step.sh"))).toBe(true);
+    for (const name of ["clawbox-root-manifest.sh", "clawbox-root-step.sh"]) {
+      expect(
+        fs.readFileSync(path.join(libexec, name), "utf-8"),
+        `${name} was not installed from the project tree`,
+      ).toBe(fs.readFileSync(path.join(project, "config", name), "utf-8"));
+    }
     expect(fs.existsSync(manifest)).toBe(true);
   });
 

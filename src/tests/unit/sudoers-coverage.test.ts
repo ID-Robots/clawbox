@@ -218,17 +218,9 @@ d("check-sudoers-coverage", () => {
     expect(r.stderr).toMatch(/UNUSED grants/);
   });
 
-  it("keeps the shipped allow-list free of wildcards", () => {
-    // Belt and braces: the checker above would fail on one, but this reads the
-    // file the device installs and says so directly.
-    const shipped = fs.readFileSync(path.join(REPO, "config", "clawbox-sudoers"), "utf-8")
-      .split("\n")
-      .filter((l) => /^\s*clawbox\s+ALL/.test(l));
-    expect(shipped.length).toBeGreaterThan(0);
-    for (const line of shipped) {
-      expect(line, "a wildcard grant is back in config/clawbox-sudoers").not.toMatch(/[*?]/);
-    }
-  });
+  // A direct assertion that the SHIPPED files contain no wildcard lives in
+  // root-steps.test.ts, which reads both drop-ins; the tests above prove the
+  // checker is what fails CI when one comes back.
 
   it("lists what it matched", () => {
     const r = run(REPO, ["--list"]);

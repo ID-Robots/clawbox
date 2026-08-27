@@ -79,8 +79,11 @@ RUN systemctl enable NetworkManager avahi-daemon dbus
 # pipeline bakes into the image, so a freshly flashed device is born with it —
 # nothing in this repo writes it, which is why it survives every install.sh run
 # and why quarantine_overbroad_sudoers is the only thing that can clear it.
-# `clawbox-nopasswd` is the second name seen in the field. The detector is
-# content-based rather than name-based; seeding both proves that.
+# `clawbox-nopasswd` is the second name seen in the field. The two lines are
+# also spelled differently on purpose — `NOPASSWD:ALL` and `NOPASSWD: ALL` —
+# because sudoers_grants_blanket_nopasswd parses the rule rather than matching
+# text, and both spellings are real. Seeding both proves the detector is
+# content-based, not name- or format-based.
 RUN useradd -m -s /bin/bash -u 1000 clawbox && \
     usermod -aG sudo clawbox && \
     echo 'clawbox ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/clawbox-nopasswd && \

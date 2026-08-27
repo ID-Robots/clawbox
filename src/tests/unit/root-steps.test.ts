@@ -21,6 +21,13 @@ const SUDOERS = [
 
 const read = (p: string) => fs.readFileSync(p, "utf-8");
 
+/** The Cmnd_Spec of every `clawbox … NOPASSWD:` rule in a drop-in. */
+const grantsIn = (file: string): string[] =>
+  read(file)
+    .split("\n")
+    .filter((l) => l.trim().startsWith("clawbox ") && l.includes("NOPASSWD:"))
+    .map((l) => l.split("NOPASSWD:")[1].trim());
+
 /** Pull a whitespace-separated shell list assigned as NAME="..." . */
 function shellList(source: string, name: string): string[] {
   const m = new RegExp(`^${name}="([^"]*)"`, "m").exec(source);
@@ -99,12 +106,7 @@ describe("root-executed paths are outside clawbox's write access", () => {
 
   it("grants NOPASSWD root only on paths clawbox cannot write", () => {
     for (const file of SUDOERS) {
-      const grants = read(file)
-        .split("\n")
-        .filter((l) => l.trim().startsWith("clawbox ") && l.includes("NOPASSWD:"))
-        .map((l) => l.split("NOPASSWD:")[1].trim());
-
-      for (const grant of grants) {
+      for (const grant of grantsIn(file)) {
         expect(
           grant.includes("/home/clawbox"),
           `sudoers grants root on a clawbox-writable path: ${grant}`,
@@ -119,10 +121,7 @@ describe("root-executed paths are outside clawbox's write access", () => {
     // LIST of units: `start clawbox-root-update@chpasswd.service ssh.service`
     // matched. Every grant is therefore an exact command now.
     for (const file of SUDOERS) {
-      const grants = read(file)
-        .split("\n")
-        .filter((l) => l.trim().startsWith("clawbox ") && l.includes("NOPASSWD:"))
-        .map((l) => l.split("NOPASSWD:")[1].trim());
+      const grants = grantsIn(file);
       expect(grants.length).toBeGreaterThan(0);
       for (const grant of grants) {
         expect(grant, `sudoers grant still uses a wildcard: ${grant}`).not.toMatch(/[*?]/);

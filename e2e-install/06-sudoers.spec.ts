@@ -25,6 +25,36 @@ async function sudoList(): Promise<string> {
   return dockerExec(["bash", "-lc", "sudo -n -l 2>&1 || true"], { user: "clawbox" });
 }
 
+/**
+ * Does the NOPASSWD allow-list cover these command lines?
+ *
+ * Behavioural, not `sudo -n -l`. install.sh puts clawbox in the `sudo` group and
+ * the distro ships `%sudo ALL=(ALL:ALL) ALL`, so `sudo -l <anything>` answers
+ * "yes, with a password" for every command on the box — it cannot tell the
+ * allow-list from the group rule. `sudo -n <cmd>` can: a command the allow-list
+ * covers runs, and one it does not falls through to the password-gated group
+ * rule, where `-n` makes sudo refuse with "a password is required" instead of
+ * prompting. That string is the answer, and it is also exactly what the web
+ * server sees, since every call site uses `sudo -n`.
+ *
+ * One container round-trip for the whole set; answers come back keyed by the
+ * command so a failure still names the exact probe.
+ */
+async function sudoCovers(cmds: string[]): Promise<Record<string, string>> {
+  const script = cmds
+    .map((c) =>
+      `out="$(sudo -n ${c} 2>&1)"; case "$out" in *"password is required"*|*"not allowed to execute"*)`
+      + ` v=DENIED ;; *) v=ALLOWED ;; esac; printf '%s\\t%s\\n' ${JSON.stringify(c)} "$v"`)
+    .join("\n");
+  const out = await dockerExec(["bash", "-lc", script], { user: "clawbox" });
+  return Object.fromEntries(
+    out.split("\n").filter(Boolean).map((l) => {
+      const [cmd, verdict] = l.split("\t");
+      return [cmd, verdict];
+    }),
+  );
+}
+
 test.describe("root escalation surface", () => {
   test("no drop-in grants clawbox unrestricted passwordless root", async () => {
     const rules = await dockerExec([
@@ -141,50 +171,50 @@ test.describe("root escalation surface", () => {
       (await sudoList())
         .split("\n")
         .flatMap((l) => l.match(/\/[\w./@-]+/g) ?? [])
-        .filter((p) => p.startsWith("/usr/") || p.startsWith("/bin/") || p.startsWith("/home/")),
+        .filter((p) => /^\/(usr|bin|sbin|home|tmp|var|opt|etc)\//.test(p)),
     )];
     expect(paths.length).toBeGreaterThan(0);
-    for (const p of paths) {
-      const stat = (await dockerExec(["bash", "-lc", `stat -c '%U %a' ${p} 2>/dev/null || echo SKIP`])).trim();
-      if (stat === "SKIP") continue;
-      const [owner, mode] = stat.split(" ");
-      expect(owner, `${p} is granted but owned by ${owner}`).toBe("root");
-      expect(Number(mode.slice(-1)) & 2, `${p} is world-writable`).toBe(0);
-      expect(Number(mode.slice(-2, -1)) & 2, `${p} is group-writable`).toBe(0);
+    const stats = await dockerExec(["bash", "-lc", `stat -c '%n %U %a' ${paths.join(" ")} 2>/dev/null`]);
+    const seen = new Set<string>();
+    for (const line of stats.split("\n").filter(Boolean)) {
+      const [name, owner, mode] = line.split(" ");
+      seen.add(name);
+      expect(owner, `${name} is granted but owned by ${owner}`).toBe("root");
+      expect(parseInt(mode, 8) & 0o022, `${name} is group- or world-writable`).toBe(0);
     }
+    // A grant on a path that does not exist is its own failure — the feature it
+    // names is broken on this device — so require every one of them to resolve.
+    for (const p of paths) expect(seen.has(p), `${p} is granted but not installed`).toBe(true);
   });
 
   test("a wildcard cannot swallow a second unit name (GAP 3)", async () => {
     // sudoers matches arguments as ONE concatenated string, so `clawbox-*` also
-    // matched `<granted unit> ssh.service` — and `systemctl start` takes a LIST
-    // of units. `sudo -n -l <cmd>` asks sudo what it MATCHES without running it.
-    for (const cmd of [
-      "/usr/bin/systemctl start clawbox-root-update@chpasswd.service ssh.service",
-      "/usr/bin/systemctl start --no-block clawbox-root-update@llamacpp_install.service ssh.service",
-      "/usr/bin/systemctl reset-failed clawbox-root-update@chpasswd.service ssh.service",
-      "/usr/bin/systemctl start --no-block clawbox-setup.service ssh.service",
-      // The update family is not reachable from the web server at all now.
-      "/usr/bin/systemctl start clawbox-root-update@git_pull.service",
-      "/usr/bin/systemctl start clawbox-root-update@build.service",
-    ]) {
-      const out = await dockerExec(
-        ["bash", "-lc", `sudo -n -l ${cmd} >/dev/null 2>&1 && echo ALLOWED || echo DENIED`],
-        { user: "clawbox" },
-      );
-      expect(out.trim(), `sudo must not match: ${cmd}`).toBe("DENIED");
-    }
-
-    // Control: what the product really issues still matches, so a pass above
-    // cannot just be "sudo denies everything".
-    for (const cmd of [
-      "/usr/bin/systemctl start clawbox-root-update@chpasswd.service",
-      "/usr/bin/systemctl start --no-block clawbox-root-update@llamacpp_install.service",
-    ]) {
-      const out = await dockerExec(
-        ["bash", "-lc", `sudo -n -l ${cmd} >/dev/null 2>&1 && echo ALLOWED || echo DENIED`],
-        { user: "clawbox" },
-      );
-      expect(out.trim(), `sudo must still match: ${cmd}`).toBe("ALLOWED");
+    // matched `<granted unit> <another unit>` — and `systemctl start` takes a
+    // LIST of units, which made those rules "start any unit as root".
+    //
+    // The appended unit is a name that does not exist on purpose: if a rule ever
+    // matches again this test fails without having started anything real.
+    const PAD = "e2e-nonexistent-probe.service";
+    const probes: Record<string, string> = {
+      [`reset-failed clawbox-root-update@chpasswd.service ${PAD}`]: "DENIED",
+      [`reset-failed clawbox-root-update@llamacpp_install.service ${PAD}`]: "DENIED",
+      [`start clawbox-root-update@chpasswd.service ${PAD}`]: "DENIED",
+      [`start --no-block clawbox-setup.service ${PAD}`]: "DENIED",
+      // No grant names an instance outside the four the product issues, so the
+      // template is no longer a way to run an arbitrary step as root. (Those
+      // instances stay reachable through the unscoped polkit `manage-units`
+      // grant until TASK-539 removes it — this asserts the allow-list, not the
+      // whole surface.)
+      "start clawbox-root-update@e2e-not-a-step.service": "DENIED",
+      "start --no-block clawbox-root-update@e2e-not-a-step.service": "DENIED",
+      // Control: something the product really issues still runs without a
+      // password, so a pass above cannot just be "sudo denies everything".
+      // reset-failed on a unit that never ran is a no-op.
+      "reset-failed clawbox-root-update@chpasswd.service": "ALLOWED",
+    };
+    const answers = await sudoCovers(Object.keys(probes).map((c) => `/usr/bin/systemctl ${c}`));
+    for (const [cmd, want] of Object.entries(probes)) {
+      expect(answers[`/usr/bin/systemctl ${cmd}`], `sudo -n /usr/bin/systemctl ${cmd}`).toBe(want);
     }
   });
 
@@ -203,10 +233,7 @@ test.describe("root escalation surface", () => {
 
     // It has to cover install.sh itself AND the scripts a root step goes on to
     // run — install.sh is only the first file root executes out of that tree.
-    const covered = await dockerExec([
-      "bash", "-lc",
-      "sed -n 's/^[0-9a-f]\\{64\\} [ *]//p' /etc/clawbox/root-exec.manifest | sort",
-    ]);
+    const covered = await dockerExec(["cat", "/etc/clawbox/root-exec.manifest"]);
     expect(covered).toContain("install.sh");
     expect(covered).toContain("scripts/start-ap.sh");
     expect(covered).toContain("config/clawbox-root-update@.service");
@@ -227,19 +254,26 @@ test.describe("root escalation surface", () => {
  */
 test.describe("root escalation surface — the refusals, exercised", () => {
   test("the root dispatcher refuses a tree it did not record (GAP 2)", async () => {
-    // ADD a file under a covered path rather than editing one: the tamper is
-    // then perfectly reversible, and it exercises the membership half of the
-    // check, which `sha256sum -c` on its own cannot see.
-    const probe = "/home/clawbox/clawbox/scripts/zz-e2e-tamper.sh";
+    // Rewrite a script a root step really runs — GAP 2 is about the indirection,
+    // not just install.sh — then put the original bytes back. An ADDED file is
+    // deliberately not tampering (see config/clawbox-root-manifest.sh), so the
+    // probe has to change content.
+    const victim = "/home/clawbox/clawbox/scripts/start-ap.sh";
     try {
-      await dockerExec(["bash", "-lc", `echo 'id -u' > ${probe}`], { user: "clawbox" });
+      await dockerExec([
+        "bash", "-lc",
+        `cp -a ${victim} /tmp/e2e-start-ap.orig && echo '# tampered' >> ${victim}`,
+      ], { user: "clawbox" });
       const refused = await dockerExec([
         "bash", "-lc",
         "/usr/local/libexec/clawbox/clawbox-root-step.sh set_hostname >/dev/null 2>&1; echo rc=$?",
       ]);
-      expect(refused.trim(), "root ran a step against an unrecorded tree").toBe("rc=65");
+      expect(refused.trim(), "root ran a step against a rewritten tree").toBe("rc=65");
     } finally {
-      await dockerExec(["bash", "-lc", `rm -f ${probe}`], { user: "clawbox" });
+      await dockerExec([
+        "bash", "-lc",
+        `cp -a /tmp/e2e-start-ap.orig ${victim} && rm -f /tmp/e2e-start-ap.orig`,
+      ], { user: "clawbox" });
     }
 
     // ...and it verifies again once the tree matches its record, so the refusal

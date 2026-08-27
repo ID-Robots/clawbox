@@ -4,13 +4,15 @@
  *
  * The privilege hand-off is: clawbox-setup (User=clawbox) →
  * `systemctl start clawbox-root-update@<step>.service` → install.sh as root.
- * The sudoers grant for that is `clawbox-root-update@*.service`, i.e. any
- * instance name at all — so the step name is attacker-influenced input on the
- * root side of the boundary, and the only real check is whatever the root-owned
- * entrypoint does with it. That check lives in
- * config/clawbox-root-step.sh, which is installed root-owned outside the
- * clawbox-writable tree; the lists here are the same data for the TypeScript
- * side, and `root-steps.test.ts` pins the two together. TASK-445.
+ * The sudoers grants name four exact instances (chpasswd, set_hostname,
+ * restart_ap, llamacpp_install) — but systemd will start
+ * `clawbox-root-update@anything.service` for anyone who can reach it by another
+ * route, so the step name is still attacker-influenced input on the root side
+ * of the boundary, and the only real check is whatever the root-owned
+ * entrypoint does with it. That check lives in config/clawbox-root-step.sh,
+ * which is installed root-owned outside the clawbox-writable tree; the lists
+ * here are the same data for the TypeScript side, and `root-steps.test.ts` pins
+ * the two together. TASK-445.
  */
 
 /**
