@@ -269,6 +269,17 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     }, 2000);
   }, [stopPolling]);
 
+  // The status effect must re-run for one reason only — a Retry — and never
+  // because these two callbacks changed identity. Reaching them through refs
+  // keeps them out of the effect's dependency list, so the effect cannot abort
+  // a status read it is about to re-issue on any render but a real reload.
+  const startPollingRef = useRef(startPolling);
+  const stopPollingRef = useRef(stopPolling);
+  useEffect(() => {
+    startPollingRef.current = startPolling;
+    stopPollingRef.current = stopPolling;
+  });
+
   // Fetch initial status (but don't auto-start)
   useEffect(() => {
     const controller = new AbortController();
@@ -286,10 +297,16 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
         if (data.versions) setVersions(data.versions);
 
         if (data.phase === "running") {
-          startPolling();
+          startPollingRef.current();
         }
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
+      } catch {
+        // Whether this read was cancelled is a fact the controller holds, not
+        // one to be inferred from the error's type. An abort during the body
+        // read surfaces as a TypeError or a plain Error, not a DOMException, so
+        // sniffing the error let a cancelled read fall through to the failure
+        // banner while every request to the box had in fact returned 200. Ask
+        // the controller; a genuine failure (signal not aborted) still shows.
+        if (controller.signal.aborted) return;
         setFetchError(true);
       } finally {
         if (!controller.signal.aborted) setLoading(false);
@@ -298,9 +315,9 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
     init();
     return () => {
       controller.abort();
-      stopPolling();
+      stopPollingRef.current();
     };
-  }, [startPolling, stopPolling, statusReloadCount]);
+  }, [statusReloadCount]);
 
   const triggerUpdate = async () => {
     actionControllerRef.current?.abort();
@@ -315,8 +332,11 @@ export default function UpdateStep({ onNext }: UpdateStepProps) {
       });
       if (!res.ok) throw new Error(`Start update failed (${res.status})`);
       startPolling();
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") return;
+    } catch {
+      // Same rule as the status read: a cancelled request is not a failure, and
+      // its abort will not reliably arrive as a DOMException. The controller is
+      // the source of truth for whether we cancelled this.
+      if (controller.signal.aborted) return;
       setFetchError(true);
       setStarting(false);
     }
