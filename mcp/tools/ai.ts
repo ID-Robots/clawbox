@@ -131,7 +131,12 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       "image_generate",
       "Generate a picture from a text description. Call this whenever the user asks for an image, a picture, a drawing or a logo. On this device it will tell you why it cannot run and what the user should do — say that, and do not attempt to make the picture by any other means.",
       {},
-      { editions: ["openclaw", "hermes"], readOnly: true },
+      // CORE, and not as an afterthought: `CLAWBOX_MCP_PROFILE=core` is the
+      // trimmed tool set a SMALL model gets, and a small model is the one most
+      // likely to answer "draw me a crab" by reaching for the shell. Dropping
+      // this tool from the profile would remove the guidance from exactly the
+      // boxes that need it most. It costs an empty schema and two sentences.
+      { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
       async () => text(IMAGE_GEN_UNAVAILABLE),
     );
   }

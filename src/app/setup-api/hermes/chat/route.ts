@@ -459,7 +459,19 @@ async function settleTurn(
   // echoed back stays in the caption for `splitAssistantMedia` to lift, exactly
   // as it did before any of this. Everything else the model names comes out and
   // has to earn its card through adoption.
-  const servableRoot = await chatMediaRoot().catch(() => null);
+  const servableRoot = await chatMediaRoot().catch((err) => {
+    // Named in the journal because the turn still SUCCEEDS, and silently a
+    // little worse: without the root there is no exemption, so an attachment
+    // the customer sent and the model echoed back is reclaimed and adopted —
+    // copied again rather than left alone. The card is still right (the media
+    // root is an adoption root of its own for exactly this case); the copy is
+    // waste, and waste nobody can see is waste nobody fixes.
+    console.log(
+      "[hermes] chat media root unresolved; an echoed attachment will be re-copied:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  });
   const { text: caption, sources: mentioned } = reclaimImageMentions(spoken, servableRoot);
   const drawn = await adoptHermesGeneratedImages([
     ...(record?.generatedImages ?? []),

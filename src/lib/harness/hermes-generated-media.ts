@@ -117,13 +117,27 @@ interface AdoptionRoot {
  * reply carried a card whose `src` 404s and whose download button saves the 21
  * bytes of `{"error":"Not found"}` under a `.png` name.
  *
- * WHY THIS IS NOT A NEW READ CAPABILITY. The agent's working directory IS the
- * Files API's browse root on this appliance, and that route already serves any
- * file in it to this same authenticated session, behind this same guard. What
- * changes is which of those files the chat will copy for itself, not which
- * files the session may read. Everything outside these roots — `/etc`, another
- * user's home, an absolute path the model simply invented — is refused, and a
- * refused picture costs a card, never the reply.
+ * WHY THE BROWSE ROOT IS NOT A NEW READ CAPABILITY. The agent's working
+ * directory IS the Files API's browse root on this appliance, and that route
+ * already serves any file in it to this same authenticated session, behind this
+ * same guard. What changes there is which of those files the chat will copy for
+ * itself, not which files the session may read.
+ *
+ * WHY `/tmp` IS HERE ANYWAY, ON A DIFFERENT ARGUMENT. That reasoning does NOT
+ * extend to the tmp dir: it sits outside the browse root, the Files API does not
+ * serve it, and a file adopted from there becomes fetchable through
+ * `chat/media` when it was not before. It is included because it is the other
+ * place a shell-improvising agent writes, and the exposure it opens is narrow
+ * and bounded on every side: the MODEL has to name the path, the extension has
+ * to be one `chat/media` serves, the guard still applies, and the only reader
+ * is the same authenticated device owner — who can already run a shell on this
+ * box through the terminal app. It is a deliberate trade, not a consequence of
+ * the paragraph above, and a later reader extending this list should extend it
+ * on this argument rather than on that one.
+ *
+ * Everything outside these roots — `/etc`, another user's home, an absolute
+ * path the model simply invented — is refused, and a refused picture costs a
+ * card, never the reply.
  */
 async function adoptionRoots(): Promise<AdoptionRoot[]> {
   const roots: AdoptionRoot[] = [];

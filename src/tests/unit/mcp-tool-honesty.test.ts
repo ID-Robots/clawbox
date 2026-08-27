@@ -616,6 +616,13 @@ describe("a box that cannot draw says so instead of improvising", () => {
     expect(ai("openclaw", false).has("image_generate")).toBe(true);
   });
 
+  it("survives the core profile, which is where it matters most", () => {
+    // `CLAWBOX_MCP_PROFILE=core` is the trimmed set a SMALL model gets, and a
+    // small model is the likeliest to answer "draw me a crab" with the shell.
+    // A tool that is dropped from core is missing from exactly those boxes.
+    expect(ai("hermes", false).get("image_generate").opts.profile).toBe("core");
+  });
+
   it("names the reason, the fix, and closes the door the agent walked through", async () => {
     const out = await ai("hermes", false).call("image_generate", {});
     // Not an error: a tool that throws trips Hermes' circuit breaker, and this
