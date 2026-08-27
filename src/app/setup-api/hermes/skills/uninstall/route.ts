@@ -6,9 +6,12 @@ import { isValidSkillName } from "@/lib/hermes-skills";
 import { parseUninstallOutcome } from "@/lib/hermes-skill-cli-outcome";
 import {
   hermesSkillsGuard,
+  hubLockEntry,
   invalidateInstalledCache,
   isInHubLock,
   readBundledManifestNames,
+  readHubLock,
+  verifySkillRemoval,
 } from "@/lib/hermes-skills-server";
 
 // Uninstall a Hermes skill. The positional argument is the skill NAME (the
@@ -26,6 +29,21 @@ import {
 // told the customer a skill was gone while the device still had it. Now the
 // CLI's own sentence is classified (parseUninstallOutcome), and a success has
 // to be true in the hub lock before it is reported.
+//
+// ── …and the hub lock is only half of it ────────────────────────────────────
+//
+// Removing a skill has TWO halves: the lock entry, which is what the store
+// lists, and the DIRECTORY, which is what the agent loads. PR #517 rewrote the
+// install route's rollback around that — "a skill directory left behind would be
+// loaded by the agent even with no lock entry" — and this route, driving the
+// same command, still stopped at the lock. On the device state #517's own test
+// names (a lock entry whose install_path the validator refuses, an `fs.rm` that
+// cannot traverse a root-owned subtree) the CLI drops the entry and leaves the
+// files, and `{"ok":true}` here left the customer with a skill the agent still
+// loads, re-listed by `enumerateInstalledSkills` as origin `local` — which the
+// store will not offer to remove and MCP's post-condition reads as a CONFLICT.
+// Both routes now take the same second swing and read the same verdict
+// (verifySkillRemoval).
 
 export async function POST(request: Request) {
   const blocked = await hermesSkillsGuard();
@@ -46,7 +64,11 @@ export async function POST(request: Request) {
   try {
     // Read the lock BEFORE the CLI runs: for a wording this parser has never
     // seen, an entry that was there and is gone afterwards is still a removal.
-    const hadEntry = await isInHubLock(id);
+    // The ENTRY, not just the boolean — `install_path` is the only thing that
+    // says where the files the CLI is supposed to delete actually live, and
+    // after the CLI has run there is no entry left to ask.
+    const entry = hubLockEntry(await readHubLock(), id);
+    const hadEntry = entry !== undefined;
     const r = await runHermesCli(["skills", "uninstall", id], {
       timeoutMs: 30_000,
       input: "y\n",
@@ -112,6 +134,29 @@ export async function POST(request: Request) {
           code: "uninstall_failed",
         },
         { status: 502 },
+      );
+    }
+    // The lock half is done. Take the same second swing at the directory the
+    // install route's rollback takes — the CLI's own `fs.rm` is the half that
+    // fails silently on this device family — and answer on the whole verdict.
+    // Only now: deleting the files under a lock entry that survived would
+    // manufacture the half-removed state this is here to detect.
+    const left = await verifySkillRemoval(id, entry);
+    if (left.dir === "present") {
+      console.error("[hermes skills uninstall] directory survived", JSON.stringify(id));
+      return NextResponse.json(
+        {
+          // The store no longer lists it, so "remove it from the Skills store"
+          // is advice that cannot be followed — say the one thing that can.
+          error:
+            `"${id}" is no longer listed in the Skills store, but its files are still on the `
+            + `device, so the agent would still load it. The leftover folder has to be deleted `
+            + `on the device.`,
+          code: "removal_incomplete",
+          name: id,
+          leftover: { lockEntry: left.lockEntry, directory: left.dir },
+        },
+        { status: 409 },
       );
     }
     return NextResponse.json({ ok: true, id, name: id });

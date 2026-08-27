@@ -45,6 +45,12 @@ export interface SkillAuditRecord {
     | 'install-incomplete'
     /** The install was refused and the device could not undo it — see the route. */
     | 'install-rollback-incomplete'
+    /**
+     * A flagged skill the device ALREADY had: the installer exited 0 without
+     * touching it and the route removed nothing. Recorded because it is the
+     * request that used to uninstall the customer's existing copy.
+     */
+    | 'install-already-installed'
     | 'install-name-conflict';
   /** Registry identifier the owner asked for. */
   id: string;
