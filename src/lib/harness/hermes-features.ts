@@ -18,7 +18,17 @@ import { hermesConfigGet } from "@/lib/hermes-config-cache";
 const PROBE_TIMEOUT_MS = 30_000;
 
 /**
- * Once per process, never per request.
+ * How long a probe that never COMPLETED is left alone before we ask again.
+ *
+ * Long enough that a genuinely broken box is not starting a Python interpreter
+ * per request, short enough that a box that was merely busy gets its attach
+ * button back inside a minute rather than at the next restart. Matches
+ * `PROBE_TTL_FAIL_MS` next door in `clawai-images`.
+ */
+const PROBE_RETRY_BACKOFF_MS = 60_000;
+
+/**
+ * Once per process, never per request — for an ANSWER.
  *
  * `hermes chat --help` starts a Python interpreter, which on this hardware is
  * seconds, not milliseconds — running it per request would put that on every
@@ -28,8 +38,20 @@ const PROBE_TIMEOUT_MS = 30_000;
  * A process restart re-probes, which is exactly the granularity that matters:
  * an update replaces the checkout and restarts the web server, so the answer
  * cannot outlive the binary it describes.
+ *
+ * WHAT IS NOT KEPT THAT LONG: a probe that never answered. `runHermesCli`
+ * rejects on a timeout, on a missing binary and on its own SIGKILL, and a child
+ * killed by a signal comes back with `code: null` — none of those read the help
+ * text, so none of them say anything about `--image`. Memoising the `false`
+ * they produce made a 30 s timeout on a loaded Jetson indistinguishable from a
+ * `hermes` that genuinely lacks the flag, and both then hid the composer's
+ * attach button for the whole process lifetime, on a box that works. Those
+ * outcomes drop the memo and are re-asked after `PROBE_RETRY_BACKOFF_MS`; a
+ * real help text — flag present or absent — is still kept for the life of the
+ * process.
  */
-let probe: Promise<boolean> | null = null;
+type Probe = { promise: Promise<boolean>; expiresAt: number };
+let probe: Probe | null = null;
 
 /**
  * Does this `hermes` take an image on a chat turn?
@@ -45,18 +67,40 @@ let probe: Promise<boolean> | null = null;
  * mention in prose elsewhere in the help cannot answer yes on its own.
  */
 export async function hermesSupportsImages(): Promise<boolean> {
-  probe ??= (async () => {
+  if (probe && Date.now() < probe.expiresAt) return probe.promise;
+  // Seeded with the BACKOFF so concurrent callers during the probe share one
+  // interpreter; the real expiry is stamped on below, once we know whether we
+  // got an answer or a failure. The entry is mutated in place rather than
+  // reassigned through `probe`, so the bookkeeping cannot be undone by the
+  // assignment below if `runHermesCli` ever throws before its first await.
+  const entry: Probe = {
+    promise: Promise.resolve(false),
+    expiresAt: Date.now() + PROBE_RETRY_BACKOFF_MS,
+  };
+  entry.promise = (async () => {
     try {
       const result = await runHermesCli(["chat", "--help"], { timeoutMs: PROBE_TIMEOUT_MS });
+      // A numeric exit code means the CLI ran and argparse spoke: 0 prints the
+      // option list, and non-zero is how it rejects a subcommand or a flag it
+      // does not have (verified on the box: exit 2). Either way that is an
+      // answer about THIS checkout, and it is kept for the life of the process.
+      // `null` means the child was killed by a signal and printed nothing,
+      // which is not an answer at all.
+      if (typeof result.code !== "number") throw new Error("hermes probe was killed");
+      entry.expiresAt = Number.POSITIVE_INFINITY;
       if (result.code !== 0) return false;
       return /^\s*--image\b/m.test(`${result.stdout}\n${result.stderr}`);
     } catch {
-      // Not installed, timed out, or the checkout is broken. All of them mean
-      // the same thing to the composer: do not offer to attach a picture.
+      // Not installed, timed out, or killed. None of them read the help text,
+      // so none of them answered the question: hide the attach button for now
+      // — a wrong `true` costs the customer's file — but do not remember this
+      // as what the checkout said. Re-asked once the backoff is up.
+      entry.expiresAt = Date.now() + PROBE_RETRY_BACKOFF_MS;
       return false;
     }
   })();
-  return probe;
+  probe = entry;
+  return entry.promise;
 }
 
 /** Test seam: forget the probe so the next call runs it again. */
