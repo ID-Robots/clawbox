@@ -45,7 +45,11 @@ export type GitHubStatusReason =
   /** `gh` ran but never finished. `gh auth status` validates the stored token
    *  against api.github.com, so a dead uplink or a captive portal hangs it
    *  until the timer kills it. Says nothing about whether gh is installed. */
-  | "unreachable";
+  | "unreachable"
+  /** The file is there but would not execute — EACCES on a binary somebody
+   *  chmod'ed, most often. Installing it again fixes nothing; the remedy is
+   *  permissions, so this must not be answered with "not installed". */
+  | "not_runnable";
 
 export interface GitHubStatus {
   /** Whether gh is installed at all. */
@@ -97,9 +101,14 @@ interface Result {
   signal: NodeJS.Signals | null;
   /** True when OUR timer killed it: the command outlived its budget. */
   timedOut: boolean;
-  /** True when the binary could not be started at all (ENOENT and friends).
-   *  The only evidence that the command is genuinely absent. */
+  /** True when the binary could not be started at all. Necessary evidence
+   *  that the command is unusable, but NOT sufficient to call it absent —
+   *  see startError. */
   startFailed: boolean;
+  /** The errno of a failed spawn: ENOENT means genuinely missing, EACCES
+   *  means present but not executable. Collapsing the two would send someone
+   *  to reinstall a binary that is sitting right there. */
+  startError: string | null;
 }
 
 /**
@@ -140,7 +149,7 @@ function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
     child.on("spawn", () => { spawned = true; });
     // A failed spawn emits `error` and THEN `close` with a null code; the
     // first resolve wins, so this is the one place startFailed is set.
-    child.on("error", () => {
+    child.on("error", (err: NodeJS.ErrnoException) => {
       clearTimeout(timer);
       resolve({
         code: null,
@@ -149,11 +158,12 @@ function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
         signal: null,
         timedOut,
         startFailed: !spawned,
+        startError: spawned ? null : (err?.code ?? null),
       });
     });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
-      resolve({ code, stdout: stdout.trim(), stderr: stderr.trim(), signal, timedOut, startFailed: false });
+      resolve({ code, stdout: stdout.trim(), stderr: stderr.trim(), signal, timedOut, startFailed: false, startError: null });
     });
   });
 }
@@ -196,7 +206,18 @@ export function parseLogin(output: string): string | null {
 export async function githubStatus(): Promise<GitHubStatus> {
   const r = await run("gh", ["auth", "status", "--hostname", "github.com"]);
   if (r.startFailed) {
-    return { installed: false, connected: false, login: null, loginCommand: GH_LOGIN_COMMAND, reason: "not_installed" };
+    // ENOENT is the only errno that means "there is no such file". Anything
+    // else — EACCES above all — is a binary that EXISTS and would not run, and
+    // answering that with "not installed" hands over the one remedy that
+    // cannot work.
+    const missing = r.startError === "ENOENT" || r.startError === null;
+    return {
+      installed: !missing,
+      connected: false,
+      login: null,
+      loginCommand: GH_LOGIN_COMMAND,
+      reason: missing ? "not_installed" : "not_runnable",
+    };
   }
   if (wasKilled(r)) {
     // gh RAN — so it is installed. It just never got an answer out of
@@ -230,7 +251,13 @@ export async function githubStatus(): Promise<GitHubStatus> {
  */
 export async function disconnectGitHub(): Promise<DisconnectOutcome> {
   const r = await run("gh", ["auth", "logout", "--hostname", "github.com"]);
-  if (r.startFailed) return { ok: false, kind: "no_gh", detail: "gh is not installed on this ClawBox." };
+  if (r.startFailed) {
+    // Present but unrunnable is not missing, and must not be answered with an
+    // install: the file is there, its permissions are not.
+    return r.startError === "ENOENT" || r.startError === null
+      ? { ok: false, kind: "no_gh", detail: "gh is not installed on this ClawBox." }
+      : { ok: false, kind: "failed", detail: `The GitHub CLI is on this ClawBox but would not start (${r.startError}). Check its permissions.` };
+  }
   if (wasKilled(r)) {
     return {
       ok: false,
@@ -257,6 +284,15 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   const dir = path.resolve(directory);
 
   const status = await githubStatus();
+  if (status.reason === "not_runnable") {
+    // "failed" rather than no_gh, so the route never tells the owner to
+    // install a gh that is already sitting on the box.
+    return {
+      pushed: false,
+      reason: "failed",
+      detail: "The GitHub CLI is on this ClawBox but would not start. Check its permissions.",
+    };
+  }
   if (status.reason === "unreachable") {
     // Transient, and nothing to install. Kept distinct from no_gh so the route
     // does not answer a network outage with "install the GitHub CLI".

@@ -43,7 +43,7 @@ interface GitHubState {
   loginCommand: string;
   /** "unreachable" means gh is here but could not reach github.com — a
    *  network fault. The card must not read like a missing install. */
-  reason?: "not_installed" | "unreachable";
+  reason?: "not_installed" | "unreachable" | "not_runnable";
 }
 
 interface AgentStatus {

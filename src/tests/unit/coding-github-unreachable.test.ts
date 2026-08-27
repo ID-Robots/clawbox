@@ -71,6 +71,20 @@ function missingBinary(): FakeChild {
 }
 
 /**
+ * gh is RIGHT THERE, and would not execute — somebody chmod'ed it. Node emits
+ * `error` with EACCES and never emits `spawn`, exactly like a missing binary,
+ * yet the remedy is permissions and not an install.
+ */
+function unrunnableBinary(): FakeChild {
+  const child = baseChild();
+  setImmediate(() => {
+    child.emit("error", Object.assign(new Error("spawn gh EACCES"), { code: "EACCES" }));
+    child.emit("close", null, null);
+  });
+  return child;
+}
+
+/**
  * A child that started fine but whose kill() cannot deliver the signal — Node
  * reports that by emitting `error` on an ALREADY SPAWNED process. It looks
  * identical to a failed spawn unless `spawn` is tracked, which is how the
@@ -167,6 +181,40 @@ describe("a probe that timed out is not a missing gh", () => {
     expect(status.installed).toBe(false);
     expect(status.connected).toBe(false);
     expect(status.reason).toBe("not_installed");
+  });
+
+  it("does not say 'not installed' for a gh that is present but not executable", async () => {
+    // EACCES: the file exists, which is why the errno is not ENOENT. Telling
+    // the owner to install it offers the one remedy that cannot help.
+    spawnMock.mockImplementation(() => unrunnableBinary());
+
+    const status = await lib.githubStatus();
+
+    expect(status.reason).toBe("not_runnable");
+    expect(status.reason).not.toBe("not_installed");
+    expect(status.installed).toBe(true);
+    expect(status.connected).toBe(false);
+  });
+
+  it("a backup over an unrunnable gh never answers no_gh", async () => {
+    spawnMock.mockImplementation(() => unrunnableBinary());
+
+    const outcome = await lib.backupToGitHub("/home/clawbox/Projects/site");
+
+    expect(outcome.pushed).toBe(false);
+    if (outcome.pushed) return;
+    expect(outcome.reason).not.toBe("no_gh");
+    expect(outcome.detail ?? "").toMatch(/permission/i);
+  });
+
+  it("a disconnect over an unrunnable gh never claims it is not installed", async () => {
+    spawnMock.mockImplementation(() => unrunnableBinary());
+
+    const out = await lib.disconnectGitHub();
+
+    expect(out.ok).toBe(false);
+    expect(out.detail ?? "").not.toMatch(/not installed/i);
+    expect(out.detail ?? "").toMatch(/EACCES|permission/i);
   });
 
   it("answers normally when gh answers, with no failure reason attached", async () => {
