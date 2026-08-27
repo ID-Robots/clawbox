@@ -198,11 +198,51 @@ describe("POST /setup-api/hermes/chat", () => {
   });
 
   it("stores the picture as a picture, not as a MEDIA: line of text", async () => {
-    stdoutReply = "here you go\n\nMEDIA:/home/clawbox/pic.png";
+    // Written into the agent's OWN working directory, which is where an agent
+    // with no image tool puts one. It is adopted into the chat media tree, and
+    // what the transcript carries is a URL the browser can fetch — never the
+    // directive, and never the device path the model wrote.
+    const drawn = path.join(root, "pic.png");
+    fs.writeFileSync(drawn, Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+    stdoutReply = `here you go\n\nMEDIA:${drawn}`;
     await post({ message: "draw" });
     const [, assistant] = transcript();
     expect(assistant.text).toBe("here you go");
+    expect(assistant.media).toHaveLength(1);
     expect(assistant.media[0]).toContain("/setup-api/chat/media");
+    // The COPY, under a name of ours — not the path the model named.
+    expect(assistant.media[0]).toContain("chat-generated");
+    expect(assistant.media[0]).not.toContain("pic.png");
+  });
+
+  it("drops the card when the picture cannot be served, and keeps the sentence", async () => {
+    // The old behaviour lifted ANY absolute path the model uttered into a card,
+    // with no containment check anywhere, so a file the chat cannot read became
+    // a dead thumbnail over a download button that saved 21 bytes of
+    // `{"error":"Not found"}` under a `.png` name. Measured on two live boxes,
+    // one linked and one not, so it was never about the link.
+    //
+    // No card is the honest answer. The sentence is what the customer asked for
+    // and it survives intact; the device path was machinery either way.
+    stdoutReply = "here you go\n\nMEDIA:/home/clawbox/never-written.png";
+    await post({ message: "draw" });
+    const [, assistant] = transcript();
+    expect(assistant.text).toBe("here you go");
+    expect(assistant.media).toBeUndefined();
+  });
+
+  it("refuses to adopt a secret store dressed up as a picture", async () => {
+    // Inside the browse root, so containment alone would pass it; the Files API
+    // secret guard is what stops a copy of `~/.ssh` landing in a tree the
+    // browser can read.
+    const secret = path.join(root, ".ssh", "id_rsa.png");
+    fs.mkdirSync(path.dirname(secret), { recursive: true });
+    fs.writeFileSync(secret, Buffer.from("89504e470d0a1a0a0000000d49484452", "hex"));
+    stdoutReply = `here you go\n\nMEDIA:${secret}`;
+    await post({ message: "draw" });
+    const [, assistant] = transcript();
+    expect(assistant.text).toBe("here you go");
+    expect(assistant.media).toBeUndefined();
   });
 
   it("records the user's own words, not the switch note written for the agent", async () => {

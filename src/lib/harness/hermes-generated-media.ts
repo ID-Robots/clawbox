@@ -83,6 +83,34 @@ export function hermesImageCacheDir(): string {
 }
 
 /**
+ * The chat media root, or null when this box cannot say what it is.
+ *
+ * `chatMediaRoot()` is awaited on the reply path, and NOTHING on the reply path
+ * may throw: by the time it is called the agent has already answered, and an
+ * exception here turns a finished turn into an error event that throws that
+ * answer away. A `.catch()` is not enough — if the module is unavailable the
+ * CALL itself throws synchronously, before there is a promise to attach a
+ * handler to — so the whole expression sits inside try/catch.
+ *
+ * Journaled rather than swallowed, because the degradation is invisible: with
+ * no root there is no exemption, and an attachment the customer sent and the
+ * model echoed back is copied instead of left alone. The card is still right
+ * (the media root is an adoption root of its own for exactly this case); the
+ * copy is waste, and waste nobody can see is waste nobody fixes.
+ */
+export async function servableMediaRoot(): Promise<string | null> {
+  try {
+    return await chatMediaRoot();
+  } catch (err) {
+    console.log(
+      "[hermes] chat media root unresolved; an echoed attachment will be re-copied:",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
+/**
  * A tree a picture may be adopted OUT of.
  *
  * `guarded` says whether the Files API's secret rule applies inside it. It is
@@ -166,7 +194,7 @@ async function adoptionRoots(): Promise<AdoptionRoot[]> {
   // DATA_DIR guard would then refuse it and the customer would lose a picture
   // that works today. Unguarded for the same reason as the cache: `chat/media`
   // already serves this exact tree to this exact session.
-  await add(await chatMediaRoot().catch(() => ""), false);
+  await add((await servableMediaRoot()) ?? "", false);
   await add(filesBrowseRoot(), true);
   // Where a shell-improvising agent writes when it does not write beside itself.
   await add(os.tmpdir(), true);

@@ -35,7 +35,14 @@ vi.mock("@/lib/hermes-dashboard-turn", async (importOriginal) => ({
 vi.mock("child_process", () => ({ spawn: spawnMock }));
 vi.mock("@/lib/harness/transcript-store", () => ({ appendTranscript: appendMock }));
 vi.mock("@/lib/harness/hermes-turn-record", () => ({ readHermesTurn: readTurnMock }));
-vi.mock("@/lib/harness/media-root", () => ({ resolveInMediaRoot: vi.fn(async (p: string) => p) }));
+// `chatMediaRoot` is named here as well as `resolveInMediaRoot` because the
+// settle path asks for it now. Left out, the CALL throws synchronously rather
+// than rejecting, which `servableMediaRoot` survives — but then every case in
+// this file would be exercising that fallback instead of the real path.
+vi.mock("@/lib/harness/media-root", () => ({
+  resolveInMediaRoot: vi.fn(async (p: string) => p),
+  chatMediaRoot: vi.fn(async () => "/tmp/clawbox-streaming-media"),
+}));
 vi.mock("@/lib/hermes-model-options", () => ({
   // No catalogue: the route falls back to its static allowlist and lets hermes
   // itself judge the pair, which is the path a box takes before the header has
