@@ -137,6 +137,9 @@ async function guardStopCost() {
 
 // ------------------------------------------------------------------ slow ---
 
+/** Longest non-streamed answer that came back as valid JSON, across probes. */
+let longestValidAnswerSeconds = 0;
+
 async function upstreamLongAnswer(name, targetSeconds, maxTokens) {
   const { url, token } = upstream();
   if (!token) return report(name, "INCONCLUSIVE", "no clawai_token on this box");
@@ -171,7 +174,15 @@ async function upstreamLongAnswer(name, targetSeconds, maxTokens) {
   const seconds = Math.round((Date.now() - startedAt) / 1000);
   let json = null;
   try { json = JSON.parse(text); } catch { /* the failure mode under test */ }
+  if (json && (json.type === "message" || json.type === "error")) {
+    longestValidAnswerSeconds = Math.max(longestValidAnswerSeconds, seconds);
+  }
   if (seconds < targetSeconds) {
+    // Cross-credit: a LONGER valid answer from any probe already proves this
+    // wall gone — a 222s JSON answer settles the 125s question.
+    if (longestValidAnswerSeconds >= targetSeconds) {
+      return report(name, "PASS", `a ${longestValidAnswerSeconds}s non-streamed answer came back as valid JSON`);
+    }
     return report(name, "INCONCLUSIVE", `answer took ${seconds}s < ${targetSeconds}s target — wall not reached (status ${res.status})`);
   }
   if (json && (json.type === "message" || json.type === "error")) {
@@ -224,8 +235,9 @@ async function main() {
     await guardStreamTerminates();
     // Sized from a measured ~110 output tokens/s on flash: the generation has
     // to RUN past the wall, so the token budget is the duration dial.
-    await upstreamLongAnswer("api-json-past-125s", 125, 8000);
+    // Longest target first, so its duration can cross-credit the shorter one.
     await upstreamLongAnswer("api-json-past-300s", 300, 16000);
+    await upstreamLongAnswer("api-json-past-125s", 125, 8000);
   } else {
     report("stream-terminates", "SKIP", "--slow to run");
     report("api-json-past-125s", "SKIP", "--slow to run (takes minutes by design)");
