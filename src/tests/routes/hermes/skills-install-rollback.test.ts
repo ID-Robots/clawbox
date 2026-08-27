@@ -267,6 +267,26 @@ describe("a rollback the device could not complete is not a plain refusal", () =
     expect(await exists(path.join(skillsDir(), "creative", "simple-english", "SKILL.md"))).toBe(
       true,
     );
+    // …so nothing may say the files went. Nothing looked at them: the entry
+    // named no location, and "not checked" is not "removed".
+    expect(body.leftover).toMatchObject({ lockEntry: true, directory: "unknown" });
+    expect(String(body.error)).not.toMatch(/files were removed/i);
+    expect(String(body.error)).toMatch(/could not be checked/i);
+  });
+
+  it("sends a directory-only leftover somewhere it can actually be removed", async () => {
+    // Lock entry gone, files still there: the Skills store no longer lists it,
+    // so "remove it from the Skills store" is advice that cannot be followed.
+    fakeDangerousInstall("works", {
+      installPath: "creative/simple-english",
+      lockInstallPath: "creative/../../escape",
+    });
+    const { body } = await install({ id: "official/creative/simple-english" });
+
+    expect(body.leftover).toMatchObject({ lockEntry: false, directory: "present" });
+    expect(String(body.error)).not.toMatch(/remove .* from the Skills store/i);
+    expect(String(body.error)).toMatch(/not in the Skills store/i);
+    expect(String(body.error)).toMatch(/deleted on the device/i);
   });
 
   it("reports a directory the rollback could not remove even when the lock is clean", async () => {
@@ -314,6 +334,21 @@ describe("a rollback that worked keeps the honest refusal it already had", () =>
     expect(body).toMatchObject({ code: "dangerous_skill", requiresConfirmation: true });
     expect(await readLock()).toEqual({});
     expect(await exists(path.join(skillsDir(), "creative", "simple-english"))).toBe(false);
+  });
+
+  it("does not turn an unverifiable directory into a failure when the lock is clean", async () => {
+    // The lock entry names no install_path, so the directory could not be
+    // checked either way — but the entry itself is gone, so the store lists
+    // nothing and the customer has nothing to act on. Answering
+    // `rollback_incomplete` here would be this bug's mirror image: reporting a
+    // failure over a rollback that did the one thing that was visible.
+    fakeDangerousInstall("works", { lockInstallPath: "" });
+    const { status, body } = await install({ id: "official/creative/simple-english" });
+
+    expect(await readLock()).toEqual({});
+    expect(status).toBe(409);
+    expect(body.code).toBe("dangerous_skill");
+    expect(body.code).not.toBe("rollback_incomplete");
   });
 
   it("still installs on the confirmed retry after a clean rollback", async () => {

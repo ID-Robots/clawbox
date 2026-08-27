@@ -533,14 +533,23 @@ async function findShadowConflict(
   return null;
 }
 
+/**
+ * What the skill directory is doing after a rollback.
+ *
+ * Three states, not two, because "not known to be there" is not "gone": a lock
+ * entry that names no `install_path` gives the removal nothing to aim at, so
+ * nothing about the directory was checked and nothing about it may be claimed.
+ */
+type RollbackDir = "present" | "absent" | "unknown";
+
 /** What a rollback ACHIEVED, as opposed to what the CLI printed about it. */
 interface RollbackVerdict {
-  /** Neither a lock entry nor a skill directory was left behind. */
+  /** No lock entry survived and no directory is known to have. */
   clean: boolean;
   /** The hub lock still lists the skill — every store surface calls it installed. */
   lockEntry: boolean;
   /** The skill directory is still on disk — the agent would load it. */
-  dir: boolean;
+  dir: RollbackDir;
 }
 
 /**
@@ -577,7 +586,10 @@ async function rollback(
     console.error("[hermes skills install] rollback uninstall failed", err);
   }
   const installPath = entry?.install_path;
-  let dir = false;
+  // `unknown` until something actually looks. With no `install_path` there is
+  // nothing to look at, and the honest answer is not `absent`: the CLI may well
+  // have left a directory behind at a location this route was never told.
+  let dir: RollbackDir = "unknown";
   if (installPath) {
     // Two things can leave the directory behind, so both are checked: a path
     // `removeSkillDir` will not resolve (it answers false and removes nothing),
@@ -585,13 +597,18 @@ async function rollback(
     // traverse, the root-owned subdirectory case this device family produces.
     const removed = await removeSkillDir(SKILLS_DIR, installPath);
     const abs = lockInstallDir(entry);
-    dir = !removed || (abs !== null && (await pathExists(abs)));
+    const stillThere = !removed || (abs !== null && (await pathExists(abs)));
+    dir = stillThere ? "present" : "absent";
   }
   invalidateInstalledCache();
   // Read the lock AFTER the CLI, never before: it is the only thing that says
   // whether the store will still list this skill.
   const lockEntry = await isInHubLock(lockName, entry?.identifier);
-  return { clean: !lockEntry && !dir, lockEntry, dir };
+  // `unknown` alone is not a failure. The store lists what the lock lists, so a
+  // vanished lock entry means the customer sees nothing and has nothing to act
+  // on; refusing here would report a failure over a rollback that did its job —
+  // the mirror image of the bug this whole change exists to fix.
+  return { clean: !lockEntry && dir !== "present", lockEntry, dir };
 }
 
 async function pathExists(p: string): Promise<boolean> {
@@ -628,14 +645,27 @@ async function rollbackIncomplete(
     warning?: SkillDangerWarning | null;
   },
 ): Promise<NextResponse> {
+  // Say only what was actually established. `unknown` is its own sentence
+  // because the alternative — calling it removed — is the false-success this
+  // change is here to stop telling.
   const leftover = left.lockEntry
-    ? left.dir
+    ? left.dir === "present"
       ? `"${ctx.name}" is still listed in the Skills store and its files are still on the device`
-      : `"${ctx.name}" is still listed in the Skills store although its files were removed`
-    : `"${ctx.name}" is no longer listed in the Skills store but its files are still on the device`;
+      : left.dir === "absent"
+        ? `"${ctx.name}" is still listed in the Skills store although its files were removed`
+        : `"${ctx.name}" is still listed in the Skills store, and the entry names no location, so whether its files are still on the device could not be checked`
+    : `"${ctx.name}" is no longer listed in the Skills store, but its files are still on the device`;
+  // A leftover the store cannot see is a leftover the store cannot remove, so
+  // the two states get the two different next steps they actually have.
+  const nextStep = left.lockEntry
+    ? `Remove "${ctx.name}" from the Skills store, then try again.`
+    : `It is not in the Skills store to remove — the leftover folder has to be deleted on the device `
+      + `before this skill can be installed again.`;
+  // JSON.stringify, not the bare name: this is caller-derived and a log line is
+  // parsed by whoever reads the journal. Escaped, it cannot forge a second line.
   console.error(
     "[hermes skills install] rollback incomplete",
-    ctx.name,
+    JSON.stringify(ctx.name),
     "lockEntry:",
     left.lockEntry,
     "dir:",
@@ -655,9 +685,7 @@ async function rollbackIncomplete(
   });
   return NextResponse.json(
     {
-      error:
-        `${ctx.cause} The device could not fully undo the install: ${leftover}. `
-        + `Remove "${ctx.name}" from the Skills store, then try again.`,
+      error: `${ctx.cause} The device could not fully undo the install: ${leftover}. ${nextStep}`,
       code: "rollback_incomplete",
       requiresConfirmation: false,
       name: ctx.name,

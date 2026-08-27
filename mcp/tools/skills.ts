@@ -194,6 +194,12 @@ interface InstallRefusal {
   missingFiles?: string[];
   /** `unresolved`: the ids the device's "did you mean" list offered instead. */
   candidates?: string[];
+  /** `rollback_incomplete`: what the failed undo left behind. */
+  leftover?: {
+    /** The store still lists it — so the store is where it can be removed. */
+    lockEntry?: boolean;
+    directory?: "present" | "absent" | "unknown";
+  };
   warning?: {
     verdict?: string;
     trust?: string;
@@ -319,12 +325,18 @@ function refusalToToolError(err: unknown): ToolError | null {
     // lock entry makes the installer say "already installed" and exit 0 without
     // fetching anything, so the next attempt fails on the files that are not
     // there. A person has to remove it first.
+    // A leftover the store cannot see cannot be removed from the store, so the
+    // advice has to follow the same branch the route's message does.
+    const listed = payload.leftover?.lockEntry !== false;
     return new ToolError(
       "CONFLICT",
       payload.error
         ?? "The device refused the install and could not fully undo it; the skill is listed but not installed.",
       "Do NOT retry and do NOT ask the user to confirm — neither can succeed while the leftover is there. "
-        + "Tell the user to remove that skill in Settings -> Skills, and to try the install again afterwards.",
+        + (listed
+          ? "Tell the user to remove that skill in Settings -> Skills, and to try the install again afterwards."
+          : "The skill is NOT in Settings -> Skills, so it cannot be removed there: tell the user the "
+            + "leftover folder has to be deleted on the device before this skill can be installed again."),
     );
   }
   if (payload.code === "incomplete_install") {
