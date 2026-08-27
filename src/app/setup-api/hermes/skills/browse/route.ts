@@ -184,10 +184,16 @@ export async function GET(request: Request) {
       totalPages: reachablePages,
       hasMore: page < reachablePages && page * pageSize < result.total,
       facets: {
-        sources: result.sources,
+        // A facet value this handler would reject is a checkbox that 400s the
+        // moment it is ticked, so the rail is never offered one. Category keys
+        // are their own normal form by construction; a registry's source or
+        // publisher string is not.
+        sources: result.sources.filter((f) => isBrowsableSource(f.id)),
         // The publisher facet exists only for GitHub-sourced skills, so it is
         // offered only while GitHub is one of the selected sources.
-        providers: wantSources.includes("github") ? result.providers : [],
+        providers: wantSources.includes("github")
+          ? result.providers.filter((f) => isValidMeta(f.id))
+          : [],
         trust: result.trust,
         categories: result.categories,
       },
@@ -229,6 +235,7 @@ export async function GET(request: Request) {
       : (await cliBrowse(page, Math.min(pageSize, 50), flagSource, request.signal)).skills;
     // Whatever the flag could not express is applied here, so a rail selection
     // never appears to be ignored just because the index is still building.
+    const wantProviders = providers.map((p) => p.toLowerCase());
     const skills = fetched.filter((s) => {
       if (wantSources.length && !wantSources.includes(sourceFlagValue(s.source || "unknown"))) return false;
       if (trust.length && !trust.includes(trustBucket(s.trust))) return false;
@@ -236,6 +243,10 @@ export async function GET(request: Request) {
         const key = normalizeCategory(s.category)?.key;
         if (!key || !categories.includes(key)) return false;
       }
+      // A row whose publisher is unknown is DROPPED, not kept: the CLI's own
+      // rows carry no `provider` at all, and keeping them would let a publisher
+      // filter answer with every skill in the registry.
+      if (wantProviders.length && !wantProviders.includes((s.provider || "").toLowerCase())) return false;
       return true;
     });
     const { facets, categoryCoverage } = facetsOfRows(skills, {

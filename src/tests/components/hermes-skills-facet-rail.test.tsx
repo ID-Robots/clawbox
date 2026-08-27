@@ -400,4 +400,18 @@ describe("the rail from the keyboard", () => {
     await openStore("browse");
     expect(screen.queryByText(/skills? match/)).toBeNull();
   });
+
+  it("says nothing when the TAB changes — that is not a filter change", async () => {
+    await openStore("browse");
+    await tick("trust", "official");
+    await waitFor(() => expect(screen.getByText("1 skill matches")).toBeTruthy());
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("skill-tab-installed"));
+    });
+    await waitFor(() => expect(screen.getByText("PDF")).toBeTruthy());
+    // The other tab's count does not get read out, and the browse one does not
+    // stay standing beside a list it no longer describes.
+    expect(screen.queryByText(/skills? match/)).toBeNull();
+  });
 });

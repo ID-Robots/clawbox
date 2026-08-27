@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { BrowseResponse, CatalogFacet } from "@/lib/hermes-skills";
 import { buildCatalogState } from "@/lib/hermes-skill-index";
 
 /**
@@ -50,20 +51,12 @@ const CATALOGUE = buildCatalogState({
   ],
 });
 
-interface Facet {
-  id: string;
-  label: string;
-  count: number;
-}
-interface Body {
-  skills: { id: string }[];
-  total: number;
-  facets: { sources: Facet[]; providers: Facet[]; trust: Facet[]; categories: Facet[] };
-  categoryCoverage: number;
-  facetScope: string;
-  degraded: boolean;
-  error?: string;
-}
+// The route's own contract, so a change to it fails here rather than sliding
+// past a hand-written copy that agrees with the assertions by construction.
+type Body = Pick<
+  BrowseResponse,
+  "skills" | "total" | "facets" | "categoryCoverage" | "facetScope" | "degraded"
+>;
 
 async function browse(query: string) {
   const { GET } = await import("@/app/setup-api/hermes/skills/browse/route");
@@ -71,7 +64,7 @@ async function browse(query: string) {
   return { status: res.status, body: (await res.json()) as Body };
 }
 
-const countOf = (list: Facet[], id: string) => list.find((f) => f.id === id)?.count;
+const countOf = (list: CatalogFacet[], id: string) => list.find((f) => f.id === id)?.count;
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -150,6 +143,7 @@ describe("browse facets with no index (the CLI fallback)", () => {
       skills: [
         { id: "clawhub/a", name: "a", source: "clawhub", trust: "community" },
         { id: "official/b", name: "b", source: "official", trust: "builtin" },
+        { id: "NVIDIA/c", name: "c", source: "github", trust: "trusted", provider: "NVIDIA" },
       ],
     } as unknown as Awaited<ReturnType<typeof cliBrowse>>);
     mockCliSearch.mockResolvedValue([
@@ -178,6 +172,15 @@ describe("browse facets with no index (the CLI fallback)", () => {
     mockCliBrowse.mockClear();
     await browse("source=github&source=clawhub");
     expect(mockCliBrowse.mock.calls[0][2]).toBeUndefined();
+  });
+
+  it("applies a publisher selection too, and drops the rows that cannot answer", async () => {
+    // The CLI's own rows carry no `provider`, so keeping them would let a
+    // publisher filter answer with the whole registry.
+    const { body } = await browse("source=github&provider=nvidia");
+    expect(body.skills.map((s) => s.id)).toEqual(["NVIDIA/c"]);
+    expect(body.total).toBe(1);
+    expect((await browse("source=clawhub&provider=nvidia")).body.total).toBe(0);
   });
 
   it("passes a query through to search and still filters it", async () => {

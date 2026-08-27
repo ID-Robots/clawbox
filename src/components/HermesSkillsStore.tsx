@@ -573,25 +573,35 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   // request is still in flight would read out the previous answer's total.
   const resultCount = browsing ? catalog.total : installedFiltered.length;
   const filterSignature = groups.map((g) => `${g.id}:${g.selected.join('+')}`).join('|');
-  const announced = useRef<string | null>(null);
+  // Keyed by TAB, not just by signature: arriving on a tab — for the first time
+  // or from the other one — is not a filter change, and each tab's rail has its
+  // own groups. Seeding here rather than in the tab handler also makes a
+  // remount silent, which is what a fresh view should be.
+  const announced = useRef<{ tab: string; signature: string } | null>(null);
   useEffect(() => {
-    announced.current = null;
-    setFilterLive('');
-  }, [tab]);
-  useEffect(() => {
-    if (browsing && (catalog.loading || catalog.stale)) return;
-    if (announced.current === null) {
-      announced.current = filterSignature; // first paint of a tab says nothing
+    if (announced.current?.tab !== tab) {
+      announced.current = { tab, signature: filterSignature };
       return;
     }
-    if (announced.current === filterSignature) return;
-    announced.current = filterSignature;
+    if (browsing && (catalog.loading || catalog.stale)) return;
+    if (announced.current.signature === filterSignature) return;
+    announced.current = { tab, signature: filterSignature };
     setFilterLive(resultCount === 0 ? COPY.liveResultsNone : COPY.liveResults(resultCount));
-  }, [browsing, catalog.loading, catalog.stale, filterSignature, resultCount, COPY]);
+  }, [tab, browsing, catalog.loading, catalog.stale, filterSignature, resultCount, COPY]);
 
   // Stable handlers: the confirm dialog installs a focus trap keyed to them, so
   // a new identity on every parent render would yank focus back to Cancel while
   // the user is tabbing (the detail fetch resolves under the open dialog).
+  /**
+   * Changing tab drops the previous tab's announcement rather than leaving it
+   * standing beside the new tab's results. In the handler, not an effect: the
+   * tab only ever changes because someone pressed the button.
+   */
+  const selectTab = useCallback((next: 'installed' | 'browse') => {
+    setTab(next);
+    setFilterLive('');
+  }, []);
+
   const closeInstallDialog = useCallback(() => setConfirmInstall(null), []);
   const closeUninstallDialog = useCallback(() => setConfirmUninstall(null), []);
   const closeDangerDialog = useCallback(() => setDanger(null), []);
@@ -778,7 +788,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
               data-testid={`skill-tab-${key}`}
               aria-selected={tab === key}
               aria-controls="hs-tabpanel"
-              onClick={() => setTab(key)}
+              onClick={() => selectTab(key)}
               className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${FOCUS_RING} ${
                 tab === key
                   ? 'bg-[var(--coral-bright)] text-white'
@@ -986,7 +996,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
                 icon="extension"
                 title={COPY.emptyInstalled}
                 hint={COPY.emptyInstalledHint}
-                action={<PrimaryButton onClick={() => setTab('browse')}>{COPY.browseSkills}</PrimaryButton>}
+                action={<PrimaryButton onClick={() => selectTab('browse')}>{COPY.browseSkills}</PrimaryButton>}
               />
             )}
             {!installed.error && installed.skills.length > 0 && installedFiltered.length === 0 && (

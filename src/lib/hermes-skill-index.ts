@@ -73,6 +73,10 @@ export interface CatalogRecord {
    * row of every query.
    */
   categoryKey?: string;
+  /** `trust` folded into its facet bucket, precomputed for the same reason. */
+  trustKey?: TrustBucket;
+  /** Lowercased `provider`, precomputed — the publisher filter compares it. */
+  providerKey?: string;
   installCount?: number;
   hostname?: string;
   detailUrl?: string;
@@ -241,15 +245,19 @@ function project(raw: RawRecord): CatalogRecord | null {
 
   const installCountRaw = extra.install_count;
   const category = str(extra.category, 60);
+  const trust = trustOf(raw.trust_level);
+  const provider = str(extra.provider, 60);
   const record: CatalogRecord = {
     id,
     name,
     description,
     provenanceNote,
     source,
-    trust: trustOf(raw.trust_level),
+    trust,
+    trustKey: trustBucket(trust),
     tags: tagList(raw.tags),
-    provider: str(extra.provider, 60),
+    provider,
+    providerKey: provider?.toLowerCase(),
     category,
     categoryKey: normalizeCategory(category)?.key,
     installCount: typeof installCountRaw === 'number' && installCountRaw >= 0 ? installCountRaw : undefined,
@@ -315,6 +323,7 @@ function applyOfficialOverlay(byId: Map<string, CatalogRecord>, disk: OfficialSk
       source: 'official',
       // Every official row in the index carries trust_level "builtin".
       trust: 'builtin',
+      trustKey: 'official',
       tags: tagList(d.tags),
       category,
       categoryKey: normalizeCategory(category)?.key,
@@ -357,7 +366,7 @@ export function buildCatalogState(parsed: unknown, official: OfficialSkillOnDisk
     if (r.source === 'github' && r.provider) {
       providerCounts.set(r.provider, (providerCounts.get(r.provider) || 0) + 1);
     }
-    const bucket = trustBucket(r.trust);
+    const bucket = r.trustKey || trustBucket(r.trust);
     trustCounts.set(bucket, (trustCounts.get(bucket) || 0) + 1);
     if (r.categoryKey) {
       categoryCounts.set(r.categoryKey, (categoryCounts.get(r.categoryKey) || 0) + 1);
@@ -603,9 +612,12 @@ export function queryCatalog(state: CatalogState, query: CatalogQuery): CatalogP
     // filters.
     for (const r of state.records) {
       if (re && !matches(r, q, re)) continue;
+      // All three are projected once at load: this pass runs over every one of
+      // the catalogue's ~90 600 rows on any request that carries a selection,
+      // and `trustBucket` alone would allocate two strings per row.
       const sourceId = sourceFlagValue(r.source);
-      const trust = trustBucket(r.trust);
-      const provider = r.provider ? r.provider.toLowerCase() : undefined;
+      const trust = r.trustKey || trustBucket(r.trust);
+      const provider = r.providerKey;
       const okSource = !wantSources || wantSources.has(sourceId);
       const okProvider = !wantProviders || (!!provider && wantProviders.has(provider));
       const okTrust = !wantTrust || wantTrust.has(trust);
