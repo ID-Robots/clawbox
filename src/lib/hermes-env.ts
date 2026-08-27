@@ -187,7 +187,7 @@ export function applyEnvValues(existing: string, values: Record<string, string |
 export async function readHermesEnv(): Promise<Record<string, string>> {
   let raw: string;
   try {
-    raw = await fs.readFile(hermesEnvPath(), "utf-8");
+    raw = await readEnvText(hermesEnvPath());
   } catch (err) {
     // ENOENT: no .env, or no ~/.hermes to hold one. ENOTDIR: a component of
     // the path is a file, so there is no ~/.hermes directory either. Both mean
@@ -197,6 +197,26 @@ export async function readHermesEnv(): Promise<Record<string, string>> {
     throw err;
   }
   return parseHermesEnv(raw);
+}
+
+/**
+ * Read a path that may not be a regular file, without ever blocking on it.
+ *
+ * `fs.readFile` opens the path with plain `O_RDONLY`, and opening a FIFO that
+ * way parks until someone opens the write end — a request that never returns,
+ * which is worse than any wrong answer. `O_NONBLOCK` makes that open return
+ * immediately; it has no effect on a regular file, which is the only case that
+ * matters here. Errors are left exactly as the OS raised them (a directory
+ * still surfaces EISDIR), because the caller's ENOENT/ENOTDIR distinction is
+ * what tells "not configured" apart from "broken".
+ */
+async function readEnvText(envPath: string): Promise<string> {
+  const handle = await fs.open(envPath, constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    return await handle.readFile("utf-8");
+  } finally {
+    await handle.close().catch(() => {});
+  }
 }
 
 /** The pure half of readHermesEnv, so parsing is testable without a file. */

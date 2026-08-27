@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "child_process";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
@@ -230,6 +231,46 @@ describe("setHermesEnvValues on disk", () => {
     await fs.mkdir(hermesEnvPath(), { recursive: true });
     await expect(readHermesEnv()).rejects.toMatchObject({ code: "EISDIR" });
     await expect(getHermesEnvValue("A")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+
+  // A FIFO at the path is the one shape that must not produce a WRONG kind of
+  // answer: `fs.readFile` opens with plain O_RDONLY, and opening a FIFO that
+  // way parks until someone opens the write end — a request that never
+  // returns. Both paths open O_NONBLOCK for that reason.
+  it("does not hang when the path is a fifo", async () => {
+    // Skipped where the platform cannot make one — Git Bash on Windows exits 0
+    // from `mkfifo` and creates nothing, which would make this test assert the
+    // opposite of what it is for. CI runs on Linux, which has real FIFOs.
+    const isFifo = await (async () => {
+      try {
+        execFileSync("mkfifo", [hermesEnvPath()]);
+        return (await fs.stat(hermesEnvPath())).isFIFO();
+      } catch {
+        return false;
+      }
+    })();
+    if (!isFifo) return;
+    // SETTLING is the property under test, not which way it settles: a
+    // non-blocking read of a writer-less FIFO gives EOF on some kernels and
+    // EAGAIN on others, and either is a fine answer. Hanging is not.
+    const settles = async (work: Promise<unknown>, what: string) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const hung = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${what} hung on a fifo`)), 2000);
+      });
+      try {
+        await Promise.race([work.catch((err: unknown) => err), hung]);
+      } finally {
+        clearTimeout(timer!);
+      }
+    };
+    await settles(readHermesEnv(), "readHermesEnv");
+    // The write must not merely settle — it must REFUSE. A FIFO is not a base
+    // to build the next .env on.
+    await settles(
+      expect(setHermesEnvValues({ A: "1" })).rejects.toBeInstanceOf(HermesEnvUnreadableError),
+      "setHermesEnvValues",
+    );
   });
 
   // TASK-452 round 2. The READ path has refused to flatten a fault into
