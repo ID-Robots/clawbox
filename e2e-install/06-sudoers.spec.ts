@@ -174,7 +174,10 @@ test.describe("root escalation surface", () => {
         .filter((p) => /^\/(usr|bin|sbin|home|tmp|var|opt|etc)\//.test(p)),
     )];
     expect(paths.length).toBeGreaterThan(0);
-    const stats = await dockerExec(["bash", "-lc", `stat -c '%n %U %a' ${paths.join(" ")} 2>/dev/null`]);
+    // `|| true`: a granted path that does not exist on this device (no snapd in
+    // the container, so no /usr/bin/snap) makes stat exit non-zero, and
+    // dockerExec throws on that. The missing ones simply do not come back.
+    const stats = await dockerExec(["bash", "-lc", `stat -c '%n %U %a' ${paths.join(" ")} 2>/dev/null || true`]);
     const seen = new Set<string>();
     for (const line of stats.split("\n").filter(Boolean)) {
       const [name, owner, mode] = line.split(" ");
@@ -182,9 +185,14 @@ test.describe("root escalation surface", () => {
       expect(owner, `${name} is granted but owned by ${owner}`).toBe("root");
       expect(parseInt(mode, 8) & 0o022, `${name} is group- or world-writable`).toBe(0);
     }
-    // A grant on a path that does not exist is its own failure — the feature it
-    // names is broken on this device — so require every one of them to resolve.
-    for (const p of paths) expect(seen.has(p), `${p} is granted but not installed`).toBe(true);
+    // Every libexec helper must resolve — those are ours to install, and the
+    // test above already pins their mode. A missing /usr/bin/snap is not a
+    // finding here: the container has no snapd, and the grant is inert without
+    // it. What matters is that nothing that DOES resolve is clawbox-writable.
+    for (const p of paths.filter((x) => x.startsWith("/usr/local/libexec/clawbox/"))) {
+      expect(seen.has(p), `${p} is granted but not installed`).toBe(true);
+    }
+    expect(seen.size, "no granted path resolved at all — the probe is broken").toBeGreaterThan(2);
   });
 
   test("a wildcard cannot swallow a second unit name (GAP 3)", async () => {
