@@ -235,7 +235,7 @@ export function severityCounts(findings: ScanFinding[]): Record<FindingSeverity,
 // else — `caution`, `dangerous`, `suspicious`, a verdict a future scanner
 // version invents — is treated as flagged. Fail CLOSED: an unrecognised verdict
 // asks the owner rather than installing silently.
-const CLEAN_VERDICTS = new Set(['safe', 'clean', 'ok', 'pass', 'passed', 'none']);
+export const CLEAN_VERDICTS = new Set(['safe', 'clean', 'ok', 'pass', 'passed', 'none']);
 
 /**
  * Did the scanner flag this skill?

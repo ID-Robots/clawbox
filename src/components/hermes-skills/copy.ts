@@ -41,11 +41,32 @@ export function useCopy() {
         popular: t('skills.sortOptions.popular'),
       } as const,
       sourceLabel: t('skills.sourceLabel'),
-      allSources: t('skills.allSources'),
       providerLabel: t('skills.providerLabel'),
-      allProviders: t('skills.allProviders'),
       categoryLabel: t('skills.categoryLabel'),
-      allCategories: t('skills.allCategories'),
+
+      // === The facet rail ===
+      filtersHeading: t('skills.filtersHeading'),
+      filtersButton: t('skills.filtersButton'),
+      filtersButtonWithCount: (n: number) => t('skills.filtersButtonWithCount', { n }),
+      filtersClearAll: t('skills.filtersClearAll'),
+      filtersClose: t('skills.filtersClose'),
+      filtersShowAll: (n: number) => t('skills.filtersShowAll', { n }),
+      filtersShowFewer: t('skills.filtersShowFewer'),
+      filtersNone: t('skills.filtersNone'),
+      filterChipRemove: (group: string, value: string) =>
+        t('skills.filterChipRemove', { group, value }),
+      facetTrust: t('skills.facetTrust'),
+      facetSafety: t('skills.facetSafety'),
+      /** Fixed vocabularies, so an id a newer index invents falls back to itself. */
+      trustBucket: (id: string) => (TRUST_KEYS.has(id) ? t(`skills.trustBucket.${id}`) : id),
+      safetyBucket: (id: string) => (SAFETY_KEYS.has(id) ? t(`skills.safetyBucket.${id}`) : id),
+      facetCategoryCoverage: (n: number, total: number) =>
+        t('skills.facetCategoryCoverage', { n: n.toLocaleString(), total: total.toLocaleString() }),
+      facetCountsLoaded: (n: number) => t('skills.facetCountsLoaded', { n: n.toLocaleString() }),
+      facetSafetyBrowseNote: t('skills.facetSafetyBrowseNote'),
+      liveResults: (n: number) =>
+        n === 1 ? t('skills.liveResults.one', { n }) : t('skills.liveResults.other', { n: n.toLocaleString() }),
+      liveResultsNone: t('skills.liveResults.none'),
       showingRange: (from: number, to: number, total: number) =>
         t('skills.showingRange', {
           from: from.toLocaleString(),
@@ -97,9 +118,8 @@ export function useCopy() {
 
       emptySearch: (q: string) => t('skills.emptySearch', { q }),
       emptySearchHint: t('skills.emptySearchHint'),
-      emptySearchAllSources: t('skills.emptySearchAllSources'),
-      emptySource: (label: string) => t('skills.emptySource', { label }),
-      clearSourceFilter: (label: string) => t('skills.clearSourceFilter', { label }),
+      emptyFiltered: t('skills.emptyFiltered'),
+      emptyCatalog: t('skills.emptyCatalog'),
       emptyInstalled: t('skills.emptyInstalled'),
       emptyInstalledHint: t('skills.emptyInstalledHint'),
       browseSkills: t('skills.browseSkills'),
@@ -252,6 +272,12 @@ export function useCopy() {
     [t],
   );
 }
+
+// The two fixed facet vocabularies, as key sets, for the same reason the
+// capability ids below are: a bucket a newer index or scanner invents must fall
+// back to its own id rather than render a raw translation key at the customer.
+const TRUST_KEYS = new Set(['official', 'trusted', 'community', 'unknown']);
+const SAFETY_KEYS = new Set(['safe', 'caution', 'dangerous', 'unscanned']);
 
 // The capability ids hermes-skill-capabilities.ts can emit. Kept as a set so a
 // bucket a newer scanner introduces falls back to the generic line instead of

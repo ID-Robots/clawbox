@@ -1,10 +1,18 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { BrowseResponse, CatalogFacet, CatalogMeta, HermesSkill, SortOption } from '@/lib/hermes-skills';
+import type {
+  BrowseResponse,
+  CatalogFacets,
+  CatalogMeta,
+  FacetScope,
+  HermesSkill,
+  SortOption,
+} from '@/lib/hermes-skills';
 
-// Browse-tab data: one endpoint (/browse) serves listing, search, facets and
-// paging, so this hook owns the whole query state and the append-on-scroll list.
+// Browse-tab data: one endpoint (/browse) serves listing, search, the facet rail
+// and paging, so this hook owns the whole query state and the append-on-scroll
+// list.
 
 const BROWSE_URL = '/setup-api/hermes/skills/browse';
 const PAGE_SIZE = 24;
@@ -20,15 +28,38 @@ const SLOW_AFTER_MS = 4000;
 // by itself the moment the origin is no longer 'warming'.
 const WARM_POLL_MS = 5000;
 
+/** The rail's groups on the Browse tab, in the order it renders them. */
+export const BROWSE_FACET_GROUPS = ['trust', 'source', 'category', 'provider'] as const;
+export type BrowseFacetGroup = (typeof BROWSE_FACET_GROUPS)[number];
+
+export type FacetSelection = Record<BrowseFacetGroup, string[]>;
+
+const EMPTY_SELECTION: FacetSelection = { trust: [], source: [], category: [], provider: [] };
+const EMPTY_FACETS: CatalogFacets = { sources: [], providers: [], trust: [], categories: [] };
+
+/**
+ * The one invariant a selection has to keep: the publisher facet exists only for
+ * GitHub skills, so a publisher left ticked after GitHub is unticked would
+ * silently filter every other source down to nothing. Applied in the state
+ * updater rather than in an effect — an effect would fire a request for the
+ * inconsistent state first and correct it afterwards.
+ */
+function reconcile(selection: FacetSelection): FacetSelection {
+  if (selection.source.includes('github') || selection.provider.length === 0) return selection;
+  return { ...selection, provider: [] };
+}
+
 export interface CatalogController {
   query: string;
   setQuery: (value: string) => void;
-  source: string;
-  setSource: (value: string) => void;
-  provider: string;
-  setProvider: (value: string) => void;
   sort: SortOption;
   setSort: (value: SortOption) => void;
+  /** Ticked values per rail group. */
+  selected: FacetSelection;
+  toggleFacet: (group: BrowseFacetGroup, id: string) => void;
+  removeFacet: (group: BrowseFacetGroup, id: string) => void;
+  /** How many facet values are ticked across every group. */
+  activeCount: number;
   results: HermesSkill[];
   total: number;
   hasMore: boolean;
@@ -46,11 +77,22 @@ export interface CatalogController {
    * that simply hadn't finished unpacking.
    */
   preparing: boolean;
+  /**
+   * The results on screen are NOT the answer to the filters on screen — a
+   * request is in flight, or has not started yet because the selection changed
+   * this render. Anything that reports a count (the polite announcement) has to
+   * wait for this to clear, or it states the previous answer's total under the
+   * new filters.
+   */
+  stale: boolean;
   error: string | null;
   degraded: boolean;
   catalog: CatalogMeta | null;
-  sources: CatalogFacet[];
-  providers: CatalogFacet[];
+  facets: CatalogFacets;
+  /** Rows in the current result set that carry a usable category. */
+  categoryCoverage: number;
+  /** Whether the counts were measured over the catalogue or this answer alone. */
+  facetScope: FacetScope;
   loadMore: () => void;
   reload: () => void;
   clearFilters: () => void;
@@ -59,8 +101,7 @@ export interface CatalogController {
 export function useSkillCatalog(active: boolean): CatalogController {
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
-  const [source, setSource] = useState('all');
-  const [provider, setProvider] = useState('');
+  const [selected, setSelected] = useState<FacetSelection>(EMPTY_SELECTION);
   const [sort, setSort] = useState<SortOption>('relevance');
   const [results, setResults] = useState<HermesSkill[]>([]);
   const [page, setPage] = useState(1);
@@ -72,9 +113,11 @@ export function useSkillCatalog(active: boolean): CatalogController {
   const [error, setError] = useState<string | null>(null);
   const [degraded, setDegraded] = useState(false);
   const [catalog, setCatalog] = useState<CatalogMeta | null>(null);
-  const [sources, setSources] = useState<CatalogFacet[]>([]);
-  const [providers, setProviders] = useState<CatalogFacet[]>([]);
+  const [facets, setFacets] = useState<CatalogFacets>(EMPTY_FACETS);
+  const [categoryCoverage, setCategoryCoverage] = useState(0);
+  const [facetScope, setFacetScope] = useState<FacetScope>('catalog');
   const [reloadKey, setReloadKey] = useState(0);
+  const [settledKey, setSettledKey] = useState<string | null>(null);
   const seenIds = useRef<Set<string>>(new Set());
   const inFlight = useRef<AbortController | null>(null);
 
@@ -83,36 +126,59 @@ export function useSkillCatalog(active: boolean): CatalogController {
     return () => clearTimeout(t);
   }, [query]);
 
-  /**
-   * Changing the source has to clean up after itself:
-   *  - the publisher facet only exists for GitHub skills, so a stale provider
-   *    would silently filter every other source down to nothing;
-   *  - "Most installed" only exists for browse.sh (the only source with an
-   *    install counter), so leaving it selected would show an option that is no
-   *    longer in the list.
-   */
-  const changeSource = useCallback(
-    (value: string) => {
-      setSource(value);
-      if (value !== 'github') setProvider('');
-      if (value !== 'browse-sh') setSort((s) => (s === 'popular' ? 'relevance' : s));
+  const applySelection = useCallback((change: (prev: FacetSelection) => FacetSelection) => {
+    setSelected((prev) => reconcile(change(prev)));
+  }, []);
+
+  const toggleFacet = useCallback(
+    (group: BrowseFacetGroup, id: string) => {
+      applySelection((prev) => {
+        const current = prev[group];
+        return {
+          ...prev,
+          [group]: current.includes(id) ? current.filter((v) => v !== id) : [...current, id],
+        };
+      });
     },
-    [],
+    [applySelection],
   );
+
+  const removeFacet = useCallback(
+    (group: BrowseFacetGroup, id: string) => {
+      applySelection((prev) => ({ ...prev, [group]: prev[group].filter((v) => v !== id) }));
+    },
+    [applySelection],
+  );
+
+  /**
+   * "Most installed" only exists for browse.sh — the one source with an install
+   * counter. Derived rather than reset on selection change, so unticking
+   * browse.sh and ticking it again brings the user's chosen order back instead
+   * of quietly leaving them on "Best match".
+   */
+  const effectiveSort: SortOption =
+    sort === 'popular' && !selected.source.includes('browse-sh') ? 'relevance' : sort;
 
   const buildUrl = useCallback(
     (targetPage: number) => {
-      const params = new URLSearchParams({ page: String(targetPage), size: String(PAGE_SIZE), sort });
+      const params = new URLSearchParams({
+        page: String(targetPage),
+        size: String(PAGE_SIZE),
+        sort: effectiveSort,
+      });
       if (debounced) params.set('q', debounced);
-      if (source && source !== 'all') params.set('source', source);
-      if (provider) params.set('provider', provider);
+      // One repeated parameter per ticked value: `?source=github&source=clawhub`.
+      for (const id of selected.source) params.append('source', id);
+      for (const id of selected.trust) params.append('trust', id);
+      for (const id of selected.category) params.append('category', id);
+      for (const id of selected.provider) params.append('provider', id);
       return `${BROWSE_URL}?${params}`;
     },
-    [debounced, source, provider, sort],
+    [debounced, selected, effectiveSort],
   );
 
   const fetchPage = useCallback(
-    async (targetPage: number, append: boolean) => {
+    async (targetPage: number, append: boolean, key?: string) => {
       inFlight.current?.abort();
       const controller = new AbortController();
       inFlight.current = controller;
@@ -141,8 +207,10 @@ export function useSkillCatalog(active: boolean): CatalogController {
         setDegraded(!!data.degraded);
         setCatalog(data.catalog ?? null);
         if (!append) {
-          setSources(data.facets?.sources ?? []);
-          setProviders(data.facets?.providers ?? []);
+          setFacets({ ...EMPTY_FACETS, ...(data.facets ?? {}) });
+          setCategoryCoverage(data.categoryCoverage ?? 0);
+          setFacetScope(data.facetScope === 'loaded' ? 'loaded' : 'catalog');
+          if (key) setSettledKey(key);
         }
       } catch (err) {
         if ((err as Error).name === 'AbortError') return;
@@ -175,7 +243,7 @@ export function useSkillCatalog(active: boolean): CatalogController {
     if (!active) return;
     if (loadedKey.current === queryKey) return; // same query, already loaded
     loadedKey.current = queryKey;
-    fetchPage(1, false);
+    fetchPage(1, false, queryKey);
     return () => inFlight.current?.abort();
   }, [active, queryKey, fetchPage]);
 
@@ -197,20 +265,21 @@ export function useSkillCatalog(active: boolean): CatalogController {
   }, [loading, appending, hasMore, page, fetchPage]);
 
   const reload = useCallback(() => setReloadKey((k) => k + 1), []);
-  const clearFilters = useCallback(() => {
-    changeSource('all');
-  }, [changeSource]);
+  const clearFilters = useCallback(() => setSelected(EMPTY_SELECTION), []);
+
+  const activeCount =
+    selected.trust.length + selected.source.length + selected.category.length + selected.provider.length;
 
   return useMemo(
     () => ({
       query,
       setQuery,
-      source,
-      setSource: changeSource,
-      provider,
-      setProvider,
-      sort,
+      sort: effectiveSort,
       setSort,
+      selected,
+      toggleFacet,
+      removeFacet,
+      activeCount,
       results,
       total,
       hasMore,
@@ -218,20 +287,24 @@ export function useSkillCatalog(active: boolean): CatalogController {
       appending,
       slow,
       preparing,
+      stale: settledKey !== queryKey,
       error,
       degraded,
       catalog,
-      sources,
-      providers,
+      facets,
+      categoryCoverage,
+      facetScope,
       loadMore,
       reload,
       clearFilters,
     }),
     [
       query,
-      source,
-      provider,
-      sort,
+      effectiveSort,
+      selected,
+      toggleFacet,
+      removeFacet,
+      activeCount,
       results,
       total,
       hasMore,
@@ -239,15 +312,17 @@ export function useSkillCatalog(active: boolean): CatalogController {
       appending,
       slow,
       preparing,
+      settledKey,
+      queryKey,
       error,
       degraded,
       catalog,
-      sources,
-      providers,
+      facets,
+      categoryCoverage,
+      facetScope,
       loadMore,
       reload,
       clearFilters,
-      changeSource,
     ],
   );
 }

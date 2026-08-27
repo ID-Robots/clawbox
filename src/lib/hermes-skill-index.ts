@@ -30,9 +30,20 @@ import {
   type CatalogFacet,
   type HermesSkill,
   type SortOption,
+  MAX_FACET_VALUES,
   checkInstallIdentifier,
+  sourceFlagValue,
   sourceLabel,
 } from '@/lib/hermes-skills';
+import {
+  type TrustBucket,
+  TRUST_BUCKETS,
+  categoryLabelFromKey,
+  fixedFacets,
+  normalizeCategory,
+  rankFacets,
+  trustBucket,
+} from '@/lib/hermes-skill-facets';
 
 const INDEX_PATH = path.join(SKILLS_DIR, '.hub', 'index-cache', 'hermes-index.json');
 
@@ -55,6 +66,13 @@ export interface CatalogRecord {
   tags: string[];
   provider?: string;
   category?: string;
+  /**
+   * `category` run through `normalizeCategory`, precomputed. Normalising 90 000
+   * strings on every browse request is exactly the kind of per-request work the
+   * `hay` field exists to avoid, and the facet counter touches this on every
+   * row of every query.
+   */
+  categoryKey?: string;
   installCount?: number;
   hostname?: string;
   detailUrl?: string;
@@ -88,6 +106,11 @@ export interface CatalogState {
   skillCount: number;
   sourceCounts: Map<string, number>;
   providerCounts: Map<string, number>;
+  /** Trust bucket → rows. Precomputed for the same reason as the orderings. */
+  trustCounts: Map<string, number>;
+  categoryCounts: Map<string, number>;
+  /** Rows that carry a usable category at all (739 of 90 605 on the box). */
+  categoryCoverage: number;
 }
 
 interface CacheSlot {
@@ -217,6 +240,7 @@ function project(raw: RawRecord): CatalogRecord | null {
   }
 
   const installCountRaw = extra.install_count;
+  const category = str(extra.category, 60);
   const record: CatalogRecord = {
     id,
     name,
@@ -226,7 +250,8 @@ function project(raw: RawRecord): CatalogRecord | null {
     trust: trustOf(raw.trust_level),
     tags: tagList(raw.tags),
     provider: str(extra.provider, 60),
-    category: str(extra.category, 60),
+    category,
+    categoryKey: normalizeCategory(category)?.key,
     installCount: typeof installCountRaw === 'number' && installCountRaw >= 0 ? installCountRaw : undefined,
     hostname: str(extra.hostname, 100),
     detailUrl: httpsOnly(extra.detail_url),
@@ -274,6 +299,7 @@ function applyOfficialOverlay(byId: Map<string, CatalogRecord>, disk: OfficialSk
     const tags = tagList(onDisk.tags);
     if (tags.length) rec.tags = tags;
     rec.category = rec.category || str(onDisk.category, 60);
+    rec.categoryKey = normalizeCategory(rec.category)?.key;
     rec.hay = hayOf(rec.name, rec.id);
   }
 
@@ -281,6 +307,7 @@ function applyOfficialOverlay(byId: Map<string, CatalogRecord>, disk: OfficialSk
     if (byId.has(d.id)) continue;
     const name = str(d.name, 120);
     if (!name || !checkInstallIdentifier(d.id).ok) continue;
+    const category = str(d.category, 60);
     byId.set(d.id, {
       id: d.id,
       name,
@@ -289,7 +316,8 @@ function applyOfficialOverlay(byId: Map<string, CatalogRecord>, disk: OfficialSk
       // Every official row in the index carries trust_level "builtin".
       trust: 'builtin',
       tags: tagList(d.tags),
-      category: str(d.category, 60),
+      category,
+      categoryKey: normalizeCategory(category)?.key,
       localPath: d.path,
       hay: hayOf(name, d.id),
     });
@@ -317,10 +345,23 @@ export function buildCatalogState(parsed: unknown, official: OfficialSkillOnDisk
   const records = Array.from(byId.values());
   const sourceCounts = new Map<string, number>();
   const providerCounts = new Map<string, number>();
+  const trustCounts = new Map<string, number>();
+  const categoryCounts = new Map<string, number>();
+  let categoryCoverage = 0;
   for (const r of records) {
-    sourceCounts.set(r.source, (sourceCounts.get(r.source) || 0) + 1);
+    // Counted under the FLAG spelling (`skills-sh`), which is the only spelling
+    // the client, the query string and the CLI all agree on. The index's own
+    // `skills.sh` never leaves this module as a facet id.
+    const sourceId = sourceFlagValue(r.source);
+    sourceCounts.set(sourceId, (sourceCounts.get(sourceId) || 0) + 1);
     if (r.source === 'github' && r.provider) {
       providerCounts.set(r.provider, (providerCounts.get(r.provider) || 0) + 1);
+    }
+    const bucket = trustBucket(r.trust);
+    trustCounts.set(bucket, (trustCounts.get(bucket) || 0) + 1);
+    if (r.categoryKey) {
+      categoryCounts.set(r.categoryKey, (categoryCounts.get(r.categoryKey) || 0) + 1);
+      categoryCoverage++;
     }
   }
   // The two unfiltered listing orders are invariant for a given index, so they
@@ -337,6 +378,9 @@ export function buildCatalogState(parsed: unknown, official: OfficialSkillOnDisk
     skillCount: records.length,
     sourceCounts,
     providerCounts,
+    trustCounts,
+    categoryCounts,
+    categoryCoverage,
   };
 }
 
@@ -426,8 +470,13 @@ export async function getCatalogRecord(id: string): Promise<CatalogRecord | unde
 
 export interface CatalogQuery {
   q?: string;
-  source?: string;
-  provider?: string;
+  /** Multi-select. Empty (or omitted) means every source. */
+  sources?: string[];
+  providers?: string[];
+  /** Trust BUCKETS — `builtin` and `official` are the same one. */
+  trust?: string[];
+  /** Normalised category keys. */
+  categories?: string[];
   sort: SortOption;
   page: number;
   pageSize: number;
@@ -438,6 +487,10 @@ export interface CatalogPage {
   total: number;
   sources: CatalogFacet[];
   providers: CatalogFacet[];
+  trust: CatalogFacet[];
+  categories: CatalogFacet[];
+  /** Rows in the CURRENT result set that carry a usable category. */
+  categoryCoverage: number;
 }
 
 function toCardPayload(r: CatalogRecord): HermesSkill {
@@ -494,47 +547,80 @@ function matches(r: CatalogRecord, q: string, re: RegExp): boolean {
   return !!r.description && re.test(r.description);
 }
 
-function facets(counts: Map<string, number>, labeller: (id: string) => string, limit: number): CatalogFacet[] {
-  return Array.from(counts.entries())
-    .map(([id, count]) => ({ id, label: labeller(id), count }))
-    .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id))
-    .slice(0, limit);
+/** Selection as a lookup, or null for "this group filters nothing". */
+function selectionSet(values: string[] | undefined, lower = false): Set<string> | null {
+  if (!values || values.length === 0) return null;
+  const set = new Set<string>();
+  for (const v of values) {
+    if (v === 'all') return null; // the firehose beats any narrowing beside it
+    set.add(lower ? v.toLowerCase() : v);
+  }
+  return set.size ? set : null;
 }
 
+/**
+ * Facet counting, the honest way.
+ *
+ * Every group's counts are measured with the OTHER groups' filters applied but
+ * NOT its own. That is what makes a rail truthful: "Trusted (478)" means 478
+ * skills are reachable by ticking it from where you stand, and ticking
+ * "Community" beside it never collapses its sibling counts to zero. The old
+ * single-<select> version approximated this by ignoring the facet selection
+ * entirely, which was right for one group and wrong the moment there were four.
+ */
 export function queryCatalog(state: CatalogState, query: CatalogQuery): CatalogPage {
   const q = (query.q || '').trim().toLowerCase();
-  const wantSource = query.source && query.source !== 'all' ? query.source : undefined;
-  const wantProvider = wantSource === 'github' && query.provider ? query.provider.toLowerCase() : undefined;
+  const wantSources = selectionSet(query.sources);
+  const wantProviders = selectionSet(query.providers, true);
+  const wantTrust = selectionSet(query.trust);
+  const wantCategories = selectionSet(query.categories);
 
   // "Best match" without a query has nothing to rank on — the listing order is
   // trust, the same default the route picks.
   const sort: SortOption = query.sort === 'relevance' && !q ? 'trust' : query.sort;
 
-  const sourceCounts = new Map<string, number>();
-  const providerCounts = new Map<string, number>();
+  const filtered = !!(wantSources || wantProviders || wantTrust || wantCategories);
+  let sourceCounts = state.sourceCounts;
+  let providerCounts = state.providerCounts;
+  let trustCounts = state.trustCounts;
+  let categoryCounts = state.categoryCounts;
+  let categoryCoverage = state.categoryCoverage;
   let sorted: CatalogRecord[];
 
-  if (!q && !wantSource && !wantProvider && (sort === 'name' || sort === 'trust')) {
-    // Unfiltered listing: served straight from the ordering computed at load.
+  if (!q && !filtered && (sort === 'name' || sort === 'trust')) {
+    // Unfiltered listing: served straight from the orderings and the counts
+    // computed once at load. 90 000 rows are not walked to show 24 of them.
     sorted = sort === 'name' ? state.orderName : state.orderTrust;
   } else {
     const re = q ? new RegExp(escapeRegExp(q), 'i') : null;
-    // The index writes `skills.sh`; the CLI flag spells it `skills-sh`.
-    const alt = wantSource === 'skills-sh' ? 'skills.sh' : wantSource;
     const rows: CatalogRecord[] = [];
-    // ONE pass does the query match, the facet counts and the facet filters.
-    // Facet counts reflect the CURRENT query text but not the current facet
-    // selection, so switching sources never shows a stale/zero count.
+    sourceCounts = new Map();
+    providerCounts = new Map();
+    trustCounts = new Map();
+    categoryCounts = new Map();
+    categoryCoverage = 0;
+    // ONE pass does the query match, all four facet counts and all four facet
+    // filters.
     for (const r of state.records) {
       if (re && !matches(r, q, re)) continue;
-      if (q) {
-        sourceCounts.set(r.source, (sourceCounts.get(r.source) || 0) + 1);
-        if (r.source === 'github' && r.provider) {
-          providerCounts.set(r.provider, (providerCounts.get(r.provider) || 0) + 1);
-        }
+      const sourceId = sourceFlagValue(r.source);
+      const trust = trustBucket(r.trust);
+      const provider = r.provider ? r.provider.toLowerCase() : undefined;
+      const okSource = !wantSources || wantSources.has(sourceId);
+      const okProvider = !wantProviders || (!!provider && wantProviders.has(provider));
+      const okTrust = !wantTrust || wantTrust.has(trust);
+      const okCategory = !wantCategories || (!!r.categoryKey && wantCategories.has(r.categoryKey));
+
+      if (okProvider && okTrust && okCategory) bump(sourceCounts, sourceId);
+      if (okSource && okTrust && okCategory && r.source === 'github' && r.provider) {
+        bump(providerCounts, r.provider);
       }
-      if (wantSource && r.source !== wantSource && r.source !== alt) continue;
-      if (wantProvider && (r.provider || '').toLowerCase() !== wantProvider) continue;
+      if (okSource && okProvider && okCategory) bump(trustCounts, trust);
+      if (okSource && okProvider && okTrust && r.categoryKey) {
+        bump(categoryCounts, r.categoryKey);
+      }
+      if (!okSource || !okProvider || !okTrust || !okCategory) continue;
+      if (r.categoryKey) categoryCoverage++;
       rows.push(r);
     }
     if (re && sort === 'relevance') {
@@ -555,9 +641,21 @@ export function queryCatalog(state: CatalogState, query: CatalogQuery): CatalogP
   return {
     skills: sorted.slice(start, start + query.pageSize).map(toCardPayload),
     total: sorted.length,
-    sources: facets(q ? sourceCounts : state.sourceCounts, sourceLabel, 12),
-    providers: facets(q ? providerCounts : state.providerCounts, (id) => id, 12),
+    sources: rankFacets(sourceCounts, query.sources || [], sourceLabel, MAX_FACET_VALUES),
+    providers: rankFacets(providerCounts, query.providers || [], (id) => id, MAX_FACET_VALUES),
+    trust: fixedFacets(TRUST_BUCKETS, trustCounts, query.trust || [], (id: TrustBucket) => id),
+    categories: rankFacets(
+      categoryCounts,
+      query.categories || [],
+      categoryLabelFromKey,
+      MAX_FACET_VALUES,
+    ),
+    categoryCoverage,
   };
+}
+
+function bump(counts: Map<string, number>, key: string): void {
+  counts.set(key, (counts.get(key) || 0) + 1);
 }
 
 // ── CLI fallbacks ───────────────────────────────────────────────────────────

@@ -184,6 +184,27 @@ export interface CatalogMeta {
   stale?: boolean;
 }
 
+export interface CatalogFacets {
+  sources: CatalogFacet[];
+  providers: CatalogFacet[];
+  /** builtin+official collapsed to one bucket — see `trustBucket`. */
+  trust: CatalogFacet[];
+  /** Normalised `extra.category`; junk and empty values never appear. */
+  categories: CatalogFacet[];
+}
+
+/**
+ * Where a facet count was measured.
+ *
+ * `catalog` — over every row the query matches, so a count is the number of
+ * skills the filter would actually reach.
+ * `loaded`  — over the rows in THIS answer only. The CLI fallback has no index
+ * to count against, and TASK-452 was full of surfaces that stated a number
+ * confidently and wrongly, so the client says "of the {n} loaded" rather than
+ * presenting a page total as a catalogue total.
+ */
+export type FacetScope = 'catalog' | 'loaded';
+
 export interface BrowseResponse {
   skills: HermesSkill[];
   page: number;
@@ -191,11 +212,22 @@ export interface BrowseResponse {
   total: number;
   totalPages: number;
   hasMore: boolean;
-  facets: { sources: CatalogFacet[]; providers: CatalogFacet[] };
+  facets: CatalogFacets;
+  /**
+   * How many of the `total` matching rows carry a usable category. Only 739 of
+   * the device's 90 605 rows do, so the rail states the coverage instead of
+   * implying that the category buckets add up to the result count.
+   */
+  categoryCoverage: number;
+  facetScope: FacetScope;
   catalog: CatalogMeta;
   /** True when the answer came from the CLI fallback (no paging, top-N only). */
   degraded: boolean;
 }
+
+/** How many values one facet group may carry, and how many may be selected. */
+export const MAX_FACET_VALUES = 24;
+export const MAX_FACET_SELECTION = 12;
 
 // The fixed set of discovery sources Hermes' `--source` flag accepts. `all` is
 // the (default) firehose; the rest narrow to one registry. Anything outside
