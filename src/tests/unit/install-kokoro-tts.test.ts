@@ -419,9 +419,13 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(res.stderr).not.toMatch(/Kokoro still works/);
     // Exit 1 is the Piper half failing, so claiming Piper is the active engine
     // would just be a smaller version of the same lie.
-    expect(res.stdout).toContain("NO engine is confirmed installed");
     expect(res.stdout).not.toContain("Piper CPU only");
     expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
+    // Nor the opposite lie. install-voice.sh returns 13, not 1, when no engine
+    // survives, so an engine IS confirmed installed on this path and saying
+    // otherwise reports a failure over something that succeeded (TTS-01).
+    expect(res.stdout).not.toContain("NO engine is confirmed installed");
+    expect(res.stdout).toContain("the voice install did not complete");
   });
 });
 

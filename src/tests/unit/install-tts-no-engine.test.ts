@@ -400,6 +400,23 @@ describe.skipIf(!hasBash)("step_openclaw_tts records the failures it is handed",
     expect(degraded.out).not.toMatch(/SILENCE/);
   });
 
+  it("does not tell a box with a working engine that it has none", () => {
+    // install-voice.sh returns 13, not 1, when no engine survives, so exit 1
+    // always leaves one standing. The summary case had no arm for 1 and fell
+    // through to the unknown-code arm, so a box running Kokoro perfectly and
+    // merely missing its fallback was told "NO engine is confirmed installed"
+    // — a failure report over something that succeeded, in the same operator
+    // line this fix exists to make truthful.
+    const res = runStep(1);
+    expect(res.out, `a working engine was reported as none:\n${res.out}`).not.toContain(
+      "NO engine is confirmed installed",
+    );
+    // And it must not swing the other way into naming an engine it cannot
+    // know: exit 1 is also reachable with Kokoro skipped behind a ready Piper.
+    expect(res.out).not.toContain("Kokoro GPU, Piper fallback");
+    expect(res.out).not.toContain("Piper CPU only");
+  });
+
   it("keeps both tolerated codes out of the fatal range step_openclaw_setup enforces", () => {
     // step_openclaw_setup returns any status it has no branch for, which aborts
     // the whole provision. 13 and 14 are the two it must carry rather than die

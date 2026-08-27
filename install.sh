@@ -2668,7 +2668,13 @@ step_openclaw_tts() {
         # than 13, because 13 means the box cannot speak AT ALL and saying that
         # about a box with a working Kokoro would be its own false report.
         TTS_RC=14
-        echo "  Warning: the Piper CPU fallback did not install — this box has no fallback behind its GPU engine" >&2
+        # Named in terms of the half that failed, without asserting WHICH half
+        # or what survived: exit 1 covers both "the Piper CPU fallback did not
+        # install" and "the voice scripts did not deploy", and install.sh cannot
+        # tell them apart from a status code. $TTS_STATUS_FILE can, and it is
+        # what step_validate_services reads a moment later.
+        echo "  Warning: the voice install did not complete — the Piper CPU fallback did not install, or the voice scripts did not deploy" >&2
+        echo "  Which engines this box actually has is recorded in $TTS_STATUS_FILE" >&2
         echo "  Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         record_provision_failure openclaw_tts
         ;;
@@ -2787,6 +2793,15 @@ step_openclaw_tts() {
     case "$VOICE_RC" in
       10|11|12)
         echo "  On-device TTS configured (Piper CPU only — $KOKORO_REASON)"
+        ;;
+      1)
+        # An engine SURVIVES here — install-voice.sh returns 13, not 1, when
+        # none does — so "NO engine is confirmed installed", which is where this
+        # case used to land, is a failure report over something that succeeded.
+        # It still says nothing about WHICH engine: exit 1 is also reachable
+        # with Kokoro skipped and the script deploy failing behind a ready
+        # Piper, and naming the wrong survivor would just be a smaller lie.
+        echo "  On-device TTS configured on the engine that installed, but the voice install did not complete ($KOKORO_REASON)"
         ;;
       13)
         echo "  On-device TTS configured, but this box has NO working engine — it answers speech with SILENCE ($KOKORO_REASON)"
