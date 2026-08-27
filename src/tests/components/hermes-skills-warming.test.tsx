@@ -106,7 +106,7 @@ describe("Browse while the skill index is still building", () => {
 
     expect(await screen.findByText(/Building the skill catalogue/i)).toBeTruthy();
     // The two strings the user actually saw on the device.
-    expect(screen.queryByText(/Nothing in .* yet/i)).toBeNull();
+    expect(screen.queryByText(/Nothing here yet/i)).toBeNull();
     expect(screen.queryByText(/Try a different term/i)).toBeNull();
   });
 
@@ -156,7 +156,7 @@ describe("Browse while the skill index is still building", () => {
     mockBrowse([{ ...READY, skills: [], total: 0 }]);
     await openBrowseTab();
 
-    expect(await screen.findByText(/Nothing in .* yet/i)).toBeTruthy();
+    expect(await screen.findByText(/Nothing here yet/i)).toBeTruthy();
     expect(screen.queryByText(/Building the skill catalogue/i)).toBeNull();
   });
 });
