@@ -75,6 +75,32 @@ function captureSubagentArtifacts(run, destDir) {
   return copied;
 }
 
+
+/** Sum agent-*.jsonl transcripts under `dir` into the main usage object. */
+export function mergeSubagentUsage(usage, dir) {
+  const walk = (d, out = []) => {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return out; }
+    for (const entry of entries) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(full, out);
+      else if (/^agent-.*\.jsonl$/.test(entry.name)) out.push(full);
+    }
+    return out;
+  };
+  for (const file of walk(dir)) {
+    const sub = parseTranscript(file);
+    if (!sub) continue;
+    usage ??= { lines: 0, byModel: {} };
+    usage.lines += sub.lines;
+    for (const [model, u] of Object.entries(sub.byModel)) {
+      const slot = (usage.byModel[model] ??= { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, messages: 0 });
+      for (const key of Object.keys(slot)) slot[key] += u[key] ?? 0;
+    }
+  }
+  return usage;
+}
+
 export function captureRun({ run, task, workdir, resultsRoot, suiteVersion, score, outcome, wallMs, commitLagMs, label }) {
   const stamp = new Date(run.startedAt).toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const dirName = `${stamp}-${task.id}-${run.id}`;
@@ -87,9 +113,13 @@ export function captureRun({ run, task, workdir, resultsRoot, suiteVersion, scor
   let usage = null;
   if (run.transcriptPath && copyIfReadable(run.transcriptPath, path.join(runDir, "transcript.jsonl"))) {
     usage = parseTranscript(path.join(runDir, "transcript.jsonl"));
-    if (usage) fs.writeFileSync(path.join(runDir, "usage.json"), JSON.stringify(usage, null, 2));
   }
   const subagentFiles = captureSubagentArtifacts(run, path.join(runDir, "subagents"));
+  // The sub-agents' spend lives in their own transcripts, not the main one —
+  // without this the flash helpers are invisible and the "orchestrator vs
+  // sub-agent" split reads as one model doing everything.
+  usage = mergeSubagentUsage(usage, path.join(runDir, "subagents"));
+  if (usage) fs.writeFileSync(path.join(runDir, "usage.json"), JSON.stringify(usage, null, 2));
 
   const git = {
     commit: run.commit ?? null,

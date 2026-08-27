@@ -18,8 +18,11 @@ export default async function score({ workdir, run }) {
   const tempModule = all.find((f) => /^lib\/temperature\.js$/.test(f))
     ?? all.find((f) => /^lib\/.*temp.*\.js$/i.test(f));
   const tempSrc = tempModule ? (read(workdir, tempModule) ?? "") : "";
+  // Plain string containment, not a built regex: the module name comes off
+  // the run's own disk output, and metacharacters in it must stay literal.
   const wired = tempModule
-    ? new RegExp(`require\\(["']\\./${tempModule.replace(/\.js$/, "").replace("/", "\\/")}["']\\)`).test(cli)
+    ? cli.includes(`require("./${tempModule.replace(/\.js$/, "")}")`)
+      || cli.includes(`require('./${tempModule.replace(/\.js$/, "")}')`)
     : false;
 
   // Numeric correctness through the real registry, in a subprocess-free way:

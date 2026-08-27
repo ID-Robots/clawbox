@@ -151,11 +151,16 @@ async function upstreamLongAnswer(name, targetSeconds, maxTokens) {
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model: "deepseek-v4-flash",
+        // The pro reasoner with a planning brief, non-streamed: the same
+        // shape that held a real bench run in one 8-minute extended think
+        // (run-okzr0lzs). Asking flash for 30 000 numbers looked cheaper but
+        // the model declines the drudgery and answers in seconds — thinking
+        // time is the one duration a model will actually spend.
+        model: "deepseek-v4-pro[1m]",
         max_tokens: maxTokens,
         messages: [{
           role: "user",
-          content: "Without using code, write out the numbers from 1 to 30000 in English words, one per line, no abbreviations, no stopping early. This is a latency test; length is the point.",
+          content: "Plan, in full engineering detail, a 12-page static documentation site for a fictional fleet-management CLI: per page, the complete information architecture, every section with its copy outline, the shared data layer's schema with field-by-field justification, the accessibility plan, and a review of at least six design alternatives you considered and rejected, with reasons. Think it through end to end before answering; completeness matters more than speed.",
         }],
       }),
     });
@@ -219,8 +224,8 @@ async function main() {
     await guardStreamTerminates();
     // Sized from a measured ~110 output tokens/s on flash: the generation has
     // to RUN past the wall, so the token budget is the duration dial.
-    await upstreamLongAnswer("api-json-past-125s", 125, 16000);
-    await upstreamLongAnswer("api-json-past-300s", 300, 40000);
+    await upstreamLongAnswer("api-json-past-125s", 125, 8000);
+    await upstreamLongAnswer("api-json-past-300s", 300, 16000);
   } else {
     report("stream-terminates", "SKIP", "--slow to run");
     report("api-json-past-125s", "SKIP", "--slow to run (takes minutes by design)");

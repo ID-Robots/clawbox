@@ -18,6 +18,9 @@ paths-ignore:
   - "**/*.test.tsx"
   - "**/*.test.js"
   - "**/*.test.mjs"
-  # Bench seed fixtures are deliberately imperfect code the coding agent is
-  # asked to work on — benchmark inputs, not the device's attack surface.
-  - "bench/tasks/**/seed/**"
+  # The bench harness is operator-run test tooling: its whole job is reading
+  # this box's own tokens off disk and writing captured API responses to
+  # files, and its seed fixtures are deliberately imperfect code for the
+  # coding agent to work on. None of it ships in the product or listens to
+  # anything — benchmark tooling, not the device's attack surface.
+  - "bench/**"

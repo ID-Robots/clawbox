@@ -126,13 +126,21 @@ describe("coding_agent_run", () => {
     );
   });
 
-  it("refuses to start with nowhere to work, before calling the device", async () => {
+  it("hands a bare task to the device, whose default-folder fallback owns it", async () => {
+    // No client-side "needs a place to work" guard any more: the route falls
+    // back to the owner's stored default folder, and when none is stored it
+    // answers 400 with its own sentence — which must reach the model intact.
+    apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Give a code project id or a folder to work in.", kind: "invalid" })));
     const out = await harness().call("coding_agent_run", { task: "do something" });
+    expect(apiPost).toHaveBeenCalledWith(
+      "/setup-api/coding-agent/run",
+      { task: "do something" },
+      expect.objectContaining({ timeoutMs: 20_000 }),
+    );
     expect(out.isError).toBe(true);
     if (!out.isError) return;
     expect(out.error.code).toBe("BAD_ARGUMENT");
-    expect(out.error.next).toMatch(/project_id/);
-    expect(apiPost).not.toHaveBeenCalled();
+    expect(out.error.message).toMatch(/code project id or a folder/);
   });
 
   it("turns 'switched off' into CONFLICT that sends the agent to the user, not into a retry", async () => {
@@ -303,7 +311,7 @@ describe("coding_agent_stop", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(out.text).toMatch(/Stopped run run-k3x9q2ab \(stopped\)/);
-    expect(apiPost).toHaveBeenCalledWith("/setup-api/coding-agent/stop", { id: "run-k3x9q2ab" }, expect.anything());
+    expect(apiPost).toHaveBeenCalledWith("/setup-api/coding-agent/stop", { runId: "run-k3x9q2ab" }, expect.anything());
   });
 
   it("does not send a stop for a run that already finished", async () => {
