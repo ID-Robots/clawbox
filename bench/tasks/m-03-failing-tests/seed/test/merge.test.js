@@ -60,12 +60,27 @@ test("unsorted input is handled", () => {
 });
 
 test("input is not mutated", () => {
-  const input = [
+  // Two shapes on purpose: the unsorted one catches an implementation that
+  // sorts the caller's array in place, the sorted overlapping one catches a
+  // result that aliases the caller's intervals and widens them in place.
+  const unsorted = [
+    [5, 7],
     [1, 4],
     [2, 6],
   ];
-  mergeIntervals(input);
-  assert.deepEqual(input, [
+  mergeIntervals(unsorted);
+  assert.deepEqual(unsorted, [
+    [5, 7],
+    [1, 4],
+    [2, 6],
+  ]);
+
+  const sorted = [
+    [1, 4],
+    [2, 6],
+  ];
+  mergeIntervals(sorted);
+  assert.deepEqual(sorted, [
     [1, 4],
     [2, 6],
   ]);

@@ -38,7 +38,9 @@ export default async function score({ workdir, run }) {
 
   const checks = [
     check("all 8 required files exist", missing.length === 0, missing.join("; "), 3),
-    check("no extra top-level clutter", all.length <= 12, `${all.length} files`),
+    check("exactly these files, nothing else",
+      all.every((f) => REQUIRED.includes(f)),
+      all.filter((f) => !REQUIRED.includes(f)).slice(0, 5).join("; ")),
     await nodeCheck(workdir, "js/main.js"),
     await nodeCheck(workdir, "js/data.js"),
     ...navChecks,

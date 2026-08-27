@@ -1,3 +1,5 @@
+# unitctl: add temperature support
+
 This folder contains `unitctl`, a small unit-conversion CLI. Get to know how
 it is put together, then add **temperature** support the same way the existing
 units are done:

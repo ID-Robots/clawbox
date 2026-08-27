@@ -127,6 +127,8 @@ export function internalLinksResolve(workdir, htmlFiles) {
     const html = read(workdir, file);
     if (html === null) continue;
     for (const ref of htmlRefs(html)) {
+      // Protocol-relative (//cdn…) is a network reference, not a local path.
+      if (/^\/\//.test(ref)) { broken.push(`${file} -> ${ref} (protocol-relative)`); continue; }
       if (/^(https?:|mailto:|tel:|data:|javascript:|#)/i.test(ref)) continue;
       const target = ref.split("#")[0].split("?")[0];
       if (!target) continue;
@@ -148,6 +150,9 @@ export function noExternalRefs(workdir, files) {
   for (const file of files) {
     const text = read(workdir, file);
     if (text === null) continue;
+    // Absolute URLs only here: a bare "//…" in raw text is usually a code
+    // comment. Protocol-relative references are caught in attribute context
+    // by internalLinksResolve, where "//cdn…" is unambiguous.
     const re = /https?:\/\/[^\s"'<>)]+/gi;
     let m;
     while ((m = re.exec(text))) hits.push(`${file}: ${m[0].slice(0, 60)}`);

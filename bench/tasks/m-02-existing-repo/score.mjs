@@ -1,8 +1,8 @@
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   check, summarize, read, listFiles, nodeTest, unchangedFromSeed,
-  antiPatterns, summaryClaimsVerifiable, cliMain,
+  antiPatterns, summaryClaimsVerifiable, cliMain, run as exec,
 } from "../../lib/score-utils.mjs";
 import { getSummary } from "../../lib/record.mjs";
 
@@ -11,42 +11,36 @@ const seedDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "seed");
 export default async function score({ workdir, run }) {
   const all = listFiles(workdir);
   const tests = await nodeTest(workdir);
-  const cli = read(workdir, "cli.js") ?? "";
   const readme = read(workdir, "README.md") ?? "";
 
-  // Pattern-following: a dedicated module that registers, wired like the others.
+  // Pattern-following: a dedicated module that registers like the others.
   const tempModule = all.find((f) => /^lib\/temperature\.js$/.test(f))
     ?? all.find((f) => /^lib\/.*temp.*\.js$/i.test(f));
   const tempSrc = tempModule ? (read(workdir, tempModule) ?? "") : "";
-  // Plain string containment, not a built regex: the module name comes off
-  // the run's own disk output, and metacharacters in it must stay literal.
-  const wired = tempModule
-    ? cli.includes(`require("./${tempModule.replace(/\.js$/, "")}")`)
-      || cli.includes(`require('./${tempModule.replace(/\.js$/, "")}')`)
-    : false;
 
-  // Numeric correctness through the real registry, in a subprocess-free way:
-  // import the workdir's modules directly.
-  let conversionsCorrect = false;
+  // Wiring and correctness through the CLI ITSELF, in a subprocess — source
+  // text can carry a require() in a comment, and a scorer-side import can
+  // load a module cli.js never does. `node cli.js list` proves the wiring,
+  // `node cli.js convert` proves the numbers, exactly as a user would.
+  const list = await exec("node", ["cli.js", "list"], { cwd: workdir });
+  const wired = list.ok && /celsius -> fahrenheit/.test(list.stdout) && /kelvin -> celsius/.test(list.stdout);
+  const cases = [
+    ["0", "celsius", "fahrenheit", 32],
+    ["100", "celsius", "fahrenheit", 212],
+    ["32", "fahrenheit", "celsius", 0],
+    ["0", "celsius", "kelvin", 273.15],
+    ["300", "kelvin", "celsius", 26.85],
+  ];
+  let conversionsCorrect = true;
   let conversionDetail = "";
-  try {
-    const { createRequire } = await import("node:module");
-    const req = createRequire(pathToFileURL(path.join(workdir, "cli.js")));
-    if (tempModule) req(path.join(workdir, tempModule));
-    const { convert } = req(path.join(workdir, "lib/registry.js"));
-    const cases = [
-      ["celsius", "fahrenheit", 0, 32],
-      ["celsius", "fahrenheit", 100, 212],
-      ["fahrenheit", "celsius", 32, 0],
-      ["celsius", "kelvin", 0, 273.15],
-      ["kelvin", "celsius", 300, 26.85],
-    ];
-    conversionsCorrect = cases.every(
-      ([from, to, v, want]) => Math.abs(convert(from, to, v) - want) < 1e-6,
-    );
-    if (!conversionsCorrect) conversionDetail = "a temperature conversion is numerically wrong";
-  } catch (err) {
-    conversionDetail = String(err).split("\n")[0];
+  for (const [value, from, to, want] of cases) {
+    const out = await exec("node", ["cli.js", "convert", value, from, to], { cwd: workdir });
+    const got = Number((out.stdout ?? "").trim());
+    if (!out.ok || !Number.isFinite(got) || Math.abs(got - want) > 1e-6) {
+      conversionsCorrect = false;
+      conversionDetail = `${value} ${from} -> ${to}: got ${out.ok ? out.stdout.trim() : out.stderr.split("\n")[0]}`;
+      break;
+    }
   }
 
   const newTests = all.filter(
@@ -60,7 +54,7 @@ export default async function score({ workdir, run }) {
     check("temperature module follows the pattern",
       Boolean(tempModule) && /register\(/.test(tempSrc),
       tempModule ?? "no lib/*temp* module found", 2),
-    check("wired into cli.js like the others", wired, "", 2),
+    check("wired into cli.js like the others", wired, wired ? "" : "cli.js list does not offer the temperature pairs", 2),
     check("conversions numerically correct", conversionsCorrect, conversionDetail, 3),
     check("README table updated",
       /fahrenheit/i.test(readme) && /kelvin/i.test(readme), "", 1),

@@ -7,7 +7,9 @@ import { getSummary } from "../../lib/record.mjs";
 const PORT = 14311;
 
 async function get(pathname) {
-  const res = await fetch(`http://127.0.0.1:${PORT}${pathname}`);
+  // Bounded: a server that accepts the socket and never answers must fail
+  // the probe, not hang the whole suite with the child unkillable behind it.
+  const res = await fetch(`http://127.0.0.1:${PORT}${pathname}`, { signal: AbortSignal.timeout(5_000) });
   const text = await res.text();
   try { return { status: res.status, json: JSON.parse(text) }; }
   catch { return { status: res.status, json: null }; }
@@ -41,18 +43,25 @@ export default async function score({ workdir, run }) {
     }
     if (up) {
       bare = await get("/items");
-      for (const q of ["?limit=5", "?per_page=5", "?pageSize=5", "?page=2&limit=5", "?page=2", "?offset=10&limit=5"]) {
-        try {
-          const res = await get(`/items${q}`);
-          probes.push({ q, status: res.status, count: itemCount(res.json) });
-        } catch { probes.push({ q, status: -1, count: -1 }); }
+      // Two sizes per convention: pagination is proven only when the asked-for
+      // limit CONTROLS the count, not when some subset comes back.
+      for (const param of ["limit", "per_page", "pageSize"]) {
+        const pair = [];
+        for (const n of [3, 5]) {
+          try {
+            const res = await get(`/items?${param}=${n}`);
+            pair.push({ status: res.status, count: itemCount(res.json), asked: n });
+          } catch { pair.push({ status: -1, count: -1, asked: n }); }
+        }
+        probes.push({ q: param, pair });
       }
     }
   } finally {
     child.kill("SIGKILL");
   }
 
-  const paginated = probes.filter((p) => p.status === 200 && p.count > 0 && p.count < 60);
+  const paginated = probes.some(({ pair }) =>
+    pair.every((r) => r.status === 200 && r.count === r.asked));
   const bareOk = bare !== null && bare.status === 200 && itemCount(bare.json) > 0;
   const readsParams = /(limit|per_?page|page_?size|offset|page|cursor)/i.test(src);
 
@@ -64,9 +73,9 @@ export default async function score({ workdir, run }) {
     check("server still boots and serves /health",
       health !== null && health.status === 200, "", 2),
     check("GET /items still answers valid JSON", bareOk, bare ? `status=${bare.status}` : "no response", 2),
-    check("a pagination parameter actually limits the result",
-      paginated.length > 0,
-      probes.map((p) => `${p.q}→${p.count}`).join(" "), 3),
+    check("a pagination parameter demonstrably controls the count",
+      paginated,
+      probes.map(({ q, pair }) => `${q}: ${pair.map((r) => `${r.asked}→${r.count}`).join(",")}`).join(" "), 3),
     check("pagination params read in code", readsParams, "", 1),
     check("summary states the chosen convention/defaults", statesAssumption,
       summary ? "" : "no summary", 3),

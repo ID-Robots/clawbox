@@ -36,7 +36,8 @@ function readIndex(file) {
 function latestSuite() {
   if (!fs.existsSync(RESULTS_DIR)) return null;
   const suites = fs.readdirSync(RESULTS_DIR).filter((d) => fs.existsSync(path.join(RESULTS_DIR, d, "index.jsonl")));
-  return suites.sort().at(-1) ?? null;
+  // Numeric where possible: suite "10" is newer than suite "9".
+  return suites.sort((a, b) => (Number(a) || 0) - (Number(b) || 0) || a.localeCompare(b)).at(-1) ?? null;
 }
 
 const fmt = {

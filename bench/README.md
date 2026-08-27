@@ -11,7 +11,7 @@ run it by hand or from a cron that respects `--budget`.
 
 ## Quick start (on the box)
 
-```
+```sh
 node bench/runner.mjs --dry-run            # what would run, what it should cost
 node bench/runner.mjs --nightly            # S+M nightly set (~$3 expected)
 node bench/runner.mjs --tasks s-01-single-edit
@@ -28,7 +28,7 @@ failures lock the whole box out for five minutes).
 
 ## Layout
 
-```
+```text
 bench/
   runner.mjs        drives the API, captures everything, scores
   compare.mjs       tables + cost-per-file / cost-per-point + baseline diff
@@ -64,7 +64,10 @@ solution (scores 100) and the untouched seed (scores low).
 
 - **Never change the benchmark and the product in the same cycle.** Bump
   `suite.json`'s `suiteVersion` when tasks change; a new version starts a
-  fresh baseline.
+  fresh baseline. (The day-0 numbers in `results/1/` were captured while the
+  suite itself was still being reviewed — m-03's seed and several scorers
+  tightened afterwards, pre-release — so the first nightly run is the
+  baseline that counts.)
 - **A failing run is a finding, not a retry.** The runner captures before it
   moves on; a runner timeout stops the run only after capture.
 - Triage every failure into exactly one bucket: infra / agent / harness /

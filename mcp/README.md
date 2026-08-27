@@ -310,10 +310,13 @@ shell tool, not less and not more:
   `setpriv --ambient-caps=-all --inh-caps=-all --no-new-privs`, and a box
   without `setpriv` reports not-ready rather than running with them;
 - the folder must be a code project or a directory inside the home that is
-  neither protected nor the ClawBox checkout itself, so a prompt-injected
-  "fix the OS" cannot edit the running product in place. With no folder named
-  at all, the owner's stored default project folder is used — the same
-  fallback the run route documents;
+  neither protected nor the ClawBox checkout itself. Honestly said, that
+  boundary binds the file tools and the run's starting point — full Bash can
+  write wherever the device user can, which is the documented cost of the
+  owner's switch; the brief's denial rule and the recorded denial count are
+  the conduct side of the same line. With no folder named at all, the owner's
+  stored default project folder is used — the same fallback the run route
+  documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
   150 turns by default (10–2000), an optional token ceiling the device itself
   enforces, an explicit environment (no session secret, no service tokens),

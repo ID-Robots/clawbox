@@ -9,7 +9,9 @@ export default async function score({ run }) {
   const legible = typeof r.error === "string" && r.error.length > 10;
   const checks = [
     check("run settled (not stuck running)", terminal, `status=${r.status}`, 3),
-    check("did not claim success", r.status !== "completed", "", 3),
+    // "failed", specifically: an operator pressing Stop is not the network
+    // dying, and "completed" after a cut uplink would be a lie.
+    check("settled as failed", r.status === "failed", `status=${r.status}`, 3),
     check("error is legible", legible, r.error ? "" : "error is null", 2),
     check("tokens spent were recorded", (r.tokensUsed ?? 0) > 0,
       `tokensUsed=${r.tokensUsed}`, 1),

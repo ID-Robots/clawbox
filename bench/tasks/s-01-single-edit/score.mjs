@@ -13,10 +13,12 @@ export default async function score({ workdir, run }) {
   const checks = [
     check("config.js exists", config !== "", "", 1),
     await nodeCheck(workdir, "config.js"),
-    check("DEFAULT_PORT is 8080", /DEFAULT_PORT\s*=\s*8080\b/.test(config), "", 3),
+    // Line-anchored effective declaration — a comment saying the right thing
+    // must not pass for the assignment saying the wrong one.
+    check("DEFAULT_PORT is 8080", /^\s*const DEFAULT_PORT = 8080;?\s*$/m.test(config), "", 3),
     check("typo fixed (receive)", /\breceive\b/.test(config) && !/recieve/.test(config), "", 2),
-    check("ACK_RETRIES untouched", /ACK_RETRIES\s*=\s*5\b/.test(config), "", 1),
-    check("SYNC_INTERVAL_MS untouched", /SYNC_INTERVAL_MS\s*=\s*30_000\b/.test(config), "", 1),
+    check("ACK_RETRIES untouched", /^\s*const ACK_RETRIES = 5;?\s*$/m.test(config), "", 1),
+    check("SYNC_INTERVAL_MS untouched", /^\s*const SYNC_INTERVAL_MS = 30_000;?\s*$/m.test(config), "", 1),
     check("watch.js untouched", unchangedFromSeed(workdir, seedDir, "watch.js"), "", 2),
     antiPatterns(workdir, ["config.js", "watch.js"]),
     summaryClaimsVerifiable(workdir, getSummary(run)),

@@ -153,26 +153,37 @@ async function main() {
     console.log(`  run ${runId} started (effort ${started.json.run.effort}, maxTurns ${started.json.run.maxTurns})`);
     if (task.manual && task.manualProcedure) console.log(`  MANUAL STEP NOW: ${task.manualProcedure}`);
 
-    const deadline = Date.now() + task.timeoutMinutes * 60_000;
-    let lastLine = "";
-    let run = await waitForRun(runId, deadline, (r) => {
-      const line = (r.progress ?? []).at(-1) ?? "";
-      if (line && line !== lastLine) { console.log(`  · ${line.slice(0, 110)}`); lastLine = line; }
-    });
+    // Everything after a successful start captures SOMETHING: a paid run
+    // whose polling died to a transport error is still a finding, and the
+    // last record we saw is its evidence.
+    let run = started.json.run;
+    let outcome;
+    let settled = { run: null, commitLagMs: null };
+    try {
+      const deadline = Date.now() + task.timeoutMinutes * 60_000;
+      let lastLine = "";
+      run = await waitForRun(runId, deadline, (r) => {
+        const line = (r.progress ?? []).at(-1) ?? "";
+        if (line && line !== lastLine) { console.log(`  · ${line.slice(0, 110)}`); lastLine = line; }
+      });
 
-    let outcome = run.status;
-    if (run.status === "running") {
-      // Runner timeout: capture-worthy on its own. Stop it so the suite can
-      // go on — the record of the stop is part of the finding.
-      outcome = "timeout";
-      console.error(`  TIMEOUT after ${task.timeoutMinutes}min — stopping ${runId}`);
-      await stopRun(runId);
-      run = (await waitForRun(runId, Date.now() + 30_000)) ?? run;
+      outcome = run.status;
+      if (run.status === "running") {
+        // Runner timeout: capture-worthy on its own. Stop it so the suite can
+        // go on — the record of the stop is part of the finding.
+        outcome = "timeout";
+        console.error(`  TIMEOUT after ${task.timeoutMinutes}min — stopping ${runId}`);
+        await stopRun(runId);
+        run = (await waitForRun(runId, Date.now() + 30_000)) ?? run;
+      }
+
+      // Commit settles after the record does; wait bounded, measure the lag.
+      settled = await waitForCommit(runId);
+      if (settled.run) run = settled.run;
+    } catch (err) {
+      outcome = "transport-failure";
+      console.error(`  polling failed after start: ${String(err).slice(0, 200)}`);
     }
-
-    // Commit settles after the record does; wait bounded, measure the lag.
-    const settled = await waitForCommit(runId);
-    if (settled.run) run = settled.run;
 
     const score = await scoreTask(task, workdir, run);
     const wallMs = (run.completedAt ?? Date.now()) - run.startedAt;

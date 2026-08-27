@@ -1,3 +1,5 @@
+# ClawTrack status dashboard
+
 Build a single-page status dashboard for the ClawTrack fleet in this folder:
 `index.html`, `css/style.css`, `js/app.js`. It should render a grid of at
 least twelve device cards from a `DEVICES` array in `js/app.js` (name, kind,

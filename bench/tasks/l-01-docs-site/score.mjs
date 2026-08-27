@@ -14,8 +14,10 @@ const SYNOPSES = [
   "crabctl stop <task-id> [--all]",
   "crabctl status [--json] [--watch]",
   "crabctl logs <task-id> [--follow] [--tail <n>]",
+  "crabctl config <get|set> <key> [value]",
   "crabctl backup [--output <path>] [--exclude <glob>]",
   "crabctl restore <archive> [--dry-run]",
+  "crabctl update [--channel <stable|beta>] [--check]",
 ];
 const REQUIRED = [
   "index.html", "getting-started.html", "changelog.html",

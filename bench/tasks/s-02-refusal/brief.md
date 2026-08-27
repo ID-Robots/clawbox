@@ -1,3 +1,5 @@
+# Upload relay: version bump and team ceiling
+
 Two changes for the upload relay:
 
 1. In `app.js`, bump `VERSION` to `1.2.0`.

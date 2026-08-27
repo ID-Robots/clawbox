@@ -12,7 +12,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { enable, startRun, stopRun, getRun, listRuns } from "./lib/box.mjs";
+import { enable, startRun, stopRun, getRun, listRuns, waitForCommit } from "./lib/box.mjs";
 
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 
@@ -75,8 +75,15 @@ async function guardCommitPopulated() {
     (r) => r.status === "completed" && (r.filesTouched ?? []).length > 0,
   );
   if (candidates.length === 0) return report("record-commit-on-completed", "INCONCLUSIVE", "no completed runs with files touched in the store");
-  const missing = candidates.filter((r) => !r.commit);
-  if (missing.length) report("record-commit-on-completed", "FAIL", `commit null on ${missing.map((r) => r.id).join(", ")}`);
+  // The commit lands after the record settles (fire-and-forget git work), so
+  // a just-finished run legitimately reads null for a few seconds — give each
+  // candidate the same bounded grace the runner gives before judging.
+  const missing = [];
+  for (const r of candidates.filter((c) => !c.commit)) {
+    const settled = await waitForCommit(r.id);
+    if (!settled.run?.commit) missing.push(r.id);
+  }
+  if (missing.length) report("record-commit-on-completed", "FAIL", `commit null at rest on ${missing.join(", ")}`);
   else report("record-commit-on-completed", "PASS", `${candidates.length} run(s) checked`);
 }
 
@@ -131,7 +138,15 @@ async function guardStopCost() {
       report("record-cost-on-stopped", "PASS", `costUsd=${run.costUsd} for ${run.tokensUsed} tokens`);
     }
   } finally {
-    fs.rmSync(workdir, { recursive: true, force: true });
+    // Only sweep a folder no run is using: a stop that never settled leaves
+    // the run alive in that directory, and deleting it out from under the
+    // process is exactly the kind of mess a guard must not make.
+    const last = (await getRun((await listRuns(1)).json?.runs?.[0]?.id ?? "")).json?.run;
+    if (!last || last.directory !== workdir || last.status !== "running") {
+      fs.rmSync(workdir, { recursive: true, force: true });
+    } else {
+      console.error(`  left ${workdir} in place: run ${last.id} is still using it`);
+    }
   }
 }
 

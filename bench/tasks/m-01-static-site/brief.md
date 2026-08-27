@@ -1,3 +1,5 @@
+# Tidepool Analytics marketing site
+
 Build a static marketing site for **Tidepool Analytics**, a (fictional) fleet
 telemetry product, in this folder. No build step, no frameworks, no network
 access from the pages — everything ships in these files and nothing else:

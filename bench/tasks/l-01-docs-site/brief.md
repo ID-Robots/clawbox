@@ -1,3 +1,5 @@
+# crabctl documentation site
+
 Build the documentation site for **crabctl**, a (fictional) fleet-management
 CLI, in this folder. Static files only — no build step, no frameworks, and no
 network access from the pages.
