@@ -105,6 +105,7 @@ prompt-injection payload with a financial outcome. The plan is reported by
 There is also no thinking/reasoning setter yet — see "Work owned by others".
 
 ### Pictures
+
 `image_generate` (both editions, **only where the box CANNOT draw**)
 
 The inverse of every other gate here: this one is registered when the probe says
