@@ -45,23 +45,36 @@ export function FacetRail({
   activeCount,
   onClearAll,
   footnotes,
+  showHeading = true,
 }: {
   groups: FacetGroupSpec[];
   activeCount: number;
   onClearAll: () => void;
   /** Caveats about the rail as a whole — scope of the counts, missing groups. */
   footnotes?: string[];
+  /**
+   * False inside the drawer, which titles itself. Two "Filters" headings one
+   * above the other is what it looked like otherwise — and the second one is
+   * noise to a screen reader as much as to the eye.
+   */
+  showHeading?: boolean;
 }) {
   const COPY = useCopy();
   const usable = groups.filter((g) => g.options.length > 0);
   return (
     <div className="flex flex-col gap-4 text-[var(--text-primary)]">
-      <div className="flex items-center justify-between gap-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--text-secondary)]">
-          {COPY.filtersHeading}
-        </h2>
-        {activeCount > 0 && <GhostButton onClick={onClearAll}>{COPY.filtersClearAll}</GhostButton>}
-      </div>
+      {(showHeading || activeCount > 0) && (
+        <div className="flex items-center justify-between gap-2">
+          {showHeading && (
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--text-secondary)]">
+              {COPY.filtersHeading}
+            </h2>
+          )}
+          {activeCount > 0 && (
+            <GhostButton onClick={onClearAll}>{COPY.filtersClearAll}</GhostButton>
+          )}
+        </div>
+      )}
       {usable.length === 0 ? (
         <p className="text-xs text-[var(--text-secondary)]">{COPY.filtersNone}</p>
       ) : (

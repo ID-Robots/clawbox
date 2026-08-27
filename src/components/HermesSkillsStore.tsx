@@ -826,6 +826,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
                     activeCount={activeCount}
                     onClearAll={clearAllFilters}
                     footnotes={railFootnotes}
+                    showHeading={false}
                   />
                 </FacetDrawerButton>
               </div>

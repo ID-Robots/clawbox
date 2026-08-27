@@ -335,6 +335,8 @@ describe("the rail on a narrow store", () => {
     const drawer = screen.getByTestId("hs-filters-drawer");
     expect(drawer.getAttribute("aria-modal")).toBe("true");
     expect(within(drawer).getByTestId("hs-facet-trust-official")).toBeTruthy();
+    // The drawer titles itself, so the rail inside it must not title itself too.
+    expect(within(drawer).getAllByText("Filters")).toHaveLength(1);
   });
 
   it("hides the column and the button at opposite widths, so only one is ever shown", async () => {
