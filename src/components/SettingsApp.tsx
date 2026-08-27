@@ -3538,7 +3538,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
-            {localAiStatus?.configured && (
+            {/* Local AI itself works on Hermes (see HERMES_LOCAL_PROVIDER_ID
+                above) — Local-ONLY mode does not. It is built from OpenClaw CLI
+                calls against a fallback chain Hermes has no equivalent of, so
+                this is the one control in the section that cannot work here.
+                Its route now refuses with `supported:false`; hiding the card
+                keeps the owner from discovering that through a red banner
+                quoting our internals at them. */}
+            {localAiStatus?.configured && edition !== "hermes" && (
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
                 <div className="flex items-center justify-between gap-4">
                   <div className="min-w-0 flex-1">
@@ -3694,6 +3701,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       {t("settings.openInTelegram", { name: `@${tgBotInfo.username}` })}
                     </a>
                   )}
+                  {/* Progress streaming is the OpenClaw gateway's Telegram
+                      channel setting. Hermes runs Telegram from ~/.hermes/.env
+                      and has no streaming mode at all, so this switch rendered
+                      itself ON (a missing config file reads as "not off") over
+                      a route that answered {restarted:true} for a gateway that
+                      does not exist. Telegram ITSELF works on Hermes — only
+                      this sub-setting does not, so only this row goes. */}
+                  {edition !== "hermes" && (
                   <div className="flex items-center justify-between gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 mb-4">
                     <div className="min-w-0 flex-1">
                       <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.telegramProgress")}</div>
@@ -3719,6 +3734,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       </button>
                     </div>
                   </div>
+                  )}
                   <button
                     onClick={() => { setTgReconfigure(true); setTgStatus(null); }}
                     className="text-sm text-[var(--coral-bright)] hover:text-orange-300 bg-transparent border-none cursor-pointer underline underline-offset-2"

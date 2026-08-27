@@ -5,7 +5,7 @@ import os from "os";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, set } from "@/lib/config-store";
-import { setControlUiAllowedOrigins, restartGateway } from "@/lib/openclaw-config";
+import { gatewayIsAbsent, restartGateway, setControlUiAllowedOrigins } from "@/lib/openclaw-config";
 import { getReachableIpv4 } from "@/lib/system-info";
 
 const execFileAsync = promisify(execFile);
@@ -69,11 +69,22 @@ export async function POST(request: Request) {
   // UI keeps working at http://<name>.local. Restart the gateway so it picks
   // up the new origin list. Both are best-effort: if either fails the
   // hostname change still proceeds (a reboot will reconcile).
-  try {
-    await setControlUiAllowedOrigins(name);
-    await restartGateway();
-  } catch (err) {
-    console.warn("[hostname] Failed to update OpenClaw allowed origins:", err);
+  // Skipped entirely on Hermes. `setControlUiAllowedOrigins` ends in
+  // `writeConfig`, which MKDIRs `~/.openclaw` and writes an
+  // `openclaw.json` carrying a `gateway.controlUi.allowedOrigins` block —
+  // manufacturing OpenClaw state on the one SKU whose defining property is not
+  // having any, for a gateway that is removed and masked there and will never
+  // read it. `restartGateway()` then no-ops. The hostname change itself is
+  // unaffected either way, so this was never a false success — just litter,
+  // and litter that makes `~/.openclaw` exist is the kind that misleads the
+  // next person debugging an edition question.
+  if (!gatewayIsAbsent()) {
+    try {
+      await setControlUiAllowedOrigins(name);
+      await restartGateway();
+    } catch (err) {
+      console.warn("[hostname] Failed to update OpenClaw allowed origins:", err);
+    }
   }
 
   try {

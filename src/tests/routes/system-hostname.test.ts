@@ -23,9 +23,14 @@ vi.mock("child_process", () => ({
     else cb(null, { stdout: result?.stdout ?? "", stderr: "" });
   },
 }));
+// `gatewayIsAbsent` decides whether the OpenClaw allowed-origins write happens
+// at all. Default false so these cases keep exercising the OpenClaw path they
+// were written for; the Hermes case below flips it.
+const gatewayIsAbsentMock = vi.fn(() => false);
 vi.mock("@/lib/openclaw-config", () => ({
   setControlUiAllowedOrigins: setControlUiAllowedOriginsMock,
   restartGateway: restartGatewayMock,
+  gatewayIsAbsent: gatewayIsAbsentMock,
 }));
 vi.mock("@/lib/config-store", () => ({
   get: getMock,
@@ -48,6 +53,10 @@ beforeEach(() => {
   restartGatewayMock.mockReset().mockResolvedValue(undefined);
   getMock.mockReset();
   setMock.mockReset().mockResolvedValue(undefined);
+  // Reset like the rest. `mockReturnValue` outlives the test that set it, so
+  // without this the gateway-absent case below would silently make every test
+  // added after it run on the Hermes branch.
+  gatewayIsAbsentMock.mockReset().mockReturnValue(false);
 });
 
 afterEach(async () => {
@@ -153,5 +162,24 @@ describe("/setup-api/system/hostname POST", () => {
     const mod = await import("@/app/setup-api/system/hostname/route");
     const res = await mod.POST(makeRequest({ hostname: "gracedeg" }));
     expect(res.status).toBe(200);
+  });
+
+  it("does not manufacture ~/.openclaw on an edition that has no gateway", async () => {
+    // `setControlUiAllowedOrigins` ends in `writeConfig`, which MKDIRs
+    // `~/.openclaw` and writes an allowedOrigins block — on the one SKU whose
+    // defining property is not having one, for a gateway that is removed and
+    // masked there and will never read it. The rename itself is unaffected,
+    // so this was never a false success; it is litter that makes `~/.openclaw`
+    // exist and misleads the next person debugging an edition question.
+    gatewayIsAbsentMock.mockReturnValue(true);
+    execFileMock.mockReturnValue({ stdout: "" });
+    setControlUiAllowedOriginsMock.mockResolvedValue(undefined);
+
+    const mod = await import("@/app/setup-api/system/hostname/route");
+    const res = await mod.POST(makeRequest({ hostname: "gracedeg" }));
+
+    expect(res.status).toBe(200);
+    expect(setControlUiAllowedOriginsMock).not.toHaveBeenCalled();
+    expect(restartGatewayMock).not.toHaveBeenCalled();
   });
 });
