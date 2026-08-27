@@ -142,11 +142,12 @@ describe("POST /setup-api/hermes/models — a crashing `hermes config set`", () 
     expect(error).toBe("Failed to set model.default");
   });
 
-  it("drops a one-line cause that IS a path, rather than quoting it", async () => {
+  it("keeps a one-line cause that IS a path, minus the path", async () => {
     // Stripping the frames is not enough on its own. A CLI failure needs no
     // traceback to name the install layout — this is the ordinary EACCES shape
     // — and the surviving line passes every "names a failure" test there is.
-    // Which is why the repo's own shape whitelist has the last word.
+    // Redacting beats dropping: "permission denied" is the half a person can
+    // act on, and only the layout has to go.
     runHermesCliMock.mockResolvedValue({
       code: 1,
       stdout: "",
@@ -156,7 +157,8 @@ describe("POST /setup-api/hermes/models — a crashing `hermes config set`", () 
     const { error } = await save();
 
     expect(error).not.toContain("/home/");
-    expect(error).toBe("Failed to set model.default");
+    expect(error).not.toContain(".hermes");
+    expect(error).toContain("permission denied");
   });
 });
 
@@ -200,12 +202,13 @@ describe("POST /setup-api/hermes/provider-key — a crashing `hermes auth add`",
     expect(error).toBe("Failed to save API key");
   });
 
-  it("drops a one-line cause that IS a path, rather than quoting it", async () => {
+  it("keeps a one-line cause that IS a path, minus the path", async () => {
     const { error } = await saveKey(
       "Error: cannot write /home/clawbox/.hermes/auth-profiles.json: permission denied",
     );
 
     expect(error).not.toContain("/home/");
-    expect(error).toBe("Failed to save API key");
+    expect(error).not.toContain("auth-profiles");
+    expect(error).toContain("permission denied");
   });
 });

@@ -161,6 +161,33 @@ function withoutTracebackFrames(lines: string[]): string[] {
   return kept;
 }
 
+/**
+ * An absolute on-device path, wherever it sits in a line we are keeping.
+ *
+ * Dropping the traceback FRAMES does not get the paths out, because the line
+ * the strip deliberately KEEPS is the one that quotes them. Every common
+ * CPython summary is that shape:
+ *
+ *   FileNotFoundError: [Errno 2] No such file or directory: '/home/clawbox/.hermes/config.yaml'
+ *   PermissionError: [Errno 13] Permission denied: '/home/clawbox/.hermes/auth-profiles.json'
+ *
+ * It sits at column 0, it genuinely names the failure, and there is no
+ * traceback at all in the plain `Error: cannot write /home/… ` case. So the
+ * layout travelled with the cause, past every rule above.
+ *
+ * Redacting beats dropping here: `FileNotFoundError` and `Permission denied`
+ * are what the person can act on, and only the path has to go. The journal
+ * still receives the raw stream.
+ *
+ * Scoped to ABSOLUTE paths under the system roots, and NOT to a leading `~`.
+ * `~/.hermes/.env` names no user, no home directory and no install layout — it
+ * is the file Hermes itself tells the customer to edit, and keeping that half
+ * of the sentence is part of what #515 fixed. A rule wide enough to catch the
+ * tilde would replace the one actionable fact in that message with `<path>`.
+ * Anchored on a preceding boundary so "2/3 of the files" is not a path.
+ */
+const DEVICE_PATH = /(?<![\w~])\/(?:home|root|usr|opt|var|etc|tmp|srv|mnt|snap)(?:\/[\w.@+-]+)+/g;
+
 /** Bookkeeping and stack noise, dropped before we look for a cause. */
 function usefulLines(stream: string): string[] {
   // Strip frames BEFORE trimming: the indentation is the only thing that tells
@@ -174,8 +201,12 @@ function usefulLines(stream: string): string[] {
   const paragraphs = unwrap(lines);
   const named = paragraphs.filter((l) =>
     /\b(?:HTTP\s+\d{3}|error|failed|not found|denied|invalid|unauthor)/i.test(l));
-  return (named.length ? named : paragraphs).map((l) =>
-    l.length > MAX_MESSAGE_CHARS ? `${l.slice(0, MAX_MESSAGE_CHARS - 1)}…` : l);
+  // Redact AFTER the filter, so a line is still classified on what it actually
+  // said, and BEFORE the cap, so the truncation counts the text a person will
+  // see rather than a path they never will.
+  return (named.length ? named : paragraphs)
+    .map((l) => l.replace(DEVICE_PATH, "<path>"))
+    .map((l) => l.length > MAX_MESSAGE_CHARS ? `${l.slice(0, MAX_MESSAGE_CHARS - 1)}…` : l);
 }
 
 /**
