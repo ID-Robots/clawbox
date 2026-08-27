@@ -164,7 +164,12 @@ describe("remote images", () => {
     // there is no request shape that can aim it at an address of the caller's
     // choosing.
     await GET(request("?uid=101&view=full&images=1&src=http://127.0.0.1/admin"));
-    expect(mockFetchImages).toHaveBeenCalledWith(["https://tracker.example/p.gif?u=abc123"]);
+    expect(mockFetchImages.mock.calls[0][0]).toEqual(["https://tracker.example/p.gif?u=abc123"]);
+  });
+
+  it("hands the fetcher the request signal, so closing the panel stops the work", async () => {
+    await GET(request("?uid=101&view=full&images=1"));
+    expect(mockFetchImages.mock.calls[0][1]).toBeInstanceOf(AbortSignal);
   });
 
   it("leaves an image blocked when the fetch came back with nothing", async () => {

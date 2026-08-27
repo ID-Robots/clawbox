@@ -29,6 +29,8 @@
 // sender learns the device's address rather than anything about the browser.
 
 import { lookup } from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 
 /** Most images fetched for one message. */
@@ -95,27 +97,52 @@ export function isPrivateAddress(ip: string): boolean {
   return true;
 }
 
+/** A hostname resolved to ONE address that every hop will be pinned to. */
+interface Pin {
+  address: string;
+  family: number;
+}
+
 /**
- * Resolve a hostname and refuse it if ANY address it answers with is private.
+ * Resolve a hostname, refuse it if ANY address it answers with is private, and
+ * return the single address the connection will actually use.
  *
- * Every address is checked, not just the first: a name that resolves to one
- * public and one loopback address is a DNS-rebinding attempt, and picking the
- * public one to validate is exactly the mistake that makes the check useless.
+ * TWO guarantees, and the second is the one that is easy to miss:
+ *
+ *  1. Every address is checked, not just the first. A name that answers with
+ *     one public and one loopback address is a rebinding attempt, and picking
+ *     the public one to validate is exactly what makes the check useless.
+ *
+ *  2. The address is then PINNED, because validating a NAME and then handing
+ *     that name to an HTTP client leaves a time-of-check/time-of-use gap: the
+ *     client resolves it again when it opens the socket, and a hostile server
+ *     answering with a short TTL can return a public address for our lookup
+ *     and a private one for the client's. Losing that race would not be a
+ *     blind request — a fetched image comes back to the owner as a `data:`
+ *     URI, so it would read a LAN service and render it.
  */
-async function hostIsPublic(hostname: string): Promise<boolean> {
-  // A bare IP in the URL never reaches a resolver, so check it directly.
-  if (net.isIP(hostname)) return !isPrivateAddress(hostname);
+async function resolvePin(hostname: string): Promise<Pin | null> {
+  // `URL.hostname` KEEPS the brackets on an IPv6 literal — `http://[::1]/`
+  // gives back "[::1]", which `net.isIP` does not recognise. Without this the
+  // address would not be seen as a literal at all and would be handed to the
+  // resolver instead of being refused outright.
+  const bare = hostname.replace(/^\[|\]$/g, "");
+  const literal = net.isIP(bare);
+  // A literal address in the URL never reaches a resolver, so there is no
+  // second lookup that could disagree and nothing to pin against.
+  if (literal) return isPrivateAddress(bare) ? null : { address: bare, family: literal };
   try {
-    const results = await lookup(hostname, { all: true, verbatim: true });
-    if (results.length === 0) return false;
-    return results.every((r) => !isPrivateAddress(r.address));
+    const results = await lookup(bare, { all: true, verbatim: true });
+    if (results.length === 0) return null;
+    if (results.some((r) => isPrivateAddress(r.address))) return null;
+    return { address: results[0].address, family: results[0].family };
   } catch {
-    return false;
+    return null;
   }
 }
 
-/** A URL this module is willing to aim a request at. */
-async function isFetchable(raw: string): Promise<URL | null> {
+/** A URL this module is willing to aim a request at, with its pinned address. */
+async function isFetchable(raw: string): Promise<{ url: URL; pin: Pin } | null> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -126,96 +153,166 @@ async function isFetchable(raw: string): Promise<URL | null> {
   // Credentials in an image URL are a way to make the device authenticate
   // somewhere on the owner's behalf.
   if (url.username || url.password) return null;
-  if (!(await hostIsPublic(url.hostname))) return null;
-  return url;
+  const pin = await resolvePin(url.hostname);
+  return pin ? { url, pin } : null;
 }
 
-/** Read a capped number of bytes, aborting the moment the cap is passed. */
-async function readCapped(response: Response, limit: number): Promise<Buffer | null> {
-  const declared = Number(response.headers.get("content-length") ?? "");
-  if (Number.isFinite(declared) && declared > limit) return null;
-  const body = response.body;
-  if (!body) return null;
-  const chunks: Buffer[] = [];
-  let total = 0;
-  const reader = body.getReader();
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      // A server that lied in Content-Length is stopped here, not after the
-      // whole thing has already been buffered.
-      if (total > limit) return null;
-      chunks.push(Buffer.from(value));
+/** What one hop produced. */
+type Hop =
+  | { kind: "redirect"; location: string }
+  | { kind: "image"; mime: string; bytes: Buffer };
+
+/**
+ * One request, with its socket pinned to `pin.address`.
+ *
+ * `node:https` rather than `fetch`, and that is the whole point: its `lookup`
+ * hook is what lets the address be decided by US instead of resolved again by
+ * the client. The URL itself is left untouched, so SNI, the Host header and
+ * certificate validation all still refer to the real hostname — rewriting the
+ * URL to the IP would have quietly broken every one of them.
+ *
+ * Redirects are NOT followed here. The caller re-validates and re-pins each
+ * hop, because a follower that only ever saw the first URL would walk happily
+ * from a public host to 127.0.0.1.
+ */
+function requestPinned(url: URL, pin: Pin, signal: AbortSignal): Promise<Hop | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (value: Hop | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    const transport = url.protocol === "https:" ? https : http;
+    let request: http.ClientRequest;
+    try {
+      request = transport.request(
+        url,
+        {
+          method: "GET",
+          signal,
+          timeout: ONE_TIMEOUT_MS,
+          headers: {
+            // No cookies, no referer, no identifying agent string. The sender
+            // learns that the image was fetched and nothing else.
+            accept: "image/*",
+            "user-agent": "ClawBox",
+          },
+          // THE PIN. Node asks for an array when it passed `all`, and for a
+          // bare address otherwise; both shapes are answered with the one
+          // address that was validated above.
+          lookup: ((
+            _hostname: string,
+            options: { all?: boolean },
+            callback: unknown,
+          ) => {
+            if (options?.all) {
+              (callback as (e: null, a: { address: string; family: number }[]) => void)(null, [
+                { address: pin.address, family: pin.family },
+              ]);
+              return;
+            }
+            (callback as (e: null, a: string, f: number) => void)(null, pin.address, pin.family);
+          }) as never,
+        },
+        (response) => {
+          const status = response.statusCode ?? 0;
+
+          // A hop we are not going to read. Destroying it releases the socket
+          // rather than leaving the connection pending on a device that has
+          // few of them to spare.
+          const discard = (value: Hop | null): void => {
+            response.destroy();
+            done(value);
+          };
+
+          if (status >= 300 && status < 400) {
+            const location = response.headers.location;
+            discard(location ? { kind: "redirect", location } : null);
+            return;
+          }
+          if (status < 200 || status >= 300) {
+            discard(null);
+            return;
+          }
+
+          const type = (response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+          const mime = type === "image/jpg" ? "image/jpeg" : type;
+          // `nosniff` reasoning applied at the source: if the server does not
+          // call it an image we will not treat it as one, whatever the bytes
+          // turn out to look like.
+          if (!ALLOWED_TYPES.has(mime)) {
+            discard(null);
+            return;
+          }
+
+          const declared = Number(response.headers["content-length"] ?? "");
+          if (Number.isFinite(declared) && declared > MAX_IMAGE_BYTES) {
+            discard(null);
+            return;
+          }
+
+          const chunks: Buffer[] = [];
+          let total = 0;
+          response.on("data", (chunk: Buffer) => {
+            total += chunk.length;
+            // A server that lied in Content-Length is stopped HERE, mid-stream,
+            // and not after the whole thing has already been buffered.
+            if (total > MAX_IMAGE_BYTES) {
+              discard(null);
+              return;
+            }
+            chunks.push(chunk);
+          });
+          response.on("end", () => {
+            const bytes = Buffer.concat(chunks);
+            done(bytes.length > 0 ? { kind: "image", mime, bytes } : null);
+          });
+          response.on("error", () => discard(null));
+        },
+      );
+    } catch {
+      // A malformed target that survived URL parsing.
+      done(null);
+      return;
     }
-  } finally {
-    await reader.cancel().catch(() => {});
-  }
-  return Buffer.concat(chunks);
+
+    // One unreachable or sulking tracker costs its own image and nothing else.
+    request.on("error", () => done(null));
+    request.on("timeout", () => {
+      request.destroy();
+      done(null);
+    });
+    request.end();
+  });
 }
 
 /**
- * Fetch one image, following a bounded number of redirects and re-validating
- * the destination at every hop.
- *
- * Redirects are followed MANUALLY (`redirect: "manual"`) for that reason: the
- * built-in follower would happily walk from a public host to `127.0.0.1`,
- * because the guard only ever saw the first URL.
+ * Fetch one image, following a bounded number of redirects and re-validating —
+ * and re-pinning — the destination at every hop.
  */
-async function fetchOne(start: URL, signal: AbortSignal): Promise<string | null> {
-  let url = start;
+async function fetchOne(
+  start: { url: URL; pin: Pin },
+  signal: AbortSignal,
+): Promise<string | null> {
+  let target = start;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const timer = AbortSignal.timeout(ONE_TIMEOUT_MS);
-    const merged = AbortSignal.any([signal, timer]);
-    let response: Response;
+    if (signal.aborted) return null;
+    const result = await requestPinned(target.url, target.pin, signal);
+    if (!result) return null;
+    if (result.kind === "image") {
+      return `data:${result.mime};base64,${result.bytes.toString("base64")}`;
+    }
+    let next: URL;
     try {
-      response = await fetch(url, {
-        redirect: "manual",
-        signal: merged,
-        headers: {
-          // No cookies, no referer, no identifying agent string. The sender
-          // learns that the image was fetched and nothing else.
-          accept: "image/*",
-          "user-agent": "ClawBox",
-        },
-        cache: "no-store",
-      });
+      next = new URL(result.location, target.url);
     } catch {
       return null;
     }
-
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location) return null;
-      let next: URL;
-      try {
-        next = new URL(location, url);
-      } catch {
-        return null;
-      }
-      const checked = await isFetchable(next.toString());
-      if (!checked) return null;
-      url = checked;
-      continue;
-    }
-
-    if (!response.ok) return null;
-    const type = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
-    const mime = type === "image/jpg" ? "image/jpeg" : type;
-    // `nosniff` reasoning applied at the source: if the server does not call it
-    // an image we will not treat it as one, whatever the bytes look like.
-    if (!ALLOWED_TYPES.has(mime)) return null;
-    // A body that errors mid-stream must cost this one image, not the whole
-    // batch: "show me this email" has to survive one misbehaving tracker.
-    let bytes: Buffer | null;
-    try {
-      bytes = await readCapped(response, MAX_IMAGE_BYTES);
-    } catch {
-      return null;
-    }
-    if (!bytes || bytes.length === 0) return null;
-    return `data:${mime};base64,${bytes.toString("base64")}`;
+    const checked = await isFetchable(next.toString());
+    if (!checked) return null;
+    target = checked;
   }
   return null;
 }
@@ -223,21 +320,28 @@ async function fetchOne(start: URL, signal: AbortSignal): Promise<string | null>
 /**
  * Fetch the images a message references, returning a URL → `data:` URI map.
  *
- * Failures are silent by design: one unreachable tracker must not turn "show me
- * this email" into an error. An image that could not be fetched simply stays
- * blocked, which is the same state the owner started in.
+ * `signal` is the owner's own request: closing the panel stops the outbound
+ * work instead of leaving it running against its own deadline.
+ *
+ * Failures are silent by design — one unreachable tracker must not turn "show
+ * me this email" into an error. An image that could not be fetched simply
+ * stays blocked, which is the state the owner started in.
  */
-export async function fetchRemoteImages(urls: string[]): Promise<Map<string, string>> {
+export async function fetchRemoteImages(
+  urls: string[],
+  signal?: AbortSignal,
+): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (urls.length === 0) return out;
   const deadline = AbortSignal.timeout(TOTAL_TIMEOUT_MS);
+  const budget = signal ? AbortSignal.any([signal, deadline]) : deadline;
   let spent = 0;
 
   for (const raw of urls.slice(0, MAX_IMAGES)) {
-    if (deadline.aborted || spent >= MAX_TOTAL_BYTES) break;
-    const url = await isFetchable(raw);
-    if (!url) continue;
-    const data = await fetchOne(url, deadline);
+    if (budget.aborted || spent >= MAX_TOTAL_BYTES) break;
+    const target = await isFetchable(raw);
+    if (!target) continue;
+    const data = await fetchOne(target, budget);
     if (!data) continue;
     // The data: URI is roughly 4/3 of the bytes; budget on what is actually
     // going into the response, not on the wire size.

@@ -339,7 +339,19 @@ export function EmailFullView({
 
   const load = useCallback(
     async (images: boolean, signal?: AbortSignal) => {
-      if (images) setLoadingImages(true)
+      // The reset belongs with the request that causes it, not in an effect
+      // body: `react-hooks/set-state-in-effect` is right that a component
+      // which sets state while rendering-then-effecting is one render more
+      // than it needs, and this reads better besides — one function that says
+      // "we are loading, then we are not".
+      if (images) {
+        setLoadingImages(true)
+      } else {
+        // A plain load is also the reset: consent does not survive being asked
+        // for the message again.
+        setState({ phase: 'loading' })
+        setWithImages(false)
+      }
       try {
         const query = `uid=${encodeURIComponent(String(uid))}&view=full${images ? '&images=1' : ''}`
         const response = await fetch(`/setup-api/email/messages?${query}`, {
@@ -363,10 +375,11 @@ export function EmailFullView({
     [uid],
   )
 
+  // `load` is stable per uid, so this runs once per message opened. The effect
+  // now carries only the abort wiring: a panel closed mid-request must not go
+  // on holding the mailbox open.
   useEffect(() => {
     const controller = new AbortController()
-    setState({ phase: 'loading' })
-    setWithImages(false)
     void load(false, controller.signal)
     return () => controller.abort()
   }, [load])

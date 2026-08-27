@@ -82,10 +82,18 @@ export function splitEmailRefs(raw: string): SplitEmailRefs {
       kept.push(line);
       continue;
     }
-    if (!seen.has(uid) && uids.length < MAX_REFS) {
-      seen.add(uid);
-      uids.push(uid);
+    // A repeat is dropped: the card is already on screen, and a second one
+    // would only duplicate it.
+    if (seen.has(uid)) continue;
+    // Past the cap the line goes back to being TEXT rather than disappearing.
+    // Same rule as an unusable payload above — this function may remove a line
+    // only when it has turned that line into a card.
+    if (uids.length >= MAX_REFS) {
+      kept.push(line);
+      continue;
     }
+    seen.add(uid);
+    uids.push(uid);
   }
 
   // Removing a line from the middle of a reply leaves a hole; collapse the run

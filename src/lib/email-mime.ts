@@ -136,11 +136,22 @@ function unquote(value: string): string {
   return value;
 }
 
+/**
+ * A parameter name counts only at the START of a parameter, never as the tail
+ * of a longer one.
+ *
+ * Without this, asking for `name` is also answered by `filename`, and asking
+ * for `boundary` by anything ending in it — so
+ * `multipart/mixed; xboundary="A"; boundary="B"` splits on the wrong string,
+ * finds no parts, and shows the message as empty.
+ */
+const DELIM = "(?:^|[;\\s])";
+
 /** A parameter out of a `Content-Type` or `Content-Disposition` header. */
 function param(header: string, name: string): string {
   // RFC 2231 continuations (`name*0=`, `name*=utf-8''…`) turn up in real mail;
   // the simple forms cover the rest.
-  const extended = new RegExp(`${name}\\*\\s*=\\s*(?:[\\w-]*'[\\w-]*')?([^;]+)`, "i").exec(header);
+  const extended = new RegExp(`${DELIM}${name}\\*\\s*=\\s*(?:[\\w-]*'[\\w-]*')?([^;]+)`, "i").exec(header);
   if (extended) {
     try {
       return decodeURIComponent(extended[1].trim().replace(/^"|"$/g, ""));
@@ -148,7 +159,7 @@ function param(header: string, name: string): string {
       return extended[1].trim().replace(/^"|"$/g, "");
     }
   }
-  const simple = new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))`, "i").exec(header);
+  const simple = new RegExp(`${DELIM}${name}\\s*=\\s*(?:"([^"]*)"|([^;\\s]+))`, "i").exec(header);
   if (!simple) return "";
   return decodeEncodedWords((simple[1] ?? simple[2] ?? "").trim());
 }

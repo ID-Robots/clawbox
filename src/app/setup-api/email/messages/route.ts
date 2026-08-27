@@ -118,7 +118,10 @@ export async function GET(request: Request) {
         // email-image-fetch.ts).
         let loaded: Map<string, string> | undefined;
         if (url.searchParams.get("images") === "1") {
-          loaded = await fetchRemoteImages(remoteImageUrls(fetched.raw));
+          // The owner's request signal rides along: closing the panel must
+          // stop the outbound fetches too, rather than leaving them running
+          // against their own 12s deadline on a device with little to spare.
+          loaded = await fetchRemoteImages(remoteImageUrls(fetched.raw), request.signal);
         }
 
         const message = buildFullMessage(

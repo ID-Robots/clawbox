@@ -508,3 +508,58 @@ describe("messages that are not well formed", () => {
     expect(message.from.address).toBe("real@example.com");
   });
 });
+
+describe("header parameters are matched by name, not by suffix (CodeRabbit #499)", () => {
+  it("splits on the real boundary when another parameter ends in the same word", () => {
+    // `xboundary` must not answer a request for `boundary`: splitting on the
+    // wrong string finds no parts and renders the message as empty.
+    const message = build(
+      mail(
+        "From: a@example.com",
+        'Content-Type: multipart/mixed; xboundary="AAA"; boundary="BBB"',
+        "",
+        "--BBB",
+        "Content-Type: text/plain",
+        "",
+        "the real body",
+        "--BBB--",
+      ),
+    );
+    expect(text(message.body)).toContain("the real body");
+  });
+
+  it("does not let `filename` answer a request for `name`", () => {
+    // A text part carrying a filename parameter is still the body, not an
+    // attachment, and must not be listed as one.
+    const message = build(
+      mail(
+        "From: a@example.com",
+        'Content-Type: text/plain; charset=utf-8; filename="notes.txt"',
+        "",
+        "just the body",
+      ),
+    );
+    expect(text(message.body)).toContain("just the body");
+  });
+
+  it("still reads a parameter that genuinely is the first one", () => {
+    const message = build(
+      mail(
+        "From: a@example.com",
+        'Content-Type: multipart/mixed; boundary="B1"',
+        "",
+        "--B1",
+        "Content-Type: text/plain",
+        "",
+        "body",
+        "--B1",
+        'Content-Type: application/pdf; name="report.pdf"',
+        "Content-Disposition: attachment",
+        "",
+        "data",
+        "--B1--",
+      ),
+    );
+    expect(message.attachments[0].filename).toBe("report.pdf");
+  });
+});

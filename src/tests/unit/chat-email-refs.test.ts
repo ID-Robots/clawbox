@@ -80,3 +80,22 @@ describe("payloads that are not a message id", () => {
     expect(uids).toEqual([]);
   });
 });
+
+describe("what happens at the cap (CodeRabbit #499)", () => {
+  it("keeps the directives past the cap as TEXT rather than losing them", () => {
+    // The rule this function follows: a line may be REMOVED only when it has
+    // been turned into a card. Past the cap it becomes neither, so it stays.
+    const raw = Array.from({ length: 30 }, (_, i) => `EMAIL:${i + 1}`).join("\n");
+    const { text, uids } = splitEmailRefs(raw);
+    expect(uids).toHaveLength(25);
+    expect(text).toContain("EMAIL:26");
+    expect(text).toContain("EMAIL:30");
+    expect(text).not.toContain("EMAIL:25");
+  });
+
+  it("still drops a repeat, which would only duplicate a card already shown", () => {
+    const { text, uids } = splitEmailRefs("Summary.\nEMAIL:7\nEMAIL:7");
+    expect(uids).toEqual([7]);
+    expect(text).toBe("Summary.");
+  });
+});

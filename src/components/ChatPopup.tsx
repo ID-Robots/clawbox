@@ -1420,7 +1420,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               }
               for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
                 const candidate = prev[i]
-                if (candidate.role !== 'assistant' || candidate.text !== pushedText) continue
+                // The STORED text still carries its `EMAIL:` lines — they are
+                // lifted at render, not at write — while `pushedText` has had
+                // them taken out. Compare like with like, or a turn that named
+                // messages never matches its own spoken supplement and the
+                // audio is dropped.
+                if (candidate.role !== 'assistant') continue
+                if (splitEmailRefs(candidate.text).text !== pushedText) continue
                 if (candidate.audio?.length) return prev // duplicate push
                 const next = [...prev]
                 next[i] = { ...candidate, audio: pushedAudio }
