@@ -47,6 +47,8 @@ let capabilities: {
   factsRetryAfterMs: number;
 };
 let capabilityFetches: number;
+/** When set, the next capabilities fetch answers non-OK rather than with facts. */
+let capabilitiesFailOnce: boolean;
 
 const gateway: GatewayLink = {
   request: async () => null,
@@ -75,6 +77,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   capabilityFetches = 0;
+  capabilitiesFailOnce = false;
   capabilities = { facts: { ...FACTS }, factsPending: false, factsRetryAfterMs: RETRY_AFTER_MS };
   fetchHarness.mockResolvedValue({ active: "hermes", edition: "hermes" });
   vi.stubGlobal(
@@ -82,6 +85,10 @@ beforeEach(() => {
     vi.fn(async (input: RequestInfo | URL) => {
       if (String(input).includes("/setup-api/chat/capabilities")) {
         capabilityFetches += 1;
+        if (capabilitiesFailOnce) {
+          capabilitiesFailOnce = false;
+          return new Response("", { status: 503 });
+        }
         return new Response(JSON.stringify(capabilities), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -100,8 +107,10 @@ afterEach(() => {
 describe("useHarnessAdapter facts backoff", () => {
   it("re-asks once the server's backoff is up when a fact is still pending", async () => {
     capabilities.factsPending = true;
-    const { unmount } = await mount();
+    const { result, unmount } = await mount();
     expect(capabilityFetches).toBe(1);
+    // The placeholder `false` is what hides the control this test is about.
+    expect(result.current.capabilities.canAttachImages).toBe(false);
 
     // The composer's attach button is hidden on a fact the server has already
     // said it will replace. Nothing must be asked before the backoff is up …
@@ -120,12 +129,67 @@ describe("useHarnessAdapter facts backoff", () => {
       await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS);
     });
     expect(capabilityFetches).toBe(2);
+    // The whole point: the attach button the placeholder hid is back, on a
+    // page nobody reloaded. Asserting the fetch count alone would stay green
+    // through a regression in `applyFacts` or `sameFacts`.
+    expect(result.current.capabilities.canAttachImages).toBe(true);
 
     // And once it has answered, it stays answered — no polling loop.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS * 4);
     });
     expect(capabilityFetches).toBe(2);
+    unmount();
+  });
+
+  it("keeps chasing when the retry request itself does not answer", async () => {
+    // A re-ask that fails is not an answer either, and abandoning the chase on
+    // it reinstates the exact bug this retry removes: the placeholder `false`
+    // stays for the whole page session because one round trip happened to land
+    // during a restart or a blip. The cap still applies — this must not become
+    // a retry loop keyed on failure.
+    capabilities.factsPending = true;
+    const { result, unmount } = await mount();
+    expect(capabilityFetches).toBe(1);
+
+    capabilitiesFailOnce = true;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS);
+    });
+    expect(capabilityFetches).toBe(2);
+    expect(result.current.capabilities.canAttachImages).toBe(false);
+
+    // The second attempt is still owed, and it is the one that recovers.
+    capabilities = {
+      facts: { ...FACTS, hermesSupportsImages: true, hermesHasVisionRoute: true },
+      factsPending: false,
+      factsRetryAfterMs: RETRY_AFTER_MS,
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS);
+    });
+    expect(capabilityFetches).toBe(3);
+    expect(result.current.capabilities.canAttachImages).toBe(true);
+
+    // And it stops there, exactly as it does on a successful chase.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS * 3);
+    });
+    expect(capabilityFetches).toBe(3);
+    unmount();
+  });
+
+  it("does not start chasing when the MOUNT fetch fails and nothing is pending", async () => {
+    // The mount path is unchanged: a box that could not answer at all keeps the
+    // cautious defaults and waits for a provider change, as it did before. Only
+    // a chase already under way is continued through a failure.
+    capabilitiesFailOnce = true;
+    const { unmount } = await mount();
+    expect(capabilityFetches).toBe(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_THE_RETRY_MS * 5);
+    });
+    expect(capabilityFetches).toBe(1);
     unmount();
   });
 

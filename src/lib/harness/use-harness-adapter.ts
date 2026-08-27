@@ -206,6 +206,25 @@ export function useHarnessAdapter(wiring: HarnessWiring): UseHarnessAdapterResul
       void (async () => {
         const probed = await fetchFacts(controller.signal);
         if (controller.signal.aborted) return;
+        if (!probed) {
+          // A re-ask that did not answer is not an answer either. Abandoning
+          // the chase here would reinstate the very bug this effect removes —
+          // the placeholder `false` kept for the whole page session because one
+          // round trip happened to land during a restart or a blip. Rescheduled
+          // under the SAME cap, and with the delay the server last published,
+          // so a box that cannot answer at all still stops after two.
+          //
+          // Handled here rather than in `applyFacts` on purpose: this is the
+          // only caller that is already chasing something. The mount fetch and
+          // the provider-change reprobe both treat a failed request as "keep
+          // the cautious defaults and wait", which is unchanged.
+          setFactsRetry(
+            factsRetry.attempt < MAX_PENDING_RETRIES
+              ? { delayMs: factsRetry.delayMs, attempt: factsRetry.attempt + 1 }
+              : null,
+          );
+          return;
+        }
         applyFacts(probed, factsRetry.attempt);
       })();
     }, factsRetry.delayMs + RETRY_MARGIN_MS);
