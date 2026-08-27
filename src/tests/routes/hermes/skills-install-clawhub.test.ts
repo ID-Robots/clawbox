@@ -182,9 +182,16 @@ describe("POST /setup-api/hermes/skills/install — ClawHub ids from search", ()
     expect(installArg()).toBe("NVIDIA/skills/skills/aiq-deploy");
   });
 
-  it("still 502s when the CLI genuinely installs nothing", async () => {
+  it("still 502s when the CLI genuinely resolves nothing", async () => {
     // The un-mapped shape: no slash reaches the adapter, the lock stays empty.
-    mockCli.mockResolvedValue({ code: 0, stdout: "No exact match", stderr: "" });
+    // The stdout is the resolver's real sentence — "could not be resolved" is
+    // now reserved for the case the CLI actually reports that way, so a fixture
+    // that only half-quotes it would be testing the wrong branch.
+    mockCli.mockResolvedValue({
+      code: 0,
+      stdout: `No exact match for '${SLUG}'. Did you mean one of these?\n  QR Code Decode — ${SLUG}\n`,
+      stderr: "",
+    });
 
     const res = await install({ id: SLUG });
 

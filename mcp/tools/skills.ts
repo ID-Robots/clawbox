@@ -57,20 +57,11 @@ interface InstalledBody {
   counts?: Record<string, number>;
 }
 
+// Only the failures whose body says nothing useful. Every install refusal the
+// route describes in JSON is decoded in refusalToToolError() instead — an
+// ErrorRule is applied inside api() and would otherwise win first, which is how
+// the `incomplete_install` branch below came to be unreachable.
 const INSTALL_RULES: ErrorRule[] = [
-  {
-    status: 502,
-    match: /could not be resolved/i,
-    code: "NOT_FOUND",
-    message: "That skill id did not resolve.",
-    next: "Call skill_search, then pass the exact id it returned.",
-  },
-  {
-    status: 502,
-    code: "CONFLICT",
-    message: "The device refused the install (the security scan failed or the download did not complete).",
-    next: "Do not retry. Tell the user the skill did not pass the device's security scan.",
-  },
   {
     status: 400,
     code: "BAD_ARGUMENT",
@@ -158,10 +149,15 @@ function shortDescription(s: BrowseSkill): string | undefined {
 
 interface InstallRefusal {
   code?: string;
+  /** The route's human sentence — the only field an older build is sure to send. */
+  error?: string;
   conflictsWith?: string;
   missingFiles?: string[];
+  /** `unresolved`: the ids the device's "did you mean" list offered instead. */
+  candidates?: string[];
   warning?: {
     verdict?: string;
+    trust?: string;
     capabilities?: { id?: string }[];
     severityCounts?: Record<string, number>;
   };
@@ -181,14 +177,28 @@ const CAPABILITY_TEXT: Record<string, string> = {
   other: "something the scan flagged but could not name",
 };
 
+/** What the scan says the skill can do, in the agent's words. Empty when it said nothing. */
+function capabilityText(payload: InstallRefusal): string {
+  return (payload.warning?.capabilities ?? [])
+    .slice(0, 6)
+    .map((c) => CAPABILITY_TEXT[c.id ?? "other"] ?? CAPABILITY_TEXT.other)
+    .join("; ");
+}
+
 /**
- * Decode the install route's structured refusals (TASK-452) into instructions.
+ * Decode the install route's structured refusals into instructions.
  *
  * The important one is the 409 `dangerous_skill`: it is NOT a failure, it is
  * the device asking the owner a question. The tool must not answer it — so the
  * error text says what the skill can do and puts the decision back on the user,
  * and `confirm` is the only way to proceed. Returns null when the error is
  * something else, so the caller can rethrow it untouched.
+ *
+ * TASK-453 round 3: the route used to answer every exit-0 install with "Skill
+ * could not be resolved", and this decoder turned that into "call skill_search
+ * and pass the exact id it returned" — the step the agent had just taken. The
+ * route now names which refusal actually happened, and each one gets a next
+ * step that is not the step that just failed.
  */
 function refusalToToolError(err: unknown): ToolError | null {
   if (!(err instanceof ApiError)) return null;
@@ -199,15 +209,62 @@ function refusalToToolError(err: unknown): ToolError | null {
     return null;
   }
   if (err.status === 409 && payload.code === "dangerous_skill") {
-    const caps = (payload.warning?.capabilities ?? [])
-      .map((c) => CAPABILITY_TEXT[c.id ?? "other"] ?? CAPABILITY_TEXT.other)
-      .slice(0, 6);
-    const what = caps.length ? `It can ${caps.join("; ")}.` : "The scan did not say which part of the device it touches.";
+    const caps = capabilityText(payload);
+    const what = caps ? `It can ${caps}.` : "The scan did not say which part of the device it touches.";
     return new ToolError(
       "CONFLICT",
       `The device's security scan flagged this skill as "${payload.warning?.verdict ?? "unsafe"}". ${what}`,
       "Do NOT install it yourself. Tell the user exactly what the skill can do and ask whether to install it anyway. "
         + "Only if they say yes, call skill_install again with the same id and confirm=true.",
+    );
+  }
+  if (err.status === 409 && payload.code === "dangerous_skill_blocked") {
+    // The device's installer refuses this one outright — a `dangerous` verdict
+    // from a community or trusted source is not overridable, by ITS policy, not
+    // ours. There is no confirmation to ask for, so the agent must not offer
+    // one and must not retry: it used to be told "pass the exact id
+    // skill_search returned", which is what it had just done.
+    const caps = capabilityText(payload);
+    return new ToolError(
+      "CONFLICT",
+      `This device refuses to install that skill: its security scan returned a "${payload.warning?.verdict ?? "dangerous"}" verdict for a ${payload.warning?.trust ?? "third-party"} source, which the installer will not accept at any confirmation.${caps ? ` The scan found it can ${caps}.` : ""}`,
+      "Do NOT retry, and do NOT ask the user to confirm — confirming cannot override this. "
+        + "Tell the user the device blocked it, then call skill_search to offer a different skill for the same job.",
+    );
+  }
+  if (err.status === 409 && payload.code === "ambiguous_id") {
+    return new ToolError(
+      "BAD_ARGUMENT",
+      "More than one skill in the store goes by that name.",
+      "Call skill_search for that name and pass the FULL id of the one you want — a short name cannot be resolved.",
+    );
+  }
+  if (err.status === 409 && payload.code === "already_installed") {
+    return new ToolError(
+      "CONFLICT",
+      "That skill is already installed on this device.",
+      "Do not retry. Call skill_list to confirm the name, and tell the user it is already there.",
+    );
+  }
+  if (payload.code === "rate_limited") {
+    return new ToolError(
+      "CONFLICT",
+      "The skill could not be downloaded: this device has used up its hourly GitHub API allowance.",
+      "Do not retry now. Tell the user to try again in an hour.",
+    );
+  }
+  if (payload.code === "download_failed") {
+    return new ToolError(
+      "ENDPOINT_DOWN",
+      "The skill exists in the store but none of its sources would serve it.",
+      "Call wifi_status. If the device is online, retry once; otherwise tell the user the device could not reach the skill's source.",
+    );
+  }
+  if (payload.code === "install_failed") {
+    return new ToolError(
+      "CONFLICT",
+      "The device's installer stopped without installing the skill, and did not say why in a way this tool can relay.",
+      "Do not retry. Tell the user the install failed on the device and that Settings -> Skills has the details.",
     );
   }
   if (err.status === 409 && payload.code === "bundled_conflict") {
@@ -223,6 +280,28 @@ function refusalToToolError(err: unknown): ToolError | null {
       "CONFLICT",
       `The skill's download was incomplete, so nothing was installed${missing ? ` (missing: ${missing})` : ""}.`,
       "Call wifi_status. If the device is online, retry once; otherwise tell the user the download could not be completed.",
+    );
+  }
+  // The genuine resolver miss — and, now, ONLY that. `error` is matched as well
+  // as `code` so a device still on an older build, whose body carries the
+  // sentence but no code, is read the same way.
+  if (payload.code === "unresolved" || /could not be resolved/i.test(payload.error ?? "")) {
+    const list = (payload.candidates ?? []).slice(0, 5).join(", ");
+    return new ToolError(
+      "NOT_FOUND",
+      `That skill id did not resolve.${list ? ` The device suggested: ${list}.` : ""}`,
+      list
+        ? "Call skill_install again with one of the ids the device suggested, or call skill_search for another skill."
+        : "Call skill_search, then pass the exact id it returned.",
+    );
+  }
+  // Our JSON, a code this build does not know: still better than the generic
+  // 502 mapping, which tells the agent to retry.
+  if (typeof payload.error === "string" && payload.error.trim()) {
+    return new ToolError(
+      "CONFLICT",
+      "The device refused the install.",
+      "Do not retry. Tell the user the device would not install that skill.",
     );
   }
   return null;
