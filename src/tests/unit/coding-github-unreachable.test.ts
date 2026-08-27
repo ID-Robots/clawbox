@@ -312,6 +312,50 @@ describe("a killed git probe is never read as an answer", () => {
     expect(outcome.detail ?? "").not.toMatch(/not its own git repository/i);
   });
 
+  it("does not call a repository EMPTY when the commit probe is killed", async () => {
+    // `rev-parse --verify HEAD` exiting non-zero means "no commits yet". A
+    // killed probe returns the same null, and telling an owner with a full
+    // history that the folder is empty is a lie drawn from a dead network.
+    script((bin, args) => {
+      if (bin === "gh") return exitingChild(0, connected);
+      if (args.includes("--show-toplevel")) return gitChild(0, TOPLEVEL);
+      if (args.includes("--verify")) return hangingChild();
+      return gitChild(0);
+    });
+
+    const outcome = await withTimeoutFired(() => lib.backupToGitHub(DIR));
+
+    expect(outcome.pushed).toBe(false);
+    if (outcome.pushed) return;
+    expect(outcome.reason).not.toBe("nothing_to_push");
+    expect(outcome.detail ?? "").not.toMatch(/no commits yet/i);
+  });
+
+  it("does not push to 'main' when the branch probe is killed", async () => {
+    // The branch name feeds `push --set-upstream origin <branch>`. Falling back
+    // to "main" on a killed probe would push a `develop` checkout to main AND
+    // bind it there — a durable wrong answer from a transient fault.
+    const seen: string[][] = [];
+    script((bin, args) => {
+      seen.push([bin, ...args]);
+      if (bin === "gh") return exitingChild(0, connected);
+      if (args.includes("--show-toplevel")) return gitChild(0, TOPLEVEL);
+      if (args.includes("--verify")) return gitChild(0, "abc123");
+      if (args.includes("--abbrev-ref")) return hangingChild();
+      if (args.includes("get-url")) return gitChild(0, "git@github.com:me/site.git");
+      return gitChild(0);
+    });
+
+    const outcome = await withTimeoutFired(() => lib.backupToGitHub(DIR));
+
+    expect(outcome.pushed).toBe(false);
+    if (outcome.pushed) return;
+    expect(outcome.reason).toBe("failed");
+    expect(outcome.detail ?? "").toMatch(/branch/i);
+    // The point: nothing was pushed anywhere, least of all to main.
+    expect(seen.some((c) => c.includes("push"))).toBe(false);
+  });
+
   it("never reports a killed push with a blank message", async () => {
     // A SIGKILLed child writes no stderr, so `(stderr || stdout)` was "".
     // The owner saw a failure with nothing in it.

@@ -267,9 +267,22 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   }
 
   const head = await run("git", ["-C", dir, "rev-parse", "--verify", "HEAD"]);
+  // "No commits yet" is a claim about the folder. A killed probe made no such
+  // finding, and saying it would tell an owner with a full history that their
+  // work is empty.
+  if (wasKilled(head)) {
+    return { pushed: false, reason: "failed", detail: killedDetail(head, "Reading the folder's commits", "Try again.") };
+  }
   if (head.code !== 0) return { pushed: false, reason: "nothing_to_push", detail: "The folder has no commits yet." };
 
   const branchOut = await run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+  // The "main" fallback is a guess, and the push below turns it into
+  // `--set-upstream origin main`. Fine when git actually answered and simply
+  // had no name to give; wrong when the probe was killed, which would push a
+  // `develop` checkout to `main` and bind it there over a transient fault.
+  if (wasKilled(branchOut)) {
+    return { pushed: false, reason: "failed", detail: killedDetail(branchOut, "Reading the folder's branch", "Try again.") };
+  }
   const branch = branchOut.code === 0 && branchOut.stdout ? branchOut.stdout : "main";
 
   const hasRemote = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
