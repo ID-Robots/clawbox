@@ -198,6 +198,16 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
 
   const sentCount = outcomes.filter((o) => o.ok).length;
   const failedCount = outcomes.length - sentCount;
+  /**
+   * Settled, with nothing to show for it.
+   *
+   * Reachable when the approval was cut short before a single draft was
+   * claimed: the route answers with an empty `results`, and a verdict computed
+   * from `failedCount` alone would find zero failures and render the all-sent
+   * line with a count of nought — "0 sent.", in the colour that means it went
+   * well. Nothing was attempted, and that is its own sentence.
+   */
+  const nothingAttempted = outcomes.length === 0;
   const canSend = !sending && included.length > 0;
 
   if (drafts.length === 0) return null;
@@ -349,11 +359,13 @@ export function EmailBatchCard({ card, hermes, onApprove, onCancel }: EmailBatch
           // has finished being a control and must not add a stop to the tab
           // path through the transcript.
           tabIndex={-1}
-          style={{ color: failedCount > 0 ? ERROR_FG : OK_FG, fontSize: 12, outline: "none" }}
+          style={{ color: failedCount > 0 || nothingAttempted ? ERROR_FG : OK_FG, fontSize: 12, outline: "none" }}
         >
-          {failedCount === 0
-            ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
-            : t("chat.emailBatch.resultPartial", { sent: String(sentCount), failed: String(failedCount) })}
+          {nothingAttempted
+            ? t("chat.emailBatch.resultNone")
+            : failedCount === 0
+              ? t("chat.emailBatch.resultAllSent", { count: String(sentCount) })
+              : t("chat.emailBatch.resultPartial", { sent: String(sentCount), failed: String(failedCount) })}
         </div>
       )}
 

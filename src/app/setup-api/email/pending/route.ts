@@ -39,6 +39,7 @@ import {
   listPending,
   MAX_PENDING,
   removePending,
+  restorePending,
   type PendingEmail,
 } from "@/lib/email-pending";
 import { hasOwnerSession } from "@/lib/owner-session";
@@ -258,6 +259,23 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
     }
 
     const draft: PendingEmail = claim.draft;
+
+    // Claimed, but the tab went away in the moment between the claim and the
+    // first byte. Nothing has reached a mail server, so putting the draft back
+    // cannot duplicate anything — and NOT putting it back would delete a
+    // message the owner never got told about, because an abandoned request has
+    // no reader for the response that would have carried it.
+    //
+    // The window this closes is the safe one. An abort that lands once the send
+    // is already in flight is deliberately NOT recovered: from here "it failed"
+    // and "the server took it and the connection dropped before saying so" look
+    // identical, and requeueing the second one mails a stranger twice. Never
+    // sending twice is the invariant the single-draft path documents too.
+    if (request.signal.aborted) {
+      restorePending(draft);
+      break;
+    }
+
     try {
       const { messageId } = await sendMail(
         smtp,

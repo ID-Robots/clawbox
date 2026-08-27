@@ -126,6 +126,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.emailBatch.draftSent": "Sent",
     "chat.emailBatch.draftFailed": "Not sent — {reason}",
     "chat.emailBatch.requestFailed": "The approval could not be delivered. Nothing was sent; the messages are still in Settings → Email.",
+    "chat.emailBatch.resultNone": "Nothing was sent — the approval did not get through. The messages are still in Settings → Email.",
     "chat.fixMyError": "Fix My Error",
     "chat.attachImage": "Attach image",
     "chat.takePhoto": "Take photo",

@@ -228,6 +228,19 @@ describe("what actually happened", () => {
     expect(screen.queryByTestId("chat-email-batch-approve")).not.toBeInTheDocument();
   });
 
+  it("does not call a settled batch with no outcomes a send", async () => {
+    // The route answers with an empty `results` when the approval was cut short
+    // before a single draft was claimed. A verdict computed from the failure
+    // count alone finds zero failures here and would render "0 sent." in the
+    // colour that means it went well.
+    await mount(card({ status: "settled", outcomes: [] }));
+    const result = await screen.findByTestId("chat-email-batch-result");
+    expect(result).toHaveTextContent("Nothing was sent");
+    expect(result.textContent).not.toContain("0 sent.");
+    // No draft carries a tick either.
+    expect(screen.queryAllByTestId("chat-email-batch-outcome")).toHaveLength(0);
+  });
+
   it("puts the button back when the approval itself could not be delivered", async () => {
     await mount(card({ requestError: "The approval could not be delivered." }));
     expect(await screen.findByTestId("chat-email-batch-error")).toBeInTheDocument();

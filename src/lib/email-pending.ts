@@ -342,6 +342,36 @@ export function claimPendingIfUnchanged(id: string, fingerprint: string): ClaimR
   return { ok: true, draft: found };
 }
 
+/**
+ * Put a claimed draft back, unchanged.
+ *
+ * WHAT IT IS FOR, and the one case it may be used in. `claimPendingIfUnchanged`
+ * removes a draft BEFORE the SMTP client is handed it, so a retry cannot put
+ * one message on the wire twice. The cost is that a claimed draft whose send
+ * then fails is out of the queue — acceptable when a person is watching, since
+ * the failure hands the whole message back to them, and NOT acceptable when the
+ * request has been abandoned and nobody will read that response.
+ *
+ * So this exists for exactly one caller: a batch that has claimed a draft and
+ * then discovers, BEFORE anything has touched the network, that it must stop.
+ * At that instant no duplicate is possible, because no message was sent.
+ *
+ * It must never be used to put back a draft whose send already began. Once
+ * bytes have gone to a mail server, "it failed" and "it was accepted and the
+ * connection dropped before it said so" are indistinguishable from here, and
+ * requeueing the second one mails a stranger the same message twice.
+ *
+ * `id` and `createdAt` come back untouched, so the draft fingerprints exactly
+ * as it did before — an approval card still on screen stays valid.
+ */
+export function restorePending(draft: PendingEmail): void {
+  const drafts = readAll();
+  // Already there: nothing to do, and re-adding would duplicate the draft in
+  // the owner's queue.
+  if (drafts.some((d) => d.id === draft.id)) return;
+  writeAll([...drafts, draft]);
+}
+
 /** Reject. Returns false when there was nothing with that id. */
 export function removePending(id: string): boolean {
   const drafts = readAll();

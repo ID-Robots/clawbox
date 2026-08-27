@@ -27,17 +27,19 @@ vi.mock("@/lib/email-pending", async (importOriginal) => ({
   listPending: vi.fn(),
   claimPending: vi.fn(),
   claimPendingIfUnchanged: vi.fn(),
+  restorePending: vi.fn(),
   removePending: vi.fn(),
 }));
 
 import { createSessionCookie } from "@/lib/auth";
 import { get } from "@/lib/config-store";
-import { claimPendingIfUnchanged, draftFingerprint, type PendingEmail } from "@/lib/email-pending";
+import { claimPendingIfUnchanged, draftFingerprint, restorePending, type PendingEmail } from "@/lib/email-pending";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
 const mockGet = vi.mocked(get);
 const mockSend = vi.mocked(sendMail);
 const mockClaimIfUnchanged = vi.mocked(claimPendingIfUnchanged);
+const mockRestore = vi.mocked(restorePending);
 
 let POST: typeof import("@/app/setup-api/email/pending/route").POST;
 
@@ -89,6 +91,19 @@ function request(init: { cookie?: string; bearer?: string; body?: unknown } = {}
 
 function approve(entries: { id: string; fingerprint: string }[], init: { cookie?: string; bearer?: string } = {}) {
   return POST(request({ ...init, body: { action: "approve_batch", drafts: entries } }));
+}
+
+/** A signal that only aborts once `after` claims have happened. */
+function abortAfterClaims(after: number): AbortSignal {
+  const controller = new AbortController();
+  let claims = 0;
+  const inner = mockClaimIfUnchanged.getMockImplementation();
+  mockClaimIfUnchanged.mockImplementation((id: string, fingerprint: string) => {
+    const result = inner!(id, fingerprint);
+    if (++claims >= after) controller.abort();
+    return result;
+  });
+  return controller.signal;
 }
 
 /** The owner's tab went away before the batch got going. */
@@ -284,6 +299,30 @@ describe("what actually happened, per draft", () => {
     expect(mockSend).not.toHaveBeenCalled();
     // Nothing was claimed, so every draft is still waiting.
     expect(mockClaimIfUnchanged).not.toHaveBeenCalled();
+  });
+
+  it("puts a claimed draft back when the tab goes before anything is sent", async () => {
+    // The claim happens before the SMTP client is handed the draft. If the
+    // request dies in that window the draft is out of the queue and the reply
+    // that would have carried it back has no reader — so it goes back, which is
+    // safe precisely because nothing reached a mail server.
+    const signal = abortAfterClaims(1);
+    const res = await POST(
+      new Request("http://localhost/setup-api/email/pending", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", cookie: ownerCookie() },
+        body: JSON.stringify({ action: "approve_batch", drafts: entriesFor(DRAFTS) }),
+        signal,
+      }),
+    );
+
+    expect(res.status).toBe(207);
+    expect(await res.json()).toMatchObject({ success: false, sent: 0, failed: 0, skipped: 3 });
+    // Nothing went out...
+    expect(mockSend).not.toHaveBeenCalled();
+    // ...and the one draft that had been claimed is back, unchanged.
+    expect(mockRestore).toHaveBeenCalledTimes(1);
+    expect(mockRestore.mock.calls[0][0]).toMatchObject({ id: "draft-1", subject: "Subject 1" });
   });
 
   it("says a draft is gone rather than sending something else in its place", async () => {

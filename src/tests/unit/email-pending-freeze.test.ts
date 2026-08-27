@@ -125,3 +125,37 @@ describe("claimPendingIfUnchanged", () => {
     expect(left[0].subject).toBe("Queued while he was reading");
   });
 });
+
+describe("restorePending", () => {
+  it("puts a claimed draft back exactly as it was, fingerprint and all", () => {
+    const queued = store.queuePending(DRAFT);
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const fingerprint = store.draftFingerprint(queued.draft);
+
+    const claim = store.claimPendingIfUnchanged(queued.draft.id, fingerprint);
+    expect(claim.ok).toBe(true);
+    if (!claim.ok) return;
+    expect(store.countPending()).toBe(0);
+
+    store.restorePending(claim.draft);
+
+    const back = store.listPending();
+    expect(back).toHaveLength(1);
+    // Same id and createdAt, so the fingerprint is unchanged and an approval
+    // card still on screen stays valid.
+    expect(back[0].id).toBe(queued.draft.id);
+    expect(back[0].createdAt).toBe(queued.draft.createdAt);
+    expect(back[0].fingerprint).toBe(fingerprint);
+  });
+
+  it("does not duplicate a draft that is already waiting", () => {
+    const queued = store.queuePending(DRAFT);
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+
+    store.restorePending(queued.draft);
+    store.restorePending(queued.draft);
+    expect(store.countPending()).toBe(1);
+  });
+});

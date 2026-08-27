@@ -2427,7 +2427,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (!emailSendSeenRef.current) return
     emailSendSeenRef.current = false
     try {
-      const res = await fetch('/setup-api/email/pending', { headers: { Accept: 'application/json' } })
+      // `no-store`, and not because the route is slow to change: the route's
+      // `dynamic = "force-dynamic"` governs Next's own render cache and does
+      // NOT put `Cache-Control: no-store` on the wire, so the browser is free
+      // to hand back a reply from an earlier turn. Stale drafts here are not a
+      // cosmetic problem — the card would carry fingerprints the queue has
+      // moved past, and every one of them would come back refused.
+      const res = await fetch('/setup-api/email/pending', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      })
       // 403 is the ordinary answer on a surface with no owner session, and 409
       // on a box with no mail account. Neither is worth a line in the
       // transcript: the customer did not ask for this, the agent did.
