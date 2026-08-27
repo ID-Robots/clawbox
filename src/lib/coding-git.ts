@@ -39,6 +39,7 @@ import {
   killedDetail,
   runChild,
   startedMissing,
+  startFailureDetail,
 } from "@/lib/child-run";
 
 /** A commit message never grows past this, however long the summary is. */
@@ -199,13 +200,14 @@ export async function commitRunWork(input: {
   // there with the wrong mode bits, and "install git" is the one remedy that
   // cannot help it.
   if (probe.startFailed) {
+    // ENOENT, and only ENOENT, is "no_git". EACCES is a git sitting right there
+    // with the wrong mode bits; an errno-less spawn error is not evidence of
+    // anything at all, and naming one remedy for it would be the same guess in
+    // a smaller hat. startFailureDetail says exactly what each case supports.
+    const detail = startFailureDetail(probe, "git");
     return startedMissing(probe)
-      ? { committed: false, reason: "no_git", detail: "git is not installed on this ClawBox." }
-      : {
-          committed: false,
-          reason: "git_failed",
-          detail: `git is on this ClawBox but would not start (${probe.startError}). Check its permissions.`,
-        };
+      ? { committed: false, reason: "no_git", detail }
+      : { committed: false, reason: "git_failed", detail };
   }
   if (probe.code === null) {
     // It RAN. Being killed says nothing about whether git is on the box.

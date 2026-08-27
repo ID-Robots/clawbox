@@ -61,6 +61,16 @@ function exitingChild(code: number, text = ""): FakeChild {
   return child;
 }
 
+/** A spawn that failed and did not say why — an `error` with no errno. */
+function errnoLessFailure(): FakeChild {
+  const child = baseChild();
+  setImmediate(() => {
+    child.emit("error", new Error("spawn failed"));
+    child.emit("close", null, null);
+  });
+  return child;
+}
+
 function gitChild(code: number, text = "", errText = ""): FakeChild {
   const child = baseChild();
   setImmediate(() => {
@@ -218,6 +228,42 @@ describe("a killed local git probe is reported as transient", () => {
       expect((outcome.detail ?? "").trim()).not.toBe("");
     });
   }
+
+  it("does not call gh MISSING when the spawn failed with no errno", async () => {
+    // Raised in review on this PR: `startError === null` was folded in with
+    // ENOENT, so a spawn error that named no reason answered "not installed"
+    // — the wrong remedy, drawn from no evidence at all.
+    spawnMock.mockImplementation(() => errnoLessFailure());
+
+    const status = await lib.githubStatus();
+
+    expect(status.reason).not.toBe("not_installed");
+    expect(status.connected).toBe(false);
+
+    const out = await lib.disconnectGitHub();
+    expect(out.ok).toBe(false);
+    expect(out.kind).not.toBe("no_gh");
+    expect(out.detail ?? "").not.toMatch(/is not installed/i);
+    expect(out.detail ?? "").toMatch(/would not start/i);
+    expect(out.detail ?? "").not.toMatch(/\(null\)|\(undefined\)/);
+  });
+
+  it("still calls gh MISSING for a real ENOENT", async () => {
+    // The discriminator: tightening the rule must not lose the true case.
+    spawnMock.mockImplementation(() => {
+      const child = baseChild();
+      setImmediate(() => {
+        child.emit("error", Object.assign(new Error("spawn gh ENOENT"), { code: "ENOENT" }));
+        child.emit("close", null, null);
+      });
+      return child;
+    });
+
+    const status = await lib.githubStatus();
+
+    expect(status.installed).toBe(false);
+    expect(status.reason).toBe("not_installed");
+  });
 
   it("does not mark a genuine `not a repo` transient", async () => {
     script((bin, args) => {

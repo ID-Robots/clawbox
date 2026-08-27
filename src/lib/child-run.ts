@@ -122,9 +122,32 @@ export function inconclusive(r: ChildResult): boolean {
 /**
  * ENOENT is the only errno that means "there is no such file". Anything else —
  * EACCES above all — is a binary that EXISTS and would not run.
+ *
+ * A spawn error with NO errno is not evidence of absence either. It is the
+ * absence of evidence, and this module's whole subject is not confusing the
+ * two: the pre-#518 code guessed "missing" from a bare null exit code, and
+ * folding `startError === null` in here would have kept that same guess alive
+ * one layer down, with the same wrong remedy attached. So: ENOENT, or nothing.
  */
 export function startedMissing(r: ChildResult): boolean {
-  return r.startFailed && (r.startError === "ENOENT" || r.startError === null);
+  return r.startFailed && r.startError === "ENOENT";
+}
+
+/**
+ * What to say about a binary that would not start, claiming exactly as much as
+ * the errno supports and no more.
+ *
+ * Three cases, three different remedies, and the third one names both because
+ * an unrecognised errno tells us only that the command did not run. Naming a
+ * single remedy there would be a guess — and the guess this code used to make
+ * was "go and install it".
+ */
+export function startFailureDetail(r: ChildResult, name: string): string {
+  if (r.startError === "ENOENT") return `${name} is not installed on this ClawBox.`;
+  if (r.startError === "EACCES" || r.startError === "EPERM") {
+    return `${name} is on this ClawBox but would not start (${r.startError}). Check its permissions.`;
+  }
+  return `${name} would not start${r.startError ? ` (${r.startError})` : ""}. Check that it is installed and that it can be executed.`;
 }
 
 /**

@@ -86,6 +86,20 @@ function unrunnableBinary(): FakeChild {
   return child;
 }
 
+/**
+ * A spawn that failed and did not say why — an `error` with no errno. The
+ * absence of evidence, which the code used to fold in with ENOENT and answer
+ * "not installed": the same guess this module exists to stop, one layer down.
+ */
+function errnoLessFailure(): FakeChild {
+  const child = baseChild();
+  setImmediate(() => {
+    child.emit("error", new Error("spawn failed"));
+    child.emit("close", null, null);
+  });
+  return child;
+}
+
 /** A child that ran and exited, writing `text` to stdout. */
 function gitChild(code: number, text = "", errText = ""): FakeChild {
   const child = baseChild();
@@ -164,6 +178,27 @@ describe("GH-01a — a null exit code is not proof git is missing", () => {
     if (out.committed) return;
     expect(out.reason).toBe("no_git");
     expect(out.detail ?? "").toMatch(/not installed/i);
+  });
+
+  it("does not say 'git is not installed' for a spawn failure with NO errno", async () => {
+    // Raised in review on this PR. ENOENT is the only errno that means "there
+    // is no such file"; an error carrying none means the spawn failed and did
+    // not say why. Reading that as absence is the same unfounded guess as
+    // reading a null exit code as absence — and it hands over the same wrong
+    // remedy. The message must name both things worth checking, neither as a
+    // finding.
+    script(() => errnoLessFailure());
+
+    const out = await lib.commitRunWork(INPUT);
+
+    expect(out.committed).toBe(false);
+    if (out.committed) return;
+    expect(out.reason).not.toBe("no_git");
+    expect(out.reason).toBe("git_failed");
+    expect(out.detail ?? "").not.toMatch(/is not installed/i);
+    expect(out.detail ?? "").toMatch(/would not start/i);
+    // and never the raw errno slot rendered empty
+    expect(out.detail ?? "").not.toMatch(/\(null\)|\(undefined\)/);
   });
 
   it("does not say 'git is not installed' when the version probe was KILLED", async () => {

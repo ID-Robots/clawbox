@@ -29,6 +29,7 @@ import {
   killedDetail,
   runChild,
   startedMissing,
+  startFailureDetail,
   wasKilled,
 } from "@/lib/child-run";
 
@@ -213,9 +214,13 @@ export async function disconnectGitHub(): Promise<DisconnectOutcome> {
   if (r.startFailed) {
     // Present but unrunnable is not missing, and must not be answered with an
     // install: the file is there, its permissions are not.
+    // Same rule as the status probe: only ENOENT is "not installed". The
+    // detail is built from the errno rather than asserted, so an unrecognised
+    // one never renders as "(null)" or as a remedy nobody can act on.
+    const detail = startFailureDetail(r, "gh");
     return startedMissing(r)
-      ? { ok: false, kind: "no_gh", detail: "gh is not installed on this ClawBox." }
-      : { ok: false, kind: "failed", detail: `The GitHub CLI is on this ClawBox but would not start (${r.startError}). Check its permissions.` };
+      ? { ok: false, kind: "no_gh", detail }
+      : { ok: false, kind: "failed", detail };
   }
   if (wasKilled(r)) {
     return {
