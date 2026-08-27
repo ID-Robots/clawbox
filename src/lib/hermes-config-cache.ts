@@ -49,8 +49,14 @@ const FAILED_READ_TTL_MS = 60_000;
  * `expiresAt` is `Infinity` for an answer and a near-future stamp for a failed
  * read. An answer needs no timer: config.yaml's mtime is a complete invalidator
  * for it, because writing that file is the only thing that can change it.
+ *
+ * `mtimeMs` is `null` for the one entry shape that can exist without a config
+ * file: a failed read on a box that has none yet. Storing the absence as a key
+ * value rather than skipping the cache keeps the comparison below total — the
+ * first write to config.yaml turns `null` into a number and invalidates it, the
+ * same way any other change to the file does.
  */
-type Entry = { mtimeMs: number; value: string; expiresAt: number };
+type Entry = { mtimeMs: number | null; value: string; expiresAt: number };
 const cache = new Map<string, Entry>();
 
 /** mtime of config.yaml, or null when it doesn't exist yet (fresh device). */
@@ -69,10 +75,8 @@ async function configMtime(): Promise<number | null> {
  */
 export async function hermesConfigGet(key: string, timeoutMs = 10_000): Promise<string> {
   const mtime = await configMtime();
-  if (mtime !== null) {
-    const hit = cache.get(key);
-    if (hit && hit.mtimeMs === mtime && Date.now() < hit.expiresAt) return hit.value;
-  }
+  const hit = cache.get(key);
+  if (hit && hit.mtimeMs === mtime && Date.now() < hit.expiresAt) return hit.value;
   let value = "";
   // Did the CLI ANSWER the question, or did the question fail? Verified on the
   // live box: an unset key exits 1 with `Config key not set: <key>` on stderr,
@@ -89,14 +93,19 @@ export async function hermesConfigGet(key: string, timeoutMs = 10_000): Promise<
   } catch {
     // hermes missing or timed out — fall through with "", uncached.
   }
-  // Only cache against a real mtime. With no config file there is nothing to
-  // invalidate against, so we would never notice the first write.
+  // An ANSWER is only cached against a real mtime. With no config file there is
+  // nothing to invalidate against, so a `""` kept from before the box was set
+  // up would outlive the first write and we would never notice it.
   //
-  // A failed read is held only for FAILED_READ_TTL_MS. Storing it the way an
-  // answer is stored was the bug: on a linked box config.yaml is never written
-  // again, so one slow moment removed the composer's attach button — and the
-  // image tools the agent advertises — until the web server restarted.
-  if (mtime !== null) {
+  // A FAILED read is cached either way, because its invalidator is the clock,
+  // not the file — it is held for FAILED_READ_TTL_MS and then re-asked. Storing
+  // it the way an answer is stored was the bug: on a linked box config.yaml is
+  // never written again, so one slow moment removed the composer's attach
+  // button — and the image tools the agent advertises — until the web server
+  // restarted. Skipping it entirely on a box with no config file is the mirror
+  // mistake: a hanging `hermes` would then start a Python interpreter for every
+  // request, which is the cost this module exists to avoid.
+  if (mtime !== null || !answered) {
     cache.set(key, {
       mtimeMs: mtime,
       value,

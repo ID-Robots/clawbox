@@ -146,6 +146,40 @@ describe("hermesConfigGet", () => {
     expect(runHermesCli).toHaveBeenCalledTimes(2);
   });
 
+  it("still backs off a failed read before config.yaml exists", async () => {
+    // The mirror of the bug. An answer has nothing to invalidate it here, so it
+    // is not kept — but a FAILURE is invalidated by the clock, not by the file,
+    // and dropping it outright would start a Python interpreter per request on
+    // exactly the box most likely to have a broken `hermes`: an unset-up one.
+    mtimeMs = null;
+    runHermesCli.mockRejectedValue(new Error("hermes timed out"));
+    const { hermesConfigGet } = await load();
+    expect(await hermesConfigGet("auxiliary.vision.model")).toBe("");
+    expect(await hermesConfigGet("auxiliary.vision.model")).toBe("");
+    expect(await hermesConfigGet("auxiliary.vision.model")).toBe("");
+    expect(runHermesCli).toHaveBeenCalledTimes(1);
+
+    runHermesCli.mockReset();
+    runHermesCli.mockResolvedValue(ok("gpt-4.1-mini"));
+    vi.setSystemTime(Date.now() + PAST_THE_BACKOFF_MS);
+    expect(await hermesConfigGet("auxiliary.vision.model")).toBe("gpt-4.1-mini");
+  });
+
+  it("drops a failure held from before config.yaml the moment the file appears", async () => {
+    // The backoff must not become its own stale probe: the customer linking is
+    // precisely the event these reads have to notice, and it writes the file.
+    mtimeMs = null;
+    runHermesCli.mockRejectedValue(new Error("hermes timed out"));
+    const { hermesConfigGet } = await load();
+    expect(await hermesConfigGet("image_gen.provider")).toBe("");
+
+    runHermesCli.mockReset();
+    runHermesCli.mockResolvedValue(ok("clawai"));
+    mtimeMs = 1_000; // first write to config.yaml — well inside the backoff.
+    expect(await hermesConfigGet("image_gen.provider")).toBe("clawai");
+    expect(runHermesCli).toHaveBeenCalledTimes(1);
+  });
+
   it("forgets everything when the cache is invalidated by hand", async () => {
     runHermesCli.mockResolvedValue(ok("clawai"));
     const { hermesConfigGet, invalidateHermesConfigCache } = await load();
