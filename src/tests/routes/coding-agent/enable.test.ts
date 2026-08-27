@@ -32,7 +32,12 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
 // this file pins the BEHAVIOUR the owner is owed — "the running agent is told" —
 // and not the name of the module that happens to tell it.
 const reloadMcp = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/hermes-mcp-reload", () => ({ reloadMcpServers: reloadMcp }));
+// Only the ASK is replaced; `reportMcpReloadRefused` stays real, so a refusal
+// still travels the path it travels on a device.
+vi.mock("@/lib/hermes-mcp-reload", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hermes-mcp-reload")>()),
+  reloadMcpServers: reloadMcp,
+}));
 
 import { get as configGet } from "@/lib/config-store";
 

@@ -1,4 +1,5 @@
 import { setMany } from "@/lib/config-store";
+import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
@@ -54,14 +55,58 @@ export function clawaiModelForTier(tier: ClawboxAiTier): string {
 export class ClawaiApplyError extends Error {}
 
 /**
+ * `getCodingAgentStatus().ready`, or null when the question could not be
+ * answered.
+ *
+ * NULL IS LOAD-BEARING. Linking is not allowed to fail because a readiness probe
+ * did — it stats a wrapper, looks for two binaries on PATH and lists the project
+ * folders, and any of those can throw on a box with a half-installed harness or
+ * an unreadable folder. This is a best-effort courtesy to the RUNNING agent laid
+ * on top of writes that have already happened (or are about to), so an
+ * unanswerable question means "do nothing", never "abandon the link".
+ *
+ * IMPORTED HERE, not at the top of the file. `coding-agent` owns the runs store
+ * and reaches DATA_DIR while it is still being evaluated, and this module is
+ * re-exported by `harness/credentials`, which every edition-agnostic credential
+ * lookup pulls in. A static import would put that whole machinery in the graph
+ * of routes that never link a box, for one boolean.
+ */
+async function codingAgentReady(): Promise<boolean | null> {
+  return await import("@/lib/coding-agent")
+    .then((mod) => mod.getCodingAgentStatus())
+    .then((status) => status.ready)
+    .catch(() => null);
+}
+
+/** @see applyClawaiToHermes */
+export interface ApplyClawaiOptions {
+  /**
+   * What `getCodingAgentStatus().ready` said before the caller touched
+   * anything, for a caller that wrote `clawai_token` ITSELF before calling.
+   *
+   * `ready` is `enabled` AND the harness installed AND ClawBox AI connected,
+   * and that third fact IS the stored token — so a snapshot taken in here, after
+   * such a caller has already written it, reads true no matter what the box
+   * looked like a moment earlier. The guard then sees before === after and the
+   * reload silently never happens. `/setup-api/hermes/clawai` persists a PASTED
+   * token before it applies it and is the one caller that needs this; the two
+   * others (the configure route and the device-code finaliser) write nothing
+   * first, so they leave it unset and the snapshot below is honest.
+   */
+  codingAgentReadyBefore?: boolean;
+}
+
+/**
  * Point Hermes at ClawBox AI and persist the device state.
  *
  * @param token device token minted by the portal (never logged, never echoed)
  * @param tier  device tier — decides which bare deepseek id becomes model.default
+ * @param options see `ApplyClawaiOptions`
  */
 export async function applyClawaiToHermes(
   token: string,
   tier: ClawboxAiTier,
+  options: ApplyClawaiOptions = {},
 ): Promise<{ provider: string; model: string; tier: ClawboxAiTier }> {
   const trimmed = token.trim();
   // A token that starts with "-" would be read by hermes as a flag. runHermesCli
@@ -76,6 +121,14 @@ export async function applyClawaiToHermes(
   // on config.yaml's mtime, so on a box that has been asked this recently — the
   // chat asks it on every open — this costs nothing.
   const couldDrawBefore = await hermesAgentDrawsImages();
+  // The SECOND family this call can move, and for the same reason: the ClawBox
+  // MCP server decides whether `coding_agent_run`/`_status`/`_stop` exist at all
+  // from one probe taken while it booted, and `ready` is `enabled` AND the
+  // harness installed AND ClawBox AI connected. #514 taught the enable route to
+  // notice when the SWITCH moved that verdict; connecting is the sibling write,
+  // and it is the order the readiness text itself asks for ("ClawBox AI is not
+  // connected. Open Settings → AI Models and sign in to ClawBox AI first.").
+  const codingReadyBefore = options.codingAgentReadyBefore ?? (await codingAgentReady());
 
   const vision = await resolveVisionModelId({ token: trimmed });
   let visionModelId: string | null = vision.id;
@@ -226,7 +279,22 @@ export async function applyClawaiToHermes(
   // their own by hand and our write failing changes nothing about what the box
   // can do. `hermesConfigGet` is keyed on config.yaml's mtime, which the writes
   // above just moved, so this sees the new value rather than a memo of the old.
-  await refreshHermesImageTools(couldDrawBefore, await hermesAgentDrawsImages());
+  const respawnedMcpChildren = await refreshHermesImageTools(couldDrawBefore, await hermesAgentDrawsImages());
+
+  // And the coding-agent family, which the token just written may have made
+  // runnable. ONE respawn between the two: `reload.mcp` kills and respawns every
+  // MCP child and invalidates the model's prompt cache, and a link that moves
+  // both families is still one fact about one box — so if the image reconcile
+  // above already reloaded (or bounced, which respawns the children with the
+  // dashboard), this one reports rather than pays for a second.
+  const codingReadyAfter = await codingAgentReady();
+  if (codingReadyBefore !== null && codingReadyAfter !== null) {
+    await refreshCodingAgentToolsIfReadinessChanged(
+      codingReadyBefore,
+      codingReadyAfter,
+      { alreadyReloaded: respawnedMcpChildren },
+    );
+  }
 
   return { provider: CLAWAI_PROVIDER, model, tier };
 }

@@ -1,6 +1,6 @@
 import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
 import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
-import { reloadMcpServers } from "@/lib/hermes-mcp-reload";
+import { reloadMcpServers, reportMcpReloadRefused } from "@/lib/hermes-mcp-reload";
 
 /**
  * Make the RUNNING Hermes serve the image backend that linking just installed.
@@ -85,13 +85,22 @@ async function runningAgentCanDraw(): Promise<boolean | null> {
   return typeof result?.available === "boolean" ? result.available : null;
 }
 
-/** Ask for the MCP tool list to be rebuilt, and say so when it is not. */
-async function reloadMcpTools(why: string): Promise<void> {
-  if (await reloadMcpServers()) return;
-  // Logged, not surfaced. Worth a line because "the agent still refuses to draw"
-  // is otherwise invisible from the outside, and this is the one place that
-  // knows the refresh was wanted and did not happen.
-  console.error(`[hermes/image-refresh] ${why}, but Hermes would not reload its MCP servers`);
+/**
+ * Ask for the MCP tool list to be rebuilt, and say so when it is not.
+ *
+ * @returns true when the children were actually respawned. The caller passes
+ *          that on, because the respawn is GLOBAL: it rebuilt every other
+ *          family's tool list too, and a second family must not pay for a
+ *          second one.
+ */
+async function reloadMcpTools(why: string): Promise<boolean> {
+  if (await reloadMcpServers().catch(() => false)) return true;
+  // Logged, not surfaced, and in the words that are true for this edition. Worth
+  // a line because "the agent still refuses to draw" is otherwise invisible from
+  // the outside, and this is the one place that knows the refresh was wanted and
+  // did not happen.
+  await reportMcpReloadRefused("hermes/image-refresh", why);
+  return false;
 }
 
 /**
@@ -117,14 +126,20 @@ async function reloadMcpTools(why: string): Promise<void> {
  * @param after  what it says after — the same fact
  *               `/setup-api/chat/capabilities` serves, so the agent's tools and
  *               the customer's chat cannot disagree about this box.
+ * @returns true when this call respawned the box's MCP children — by reloading
+ *          them or by bouncing the dashboard that owns them. Both rebuild EVERY
+ *          family's tool list, not just the image one, so a caller that also
+ *          moved another family (the coding agent, on the ClawBox AI connect
+ *          path) can skip a second global reload and the second prompt-cache
+ *          invalidation that comes with it.
  */
-export async function refreshHermesImageTools(before: boolean, after: boolean): Promise<void> {
+export async function refreshHermesImageTools(before: boolean, after: boolean): Promise<boolean> {
   if (!after) {
     // The box cannot draw. The only stale thing is the MCP server's view, and
     // the tool it owes an owner here is the honest refusal — a linked-looking
     // box with no backend must say so rather than let the agent improvise.
-    if (before) await reloadMcpTools("this box can no longer draw");
-    return;
+    if (before) return await reloadMcpTools("this box can no longer draw");
+    return false;
   }
 
   // 1. The credential. Cheap, and on a box whose agent already knows the
@@ -140,15 +155,15 @@ export async function refreshHermesImageTools(before: boolean, after: boolean): 
   if (live === true) {
     // The agent can draw. The MCP server may still be holding the refusal tool
     // it registered when it could not — drop it now, in the same breath.
-    if (!before) await reloadMcpTools("the agent can draw");
-    return;
+    if (!before) return await reloadMcpTools("the agent can draw");
+    return false;
   }
 
   if (live === null) {
     // Asked and got no answer. Nothing here knows whether this box needs a
     // bounce, and a bounce is not the kind of thing to do on a guess.
     console.error("[hermes/image-refresh] the Hermes dashboard did not say whether it can draw; left it alone");
-    return;
+    return false;
   }
 
   // 3. The agent SAYS no with the credential freshly loaded, so the backend was
@@ -157,10 +172,14 @@ export async function refreshHermesImageTools(before: boolean, after: boolean): 
   //    reload is wanted after this one.
   if (await bounceHermesDashboard()) {
     console.log("[hermes/image-refresh] bounced the Hermes dashboard so it picks up the image backend");
-    return;
+    // The bounce takes the MCP children down with the dashboard and brings them
+    // back, so every family's tool list is rebuilt — the same effect a reload
+    // would have had, by a bigger hammer.
+    return true;
   }
 
   console.error(
     "[hermes/image-refresh] the image backend is installed but the running agent cannot see it; restart the agent to enable pictures",
   );
+  return false;
 }

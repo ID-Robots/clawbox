@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { get, setMany } from "@/lib/config-store";
 import { hermesConfigGet } from "@/lib/hermes-config-cache";
 import { getActiveHarness } from "@/lib/harness";
+import { getCodingAgentStatus } from "@/lib/coding-agent";
 import {
   CLAWAI_PROVIDER,
   ClawaiApplyError,
@@ -100,10 +101,25 @@ export async function POST(request: Request) {
   const suppliedToken = typeof (body as { token?: unknown } | null)?.token === "string"
     ? ((body as { token?: string }).token || "").trim()
     : "";
+  // Storing it first is also why the coding-agent verdict has to be sampled
+  // HERE rather than inside the apply. The ClawBox MCP server registers
+  // `coding_agent_run`/`_status`/`_stop` only when `getCodingAgentStatus().ready`
+  // is true, and `ready` is `enabled` AND the harness installed AND ClawBox AI
+  // connected — where "connected" IS the `clawai_token` the next line stores.
+  // Read it a line later and the answer is always true, the apply's
+  // before/after guard sees no change, and a box whose switch was already on
+  // ends up with a panel that says ready over an agent that still has none of
+  // the three tools. Left undefined on the no-token path, where the apply's own
+  // snapshot is taken before any write and is honest; and on a probe that threw,
+  // which must not turn a link into a 500.
+  let codingAgentReadyBefore: boolean | undefined;
   if (suppliedToken) {
     if (!isPlausibleClawaiToken(suppliedToken)) {
       return NextResponse.json({ error: "That doesn't look like a ClawBox AI token." }, { status: 400 });
     }
+    codingAgentReadyBefore = await getCodingAgentStatus()
+      .then((status) => status.ready)
+      .catch(() => undefined);
     await setMany({ clawai_token: suppliedToken });
   }
 
@@ -118,7 +134,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = await applyClawaiToHermes(token, tier);
+    const result = await applyClawaiToHermes(token, tier, { codingAgentReadyBefore });
     return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     // Only OUR own error text is safe to echo — a raw spawn error can carry the
