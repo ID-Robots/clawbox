@@ -127,10 +127,12 @@ function defaultModelForProvider(provider: string | null): string | null {
  * whenever the provider changes.
  */
 function subscriptionProvidersForUi(config: OpenClawConfig): string[] {
-  const ids = subscriptionOnlyProviders(config.auth?.profiles)
-    .map((provider) => normalizeProvider(provider))
-    .filter((provider): provider is string => !!provider);
-  return [...new Set(ids)].sort();
+  // `normalizeProvider` goes IN, not around the outside. deepseek and clawai
+  // are one provider under two names, so collapsing the alias after the
+  // credentials are counted would read an OAuth profile written as `deepseek`
+  // and an API key written as `clawai` as two separate providers, and report
+  // the box subscription-only on a key it actually holds.
+  return subscriptionOnlyProviders(config.auth?.profiles, normalizeProvider);
 }
 
 function hasOpenAiApiKeyProfile(config: OpenClawConfig): boolean {
@@ -183,7 +185,9 @@ async function refuseOffSurfaceClaudeModel(
   if (provider !== "anthropic") return null;
   const config = await getConfig();
   if (!config) return null;
-  if (!subscriptionOnlyProviders(config.auth?.profiles).includes("anthropic")) return null;
+  if (!subscriptionOnlyProviders(config.auth?.profiles, normalizeProvider).includes("anthropic")) {
+    return null;
+  }
   const surfaceIds = await getSurfaceIds();
   if (!surfaceIds || surfaceIds.has(modelId)) return null;
   const surface = subscriptionSurfaceLabel("anthropic");

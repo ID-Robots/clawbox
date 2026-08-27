@@ -155,6 +155,43 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
     expect(body.subscriptionProviders).toEqual([]);
   });
 
+  /**
+   * `deepseek` and `clawai` are the same provider wearing two names: the wire
+   * format is deepseek (Mike's gateway forwards there), the UI id is clawai.
+   * Classifying credentials BEFORE collapsing the alias makes an OAuth profile
+   * under one name and an API key under the other look like two providers, and
+   * the box gets reported as subscription-only on a credential it does not
+   * actually lack.
+   */
+  it.each([
+    ["deepseek OAuth + clawai API key", "deepseek", "clawai"],
+    ["clawai OAuth + deepseek API key", "clawai", "deepseek"],
+  ])("collapses the deepseek/clawai alias before classifying: %s", async (_name, oauthAs, keyedAs) => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: {
+        profiles: {
+          "a:oauth": { provider: oauthAs, mode: "oauth" },
+          "b:key": { provider: keyedAs, mode: "api_key" },
+        },
+      },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    const body = await (await GET()).json();
+    expect(body.subscriptionProviders).toEqual([]);
+  });
+
+  it("still reports the alias as subscription-only when there is no key at all", async () => {
+    vi.mocked(readConfig).mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+    } as never);
+
+    // Reported under the UI's id, which is what the header pill carries.
+    const body = await (await GET()).json();
+    expect(body.subscriptionProviders).toEqual(["clawai"]);
+  });
+
   it("refuses a Claude model the subscription surface does not carry", async () => {
     const response = await postModel(POST, "anthropic/claude-fable-5");
 

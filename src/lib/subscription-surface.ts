@@ -76,9 +76,18 @@ const KEY_MODES = new Set(["token", "api_key", "api-key"]);
  * spelled out for OpenAI in the chat/model route
  * (`!hasOpenAiKey && hasCodexOauth`), generalised so every provider in
  * SUBSCRIPTION_SURFACE gets the same answer from one place.
+ *
+ * `normalize` collapses provider ALIASES, and it is applied here rather than
+ * to the result because the two are not interchangeable: deepseek and clawai
+ * are one provider under two names (wire format vs UI id), so an OAuth profile
+ * written under one and an API key under the other read as two providers if
+ * the alias is collapsed afterwards — and the box gets called
+ * subscription-only over a credential it does have. Aliasing has to happen
+ * before the credentials are counted, not after.
  */
 export function subscriptionOnlyProviders(
   profiles: Record<string, { provider?: string; mode?: string } | undefined> | undefined,
+  normalize: (provider: string) => string | null = (provider) => provider,
 ): string[] {
   const oauth = new Set<string>();
   const keyed = new Set<string>();
@@ -86,7 +95,7 @@ export function subscriptionOnlyProviders(
     const rawProvider = typeof entry?.provider === "string" && entry.provider.trim()
       ? entry.provider
       : profileKey.split(":")[0];
-    const provider = rawProvider.trim().toLowerCase();
+    const provider = normalize(rawProvider.trim().toLowerCase()) ?? "";
     if (!provider) continue;
     const mode = typeof entry?.mode === "string" ? entry.mode.trim().toLowerCase() : "";
     if (mode === "oauth") oauth.add(provider);
