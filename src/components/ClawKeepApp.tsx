@@ -1,13 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
+import { backupSourceFor } from "@/lib/harness/backup-source";
 import type {
   ClawKeepMemoryStatus,
   MemoryIndexMode,
   MemoryIndexSchedule,
 } from "@/lib/clawkeep-memory";
+
+/**
+ * Is anything still missing before a backup can run?
+ *
+ * Reads the server's answer when it gave one, and otherwise falls back to the
+ * pre-Hermes meaning of the status object — "the openclaw CLI is on PATH" —
+ * so a browser holding a cached bundle against an older server still gates the
+ * button the way that server intends, rather than enabling it on a box that
+ * cannot archive.
+ */
+function archiverReady(status: ClawKeepStatus): boolean {
+  return status.archiverReady ?? status.openclawInstalled;
+}
 
 type ScheduleFrequency = "daily" | "weekly";
 interface ClawKeepSchedule {
@@ -34,8 +48,16 @@ interface ClawKeepStatus {
   uploadStartedAtMs: number;
   openclawInstalled: boolean;
   daemonInstalled: boolean;
-  /** False on an edition with no OpenClaw to back up (Hermes). */
-  supportedOnEdition?: boolean;
+  /** Which agent this box archives — decides the wording throughout. */
+  agent?: "openclaw" | "hermes";
+  /** Everything the archiver needs is present. On OpenClaw that means the
+   *  `openclaw` CLI; on Hermes the archiver is inside the daemon, so there is
+   *  nothing extra to install. Optional so a status from an older server
+   *  (which had neither field) still renders. */
+  archiverReady?: boolean;
+  /** A snapshot from this box carries provider keys. Drives the warning that
+   *  a backup is a credential. */
+  backupContainsCredentials?: boolean;
   schedule: ClawKeepSchedule;
   nextRunAtMs: number;
   /** True when the device has a stored backup-encryption passphrase. The
@@ -94,6 +116,8 @@ interface RestoreResponse {
   archiveBytes: number;
   assets: { kind: string; targetPath: string; backupPath: string; bytesRestored: number }[];
   restartErrors: string[];
+  /** Members the daemon could not recreate. Absent from older servers. */
+  skippedMembers?: string[];
 }
 
 interface PairStartResponse {
@@ -116,6 +140,31 @@ interface BackupResponse {
 }
 
 const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
+
+/**
+ * The name of the agent this box runs, for the strings that name it.
+ *
+ * Eight ClawKeep strings say "OpenClaw" out loud — "Protect my OpenClaw",
+ * "Your OpenClaw is safe in the ClawBox cloud", "This replaces your current
+ * OpenClaw state". On a Hermes box every one of them named software the device
+ * does not run. They now interpolate `{agent}`, which keeps each locale's
+ * existing wording and case endings intact — it is the brand that varies, not
+ * the sentence.
+ *
+ * A context rather than a prop because the eight sites sit in five different
+ * components, and this is a property of the DEVICE, not of any one card.
+ * "OpenClaw" is the default because that is what a box is unless its status
+ * says otherwise, and it is what every one of these strings used to say.
+ */
+const AgentLabelContext = createContext("OpenClaw");
+
+function useAgentLabel(): string {
+  return useContext(AgentLabelContext);
+}
+
+function agentLabelFor(agent: ClawKeepStatus["agent"]): string {
+  return agent === "hermes" ? "Hermes" : "OpenClaw";
+}
 
 type Translator = (key: string, params?: Record<string, string | number>) => string;
 
@@ -165,6 +214,10 @@ export default function ClawKeepApp() {
   // outer full-app login gate was tried and removed — it duplicated the
   // inline UX and broke local-only flows where ClawBox AI isn't required.
   const [status, setStatus] = useState<ClawKeepStatus | null>(null);
+  // Which agent this box archives, for the strings that name it. Read before
+  // the status has landed too, hence the optional chain — the default is the
+  // word every one of those strings used to be hardcoded to.
+  const agent = agentLabelFor(status?.agent);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"" | "pair" | "backup" | "unpair" | "restore">("");
   const [backupResult, setBackupResult] = useState<BackupResponse | null>(null);
@@ -441,17 +494,17 @@ export default function ClawKeepApp() {
 
   const onRestore = useCallback(
     (name: string) => {
-      // The restore is destructive — we move ~/.openclaw aside and replace
-      // it with the snapshot's contents, then bounce the gateway. Route
-      // the confirm through our themed dialog instead of window.confirm
-      // so the look matches the rest of the app on every browser.
+      // The restore is destructive — we move the agent's state directory aside
+      // and replace it with the snapshot's contents, then bounce the service
+      // that holds it open. Route the confirm through our themed dialog
+      // instead of window.confirm so the look matches on every browser.
       setConfirmPending({
         title: t("clawkeep.confirm.restoreTitle", { name }),
         body: (
           <>
-            <p>{t("clawkeep.confirm.restoreBody1")}</p>
+            <p>{t("clawkeep.confirm.restoreBody1", { agent })}</p>
             <p className="mt-2 text-[var(--text-muted)]">
-              {t("clawkeep.confirm.restoreBody2")}
+              {t("clawkeep.confirm.restoreBody2", { agent })}
             </p>
           </>
         ),
@@ -475,7 +528,10 @@ export default function ClawKeepApp() {
         },
       });
     },
-    [performRestore, t],
+    // `agent` is interpolated into the confirmation copy, so a stale closure
+    // would name the wrong agent in the one dialog that warns the customer
+    // their state is about to be replaced.
+    [performRestore, t, agent],
   );
 
   if (!status && !error) {
@@ -504,23 +560,8 @@ export default function ClawKeepApp() {
     );
   }
 
-  // ClawKeep archives the OpenClaw agent through the openclaw CLI. On an edition
-  // that ships no OpenClaw (Hermes) the feature genuinely cannot run, so say so
-  // honestly and stop here — rather than dropping to the setup card that told
-  // the user to `npm install -g openclaw`, which would contradict this SKU.
-  if (status.supportedOnEdition === false) {
-    return (
-      <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-        <div className="min-h-full w-full flex items-center justify-center p-6">
-          <div className="w-full max-w-2xl">
-            <EditionUnavailableCard />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
+    <AgentLabelContext.Provider value={agent}>
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
       <div className="min-h-full w-full flex items-center justify-center p-6">
         <div className="w-full max-w-2xl space-y-4">
@@ -596,9 +637,15 @@ export default function ClawKeepApp() {
           {/* Not inside the `paired` branch above on purpose: the memory index
               is entirely on-device, so it is just as relevant on a box that
               has never been paired for cloud backups. */}
+          {/* The memory index IS OpenClaw's — its own store and its own
+              embedding provider (`clawkeep-memory.ts`). Hermes has no
+              equivalent, so this stays keyed to the OpenClaw CLI even now that
+              the backup itself works on both. */}
           {status.openclawInstalled && <MemoryIndexCard onError={setError} />}
 
-          {(!status.openclawInstalled || !status.daemonInstalled) && <SystemCard status={status} />}
+          <BackupContentsCard status={status} />
+
+          {(!archiverReady(status) || !status.daemonInstalled) && <SystemCard status={status} />}
 
           {backupResult && <BackupResultCard result={backupResult} />}
           {restoreResult && <RestoreResultCard result={restoreResult} />}
@@ -608,6 +655,7 @@ export default function ClawKeepApp() {
               onClose={() => setRestoreOpen(false)}
               onPick={(name) => onRestore(name)}
               onError={setError}
+              agent={status.agent === "hermes" ? "hermes" : "openclaw"}
             />
           )}
         </div>
@@ -664,6 +712,7 @@ export default function ClawKeepApp() {
         />
       )}
     </div>
+    </AgentLabelContext.Provider>
   );
 }
 
@@ -1294,6 +1343,7 @@ function ConfirmDialog({
 
 function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
   const { t } = useT();
+  const agent = useAgentLabel();
   return (
     <div
       className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-12 pb-8`}
@@ -1323,7 +1373,7 @@ function PairCard({ onPair, busy }: { onPair: () => void; busy: boolean }) {
       </div>
       <h2 className="relative text-3xl font-bold font-display">{t("clawkeep.pair.title")}</h2>
       <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t("clawkeep.pair.description")}
+        {t("clawkeep.pair.description", { agent })}
       </p>
       <button
         type="button"
@@ -1486,6 +1536,7 @@ function BackupProgressPanel({
   onReset?: () => void;
 }) {
   const { t } = useT();
+  const agent = useAgentLabel();
   // `nowMs` is sampled by the 1s tick so render stays pure (no `Date.now()`
   // reads at render time — the React compiler rule that flags those is on).
   // It's the only thing the panel uses time for: deriving the upload MB/s
@@ -1514,7 +1565,7 @@ function BackupProgressPanel({
   const isBackup = kind === "backup";
   const fallback = isBackup
     ? t("clawkeep.progress.backupFallback")
-    : t("clawkeep.progress.restoreFallback");
+    : t("clawkeep.progress.restoreFallback", { agent });
   const stepLabel = explicitStepLabel || fallback;
 
   // Backup = green (we're actively protecting). Restore = orange (recovery
@@ -1550,7 +1601,7 @@ function BackupProgressPanel({
         <div className="flex-1 min-w-0">
           <div className={`text-base font-semibold ${palette.text}`}>
             {isBackup
-              ? t("clawkeep.progress.backupTitle")
+              ? t("clawkeep.progress.backupTitle", { agent })
               : t("clawkeep.progress.restoreTitle")}
           </div>
           <div className="text-xs text-[var(--text-muted)] mt-0.5">
@@ -1690,6 +1741,7 @@ function DashboardCard({
   busyKind: "backup" | "restore" | null;
 }) {
   const { t } = useT();
+  const agent = agentLabelFor(status.agent);
   // Optional "Name this backup" field for the manual run — passed to the
   // daemon as the snapshot label. Cleared after we hand it off.
   const [backupName, setBackupName] = useState("");
@@ -1708,7 +1760,7 @@ function DashboardCard({
     );
   }
 
-  const disabled = !status.daemonInstalled || !status.openclawInstalled;
+  const disabled = !status.daemonInstalled || !archiverReady(status);
   // No snapshots → restore nothing. Hide rather than offer an action that's
   // guaranteed to be empty.
   const canRestore = !disabled && status.snapshotCount > 0;
@@ -1760,7 +1812,7 @@ function DashboardCard({
 
       <h2 className="relative text-3xl font-bold font-display mt-2">{t(copy.headlineKey)}</h2>
       <p className="relative mt-1.5 max-w-md text-sm text-[var(--text-muted)] leading-relaxed">
-        {t(copy.subheadKey)}
+        {t(copy.subheadKey, { agent })}
       </p>
 
       {/* Stats strip — compact, equal-width, no card chrome to keep the eye on the shield */}
@@ -1799,7 +1851,7 @@ function DashboardCard({
           disabled={disabled}
           className={`px-6 py-2.5 rounded-full ${copy.primaryClass} disabled:opacity-50 text-white text-sm font-semibold shadow-lg transition-colors cursor-pointer`}
         >
-          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw")}
+          {state === "protected" ? t("clawkeep.backupNow") : t("clawkeep.protectMyOpenclaw", { agent })}
         </button>
         {canRestore && (
           <button
@@ -1818,19 +1870,43 @@ function DashboardCard({
   );
 }
 
-function EditionUnavailableCard() {
+/**
+ * What travels in a snapshot from THIS box, and the warning that goes with it.
+ *
+ * Rendered rather than left implicit because the archive holds the box's
+ * provider keys: the customer is entitled to know that before they schedule a
+ * nightly upload, and to know it again before they hand a restore file to
+ * anyone. The list is per-edition and comes from `backupSourceFor`, whose
+ * Hermes half is pinned by test to the archiver's own asset list — so this can
+ * never drift into describing a backup we do not actually make.
+ */
+function BackupContentsCard({ status }: { status: ClawKeepStatus }) {
   const { t } = useT();
+  const source = backupSourceFor(status.agent === "hermes" ? "hermes" : "openclaw");
   return (
     <div className={`${CARD} space-y-2`}>
       <div className="flex items-center gap-2">
         <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
-          cloud_off
+          inventory_2
         </span>
-        <h2 className="font-semibold text-[var(--text-primary)]">{t("clawkeep.edition.unsupportedTitle")}</h2>
+        <h2 className="font-semibold text-[var(--text-primary)]">
+          {t("clawkeep.contents.title")}
+        </h2>
       </div>
-      <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
-        {t("clawkeep.edition.unsupportedBody")}
-      </p>
+      <ul className="text-sm text-[var(--text-secondary)] space-y-1 list-disc list-inside">
+        {source.includesKeys.map((key) => <li key={key}>{t(key)}</li>)}
+      </ul>
+      {source.excludesKeys.length > 0 && (
+        <p className="text-xs text-[var(--text-muted)] leading-relaxed">
+          {t("clawkeep.contents.excludes")}{" "}
+          {source.excludesKeys.map((key) => t(key)).join("; ")}.
+        </p>
+      )}
+      {status.backupContainsCredentials !== false && (
+        <p className="text-xs text-amber-200/90 leading-relaxed">
+          🔒 {t("clawkeep.contents.credentialWarning")}
+        </p>
+      )}
     </div>
   );
 }
@@ -1841,7 +1917,11 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
     <div className={`${CARD} space-y-2 border-amber-500/20 bg-amber-500/5`}>
       <h2 className="font-semibold text-amber-200">⚙️ {t("clawkeep.system.setupNeeded")}</h2>
       <ul className="text-sm text-amber-100 space-y-1">
-        {!status.openclawInstalled && (
+        {/* Only on the edition that HAS a separate CLI. On Hermes the archiver
+            ships inside the daemon, so telling the owner to
+            `npm install -g openclaw` would be an instruction that contradicts
+            their SKU and fixes nothing. */}
+        {status.agent !== "hermes" && !status.openclawInstalled && (
           <li>
             <code className="bg-black/30 px-1 rounded">openclaw</code>{" "}
             {t("clawkeep.system.notOnPath")}{" "}
@@ -1893,6 +1973,15 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
   );
 }
 
+/** The unit named by the first restart failure (`"<unit>: <detail>"`), so the
+ *  remedy we print is the one that actually failed rather than a guess that is
+ *  wrong on half the fleet. Falls back to the OpenClaw unit only when the
+ *  string is not in the expected shape. */
+function restartUnit(errors: string[]): string {
+  const unit = errors[0]?.split(":")[0]?.trim();
+  return unit && unit.length > 0 ? unit : "clawbox-gateway.service";
+}
+
 function RestoreResultCard({ result }: { result: RestoreResponse }) {
   const { t } = useT();
   return (
@@ -1918,8 +2007,23 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
       {result.restartErrors.length > 0 && (
         <p className="text-xs text-amber-300">
           ⚠️ {t("clawkeep.result.restartFailed", { count: result.restartErrors.length })}{" "}
-          <code className="bg-black/30 px-1 rounded">sudo systemctl restart clawbox-gateway</code>{" "}
+          {/* The unit is READ OFF the failure, not hardcoded. Each entry is
+              `<unit>: <detail>`, and which unit holds the restored state is
+              per-edition — `clawbox-gateway` does not exist on Hermes, so
+              printing it there told the owner to run a command that cannot
+              work. Naming the unit that actually failed cannot drift. */}
+          <code className="bg-black/30 px-1 rounded">
+            sudo systemctl restart {restartUnit(result.restartErrors)}
+          </code>{" "}
           {t("clawkeep.result.manually")}
+        </p>
+      )}
+      {(result.skippedMembers?.length ?? 0) > 0 && (
+        <p className="text-xs text-amber-300">
+          {/* A restore that could not recreate part of the archive is NOT a
+              clean success. Saying so here is the whole point of carrying
+              `skippedMembers` out of the daemon. */}
+          ⚠️ {t("clawkeep.result.skipped", { count: result.skippedMembers!.length })}
         </p>
       )}
     </div>
@@ -1946,10 +2050,13 @@ function RestoreModal({
   onClose,
   onPick,
   onError,
+  agent,
 }: {
   onClose: () => void;
   onPick: (name: string) => void;
   onError: (msg: string) => void;
+  /** Which agent this box archives — decides where "moved aside to" points. */
+  agent: "openclaw" | "hermes";
 }) {
   const { t } = useT();
   const [snapshots, setSnapshots] = useState<CloudSnapshot[] | null>(null);
@@ -2301,7 +2408,13 @@ function RestoreModal({
           </span>
           <span>
             {t("clawkeep.restoreModal.footerPrefix")}{" "}
-            <code className="bg-black/40 px-1 rounded">~/.openclaw.bak-restore-*</code>.
+            {/* Per-edition: a Hermes box has no `~/.openclaw`, and this is the
+                one line a customer reads if a restore goes wrong. */}
+            {/* One expression, not `{...}/*...`: a `/*` sitting in JSX children
+                right after a closing brace opens a comment. */}
+            <code className="bg-black/40 px-1 rounded">
+              {`${backupSourceFor(agent).stateDir}/*.bak-restore-*`}
+            </code>.
           </span>
         </footer>
       </div>

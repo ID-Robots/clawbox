@@ -186,6 +186,10 @@ def _restore_main(argv: list[str]) -> int:
             }
             for a in result.assets
         ],
+        # Members the restore deliberately did not recreate. Normally empty.
+        # Emitted unconditionally so the bridge and the UI can warn instead of
+        # presenting an incomplete restore as a clean one.
+        "skippedMembers": list(result.skipped_members),
     }))
     return 0
 

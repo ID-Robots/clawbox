@@ -27,7 +27,10 @@ const COPY: Record<ClawBoxLoginFeature, { title: string; body: string }> = {
   },
   clawkeep: {
     title: "Sign in to use ClawKeep",
-    body: "ClawKeep stores your OpenClaw backups in the ClawBox cloud. You need a ClawBox account to claim a private prefix. Sign in and come back to pair.",
+    // Not "your OpenClaw backups": ClawKeep archives whichever agent the
+    // device runs, and naming the wrong one is the first thing a Hermes owner
+    // would read here.
+    body: "ClawKeep stores this device's backups in the ClawBox cloud. You need a ClawBox account to claim a private prefix. Sign in and come back to pair.",
   },
   generic: {
     title: "Sign in to ClawBox",
