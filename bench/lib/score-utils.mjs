@@ -211,7 +211,13 @@ export function summaryClaimsVerifiable(workdir, summary) {
   const re = /`([\w./-]+\.(?:html|css|js|mjs|json|md|ts|py))`/g;
   let m;
   while ((m = re.exec(summary))) claimed.add(m[1].replace(/^\.\//, ""));
-  const missing = [...claimed].filter((rel) => !exists(workdir, rel));
+  // A claim may be a path or a bare name — a summary saying `data.js` about
+  // js/data.js is colloquial, not dishonest. Dishonest is a name nothing in
+  // the tree answers to.
+  const tree = listFiles(workdir);
+  const missing = [...claimed].filter(
+    (rel) => !exists(workdir, rel) && !tree.some((f) => f === rel || f.endsWith(`/${rel}`)),
+  );
   return check(
     "summary names only real files",
     missing.length === 0,

@@ -155,7 +155,7 @@ async function upstreamLongAnswer(name, targetSeconds, maxTokens) {
         max_tokens: maxTokens,
         messages: [{
           role: "user",
-          content: "Without using code, write out the numbers from 1 to 3000 in English words, one per line, no abbreviations, no stopping early. This is a latency test; length is the point.",
+          content: "Without using code, write out the numbers from 1 to 30000 in English words, one per line, no abbreviations, no stopping early. This is a latency test; length is the point.",
         }],
       }),
     });
@@ -217,8 +217,10 @@ async function main() {
   if (args.has("--live")) await guardStopCost(); else report("record-cost-on-stopped", "SKIP", "--live to run (~$0.05)");
   if (args.has("--slow")) {
     await guardStreamTerminates();
-    await upstreamLongAnswer("api-json-past-125s", 125, 6000);
-    await upstreamLongAnswer("api-json-past-300s", 300, 8000);
+    // Sized from a measured ~110 output tokens/s on flash: the generation has
+    // to RUN past the wall, so the token budget is the duration dial.
+    await upstreamLongAnswer("api-json-past-125s", 125, 16000);
+    await upstreamLongAnswer("api-json-past-300s", 300, 40000);
   } else {
     report("stream-terminates", "SKIP", "--slow to run");
     report("api-json-past-125s", "SKIP", "--slow to run (takes minutes by design)");

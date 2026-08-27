@@ -1,7 +1,23 @@
 {
-  "_note": "Bench-owned. The product repo has NO pricing table (run.costUsd is whatever the CLI's result event said), so any $ split computed from transcripts uses THESE numbers. All null = compare.mjs reports token splits only and never invents dollars. Rates are per million tokens.",
+  "_note": "Bench-owned. The product repo has NO pricing table (run.costUsd is whatever the CLI's result event said), so any $ split computed from transcripts uses THESE numbers. All null = compare.mjs reports token splits only and never invents dollars. Rates are per million tokens. Transcript message.model omits the [1m] suffix, hence both pro keys.",
   "models": {
-    "deepseek-v4-pro[1m]": { "inputPerMTok": null, "outputPerMTok": null, "cacheReadPerMTok": null, "cacheWritePerMTok": null },
-    "deepseek-v4-flash": { "inputPerMTok": null, "outputPerMTok": null, "cacheReadPerMTok": null, "cacheWritePerMTok": null }
+    "deepseek-v4-pro[1m]": {
+      "inputPerMTok": null,
+      "outputPerMTok": null,
+      "cacheReadPerMTok": null,
+      "cacheWritePerMTok": null
+    },
+    "deepseek-v4-flash": {
+      "inputPerMTok": null,
+      "outputPerMTok": null,
+      "cacheReadPerMTok": null,
+      "cacheWritePerMTok": null
+    },
+    "deepseek-v4-pro": {
+      "inputPerMTok": null,
+      "outputPerMTok": null,
+      "cacheReadPerMTok": null,
+      "cacheWritePerMTok": null
+    }
   }
 }
