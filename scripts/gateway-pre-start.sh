@@ -651,8 +651,9 @@ if isinstance(_vision_models, list) and isinstance(_vision_token, str) and _visi
     ):
         # The slot names one of OUR vision ids — the previous default is ours
         # to move to the resolved one, both directions. Anything else in the
-        # slot is the owner's choice and stays.
-        agents_defaults["imageModel"] = {"primary": CLAWBOX_VISION_MODEL_REF}
+        # slot is the owner's choice and stays — and the move changes ONLY
+        # `primary`, so fallbacks the owner added ride along.
+        _vision_model_cfg["primary"] = CLAWBOX_VISION_MODEL_REF
         changed = True
 
 # Set by the image-generation migration below, on the one path where it decides

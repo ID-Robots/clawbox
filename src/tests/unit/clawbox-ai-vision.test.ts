@@ -70,6 +70,10 @@ describe("isClawboxAiVisionId", () => {
     expect(isClawboxAiVisionId(CLAWBOX_AI_LEGACY_VISION_MODEL_ID)).toBe(true);
     expect(isClawboxAiVisionId(`deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}`)).toBe(true);
     expect(isClawboxAiVisionId("google/gemini-2.5-flash")).toBe(false);
+    // An owner routing one of the same model NAMES through their own account
+    // is their configuration, not our migration target.
+    expect(isClawboxAiVisionId(`openai/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}`)).toBe(false);
+    expect(isClawboxAiVisionId(`openai/${CLAWBOX_AI_VISION_MODEL_ID}`)).toBe(false);
     expect(isClawboxAiVisionId("")).toBe(false);
   });
 });

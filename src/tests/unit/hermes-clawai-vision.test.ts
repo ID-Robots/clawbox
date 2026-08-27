@@ -35,7 +35,10 @@ vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
 // (`clawbox-ai-vision.test.ts`); here it answers "preferred allowed" unless a
 // test says otherwise, so no unit test touches the network.
 const resolveVisionMock = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/clawbox-ai-vision", () => ({ resolveVisionModelId: resolveVisionMock }));
+vi.mock("@/lib/clawbox-ai-vision", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/clawbox-ai-vision")>()),
+  resolveVisionModelId: resolveVisionMock,
+}));
 
 import {
   CLAWAI_PROVIDER,
@@ -69,6 +72,17 @@ describe("pointing Hermes at ClawBox AI", () => {
   it("names a model that can see, so an attached picture is looked at", async () => {
     await applyClawaiToHermes("claw_token_abc", "flash");
     expect(sets()).toContain(`auxiliary.vision.provider=${CLAWAI_PROVIDER}`);
+    expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
+  });
+
+  it("keeps an already-upgraded box on the DeepSeek id when the probe cannot answer", async () => {
+    resolveVisionMock.mockResolvedValue({ id: "gpt-5.6-luna", verified: false, reason: "probe-failed" });
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[1] === "get" && args[2] === "auxiliary.vision.model"
+        ? { code: 0, stdout: `${CLAWBOX_AI_VISION_MODEL_ID}\n`, stderr: "" }
+        : { code: 0, stdout: "", stderr: "" });
+    await applyClawaiToHermes("claw_token_abc", "flash");
+    // A bad network moment must not downgrade a box the proxy already upgraded.
     expect(sets()).toContain(`auxiliary.vision.model=${CLAWBOX_AI_VISION_MODEL_ID}`);
   });
 

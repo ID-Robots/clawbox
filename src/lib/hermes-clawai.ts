@@ -17,7 +17,7 @@ import {
   CLAWBOX_AI_VISION_MODEL_ID,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
-import { resolveVisionModelId } from "@/lib/clawbox-ai-vision";
+import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 
 // Applying ClawBox AI to a HERMES device, in one place.
 //
@@ -78,7 +78,15 @@ export async function applyClawaiToHermes(
   const couldDrawBefore = await hermesAgentDrawsImages();
 
   const vision = await resolveVisionModelId({ token: trimmed });
-  const visionModelId = vision.id;
+  let visionModelId = vision.id;
+  if (vision.reason === "probe-failed") {
+    // The QUESTION failed — not a refusal. If the box already runs one of
+    // OUR vision ids, keep it: a bad network moment must not downgrade a
+    // box the proxy already upgraded.
+    const current = await runHermesCli(["config", "get", "auxiliary.vision.model"], { timeoutMs: 15_000 });
+    const currentId = current.code === 0 ? (current.stdout ?? "").trim() : "";
+    if (currentId && isClawboxAiVisionId(currentId)) visionModelId = currentId;
+  }
   console.log(`[Hermes ClawAI] Vision model resolved to ${visionModelId} (${vision.reason})`);
 
   const steps: string[][] = [

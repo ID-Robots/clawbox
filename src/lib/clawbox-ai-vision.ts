@@ -24,6 +24,7 @@
  */
 import {
   CLAWBOX_AI_LEGACY_VISION_MODEL_ID,
+  CLAWBOX_AI_PROVIDER,
   CLAWBOX_AI_VISION_MODEL_ID,
 } from "@/lib/clawbox-ai-models";
 
@@ -74,8 +75,18 @@ export async function resolveVisionModelId(
   }
 }
 
-/** Is `ref`/`id` one of OUR vision ids — ours to move — rather than an owner's choice? */
+/**
+ * Is `ref`/`id` one of OUR vision ids — ours to move — rather than an owner's
+ * choice? Bare ids match, and qualified refs only under OUR provider: an
+ * owner routing `openai/gpt-5.6-luna` through their own account is their
+ * configuration, not our migration target.
+ */
 export function isClawboxAiVisionId(value: string): boolean {
-  const bare = value.replace(/^[a-z0-9-]+\//i, "").trim();
+  const trimmed = value.trim();
+  const bare = trimmed.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
+    ? trimmed.slice(CLAWBOX_AI_PROVIDER.length + 1)
+    : trimmed;
+  if (bare !== trimmed && bare.includes("/")) return false;
+  if (trimmed.includes("/") && !trimmed.startsWith(`${CLAWBOX_AI_PROVIDER}/`)) return false;
   return bare === CLAWBOX_AI_VISION_MODEL_ID || bare === CLAWBOX_AI_LEGACY_VISION_MODEL_ID;
 }

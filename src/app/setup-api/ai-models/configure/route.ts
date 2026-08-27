@@ -774,10 +774,21 @@ async function configureClawboxAi(
   }
 
   // Which vision id may this box name? The DeepSeek model when the proxy
-  // serves it, the previous one until then — asked live, never assumed.
+  // serves it, the previous one until then — asked live, never assumed. When
+  // the QUESTION failed (timeout, 5xx — not a refusal), keep whichever of
+  // OUR ids the box already runs: a bad network moment must not downgrade a
+  // box the proxy already upgraded.
   const vision = await resolveVisionModelId({ token: clawboxAiToken });
-  const visionRef = clawboxAiVisionModelRef(vision.id);
-  console.log(`[AI Config] Vision model resolved to ${vision.id} (${vision.reason})`);
+  const currentImageModel = snapshot?.agents?.defaults?.imageModel as { primary?: unknown; fallbacks?: unknown } | undefined;
+  const currentPrimary = typeof currentImageModel?.primary === "string" ? currentImageModel.primary.trim() : "";
+  const currentBareId = currentPrimary.startsWith(`${CLAWBOX_AI_PROVIDER}/`)
+    ? currentPrimary.slice(CLAWBOX_AI_PROVIDER.length + 1)
+    : currentPrimary;
+  const visionId = vision.reason === "probe-failed" && currentPrimary && isClawboxAiVisionId(currentPrimary)
+    ? currentBareId
+    : vision.id;
+  const visionRef = clawboxAiVisionModelRef(visionId);
+  console.log(`[AI Config] Vision model resolved to ${visionId} (${vision.reason})`);
 
   const requiredOps: OpenclawConfigSetArgs[] = [
     [
@@ -787,7 +798,7 @@ async function configureClawboxAi(
     ],
     [
       `models.providers.${CLAWBOX_AI_PROVIDER}`,
-      buildClawboxAiProviderDefinition(clawboxAiToken, vision.id),
+      buildClawboxAiProviderDefinition(clawboxAiToken, visionId),
       "--json",
     ],
     ...(extra?.requiredOps ?? []),
@@ -808,23 +819,22 @@ async function configureClawboxAi(
   // for some other provider, and a slot the owner filled is their choice.
   // Non-fatal for the same reason too.
   const visionOps: OpenclawConfigSetArgs[] = [];
-  const imageModelCfg = snapshot?.agents?.defaults?.imageModel as { primary?: unknown } | undefined;
-  const imageModelPrimary = typeof imageModelCfg?.primary === "string" ? imageModelCfg.primary.trim() : "";
   if (!hasToolModelConfig(snapshot?.agents?.defaults?.imageModel)) {
     visionOps.push([
       "agents.defaults.imageModel",
       JSON.stringify({ primary: visionRef }),
       "--json",
     ]);
-  } else if (imageModelPrimary && isClawboxAiVisionId(imageModelPrimary) && imageModelPrimary !== visionRef) {
+  } else if (currentPrimary && isClawboxAiVisionId(currentPrimary) && currentPrimary !== visionRef) {
     // The slot names one of OUR vision ids — the previous default is ours to
     // move to the resolved one (both directions: the DeepSeek upgrade when
     // the proxy starts serving it, and the fall-back if it stops). A value
-    // the owner set themselves never matches and is never touched.
-    console.log(`[AI Config] Moving agents.defaults.imageModel ${imageModelPrimary} -> ${visionRef}`);
+    // the owner set themselves never matches and is never touched — and the
+    // move changes ONLY `primary`: fallbacks the owner added ride along.
+    console.log(`[AI Config] Moving agents.defaults.imageModel ${currentPrimary} -> ${visionRef}`);
     visionOps.push([
       "agents.defaults.imageModel",
-      JSON.stringify({ primary: visionRef }),
+      JSON.stringify({ ...(currentImageModel as object), primary: visionRef }),
       "--json",
     ]);
   } else {

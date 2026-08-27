@@ -276,6 +276,16 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI vision migration",
     expect(imageModel(cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL });
   });
 
+  it("a managed move changes only primary — owner fallbacks ride along", () => {
+    const { cfg } = migrate(pairedBox({
+      models: [
+        { id: CLAWBOX_AI_LEGACY_VISION_MODEL_ID, name: CLAWBOX_AI_VISION_MODEL_LABEL, input: ["text", "image"], maxTokens: 128000 },
+      ],
+      defaults: { imageModel: { primary: `deepseek/${CLAWBOX_AI_LEGACY_VISION_MODEL_ID}`, fallbacks: ["google/gemini-2.5-flash"] } },
+    }));
+    expect(imageModel(cfg)).toEqual({ primary: CLAWBOX_AI_VISION_MODEL, fallbacks: ["google/gemini-2.5-flash"] });
+  });
+
   it("moves only OUR slot value — an owner's model is never retargeted", () => {
     const { cfg } = migrate(pairedBox({
       defaults: { imageModel: { primary: "google/gemini-2.5-flash" } },
