@@ -473,6 +473,7 @@ export const zh: Record<string, string> = {
   "codingAgent.tokensWord": "词元",
   "codingAgent.updated": "更新于",
   "codingAgent.githubOff": "未连接",
+  "codingAgent.githubUnreachable": "无法连接 GitHub",
   "codingAgent.githubConnect": "连接",
   "codingAgent.githubReconnect": "更改",
   "codingAgent.githubOut": "退出登录",

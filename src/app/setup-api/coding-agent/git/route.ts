@@ -46,7 +46,15 @@ export async function DELETE(request: Request) {
     );
   }
   const out = await disconnectGitHub();
-  if (!out.ok) return NextResponse.json({ error: out.detail ?? "Could not disconnect" }, { status: 500 });
+  if (!out.ok) {
+    // A dead uplink is not a broken box: 503 says "transient, try again",
+    // which is what the owner should do, and the detail no longer claims gh
+    // is missing when the logout simply timed out.
+    return NextResponse.json(
+      { error: out.detail, kind: out.kind },
+      { status: out.kind === "gh_unreachable" ? 503 : 500 },
+    );
+  }
   console.error("[coding-agent] GitHub disconnected by the owner");
   return NextResponse.json(await githubStatus());
 }
@@ -81,7 +89,13 @@ export async function POST(request: Request) {
     });
     const outcome = await backupToGitHub(directory);
     if (!outcome.pushed) {
-      return NextResponse.json({ error: outcome.detail ?? outcome.reason, kind: outcome.reason }, { status: 409 });
+      // 409 means "the request cannot be satisfied as it stands" — true of a
+      // folder with no commits, false of a network that is merely down. That
+      // one gets 503, so nothing tells the owner to install a gh they have.
+      return NextResponse.json(
+        { error: outcome.detail ?? outcome.reason, kind: outcome.reason },
+        { status: outcome.reason === "gh_unreachable" ? 503 : 409 },
+      );
     }
     console.error(`[coding-agent] backed up ${directory} to ${outcome.repo}${outcome.created ? " (new repo)" : ""}`);
     return NextResponse.json(outcome);

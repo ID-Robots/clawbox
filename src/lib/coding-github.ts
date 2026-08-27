@@ -34,6 +34,23 @@ const PUSH_TIMEOUT_MS = 180_000;
  *  Terminal app, so both say the same thing. */
 export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https";
 
+/**
+ * Why the probe could not answer. Absent when it did — including when the
+ * honest answer is "installed, nobody has logged in yet", which is a state,
+ * not a failure.
+ */
+export type GitHubStatusReason =
+  /** `gh` could not be started at all. The binary really is missing. */
+  | "not_installed"
+  /** `gh` ran but never finished. `gh auth status` validates the stored token
+   *  against api.github.com, so a dead uplink or a captive portal hangs it
+   *  until the timer kills it. Says nothing about whether gh is installed. */
+  | "unreachable"
+  /** The file is there but would not execute — EACCES on a binary somebody
+   *  chmod'ed, most often. Installing it again fixes nothing; the remedy is
+   *  permissions, so this must not be answered with "not installed". */
+  | "not_runnable";
+
 export interface GitHubStatus {
   /** Whether gh is installed at all. */
   installed: boolean;
@@ -43,6 +60,8 @@ export interface GitHubStatus {
   login: string | null;
   /** The command that connects, for the UI to offer. */
   loginCommand: string;
+  /** Why the probe failed, when it did. Undefined on an answer we trust. */
+  reason?: GitHubStatusReason;
 }
 
 export type BackupOutcome =
@@ -52,6 +71,9 @@ export type BackupOutcome =
 export type BackupFailure =
   /** gh is not installed on this device. */
   | "no_gh"
+  /** gh is installed but could not reach GitHub — a transient network fault,
+   *  not a missing dependency. Worth retrying; nothing to install. */
+  | "gh_unreachable"
   /** Nobody has connected a GitHub account yet. */
   | "not_connected"
   /** The folder has no commits, so there is nothing to back up. */
@@ -62,7 +84,32 @@ export type BackupFailure =
   /** git or gh refused; detail carries what it said. */
   | "failed";
 
-interface Result { code: number | null; stdout: string; stderr: string }
+export type DisconnectOutcome =
+  | { ok: true; detail?: undefined; kind?: undefined }
+  /** `kind` so the route can answer a network fault as one (503, retry) rather
+   *  than as a broken box (500). */
+  | { ok: false; kind: "no_gh" | "gh_unreachable" | "failed"; detail: string };
+
+interface Result {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  /** The signal that killed it, when one did. A signalled child closes with a
+   *  null `code` — the SAME null a failed spawn gives — so the code alone
+   *  cannot tell "killed" from "never started". This is what tells them
+   *  apart, and getting it wrong reported a network outage as a missing gh. */
+  signal: NodeJS.Signals | null;
+  /** True when OUR timer killed it: the command outlived its budget. */
+  timedOut: boolean;
+  /** True when the binary could not be started at all. Necessary evidence
+   *  that the command is unusable, but NOT sufficient to call it absent —
+   *  see startError. */
+  startFailed: boolean;
+  /** The errno of a failed spawn: ENOENT means genuinely missing, EACCES
+   *  means present but not executable. Collapsing the two would send someone
+   *  to reinstall a binary that is sitting right there. */
+  startError: string | null;
+}
 
 /**
  * Run a command with a deliberate, minimal environment.
@@ -87,13 +134,55 @@ function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
     });
     let stdout = "";
     let stderr = "";
-    const timer = setTimeout(() => child.kill("SIGKILL"), opts.timeoutMs ?? GH_TIMEOUT_MS);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, opts.timeoutMs ?? GH_TIMEOUT_MS);
     timer.unref();
     child.stdout.on("data", (c) => { stdout += String(c); });
     child.stderr.on("data", (c) => { stderr += String(c); });
-    child.on("error", () => { clearTimeout(timer); resolve({ code: null, stdout, stderr: "could not start" }); });
-    child.on("close", (code) => { clearTimeout(timer); resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() }); });
+    // `error` is not proof the binary is missing. It also fires on a child
+    // that spawned perfectly well and whose kill() could not deliver its
+    // signal — so treating every error as "not installed" would reintroduce
+    // the exact false-failure this file exists to prevent, on the timeout path
+    // of all places. `spawn` fires only when the process really started, so it
+    // is what separates "never ran" from "ran and then something went wrong".
+    let spawned = false;
+    child.on("spawn", () => { spawned = true; });
+    // A failed spawn emits `error` and THEN `close` with a null code; the
+    // first resolve wins, so this is the one place startFailed is set.
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      resolve({
+        code: null,
+        stdout,
+        stderr: spawned ? stderr.trim() : "could not start",
+        signal: null,
+        timedOut,
+        startFailed: !spawned,
+        startError: spawned ? null : (err?.code ?? null),
+      });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, stdout: stdout.trim(), stderr: stderr.trim(), signal, timedOut, startFailed: false, startError: null });
+    });
   });
+}
+
+/** True when the command ran but produced no exit code — it was killed, by our
+ *  own timer or by something else. It started, so the binary exists. */
+function wasKilled(r: Result): boolean {
+  return !r.startFailed && r.code === null;
+}
+
+/**
+ * What to tell the owner about a call that was cut short. Never mentions
+ * installing anything: the binary demonstrably ran. Never blank either — a
+ * SIGKILLed child writes no stderr, so the old `(stderr || stdout)` detail for
+ * a killed call was the empty string.
+ */
+function killedDetail(r: Result, what: string, advice = "Check this ClawBox's network connection and try again."): string {
+  const how = r.timedOut ? "timed out" : `was stopped before it finished${r.signal ? ` (${r.signal})` : ""}`;
+  return `${what} ${how}. ${advice}`;
 }
 
 /**
@@ -108,10 +197,33 @@ export function parseLogin(output: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * Probed fresh on every call, deliberately. `unreachable` is a statement about
+ * this moment's network, not a property of the box: caching one would outlive
+ * the outage that produced it and go on refusing backups after the uplink came
+ * back.
+ */
 export async function githubStatus(): Promise<GitHubStatus> {
   const r = await run("gh", ["auth", "status", "--hostname", "github.com"]);
-  if (r.code === null) {
-    return { installed: false, connected: false, login: null, loginCommand: GH_LOGIN_COMMAND };
+  if (r.startFailed) {
+    // ENOENT is the only errno that means "there is no such file". Anything
+    // else — EACCES above all — is a binary that EXISTS and would not run, and
+    // answering that with "not installed" hands over the one remedy that
+    // cannot work.
+    const missing = r.startError === "ENOENT" || r.startError === null;
+    return {
+      installed: !missing,
+      connected: false,
+      login: null,
+      loginCommand: GH_LOGIN_COMMAND,
+      reason: missing ? "not_installed" : "not_runnable",
+    };
+  }
+  if (wasKilled(r)) {
+    // gh RAN — so it is installed. It just never got an answer out of
+    // api.github.com. Reporting this as "not installed" sent the owner off to
+    // install software that was already on the box.
+    return { installed: true, connected: false, login: null, loginCommand: GH_LOGIN_COMMAND, reason: "unreachable" };
   }
   const login = parseLogin(`${r.stderr}\n${r.stdout}`);
   return {
@@ -131,11 +243,29 @@ export async function githubStatus(): Promise<GitHubStatus> {
  *
  * Any repository already pushed stays on GitHub, and any remote already set
  * on a folder stays set — this removes the ability to push, not the history.
+ *
+ * A logout that was cut short says so, and says nothing more. gh may well have
+ * dropped its local credential before it hung, so neither "you are still
+ * connected" nor "nothing changed" would be a fact — the owner is pointed back
+ * at the status, which re-probes.
  */
-export async function disconnectGitHub(): Promise<{ ok: boolean; detail?: string }> {
+export async function disconnectGitHub(): Promise<DisconnectOutcome> {
   const r = await run("gh", ["auth", "logout", "--hostname", "github.com"]);
-  if (r.code === null) return { ok: false, detail: "gh is not installed on this ClawBox." };
-  if (r.code !== 0) return { ok: false, detail: (r.stderr || r.stdout).slice(0, 300) };
+  if (r.startFailed) {
+    // Present but unrunnable is not missing, and must not be answered with an
+    // install: the file is there, its permissions are not.
+    return r.startError === "ENOENT" || r.startError === null
+      ? { ok: false, kind: "no_gh", detail: "gh is not installed on this ClawBox." }
+      : { ok: false, kind: "failed", detail: `The GitHub CLI is on this ClawBox but would not start (${r.startError}). Check its permissions.` };
+  }
+  if (wasKilled(r)) {
+    return {
+      ok: false,
+      kind: "gh_unreachable",
+      detail: `${killedDetail(r, "Signing out of GitHub")} Then read the connection again.`,
+    };
+  }
+  if (r.code !== 0) return { ok: false, kind: "failed", detail: (r.stderr || r.stdout).slice(0, 300) };
   return { ok: true };
 }
 
@@ -154,23 +284,67 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   const dir = path.resolve(directory);
 
   const status = await githubStatus();
+  if (status.reason === "not_runnable") {
+    // "failed" rather than no_gh, so the route never tells the owner to
+    // install a gh that is already sitting on the box.
+    return {
+      pushed: false,
+      reason: "failed",
+      detail: "The GitHub CLI is on this ClawBox but would not start. Check its permissions.",
+    };
+  }
+  if (status.reason === "unreachable") {
+    // Transient, and nothing to install. Kept distinct from no_gh so the route
+    // does not answer a network outage with "install the GitHub CLI".
+    return {
+      pushed: false,
+      reason: "gh_unreachable",
+      detail: "Could not reach GitHub from this ClawBox. Check the network connection and try again.",
+    };
+  }
   if (!status.installed) return { pushed: false, reason: "no_gh" };
   if (!status.connected) return { pushed: false, reason: "not_connected" };
 
   // Its OWN repository or nothing — the same rule as the per-run commit, and
   // for the same reason: a code project sits inside the ClawBox checkout.
   const top = await run("git", ["-C", dir, "rev-parse", "--show-toplevel"]);
+  // A killed probe is not evidence about the folder. Reading it as one would
+  // tell the owner their repository is not a repository.
+  if (wasKilled(top)) {
+    return { pushed: false, reason: "failed", detail: killedDetail(top, "Reading the folder's git repository", "Try again.") };
+  }
   if (top.code !== 0 || path.resolve(top.stdout || "") !== dir) {
     return { pushed: false, reason: "not_a_repo", detail: "This folder is not its own git repository." };
   }
 
   const head = await run("git", ["-C", dir, "rev-parse", "--verify", "HEAD"]);
+  // "No commits yet" is a claim about the folder. A killed probe made no such
+  // finding, and saying it would tell an owner with a full history that their
+  // work is empty.
+  if (wasKilled(head)) {
+    return { pushed: false, reason: "failed", detail: killedDetail(head, "Reading the folder's commits", "Try again.") };
+  }
   if (head.code !== 0) return { pushed: false, reason: "nothing_to_push", detail: "The folder has no commits yet." };
 
   const branchOut = await run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
+  // The "main" fallback is a guess, and the push below turns it into
+  // `--set-upstream origin main`. Fine when git actually answered and simply
+  // had no name to give; wrong when the probe was killed, which would push a
+  // `develop` checkout to `main` and bind it there over a transient fault.
+  if (wasKilled(branchOut)) {
+    return { pushed: false, reason: "failed", detail: killedDetail(branchOut, "Reading the folder's branch", "Try again.") };
+  }
   const branch = branchOut.code === 0 && branchOut.stdout ? branchOut.stdout : "main";
 
   const hasRemote = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
+  // The consequential one. A non-zero code here means "no remote yet", and the
+  // branch below acts on it by CREATING a repository on GitHub. A killed probe
+  // returns the same null code, so reading it as "no remote" would create a
+  // second repository for a folder that already has one — an irreversible
+  // guess made from a transient fault.
+  if (wasKilled(hasRemote)) {
+    return { pushed: false, reason: "failed", detail: killedDetail(hasRemote, "Reading the folder's git remote", "Try again.") };
+  }
   let created = false;
   let repo = hasRemote.code === 0 ? hasRemote.stdout : "";
 
@@ -184,7 +358,13 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
       { cwd: dir, timeoutMs: PUSH_TIMEOUT_MS },
     );
     if (create.code !== 0) {
-      return { pushed: false, reason: "failed", detail: (create.stderr || create.stdout).slice(0, 400) };
+      return {
+        pushed: false,
+        reason: "failed",
+        detail: wasKilled(create)
+          ? killedDetail(create, "Creating the repository on GitHub")
+          : (create.stderr || create.stdout).slice(0, 400),
+      };
     }
     created = true;
     const url = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
@@ -198,7 +378,13 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
     { timeoutMs: PUSH_TIMEOUT_MS },
   );
   if (push.code !== 0) {
-    return { pushed: false, reason: "failed", detail: (push.stderr || push.stdout).slice(0, 400) };
+    return {
+      pushed: false,
+      reason: "failed",
+      detail: wasKilled(push)
+        ? killedDetail(push, "Pushing to GitHub")
+        : (push.stderr || push.stdout).slice(0, 400),
+    };
   }
   return { pushed: true, repo, created, branch };
 }

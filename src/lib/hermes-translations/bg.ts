@@ -449,6 +449,7 @@ export const bg: Record<string, string> = {
   "codingAgent.tokensWord": "токена",
   "codingAgent.updated": "обновено",
   "codingAgent.githubOff": "не е свързан",
+  "codingAgent.githubUnreachable": "GitHub е недостъпен",
   "codingAgent.githubConnect": "Свържи",
   "codingAgent.githubReconnect": "Промени",
   "codingAgent.githubOut": "Изход",
