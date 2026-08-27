@@ -114,6 +114,54 @@ describe("everything that will be sent is on the screen", () => {
     expect(screen.getByTestId("chat-email-batch-body")).toHaveTextContent(LONG_TAIL.trim());
   });
 
+  it("clamps a long body by character, never through the middle of one", async () => {
+    // Every one of these is a surrogate PAIR: "\u{1F642}".length is 2, so a
+    // clamp counting UTF-16 units would cut one in half and render a lone
+    // surrogate — a character the draft does not contain — and would claim
+    // twice as much was hidden as actually is.
+    const emoji = "\u{1F642}";
+    const body = emoji.repeat(700);
+    await mount(card({ drafts: [draft(1, { body })] }));
+
+    const shown = screen.getByTestId("chat-email-batch-body").textContent ?? "";
+    expect(Array.from(shown)).toHaveLength(600);
+    expect(shown).not.toContain("�");
+    // 700 characters, 600 shown, so 100 are folded away — not 800, which is
+    // what counting UTF-16 units would have reported.
+    expect(screen.getByTestId("chat-email-batch-expand")).toHaveTextContent("100");
+
+    fireEvent.click(screen.getByTestId("chat-email-batch-expand"));
+    expect(Array.from(screen.getByTestId("chat-email-batch-body").textContent ?? "")).toHaveLength(700);
+  });
+
+  it("shows a body of exactly the clamp length whole, with no control at all", async () => {
+    await mount(card({ drafts: [draft(1, { body: "x".repeat(600) })] }));
+    expect(screen.queryByTestId("chat-email-batch-expand")).not.toBeInTheDocument();
+  });
+
+  it("clamps a long body by code point, so no character is cut in half", async () => {
+    // `slice` counts UTF-16 units. A clamp landing between the halves of a
+    // surrogate pair renders U+FFFD in the middle of the owner's own message —
+    // text that is not what the draft says, on the one card whose whole job is
+    // showing exactly what will be sent. The folded-away count has the same
+    // bug: "🙂".length is 2, so an emoji body would overstate what is hidden.
+    const emoji = "🙂";
+    const total = 700; // code points, comfortably past the 600 clamp
+    await mount(card({ drafts: [draft(1, { body: emoji.repeat(total) })] }));
+
+    const body = await screen.findByTestId("chat-email-batch-body");
+    expect(body.textContent).not.toContain("�");
+    expect(Array.from(body.textContent ?? "")).toHaveLength(600);
+
+    // 700 code points shown 600 of them leaves 100 — not 800, which is what
+    // counting UTF-16 units would have claimed.
+    const toggle = screen.getByTestId("chat-email-batch-expand");
+    expect(toggle).toHaveTextContent("100");
+
+    fireEvent.click(toggle);
+    expect(Array.from(screen.getByTestId("chat-email-batch-body").textContent ?? "")).toHaveLength(total);
+  });
+
   it("never reduces the batch to a count", async () => {
     // The summary says how many, and the rows still say what. A card that only
     // said "send 3 emails?" would keep the click and throw the protection away.

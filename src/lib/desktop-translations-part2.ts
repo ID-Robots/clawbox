@@ -573,7 +573,7 @@ export const it: Record<string, string> = {
   "chat.emailBatch.showFull": "Mostra tutto il messaggio ({count} caratteri in più)",
   "chat.emailBatch.showLess": "Mostra meno",
   "chat.emailBatch.sendOne": "Invialo",
-  "chat.emailBatch.sendAll": "Invia tutti e {count}",
+  "chat.emailBatch.sendAll": "Invia tutti ({count})",
   "chat.emailBatch.sending": "Invio in corso…",
   "chat.emailBatch.cancel": "Non inviare nulla",
   "chat.emailBatch.noneSelected": "Nessun messaggio selezionato — non verrà inviato nulla.",

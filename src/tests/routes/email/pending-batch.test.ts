@@ -339,19 +339,27 @@ describe("what actually happened, per draft", () => {
 
 describe("the batch is frozen at the moment it was shown", () => {
   it("does not send a draft the agent queued while the owner was reading", async () => {
-    // Drawn from two...
+    // The queue holds exactly what the card was drawn from: two drafts. Seeded
+    // here rather than left to the shared fixture, because a third that was
+    // already waiting before the card existed would prove something weaker —
+    // that unnamed drafts are not claimed — instead of the thing that matters.
+    const queue = liveStore([DRAFTS[0], DRAFTS[1]]);
     const shown = entriesFor([DRAFTS[0], DRAFTS[1]]);
-    // ...and a third arrives during the pause the card introduces. This is the
-    // #492 shape: state moving underneath a human-length dialog.
-    liveStore([...DRAFTS]);
+
+    // ...and now, AFTER the owner has read what is on screen and while he is
+    // deciding, the agent queues a third. This is the #492 shape: device state
+    // moving underneath a human-length dialog.
+    queue.set(DRAFTS[2].id, DRAFTS[2]);
+    expect(queue.size).toBe(3);
 
     const res = await approve(shown, { cookie: ownerCookie() });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ sent: 2, failed: 0 });
     expect(mockSend).toHaveBeenCalledTimes(2);
     expect(mockSend.mock.calls.map((call) => call[1].subject)).toEqual(["Subject 1", "Subject 2"]);
-    // The late one was never even looked at.
+    // The late one was never even looked at, and is still waiting afterwards.
     expect(mockClaimIfUnchanged.mock.calls.map((call) => call[0])).not.toContain("draft-3");
+    expect(queue.has("draft-3")).toBe(true);
   });
 
   it("refuses a draft whose text changed after it was shown", async () => {

@@ -105,7 +105,7 @@ async function push(chunk: string | null) {
  * own MCP tool over, and a matcher that only knew the bare name would never
  * fire on a real box.
  */
-async function turnThatSentMail(toolName = "clawbox_email_send") {
+async function turnThatSentMail(toolName = "clawbox_email_send"): Promise<HTMLElement> {
   const box = installBoxWithMailQueue();
   const textarea = await mountHermesChat(box);
   await send(textarea, "Email the team about Friday");
@@ -113,6 +113,10 @@ async function turnThatSentMail(toolName = "clawbox_email_send") {
   await push(frame("tool", { kind: "tool", phase: "result", id: "t1", name: toolName, status: "ok" }));
   await push(frame("done", { text: "I have drafted those." }));
   await push(null);
+  // Handed back so a second turn does not have to go looking for the composer:
+  // `getByPlaceholderText(/./)` matched anything with a placeholder at all, and
+  // would start throwing the day this surface grew a second one.
+  return textarea;
 }
 
 beforeEach(() => {
@@ -275,13 +279,12 @@ describe("a turn that queued mail", () => {
   });
 
   it("does not draw a second card for drafts already on screen", async () => {
-    await turnThatSentMail();
+    const textarea = await turnThatSentMail();
     await waitFor(() => expect(screen.getByTestId("chat-email-batch")).toBeTruthy());
 
     // A second turn sends more mail; the queue still holds the first three plus
     // one new one. Only the new one is a fresh decision.
     queued = [...queued, pendingDraft(9, { subject: "A later message" })];
-    const textarea = screen.getByPlaceholderText(/./) as HTMLElement;
     await send(textarea, "And one more");
     await push(frame("tool", { kind: "tool", phase: "result", id: "t2", name: "clawbox_email_send", status: "ok" }));
     await push(frame("done", { text: "Done." }));

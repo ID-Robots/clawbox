@@ -51,6 +51,8 @@ const OK_FG = "#86efac";
  * says exactly how many characters are still folded away rather than a vague
  * "show more". Anything at or under this is rendered whole with no control at
  * all, which is the common case.
+ *
+ * COUNTED IN CODE POINTS, not in UTF-16 units — see `bodyChars` below.
  */
 export const BODY_CLAMP_CHARS = 600;
 
@@ -409,9 +411,21 @@ function EmailBatchRow({
   const [expanded, setExpanded] = useState(false);
   const checkId = `${idPrefix}-inc${index}`;
   const bodyId = `${idPrefix}-body${index}`;
-  const long = draft.body.length > BODY_CLAMP_CHARS;
-  const shown = long && !expanded ? draft.body.slice(0, BODY_CLAMP_CHARS) : draft.body;
-  const hidden = draft.body.length - BODY_CLAMP_CHARS;
+  /**
+   * The body as CODE POINTS, because `String.prototype.slice` counts UTF-16
+   * units and would cut an astral character in half.
+   *
+   * That is not a cosmetic worry on this card. The owner is being asked to
+   * approve the exact characters that will be sent, and a clamp landing between
+   * the two halves of a surrogate pair renders a replacement character in the
+   * middle of his own message — text that is not what the draft says. The
+   * hidden count is wrong the same way: `"🙂".length` is 2, so a body of emoji
+   * would claim twice as much was folded away as actually is.
+   */
+  const bodyChars = useMemo(() => Array.from(draft.body), [draft.body]);
+  const long = bodyChars.length > BODY_CLAMP_CHARS;
+  const shown = long && !expanded ? bodyChars.slice(0, BODY_CLAMP_CHARS).join("") : draft.body;
+  const hidden = bodyChars.length - BODY_CLAMP_CHARS;
   const recipients = draft.to.join(", ");
 
   return (
