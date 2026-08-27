@@ -16,12 +16,36 @@ one for you.
 
 Two tabs:
 
-- **Installed** — everything on the device right now, with a category filter and
-  counts. This opens first.
-- **Browse** — the full catalogue, with search, source filters and paging.
+- **Installed** — everything on the device right now, with counts. This opens
+  first.
+- **Browse** — the full catalogue, with search and paging.
 
 Each card opens a detail view with the skill's own documentation, where it came
 from, and what it needs.
+
+### Filters
+
+Both tabs carry the same filter rail down the left, with a live count beside
+every value. Tick more than one value in a group to widen (Official **or**
+Trusted); tick values in two groups to narrow (Trusted **and** from GitHub).
+What you have picked appears as chips above the results, each removable on its
+own, with **Clear all** beside them. On a narrow window the rail collapses into
+a **Filters** button.
+
+| Group | Where it comes from |
+| --- | --- |
+| **Trust** | The publisher tier the registry recorded: Official, Trusted, Community, Unknown. |
+| **Safety** | The installer's own security scan. Only on **Installed** — a skill is scanned as it installs, so the catalogue has no verdict to filter on. |
+| **Category** | What the skill says it is. Only a small fraction of the catalogue declares one, so the group says how many of the current results it can speak for. |
+| **Source** | Which registry the skill came from. |
+| **Publisher** | The GitHub org — offered while GitHub is one of the selected sources. |
+
+<Note>
+A count is what ticking that box would reach from where you are standing: it is
+measured with your other groups still applied. While the device is still
+building its catalogue the counts can only cover the results on screen, and the
+rail says so.
+</Note>
 
 <Note>
 The first time you open **Browse** on a new device, ClawBox builds the local
@@ -33,9 +57,9 @@ the device — they are fast, and they work with no internet connection.
 ### Where skills come from
 
 The catalogue aggregates several public registries. The store shows the source
-on every result and lets you filter by it — among them the skills bundled with
-Hermes itself, GitHub, ClawHub, LobeHub, NVIDIA, OpenAI, Anthropic and Hugging
-Face.
+on every result and the rail lets you filter by it — among them the skills
+bundled with Hermes itself, GitHub, ClawHub, LobeHub, NVIDIA, OpenAI, Anthropic
+and Hugging Face.
 
 A few things are worth knowing before you install:
 
