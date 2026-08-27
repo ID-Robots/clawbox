@@ -1421,12 +1421,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               for (let i = prev.length - 1; pushedText && i > latestUser; i--) {
                 const candidate = prev[i]
                 // The STORED text still carries its `EMAIL:` lines — they are
-                // lifted at render, not at write — while `pushedText` has had
+                // lifted at render, not at write — and a caption can carry a
+                // `MEDIA:` line too, while `pushedText` has had
                 // them taken out. Compare like with like, or a turn that named
                 // messages never matches its own spoken supplement and the
                 // audio is dropped.
                 if (candidate.role !== 'assistant') continue
-                if (splitEmailRefs(candidate.text).text !== pushedText) continue
+                if (splitEmailRefs(splitMediaDirectives(candidate.text).text).text !== pushedText) continue
                 if (candidate.audio?.length) return prev // duplicate push
                 const next = [...prev]
                 next[i] = { ...candidate, audio: pushedAudio }
@@ -4296,7 +4297,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           reason as the image preview below, and brings its own dialog
           behaviour — focus, Tab trap, Escape — from the shared hook. */}
       {openEmailUid !== null && (
-        <EmailFullView uid={openEmailUid} onClose={closeEmail} t={t} />
+        <EmailFullView key={openEmailUid} uid={openEmailUid} onClose={closeEmail} t={t} />
       )}
 
       {/* Full-size image preview.

@@ -294,6 +294,35 @@ export function EmailCard({
 
 // ── The panel ────────────────────────────────────────────────────────────────
 
+/**
+ * Ask the device for one message, and say what happened.
+ *
+ * Deliberately state-free: it returns a value rather than setting anything, so
+ * its `catch` cannot run a `setState` in the same tick as the effect that
+ * called it.
+ *
+ * A failure returns `null` and nothing more. A mail-server error string can
+ * carry the mailbox address, and this panel is not where debugging happens.
+ */
+async function requestFullMessage(
+  uid: number,
+  images: boolean,
+  signal?: AbortSignal,
+): Promise<FullMessage | 'aborted' | null> {
+  try {
+    const query = `uid=${encodeURIComponent(String(uid))}&view=full${images ? '&images=1' : ''}`
+    const response = await fetch(`/setup-api/email/messages?${query}`, {
+      cache: 'no-store',
+      signal,
+    })
+    if (!response.ok) return null
+    const data = (await response.json()) as { message?: FullMessage }
+    return data.message ?? null
+  } catch (err) {
+    return (err as Error)?.name === 'AbortError' ? 'aborted' : null
+  }
+}
+
 type LoadState =
   | { phase: 'loading' }
   | { phase: 'ready'; message: FullMessage }
@@ -337,57 +366,78 @@ export function EmailFullView({
   const titleId = useId()
   const panelRef = useModalDialog<HTMLDivElement>({ onClose })
 
-  const load = useCallback(
+  /**
+   * Ask the device for the message.
+   *
+   * Sets NO state before the request. That is what keeps the mount effect below
+   * free of a synchronous `setState` — `react-hooks/set-state-in-effect` flags
+   * it as an error, and rightly: a component that renders, then immediately
+   * sets state, renders twice to show one thing. `useState` already starts at
+   * `loading`, so the first fetch has nothing to announce.
+   *
+   * The two paths that DO need to announce something — pressing "load images",
+   * and retrying after a failure — say so themselves, in their own handlers,
+   * where a user action is what caused it.
+   */
+  const fetchMessage = useCallback(
     async (images: boolean, signal?: AbortSignal) => {
-      // The reset belongs with the request that causes it, not in an effect
-      // body: `react-hooks/set-state-in-effect` is right that a component
-      // which sets state while rendering-then-effecting is one render more
-      // than it needs, and this reads better besides — one function that says
-      // "we are loading, then we are not".
-      if (images) {
-        setLoadingImages(true)
-      } else {
-        // A plain load is also the reset: consent does not survive being asked
-        // for the message again.
-        setState({ phase: 'loading' })
-        setWithImages(false)
-      }
-      try {
-        const query = `uid=${encodeURIComponent(String(uid))}&view=full${images ? '&images=1' : ''}`
-        const response = await fetch(`/setup-api/email/messages?${query}`, {
-          cache: 'no-store',
-          signal,
-        })
-        if (!response.ok) throw new Error(`status ${response.status}`)
-        const data = (await response.json()) as { message?: FullMessage }
-        if (!data.message) throw new Error('no message')
-        setState({ phase: 'ready', message: data.message })
-      } catch (err) {
-        if ((err as Error)?.name === 'AbortError') return
-        // Nothing from the failure is shown: an error string from a mail server
-        // can carry the address or the mailbox name, and this panel is not the
-        // place that debugging happens.
-        setState({ phase: 'error' })
-      } finally {
-        setLoadingImages(false)
-      }
+      const result = await requestFullMessage(uid, images, signal)
+      // Every update below happens after an await, and none of them sit in a
+      // catch or a finally — those can run in the SAME tick as the effect that
+      // started the request, which is both a wasted render and what
+      // `react-hooks/set-state-in-effect` exists to catch. The request's
+      // failure handling lives in `requestFullMessage`, which sets no state at
+      // all and simply says what happened.
+      if (result === 'aborted') return
+      setState(result ? { phase: 'ready', message: result } : { phase: 'error' })
+      setLoadingImages(false)
     },
     [uid],
   )
 
-  // `load` is stable per uid, so this runs once per message opened. The effect
-  // now carries only the abort wiring: a panel closed mid-request must not go
-  // on holding the mailbox open.
+  // One fetch per message opened.
+  //
+  // The await is INLINE rather than a call to `fetchMessage`, and that is the
+  // whole difference `react-hooks/set-state-in-effect` cares about: handed a
+  // function, the rule can only see that it sets state somewhere and has to
+  // assume the worst. Written out, the updates are plainly on the far side of
+  // an await and it is satisfied — as it should be, because a panel that set
+  // state on mount would render twice to show one thing.
+  //
+  // ChatPopup keys this component by uid, so a different message is a fresh
+  // mount and the `useState` initialisers above are its reset.
   useEffect(() => {
     const controller = new AbortController()
-    void load(false, controller.signal)
-    return () => controller.abort()
-  }, [load])
+    let live = true
+    void (async () => {
+      const result = await requestFullMessage(uid, false, controller.signal)
+      // A panel closed mid-request must not go on holding the mailbox open,
+      // nor set state on a component that is gone.
+      if (!live || result === 'aborted') return
+      setState(result ? { phase: 'ready', message: result } : { phase: 'error' })
+    })()
+    return () => {
+      live = false
+      controller.abort()
+    }
+  }, [uid])
 
   const onLoadImages = useCallback(() => {
     setWithImages(true)
-    void load(true)
-  }, [load])
+    setLoadingImages(true)
+    // A message already on screen stays there — re-fetching its pictures is no
+    // reason to take the words away. From an ERROR, though, there is nothing on
+    // screen that says anything is happening, because the blocked-image notice
+    // that `loadingImages` drives is not rendered in that state.
+    setState((prev) => (prev.phase === 'ready' ? prev : { phase: 'loading' }))
+    void fetchMessage(true)
+  }, [fetchMessage])
+
+  const onRetry = useCallback(() => {
+    setState({ phase: 'loading' })
+    if (withImages) setLoadingImages(true)
+    void fetchMessage(withImages)
+  }, [fetchMessage, withImages])
 
   const message = state.phase === 'ready' ? state.message : null
 
@@ -519,7 +569,7 @@ export function EmailFullView({
           {state.phase === 'error' && (
             <div role="alert">
               <p style={{ color: '#fca5a5' }}>{t('chat.email.failed')}</p>
-              <button type="button" style={PANEL_BUTTON} onClick={() => void load(withImages)}>
+              <button type="button" style={PANEL_BUTTON} onClick={onRetry}>
                 {t('chat.email.retry')}
               </button>
             </div>

@@ -78,6 +78,12 @@ export function isPrivateAddress(ip: string): boolean {
     if (a === 192 && b === 168) return true;
     if (a === 100 && b >= 64 && b <= 127) return true;  // carrier-grade NAT
     if (a === 192 && b === 0) return true;        // IETF protocol assignments
+    // Documentation and benchmarking ranges. Not routable on the internet, so
+    // nothing legitimate serves an image from one — but a LAN is free to use
+    // them internally, which is exactly the case this guard exists for.
+    if (a === 198 && (b === 18 || b === 19)) return true;   // benchmarking
+    if (a === 198 && b === 51) return true;                 // TEST-NET-2
+    if (a === 203 && b === 0) return true;                  // TEST-NET-3
     if (a >= 224) return true;                    // multicast and reserved
     return false;
   }

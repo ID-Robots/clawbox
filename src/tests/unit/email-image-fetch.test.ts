@@ -301,7 +301,7 @@ describe("redirects", () => {
     let hop = 0;
     lookup.mockImplementation(async (host: string) =>
       host === "other.example"
-        ? [{ address: "203.0.113.9", family: 4 }]
+        ? [{ address: "198.41.0.4", family: 4 }]
         : [{ address: "93.184.216.34", family: 4 }],
     );
     serve(() => {
@@ -312,7 +312,7 @@ describe("redirects", () => {
     });
     await fetchRemoteImages(["https://cdn.example/a.png"]);
     expect(calls[0].pinned?.address).toBe("93.184.216.34");
-    expect(calls[1].pinned?.address).toBe("203.0.113.9");
+    expect(calls[1].pinned?.address).toBe("198.41.0.4");
   });
 
   it("refuses a redirect that lands on a private address", async () => {
@@ -451,5 +451,23 @@ describe("bounds", () => {
     const out = await fetchRemoteImages(["https://cdn.example/a.png"], controller.signal);
     expect(out.size).toBe(0);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("reserved ranges are not the public internet either (CodeRabbit #499)", () => {
+  it.each([
+    ["TEST-NET-1", "192.0.2.5"],
+    ["TEST-NET-2", "198.51.100.5"],
+    ["TEST-NET-3", "203.0.113.9"],
+    ["benchmarking", "198.18.0.1"],
+  ])("refuses %s", (_label, ip) => {
+    // Nothing legitimate serves an image from one of these — but a LAN is free
+    // to use them internally, which is the case this guard exists for.
+    expect(isPrivateAddress(ip)).toBe(true);
+  });
+
+  it("still allows an ordinary public address in the same neighbourhood", () => {
+    expect(isPrivateAddress("198.41.0.4")).toBe(false);
+    expect(isPrivateAddress("203.1.113.9")).toBe(false);
   });
 });

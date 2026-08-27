@@ -540,6 +540,10 @@ describe("header parameters are matched by name, not by suffix (CodeRabbit #499)
       ),
     );
     expect(text(message.body)).toContain("just the body");
+    // The claim in the name: if `name` started answering for `filename`, this
+    // text part would be read as an attachment, and the body could still be
+    // there — so the body assertion alone would not have caught it.
+    expect(message.attachments).toEqual([]);
   });
 
   it("still reads a parameter that genuinely is the first one", () => {
