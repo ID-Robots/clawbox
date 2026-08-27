@@ -393,9 +393,17 @@ function runValidator(
   edition: string,
   units: Record<string, string>,
 ): { status: number; stdout: string } {
+  // The on-device TTS verdict is stubbed healthy for the same reason systemctl
+  // and curl are: this file's subject is the edition checks, and a validator
+  // that also reads the TTS verdict would otherwise fail every case here for a
+  // reason that has nothing to do with editions.
+  const ttsStatus = path.join(tmp, "tts-status");
+  fs.writeFileSync(ttsStatus, "KOKORO=ready\n");
+
   const script = [
     "set -uo pipefail",
     `CLAWBOX_EDITION=${edition}`,
+    `TTS_STATUS_FILE=${JSON.stringify(ttsStatus)}`,
     "CLAWBOX_TEST_MODE=1",
     "PROJECT_DIR=/nonexistent",
     "CLAWBOX_HOME=/nonexistent",
@@ -516,8 +524,9 @@ d("step_validate_services sees units belonging to another edition", () => {
     const total = /All (\d+) checks healthy/.exec(withoutHermes.stdout)?.[1];
     expect(total).toBeDefined();
     // 5 active (test mode drops clawbox-ap + clawbox-performance) + 6 installed
-    // + 1 probe (test mode drops the WiFi probe) + 3 foreign-unit checks.
-    expect(Number(total)).toBe(15);
+    // + 1 probe (test mode drops the WiFi probe) + 1 on-device TTS verdict
+    // (openclaw only — Hermes has no TTS step) + 3 foreign-unit checks.
+    expect(Number(total)).toBe(16);
   });
 });
 

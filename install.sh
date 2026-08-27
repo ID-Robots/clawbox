@@ -120,6 +120,10 @@ CLAWBOX_HOME="/home/clawbox"
 # exits non-zero, and a machine-readable marker is left for the flash host.
 PROVISION_FAILURES=()
 PROVISION_STATUS_FILE="${CLAWBOX_PROVISION_STATUS_FILE:-/etc/clawbox/provision-status}"
+# The on-device TTS verdict, written by scripts/install-voice.sh and read by
+# step_validate_services. Exported to that script rather than defaulted twice,
+# so the writer and the reader cannot drift onto two different paths.
+TTS_STATUS_FILE="${CLAWBOX_TTS_STATUS_FILE:-/etc/clawbox/tts-status}"
 # Identifies THIS run. Stamped into the marker and printed on stdout, so a
 # reader holding both can tell whose verdict it is looking at.
 PROVISION_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo unknown)-$$"
@@ -1566,7 +1570,14 @@ step_openclaw_setup() {
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
-  step_openclaw_tts
+  # Non-fatal by design: a box that could not install GPU TTS must still finish
+  # provisioning and come up reachable on the CPU fallback. NOT silent, though —
+  # the step has already recorded the failure with record_provision_failure, so
+  # the final summary, install.sh's exit status and the provisioning marker all
+  # carry it, and step_validate_services fails its TTS check below. Swallowing
+  # the status here without that record is what let "flashed successfully" and
+  # "the GPU TTS silently did not install" mean the same thing.
+  step_openclaw_tts || echo "  Warning: openclaw_tts reported a failure (recorded above; provisioning continues)"
 }
 
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
@@ -2517,13 +2528,41 @@ step_openclaw_tts() {
   # path, it reports whether Kokoro is actually there so the summary below can
   # tell the truth instead of asserting it.
   local VOICE_RC=0
-  bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
+  CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
+    bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
   local KOKORO_READY=false KOKORO_REASON=""
+  # The status this STEP returns, separate from whether TTS could be configured.
+  # A Kokoro that was asked for and did not arrive is a failure of this step
+  # even though the box keeps a working (CPU) voice — see the block under
+  # VOICE_RC=12 below.
+  local TTS_RC=0
   case "$VOICE_RC" in
     0)  KOKORO_READY=true ;;
     10) KOKORO_REASON="no CUDA toolkit on this board" ;;
     11) KOKORO_REASON="no Jetson CUDA build for this CPU architecture" ;;
-    12) KOKORO_REASON="the Kokoro GPU install failed, see the log above" ;;
+    12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
+        # ── A hard failure must stop arriving as a soft fallback ─────────────
+        # This is the branch that made a shipped defect invisible. Kokoro's
+        # model pre-download died on a shell syntax error, this step printed one
+        # ERROR line, returned 0, and the flash reported "Setup: 1/1 succeeded"
+        # — so every box installed in that window ran CPU Piper while the
+        # install claimed GPU TTS, and nobody noticed because speech still
+        # worked. 10 and 11 deliberately do NOT come through here: "this board
+        # has no CUDA" is a box that was never going to have Kokoro, which is a
+        # different fact from "the GPU engine you asked for did not install".
+        #
+        # Non-fatal stays non-fatal — the caller decides, the provider is still
+        # configured below, and the box keeps its voice — but the failure now
+        # reaches the run's exit status, the provisioning summary, the marker
+        # the flash host reads, and step_validate_services' checks.
+        TTS_RC=12
+        echo "  ############################################################" >&2
+        echo "  # Kokoro GPU TTS was REQUESTED and did NOT install." >&2
+        echo "  # This box answers speech on the Piper CPU fallback." >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+        echo "  ############################################################" >&2
+        record_provision_failure openclaw_tts
+        ;;
     1)  KOKORO_REASON="the voice install did not complete"
         # Reworded for TASK-420: this used to say "Kokoro still works, but a
         # GPU failure will be silent", which was written when Kokoro was
@@ -2562,10 +2601,10 @@ step_openclaw_tts() {
         return 1
       fi
       echo "  TTS provider already set (tts-local-cli) — preserved, plugin registry verified"
-      return 0
+      return "$TTS_RC"
     fi
     echo "  TTS provider already set ($CURRENT_TTS) — preserving"
-    return 0
+    return "$TTS_RC"
   fi
 
   # Never point OpenClaw at a command that is not there: that configures the
@@ -2630,6 +2669,9 @@ step_openclaw_tts() {
   else
     echo "  On-device TTS configured (Piper CPU only — $KOKORO_REASON)"
   fi
+  # Configuring the provider succeeded; whether the ENGINE the owner asked for
+  # arrived is a separate verdict, and it is this one that leaves the function.
+  return "$TTS_RC"
 }
 
 step_setup_config() {
@@ -4263,6 +4305,39 @@ step_validate_services() {
       *) failed_probe+=("ClawBox: dashboard at http://localhost/ returned HTTP $http_code (expected 2xx or 3xx)") ;;
     esac
 
+    # Probe: on-device TTS delivered the engine it was asked for.
+    #
+    # scripts/install-voice.sh publishes its verdict to $TTS_STATUS_FILE for
+    # exactly this check. The distinction the file carries is the whole point:
+    # `skipped:*` means this board was never going to run Kokoro (no CUDA, no
+    # Jetson build for its architecture) and is a PASS, while `failed:*` means
+    # the GPU engine was requested and did not arrive — the box is on the Piper
+    # CPU fallback and someone has to fix it.
+    #
+    # An ABSENT verdict fails too. The TTS step runs before this check on both
+    # the install and the update path, so nothing here can assert "Kokoro is
+    # fine" from a file that is not there; the codebase has been bitten enough
+    # times by a missing signal reading as a healthy one (a gateway restart
+    # returning success after failing, an email batch reporting success having
+    # sent nothing) that "no answer" is not allowed to score as a pass.
+    #
+    # Hermes has no on-device TTS step at all, so it has nothing to verify.
+    if ! is_hermes_edition; then
+      local tts_state=""
+      if [ -r "$TTS_STATUS_FILE" ]; then
+        tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
+      fi
+      case "$tts_state" in
+        ready|skipped:*) ;;
+        "")
+          failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has the GPU engine cannot be asserted either way. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
+          ;;
+        *)
+          failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box answers speech on the Piper CPU fallback. Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts")
+          ;;
+      esac
+    fi
+
     # Probe 3 (hermes only): the OpenClaw gateway must be GONE. This is the only
     # automated guard that the Hermes SKU never ships an unauthenticated agent
     # gateway on :18789 — a regression anywhere in the install path (a stray
@@ -4360,8 +4435,15 @@ step_validate_services() {
 
   local probe_count=2
   if is_test_mode; then probe_count=1; fi
-  # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
-  if is_hermes_edition; then probe_count=$(( probe_count + 3 )); fi
+  if is_hermes_edition; then
+    # +3: gateway-inactive, gateway-port-silent, dashboard-proxy-answers.
+    probe_count=$(( probe_count + 3 ))
+  else
+    # +1: the on-device TTS verdict. Counted even when it passes, so the total
+    # the healthy line prints is the number of checks that actually ran. Hermes
+    # has no on-device TTS step, hence the either/or.
+    probe_count=$(( probe_count + 1 ))
+  fi
   # +1 (hermes AND dual): the dashboard auth provider actually verifies.
   if has_hermes_harness; then probe_count=$(( probe_count + 1 )); fi
   # One per foreign unit. Counted even when the unit is absent: "the other

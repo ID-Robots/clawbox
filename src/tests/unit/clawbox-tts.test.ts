@@ -732,10 +732,14 @@ describe("install.sh wires TTS to the on-device chain", () => {
     expect(step).toMatch(/CURRENT_TTS.*!=.*"null"|"\$CURRENT_TTS" != "null"/);
     expect(step).toContain("preserving");
     // The preserve branch must return BEFORE anything is written, otherwise
-    // "seed-if-unset" is just "set".
+    // "seed-if-unset" is just "set". It returns $TTS_RC rather than a literal
+    // 0: preserving the owner's provider says nothing about whether the GPU
+    // engine installed, and a Kokoro that was requested and failed has to leave
+    // the step on this path too — that population (already-configured, updating
+    // in place) is exactly the one that had the defect.
     const guardIndex = step.indexOf("preserving");
     const setIndex = step.indexOf("oc_config_set messages.tts.provider");
-    expect(step.slice(guardIndex, setIndex)).toContain("return 0");
+    expect(step.slice(guardIndex, setIndex)).toMatch(/return "\$TTS_RC"/);
     expect(setIndex).toBeGreaterThan(guardIndex);
   });
 

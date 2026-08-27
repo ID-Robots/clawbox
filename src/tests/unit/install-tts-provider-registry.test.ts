@@ -87,9 +87,16 @@ function runStep(env: Record<string, string> = {}) {
     `PROJECT_DIR="${projectDir}"`,
     `OPENCLAW_BIN="${path.join(dir, "openclaw")}"`,
     "CLAWBOX_USER=clawbox",
+    // Where install-voice.sh publishes its Kokoro verdict. This file's subject
+    // is the plugin registry, so the path only has to exist as a variable —
+    // but it does have to exist, because the step passes it down.
+    `TTS_STATUS_FILE="${path.join(dir, "tts-status")}"`,
     // as_clawbox drops privileges on a device; here it just runs the command.
     "as_clawbox() { env \"$@\"; }",
     "is_hermes_edition() { return 1; }",
+    // Recorded by the step when Kokoro was requested and did not install, so
+    // the failure reaches the provisioning summary. A no-op here.
+    "record_provision_failure() { :; }",
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),

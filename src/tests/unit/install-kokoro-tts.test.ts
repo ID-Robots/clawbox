@@ -60,11 +60,23 @@ interface VoiceRun {
   status: number | null;
   stdout: string;
   stderr: string;
-  /** Every command string handed to `su - clawbox -c`, one per line. */
+  /**
+   * Every command handed to `su - clawbox -c`, one per entry — with the
+   * program that travelled on stdin appended, so a payload that reads its
+   * snippet from `python3 -` is still searchable by its contents.
+   */
   su: string[];
+  /**
+   * Payloads a real `bash -n` refused to parse, each preceded by bash's own
+   * complaint. MUST be empty: `su` hands the string to a login shell, so a
+   * payload the shell cannot parse never runs at all.
+   */
+  suSyntax: string;
   curl: string[];
   /** Every `chown` argument list, one per line. */
   chown: string[];
+  /** Contents of the published TTS verdict file, or "" when none was written. */
+  ttsStatus: string;
   home: string;
 }
 
@@ -89,10 +101,27 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
   const home = path.join(root, "home", "clawbox");
   const bin = path.join(root, "bin");
   const suLog = path.join(root, "su.log");
+  const suSyntaxLog = path.join(root, "su-syntax.log");
   const curlLog = path.join(root, "curl.log");
   const chownLog = path.join(root, "chown.log");
+  const ttsStatus = path.join(root, "tts-status");
+  const cudaHome = path.join(root, env.WITH_CUDA_LIBS === "1" ? "cuda" : "no-such-cuda");
   mkdirSync(bin, { recursive: true });
   mkdirSync(home, { recursive: true });
+  // A real device HAS these three directories: the cusparselt wheel unpacks
+  // into user-site and CUDA lives under /usr/local/cuda. They are what makes
+  // kokoro_ld_path() return a non-empty path, and therefore what makes the
+  // LD_LIBRARY_PATH export appear in the payload at all. Every test in this
+  // file used to run without them, so `$ld` was always empty, the export was
+  // always skipped, and the payload that is broken on real hardware was never
+  // built here — which is precisely how a script that could not execute a
+  // single python snippet on a Jetson kept a green suite.
+  if (env.WITH_CUDA_LIBS === "1") {
+    mkdirSync(path.join(home, ".local", "lib", "python3.10", "site-packages", "nvidia", "cusparselt", "lib"), {
+      recursive: true,
+    });
+    mkdirSync(path.join(cudaHome, "lib64"), { recursive: true });
+  }
   if (stamped) {
     mkdirSync(path.join(home, ".cache", "clawbox"), { recursive: true });
     const version = typeof stamped === "string" ? stamped : shellConst("KOKORO_STAMP_VERSION");
@@ -106,8 +135,23 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
     [
       'cmd=""',
       'while [ $# -gt 0 ]; do case "$1" in -c) cmd="$2"; shift 2;; *) shift;; esac; done',
-      `printf '%s\\n---\\n' "$cmd" >> "${suLog}"`,
-      'case "$cmd" in',
+      // Hand the payload to a REAL shell to parse before doing anything else.
+      // `su` passes its -c string to the user's login shell, so a string that
+      // shell cannot parse is a call that never happens — and that is exactly
+      // what shipped: the model pre-download payload was
+      //   -bash: -c: line 7: unexpected EOF while looking for matching `"'
+      // on every box whose CUDA loader path resolved. These tests stayed green
+      // through it because this stub only ever pattern-matched the string, and
+      // because no test created the directories that make that path non-empty.
+      `if ! bash -n -c "$cmd" 2>>"${suSyntaxLog}"; then printf '%s\\n---\\n' "$cmd" >> "${suSyntaxLog}"; fi`,
+      // A payload that reads its program from stdin (`python3 -`, the form that
+      // keeps a snippet out of shell-quoting entirely) carries it there, so the
+      // log and the dispatch below have to see both halves.
+      'stdin_code=""',
+      'case "$cmd" in *"python3 -") stdin_code="$(cat)" ;; esac',
+      'full=$(printf "%s\\n%s" "$cmd" "$stdin_code")',
+      `printf '%s\\n---\\n' "$full" >> "${suLog}"`,
+      'case "$full" in',
       // How the script asks the box which python pip --user will unpack the
       // cusparselt wheel under, instead of pinning the version it was written
       // against. A device answers "python3.10" (JetPack 6.2); the test host's
@@ -162,8 +206,13 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
       CLAWBOX_HOME: home,
       PIPER_DIR: piperDir,
       // Point the /usr/local/cuda probe at nothing so a dev box or CI runner
-      // that happens to have CUDA cannot turn the no-CUDA test green.
-      CLAWBOX_CUDA_HOME: path.join(root, "no-such-cuda"),
+      // that happens to have CUDA cannot turn the no-CUDA test green. With
+      // WITH_CUDA_LIBS this is a real directory the block above created.
+      CLAWBOX_CUDA_HOME: cudaHome,
+      // Never /etc: the verdict file has to be somewhere a non-root test run
+      // can actually write, or the "it publishes its verdict" assertions would
+      // only ever be measuring the permission error.
+      CLAWBOX_TTS_STATUS_FILE: ttsStatus,
       ...env,
     },
   });
@@ -174,8 +223,10 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
     stdout: res.stdout ?? "",
     stderr: res.stderr ?? "",
     su: read(suLog).split("\n---\n").filter(Boolean),
+    suSyntax: read(suSyntaxLog).trim(),
     curl: read(curlLog).trim().split("\n").filter(Boolean),
     chown: read(chownLog).trim().split("\n").filter(Boolean),
+    ttsStatus: read(ttsStatus),
     home,
   };
 }
@@ -209,13 +260,23 @@ function runStep(voiceExit: number) {
     ].join("\n"),
   );
 
+  const provisionLog = path.join(root, "provision-failures.log");
+  const ttsStatus = path.join(root, "tts-status");
+
   const program = [
     "set -uo pipefail",
     `PROJECT_DIR="${projectDir}"`,
     `OPENCLAW_BIN="${openclaw}"`,
+    `TTS_STATUS_FILE="${ttsStatus}"`,
     "CLAWBOX_USER=clawbox",
     'as_clawbox() { env "$@"; }',
     "is_hermes_edition() { return 1; }",
+    // The real one appends to PROVISION_FAILURES, which the full install turns
+    // into the summary, the exit status and the marker the flash host reads.
+    // Logged here so a test can assert the step actually reaches for it: that
+    // call is the difference between a failure the operator sees and one that
+    // ends at a log line nobody greps.
+    `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
@@ -230,6 +291,8 @@ function runStep(voiceExit: number) {
     stderr: res.stderr ?? "",
     voiceArgs: read(voiceArgs),
     openclaw: read(callsLog),
+    /** Step names handed to record_provision_failure, one per entry. */
+    provisionFailures: read(provisionLog),
   };
 }
 
@@ -259,14 +322,62 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     [12, /Kokoro GPU install failed/],
   ])("stays non-fatal and tells the truth when the voice install exits %i", (code, reason) => {
     const res = runStep(code as number);
-    // Non-fatal: a box must never lose its voice, or its install, to the GPU
-    // path. TTS is still configured — through Piper.
-    expect(res.status).toBe(0);
+    // Non-fatal: a box must never lose its voice to the GPU path. TTS is still
+    // configured — through Piper.
     expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
     // And the summary must not repeat the lie that hid this bug for a release.
     expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
     expect(res.stdout).toContain("Piper CPU only");
     expect(res.stdout).toMatch(reason as RegExp);
+  });
+
+  // ── Requested-and-failed is not the same outcome as never-requested ────────
+  // The deeper defect, and the one that let a shell syntax error ship: the step
+  // treated "this board has no CUDA" and "the GPU engine you asked for did not
+  // install" as the same result — zero — so a flash host printed
+  // "Setup: 1/1 succeeded" over a box that had told itself it was broken.
+
+  it.each([
+    [10, "no CUDA toolkit on this board"],
+    [11, "no Jetson build for this architecture"],
+  ])("exit %i is a SKIP: nothing was requested, so nothing is reported failed", (code) => {
+    const res = runStep(code as number);
+    expect(res.status, "a board that was never going to run Kokoro is not a failed install").toBe(0);
+    expect(res.provisionFailures, "a skip was recorded as a provisioning failure").toEqual([]);
+  });
+
+  it("exit 12 is a FAILURE: it leaves the step, the summary and the operator's screen", () => {
+    const res = runStep(12);
+    // 1. The caller's status. Under `set -e` this is what makes
+    //    `install.sh --step openclaw_tts` — the form the in-app updater runs —
+    //    exit non-zero instead of announcing a clean update.
+    expect(res.status, "a requested engine that did not install still exited 0").not.toBe(0);
+    // 2. The provisioning record: summary + exit status + the marker file the
+    //    flash host reads instead of parsing stdout.
+    expect(res.provisionFailures).toContain("openclaw_tts");
+    // 3. Something an operator cannot scroll past, with the one command that
+    //    retries it.
+    expect(res.stderr).toMatch(/Kokoro GPU TTS was REQUESTED and did NOT install/);
+    expect(res.stderr).toMatch(/--step openclaw_tts/);
+    // Still non-fatal for the box's voice: the provider is configured anyway,
+    // because Piper is a working engine and refusing to configure TTS at all
+    // would cost the box speech it can actually deliver.
+    expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
+  });
+
+  it("carries the failure through even when the owner's provider is preserved", () => {
+    // The update path on a shipped box: messages.tts.provider is already set,
+    // so the step returns early. Returning 0 from there would drop the verdict
+    // on exactly the population that has the defect.
+    const res = runStep(12);
+    expect(res.status).not.toBe(0);
+  });
+
+  it("hands install-voice.sh the verdict path so both halves cannot drift", () => {
+    // Two independent defaults for the same file is how the writer and the
+    // health check end up looking at different paths and agreeing forever.
+    const step = extractShellFn(INSTALL_SH, "step_openclaw_tts");
+    expect(step).toContain("CLAWBOX_TTS_STATUS_FILE=");
   });
 
   it("warns about the fallback in terms of the fallback, not of Kokoro", () => {
@@ -550,5 +661,175 @@ describe.skipIf(!hasBash)("the older --piper-only entry point still works", () =
     const tts = readFileSync(path.join(REPO, "scripts/openclaw/clawbox-tts.sh"), "utf-8");
     expect(tts).toContain("--piper-only");
     expect(INSTALL_VOICE_SH).toContain('if [ "${1:-}" = "--piper-only" ]; then');
+  });
+});
+
+// ── The payload every python step is handed must be shell a shell can run ────
+//
+// `su - clawbox -c "<payload>"` hands <payload> to the user's login shell, so a
+// payload that shell cannot PARSE is a call that never happens. One shipped:
+//
+//   Pre-downloading Kokoro model...
+//   -bash: -c: line 7: unexpected EOF while looking for matching `"'
+//   -bash: -c: line 8: syntax error: unexpected end of file
+//   ERROR: Kokoro model pre-download failed — leaving TTS on the Piper fallback
+//
+// captured from a factory-fresh box during its first-boot update. The cause was
+// one line in clawbox_python():
+//
+//   ${ld:+export LD_LIBRARY_PATH=\"$ld\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\"}
+//
+// bash ends a ${var:+word} at the first UNESCAPED `}` — which was the one
+// closing the INNER ${LD_LIBRARY_PATH:+...} — so the trailing `\"}` fell
+// outside the expansion and emitted the quote and the brace in the wrong
+// order: `...:$LD_LIBRARY_PATH"}` instead of `...:$LD_LIBRARY_PATH}"`. The
+// stray quote swallowed the rest of the line and every payload became a syntax
+// error, on every box where $ld resolved — which is every box that has CUDA.
+// The graceful fallback to Piper then hid it: speech still worked, on the wrong
+// engine, and the flash reported success.
+
+describe.skipIf(!hasBash)("every su payload is shell a login shell can actually run", () => {
+  it("hands su nothing bash refuses to parse, on a box whose loader path resolves", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", WITH_CUDA_LIBS: "1", KOKORO_IMPORT_EXIT: "1" });
+    expect(
+      res.suSyntax,
+      `bash refused to parse a payload install-voice.sh handed su:\n${res.suSyntax}`,
+    ).toBe("");
+    expect(res.status, res.stderr).toBe(0);
+  });
+
+  it("still parses when nothing resolved and the export is skipped", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
+    expect(res.suSyntax, res.suSyntax).toBe("");
+  });
+
+  it("actually puts the cusparselt directory on LD_LIBRARY_PATH for the warm-up", () => {
+    // The functional half. Without this export `import torch` on a Jetson dies
+    // with `ImportError: libcusparseLt.so.0: cannot open shared object file` —
+    // the library that ships inside the nvidia-cusparselt-cu12 wheel, under
+    // user-site, where no loader looks by default. That is the error the
+    // affected box answered with, which is how the missing export was
+    // confirmed on device rather than inferred from the script.
+    const res = runTtsOnly({ WITH_CUDA: "1", WITH_CUDA_LIBS: "1", KOKORO_IMPORT_EXIT: "1" });
+    const warm = res.su.find((c) => c.includes("from kokoro import KPipeline"));
+    expect(warm, "the model warm-up never ran at all").toBeDefined();
+    expect(warm).toMatch(/export LD_LIBRARY_PATH=/);
+    expect(warm).toContain("nvidia/cusparselt/lib");
+  });
+
+  it("omits the export rather than leading LD_LIBRARY_PATH with an empty entry", () => {
+    // An empty entry means "the current directory" to the loader, which is not
+    // a place to resolve .so files from.
+    const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
+    const warm = res.su.find((c) => c.includes("from kokoro import KPipeline"));
+    expect(warm).toBeDefined();
+    expect(warm).not.toContain("LD_LIBRARY_PATH");
+  });
+
+  it("keeps the snippet out of the shell string entirely", () => {
+    // The structural fix, asserted structurally: the python program travels on
+    // stdin, so no amount of quoting inside it can terminate a shell quote.
+    // Another layer of escaping would have passed the tests above and broken on
+    // the next edit — this is the property that stops the bug class, not just
+    // this instance of it.
+    const fn = extractShellFn(INSTALL_VOICE_SH, "clawbox_python");
+    expect(fn).toContain("python3 -");
+    expect(fn).not.toContain('python3 -c \\"');
+  });
+});
+
+// ── A hard failure must stop being reported as a soft fallback ───────────────
+
+describe.skipIf(!hasBash)("the Kokoro verdict outlives the run", () => {
+  it("publishes failed:model where something other than stdout can read it", () => {
+    const res = runTtsOnly({
+      WITH_CUDA: "1",
+      WITH_CUDA_LIBS: "1",
+      KOKORO_IMPORT_EXIT: "1",
+      WARMUP_EXIT: "1",
+    });
+    expect(res.status).toBe(12);
+    expect(res.ttsStatus).toContain("KOKORO=failed:model");
+  });
+
+  it("publishes skipped:* as its own state — not a failure, not a success", () => {
+    const res = runTtsOnly({ KOKORO_IMPORT_EXIT: "1" });
+    expect(res.status).toBe(10);
+    expect(res.ttsStatus).toContain("KOKORO=skipped:no-cuda");
+    expect(res.ttsStatus).not.toContain("failed");
+  });
+
+  it("publishes ready when the engine genuinely landed", () => {
+    const res = runTtsOnly({ WITH_CUDA: "1", WITH_CUDA_LIBS: "1", KOKORO_IMPORT_EXIT: "1" });
+    expect(res.ttsStatus).toContain("KOKORO=ready");
+  });
+});
+
+// ── The health check that makes "flashed successfully" mean something ────────
+
+function runValidator(ttsStatusContents: string | null): { status: number; out: string } {
+  const ttsStatus = path.join(root, "validator-tts-status");
+  if (ttsStatusContents !== null) writeFileSync(ttsStatus, ttsStatusContents);
+  const clock = path.join(root, "clock");
+  writeFileSync(clock, "1000\n");
+
+  const program = [
+    "set -uo pipefail",
+    "CLAWBOX_EDITION=openclaw",
+    "CLAWBOX_TEST_MODE=1",
+    "PROJECT_DIR=/home/clawbox/clawbox",
+    'IFACE_ENV="/nonexistent/network.env"',
+    `TTS_STATUS_FILE="${ttsStatus}"`,
+    // The unit registry is another file's subject; empty lists keep this test
+    // about the one probe it is here to pin.
+    "EXPECTED_ACTIVE_SERVICES=()",
+    "EXPECTED_INSTALLED_SERVICES=()",
+    "FOREIGN_EDITION_UNITS=()",
+    'is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }',
+    'is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }',
+    "has_hermes_harness() { return 1; }",
+    "gateway_port_listening() { return 1; }",
+    "systemctl() { return 0; }",
+    "curl() { printf '200'; }",
+    // The poll loop reads `date +%s` twice per pass and gives up after 30s. A
+    // file-backed clock that jumps 100s per read makes a failing run finish in
+    // one pass instead of polling for half a minute.
+    `_CLOCK="${clock}"`,
+    'date() { local n; n=$(( $(cat "$_CLOCK") + 100 )); echo "$n" > "$_CLOCK"; printf %s "$n"; }',
+    "sleep() { :; }",
+    extractShellFn(INSTALL_SH, "step_validate_services"),
+    "step_validate_services",
+  ].join("\n");
+
+  const r = spawnSync("bash", ["-c", program], { encoding: "utf-8", timeout: 60_000 });
+  return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
+}
+
+describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box healthy", () => {
+  it("fails the install when the GPU engine was requested and did not install", () => {
+    const res = runValidator("KOKORO=failed:model\n");
+    expect(res.status, `validation passed a box with no GPU TTS:\n${res.out}`).toBe(1);
+    expect(res.out).toMatch(/requested and did NOT install/);
+    expect(res.out).toMatch(/--step openclaw_tts/);
+  });
+
+  it("passes a board that was never going to run Kokoro", () => {
+    // The distinction the whole verdict file exists for: no CUDA is not a
+    // defect, and failing every x86 or non-Jetson install would just teach
+    // everyone to ignore this check.
+    const res = runValidator("KOKORO=skipped:no-cuda\n");
+    expect(res.status, res.out).toBe(0);
+  });
+
+  it("passes a box that has the engine", () => {
+    expect(runValidator("KOKORO=ready\n").status).toBe(0);
+  });
+
+  it("refuses to read a MISSING verdict as a healthy one", () => {
+    // "No answer" scoring as a pass is the same bug one level up, and this
+    // codebase has shipped it more than once.
+    const res = runValidator(null);
+    expect(res.status).toBe(1);
+    expect(res.out).toMatch(/no on-device TTS verdict/);
   });
 });
