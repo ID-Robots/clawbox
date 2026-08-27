@@ -141,6 +141,12 @@ interface ChatModelState {
   }>
   primary: { available: boolean; label: string | null; model: string | null }
   local: { available: boolean; label: string | null; model: string | null }
+  /** Providers this box authenticates to by SUBSCRIPTION only. The catalogue's
+   * `availableOnSubscription` stamp says what a provider's subscription
+   * surface carries; this says whether that applies to this device. Optional
+   * so an older/partial payload reads as "no provider is subscription-only" —
+   * unknown must not invent a restriction. */
+  subscriptionProviders?: string[]
 }
 
 // Left dropdown is the provider selector — always show the friendly
@@ -207,6 +213,7 @@ import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useT } from '@/lib/i18n'
 import {
   extractProviderModelId,
+  isModelUsableOnSubscription,
 } from '@/lib/provider-models'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // Hermes chat header. Deliberately a separate namespace from the OpenClaw
@@ -687,6 +694,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     ? thinkingLevel
     : reasoningConfig.default
   const chatProviderCatalog = useProviderCatalog(headerProvider)
+  // Does the greying-out rule apply to THIS box? `chatModelState` is refetched
+  // whenever the provider changes or a configure lands, so this follows the
+  // device rather than being sampled once at mount — a box that swaps a Claude
+  // sign-in for an API key gets its full model list back without a reload.
+  const headerOnSubscription = useMemo(
+    () => !!headerProvider
+      && !!chatModelState?.subscriptionProviders?.includes(headerProvider),
+    [headerProvider, chatModelState],
+  )
   // Pull live tier so the chat-model picker can filter ClawBox AI options
   // by entitlement. Without this, a Free user could pick deepseek-v4-pro,
   // see a "Switched chat to deepseek/deepseek-v4-pro" success message,
@@ -3658,13 +3674,30 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   activeModelLabel,
                   getProviderPillText(activeOption),
                 )}
-                options={modelOptions.map(option => ({
-                  id: option.id,
-                  label: option.label,
-                  hint: option.hint,
-                }))}
+                // A model the box's SUBSCRIPTION surface does not carry is
+                // SHOWN, not hidden, and it says why — the same treatment the
+                // setup wizard gives it, because the wizard's help line sends
+                // the customer here to switch models. Dropping the row would
+                // be the same lie in the other direction.
+                options={modelOptions.map(option => {
+                  const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
+                  return {
+                    id: option.id,
+                    label: option.label,
+                    hint: option.hint,
+                    disabled: blocked,
+                    unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
+                  }
+                })}
                 onChange={(nextId) => {
                   if (nextId === activeModelId) return
+                  // The list already refuses a disabled row, but the switch is
+                  // not allowed to depend on that: the server guard exists for
+                  // ids that arrive some other way, and this one exists so the
+                  // customer is never shown a "Switched to ..." for a model
+                  // the same screen just told them the box cannot run.
+                  const next = modelOptions.find(option => option.id === nextId)
+                  if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
                   // Wire-format provider for ClawBox AI is `deepseek`
                   // (Mike's gateway routes via DeepSeek). Sending
                   // `clawai/...` would be rejected by the gateway as
