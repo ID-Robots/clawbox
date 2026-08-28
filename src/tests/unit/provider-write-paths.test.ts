@@ -92,12 +92,31 @@ describe("saving a cloud provider key through the OpenClaw-shaped panel", () => 
   });
 
   it("asks for nothing when hermes refused the key", async () => {
-    catalogueGrows(["openrouter"], ["openrouter", "anthropic"]);
+    // `hermes auth add` failed, so nothing was credentialed — and the catalogue
+    // says so. The set is what decides, not the fact that a call threw.
+    catalogueGrows(["openrouter"], ["openrouter"]);
     cliMock.mockResolvedValue({ code: 1, stdout: "", stderr: "nope" });
     await expect(
       applyCloudProviderKeyToHermes({ openclawProvider: "anthropic", apiKey: "sk-abcdefgh" }),
     ).rejects.toThrow();
     expect(reloadCount()).toBe(0);
+  });
+
+  it("still re-advertises when the key landed and a LATER step threw", async () => {
+    // The credential is stored first, and selecting the provider or the model
+    // can still fail after it. The provider is credentialed by then and the
+    // agent's enum is already stale, so reconciling only on success would be
+    // this PR's own bug one level up.
+    catalogueGrows(["openrouter"], ["openrouter", "anthropic"], "openrouter");
+    cliMock.mockImplementation(async (args: string[]) =>
+      args[0] === "auth"
+        ? { code: 0, stdout: "", stderr: "" }
+        : { code: 1, stdout: "", stderr: "could not select" },
+    );
+    await expect(
+      applyCloudProviderKeyToHermes({ openclawProvider: "anthropic", apiKey: "sk-abcdefgh" }),
+    ).rejects.toThrow();
+    expect(reloadCount()).toBe(1);
   });
 });
 

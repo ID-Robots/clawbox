@@ -20,11 +20,24 @@ const POLL_KEYS = ["session_id", "status", "error_message", "expires_at"] as con
 //
 // That asymmetry follows what the second line is for. `@/lib/route-auth` exists
 // so a handler that CHANGES something still refuses when the gate in front of
-// it is wrong; this one changes nothing. It reads back a status the caller must
-// already hold a dashboard-minted session id to name, and relays four fields —
-// session_id, status, error_message, expires_at — none of them credential
-// material (`relayJson`'s whitelist is what guarantees that). Minting the id it
-// needs goes through `start`, which is gated twice.
+// it is wrong; this one changes nothing OF THE DEVICE'S OWN. It reads back a
+// status the caller must already hold a dashboard-minted session id to name, and
+// relays four fields — session_id, status, error_message, expires_at — none of
+// them credential material (`relayJson`'s whitelist is what guarantees that).
+// Minting the id it needs goes through `start`, which is gated twice.
+//
+// IT IS NO LONGER SIDE-EFFECT-FREE, and that is worth stating plainly rather
+// than leaving the sentence above to read as more than it means. On the terminal
+// "approved" tick this route drops the model catalogue and may ask the agent for
+// a `reload.mcp`, which respawns every MCP child and invalidates the model's
+// prompt cache. Nothing about the gate changed, because nothing about what a
+// caller must hold changed: reaching that branch needs a session (middleware), a
+// dashboard-minted session id it cannot guess, and the dashboard itself
+// reporting that a real credential just landed — the sign-in the owner started
+// through `start`. A caller who can do all three has already completed the
+// owner's OAuth flow. What a stranger can still not do is turn this into a
+// repeated reload: the refresh fires only when the provider set actually MOVED,
+// so a client hammering a finished session gets one respawn, not one per tick.
 export async function GET(request: Request) {
   const gate = await hermesGate();
   if (gate) return gate;

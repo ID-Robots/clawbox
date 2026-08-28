@@ -42,6 +42,36 @@ export interface ProviderRefreshOptions {
 }
 
 /**
+ * How long a snapshot may take before it answers "I could not tell".
+ *
+ * `getModelOptions()` answers from an in-process SWR cache in the normal case
+ * and, on a warm dashboard, in 0.35-0.6 s when it does go out. Its own ceiling is
+ * `DASHBOARD_TIMEOUT_MS` (8 s), and this helper is taken TWICE inside a request
+ * the owner is holding open — so on a box whose dashboard is down, an unbounded
+ * pair could put sixteen seconds in front of a save that has already succeeded.
+ * Every helper in this family promises not to make the owner's save worse; this
+ * is what that promise costs here. A snapshot that misses the deadline is
+ * `null`, the guard declines to act on it, and the tool list catches up at the
+ * next restart — the behaviour of every box before this existed.
+ */
+const SNAPSHOT_TIMEOUT_MS = 3_000;
+
+/** Resolve with `null` rather than wait past the deadline. */
+async function withDeadline<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * The provider ids the MCP server would register its enum from right now, or
  * null when the catalogue could not be read.
  *
@@ -62,7 +92,11 @@ export interface ProviderRefreshOptions {
  */
 export async function readUsableProviderIds(): Promise<string[] | null> {
   try {
-    const payload = await getModelOptions();
+    // The promise is NOT abandoned by the deadline — it goes on to populate the
+    // catalogue cache, so a box that was merely slow is fast for the read on the
+    // other side of the write.
+    const payload = await withDeadline(getModelOptions(), SNAPSHOT_TIMEOUT_MS);
+    if (!payload) return null;
     const ids = payload.providers
       .filter((row) => typeof row.id === "string" && row.id && row.authenticated !== false)
       .map((row) => row.id);
@@ -181,15 +215,24 @@ export async function refreshProviderToolsIfSetChanged(
  * assumed from the fact that the write returned. Assuming it is the exact shape
  * this round of fixes exists to remove.
  *
- * `run`'s own failure is re-thrown untouched and asks for nothing: a write that
- * did not happen changed no set.
+ * `run`'s own failure is re-thrown untouched, but the comparison still happens —
+ * IN A `finally`, because "the write threw" is not the same as "nothing was
+ * written". `applyCloudProviderKeyToHermes` stores the credential with
+ * `hermes auth add` and only THEN tries to select a provider and a model, either
+ * of which can throw; the provider is credentialed by that point and the agent's
+ * enum is already stale. Reconciling only on success is exactly the
+ * sibling-left-unguarded shape this PR exists to close, one level up. A write
+ * that genuinely stored nothing costs nothing here: the sets match and the guard
+ * returns without asking for anything.
  */
 export async function withProviderMcpRefresh<T>(
   run: () => Promise<T>,
   options: ProviderRefreshOptions = {},
 ): Promise<T> {
   const before = await readUsableProviderIds();
-  const result = await run();
-  await refreshProviderToolsIfSetChanged(before, await readUsableProviderIds(), options);
-  return result;
+  try {
+    return await run();
+  } finally {
+    await refreshProviderToolsIfSetChanged(before, await readUsableProviderIds(), options);
+  }
 }

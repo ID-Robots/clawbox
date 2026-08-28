@@ -95,6 +95,23 @@ describe("readUsableProviderIds", () => {
     expect(await readUsableProviderIds()).toEqual(["openrouter", "auto"]);
   });
 
+  it("gives up rather than hold the owner's save open", async () => {
+    // Taken twice per write, inside a request the owner is waiting on, and
+    // `getModelOptions`' own ceiling is eight seconds. A box whose dashboard is
+    // down must not turn a save that already succeeded into a sixteen-second
+    // one; missing the deadline is "I could not tell", and the guard declines to
+    // act on that.
+    vi.useFakeTimers();
+    try {
+      optionsMock.mockImplementation(() => new Promise(() => {}));
+      const pending = readUsableProviderIds();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await pending).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("answers null rather than a wrong set when the catalogue cannot be read", async () => {
     // Null is "I could not tell", and the guard below refuses to act on it. An
     // empty array here would read as "this box has no providers" and ask for a
