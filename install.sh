@@ -425,6 +425,15 @@ if [ -f /etc/clawbox/test-mode.env ]; then
 fi
 CLAWBOX_TEST_MODE="${CLAWBOX_TEST_MODE:-0}"
 is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
+# CLAWBOX_TEST_NO_GPU=1 is the e2e-install container saying "this host has no
+# GPU by construction". It is deliberately a second knob and not a reading of
+# CLAWBOX_TEST_MODE: the unit tests run the installer's functions under test
+# mode too and pin the real-hardware rule that a Kokoro which declines is a
+# mute box, so test mode alone must not soften that rule. Only the harness
+# entrypoint sets this (e2e-install/entrypoint.sh); a real device never does.
+harness_has_no_gpu() {
+  [ "${CLAWBOX_TEST_NO_GPU:-0}" = "1" ]
+}
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
@@ -2678,7 +2687,19 @@ step_openclaw_tts() {
         echo "  # ClawBox AI; until then spoken requests go unanswered." >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
-        record_provision_failure openclaw_tts
+        # The e2e-install container has no GPU by construction (it says so
+        # with CLAWBOX_TEST_NO_GPU=1 — see e2e-install/README.md, which lists
+        # every CUDA step it skips for that reason), so a board that declines
+        # Kokoro there is the harness's documented state, not a provisioning
+        # failure to file. The verdict still stands in $TTS_STATUS_FILE and
+        # the step still returns 13; only the failure record is withheld, and
+        # only for that host, so a real device that declines the engine fails
+        # exactly as before.
+        if harness_has_no_gpu; then
+          echo "  CLAWBOX_TEST_NO_GPU=1, not recording the missing engine as a provisioning failure (no GPU in the harness)"
+        else
+          record_provision_failure openclaw_tts
+        fi
         ;;
     12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
         # ── A hard failure must stop arriving as a soft fallback ─────────────
@@ -5121,7 +5142,21 @@ step_validate_services() {
           skipped:?*)
             # The mute box: the same recorded, named, non-fatal fact as
             # step_openclaw_tts's 13, checked again here from the file.
-            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+            #
+            # Except in the e2e-install container, which says it has no GPU by
+            # construction with CLAWBOX_TEST_NO_GPU=1 (e2e-install/README.md
+            # lists every CUDA step it skips for the same reason): a Kokoro
+            # that declines there is the documented state of that host, not a
+            # defect in it — and failing every harness run would teach
+            # everyone to ignore this check on the hardware where it matters.
+            # Not keyed on test mode itself: the unit tests run this probe in
+            # test mode and pin the real-hardware rule. Real devices never set
+            # either; on them a skipped Kokoro fails exactly as before.
+            if harness_has_no_gpu; then
+              echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
+            else
+              failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+            fi
             ;;
           failed:?*)
             failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")

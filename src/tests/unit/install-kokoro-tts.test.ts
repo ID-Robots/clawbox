@@ -240,7 +240,7 @@ function runTtsOnly(
  *                          engine's REASON off this file, never off the exit
  *                          code, so a test about the wording has to write one.
  */
-function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: string | null = null) {
+function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: string | null = null, extraEnv: Record<string, string> = {}) {
   const projectDir = path.join(root, "project");
   const callsLog = path.join(root, "openclaw.log");
   const voiceArgs = path.join(root, "voice-args.log");
@@ -285,6 +285,8 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
+    // The real knob, not a stub: the test is about what the step does with it.
+    extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",
   ].join("\n");
@@ -295,7 +297,7 @@ function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: str
   const res = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8").trim().split("\n").filter(Boolean) : []);
   return {
@@ -402,6 +404,29 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     // Still non-fatal for the box's voice: the provider is configured anyway,
     // so the box comes up reachable — and fixable.
     expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
+  });
+
+  it("on the GPU-less harness (CLAWBOX_TEST_NO_GPU=1) a declined Kokoro is still 13, still named, but not filed as a failure", () => {
+    // The e2e-install container has no GPU by construction, so Kokoro
+    // declines there on every run. The verdict, the return status and the
+    // banner all stay — the harness must not be told it has a voice it lacks
+    // — but the provisioning-failure record is withheld, because that record
+    // is what fails service validation, and a check that fails every CI run
+    // over a documented fact teaches everyone to ignore it where it matters.
+    const res = runStep(13, "", "KOKORO=skipped:no-cuda\n", { CLAWBOX_TEST_NO_GPU: "1" });
+    expect(res.status).toBe(13);
+    expect(res.stderr).toMatch(/NO working on-device TTS engine/);
+    expect(res.stdout).toContain("CLAWBOX_TEST_NO_GPU=1");
+    expect(res.provisionFailures, "the harness's documented no-GPU state was filed as a provisioning failure").toEqual([]);
+  });
+
+  it("test mode alone does not soften the mute-box rule — only the explicit no-GPU knob does", () => {
+    // Test mode is what the unit tests and the install harness both run the
+    // installer under; the real-hardware rule has to survive it, or every
+    // test that pins the rule would be pinning the exemption instead.
+    const res = runStep(13, "", "KOKORO=skipped:no-cuda\n", { CLAWBOX_TEST_MODE: "1" });
+    expect(res.status).toBe(13);
+    expect(res.provisionFailures).toEqual(["openclaw_tts"]);
   });
 
   it("exit 13 with no verdict on file is still recorded, and invents no reason", () => {
@@ -915,7 +940,7 @@ describe.skipIf(!hasBash)("the Kokoro verdict outlives the run", () => {
  * stubbed healthy. `ttsStatusContents` is written to the verdict file, or the
  * file is left absent when it is null.
  */
-function runValidator(ttsStatusContents: string | null): { status: number; out: string } {
+function runValidator(ttsStatusContents: string | null, extraEnv: Record<string, string> = {}): { status: number; out: string } {
   const ttsStatus = path.join(root, "validator-tts-status");
   if (ttsStatusContents !== null) writeFileSync(ttsStatus, ttsStatusContents);
   const clock = path.join(root, "clock");
@@ -935,6 +960,7 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
     'is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }',
     'is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }',
     "has_hermes_harness() { return 1; }",
+    extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     "gateway_port_listening() { return 1; }",
     "systemctl() { return 0; }",
     "curl() { printf '200'; }",
@@ -951,7 +977,7 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
   const r = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
@@ -971,6 +997,27 @@ describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box 
     expect(res.out).toMatch(/cloud voice/);
     expect(res.out, "a fallback was claimed from an unreported verdict").not.toMatch(/piper/i);
     expect(res.out).toMatch(/--step openclaw_tts/);
+  });
+
+  it("passes the GPU-less harness (CLAWBOX_TEST_NO_GPU=1) with the declined engine named, not hidden", () => {
+    // Same verdict as the mute-box case above, on the one host that declares
+    // it has no GPU by construction. The probe still says what it read — an
+    // operator reading the harness log learns the engine declined and why —
+    // it just does not count that as a failed probe there.
+    const res = runValidator("KOKORO=skipped:no-cuda\n", { CLAWBOX_TEST_NO_GPU: "1" });
+    expect(res.status, `the harness's documented no-GPU state failed validation:\n${res.out}`).toBe(0);
+    expect(res.out).toMatch(/CLAWBOX_TEST_NO_GPU=1/);
+    expect(res.out).toMatch(/skipped:no-cuda/);
+    expect(res.out).not.toMatch(/NO working on-device TTS engine/);
+  });
+
+  it("the no-GPU knob excuses a DECLINED engine only — a requested Kokoro that failed still fails the harness", () => {
+    // "No GPU here" explains a skip; it does not explain a GPU install that
+    // was attempted and died, which on the harness would mean the install
+    // path itself is broken.
+    const res = runValidator("KOKORO=failed:model\n", { CLAWBOX_TEST_NO_GPU: "1" });
+    expect(res.status).toBe(1);
+    expect(res.out).toMatch(/requested and did NOT install/);
   });
 
   it("is not rescued by a stale PIPER=ready line left by an earlier release", () => {

@@ -38,7 +38,15 @@ mkdir -p /etc/clawbox
 cat > /etc/clawbox/test-mode.env <<EOF
 CLAWBOX_TEST_MODE=1
 NETWORK_INTERFACE=${NETWORK_INTERFACE:-eth0}
+CLAWBOX_TEST_NO_GPU=1
 EOF
+# CLAWBOX_TEST_NO_GPU=1: this container has no GPU by construction, so the
+# only on-device TTS engine (Kokoro, CUDA) declines here on every run. The
+# installer records a declined Kokoro as a mute box on real hardware; this
+# knob tells it the mute box is the harness's documented state, not a defect,
+# so service validation does not fail every run over it. It is a separate
+# knob from CLAWBOX_TEST_MODE on purpose: the unit tests run the installer's
+# functions under test mode and pin the real-hardware rule.
 
 # The full installer still deploys clawbox-ap.service so upgrade paths can
 # verify its unit file, but this container has no WiFi radio and the install
