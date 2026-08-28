@@ -1,6 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+vi.mock("@/lib/openclaw-whatsapp", () => ({
+  readOpenclawWhatsappStatus: vi.fn(async () => ({
+    state: "not_configured",
+    enabled: false,
+    paired: false,
+    connected: false,
+  })),
+}));
 vi.mock("@/lib/hermes-telegram", () => ({ hermesGatewayStatus: vi.fn() }));
 vi.mock("@/lib/hermes-whatsapp", () => ({ readHermesWhatsappStatus: vi.fn() }));
 
@@ -35,15 +43,18 @@ beforeEach(async () => {
 });
 
 describe("GET /setup-api/whatsapp/status", () => {
-  it("reports supported:false on a non-Hermes harness without touching Hermes", async () => {
+  it("answers from the OpenClaw channel, without touching Hermes", async () => {
+    // This used to assert `supported: false` / `state: "unsupported"`, which
+    // was the honest answer while the OpenClaw WhatsApp plugin had no surface
+    // a ClawBox build could drive. It has one now — see
+    // src/tests/routes/whatsapp/openclaw.test.ts for that branch's contract.
+    // What still has to hold here is that the Hermes probes stay untouched.
     mockHarness.mockResolvedValue("openclaw");
     const res = await GET();
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.supported).toBe(false);
-    expect(body.state).toBe("unsupported");
-    // Nothing OpenClaw-side is guessed at or written.
+    expect(body.harness).toBe("openclaw");
     expect(mockStatus).not.toHaveBeenCalled();
     expect(mockGateway).not.toHaveBeenCalled();
   });

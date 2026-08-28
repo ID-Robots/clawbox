@@ -2,6 +2,23 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 
+const openclawStart = vi.fn(async () => ({ phase: "waiting", qr: null, qrImage: null }));
+const openclawPoll = vi.fn(() => ({ phase: "waiting", qr: null, qrImage: null }));
+const openclawStop = vi.fn(() => ({ phase: "idle", qr: null, qrImage: null }));
+const openclawLogout = vi.fn(async () => {});
+const openclawSetEnabled = vi.fn(async () => {});
+vi.mock("@/lib/openclaw-whatsapp", () => ({
+  WHATSAPP_CHANNEL_ID: "whatsapp",
+  getOpenclawWhatsappPairing: () => ({
+    start: openclawStart,
+    poll: openclawPoll,
+    stop: openclawStop,
+  }),
+  logoutOpenclawWhatsapp: openclawLogout,
+  setOpenclawWhatsappEnabled: openclawSetEnabled,
+}));
+vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
+
 const start = vi.fn();
 const poll = vi.fn();
 const stop = vi.fn();
@@ -89,14 +106,16 @@ describe("POST /setup-api/whatsapp/pair", () => {
     expect(start).toHaveBeenCalledWith({ force: false });
   });
 
-  it("refuses on a non-Hermes harness without touching the bridge", async () => {
+  it("routes an OpenClaw device to its own pairing, never to the Hermes bridge", async () => {
+    // The 501 these three tests used to assert is gone: OpenClaw pairs through
+    // the gateway's web.login RPC (see openclaw.test.ts). What must still hold
+    // is that the Hermes bridge — a Baileys process against ~/.hermes — is not
+    // what answers on the other harness.
     mockHarness.mockResolvedValue("openclaw");
-    const res = await POST(req({}));
-    const body = await res.json();
+    await POST(req({}));
 
-    expect(res.status).toBe(501);
-    expect(body.supported).toBe(false);
     expect(start).not.toHaveBeenCalled();
+    expect(openclawStart).toHaveBeenCalled();
   });
 
   it("returns 500 rather than a half-answer when the manager throws", async () => {
@@ -134,11 +153,11 @@ describe("GET /setup-api/whatsapp/pair", () => {
     expect(poll).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses on a non-Hermes harness", async () => {
+  it("polls the OpenClaw session, not the Hermes bridge", async () => {
     mockHarness.mockResolvedValue("openclaw");
-    const res = await GET();
-    expect(res.status).toBe(501);
+    await GET();
     expect(poll).not.toHaveBeenCalled();
+    expect(openclawPoll).toHaveBeenCalled();
   });
 });
 
@@ -152,11 +171,11 @@ describe("DELETE /setup-api/whatsapp/pair", () => {
     expect(stop).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses on a non-Hermes harness", async () => {
+  it("stops the OpenClaw session, not the Hermes bridge", async () => {
     mockHarness.mockResolvedValue("openclaw");
-    const res = await DELETE();
-    expect(res.status).toBe(501);
+    await DELETE();
     expect(stop).not.toHaveBeenCalled();
+    expect(openclawStop).toHaveBeenCalled();
   });
 });
 
@@ -173,12 +192,18 @@ describe("POST /setup-api/whatsapp/unpair", () => {
     ]);
   });
 
-  it("refuses on a non-Hermes harness without deleting anything", async () => {
+  it("never deletes a Hermes session directory on an OpenClaw device", async () => {
+    // unpairWhatsapp() removes ~/.hermes/**/session. On OpenClaw the link lives
+    // in the plugin's own auth dir and is dropped through `channels logout`, so
+    // reaching for the Hermes paths here would delete the wrong box's files.
     mockHarness.mockResolvedValue("openclaw");
-    const res = await UNPAIR();
+    await UNPAIR();
 
-    expect(res.status).toBe(501);
     expect(unpair).not.toHaveBeenCalled();
+    expect(openclawLogout).toHaveBeenCalled();
+    // Both halves move together: a session dropped while the channel stays on
+    // leaves the gateway retrying a login it cannot complete.
+    expect(openclawSetEnabled).toHaveBeenCalledWith(false);
   });
 
   it("reports a failure instead of claiming success", async () => {

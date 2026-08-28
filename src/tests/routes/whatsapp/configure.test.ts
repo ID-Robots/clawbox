@@ -1,6 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+vi.mock("@/lib/openclaw-whatsapp", () => ({
+  WHATSAPP_CHANNEL_ID: "whatsapp",
+  setOpenclawWhatsappEnabled: vi.fn(async () => {}),
+}));
+vi.mock("@/lib/openclaw-channels", () => ({
+  ensureChannelPlugin: vi.fn(async () => ({ ok: true, installed: false })),
+  waitForChannelConnected: vi.fn(async () => null),
+}));
+vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
 vi.mock("@/lib/hermes-telegram", () => ({ ensureHermesGateway: vi.fn() }));
 vi.mock("@/lib/hermes-whatsapp", async () => {
   // The pure helpers are the contract under test in the unit suite; re-use the
@@ -64,11 +73,14 @@ describe("POST /setup-api/whatsapp/configure", () => {
     expect(mockSet).not.toHaveBeenCalled();
   });
 
-  it("refuses on a non-Hermes harness and writes nothing", async () => {
+  it("never writes Hermes env on an OpenClaw device", async () => {
+    // The 501 this used to assert is gone — OpenClaw has its own leg now (see
+    // openclaw.test.ts). The invariant that survives, and matters more, is that
+    // setHermesWhatsappConfig() is not what answers there: it writes
+    // ~/.hermes/.env, which on an OpenClaw box configures nothing and leaves a
+    // credential file behind for a harness that is not installed.
     mockHarness.mockResolvedValue("openclaw");
-    const res = await post({ enabled: false });
-    expect(res.status).toBe(501);
-    expect((await res.json()).supported).toBe(false);
+    await post({ enabled: false });
     expect(mockSet).not.toHaveBeenCalled();
   });
 

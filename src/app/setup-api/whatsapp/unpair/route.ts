@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { whatsappSessionDirs } from "@/lib/hermes-whatsapp";
 import { unpairWhatsapp } from "@/lib/whatsapp-pairing";
+import { restartGateway } from "@/lib/openclaw-config";
+import {
+  getOpenclawWhatsappPairing,
+  logoutOpenclawWhatsapp,
+  setOpenclawWhatsappEnabled,
+} from "@/lib/openclaw-whatsapp";
 
 export const dynamic = "force-dynamic";
 
@@ -20,11 +26,38 @@ export const dynamic = "force-dynamic";
 export async function POST() {
   try {
     const harness = await getActiveHarness();
+
     if (harness !== "hermes") {
-      return NextResponse.json(
-        { error: "WhatsApp is only available on the Hermes edition", supported: false },
-        { status: 501 },
-      );
+      // Config first, destructive step second — the same ordering rule
+      // setDiscordToken follows. A failed config write must not come after a
+      // session that is already gone: that would leave the channel enabled
+      // with nothing to authenticate as, which is the half-applied state this
+      // route exists to avoid. This way the worst case is a channel switched
+      // off with its session intact, which the owner can simply re-enable.
+      await setOpenclawWhatsappEnabled(false);
+
+      // End any pairing session first. Its keepalive calls `web.login.wait`
+      // every few seconds, so a login left running through an unpair would go
+      // on asking the gateway for a channel that is now off — and an in-flight
+      // answer would put a QR back on screen for a link the owner just
+      // removed. stop() bumps the epoch, so that answer is discarded too.
+      getOpenclawWhatsappPairing().stop();
+
+      // The logout still has to happen, and its failure is reported rather
+      // than swallowed — but the channel is already off, so a gateway that
+      // cannot drop the session is not left retrying a login with it.
+      let logoutError: unknown = null;
+      try {
+        await logoutOpenclawWhatsapp();
+      } catch (err) {
+        logoutError = err;
+      }
+      await restartGateway().catch((err) => {
+        console.error("[whatsapp/unpair] gateway restart failed:", err);
+      });
+      if (logoutError) throw logoutError;
+      console.info("[whatsapp/unpair] logged out and disabled the channel");
+      return NextResponse.json({ success: true });
     }
 
     await unpairWhatsapp(whatsappSessionDirs());

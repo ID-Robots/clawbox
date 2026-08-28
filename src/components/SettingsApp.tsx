@@ -214,14 +214,19 @@ interface WhatsappStatus {
   receiving?: boolean;
 }
 
+/** A PNG data URL that actually carries an image. Mirrors the server's guard. */
+const WHATSAPP_QR_DATA_URL_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+
 /** Phases of GET /setup-api/whatsapp/pair. Mirrors WhatsappPairPhase server-side. */
 type WhatsappPairPhase = "idle" | "preparing" | "starting" | "waiting" | "scanned" | "paired" | "error";
 
 /** Shape of GET/POST /setup-api/whatsapp/pair, normalised client-side. */
 interface WhatsappPairSnapshot {
   phase: WhatsappPairPhase;
-  /** Raw Baileys payload. Rendered as a QR; never shown as text. */
+  /** Raw Baileys payload (Hermes). Rendered as a QR; never shown as text. */
   qr: string | null;
+  /** Pre-rendered PNG data URL (OpenClaw, whose plugin draws the code itself). */
+  qrImage: string | null;
   /** Distinct QR payloads this session — proof the rotation is live. */
   qrCount: number;
   restarts: number;
@@ -2119,6 +2124,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         ? (phase as WhatsappPairPhase)
         : "idle",
       qr: typeof raw.qr === "string" && raw.qr.length > 0 ? raw.qr : null,
+      // Prefix AND payload. `"data:image/png;base64,"` on its own is a valid
+      // data URL for an empty image, and would render a blank square the owner
+      // is invited to scan. Same rule as readQrDataUrl() server-side.
+      qrImage: WHATSAPP_QR_DATA_URL_RE.test(String(raw.qrImage ?? "")) ? (raw.qrImage as string) : null,
       qrCount: typeof raw.qrCount === "number" ? raw.qrCount : 0,
       restarts: typeof raw.restarts === "number" ? raw.restarts : 0,
       error: typeof raw.error === "string" ? raw.error : null,
@@ -2142,7 +2151,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // Show "preparing" the instant the click lands: on a box with no
       // node_modules the POST below does not return until npm has finished,
       // and a dead button for two minutes reads as a broken one.
-      setWaPair({ phase: "preparing", qr: null, qrCount: 0, restarts: 0, error: null, user: null });
+      setWaPair({ phase: "preparing", qr: null, qrImage: null, qrCount: 0, restarts: 0, error: null, user: null });
       try {
         const res = await fetch("/setup-api/whatsapp/pair", {
           method: "POST",
@@ -2154,6 +2163,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           setWaPair({
             phase: "error",
             qr: null,
+            qrImage: null,
             qrCount: 0,
             restarts: 0,
             error: typeof data?.error === "string" ? data.error : "start_failed",
@@ -2163,7 +2173,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         }
         setWaPair(readPairSnapshot(data));
       } catch {
-        setWaPair({ phase: "error", qr: null, qrCount: 0, restarts: 0, error: "start_failed", user: null });
+        setWaPair({ phase: "error", qr: null, qrImage: null, qrCount: 0, restarts: 0, error: "start_failed", user: null });
       } finally {
         setWaPairBusy(false);
       }
@@ -4766,20 +4776,37 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             these payloads run past 200 characters, and at 256px
                             a denser correction level shrinks each module below
                             what a phone reads at arm's length. */}
-                        {waPair?.phase === "waiting" && waPair.qr && (
+                        {waPair?.phase === "waiting" && (waPair.qr || waPair.qrImage) && (
                           <div className="mt-3" aria-live="polite">
                             <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairScanTitle")}</div>
                             <div className="flex justify-center my-4">
                               <div className="bg-white rounded-xl p-3" data-testid="whatsapp-qr">
-                                <QRCodeSVG
-                                  value={waPair.qr}
-                                  size={256}
-                                  level="L"
-                                  marginSize={4}
-                                  bgColor="#ffffff"
-                                  fgColor="#000000"
-                                  title={t("settings.whatsappPairQrLabel")}
-                                />
+                                {/* Two harnesses, one card. The Hermes bridge emits the raw
+                                    Baileys payload, so we draw the code ourselves; the
+                                    OpenClaw plugin renders it and hands back a PNG, so
+                                    there is nothing to draw and re-encoding it would only
+                                    lose fidelity. `qr` wins when both are somehow present:
+                                    a vector at any zoom beats a fixed bitmap. */}
+                                {waPair.qr ? (
+                                  <QRCodeSVG
+                                    value={waPair.qr}
+                                    size={256}
+                                    level="L"
+                                    marginSize={4}
+                                    bgColor="#ffffff"
+                                    fgColor="#000000"
+                                    title={t("settings.whatsappPairQrLabel")}
+                                  />
+                                ) : (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={waPair.qrImage as string}
+                                    alt={t("settings.whatsappPairQrLabel")}
+                                    width={256}
+                                    height={256}
+                                    className="block"
+                                  />
+                                )}
                               </div>
                             </div>
                             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.whatsappPairScanHint")}</p>
