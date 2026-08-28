@@ -20,7 +20,15 @@ vi.mock("@/lib/openclaw-config", async () => {
   const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>(
     "@/lib/openclaw-config",
   );
-  return { ...actual, spawnOpenclawCli: vi.fn(), readConfig: vi.fn() };
+  return {
+    ...actual,
+    // Pinned rather than inherited: the real one reads the edition off disk and
+    // falls back to process.env, so a CI runner with CLAWBOX_EDITION=hermes
+    // would make readChannelStatus short-circuit and these tests assert nothing.
+    openclawIsAbsent: () => false,
+    spawnOpenclawCli: vi.fn(),
+    readConfig: vi.fn(),
+  };
 });
 
 import { readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
@@ -136,6 +144,31 @@ describe("ensureChannelPlugin", () => {
 
     expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
     expect(mockSpawn.mock.calls[2][0]).toEqual(["plugins", "enable", "discord"]);
+  });
+
+  it("treats OpenClaw's 'plugin already exists' refusal as installed, not as a failure", async () => {
+    // Live on 192.168.50.82. `plugins list` reads a PERSISTED registry
+    // snapshot, so a plugin that is in OpenClaw's own store but missing from
+    // that snapshot is invisible to the pre-check above. The install then hits
+    //
+    //   plugin already exists: ~/.openclaw/npm/projects/openclaw-discord-…/
+    //   node_modules/@openclaw/discord (delete it first)
+    //
+    // on stderr with exit 1. Reporting that as install_failed blocked a save
+    // whose plugin was present and working — the same dishonesty this module
+    // exists to remove, only inverted. The package being on disk IS the
+    // outcome we asked for, and whether it actually serves the channel is
+    // settled afterwards by the live connectivity probe, not guessed here.
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockRejectedValueOnce(
+        new Error(
+          "plugin already exists: /home/clawbox/.openclaw/npm/projects/openclaw-discord-c0892df945/node_modules/@openclaw/discord (delete it first)",
+        ),
+      );
+
+    // Not `installed: true` — this call did not install it, it found it.
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: false });
   });
 
   it("installs the WhatsApp plugin the same way — nothing is special-cased to Discord", async () => {

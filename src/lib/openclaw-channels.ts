@@ -153,6 +153,29 @@ function isTimeout(err: unknown): boolean {
 }
 
 /**
+ * OpenClaw refusing to install a plugin it already has.
+ *
+ * `plugins list` reads a PERSISTED registry snapshot, so a plugin that is in
+ * OpenClaw's own store but missing from that snapshot is invisible to the
+ * pre-check and we go on to install it. The CLI then exits 1 with
+ *
+ *     plugin already exists: ~/.openclaw/npm/projects/openclaw-discord-…/
+ *     node_modules/@openclaw/discord (delete it first)
+ *
+ * That is not a failure — the package being on disk is the outcome we asked
+ * for. Reporting it as install_failed blocked a save whose plugin was present
+ * and working, which is this module's own dishonesty inverted. Whether the
+ * plugin actually serves the channel is settled afterwards by the live
+ * connectivity probe, never guessed here.
+ *
+ * Deliberately NOT retried with `--force`: that would delete and re-download a
+ * working plugin over the network to fix a stale index.
+ */
+function isAlreadyInstalled(err: unknown): boolean {
+  return err instanceof Error && /plugin already exists/i.test(err.message);
+}
+
+/**
  * Make sure the plugin that owns `channelId` is installed and enabled.
  *
  * Idempotent: a device that already has it pays one `plugins list` and writes
@@ -197,10 +220,15 @@ export async function ensureChannelPlugin(
       });
       installed = true;
     } catch (err) {
-      // npm's output can be long and is not phrased for a settings panel, so
-      // the caller gets a code and the log gets the cause.
-      console.error(`[openclaw-channels] installing ${spec} failed:`, err);
-      return { ok: false, reason: isTimeout(err) ? "install_timeout" : "install_failed" };
+      if (!isAlreadyInstalled(err)) {
+        // npm's output can be long and is not phrased for a settings panel, so
+        // the caller gets a code and the log gets the cause.
+        console.error(`[openclaw-channels] installing ${spec} failed:`, err);
+        return { ok: false, reason: isTimeout(err) ? "install_timeout" : "install_failed" };
+      }
+      // Present already; fall through to the enable step, which is the half
+      // that actually decides whether the gateway loads it.
+      console.info(`[openclaw-channels] ${spec} was already installed; continuing`);
     }
   }
 
@@ -299,7 +327,11 @@ export function parseChannelRow(row: Record<string, unknown>): ChannelStatus {
  */
 export async function readChannelStatus(
   channelId: string,
-  options: SpawnOpenclawOptions = {},
+  // `captureStdout` is deliberately not offerable: this function's whole job is
+  // to parse the CLI's `--json`, and a caller that turned stdout off would get
+  // an empty string and a silent `null` — "the gateway said nothing" — for a
+  // channel that is perfectly healthy.
+  options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
 ): Promise<ChannelStatus | null> {
   if (openclawIsAbsent()) return null;
   let parsed: unknown;
@@ -316,7 +348,7 @@ export async function readChannelStatus(
         "--timeout",
         String(CHANNEL_STATUS_GATEWAY_TIMEOUT_MS),
       ],
-      { captureStdout: true, timeoutMs: CHANNEL_STATUS_TIMEOUT_MS, ...options },
+      { timeoutMs: CHANNEL_STATUS_TIMEOUT_MS, ...options, captureStdout: true },
     );
     parsed = JSON.parse(out);
   } catch (err) {

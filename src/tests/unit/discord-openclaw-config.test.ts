@@ -206,6 +206,75 @@ describe("writeDiscordGatewayEnv (env-file injection guard)", () => {
   });
 });
 
+// Plugin TRUST, which is a separate fact from plugin INSTALLATION.
+//
+// `openclaw plugins install @openclaw/discord` puts the package in OpenClaw's
+// own store and writes `plugins.entries.discord`. But that entry is the only
+// thing that makes the gateway TRUST an external plugin, and it lives in the
+// same openclaw.json that every other ClawBox route read-modify-writes. Any
+// route that read the file before the save and wrote it after silently drops
+// the entry, and the gateway then refuses the channel:
+//
+//   channels.discord: channel is configured, but external plugin "discord" is
+//   installed without explicit trust. Add plugins.entries.discord.enabled=true.
+//
+// Observed on 192.168.50.82: Discord connected at 09:56:37, a config write at
+// 09:58:48 dropped `plugins.entries.discord`, and every `channels status` from
+// then on answered `unknown channel: discord` while the panel showed the card
+// as "unknown". Restoring the entry brought the channel straight back to
+// connected, across a full gateway restart.
+//
+// So the entry is written HERE, in the same atomic write as the channel block,
+// rather than being left to survive on its own.
+describe("channel plugin trust", () => {
+  let openclawConfig: typeof import("@/lib/openclaw-config");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockFs.readFile.mockResolvedValue("{}");
+    mockFs.writeFile.mockResolvedValue(undefined);
+    mockFs.rename.mockResolvedValue(undefined);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.chmod.mockResolvedValue(undefined);
+    openclawConfig = await import("@/lib/openclaw-config");
+  });
+
+  it("trusts the discord plugin in the same write as the channel", async () => {
+    await openclawConfig.setDiscordToken(TOKEN);
+
+    const written = writtenJsonConfig() as unknown as {
+      plugins?: { entries?: Record<string, { enabled?: boolean }> };
+      channels: Record<string, unknown>;
+    };
+    expect(written.plugins?.entries?.discord).toEqual({ enabled: true });
+    // Same write, so the two cannot be separated by a concurrent writer.
+    expect(written.channels.discord).toBeDefined();
+  });
+
+  it("leaves other plugin entries, and the rest of the entry, alone", async () => {
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({
+        plugins: {
+          entries: {
+            anthropic: { enabled: true },
+            discord: { enabled: false, someOperatorKey: "keep me" },
+          },
+        },
+      }),
+    );
+
+    await openclawConfig.setDiscordToken(TOKEN);
+
+    const entries = (writtenJsonConfig() as unknown as {
+      plugins: { entries: Record<string, Record<string, unknown>> };
+    }).plugins.entries;
+    expect(entries.anthropic).toEqual({ enabled: true });
+    // Flipped to trusted, without discarding what the operator put beside it.
+    expect(entries.discord).toEqual({ enabled: true, someOperatorKey: "keep me" });
+  });
+});
+
 // The other half of the env-reference story, and the half that was missing.
 //
 // `token: {source:"env", provider:"default", id:"…"}` is resolved by OpenClaw
@@ -293,5 +362,46 @@ describe("env SecretRef provider (the chokepoint)", () => {
 
     expect(err.message).not.toContain(TOKEN);
     expect(err.message).toContain("exec");
+  });
+});
+
+// The config comes off disk, so `secrets` can be any JSON at all. None of these
+// shapes may reach a property access that throws — the caller handles the typed
+// refusal and turns it into `token_unresolved`; a TypeError becomes an opaque
+// 500 halfway through a save.
+describe("envSecretRef against a malformed config", () => {
+  let openclawConfig: typeof import("@/lib/openclaw-config");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockFs.writeFile.mockResolvedValue(undefined);
+    mockFs.rename.mockResolvedValue(undefined);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.chmod.mockResolvedValue(undefined);
+    openclawConfig = await import("@/lib/openclaw-config");
+  });
+
+  const MALFORMED = [
+    ["secrets is a string", { secrets: "nope" }],
+    ["secrets is an array", { secrets: [] }],
+    ["providers is a string", { secrets: { providers: "nope" } }],
+    ["the provider entry is null", { secrets: { providers: { default: null } } }],
+    ["the provider entry is an array", { secrets: { providers: { default: [] } } }],
+  ] as const;
+
+  it.each(MALFORMED)("refuses when %s, and writes nothing", async (_why, config) => {
+    mockFs.readFile.mockResolvedValue(JSON.stringify(config));
+
+    await expect(openclawConfig.setDiscordToken(TOKEN)).rejects.toBeInstanceOf(
+      openclawConfig.EnvSecretProviderConflictError,
+    );
+    expect(mockFs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("still accepts a config whose secrets block is simply absent", async () => {
+    mockFs.readFile.mockResolvedValue("{}");
+    await openclawConfig.setDiscordToken(TOKEN);
+    expect(writtenJsonConfig().secrets).toEqual({ providers: { default: { source: "env" } } });
   });
 });

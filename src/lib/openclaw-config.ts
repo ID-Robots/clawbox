@@ -665,6 +665,15 @@ export interface OpenClawConfig {
     providers?: Record<string, { source?: string; [key: string]: unknown }>;
     [key: string]: unknown;
   };
+  /**
+   * Plugin registry. `entries.<id>.enabled` is what makes the gateway TRUST an
+   * external (non-bundled) plugin; without it a configured channel is refused
+   * even though the package is installed. See {@link trustChannelPlugin}.
+   */
+  plugins?: {
+    entries?: Record<string, { enabled?: boolean; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
   tools?: {
     profile?: string;
     web?: { search?: { enabled?: boolean } };
@@ -1008,15 +1017,32 @@ export class EnvSecretProviderConflictError extends Error {
   }
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function envSecretRef(
   config: OpenClawConfig,
   envVar: string,
 ): { source: "env"; provider: string; id: string } {
+  // Everything here came off disk via readConfig(), which returns whatever the
+  // file parsed to. A `secrets` that is a string, or a provider entry that is
+  // null, must produce the typed refusal the caller already handles — not a
+  // TypeError that becomes an opaque 500 halfway through a save.
+  if (config.secrets !== undefined && !isPlainObject(config.secrets)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, typeof config.secrets);
+  }
   const secrets = (config.secrets ??= {});
+  if (secrets.providers !== undefined && !isPlainObject(secrets.providers)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, typeof secrets.providers);
+  }
   const providers = (secrets.providers ??= {});
+
   const existing = providers[ENV_SECRET_PROVIDER];
   if (existing === undefined) {
     providers[ENV_SECRET_PROVIDER] = { source: "env" };
+  } else if (!isPlainObject(existing)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, existing === null ? "null" : typeof existing);
   } else if (existing.source !== "env") {
     throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, String(existing.source));
   }
@@ -1025,6 +1051,9 @@ export function envSecretRef(
 
 /** Env var the gateway resolves the Discord credential from. */
 export const DISCORD_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN";
+
+/** OpenClaw's id for the Discord channel — the config key's, and the plugin's. */
+const DISCORD_CHANNEL_ID = "discord";
 
 // The data dir is re-derived here rather than imported from config-store, and
 // that is load-bearing, not a style choice. This module is imported (via
@@ -1103,6 +1132,39 @@ export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
  *   * a literal `botToken` left by any other writer is dropped, so the env
  *     reference is the only credential path and a stale copy cannot outlive it.
  */
+/**
+ * Mark the channel plugin `channelId` as trusted, in whatever config object the
+ * caller is about to write.
+ *
+ * INSTALLATION AND TRUST ARE DIFFERENT FACTS. `openclaw plugins install` puts
+ * the package in OpenClaw's own store AND writes `plugins.entries.<id>` — but
+ * that entry lives in the same openclaw.json every other route in this repo
+ * read-modify-writes. A route that read the file before a channel save and
+ * wrote it after drops the entry without touching anything it meant to, and the
+ * gateway then refuses the channel it is still configured for:
+ *
+ *     channels.discord: channel is configured, but external plugin "discord" is
+ *     installed without explicit trust. Add plugins.entries.discord.enabled=true.
+ *
+ * Measured on a live box: the channel connected, a config write two minutes
+ * later dropped the entry, and `channels status` answered `unknown channel:
+ * discord` from then on while the panel's card sat at "unknown". Restoring the
+ * entry brought it back to connected across a full restart.
+ *
+ * So ClawBox writes the trust entry ITSELF, in the same atomic write as the
+ * channel block — the same reasoning as {@link envSecretRef}: the facts that
+ * have to be true together are written together, and cannot be separated by a
+ * concurrent writer.
+ *
+ * Merges rather than replaces, because the entry is shared config and may carry
+ * keys this repo knows nothing about.
+ */
+export function trustChannelPlugin(config: OpenClawConfig, channelId: string): void {
+  const plugins = (config.plugins ??= {});
+  const entries = (plugins.entries ??= {});
+  entries[channelId] = { ...entries[channelId], enabled: true };
+}
+
 export async function setDiscordToken(botToken: string): Promise<void> {
   const config = await readConfig();
   if (!config.channels) {
@@ -1121,6 +1183,10 @@ export async function setDiscordToken(botToken: string): Promise<void> {
     // this reference is unresolvable at runtime — see its doc comment.
     token: envSecretRef(config, DISCORD_TOKEN_ENV_VAR),
   };
+  // Same write, deliberately: an installed-but-untrusted plugin is a channel
+  // the gateway refuses, and leaving the entry to survive on its own is what
+  // let a later read-modify-write silently take Discord back down.
+  trustChannelPlugin(config, DISCORD_CHANNEL_ID);
   await writeConfig(config);
   // Config first, secret second: a half-applied save that has the reference but
   // not the value is a bot that does not log in, which the status route reports
