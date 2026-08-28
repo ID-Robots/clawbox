@@ -26,6 +26,24 @@ export const localModelsEn: Record<string, string> = {
   "localModels.managedInLocalAi": "Managed in Settings → Local AI.",
   "localModels.toggleLabel": "{name} enabled",
   "localModels.footer": "Turning a model off stops it now and keeps it off after a reboot.",
+  // The grouped list (LocalAiPanel): one row per engine, the actions behind a
+  // "more" menu, and each row's role read from the surface that decides it.
+  "localModels.group.llm": "AI agent model",
+  "localModels.group.tts": "Voice (text to speech)",
+  "localModels.group.stt": "Speech to text",
+  "localModels.group.other": "Other",
+  "localModels.role.primary": "Primary",
+  "localModels.role.fallback": "Fallback",
+  "localModels.menu.more": "More actions for {name}",
+  "localModels.menu.install": "Install",
+  "localModels.menu.enable": "Enable",
+  "localModels.menu.disable": "Disable",
+  "localModels.menu.makePrimary": "Make primary",
+  "localModels.menu.useAsFallback": "Use as fallback",
+  "localModels.menu.turnOffLocalAi": "Turn off Local AI",
+  "localModels.menu.manageInClawKeep": "Manage in ClawKeep",
+  "localModels.localOnly.title": "Local-only mode",
+  "localModels.localOnly.hint": "Route everything to the local model. Disables all cloud AI providers, fallbacks included.",
 
   // === Errors ===
   "localModels.error.changeFailed": "Could not change that model.",

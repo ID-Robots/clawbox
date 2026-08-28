@@ -15,7 +15,7 @@ import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProv
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
-import LocalModelsPanel from "./LocalModelsPanel";
+import LocalAiPanel from "./LocalAiPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
@@ -24,9 +24,8 @@ import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/facto
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
-import { cachedActiveHarness, cachedEdition, fetchHarness } from "@/lib/client-harness";
+import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
-import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -276,25 +275,6 @@ function toDiscordMembers(value: unknown): DiscordMemberOption[] {
   }
   return out;
 }
-
-/* ── Helpers ── */
-// Hermes registers the on-device model under this single provider id whichever
-// local runtime backs it (see HERMES_LOCAL_PROVIDER in lib/hermes-local-ai.ts).
-// OpenClaw instead names the runtime directly ("llamacpp" / "ollama"), so
-// "is the local model the active provider" has to accept either spelling.
-const HERMES_LOCAL_PROVIDER_ID = "clawlocal";
-
-// Copy for the four Local AI states, kept as data so the status line and the
-// card below cannot drift apart. "Selected" vs "available" is the distinction
-// that matters: installing the on-device model does not make it the one that
-// answers, and saying "sleeping until needed" when it was never selected read
-// as though it were.
-const LOCAL_AI_STATUS_SUFFIX = {
-  offline: "endpoint not responding",
-  available: "available, not currently selected",
-  standby: "selected · sleeping until needed",
-  running: "selected · running",
-} as const;
 
 function formatBytes(b: number): string {
   if (!b) return "0 B";
@@ -1260,18 +1240,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     // left and re-entered. Seen on a live box, in the same window.
     return onProvidersChanged(load);
   }, [section, isMobile]);
-  // Which agent consumes the local model. Named the harness outright, and said
-  // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
-  const [harnessLabel, setHarnessLabel] = useState(
-    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
-  );
-  useEffect(() => {
-    let alive = true;
-    void fetchHarness().then((d) => {
-      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
-    });
-    return () => { alive = false; };
-  }, []);
 
   // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
   // tracks its own copy — seeded from the immutable cache, then confirmed once.
@@ -1293,8 +1261,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, [edition]);
 
   const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
-  const [localAiDisabling, setLocalAiDisabling] = useState(false);
-  const [localAiError, setLocalAiError] = useState<string | null>(null);
   const refreshLocalAiStatus = useCallback(async () => {
     try {
       const res = await fetch("/setup-api/setup/status", { cache: "no-store" });
@@ -1316,60 +1282,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
 
       setLocalAiStatus({ configured, provider, model, running, standbyEnabled });
-      setLocalAiError(null);
     } catch {
       setLocalAiStatus({ configured: false, provider: null, model: null, running: null, standbyEnabled: false });
     }
   }, []);
-  // Is the on-device model the provider the active harness will actually answer
-  // with? `localAiStatus` alone can never say — it is built from the
-  // config-store keys written when the model was installed, and installing one
-  // deliberately does not take over from the provider the customer chose. The
-  // harness's own selection (via /setup-api/ai-models/status) is the only proof.
-  const localAiIsActive = !!localAiStatus?.configured
-    && !!aiProvider?.provider
-    && (aiProvider.provider === HERMES_LOCAL_PROVIDER_ID || aiProvider.provider === localAiStatus.provider);
-
-  /**
-   * The four states the Local AI cards render, resolved once so the status line
-   * and the card copy cannot drift apart:
-   *   offline   — configured, but the endpoint isn't answering and there is no standby
-   *   available — installed and healthy, but something else is answering
-   *   standby   — selected, asleep to free RAM until it is needed
-   *   running   — selected and resident
-   */
-  const localAiState: "offline" | "available" | "standby" | "running" | null = !localAiStatus?.configured
-    ? null
-    : localAiStatus.running === false && !localAiStatus.standbyEnabled
-      ? "offline"
-      : !localAiIsActive
-        ? "available"
-        : localAiStatus.running === false
-          ? "standby"
-          : "running";
-  const localAiOffline = localAiState === "offline";
-
-  const disableLocalAi = useCallback(async () => {
-    setLocalAiDisabling(true);
-    setLocalAiError(null);
-    try {
-      const res = await fetch("/setup-api/local-ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "disable" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.success) {
-        throw new Error(typeof data.error === "string" ? data.error : "Failed to disable Local AI");
-      }
-      await refreshLocalAiStatus();
-      notifyChatModelStateChanged();
-    } catch (err) {
-      setLocalAiError(err instanceof Error ? err.message : "Failed to disable Local AI");
-    } finally {
-      setLocalAiDisabling(false);
-    }
-  }, [notifyChatModelStateChanged, refreshLocalAiStatus]);
   const localTabOpen = section === "localAi";
   useEffect(() => {
     if (!localTabOpen && !isMobile) return;
@@ -1381,36 +1297,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => clearInterval(interval);
   }, [refreshLocalAiStatus, localTabOpen, isMobile]);
 
-  const [localOnlyMode, setLocalOnlyMode] = useState<boolean | null>(null);
-  const [localOnlyPending, setLocalOnlyPending] = useState(false);
-  useEffect(() => {
-    if (!localTabOpen) return;
-    fetch("/setup-api/local-ai/exclusive", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => setLocalOnlyMode(!!d.enabled))
-      .catch(() => setLocalOnlyMode(false));
-  }, [localTabOpen]);
-  const toggleLocalOnly = useCallback(async (next: boolean) => {
-    setLocalOnlyPending(true);
-    try {
-      const res = await fetch("/setup-api/local-ai/exclusive", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
-      });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setLocalOnlyMode(next);
-      notifyChatModelStateChanged();
-      fetch("/setup-api/ai-models/status", { cache: "no-store" })
-        .then((r) => r.json())
-        .then(setAiProvider)
-        .catch(() => {});
-    } catch (err) {
-      setLocalAiError(err instanceof Error ? err.message : "Failed to toggle local-only mode");
-    } finally {
-      setLocalOnlyPending(false);
-    }
-  }, [notifyChatModelStateChanged]);
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -3504,200 +3390,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── Local AI: the on-device model, and the inventory of everything on the box ─── */}
+        {/* ─── Local AI: everything on the box, one grouped list ─── */}
         {activeSection === "localAi" && (
-          <div className="max-w-xl space-y-5">
-            <AiProviderList filter="local" onOpen={(tab) => setSectionGated(tab === "local" ? "localAi" : "ai")} />
-
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>memory</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
-              </div>
-              {localAiStatus === null ? (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
-                  </div>
-                </div>
-              ) : localAiStatus.configured ? (
-                <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
-                  localAiOffline
-                    ? "bg-amber-500/[0.06] border-amber-500/15"
-                    : "bg-cyan-500/[0.06] border-cyan-500/15"
-                }`}>
-                  <div className={`relative w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
-                    localAiOffline
-                      ? "bg-amber-500/10 border-amber-400/10"
-                      : "bg-cyan-500/10 border-cyan-400/10"
-                  }`}>
-                    <AIProviderIcon provider={localAiStatus.provider} size={24} />
-                    <span className={`absolute -right-1 -bottom-1 w-5 h-5 rounded-full border flex items-center justify-center ${
-                      localAiOffline
-                        ? "bg-[#2a1d10] border-amber-500/25"
-                        : "bg-[#10212a] border-cyan-500/25"
-                    }`}>
-                      <span className={`material-symbols-rounded ${
-                        localAiOffline ? "text-amber-300" : "text-cyan-300"
-                      }`} style={{ fontSize: 14 }}>
-                        {localAiOffline ? "warning" : "check"}
-                      </span>
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--text-primary)] font-medium">
-                      {localAiStatus.provider === "llamacpp" ? "Gemma 4 Local" : localAiStatus.provider === "ollama" ? "Ollama Local" : "Local AI"}
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                        localAiOffline ? "bg-amber-300" : "bg-cyan-300"
-                      }`} />
-                      <span className={`text-xs ${
-                        localAiOffline ? "text-amber-300/80" : "text-cyan-300/80"
-                      }`}>
-                        {`${localAiStatus.model ? lastModelSegment(localAiStatus.model) : "Configured"} · ${
-                          localAiState ? LOCAL_AI_STATUS_SUFFIX[localAiState] : ""
-                        }`}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>memory</span>
-                  </div>
-                  <div>
-                    <div className="text-sm text-[var(--text-muted)]">No local model configured</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Turn on Gemma 4 or Ollama to add a private on-device backup.</div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {localAiError && (
-              <div className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
-                {localAiError}
-              </div>
-            )}
-
-            {/* Local AI itself works on Hermes (see HERMES_LOCAL_PROVIDER_ID
-                above) — Local-ONLY mode does not. It is built from OpenClaw CLI
-                calls against a fallback chain Hermes has no equivalent of, so
-                this is the one control in the section that cannot work here.
-                Its route now refuses with `supported:false`; hiding the card
-                keeps the owner from discovering that through a red banner
-                quoting our internals at them. */}
-            {localAiStatus?.configured && edition !== "hermes" && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">Local-only mode</div>
-                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                      Route everything to the local model. Disables all cloud AI providers (including fallbacks).
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {localOnlyPending && (
-                      <span
-                        className="material-symbols-rounded animate-spin text-[var(--text-muted)]"
-                        style={{ fontSize: 18 }}
-                        aria-hidden="true"
-                      >
-                        progress_activity
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-label="Local-only mode"
-                      aria-checked={!!localOnlyMode}
-                      aria-busy={localOnlyPending}
-                      disabled={localOnlyPending || localOnlyMode === null}
-                      onClick={() => toggleLocalOnly(!localOnlyMode)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
-                        localOnlyMode ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-                      }`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${localOnlyMode ? "translate-x-6" : "translate-x-1"}`} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {localAiStatus?.configured && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-lg font-semibold text-[var(--text-primary)]">
-                      {localAiStatus.provider === "llamacpp" ? "Gemma 4" : "Ollama"}
-                    </div>
-                    <p className="text-sm text-[var(--text-secondary)] mt-1">
-                      {localAiState === "offline"
-                        ? "Configured, but currently offline."
-                        : localAiState === "available"
-                          // Installed and ready, but the harness is pointed
-                          // elsewhere — name what IS answering so the state is
-                          // unambiguous. The label comes from the same endpoint
-                          // that reports the active provider, so it can't drift.
-                          ? `Installed and ready, but ${harnessLabel} is currently set to ${aiProvider?.providerLabel || aiProvider?.provider || "another provider"}.`
-                          : localAiState === "standby"
-                            ? `Selected. Kept in on-demand standby to free RAM until ${harnessLabel} needs it.`
-                            : "Selected and running as your on-device model."}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={disableLocalAi}
-                    disabled={localAiDisabling}
-                    className="px-4 py-2.5 bg-red-500/10 text-red-300 border border-red-500/20 rounded-xl text-sm font-semibold cursor-pointer hover:bg-red-500/20 transition-colors disabled:opacity-50"
-                  >
-                    {localAiDisabling ? "Disabling..." : "Disable"}
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--text-muted)] mt-3">
-                  Disabling Local AI stops the local model and frees the memory it is using.
-                </p>
-              </div>
-            )}
-
-            <I18nProvider><AIModelsStep
-              embedded
-              providerIds={["llamacpp"]}
-              defaultProviderId="llamacpp"
-              currentProviderId={localAiStatus?.provider ?? null}
-              currentModel={localAiStatus?.model ?? null}
-              // Installed is not selected. Without this the panel rendered the
-              // green "already configured" pill and hid its own switch button,
-              // so a device that had Gemma installed but unselected offered no
-              // way to actually start using it.
-              localAiIsActive={localAiIsActive}
-              title="Set Up Local AI"
-              description={localAiStatus?.configured
-                ? "Gemma 4 is installed as your private on-device model."
-                : "Turn on a local model so ClawBox always has a private on-device backup."}
-              configureScope="local"
-              testId="settings-local-ai-step"
-              onConfigured={() => {
-                refreshLocalAiStatus().catch(() => {});
-                notifyChatModelStateChanged();
-              }}
-            /></I18nProvider>
-          </div>
+          <LocalAiPanel active={localTabOpen} edition={edition} />
         )}
 
-        {/* ─── Local Models ─── */}
+        {/* ─── Voice ─── */}
         {activeSection === "voice" && (
           <VoiceOutputPanel active={activeSection === "voice"} />
-        )}
-
-        {/* The on-device inventory — every engine on the box and what it is
-            doing — lives on Local AI beneath the model setup. */}
-        {activeSection === "localAi" && (
-          <LocalModelsPanel active={localTabOpen} />
         )}
 
         {/* ─── Accounts (the hub) ───

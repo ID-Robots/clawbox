@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
-import { formatBytes } from "@/components/LocalModelsPanel";
+import { formatBytes } from "@/lib/format-bytes";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.

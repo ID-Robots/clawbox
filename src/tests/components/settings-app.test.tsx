@@ -679,22 +679,22 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(labels.findIndex((l) => l.includes("settings.localAi"))).toBe(labels.findIndex((l) => l.includes("settings.providers")) + 1);
   });
 
-  it("opens on Providers with the provider list, and Local AI shows the model setup plus the inventory", async () => {
+  it("opens on Providers with the provider list, and Local AI shows the grouped on-device page", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     expect(await screen.findByTestId("ai-provider-list")).toBeInTheDocument();
 
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"));
     if (!local) throw new Error("Local AI nav entry did not render");
     fireEvent.click(local);
-    expect(await screen.findByTestId("settings-local-ai-step")).toBeInTheDocument();
-    expect(await screen.findByTestId("local-models-loading")).toBeInTheDocument();
-    expect(screen.getByTestId("ai-provider-list")).toBeInTheDocument();
+    // One grouped page for everything on the box (it loads its inventory first).
+    expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-local-ai-step")).not.toBeInTheDocument();
   });
 
   it("lands the old Local Models deep link on Local AI and keeps that entry lit", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localModels" } }));
-    expect(await screen.findByTestId("settings-local-ai-step")).toBeInTheDocument();
+    expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
     const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
     expect(local.className).toContain("coral-bright");
   });
