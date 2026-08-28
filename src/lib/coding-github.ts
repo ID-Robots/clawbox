@@ -4,19 +4,24 @@
  * WHY gh RATHER THAN OUR OWN OAUTH
  *
  * GitHub's device flow needs a registered OAuth App's client id. ClawBox has
- * none, and one cannot be conjured at runtime — it is a thing a human
- * registers on github.com. `gh` already ships one, already implements the
- * flow correctly, and is already installed on the device. So "connect" opens
- * a terminal on `gh auth login`, which prints the device code for the owner
- * to enter on github.com from any device. No token is typed on the box, and
- * ClawBox never handles the credential: gh stores it in its own config and
- * lends it to git as a credential helper.
+ * none — but `gh` does, published in its open source and honoured by
+ * github.com for exactly this flow. So "connect" runs the SAME device flow gh
+ * itself would run, just without the terminal: startDeviceLogin() asks
+ * github.com for a one-time code the UI shows with a tappable link (a
+ * terminal `gh auth login` on a phone tries xdg-open on the box, fails
+ * noisily, and buries the URL — measured from a phone through the tunnel),
+ * pollDeviceLogin() waits for the owner to approve on github.com from any
+ * device, and the resulting token is handed straight to
+ * `gh auth login --with-token` on stdin. gh stores it in its own config and
+ * lends it to git as a credential helper; ClawBox holds the token for the
+ * milliseconds between GitHub's answer and gh's stdin, never in argv, a
+ * file, or a log.
  *
  * WHAT THIS DOES NOT DO
  *
- * It does not log in on the owner's behalf, because driving an interactive
- * TUI from a web request is a fragile way to handle someone's credentials.
- * It reads the state and it pushes; the owner does the authorising.
+ * It does not log in on the owner's behalf: the owner approves the code on
+ * github.com, and the routes behind these functions refuse the agent's
+ * bearer. It reads the state and it pushes; the owner does the authorising.
  *
  * Every repository this creates is PRIVATE. A backup of a half-finished
  * project is not a publication, and a run that guessed wrong about a secret
@@ -40,6 +45,114 @@ const PUSH_TIMEOUT_MS = 180_000;
 /** The command the owner runs to connect. Shown in the UI and typed into the
  *  Terminal app, so both say the same thing. */
 export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https";
+
+// ── Device-flow login ────────────────────────────────────────────────────────
+
+/** The GitHub CLI's own OAuth client id — public in gh's source, and the id
+ *  the token must be minted under for `gh auth login --with-token` to be
+ *  indistinguishable from a terminal login. Env-overridable for a fork that
+ *  registered its own app. */
+const GH_OAUTH_CLIENT_ID = process.env.CLAWBOX_GITHUB_CLIENT_ID?.trim() || "178c6fc778ccc68e1d6a";
+/** The scopes a terminal `gh auth login` requests. */
+const DEVICE_SCOPES = "repo read:org gist workflow";
+const DEVICE_HTTP_TIMEOUT_MS = 15_000;
+
+/** The one login in flight. Module state like the runs store: one owner, one
+ *  web-server process, one pending code at a time — a second start replaces
+ *  the first, exactly as re-running `gh auth login` would. */
+let pendingLogin: { deviceCode: string; interval: number; expiresAt: number } | null = null;
+
+export interface DeviceLoginStart {
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
+}
+
+export type DeviceLoginPoll =
+  | { status: "pending" }
+  | { status: "connected"; login: string | null }
+  /** Over — declined, expired, or gh refused the token. A new start is the retry. */
+  | { status: "failed"; detail: string };
+
+async function githubJson(url: string, body: Record<string, string>): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(DEVICE_HTTP_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    return await res.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Ask github.com for a one-time code the owner will approve from any device. */
+export async function startDeviceLogin(): Promise<DeviceLoginStart | { error: string }> {
+  const data = await githubJson("https://github.com/login/device/code", {
+    client_id: GH_OAUTH_CLIENT_ID,
+    scope: DEVICE_SCOPES,
+  });
+  const deviceCode = data?.device_code;
+  const userCode = data?.user_code;
+  const verificationUri = data?.verification_uri;
+  if (typeof deviceCode !== "string" || typeof userCode !== "string" || typeof verificationUri !== "string") {
+    return { error: "Could not reach github.com to start the login. Check the network connection and try again." };
+  }
+  const interval = typeof data?.interval === "number" ? Math.max(5, data.interval) : 5;
+  const expiresIn = typeof data?.expires_in === "number" ? data.expires_in : 900;
+  pendingLogin = { deviceCode, interval, expiresAt: Date.now() + expiresIn * 1000 };
+  return { userCode, verificationUri, expiresIn, interval };
+}
+
+/**
+ * One poll of the login in flight. "pending" until the owner approves the
+ * code on github.com; on approval the token goes straight to gh's stdin and
+ * is forgotten.
+ */
+export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
+  if (!pendingLogin) return { status: "failed", detail: "No login is in progress. Start again." };
+  if (Date.now() > pendingLogin.expiresAt) {
+    pendingLogin = null;
+    return { status: "failed", detail: "The code expired before it was entered. Start again for a fresh one." };
+  }
+  const data = await githubJson("https://github.com/login/oauth/access_token", {
+    client_id: GH_OAUTH_CLIENT_ID,
+    device_code: pendingLogin.deviceCode,
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+  });
+  if (!data) return { status: "pending" };
+  if (data.error === "authorization_pending") return { status: "pending" };
+  if (data.error === "slow_down") {
+    pendingLogin.interval += 5;
+    return { status: "pending" };
+  }
+  if (typeof data.access_token !== "string") {
+    pendingLogin = null;
+    return {
+      status: "failed",
+      detail: data.error === "access_denied"
+        ? "The login was declined on github.com."
+        : "GitHub ended the login. Start again for a fresh code.",
+    };
+  }
+  pendingLogin = null;
+  const stored = await run("gh", ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"], {
+    input: data.access_token,
+  });
+  if (stored.code !== 0) {
+    return { status: "failed", detail: `gh would not store the credential: ${(stored.stderr || stored.stdout).slice(0, 200)}` };
+  }
+  return { status: "connected", login: (await githubStatus()).login };
+}
+
+/** Forget the login in flight; the code on github.com simply goes unused. */
+export function cancelDeviceLogin(): void {
+  pendingLogin = null;
+}
 
 /**
  * Why the probe could not answer. Absent when it did — including when the
@@ -121,9 +234,10 @@ export type DisconnectOutcome =
  * `@/lib/child-run` — shared with coding-git.ts, which used to carry its own
  * pre-#518 copy of both.
  */
-function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<ChildResult> {
+function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number; input?: string } = {}): Promise<ChildResult> {
   return runChild(bin, args, {
     cwd: opts.cwd,
+    input: opts.input,
     timeoutMs: opts.timeoutMs ?? GH_TIMEOUT_MS,
     env: {
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",

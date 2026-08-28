@@ -209,6 +209,9 @@ export default function CodingAgentApp() {
   const [runsShown, setRunsShown] = useState(RUNS_PAGE);
   const [github, setGithub] = useState<GitHubState | null>(null);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  /** A device-flow login in flight: the code the card shows and how often to
+   *  ask github.com whether it was entered. */
+  const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
   // Clearing is two clicks, not a browser confirm(): the second click is the
   // confirmation, and collapsing the list takes the offer back.
   const [confirmClear, setConfirmClear] = useState(false);
@@ -257,6 +260,36 @@ export default function CodingAgentApp() {
     const id = setInterval(() => { void load(); }, POLL_MS);
     return () => clearInterval(id);
   }, [anyRunning, load]);
+
+  // While a device login is showing its code, ask github.com (through the
+  // box) whether it was entered. A transient fetch failure keeps polling —
+  // the code is still valid; only a verdict ends the wait.
+  useEffect(() => {
+    if (!deviceLogin) return;
+    let alive = true;
+    const id = setInterval(async () => {
+      try {
+        const res = await fetch("/setup-api/coding-agent/github-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "poll" }),
+        });
+        if (!res.ok || !alive) return;
+        const out = await res.json() as { status?: string; detail?: string };
+        if (!alive) return;
+        if (out.status === "connected") {
+          setDeviceLogin(null);
+          void load();
+        } else if (out.status === "failed") {
+          setDeviceLogin(null);
+          setError(out.detail || tRef.current("codingAgent.githubStartFailed"));
+        }
+      } catch {
+        // Transient; keep polling.
+      }
+    }, deviceLogin.interval * 1000);
+    return () => { alive = false; clearInterval(id); };
+  }, [deviceLogin, load]);
 
   const readError = async (res: Response, fallback: string) => {
     try {
@@ -347,9 +380,41 @@ export default function CodingAgentApp() {
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
   };
 
-  /** Open a terminal on `gh auth login`. gh prints the device code; the owner
-   *  enters it on github.com from any device. No token is typed on the box. */
-  const connectGithub = () => {
+  /** The GitHub device flow, driven by this card so it works from a phone:
+   *  show the one-time code with a tappable github.com link and poll until
+   *  the owner approves. The token never reaches the browser — the route
+   *  hands it straight to gh's stdin. */
+  const connectGithub = async () => {
+    setBusy("gh-connect");
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/github-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start" }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.githubStartFailed")));
+      const data = await res.json() as { userCode: string; verificationUri: string; interval?: number };
+      setDeviceLogin({ userCode: data.userCode, verificationUri: data.verificationUri, interval: data.interval ?? 5 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.githubStartFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const cancelGithubLogin = () => {
+    setDeviceLogin(null);
+    void fetch("/setup-api/coding-agent/github-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "cancel" }),
+    }).catch(() => { /* the pending code simply expires */ });
+  };
+
+  /** The terminal fallback — the flow this card ran before it grew its own. */
+  const connectGithubTerminal = () => {
+    cancelGithubLogin();
     const cmd = github?.loginCommand ?? "gh auth login --hostname github.com --git-protocol https";
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command: cmd } }));
   };
@@ -590,15 +655,16 @@ export default function CodingAgentApp() {
               )}
             </div>
             <div className="flex items-center gap-1.5 shrink-0">
-              {/* Not offered to a gh that would not start: the button opens a
-                  terminal on `gh auth login`, which needs the very binary that
-                  will not execute. The badge beside it says what to fix. */}
+              {/* Not offered to a gh that would not start: the flow ends by
+                  handing the token to that very binary. The badge beside it
+                  says what to fix. */}
               {github.reason !== "not_runnable" && (
                 <button
                   type="button"
-                  onClick={connectGithub}
+                  onClick={() => void connectGithub()}
+                  disabled={busy === "gh-connect" || deviceLogin !== null}
                   data-testid="coding-agent-github-connect"
-                  className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                  className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
                 >
                   {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
                 </button>
@@ -618,6 +684,45 @@ export default function CodingAgentApp() {
                   {confirmSignOut ? t("codingAgent.githubOutConfirm") : t("codingAgent.githubOut")}
                 </button>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* A device login in flight: the code, big and selectable, and a
+            TAPPABLE link — this flow exists because `gh auth login` in a
+            terminal on a phone tries xdg-open on the box and buries the URL.
+            The card polls; nothing else to type on this device. */}
+        {deviceLogin && (
+          <div className="mt-2 rounded-xl border border-sky-400/30 bg-sky-400/[0.06] px-3 py-3" data-testid="coding-agent-github-device">
+            <p className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.githubDeviceIntro")}</p>
+            <p className="mt-2 text-center font-mono text-xl tracking-[0.3em] text-white select-all" data-testid="coding-agent-github-code">
+              {deviceLogin.userCode}
+            </p>
+            <a
+              href={deviceLogin.verificationUri}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-3 block w-full text-center text-xs font-semibold px-3 py-2 rounded-lg bg-[var(--coral-bright)] text-white hover:opacity-90"
+            >
+              {t("codingAgent.githubDeviceOpen")}
+            </a>
+            <p className="mt-2 text-center text-[11px] text-[var(--text-muted)] animate-pulse">{t("codingAgent.githubDeviceWaiting")}</p>
+            <div className="mt-1.5 flex items-center justify-between">
+              <button
+                type="button"
+                onClick={cancelGithubLogin}
+                data-testid="coding-agent-github-device-cancel"
+                className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
+              >
+                {t("codingAgent.githubDeviceCancel")}
+              </button>
+              <button
+                type="button"
+                onClick={connectGithubTerminal}
+                className="text-[11px] text-[var(--text-muted)] underline decoration-white/20 hover:text-white"
+              >
+                {t("codingAgent.githubDeviceTerminal")}
+              </button>
             </div>
           </div>
         )}

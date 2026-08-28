@@ -77,6 +77,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.denials": "{n} actions were not allowed",
   "codingAgent.deniedTitle": "Not allowed",
   "codingAgent.artifactsTitle": "Evidence from this run",
+  "codingAgent.githubDeviceIntro": "Enter this code on github.com to connect your account:",
+  "codingAgent.githubDeviceOpen": "Open github.com/login/device",
+  "codingAgent.githubDeviceWaiting": "Waiting for the code to be entered…",
+  "codingAgent.githubDeviceCancel": "Cancel",
+  "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
+  "codingAgent.githubStartFailed": "Could not start the GitHub login",
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
   "codingAgent.stop": "Stop",
