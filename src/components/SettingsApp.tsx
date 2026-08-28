@@ -143,10 +143,10 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "accounts", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
 
 /**
- * The connectors that live behind the single "Accounts" entry — the same idea
+ * The channels that live behind the single "Messaging Channels" entry — the same idea
  * as GNOME's Online Accounts: one page listing every outside service the
  * assistant can be reached through, each row opening its own settings.
  *
@@ -154,18 +154,18 @@ const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice",
  * (`clawbox:open-settings`) and their status lines are unchanged; only the
  * sidebar stops carrying four near-identical entries.
  */
-const ACCOUNT_SECTIONS = ["telegram", "email", "whatsapp", "discord"] as const;
-type AccountSection = typeof ACCOUNT_SECTIONS[number];
+const CHANNEL_SECTIONS = ["telegram", "email", "whatsapp", "discord"] as const;
+type ChannelSection = typeof CHANNEL_SECTIONS[number];
 
-const ACCOUNT_ITEMS: { id: AccountSection; icon: string; labelKey: string; hintKey: string }[] = [
-  { id: "telegram", icon: "send", labelKey: "settings.telegram", hintKey: "settings.accountsTelegramHint" },
-  { id: "email", icon: "mail", labelKey: "settings.email", hintKey: "settings.accountsEmailHint" },
-  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp", hintKey: "settings.accountsWhatsappHint" },
-  { id: "discord", icon: "forum", labelKey: "settings.discord", hintKey: "settings.accountsDiscordHint" },
+const CHANNEL_ITEMS: { id: ChannelSection; icon: string; labelKey: string; hintKey: string }[] = [
+  { id: "telegram", icon: "send", labelKey: "settings.telegram", hintKey: "settings.channelsTelegramHint" },
+  { id: "email", icon: "mail", labelKey: "settings.email", hintKey: "settings.channelsEmailHint" },
+  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp", hintKey: "settings.channelsWhatsappHint" },
+  { id: "discord", icon: "forum", labelKey: "settings.discord", hintKey: "settings.channelsDiscordHint" },
 ];
 
-function isAccountSection(id: string): id is AccountSection {
-  return (ACCOUNT_SECTIONS as readonly string[]).includes(id);
+function isChannelSection(id: string): id is ChannelSection {
+  return (CHANNEL_SECTIONS as readonly string[]).includes(id);
 }
 
 /** The three mailbox modes, in increasing order of what the assistant may do. */
@@ -225,8 +225,8 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "localModels", icon: "deployed_code", labelKey: "settings.localModels" },
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   // One entry for every messaging/mail connector; the four panes live behind
-  // it (ACCOUNT_ITEMS) rather than each claiming a sidebar row of its own.
-  { id: "accounts", icon: "account_circle", labelKey: "settings.accounts" },
+  // it (CHANNEL_ITEMS) rather than each claiming a sidebar row of its own.
+  { id: "channels", icon: "forum", labelKey: "settings.channels" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
@@ -2548,9 +2548,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
-  // A connector pane keeps the Accounts entry lit: the sidebar no longer has a
+  // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
-  const navSection: Section = isAccountSection(activeSection) ? "accounts" : activeSection;
+  const navSection: Section = isChannelSection(activeSection) ? "channels" : activeSection;
   const visibleNavItems = NAV_ITEMS;
   const resetProgressSteps = [
     {
@@ -3683,30 +3683,30 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* ─── Accounts (the hub) ───
-            One page for every outside service the assistant can be reached
+            One page for every messaging channel the assistant can be reached
             through, in the shape people already know from GNOME's Online
-            Accounts: a row per connector with its live status, opening that
-            connector's own settings. */}
-        {activeSection === "accounts" && (
+            Accounts: a row per channel with its live status, opening that
+            channel's own settings. */}
+        {activeSection === "channels" && (
           <div className="max-w-xl space-y-5">
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-1">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>account_circle</span>
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>forum</span>
                 <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
-                  {t("settings.accountsConnect")}
+                  {t("settings.channelsConnect")}
                 </label>
               </div>
-              <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.accountsHelper")}</p>
-              <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-accounts-list">
-                {ACCOUNT_ITEMS.map((item) => {
-                  const connected = accountConnected(item.id);
+              <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.channelsHelper")}</p>
+              <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
+                {CHANNEL_ITEMS.map((item) => {
+                  const connected = channelConnected(item.id);
                   const { subtitle } = sectionStatus(item.id);
                   return (
                     <button
                       key={item.id}
                       type="button"
                       onClick={() => setSectionGated(item.id)}
-                      data-testid={`settings-account-${item.id}`}
+                      data-testid={`settings-channel-${item.id}`}
                       className="w-full flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer hover:bg-white/[0.04] transition-colors"
                     >
                       <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
@@ -3734,18 +3734,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* The way back out of a connector pane, now that the sidebar has no
+        {/* The way back out of a channel pane, now that the sidebar has no
             row of its own for it. */}
-        {isAccountSection(activeSection) && (
+        {isChannelSection(activeSection) && (
           <div className="max-w-xl">
             <button
               type="button"
-              onClick={() => setSectionGated("accounts")}
-              data-testid="settings-accounts-back"
+              onClick={() => setSectionGated("channels")}
+              data-testid="settings-channels-back"
               className="flex items-center gap-1 mb-3 px-2 py-1 -ml-2 rounded-lg bg-transparent border-none cursor-pointer text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.05] transition-colors"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_left</span>
-              {t("settings.accounts")}
+              {t("settings.channels")}
             </button>
           </div>
         )}
@@ -5623,8 +5623,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // ─── Section status (subtitle) shared by mobile list + desktop sidebar ───
   // SectionStatus type is declared at module scope (above component)
-  /** Whether a connector actually holds a working account right now. */
-  const accountConnected = (id: AccountSection): boolean => {
+  /** Whether a channel actually holds a working account right now. */
+  const channelConnected = (id: ChannelSection): boolean => {
     switch (id) {
       case "telegram": return tgConfigured === true;
       case "email": return emailStatus?.configured === true;
@@ -5635,11 +5635,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
-      case "accounts": {
-        const connected = ACCOUNT_ITEMS.filter((a) => accountConnected(a.id)).length;
+      case "channels": {
+        const connected = CHANNEL_ITEMS.filter((a) => channelConnected(a.id)).length;
         return {
           subtitle: connected > 0
-            ? t("settings.accountsConnectedCount", { n: connected })
+            ? t("settings.channelsConnectedCount", { n: connected })
             : (t("settings.notConfigured") || "Not configured"),
         };
       }

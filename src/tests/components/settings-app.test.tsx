@@ -569,12 +569,12 @@ describe("SettingsApp — AI section Status card is not doubled on Hermes", () =
 });
 
 /**
- * The Accounts hub — one sidebar entry for every outside service the assistant
+ * The Messaging Channels hub — one sidebar entry for every outside service the assistant
  * can be reached through, in the shape of GNOME's Online Accounts. The four
  * connectors keep their own panes (and their deep links); what changed is that
  * the sidebar stopped carrying four near-identical rows.
  */
-describe("SettingsApp accounts hub", () => {
+describe("SettingsApp messaging channels hub", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
       const url = input.toString();
@@ -593,47 +593,47 @@ describe("SettingsApp accounts hub", () => {
     return [...nav.querySelectorAll(":scope > button")] as HTMLElement[];
   }
 
-  it("carries one Accounts entry instead of a row per connector", () => {
+  it("carries one Messaging Channels entry instead of a row per channel", () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const labels = navButtons(container).map((b) => b.textContent ?? "");
 
     // Each row's text carries its label plus an sr-only status line, so these
     // are substring checks rather than exact matches.
-    expect(labels.some((l) => l.includes("settings.accounts"))).toBe(true);
+    expect(labels.some((l) => l.includes("settings.channels"))).toBe(true);
     for (const gone of ["settings.telegram", "settings.email", "settings.whatsapp", "settings.discord"]) {
       expect(labels.some((l) => l.includes(gone))).toBe(false);
     }
   });
 
-  it("lists every connector on the hub page, each opening its own settings", async () => {
+  it("lists every channel on the hub page, each opening its own settings", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
-    const accounts = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.accounts"));
-    if (!accounts) throw new Error("Accounts nav entry did not render");
+    const accounts = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.channels"));
+    if (!accounts) throw new Error("Messaging Channels nav entry did not render");
     fireEvent.click(accounts);
 
-    const list = await screen.findByTestId("settings-accounts-list");
+    const list = await screen.findByTestId("settings-channels-list");
     for (const id of ["telegram", "email", "whatsapp", "discord"]) {
-      expect(within(list).getByTestId(`settings-account-${id}`)).toBeInTheDocument();
+      expect(within(list).getByTestId(`settings-channel-${id}`)).toBeInTheDocument();
     }
 
     // A row opens that connector's pane, and the pane offers the way back —
     // the sidebar no longer has a row of its own to return to.
-    fireEvent.click(screen.getByTestId("settings-account-telegram"));
-    expect(await screen.findByTestId("settings-accounts-back")).toBeInTheDocument();
-    expect(screen.queryByTestId("settings-accounts-list")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("settings-channel-telegram"));
+    expect(await screen.findByTestId("settings-channels-back")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-channels-list")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByTestId("settings-accounts-back"));
-    expect(await screen.findByTestId("settings-accounts-list")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("settings-channels-back"));
+    expect(await screen.findByTestId("settings-channels-list")).toBeInTheDocument();
   });
 
-  it("keeps the Accounts entry lit while a connector pane is open", async () => {
+  it("keeps the entry lit while a channel pane is open", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const accountsButton = () =>
-      navButtons(container).find((b) => (b.textContent ?? "").includes("settings.accounts"))!;
+      navButtons(container).find((b) => (b.textContent ?? "").includes("settings.channels"))!;
     fireEvent.click(accountsButton());
-    fireEvent.click(await screen.findByTestId("settings-account-discord"));
+    fireEvent.click(await screen.findByTestId("settings-channel-discord"));
 
-    await waitFor(() => expect(screen.getByTestId("settings-accounts-back")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("settings-channels-back")).toBeInTheDocument());
     expect(accountsButton().className).toContain("coral-bright");
   });
 });
