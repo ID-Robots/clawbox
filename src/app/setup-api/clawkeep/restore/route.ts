@@ -6,47 +6,81 @@ import { NextRequest, NextResponse } from "next/server";
 import { ClawKeepError, RestoreNeedsPassphraseError, runRestore } from "@/lib/clawkeep";
 import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
+import { bounceHermesDashboard } from "@/lib/hermes-dashboard-control";
 
 export const dynamic = "force-dynamic";
 
 const exec = promisify(execFile);
 
-// Services that hold the restored state open while running. After we swap a
-// directory (or file) atomically, their existing handles still see the OLD
-// inodes, so they have to be restarted for user-facing behaviour to reflect
-// the restored state.
+// The OpenClaw unit that holds the restored state open. After we swap a
+// directory (or file) atomically, a running process's existing handles still
+// see the OLD inodes, so it has to be restarted for user-facing behaviour to
+// reflect the restored state.
 //
-// WHICH service is per-edition, and getting it wrong is not a cosmetic bug.
-// install.sh's step_edition_gateway_state REMOVES the clawbox-gateway unit
-// file on Hermes and persistently masks it, so restarting it there fails
-// twice over — while `clawbox-hermes-dashboard`, which is the process
-// actually holding `~/.hermes/state.db` open, is never touched. The restore
-// then reports success and the agent keeps serving pre-restore state until
-// something else happens to restart it. That is the same false-success shape
-// this codebase has already been bitten by twice.
-//
-// Names use the .service suffix so they match the NOPASSWD sudoers rules in
+// Spelled with `.service` so it matches the NOPASSWD rule in
 // config/clawbox-sudoers verbatim — sudoers Cmnd_Spec is exact-string, so
 // "clawbox-gateway" would NOT match "clawbox-gateway.service".
-//
-// NOTE on the Hermes side: there is deliberately NO sudoers grant for
-// `clawbox-hermes-dashboard`, and this route does not add one. `systemctl
-// restart` starts a stopped unit, so such a grant would let a customer on an
-// OPENCLAW box resurrect the Hermes dashboard that the foreign-edition
-// teardown just stopped and disabled — the exact resurrection the gateway's
-// mask exists to prevent, in the other direction.
-// `install-foreign-edition-teardown.test.ts` guards that invariant.
-//
-// So the restart is ATTEMPTED (it succeeds on devices whose sudoers policy
-// allows it) and, where it is refused, the failure travels back in
-// `restartErrors` and the result card tells the owner to restart the agent
-// themselves. An unrestarted dashboard keeps serving pre-restore state from
-// the file handles it already holds, so the one thing we must not do is stay
-// quiet about it.
-function restartServicesFor(edition: string): string[] {
-  return edition === "hermes"
-    ? [HERMES_DASHBOARD_UNIT]
-    : ["clawbox-gateway.service"];
+const OPENCLAW_RESTART_UNIT = "clawbox-gateway.service";
+
+/**
+ * Bring the process that holds the restored state back onto the new inodes.
+ *
+ * WHICH process is per-edition, and so is HOW it is restarted.
+ *
+ * OPENCLAW — `clawbox-gateway.service`, restarted through the sudoers grant
+ * that exists for it.
+ *
+ * HERMES — `clawbox-hermes-dashboard.service`, and NOT through sudo. There is
+ * deliberately no sudoers grant over any Hermes unit:
+ * `install-foreign-edition-teardown.test.ts` asserts it, because `systemctl
+ * restart` STARTS a stopped unit and such a grant would let a customer on an
+ * OpenClaw box resurrect the Hermes dashboard the foreign-edition teardown had
+ * just stopped and disabled. That decision is right and it stays.
+ *
+ * What was wrong was reaching for `sudo systemctl restart` anyway and calling
+ * the guaranteed refusal "best effort". On the owner's Hermes box the restore
+ * put every file back and then reported it could not restart the dashboard.
+ *
+ * `bounceHermesDashboard()` is the path built for exactly this: it asks the
+ * unit whether it is `Restart=always`, and if so runs `hermes dashboard
+ * --stop`, which is unprivileged (the dashboard runs `User=clawbox`, and the
+ * unit's own ExecStartPre runs the same command) and is a stop, not a start —
+ * so a dashboard that is stopped and disabled stays that way. Its own doc
+ * comment names "a restored backup" as the reason it exists; ClawKeep simply
+ * never picked it up, because it landed after this route was written.
+ *
+ * Either way a failure is REPORTED, never swallowed: an unrestarted process
+ * keeps serving pre-restore state from the handles it already holds, so the one
+ * thing this must not do is stay quiet about it. The caller puts whatever comes
+ * back into `restartErrors` and the result card tells the owner which unit to
+ * restart by hand.
+ */
+async function restartStateHolder(edition: string): Promise<string[]> {
+  if (edition === "hermes") {
+    if (await bounceHermesDashboard()) return [];
+    // No exception to quote: bounceHermesDashboard() never throws, it answers
+    // "this box was left exactly as it was". Say which of its two reasons the
+    // owner can act on rather than inventing a detail we do not have.
+    const detail =
+      "could not be bounced from here — the unit is not Restart=always, or the stop did not take";
+    console.warn(`[clawkeep/restore] ${HERMES_DASHBOARD_UNIT} ${detail}`);
+    return [`${HERMES_DASHBOARD_UNIT}: ${detail}`];
+  }
+  try {
+    // The unit name comes from the const above rather than being spelled again
+    // here, and scripts/check-sudoers-coverage.sh resolves it: one name, checked
+    // against the allow-list, with no second copy to drift.
+    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", OPENCLAW_RESTART_UNIT], {
+      timeout: 30_000,
+    });
+    return [];
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    // Visible in journalctl this way even if the user dismisses the result
+    // card before reading restartErrors.
+    console.warn(`[clawkeep/restore] systemctl restart ${OPENCLAW_RESTART_UNIT} failed: ${detail}`);
+    return [`${OPENCLAW_RESTART_UNIT}: ${detail}`];
+  }
 }
 
 // POST /setup-api/clawkeep/restore
@@ -76,23 +110,10 @@ export async function POST(request: NextRequest) {
 
     const result = await runRestore(name, { passphrase });
 
-    // Best-effort service restart. Swallow individual failures — the
-    // restore itself succeeded, and a manual `systemctl restart` is a
-    // recoverable follow-up.
-    const restartErrors: string[] = [];
-    for (const svc of restartServicesFor(getEdition())) {
-      try {
-        await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", svc], {
-          timeout: 30_000,
-        });
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e);
-        // Service-restart failures are visible in journalctl this way even
-        // if the user dismisses the result card before reading restartErrors.
-        console.warn(`[clawkeep/restore] systemctl restart ${svc} failed: ${detail}`);
-        restartErrors.push(`${svc}: ${detail}`);
-      }
-    }
+    // The restore itself has succeeded by here. A process that could not be
+    // brought back onto the restored inodes is still a partial result, so the
+    // reasons travel out to the caller instead of being swallowed.
+    const restartErrors = await restartStateHolder(getEdition());
 
     return NextResponse.json(
       {
