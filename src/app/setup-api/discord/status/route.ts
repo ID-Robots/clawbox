@@ -17,8 +17,46 @@ import {
   readHermesDiscordAccess,
   readHermesGatewaySnapshot,
 } from "@/lib/hermes-discord";
+import { type ChannelStatus, readChannelStatus } from "@/lib/openclaw-channels";
 
 export const dynamic = "force-dynamic";
+
+/** OpenClaw's id for this channel — the config key's, the plugin's, the CLI's. */
+const DISCORD_CHANNEL_ID = "discord";
+
+// Discord refuses a gateway connection outright when a privileged intent the
+// bot asked for was never enabled in the Developer Portal. The gateway records
+// that refusal verbatim, and it is the one failure with a remedy the panel can
+// name, so it gets its own state rather than being flattened into "offline".
+const DISALLOWED_INTENTS_RE = /disallowed\s*intents|privileged\s*intent/i;
+
+/**
+ * Map an OpenClaw channel row onto the SAME four states the Hermes branch uses.
+ *
+ * Deliberately not a second vocabulary: one card renders these, and two
+ * meanings behind one word is how "connected" stopped meaning connected.
+ *
+ * Order is the argument, mirroring mapDiscordConnectionState():
+ *   * nothing is connected while the adapter is not running, so that is checked
+ *     before any recorded error;
+ *   * an intents refusal outranks the transport's own word once it IS running,
+ *     because the adapter will never retry out of it and it is what the owner
+ *     has to act on;
+ *   * `connected` requires the transport to actually be up. `running` alone was
+ *     satisfied by a process in a restart loop.
+ *
+ * "denied-no-allowlist" is unreachable here on purpose: OpenClaw admits senders
+ * through its own owner-approved DM pairing, which ClawBox neither writes nor
+ * reads, so there is no allowlist whose emptiness this could honestly report.
+ */
+export function mapOpenclawChannelState(status: ChannelStatus): DiscordConnectionState {
+  if (status.lastError && DISALLOWED_INTENTS_RE.test(status.lastError) && status.running) {
+    return "intents-missing";
+  }
+  if (!status.running) return "offline";
+  if (status.connected) return "connected";
+  return "offline";
+}
 
 // Caching mirrors /telegram/status, and for the same reason: the Settings panel
 // and the section subtitle both read this, so a naive implementation would hit
@@ -74,6 +112,35 @@ async function fetchBotProbe(token: string): Promise<BotProbe> {
     inFlightFetch.delete(token);
   });
   inFlightFetch.set(token, pending);
+  return pending;
+}
+
+// ── OpenClaw: one CLI cold start, shared ────────────────────────────────────
+//
+// `openclaw channels status` is a full CLI invocation plus a gateway round trip
+// — ~10-12 s on a Jetson before the gateway even answers. The Settings panel
+// polls this route, so the probe is cached and concurrent callers share one
+// in-flight call, exactly like the Hermes probe below. Failures are cached too:
+// the slower the CLI gets, the more often the panel would otherwise pay for the
+// call it had just given up on.
+const CHANNEL_PROBE_TTL = 15_000;
+let cachedChannel: { value: ChannelStatus | null; at: number } | null = null;
+let inFlightChannel: Promise<ChannelStatus | null> | null = null;
+
+function probeChannel(): Promise<ChannelStatus | null> {
+  if (cachedChannel && Date.now() - cachedChannel.at < CHANNEL_PROBE_TTL) {
+    return Promise.resolve(cachedChannel.value);
+  }
+  if (inFlightChannel) return inFlightChannel;
+  const pending = readChannelStatus(DISCORD_CHANNEL_ID)
+    .then((value) => {
+      cachedChannel = { value, at: Date.now() };
+      return value;
+    })
+    .finally(() => {
+      inFlightChannel = null;
+    });
+  inFlightChannel = pending;
   return pending;
 }
 
@@ -177,15 +244,39 @@ export async function GET() {
       });
     }
 
+    // ── OpenClaw ───────────────────────────────────────────────────────────
+    //
+    // This branch used to answer `state: null`, on the reasoning that OpenClaw
+    // "exposes no per-platform state file". That was true when it was written
+    // and is not true of openclaw 2026.7.x: `openclaw channels status --json`
+    // publishes a per-account row carrying `running`, `connected`,
+    // `tokenStatus` and `lastError`, which is exactly the vocabulary the Hermes
+    // branch above maps. So the card was blank on a box whose bot was
+    // answering in Discord.
+    const channel = await probeChannel();
+    // `null` = the gateway could not be asked (CLI timeout, gateway restarting,
+    // no openclaw binary). UNKNOWN, which the panel renders as its neutral
+    // state — never "offline", which would accuse a healthy bot, and never
+    // "connected", which is the lie this file exists to prevent.
+    const state = channel ? mapOpenclawChannelState(channel) : null;
+
     return NextResponse.json({
       configured: true,
-      // OpenClaw gates Discord through its own owner-approved DM pairing and
-      // exposes no per-platform state file, so there is nothing here that could
-      // honestly be mapped to the four states.
-      state: null,
+      // Whether the answer came from the gateway or from the stored token alone
+      // — the same field, with the same meaning, as the Hermes branch.
+      verified: channel !== null,
+      state,
+      // Same rule as Hermes, and it is the rule that matters: "receiving" may
+      // be true ONLY when the transport is genuinely up.
+      receiving: state === "connected",
+      // OpenClaw gates who may talk to the bot through its own owner-approved
+      // DM pairing, which ClawBox does not write — so there is no allowlist to
+      // offer here and no "denied" state to report.
       allowlistSupported: false,
       tokenRejected: bot.rejected,
-      username: bot.info?.displayName,
+      // Discord's own answer stays authoritative for the display name; the
+      // gateway's is the fallback for a device that cannot reach Discord.
+      username: bot.info?.displayName ?? channel?.botUsername ?? undefined,
       botId: bot.info?.id,
     });
   } catch (err) {

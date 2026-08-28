@@ -39,7 +39,7 @@ const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
 type WriteCall = [string, string, unknown];
 
-function writtenJsonConfig(): Record<string, never> & {
+function writtenJsonConfig(): Record<string, unknown> & {
   channels: Record<string, Record<string, unknown>>;
 } {
   const call = (mockFs.writeFile.mock.calls as unknown as WriteCall[]).find((c) =>
@@ -203,5 +203,70 @@ describe("writeDiscordGatewayEnv (env-file injection guard)", () => {
   it("still writes a well-formed token", async () => {
     await openclawConfig.writeDiscordGatewayEnv(TOKEN);
     expect(writtenEnvFile().body).toContain(`DISCORD_BOT_TOKEN=${TOKEN}`);
+  });
+});
+
+// The other half of the env-reference story, and the half that was missing.
+//
+// `token: {source:"env", provider:"default", id:"…"}` is resolved by OpenClaw
+// through `secrets.providers["default"]`. There is NO implicit default provider
+// in the runtime, so a config that carries the reference and no provider block
+// starts the channel and then kills it on first use with
+//
+//   Discord bot token configured for account "default" is unavailable; resolve
+//   SecretRefs against the active runtime snapshot before using this account.
+//
+// Proven live: adding secrets.providers.default = { source: "env" } and
+// restarting fixed a box that had been in that restart loop.
+describe("env SecretRef provider (the chokepoint)", () => {
+  let openclawConfig: typeof import("@/lib/openclaw-config");
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    mockFs.readFile.mockResolvedValue("{}");
+    mockFs.writeFile.mockResolvedValue(undefined);
+    mockFs.rename.mockResolvedValue(undefined);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.chmod.mockResolvedValue(undefined);
+    openclawConfig = await import("@/lib/openclaw-config");
+  });
+
+  it("writes the provider the reference resolves through", async () => {
+    await openclawConfig.setDiscordToken(TOKEN);
+    expect(writtenJsonConfig().secrets).toEqual({ providers: { default: { source: "env" } } });
+  });
+
+  it("is one helper, so every future env-backed channel gets it too", async () => {
+    // Not a Discord special case: the helper that mints an env SecretRef is
+    // what installs the provider, so WhatsApp/Slack/anything added later
+    // cannot repeat this bug by forgetting a second write.
+    const config: import("@/lib/openclaw-config").OpenClawConfig = {};
+    const ref = openclawConfig.envSecretRef(config, "WHATSAPP_TOKEN");
+
+    expect(ref).toEqual({ source: "env", provider: "default", id: "WHATSAPP_TOKEN" });
+    expect(config.secrets).toEqual({ providers: { default: { source: "env" } } });
+  });
+
+  it("leaves an operator's own providers alone", async () => {
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({ secrets: { providers: { vault: { source: "exec" } } } }),
+    );
+
+    await openclawConfig.setDiscordToken(TOKEN);
+
+    expect(writtenJsonConfig().secrets).toEqual({
+      providers: { vault: { source: "exec" }, default: { source: "env" } },
+    });
+  });
+
+  it("repairs a default provider that points somewhere an env var cannot resolve", async () => {
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({ secrets: { providers: { default: { source: "file" } } } }),
+    );
+
+    await openclawConfig.setDiscordToken(TOKEN);
+
+    expect(writtenJsonConfig().secrets).toEqual({ providers: { default: { source: "env" } } });
   });
 });

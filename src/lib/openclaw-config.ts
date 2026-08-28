@@ -134,7 +134,7 @@ async function withConfigMutationRetry(
   throw lastError ?? new Error(`${label} exhausted retries`);
 }
 
-interface SpawnOpenclawOptions {
+export interface SpawnOpenclawOptions {
   /** Per-call timeout in ms. Default 30_000 (Jetson CLI cold-start is ~10-12s). */
   timeoutMs?: number;
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
@@ -218,6 +218,22 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
       }
     });
   });
+}
+
+/**
+ * Public face of {@link spawnOpenclaw} for other libs in this repo.
+ *
+ * Exported as a named wrapper rather than by exporting `spawnOpenclaw` itself
+ * so the edition guard, the timeout and the stdio rules stay in ONE place: a
+ * caller that wants `--json` output gets the same "drain stdout or the child
+ * deadlocks" handling every internal caller already has, and the
+ * OpenclawUnavailableError guard cannot be routed around.
+ */
+export function spawnOpenclawCli(
+  args: string[],
+  options: SpawnOpenclawOptions = {},
+): Promise<string> {
+  return spawnOpenclaw(args, options);
 }
 
 /**
@@ -639,6 +655,16 @@ export interface OpenClawConfig {
       [key: string]: unknown;
     };
   };
+  /**
+   * Where a `token: {source, provider, id}` reference is resolved FROM.
+   * OpenClaw looks the `provider` name up in here; there is no implicit
+   * default, so a reference without a matching entry is unresolvable at
+   * runtime. See {@link envSecretRef}.
+   */
+  secrets?: {
+    providers?: Record<string, { source?: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
   tools?: {
     profile?: string;
     web?: { search?: { enabled?: boolean } };
@@ -902,13 +928,65 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
 // (`token: {source:"env", provider:"default", id:"DISCORD_BOT_TOKEN"}`), not as
 // a literal string like `channels.telegram.botToken`. So writing the config is
 // only half the job — DISCORD_BOT_TOKEN also has to be present in the gateway
-// PROCESS environment, or the config validates, the gateway starts, and the bot
-// silently never logs in.
+// PROCESS environment, and `secrets.providers.default` has to exist for the
+// reference to resolve at all (see envSecretRef below), or the config
+// validates, the gateway starts, and the bot silently never logs in.
 //
 // That is what `data/discord.env` is for: clawbox-gateway.service loads it with
 // `EnvironmentFile=-`, the same mechanism it already uses for network.env.
 // systemd re-reads EnvironmentFile on every start, so the restart that follows
 // a save is what picks the value up.
+
+// === Env-backed credentials (SecretRefs) ====================================
+//
+// A channel whose credential lives in the gateway's PROCESS environment is
+// configured with a reference, not a literal:
+//
+//     token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" }
+//
+// OpenClaw resolves that through `resolveProviderRefs()`, which switches on
+// `secrets.providers[<provider>].source`. THERE IS NO IMPLICIT DEFAULT
+// PROVIDER — grepping the shipped runtime for one finds nothing. A config that
+// carries the reference and no `secrets` block therefore validates, starts the
+// channel, and then kills it on first use:
+//
+//     Discord bot token configured for account "default" is unavailable;
+//     resolve SecretRefs against the active runtime snapshot before using this
+//     account.
+//
+// which on a live box was a restart loop behind a panel reporting success.
+// Adding the provider and restarting fixed it immediately.
+
+/** The single provider name every env SecretRef this repo writes points at. */
+export const ENV_SECRET_PROVIDER = "default";
+
+/**
+ * Mint an env SecretRef for `envVar`, installing the provider it resolves
+ * through into `config` as a side effect.
+ *
+ * THE CHOKEPOINT. The reference and the provider that makes it resolvable are
+ * produced by one call, so a channel added later cannot repeat this bug by
+ * writing the reference and forgetting the provider — the two cannot be
+ * written apart. Grep `source: "env"` across `src/` and this is the only
+ * production writer of one; `gateway-proxy.ts` only ever READS the shape.
+ *
+ * A `default` provider pointing anywhere else is repaired rather than left
+ * alone: `source: "file"` would send an env-backed reference to a path that
+ * does not exist, which is the same silent failure with a different message.
+ * Any other provider an operator configured is preserved untouched.
+ */
+export function envSecretRef(
+  config: OpenClawConfig,
+  envVar: string,
+): { source: "env"; provider: string; id: string } {
+  const secrets = (config.secrets ??= {});
+  const providers = (secrets.providers ??= {});
+  const existing = providers[ENV_SECRET_PROVIDER];
+  if (existing?.source !== "env") {
+    providers[ENV_SECRET_PROVIDER] = { ...existing, source: "env" };
+  }
+  return { source: "env", provider: ENV_SECRET_PROVIDER, id: envVar };
+}
 
 /** Env var the gateway resolves the Discord credential from. */
 export const DISCORD_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN";
@@ -1004,7 +1082,9 @@ export async function setDiscordToken(botToken: string): Promise<void> {
   config.channels.discord = {
     ...rest,
     enabled: true,
-    token: { source: "env", provider: "default", id: DISCORD_TOKEN_ENV_VAR },
+    // envSecretRef also installs `secrets.providers.default`, without which
+    // this reference is unresolvable at runtime — see its doc comment.
+    token: envSecretRef(config, DISCORD_TOKEN_ENV_VAR),
   };
   await writeConfig(config);
   // Config first, secret second: a half-applied save that has the reference but
