@@ -97,6 +97,7 @@ import { promises as nodeFsPromises } from "fs";
 import { getAll, setMany } from "@/lib/config-store";
 import {
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -197,6 +198,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     vi.mocked(getAll).mockResolvedValue({});
     vi.mocked(setMany).mockResolvedValue();
     vi.mocked(readConfig).mockResolvedValue({} as never);
+    vi.mocked(readConfigStrict).mockResolvedValue({} as never);
     vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
     vi.mocked(restartGateway).mockResolvedValue();
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);

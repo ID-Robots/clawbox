@@ -110,6 +110,7 @@ import { unpairLocal } from "@/lib/clawkeep";
 import {
   inferConfiguredLocalModel,
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -122,6 +123,7 @@ const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
 const mockSetMany = vi.mocked(setMany);
 const mockReadConfig = vi.mocked(readConfig);
+const mockReadConfigStrict = vi.mocked(readConfigStrict);
 const mockRunOpenclawConfigSet = vi.mocked(runOpenclawConfigSet);
 const mockRunOpenclawConfigSetBatch = vi.mocked(runOpenclawConfigSetBatch);
 const mockFs = vi.mocked(fsp);
@@ -176,6 +178,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI image provider", ()
     mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
     mockReadConfig.mockResolvedValue({});
+    mockReadConfigStrict.mockResolvedValue({});
     vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
     mockSetMany.mockResolvedValue();
     vi.mocked(restartGateway).mockResolvedValue();
