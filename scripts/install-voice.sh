@@ -863,7 +863,9 @@ if [ "${1:-}" = "--piper-only" ]; then
     *)
       # `failed:*`, nothing published, or a verdict outside the vocabulary.
       # None of those is evidence of an engine, and an unparseable answer is at
-      # least as suspicious as an absent one.
+      # least as suspicious as an absent one. Also reached only past the guard
+      # above, so this is a LOST FALLBACK behind a working Kokoro rather than a
+      # mute box — which is why it stays 1 and does not borrow 13's words.
       echo "=== Piper fallback INCOMPLETE — no usable Piper verdict (Piper: ${TTS_PIPER_VERDICT:-unreported}) ===" >&2
       exit 1
       ;;
