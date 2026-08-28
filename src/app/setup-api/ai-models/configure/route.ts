@@ -66,6 +66,7 @@ import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-a
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
+  offSurfaceCodexModelMessage,
 } from "@/lib/subscription-surface";
 // The model name on this route arrives in the request body. For a local
 // provider it is the whole of `apiKey`, which nothing further constrains, and
@@ -1390,11 +1391,26 @@ export async function POST(request: Request) {
     // `local_ai_was_default` is the flag POST /setup-api/local-ai leaves behind
     // when it clears a `model.provider` that pointed at the local model.
     const localWasDefaultBeforeDisable = isLocalScope && configStore.local_ai_was_default === true;
-    if (!isLocalScope && configStore.local_ai_was_default === true) {
-      // The owner has since chosen a different provider on purpose. Re-enabling
-      // the local model later must not evict that choice.
+    /**
+     * Forget that the local model used to be the default, because the owner has
+     * now chosen a cloud provider on purpose and re-enabling local later must
+     * not evict that choice.
+     *
+     * Called where the cloud save LANDS, not here. It used to run the moment
+     * the request was parsed, so a save the route went on to REFUSE — an
+     * off-surface Claude or ChatGPT id, a Hermes provider that needs its own
+     * panel — still changed how a later local re-enable behaves. A rejection
+     * that has already had a side effect is not a rejection: the same rule the
+     * subscription-surface guards below are placed to obey.
+     *
+     * Reading `configStore`, the snapshot taken at the top of the request, so
+     * it stays the same question it was then; `shouldPromoteLocalToPrimary`
+     * below reads that snapshot too and is unaffected by when this runs.
+     */
+    const forgetLocalWasDefault = async () => {
+      if (isLocalScope || configStore.local_ai_was_default !== true) return;
       await setMany({ local_ai_was_default: undefined });
-    }
+    };
     const shouldPromoteLocalToPrimary =
       isLocalScope && (!configStore.ai_model_configured || body.activate === true || localWasDefaultBeforeDisable);
 
@@ -1620,6 +1636,7 @@ export async function POST(request: Request) {
         }
         if (isClawAI) {
           await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
+          await forgetLocalWasDefault();
           return NextResponse.json({ success: true });
         }
         if (authMode !== "subscription" && normalizedApiKey) {
@@ -1631,8 +1648,12 @@ export async function POST(request: Request) {
             apiKey: normalizedApiKey,
           });
           if (result.activated) {
+            await forgetLocalWasDefault();
             return NextResponse.json({ success: true });
           }
+          // 409, not success: the key is stored but no model is picked, so this
+          // save has not chosen a provider yet and must not evict the local
+          // model's claim on the primary slot.
           return NextResponse.json(
             { error: "Key saved. Open the Hermes provider panel to pick a model for it." },
             { status: 409 },
@@ -1667,37 +1688,60 @@ export async function POST(request: Request) {
       }
     }
 
-    // ── The Claude subscription surface ─────────────────────────────────────
+    // ── The subscription surfaces ───────────────────────────────────────────
     // This route is the SECOND write path to `agents.defaults.model.primary`;
-    // /setup-api/chat/model is the first, and the guard there exists "for ids
+    // /setup-api/chat/model is the first, and the guards there exist "for ids
     // that arrive some other way". This is that other way. The shape check
     // above deliberately does not consult the curated list ("users can type
     // newer model IDs we haven't added yet"), and the wizard's picker exempts
-    // a typed custom id from its own greying-out rule, so without this a
-    // Claude-subscription box can be pinned from Settings to exactly the model
-    // the chat header refuses — one the `claude-cli` surface cannot route.
+    // a typed custom id from its own greying-out rule, so without these a
+    // subscription box can be pinned from Settings to exactly the model the
+    // chat header refuses — one its subscription cannot route.
     //
     // Judged on the SETTLED `config.defaultModel`, after every branch above
     // has had its say, so the PROVIDERS-table default is covered as well as a
     // typed id: one check for every value this save can write to primary.
+    // Split once, so both rules judge the same value and cannot disagree about
+    // what this save is going to write.
     //
-    // AFTER the Hermes branch, because the question it asks is about
+    // AFTER the Hermes branch, because the questions they ask are about
     // `openclaw.json` and a Hermes box has none — and that branch refuses a
     // subscription save outright anyway. BEFORE `writeAuthProfiles` below,
     // because a refusal that has already persisted a credential is not a
     // refusal, it is a half-applied save. Nothing between here and there
     // writes anything (the OAuth handoff file is consumed only on success).
+    const settledSlash = config.defaultModel.indexOf("/");
+    const settledProvider = settledSlash > 0 ? config.defaultModel.slice(0, settledSlash) : null;
+    const settledModelId = config.defaultModel.slice(settledSlash + 1);
+
+    // ChatGPT: the same gap as the Claude one below, on the other
+    // subscription — and the one that ARMS it, because an off-surface
+    // `codex/*` id has to reach `agents.defaults.model.primary` before the
+    // chat header can restore it, and this save is the only way in.
+    // `isValidModelId` above checks SHAPE only and `resolveEntitledCodexModel`
+    // runs solely in the nothing-was-typed branch, so `gpt-5.4-pro` typed into
+    // the custom-model field was written as `codex/gpt-5.4-pro` — precisely
+    // the id /setup-api/chat/model has refused since it was written. Every
+    // turn afterwards fails upstream.
     //
-    // Only a SUBSCRIPTION save can create the hazard. An API-key save writes
-    // the anthropic key that makes the API-only models routable, so after it
-    // lands the box is not subscription-only and there is nothing to refuse —
-    // refusing there would block the very switch the message recommends
-    // ("switch Anthropic to API-key mode for the API-only models").
+    // Not gated on `authMode`, because the NAMESPACE is the gate: ClawBox
+    // writes `codex/` only for an OpenAI save in subscription mode, and an
+    // API-key save writes `openai/`, where the -pro tiers route fine — which
+    // is exactly the switch the refusal recommends.
+    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId);
+    if (offSurfaceCodex) {
+      return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
+    }
+
+    // Claude: only a SUBSCRIPTION save can create the hazard here. An API-key
+    // save writes the anthropic key that makes the API-only models routable,
+    // so after it lands the box is not subscription-only and there is nothing
+    // to refuse — refusing there would block the very switch the message
+    // recommends ("switch Anthropic to API-key mode for the API-only models").
     if (authMode === "subscription") {
-      const slash = config.defaultModel.indexOf("/");
       const offSurface = await offSurfaceClaudeModelMessage(
-        slash > 0 ? config.defaultModel.slice(0, slash) : null,
-        config.defaultModel.slice(slash + 1),
+        settledProvider,
+        settledModelId,
         async () => {
           // Ask about the profiles this save is ABOUT TO leave behind, not the
           // ones already on disk: this sign-in is what writes the OAuth
@@ -1946,6 +1990,8 @@ export async function POST(request: Request) {
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
+      // The cloud save has landed — see `forgetLocalWasDefault`.
+      await forgetLocalWasDefault();
     }
 
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json
