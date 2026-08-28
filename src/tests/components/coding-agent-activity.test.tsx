@@ -12,8 +12,10 @@
  *    the message above it. The badge now STAYS and reports the outcome.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import fs from "fs";
+import path from "path";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import { renderHook } from "@testing-library/react";
+import { cleanup, renderHook } from "@testing-library/react";
 import { translations } from "@/lib/translations";
 import CodingAgentActivityPill from "@/components/CodingAgentActivityPill";
 import { artifactUrl, isCodingAgentTool, useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
@@ -47,6 +49,11 @@ const LABELS = {
   thinking: en["codingAgent.thinking"],
   filesTouched: en["codingAgent.chatFilesTouched"],
   turns: en["codingAgent.chatTurns"],
+  plan: en["codingAgent.chatPlan"],
+  done: en["codingAgent.chatDone"],
+  now: en["codingAgent.chatNow"],
+  more: en["codingAgent.chatMore"],
+  busy: en["codingAgent.chatBusy"],
   steps: {
     screenshot: en["codingAgent.chatScreenshot"],
     lookingAtPage: en["codingAgent.chatLookingAtPage"],
@@ -56,9 +63,17 @@ const LABELS = {
     write: en["codingAgent.chatWrite"],
     edit: en["codingAgent.chatEdit"],
     read: en["codingAgent.chatRead"],
+    plan: en["codingAgent.chatPlan"],
   },
 };
 const OPEN = en["codingAgent.chatOpenApp"];
+
+/** A run's plan as TodoWrite last wrote it: one done, one on, one to go. */
+const TODOS = [
+  { content: "Scaffold the page", status: "completed" },
+  { content: "Wire the game loop", status: "in_progress", activeForm: "Wiring the game loop" },
+  { content: "Add tests", status: "pending" },
+] as const;
 /**
  * The header is the expand/collapse control. Reached by test id, not by role
  * and name: jsdom computes an accessible name by walking the whole tree, and
@@ -131,7 +146,24 @@ describe("useCodingAgentActivity", () => {
     vi.stubGlobal("fetch", vi.fn(async () => runsResponse([RUNNING])));
     const { result } = renderHook(() => useCodingAgentActivity(true));
     await waitFor(() => expect(result.current.runs).toHaveLength(1));
-    expect(result.current.runs[0]).toMatchObject({ progress: [], screenshots: [], thinkingTokens: 0, numTurns: 0 });
+    expect(result.current.runs[0]).toMatchObject({ progress: [], screenshots: [], thinkingTokens: 0, numTurns: 0, todos: [] });
+  });
+
+  it("carries the run's plan, and only the items it can draw", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => runsResponse([{
+      ...RUNNING,
+      todos: [...TODOS, { content: "Odd", status: "weird" }, { status: "completed" }, "nope", null],
+    }])));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+    expect(result.current.runs[0].todos).toEqual([...TODOS, { content: "Odd", status: "pending" }]);
+  });
+
+  it("reads a plan that is not a list as no plan", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => runsResponse([{ ...RUNNING, todos: "soon" }])));
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+    expect(result.current.runs[0].todos).toEqual([]);
   });
 
   it("builds the served URL of a screenshot with both parts encoded", () => {
@@ -284,7 +316,7 @@ describe("the badge", () => {
       id: "run-x", projectId: null, task: "x", startedAt: NOW,
       completedAt: null, status: "running" as const, source: "agent" as const,
       subagentsTotal: 0, subagentsActive: 0, subagentsByType: {}, tokensUsed: 0, thinkingTokens: 0,
-      filesTouched: 0, numTurns: 0, progress: [], screenshots: [],
+      filesTouched: 0, numTurns: 0, progress: [], screenshots: [], todos: [],
     };
     const { rerender } = render(
       <CodingAgentActivityPill run={run} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,
@@ -316,6 +348,7 @@ describe("the card, expanded", () => {
           tokensUsed: 46_000, thinkingTokens: 0, filesTouched: 3, numTurns: 0,
           progress: ["Write style.css", "Now the JavaScript:", "$ node --check /home/clawbox/clawbox/data/app.js", "mcp__clawbox__browser_screenshot"],
           screenshots: ["before.png", "after.png"],
+          todos: [],
           ...over,
         }}
         labels={LABELS}
@@ -466,3 +499,167 @@ describe("the card, expanded", () => {
     expect(screen.getByTestId("coding-agent-activity-details")).toHaveAttribute("aria-live", "off");
   });
 });
+
+/**
+ * The owner's next ask, in their words: "Add some animation to indicate
+ * Agent Working. In live work show summaries of current tasks if possible."
+ * The summaries are the run's own TodoWrite plan; the animation is three
+ * compositor-only signs of life that stop the moment the run does.
+ */
+describe("the plan and the signs of life", () => {
+  const card = (over: Record<string, unknown> = {}) => {
+    render(
+      <CodingAgentActivityPill
+        run={{
+          id: "run-k3x9q2ab", projectId: "timer", task: "x",
+          startedAt: NOW - 30_000, completedAt: null,
+          status: "running", source: "agent",
+          subagentsTotal: 0, subagentsActive: 0, subagentsByType: {},
+          tokensUsed: 0, thinkingTokens: 0, filesTouched: 0, numTurns: 0,
+          progress: ["Read app.js", "Plan: 3 tasks, 1 done"],
+          screenshots: [],
+          todos: [...TODOS],
+          ...over,
+        }}
+        labels={LABELS}
+        openLabel={OPEN}
+      />,
+    );
+    return screen.getByTestId("coding-agent-activity");
+  };
+
+  it("collapsed and live, says what the run is on now in its own words, above the newest step", () => {
+    const el = card();
+    const now = screen.getByTestId("coding-agent-activity-now");
+    expect(now.textContent).toContain(`${LABELS.now}:`);
+    expect(now.textContent).toContain("Wiring the game loop"); // the activeForm, not the content
+    expect(now.textContent).not.toContain("Wire the game loop");
+    // The step chip is still there, after it: the tool call and the intent
+    // both fit — and its counts are in the owner's words, never the runner's
+    // "3 tasks, 1 done".
+    const chip = screen.getByTestId("coding-agent-activity-progress");
+    expect(chip.textContent).toContain(LABELS.plan);
+    expect(chip.textContent).toContain(`1/3 ${LABELS.done}`);
+    expect(chip.textContent).not.toContain("tasks");
+    expect(now.compareDocumentPosition(chip) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(el.textContent).not.toContain("Add tests"); // collapsed: the list waits for a click
+  });
+
+  it("falls back to the item's content when the tool sent no present-tense form", () => {
+    card({ todos: [{ content: "Wire the game loop", status: "in_progress" }] });
+    expect(screen.getByTestId("coding-agent-activity-now").textContent).toContain("Wire the game loop");
+  });
+
+  it("has no 'now' line without an item in progress, or once the run has settled", () => {
+    card({ todos: [{ content: "Add tests", status: "pending" }] });
+    expect(screen.queryByTestId("coding-agent-activity-now")).not.toBeInTheDocument();
+    cleanupRender();
+    card({ status: "completed", completedAt: NOW });
+    expect(screen.queryByTestId("coding-agent-activity-now")).not.toBeInTheDocument();
+  });
+
+  it("expanded, draws the plan as a checklist above the steps — done, in progress, pending", () => {
+    card();
+    fireEvent.click(header());
+    const plan = screen.getByTestId("coding-agent-activity-plan");
+    expect(plan.textContent).toContain(`${LABELS.plan} · 1/3 ${LABELS.done}`);
+    const items = Array.from(screen.getByTestId("coding-agent-activity-todos").querySelectorAll("li"));
+    expect(items.map((li) => li.getAttribute("data-status"))).toEqual(["completed", "in_progress", "pending"]);
+    expect(items[0].textContent).toContain("✓");
+    expect(items[0].textContent).toContain("Scaffold the page");
+    expect(items[1].textContent).toContain("●");
+    expect(items[1].textContent).toContain("Wiring the game loop");
+    expect(items[2].textContent).toContain("○");
+    expect(items[2].textContent).toContain("Add tests");
+    // The state a screen reader hears — the glyphs are aria-hidden and a
+    // colour or a strike-through is not voiced: "current step" on the one in
+    // progress, the word "done" before a finished item, a pending item bare.
+    expect(items[1]).toHaveAttribute("aria-current", "step");
+    expect(items[0]).not.toHaveAttribute("aria-current");
+    expect(items[2]).not.toHaveAttribute("aria-current");
+    expect(items[0].querySelector(".sr-only")?.textContent?.trim()).toBe(LABELS.done);
+    expect(items[1].querySelector(".sr-only")).toBeNull();
+    expect(items[2].querySelector(".sr-only")).toBeNull();
+    // Intent first, then the tool calls that carry it out.
+    const steps = screen.getByTestId("coding-agent-activity-steps");
+    expect(plan.compareDocumentPosition(steps) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Expanded, the checklist IS the "now" line; it is not said twice.
+    expect(screen.queryByTestId("coding-agent-activity-now")).not.toBeInTheDocument();
+  });
+
+  it("folds a long plan to eight items around the one in progress, and counts the rest", () => {
+    const todos = Array.from({ length: 14 }, (_, i) => ({
+      content: `task ${i}`,
+      status: i < 9 ? "completed" : i === 9 ? "in_progress" : "pending",
+    }));
+    card({ todos });
+    fireEvent.click(header());
+    const items = Array.from(screen.getByTestId("coding-agent-activity-todos").querySelectorAll("li"));
+    expect(items).toHaveLength(8);
+    expect(items.some((li) => li.getAttribute("data-status") === "in_progress")).toBe(true);
+    expect(items[items.length - 1].textContent).toContain("task 11"); // a little of what comes next
+    expect(screen.getByTestId("coding-agent-activity-todos-more").textContent)
+      .toBe(LABELS.more.replace("{n}", "6"));
+    expect(screen.getByTestId("coding-agent-activity-plan").textContent).toContain(`9/14 ${LABELS.done}`);
+  });
+
+  it("shows no plan section for a run that never planned", () => {
+    card({ todos: [] });
+    fireEvent.click(header());
+    expect(screen.queryByTestId("coding-agent-activity-plan")).not.toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-activity-steps")).toBeInTheDocument();
+  });
+
+  it("moves while the run is live: the glyph breathes, three dots step, the item in progress pulses", () => {
+    const el = card();
+    const dots = screen.getByTestId("coding-agent-activity-working");
+    expect(dots).toHaveClass("coding-agent-working");
+    expect(dots.querySelectorAll("span")).toHaveLength(3);
+    expect(dots).toHaveAttribute("aria-label", LABELS.busy);
+    // The 🤖 and the "now" marker, collapsed…
+    expect(el.querySelectorAll(".coding-agent-pulse").length).toBeGreaterThanOrEqual(2);
+    // …and the in-progress item's dot, expanded.
+    fireEvent.click(header());
+    const active = screen.getByTestId("coding-agent-activity-todos").querySelector('li[data-status="in_progress"]');
+    expect(active?.querySelector(".coding-agent-pulse")).not.toBeNull();
+    const done = screen.getByTestId("coding-agent-activity-todos").querySelector('li[data-status="completed"]');
+    expect(done?.querySelector(".coding-agent-pulse")).toBeNull();
+  });
+
+  it("is still once the run has settled — nothing animates on a finished card", () => {
+    for (const status of ["completed", "failed", "stopped"] as const) {
+      const el = card({ status, completedAt: NOW });
+      expect(screen.queryByTestId("coding-agent-activity-working")).not.toBeInTheDocument();
+      expect(el.querySelector(".coding-agent-pulse")).toBeNull();
+      fireEvent.click(header());
+      expect(el.querySelector(".coding-agent-pulse")).toBeNull();
+      expect(el.querySelector(".coding-agent-working")).toBeNull();
+      cleanupRender();
+    }
+  });
+
+  it("is animated by the compositor only, and holds still under reduced motion", () => {
+    const css = fs.readFileSync(path.join(process.cwd(), "src", "app", "globals.css"), "utf-8");
+    const block = css.slice(css.indexOf("Coding agent card"));
+    expect(block.length).toBeGreaterThan(0);
+    for (const name of ["coding-agent-breathe", "coding-agent-dot"]) {
+      const frames = /@keyframes\s+NAME\s*\{([\s\S]*?)\n\}/.source.replace("NAME", name);
+      const body = new RegExp(frames).exec(block)?.[1] ?? "";
+      expect(body, `@keyframes ${name}`).not.toBe("");
+      // Every animated property is one the compositor owns — no filter, no
+      // blur, no layout property, on a Jetson that is already running the run.
+      const props = Array.from(body.matchAll(/([a-z-]+)\s*:/g)).map((m) => m[1]);
+      expect(props.length).toBeGreaterThan(0);
+      for (const p of props) expect(["opacity", "transform"], `${name} animates ${p}`).toContain(p);
+    }
+    const guard = /@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/.exec(block)?.[1] ?? "";
+    expect(guard).toContain(".coding-agent-pulse");
+    expect(guard).toContain(".coding-agent-working > span");
+    expect(guard).toContain("animation: none");
+  });
+});
+
+/** Unmount between two renders inside one test, the way the setup's afterEach does. */
+function cleanupRender() {
+  cleanup();
+}

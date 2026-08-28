@@ -36,6 +36,15 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.chatRead": "Reading",
   "codingAgent.chatFilesTouched": "files touched",
   "codingAgent.chatTurns": "turns",
+  // The run's own plan (its TodoWrite list) on the card: the checklist's
+  // heading, the counted word after "3 of 7", the line that names the item
+  // it is on now, the overflow of a long list, and the word beside the
+  // three moving dots that say a live run is still working.
+  "codingAgent.chatPlan": "Plan",
+  "codingAgent.chatDone": "done",
+  "codingAgent.chatNow": "Now",
+  "codingAgent.chatMore": "+{n} more",
+  "codingAgent.chatBusy": "working",
 
   // The desktop card a finished run raises, top-right with the others.
   "codingAgent.noticeOpen": "Open the coding agent",

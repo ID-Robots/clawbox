@@ -1133,3 +1133,101 @@ describe("the report", () => {
     }
   });
 });
+
+/**
+ * The run's own plan. Claude Code's TodoWrite tool sends the WHOLE list each
+ * time; the record keeps the latest one so the chat card can show what the
+ * run is on in its own words — the owner's "show summaries of current tasks".
+ */
+describe("the run's plan", () => {
+  beforeEach(() => readyDevice());
+
+  const TODO = (todos: unknown) => JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "t_todo", name: "TodoWrite", input: { todos } }] },
+  });
+  const DONE = '{"type":"result","subtype":"success","num_turns":2,"result":"done"}';
+
+  it("keeps the latest list, and notes each rewrite as one line in the feed", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TODO([
+        { content: "Scaffold the page", status: "completed", activeForm: "Scaffolding the page" },
+        { content: "Wire the game loop", status: "in_progress", activeForm: "Wiring the game loop" },
+        { content: "Add tests", status: "pending" },
+      ])}'`,
+      `echo '${TODO([
+        { content: "Scaffold the page", status: "completed" },
+        { content: "Wire the game loop", status: "completed" },
+        { content: "Add tests", status: "in_progress", activeForm: "Adding tests" },
+      ])}'`,
+      `echo '${DONE}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.todos).toEqual([
+      { content: "Scaffold the page", status: "completed" },
+      { content: "Wire the game loop", status: "completed" },
+      { content: "Add tests", status: "in_progress", activeForm: "Adding tests" },
+    ]);
+    // One summary line per rewrite — never the list itself in the feed.
+    expect(run.progress.filter((p) => p.startsWith("Plan:"))).toEqual(["Plan: 3 tasks, 1 done", "Plan: 3 tasks, 2 done"]);
+    expect(run.progress.join("\n")).not.toContain("Wire the game loop");
+  });
+
+  it("caps the list, cuts each line, and reads an unknown status as pending", async () => {
+    const long = "x".repeat(400);
+    const todos = Array.from({ length: 25 }, (_, i) => ({ content: `task ${i} ${long}`, status: i === 0 ? "done" : "pending" }));
+    installFakeWrapper([`echo '${INIT}'`, `echo '${TODO(todos)}'`, `echo '${DONE}'`, "exit 0"].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.todos).toHaveLength(20);
+    expect(run.todos[0].content.length).toBe(160);
+    expect(run.todos[0].content.endsWith("…")).toBe(true);
+    expect(run.todos[0].status).toBe("pending"); // "done" is not a status the tool defines
+    expect(run.progress).toContain("Plan: 20 tasks, 0 done");
+  });
+
+  it("ignores a payload that is not a list, and skips items without words", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TODO([{ content: "Real", status: "in_progress" }])}'`,
+      `echo '${TODO("not a list")}'`,
+      `echo '${TODO([null, 7, { status: "completed" }, { content: "   " }, { content: "Also real" }])}'`,
+      `echo '${DONE}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    // The string payload left the good list alone; the mixed list kept its one readable item.
+    expect(run.todos).toEqual([{ content: "Also real", status: "pending" }]);
+    expect(run.progress.filter((p) => p.startsWith("Plan:"))).toEqual(["Plan: 1 tasks, 0 done", "Plan: 1 tasks, 0 done"]);
+    // The unparseable call still shows in the feed as the tool it was.
+    expect(run.progress).toContain("TodoWrite");
+  });
+
+  it("is on the record on disk and survives a fresh import", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TODO([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }])}'`,
+      `echo '${DONE}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const id = (await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id;
+    await finished(id);
+
+    const onDisk = JSON.parse(fs.readFileSync(runsFile(), "utf-8")) as { id: string; todos: unknown }[];
+    expect(onDisk.find((r) => r.id === id)?.todos).toEqual([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }]);
+
+    vi.resetModules();
+    const fresh: Lib = await import("@/lib/coding-agent");
+    expect(fresh.getRun(id)?.todos).toEqual([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }]);
+    // A record from before the field existed reads as "never planned".
+    expect(fresh.parseTodosForTests(undefined)).toBeNull();
+  });
+});

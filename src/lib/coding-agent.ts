@@ -196,6 +196,14 @@ const MAX_RUNS_KEPT = 30;
 /** Progress lines kept per run. */
 const PROGRESS_KEEP = 60;
 const MAX_PROGRESS_LINE_CHARS = 160;
+/**
+ * The plan Claude Code keeps through its TodoWrite tool, as much of it as a
+ * card can show. Twenty items is more than any run on this box has planned;
+ * a longer list is a run enumerating files, not planning, and the newest
+ * twenty still say where it is.
+ */
+const MAX_TODOS = 20;
+const MAX_TODO_CHARS = 160;
 const MAX_SUMMARY_CHARS = 6_000;
 const MAX_ERROR_CHARS = 1_000;
 const MAX_STDERR_CHARS = 8_000;
@@ -430,8 +438,32 @@ export interface CodingRun {
    */
   resumable: boolean;
   progress: string[];
+  /**
+   * The run's OWN plan — the latest list Claude Code wrote with its TodoWrite
+   * tool, whole, replacing the one before it.
+   *
+   * The progress feed says what tool the run just called; this says what it
+   * is trying to do and how far along it is, in its own words. It is the
+   * difference between "Read app.js" and "Wiring the game loop — 3 of 7
+   * done", and it is what the owner asked to see while a run works. A run
+   * that never plans has an empty list, and that is fine: the feed still
+   * carries its steps.
+   */
+  todos: CodingTodo[];
   exitCode: number | null;
 }
+
+/** One item of the run's plan, as Claude Code's TodoWrite tool reports it. */
+export interface CodingTodo {
+  content: string;
+  status: CodingTodoStatus;
+  /** The present-tense form of the item — "Wiring the game loop" — when the
+   *  tool sent one. The card shows it as "now" while the item is in progress. */
+  activeForm?: string;
+}
+
+export type CodingTodoStatus = "pending" | "in_progress" | "completed";
+const TODO_STATUSES: readonly CodingTodoStatus[] = ["pending", "in_progress", "completed"];
 
 /** One sub-agent currently out, as the owner should read it. */
 export interface ActiveSubagent {
@@ -825,6 +857,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
+    todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
   };
 }
@@ -987,6 +1020,7 @@ function cloneRun(run: CodingRun): CodingRun {
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
     subagentsByType: { ...run.subagentsByType },
     modelsUsed: [...run.modelsUsed],
+    todos: run.todos.map((t) => ({ ...t })),
   };
 }
 
@@ -1537,6 +1571,38 @@ function describeDenial(entry: unknown): string {
 /** Exported for the test: this parses a payload the device does not control. */
 export const describeDenialForTests = describeDenial;
 
+/**
+ * The `todos` a TodoWrite tool_use carries, or null when the payload is not a
+ * list at all — the caller then leaves the plan it has alone rather than
+ * replacing a good plan with nothing. A list with a broken item in it keeps
+ * the items that read; the tool's shape is Claude Code's to change, and the
+ * card must never crash on a field the model spelled differently.
+ */
+function parseTodos(raw: unknown): CodingTodo[] | null {
+  if (!Array.isArray(raw)) return null;
+  const cut = (s: string) => {
+    const cleaned = s.replace(/\s+/g, " ").trim();
+    return cleaned.length > MAX_TODO_CHARS ? `${cleaned.slice(0, MAX_TODO_CHARS - 1)}…` : cleaned;
+  };
+  const todos: CodingTodo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const t = item as { content?: unknown; status?: unknown; activeForm?: unknown };
+    if (typeof t.content !== "string") continue;
+    const content = cut(t.content);
+    if (!content) continue;
+    // An unknown status is "not done": the safe reading of a word we do not know.
+    const status = (TODO_STATUSES as readonly unknown[]).includes(t.status) ? t.status as CodingTodoStatus : "pending";
+    const activeForm = typeof t.activeForm === "string" ? cut(t.activeForm) : "";
+    todos.push(activeForm ? { content, status, activeForm } : { content, status });
+    if (todos.length >= MAX_TODOS) break;
+  }
+  return todos;
+}
+
+/** Exported for the test, for the same reason. */
+export const parseTodosForTests = parseTodos;
+
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (typeof event.session_id === "string" && event.session_id && !run.sessionId) run.sessionId = event.session_id;
@@ -1639,6 +1705,21 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
           case "Grep":
             pushProgress(run, `${block.name} ${typeof input.pattern === "string" ? input.pattern : ""}`);
             break;
+          case "TodoWrite": {
+            // The run's plan, whole: TodoWrite always sends the full list, so
+            // the newest one replaces the record's. One summary line in the
+            // feed — the list itself lives on the record, where the card
+            // draws it as a checklist rather than as twenty progress lines.
+            const todos = parseTodos(input.todos);
+            if (!todos) {
+              pushProgress(run, block.name);
+              break;
+            }
+            run.todos = todos;
+            const done = todos.filter((t) => t.status === "completed").length;
+            pushProgress(run, `Plan: ${todos.length} tasks, ${done} done`);
+            break;
+          }
           default:
             pushProgress(run, `${block.name}`);
         }
@@ -2100,6 +2181,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     retries: 0,
     resumable: false,
     progress: [],
+    todos: [],
     exitCode: null,
   };
   if (resumeSessionId) pushProgress(run, "Resuming the previous session");

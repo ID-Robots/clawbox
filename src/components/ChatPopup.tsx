@@ -577,6 +577,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         thinking: t("codingAgent.thinking"),
         filesTouched: t("codingAgent.chatFilesTouched"),
         turns: t("codingAgent.chatTurns"),
+        // The run's own plan on the card, and the word beside the three dots
+        // that say a live run is still working.
+        plan: t("codingAgent.chatPlan"),
+        done: t("codingAgent.chatDone"),
+        now: t("codingAgent.chatNow"),
+        more: t("codingAgent.chatMore"),
+        busy: t("codingAgent.chatBusy"),
         // One word per kind of step the card can draw as a chip — the
         // owner's language for what the harness names by tool.
         steps: {
@@ -588,6 +595,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           write: t("codingAgent.chatWrite"),
           edit: t("codingAgent.chatEdit"),
           read: t("codingAgent.chatRead"),
+          plan: t("codingAgent.chatPlan"),
         },
       }}
       openLabel={t("codingAgent.chatOpenApp")}
