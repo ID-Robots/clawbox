@@ -41,7 +41,7 @@ async function tick(req: Request = request()) {
 beforeEach(() => {
   vi.resetModules();
   liveness.mayRestart.mockReturnValue(true);
-  cloudflared.startTunnelService.mockResolvedValue(undefined);
+  cloudflared.startTunnelService.mockResolvedValue({ bootPersisted: true, bootPersistWarning: null });
   // Default for the behavioural tests below: the systemd unit, presenting the
   // install's internal token.
   internalToken.isInternalRequest.mockReturnValue(true);

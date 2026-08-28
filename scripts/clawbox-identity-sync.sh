@@ -36,6 +36,59 @@ resolve_active_harness() {
   node -e 'try{const c=require(process.argv[1]);process.stdout.write(String(c.active_harness||"openclaw"))}catch(e){process.stdout.write("openclaw")}' "$CONFIG_JSON" 2>/dev/null || echo openclaw
 }
 
+# The gateway restart, and whether it actually happened.
+#
+# This restart is not a nicety attached to the sync - for OpenClaw it IS the
+# sync. The copies below land on disk in a directory the gateway already scanned
+# and cached at start, so until it restarts, OpenClaw keeps answering as whoever
+# it was before. The old form ended `|| true`, which turned "the identity did not
+# change" into "[identity-sync] done" and exit 0 - and left the caller's own
+# guard unreachable: /setup-api/harness/select refuses to switch harnesses when
+# this script fails, and this script could not fail.
+#
+# System unit first, user unit as the fallback for a dev box; a non-zero return
+# means NEITHER worked.
+restart_openclaw_gateway() {
+  sudo -n /usr/bin/systemctl restart clawbox-gateway.service 2>/dev/null && return 0
+  systemctl --user restart clawbox-gateway 2>/dev/null && return 0
+  return 1
+}
+
+# Is there a systemd MANAGER to talk to — not merely a systemctl binary?
+#
+# `command -v systemctl` is not that question. Plenty of containers ship
+# /usr/bin/systemctl with no manager behind it, and on one of those every
+# restart attempt fails for a reason that is not the device's: the harness
+# switch would 502 on a box where there is no gateway to refresh in the first
+# place. That is the false-FAILURE twin of the bug this file is fixing.
+#
+# `is-system-running` answers by TEXT, not by exit status, because the status is
+# non-zero for `degraded` — an ordinary state on these devices, and one where
+# systemd is very much running. Only "no answer at all" and an explicit
+# `offline` mean there is no manager.
+systemd_scope_running() {
+  local answer
+  case "$1" in
+    user) answer="$(systemctl --user is-system-running 2>/dev/null)" ;;
+    *)    answer="$(systemctl is-system-running 2>/dev/null)" ;;
+  esac
+  case "$answer" in
+    ""|offline|unknown) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# BOTH scopes, because restart_openclaw_gateway tries both. A host with an
+# offline system manager and a reachable USER manager that refused the unit has
+# had its refresh refused, not skipped — and reporting that as "nothing to do
+# here" is the same silence this file exists to remove, one level up.
+systemd_manager_available() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemd_scope_running system && return 0
+  systemd_scope_running user && return 0
+  return 1
+}
+
 should_refresh_openclaw() {
   if [ "$TARGET_HARNESS" = "openclaw" ]; then
     return 0
@@ -63,9 +116,18 @@ if [ -d "$OC_WS" ]; then
     [ -f "$CANON/$f.md" ] && cp "$CANON/$f.md" "$OC_WS/$f.md"
   done
   if should_refresh_openclaw; then
-    # Refresh the gateway's cached workspace-file scan (best-effort).
-    sudo -n /usr/bin/systemctl restart clawbox-gateway.service 2>/dev/null || \
-      systemctl --user restart clawbox-gateway 2>/dev/null || true
+    if restart_openclaw_gateway; then
+      echo "[identity-sync] clawbox-gateway restarted; OpenClaw has re-read the identity files"
+    elif ! systemd_manager_available; then
+      # No init to ask - a dev checkout, or a container with the binary but no
+      # manager. There is no running gateway holding a stale copy either, so
+      # nothing was left undone.
+      echo "[identity-sync] no systemd manager on this host; skipping the gateway refresh"
+    else
+      echo "[identity-sync] could not restart clawbox-gateway: OpenClaw would keep" >&2
+      echo "  answering as whoever it was before this sync. Refusing to report success." >&2
+      exit 1
+    fi
   fi
 fi
 

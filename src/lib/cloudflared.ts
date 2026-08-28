@@ -109,24 +109,84 @@ export async function readTunnelUrlFromJournal(lines = 200): Promise<string | nu
   }
 }
 
-export async function startTunnelService(): Promise<void> {
+/**
+ * What a start/stop actually achieved.
+ *
+ * Turning Remote Access on or off is TWO facts, not one: the unit's state right
+ * now (`restart`/`stop`) and the same intent recorded for the next boot
+ * (`enable`/`disable`). They are two systemctl calls because
+ * config/clawbox-sudoers grants the plain verbs and no `--now` variant, so they
+ * can and do fail independently.
+ *
+ * The second one used to be swallowed into a `console.warn` behind a `void`
+ * return, which made "stopped" and "stopped until the next reboot puts it back"
+ * the same answer to the caller — and the second is the one where the box keeps
+ * serving itself to the public internet after the owner switched it off. The
+ * first call still throws (nothing happened at all); the second is reported.
+ */
+export interface TunnelServiceResult {
+  /** True when the change was also recorded for the next boot. */
+  bootPersisted: boolean;
+  /** Why it was not, in the owner's words — null when it was. */
+  bootPersistWarning: string | null;
+}
+
+const START_PERSIST_WARNING =
+  "Remote access is running, but this ClawBox could not be told to start it "
+  + "again automatically — it will be off after the next reboot.";
+
+const STOP_PERSIST_WARNING =
+  "Remote access is stopped, but this ClawBox could not be told to keep it off "
+  + "— it will start serving a public address again after the next reboot.";
+
+/**
+ * Run the boot-persistence call and say whether it worked.
+ *
+ * Never throws: the unit is already in the state the caller asked for by the
+ * time this runs, and the caller decides what a failed persist means. It
+ * REPORTS, though — that is the whole difference from the `.catch(warn)` this
+ * replaces.
+ *
+ * Takes a THUNK rather than the verb, so the argv stays a literal at the call
+ * site. sudo matches the argument list exactly and
+ * scripts/check-sudoers-coverage.sh reads these statically; a `verb` parameter
+ * makes both the grant and the check unresolvable.
+ */
+async function persistTunnelIntent(
+  label: "enable" | "disable",
+  run: () => Promise<unknown>,
+  warning: string,
+): Promise<TunnelServiceResult> {
+  try {
+    await run();
+    return { bootPersisted: true, bootPersistWarning: null };
+  } catch (err) {
+    console.warn(`[cloudflared] ${label} failed:`, err instanceof Error ? err.message : err);
+    return { bootPersisted: false, bootPersistWarning: warning };
+  }
+}
+
+export async function startTunnelService(): Promise<TunnelServiceResult> {
   await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
   // Persist the user's intent across reboots — without `enable`, the next
   // power cycle would leave the box unreachable until they SSH in again,
-  // which defeats the whole point of Remote Access. Best-effort: a failure
-  // here is non-fatal because the tunnel itself just got started above.
-  await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", TUNNEL_SERVICE]).catch((err) => {
-    console.warn("[cloudflared] enable failed (non-fatal):", err instanceof Error ? err.message : err);
-  });
+  // which defeats the whole point of Remote Access.
+  return persistTunnelIntent(
+    "enable",
+    () => execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", TUNNEL_SERVICE]),
+    START_PERSIST_WARNING,
+  );
 }
 
-export async function stopTunnelService(): Promise<void> {
+export async function stopTunnelService(): Promise<TunnelServiceResult> {
   await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "stop", TUNNEL_SERVICE]);
   // Mirror image of startTunnelService — without `disable` the unit comes
   // back on the next reboot, silently overriding the user's stop intent.
-  await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "disable", TUNNEL_SERVICE]).catch((err) => {
-    console.warn("[cloudflared] disable failed (non-fatal):", err instanceof Error ? err.message : err);
-  });
+  return persistTunnelIntent(
+    "disable",
+    () => execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "disable", TUNNEL_SERVICE]),
+    STOP_PERSIST_WARNING,
+  );
 }
 
 export type TunnelUnitState = "active" | "inactive" | "failed" | "activating" | "unknown";
