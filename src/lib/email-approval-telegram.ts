@@ -141,7 +141,11 @@ async function call(
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
-      signal: signal ?? AbortSignal.timeout(timeoutMs),
+      // BOTH, never one or the other. A caller's signal is a shutdown request;
+      // the timeout is the deadline. Passing only the caller's would let a
+      // getUpdates that Telegram never answers sit open until the process
+      // stops, which is the hang the deadline exists to prevent.
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new TelegramUnavailableError();
