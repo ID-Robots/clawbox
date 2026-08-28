@@ -112,9 +112,12 @@ function anthropicConfig(mode: "oauth" | "api_key", extraProfiles = {}) {
 
 /** Whichever cache file the guard actually opened. */
 function cacheFileFor(filePath: string) {
-  return filePath.includes("claude-cli")
-    ? surfaceCache(CLAUDE_CLI_SURFACE_IDS, "claude-cli")
-    : surfaceCache(SURFACE_IDS, "anthropic");
+  if (filePath.includes("claude-cli")) return surfaceCache(CLAUDE_CLI_SURFACE_IDS, "claude-cli");
+  if (filePath.includes("anthropic")) return surfaceCache(SURFACE_IDS, "anthropic");
+  // Anything else is a cache this guard has no business opening, and answering
+  // it with the Anthropic catalogue would let a wrong-file read pass as a
+  // right one — which is the exact failure these fixtures exist to catch.
+  throw new Error(`unexpected subscription-surface cache read: ${filePath}`);
 }
 
 /** POST a model switch the way the chat header's dropdown does. */
