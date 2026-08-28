@@ -96,7 +96,7 @@ class UnsupportedSelector extends Error {}
  * throws, so the engine can never quietly answer the wrong thing.
  */
 const NON_MATCHING_PSEUDOS =
-  /^::|^:(hover|active|focus|focus-visible|focus-within|disabled|checked|first-child|last-child|nth-child|placeholder|before|after|target|visited)\b/;
+  /^::|^:(hover|active|focus|focus-visible|focus-within|disabled|checked|fullscreen|first-child|last-child|nth-child|placeholder|target|visited)\b/;
 
 function matchesCompound(compound: string, el: El): boolean {
   let rest = compound;
@@ -105,8 +105,13 @@ function matchesCompound(compound: string, el: El): boolean {
       const close = rest.indexOf(")");
       if (close === -1) throw new UnsupportedSelector(compound);
       const inner = rest.slice(5, close);
-      if (!inner.startsWith(".")) throw new UnsupportedSelector(compound);
-      if ((el.classes ?? []).includes(inner.slice(1))) return false;
+      if (inner.startsWith(".")) {
+        if ((el.classes ?? []).includes(inner.slice(1))) return false;
+      } else if (!NON_MATCHING_PSEUDOS.test(inner)) {
+        // `:not(:disabled)` on a resting element is a no-op; anything else is
+        // a construct this engine has not been taught, and must not be guessed.
+        throw new UnsupportedSelector(compound);
+      }
       rest = rest.slice(close + 1);
       continue;
     }
