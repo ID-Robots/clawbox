@@ -292,6 +292,7 @@ describe("what every run now gets, permanently", () => {
     // lists: put it last and it eats whatever follows.
     const lib = await import("@/lib/coding-agent");
     const args = lib.buildRunArgs({ resumeSessionId: "abc" });
+    expect(args).toContain("--add-dir");
     for (const flag of ["--tools", "--agents", "--allowedTools", "--disallowedTools", "--resume"]) {
       expect(args.indexOf("--add-dir"), `--add-dir must precede ${flag}`).toBeLessThan(args.indexOf(flag));
     }
@@ -319,10 +320,10 @@ describe("what every run now gets, permanently", () => {
       expect(lib.denyRulesCover(deny, secret), `${secret} must stay denied`).toBe(true);
     }
     // A path-scoped ALLOW rule would be a narrower exception someone could
-    // later point at a credential store. There are none: the widening is six
-    // bare tool names and one added directory.
+    // later point at a credential store. The whole allow-list, pinned: seven
+    // bare grants and not one path among them.
     const allow = args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--disallowedTools"));
-    for (const rule of allow) expect(rule, `${rule} must not name a path`).not.toMatch(/^(?:Read|Edit|Write|Glob|Grep|NotebookEdit)\(/);
+    expect([...allow].sort()).toEqual(["Bash(*)", "Edit", "Glob", "Grep", "NotebookEdit", "Read", "Write"]);
   });
 
   it("never reaches for the flag that would void the deny rules", async () => {
