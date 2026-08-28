@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { dashboardFetch } from "@/lib/hermes-dashboard-auth";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import {
   dashboardUnreachable,
   isValidProviderId,
@@ -43,6 +44,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid code" }, { status: 400 });
   }
 
+  // Sampled ahead of the exchange, for the same reason the API-key route samples
+  // ahead of `hermes auth add`: after it, the answer already includes the
+  // provider that just connected and no change can be seen.
+  const providersBefore = await readUsableProviderIds();
+
   try {
     const res = await dashboardFetch(`/api/providers/oauth/${body.providerId}/submit`, {
       method: "POST",
@@ -56,9 +62,22 @@ export async function POST(request: Request) {
     // the provider as connected instead of serving a stale "not connected" for
     // up to FRESH_MS. This was the row-vs-card mismatch: the OAuth card flipped
     // to Connected from local state while the row kept reading the stale cache.
-    return await relayJson(res, SUBMIT_KEYS, (data, ok) => {
-      if (ok && data.ok !== false) invalidateModelOptions();
+    let connected = false;
+    const relayed = await relayJson(res, SUBMIT_KEYS, (data, ok) => {
+      if (ok && data.ok !== false) {
+        invalidateModelOptions();
+        connected = true;
+      }
     });
+    // The browser has been told; the RUNNING AGENT has not. The ClawBox MCP
+    // server turned the provider list into `ai_set_provider`'s enum once, while
+    // it booted — see `provider-mcp-refresh.ts`. Only on the terminal success:
+    // a failed exchange credentialled nothing, and a reload respawns every MCP
+    // child and invalidates the model's prompt cache.
+    if (connected) {
+      await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
+    }
+    return relayed;
   } catch {
     return dashboardUnreachable();
   }

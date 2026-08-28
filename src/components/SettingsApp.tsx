@@ -2263,6 +2263,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (warning === "no_allowed_users") return t("settings.discordSavedNoUsers");
     if (warning === "members_unavailable") return t("settings.discordMembersUnavailable");
     if (warning === "server_members_intent") return t("settings.discordMembersUnavailable");
+    // The OpenClaw channel-plugin states. The two install failures share one
+    // sentence on purpose — the codes differ so a support log can tell a
+    // refused install from a slow one, but the remedy the owner acts on is the
+    // same: check the connection and save again.
+    if (warning === "plugin_install_failed" || warning === "plugin_install_timeout") {
+      return t("settings.discordSavePluginFailed");
+    }
+    if (warning === "token_unresolved") return t("settings.discordSaveTokenUnresolved");
+    if (warning === "channel_unverified") return t("settings.discordSaveUnverified");
+    if (warning === "not_connected") return t("settings.discordSaveNotConnected");
     return null;
   };
 
@@ -2296,6 +2306,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               : [],
           );
           setDcStatus({ type: "error", message: t("settings.discordStateIntentsMissingHint") });
+          return;
+        }
+        // A blocking channel state: the credential IS saved, the channel is
+        // just not reachable yet, and the panel can say which of the four
+        // reasons it was. Falling through to "failed to save" here would be
+        // both wrong (it did save) and unactionable.
+        const blocked = discordWarningText(data.code);
+        if (blocked) {
+          setDcStatus({ type: "error", message: blocked });
+          setDcConfigured(true);
+          setDcToken("");
+          setDcReconfigure(false);
+          refreshDiscordStatus();
           return;
         }
         // The route already phrases its other errors for a person (bad token vs

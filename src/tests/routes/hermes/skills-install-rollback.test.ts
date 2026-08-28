@@ -268,10 +268,56 @@ describe("a rollback the device could not complete is not a plain refusal", () =
       true,
     );
     // …so nothing may say the files went. Nothing looked at them: the entry
-    // named no location, and "not checked" is not "removed".
-    expect(body.leftover).toMatchObject({ lockEntry: true, directory: "unknown" });
+    // named no location, and "not checked" is not "removed" — which is the
+    // verdict's `unchecked`, distinct from the `unknown` of a check that ran
+    // and could not answer (the test below).
+    expect(body.leftover).toMatchObject({ lockEntry: true, directory: "unchecked" });
     expect(String(body.error)).not.toMatch(/files were removed/i);
     expect(String(body.error)).toMatch(/could not be checked/i);
+    // Here — and only here — the cause IS established, so it may be named.
+    expect(String(body.error)).toMatch(/names no location/i);
+  });
+
+  it("does not claim the entry named no location when it named one", async () => {
+    // The other way a directory check comes back unanswered: the entry DOES
+    // name a location, the removal believed it worked, and the `stat` that
+    // would have confirmed it failed with something other than ENOENT — EACCES
+    // on the root-owned subtree this device family produces. The customer was
+    // told "the entry names no location", which is false, and the sentence
+    // that follows from it — "whether its files are still on the device could
+    // not be checked" — was the only true half.
+    fakeDangerousInstall("throws");
+    const inner = mockCli.getMockImplementation()!;
+    let rolledBack = false;
+    mockCli.mockImplementation(async (...args: Parameters<typeof runHermesCli>) => {
+      if (args[0][1] === "uninstall") rolledBack = true;
+      return await inner(...args);
+    });
+
+    const abs = path.join(skillsDir(), "creative", "simple-english");
+    const realStat = fs.stat;
+    // Scoped to the post-rollback check on that one path: everything the
+    // install itself stats has to keep its real answer, or the route would be
+    // failing for a different reason than the one under test.
+    vi.spyOn(fs, "stat").mockImplementation((async (p: Parameters<typeof fs.stat>[0]) => {
+      if (rolledBack && path.resolve(String(p)) === path.resolve(abs)) {
+        const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }
+      return realStat(p);
+    }) as typeof fs.stat);
+
+    const { status, body } = await install({ id: "official/creative/simple-english" });
+
+    expect(status).toBe(409);
+    expect(body.code).toBe("rollback_incomplete");
+    expect(body.leftover).toMatchObject({ lockEntry: true, directory: "unknown" });
+    // The claim the verdict does not support.
+    expect(String(body.error)).not.toMatch(/names no location/i);
+    // The consequence, which is still true and still what the customer needs.
+    expect(String(body.error)).toMatch(/could not be checked/i);
+    expect(String(body.error)).toMatch(/still listed in the Skills store/i);
   });
 
   it("sends a directory-only leftover somewhere it can actually be removed", async () => {

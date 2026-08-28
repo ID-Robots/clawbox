@@ -2,9 +2,11 @@ import { runHermesCli } from "@/lib/hermes-cli";
 import { get } from "@/lib/config-store";
 import { patchHermesConfig, readHermesConfigValue } from "@/lib/hermes-config-yaml";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 import { getLocalAiOpenAiBaseUrl, getLocalAiProxyRootUrl } from "@/lib/local-ai-runtime";
+import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 
 /**
  * Register the on-device model with Hermes.
@@ -42,6 +44,18 @@ export async function applyLocalAiToHermes(options: {
   model: string;
   makeDefault?: boolean;
 }): Promise<{ provider: string; model: string }> {
+  // Registering the local model adds a provider to the list the ClawBox MCP
+  // server probed ONCE, at boot, and turned into `ai_set_provider`'s enum. The
+  // wrapper samples that set either side of the write and asks the agent to
+  // re-advertise only when it moved — see `provider-mcp-refresh.ts`.
+  return withProviderMcpRefresh(() => applyLocalAi(options));
+}
+
+async function applyLocalAi(options: {
+  provider: LocalAiProviderId;
+  model: string;
+  makeDefault?: boolean;
+}): Promise<{ provider: string; model: string }> {
   const model = (options.model || getDefaultLlamaCppModel()).trim();
   // The id reaches argv. A leading dash would be read as a flag.
   if (!model || model.startsWith("-")) {
@@ -69,8 +83,14 @@ export async function applyLocalAiToHermes(options: {
   try {
     await patchHermesConfig({ set });
   } catch (err) {
+    // Guarded here as well as at the source, because this catch is `catch
+    // (err)` — it re-publishes the message of ANY throw from the write path,
+    // not only the `HermesConfigWriteError` that path cleans. A wrapper whose
+    // safety depends on every future thrower having remembered is the shape
+    // this whole round is about.
     throw new HermesLocalApplyError(
-      err instanceof Error ? err.message : "Failed to register the local model with Hermes",
+      sanitizeErrorMessage(err instanceof Error ? err.message : "")
+        || "Failed to register the local model with Hermes",
     );
   }
 
@@ -118,7 +138,13 @@ export async function reconcileLocalAiWithHermes(): Promise<void> {
     const stored = await get("local_ai_model");
     // Stored as "llamacpp/gemma4-e2b-it-q4_0"; Hermes wants the bare id.
     const model = typeof stored === "string" ? stored.split("/").pop() || "" : "";
-    await applyLocalAiToHermes({ provider, model });
+    // The INNER write, deliberately — this one repair must not ask for an MCP
+    // reload. It hangs off `GET /setup-api/hermes/models`, and that route is
+    // what the agent's own `ai_list_models` reads: a `reload.mcp` from in here
+    // would shut down the very MCP child that is mid-tool-call. The enum
+    // catches up at the owner's next provider action or the next restart, which
+    // is what a box in this state has been doing all along.
+    await applyLocalAi({ provider, model });
   } catch (err) {
     // Never let a repair break the read it is attached to.
     console.error("[hermes-local-ai] reconcile failed:", err);
@@ -151,6 +177,13 @@ export function _resetLocalAiReconcileForTests(): void {
  * rather than leaving the device on nothing — off → on round-trips.
  */
 export async function removeLocalAiFromHermes(): Promise<{ wasDefault: boolean; model: string | null }> {
+  // The same bug pointing the other way: an enum still offering a provider the
+  // device no longer serves, which /setup-api/hermes/models answers with
+  // "Unknown provider".
+  return withProviderMcpRefresh(() => removeLocalAi());
+}
+
+async function removeLocalAi(): Promise<{ wasDefault: boolean; model: string | null }> {
   const activeProvider = await readHermesConfigValue("model.provider").catch(() => null);
   const wasDefault = activeProvider === HERMES_LOCAL_PROVIDER;
   const model = wasDefault ? await readHermesConfigValue("model.default").catch(() => null) : null;

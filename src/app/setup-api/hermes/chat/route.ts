@@ -50,6 +50,7 @@ import { isQuietStreamError, openDashboardTurn, type DashboardTurn } from "@/lib
 import {
   errorFromStderr,
   hermesFailureMessage,
+  safeHermesFailureMessage,
   spawnFailureMessage,
 } from "@/lib/hermes-cli-message";
 
@@ -454,7 +455,12 @@ async function settleTurn(
  *   `done`  — the settled turn, byte-identical in shape to what the non-
  *             streaming path returns, including the tool steps and the
  *             deduplicated reasoning that only the agent's database has.
- *   `error` — the turn failed; the message is already customer-readable.
+ *   `error` — the turn failed, and the message has been MADE customer-readable
+ *             on the way out. It used to say "already", which was an assumption
+ *             about Python text written on the other side of a socket — the
+ *             exact assumption the CLI transport needed a 200-line parser to
+ *             stop making. Both transports now hand their failure text to
+ *             `safeHermesFailureMessage` before anyone sees it.
  *
  * Once the first byte is out the status code is spent, so a failure after that
  * point is reported inside the stream rather than as an HTTP error. Everything
@@ -514,7 +520,19 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
           },
         );
         if (final.status === "error") {
-          const detail = final.error || final.text || "Hermes chat failed";
+          // The dashboard's `payload.error` is Python-authored text off a
+          // socket, no different in kind from the CLI's stderr — so it takes
+          // the same road out. `final.text` is NOT a fallback for it: the
+          // answer body is not an error message, and the transport caps it at
+          // MAX_TEXT_BYTES (2,000,000), so using it wrote up to a two-megabyte
+          // `Error: …` row into a customer's durable transcript where the CLI
+          // branch would have capped the same failure at 400 characters.
+          //
+          // The raw frame stays in the journal, the pattern the provider-key
+          // route already uses: the diagnosis is not lost, it just stops being
+          // published.
+          if (final.error) console.error("[hermes chat] dashboard turn failed", final.error);
+          const detail = safeHermesFailureMessage("", final.error || "") || "Hermes chat failed";
           await appendTranscript({
             role: "system",
             text: `Error: ${detail}`,
@@ -534,7 +552,17 @@ function streamTurn(turn: DashboardTurn, fallbackSessionId: string): Response {
           );
         }
       } catch (err) {
-        const detail = err instanceof Error ? err.message : "Hermes chat failed";
+        // The sibling of the branch above, and it carries the SAME text from
+        // the SAME place: hermes-dashboard-turn.ts rethrows the transport's
+        // `error` frame as `new Error(payload.message)`. ClawBox-authored
+        // failures thrown here (a quiet stream, a cancelled call) pass through
+        // the parser unchanged — nothing in them looks like a traceback or a
+        // path — so one treatment is right for both.
+        const raw = err instanceof Error ? err.message : "";
+        // Not for an abort: the socket died because the customer pressed Stop,
+        // and a journal line per cancelled turn is noise, not diagnosis.
+        if (raw && !isAbort(err)) console.error("[hermes chat] dashboard stream failed", raw);
+        const detail = safeHermesFailureMessage("", raw) || "Hermes chat failed";
         // ── Silence is not failure: ask the agent before saying so ─────────
         //
         // A quiet stream means this socket stopped hearing. It does NOT mean

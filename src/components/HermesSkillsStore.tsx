@@ -15,6 +15,7 @@ import {
   type SortOption,
   MAX_FACET_VALUES,
   SORT_OPTIONS,
+  isRemovableOrigin,
   sourceLabel,
   trustMeta,
 } from '@/lib/hermes-skills';
@@ -154,8 +155,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         (s) => s.identifier === skill.id || (s.origin === 'hub' && s.id === skill.id),
       );
       // Only hub-installed skills are removable: `hermes skills uninstall`
-      // works off the lock, so a Remove for anything else can only fail.
-      if (!match || match.origin !== 'hub') return null;
+      // works off the lock, so a Remove for anything else can only fail. The
+      // rule is shared with the agent's skill_list/skill_uninstall so the page
+      // and the assistant cannot answer one device state two ways.
+      if (!match || !isRemovableOrigin(match.origin)) return null;
       return { name: match.id, key: skill.id, identifier: match.identifier || skill.id };
     },
     [installed.skills],
@@ -210,6 +213,21 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           throw new Error(COPY.nameConflict(String(data.conflictsWith || skill.name)));
         }
         if (res.status === 502 && data?.code === 'incomplete_install') {
+          // Two device states share this code. `preexisting` means the skill was
+          // already installed before this request, so the rollback deliberately
+          // left the customer's copy alone — and the translated copy for the
+          // other state ("Nothing was installed. Check your internet connection
+          // and try again.") is false twice over: it IS installed, and the retry
+          // it invites re-enters this branch, because the installer meets the
+          // surviving lock entry and exits 0 without fetching anything. The
+          // route's own sentence is the one that matches the device, the same
+          // way `rollback_incomplete` below takes it.
+          if (data.preexisting) {
+            // The row they are being told to remove is the one on screen: the
+            // Installed tab still holds the pre-request list.
+            await installed.refresh();
+            throw new Error(String(data.error || COPY.installFailed));
+          }
           throw new Error(COPY.installIncomplete((data.missingFiles as string[]) || []));
         }
         // A rollback the device could not finish leaves a lock entry THIS
@@ -293,6 +311,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const renderBrowseAction = useCallback(
     (skill: HermesSkill, size: 'card' | 'detail' = 'card'): ReactNode => {
       const state = progress[skill.id];
+      const target = uninstallTargetFor(skill);
       if (state?.status === 'working') {
         return (
           <span className="inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
@@ -309,13 +328,29 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
             <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
               {state.message}
             </span>
-            <GhostButton tone="danger" onClick={() => setConfirmInstall(skill)}>
-              {COPY.retry}
-            </GhostButton>
+            {/*
+              The button has to be the one the message asks for. A hub row
+              exists for this skill, so the install just failed over a copy that
+              is ON the device — the two refusals that say so ("remove it from
+              the Skills store and install it again", and the leftover a
+              rollback could not undo) both name removal as the next step, and
+              Retry is the one action that cannot work: the installer meets the
+              lock entry and exits 0 without fetching. `target` is null for
+              anything the store cannot remove, so a skill that is genuinely not
+              installed keeps Retry.
+            */}
+            {target ? (
+              <GhostButton tone="danger" onClick={() => setConfirmUninstall(target)}>
+                {COPY.remove}
+              </GhostButton>
+            ) : (
+              <GhostButton tone="danger" onClick={() => setConfirmInstall(skill)}>
+                {COPY.retry}
+              </GhostButton>
+            )}
           </span>
         );
       }
-      const target = uninstallTargetFor(skill);
       if (state?.status === 'success' || isInstalled(skill)) {
         return (
           <span className="flex items-center gap-2 flex-wrap">
@@ -360,7 +395,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       // Only skills the STORE installed are removable: `hermes skills uninstall`
       // works off the hub lock, so offering Remove for a bundled skill or one
       // the agent wrote itself would be a button that can only fail.
-      if (skill.origin !== 'hub') {
+      if (!isRemovableOrigin(skill.origin)) {
         return (
           <span className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
@@ -716,7 +751,8 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   // ── Detail view ───────────────────────────────────────────────────────────
   if (selected) {
     // Same rule as the installed cards: only hub-installed skills get an action.
-    const fixedOrigin = 'origin' in selected && selected.origin !== 'hub' ? selected.origin : null;
+    const fixedOrigin =
+      'origin' in selected && !isRemovableOrigin(selected.origin) ? selected.origin : null;
     const action = fixedOrigin ? (
       <span className="inline-flex items-center gap-1 text-sm text-[var(--text-secondary)]">
         <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">

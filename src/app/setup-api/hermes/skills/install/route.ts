@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import fs from "fs/promises";
 import path from "path";
 import { NextResponse } from "next/server";
-import { runHermesCli } from "@/lib/hermes-cli";
+import { type HermesCliResult, runHermesCli } from "@/lib/hermes-cli";
 import { checkInstallIdentifier, cliInstallIdentifier, isValidMeta } from "@/lib/hermes-skills";
 import {
   type InstallOutcome,
@@ -173,19 +173,40 @@ export async function POST(request: Request) {
   if (category) args.push("--category", category);
   if (name) args.push("--name", name);
 
-  let cli;
+  // A skill fetched from GitHub (every browse.sh row, and the github source)
+  // goes over the unauthenticated GitHub API — 60 requests/hour, slow on a
+  // loaded Jetson — so `hermes skills install` genuinely runs tens of seconds
+  // and can pass INSTALL_TIMEOUT_MS. When it does, runHermesCli SIGKILLs the
+  // child and throws "hermes timed out", discarding stdout/stderr. The old
+  // catch answered with that bare phrase and stopped — but the kill races the
+  // install: the files and the lock entry may already be on disk. That is the
+  // same trap PR #504/#510 closed for the exit-0 refusal path, one layer up:
+  // the CLI's report (here, its ABSENCE) is not the truth about what landed,
+  // the lock is. So on a timeout we do not answer yet — we fall through to the
+  // same `isInHubLock` check the exit-0 path uses and report what is actually
+  // on the device. `timedOut` only steers the ONE branch that still needs the
+  // CLI's stdout it no longer has: a genuine no-landing.
+  let cli: HermesCliResult;
+  let timedOut = false;
   try {
     cli = await runHermesCli(args, { timeoutMs: INSTALL_TIMEOUT_MS });
   } catch (err) {
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Hermes install failed" },
-      { status: 502 },
-    );
+    if (!(err instanceof Error && /timed out/i.test(err.message))) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Hermes install failed" },
+        { status: 502 },
+      );
+    }
+    timedOut = true;
+    // A neutral placeholder: from here the outcome is decided by the lock, not
+    // by this object. The only consumer that reads its streams is the
+    // no-landing branch, and that branch is guarded by `timedOut` below.
+    cli = { code: 0, stdout: "", stderr: "" };
   }
   // The tree changed (or may have) — drop the cached installed list before we
   // answer, so the client's immediate re-fetch can't be served a stale walk.
   invalidateInstalledCache();
-  if (cli.code !== 0) {
+  if (!timedOut && cli.code !== 0) {
     // Hermes is a Python CLI: an unhandled exception prints a traceback with
     // site-packages paths and local install dirs. That never reaches the
     // browser — it is logged here and the user gets a fixed message, the same
@@ -206,6 +227,24 @@ export async function POST(request: Request) {
   const landed = (await isInHubLock(fallbackName, id))
     || (cliId !== id && (await isInHubLock(fallbackName, cliId)));
   if (!landed) {
+    if (timedOut) {
+      // Nothing landed AND the CLI was killed before it said why: we have no
+      // outcome to parse, so we do not invent one. The one thing that is true
+      // is that it ran out of time, and the remedy is to try again — some
+      // community skills are fetched from a rate-limited GitHub and are simply
+      // slow on this device. 504, because the failure is a deadline, not a bad
+      // request. No raw "hermes timed out": that is the CLI's word for its own
+      // SIGKILL, not a sentence a customer can act on.
+      return NextResponse.json(
+        {
+          error:
+            `Installing "${fallbackName}" took too long and was stopped, so nothing was installed. `
+            + `Some community skills download from a rate-limited source and can be slow — try again in a moment.`,
+          code: "install_timeout",
+        },
+        { status: 504 },
+      );
+    }
     return await refusalResponse(parseInstallOutcome(cli.stdout, cli.stderr), {
       id,
       name: fallbackName,
@@ -697,15 +736,21 @@ async function rollbackIncomplete(
     warning?: SkillDangerWarning | null;
   },
 ): Promise<NextResponse> {
-  // Say only what was actually established. `unknown` is its own sentence
-  // because the alternative — calling it removed — is the false-success this
-  // change is here to stop telling.
+  // Say only what was actually established, and no more: each unanswered state
+  // gets its own sentence because the alternative — calling it removed — is the
+  // false-success this change is here to stop telling, and because naming a
+  // CAUSE the verdict did not establish is the same failure wearing a different
+  // sentence. `unchecked` is the only state in which "the entry names no
+  // location" is a fact; under `unknown` the entry named one, the check ran on
+  // it, and only the answer is missing.
   const leftover = left.lockEntry
     ? left.dir === "present"
       ? `"${ctx.name}" is still listed in the Skills store and its files are still on the device`
       : left.dir === "absent"
         ? `"${ctx.name}" is still listed in the Skills store although its files were removed`
-        : `"${ctx.name}" is still listed in the Skills store, and the entry names no location, so whether its files are still on the device could not be checked`
+        : left.dir === "unchecked"
+          ? `"${ctx.name}" is still listed in the Skills store, and the entry names no location, so whether its files are still on the device could not be checked`
+          : `"${ctx.name}" is still listed in the Skills store, and whether its files were removed could not be checked`
     : `"${ctx.name}" is no longer listed in the Skills store, but its files are still on the device`;
   // A leftover the store cannot see is a leftover the store cannot remove, so
   // the two states get the two different next steps they actually have.

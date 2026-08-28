@@ -27,6 +27,15 @@ jobs:
       - name: Install
         run: bun install --frozen-lockfile
 
+      # Explicit, and first: the sudoers allow-list is a privilege boundary, and
+      # until now this check only reached CI as a side effect of one vitest case
+      # (src/tests/unit/sudoers-coverage.test.ts, which skips itself off Linux).
+      # A change to the vitest config or a rename of that file would have taken
+      # the guard off the build without anything saying so. It runs in seconds,
+      # so it also fails fast rather than after the whole suite.
+      - name: Sudoers allow-list coverage
+        run: bun run check:sudoers
+
       - name: Test
         run: bun run test:coverage
 

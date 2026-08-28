@@ -2,8 +2,10 @@ import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { setHermesEnvValues } from "@/lib/hermes-env";
 import {
   HERMES_IMAGE_PLUGIN_NAME,
@@ -129,6 +131,12 @@ export async function applyClawaiToHermes(
   // and it is the order the readiness text itself asks for ("ClawBox AI is not
   // connected. Open Settings → AI Models and sign in to ClawBox AI first.").
   const codingReadyBefore = options.codingAgentReadyBefore ?? (await codingAgentReady());
+  // And the THIRD, which is the same fact from the picker's side: connecting
+  // credentials the `clawai` provider, and the ClawBox MCP server turned the
+  // provider list into `ai_set_provider`'s enum from one read taken while it
+  // booted. Sampled here, ahead of every write below, for the same reason as
+  // its two neighbours.
+  const providersBefore = await readUsableProviderIds();
 
   const vision = await resolveVisionModelId({ token: trimmed });
   let visionModelId: string | null = vision.id;
@@ -223,7 +231,28 @@ export async function applyClawaiToHermes(
     const r = await runHermesCli(args, { timeoutMs: 15_000 });
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
     if (r.code !== 0 && args[1] === "set") {
-      throw new ClawaiApplyError(r.stderr || "Failed to configure ClawBox AI");
+      // This message is rendered verbatim in the Settings save banner (the
+      // configure route returns it as `{ error }`, and the clawai poll route
+      // re-throws it unchanged), so the raw stream stops here: `hermes config
+      // set` is a Python CLI and a crash prints /home/clawbox/.hermes at the
+      // customer.
+      //
+      // The journal gets the diagnosis but NOT the credential, and that needs
+      // saying twice because the token appears in two places at once. One of
+      // these steps is `config set providers.clawai.api_key <device token>`, so
+      // the KEY is logged and the value is not; and an argparse usage error
+      // prints the argv it choked on, so the stream is redacted before either
+      // the log or the parser sees it — the same order the `hermes auth add`
+      // callers use.
+      // Passed as ARGUMENTS rather than interpolated into the message: a
+      // template built from argv is a tainted format string, and CodeQL is
+      // right that a value flowing into the shape of a log line is a different
+      // risk from one flowing into its data.
+      console.error("[hermes/clawai] config write failed", args[1], args[2], r.code, redactKey(r.stderr, trimmed));
+      throw new ClawaiApplyError(
+        safeHermesFailureMessage(redactKey(r.stdout, trimmed), redactKey(r.stderr, trimmed))
+          || "Failed to configure ClawBox AI",
+      );
     }
   }
 
@@ -281,18 +310,28 @@ export async function applyClawaiToHermes(
   // above just moved, so this sees the new value rather than a memo of the old.
   const respawnedMcpChildren = await refreshHermesImageTools(couldDrawBefore, await hermesAgentDrawsImages());
 
+  // And the providers the agent may switch to, which the credential just written
+  // added to the catalogue. ONE respawn across all three families: `reload.mcp`
+  // kills and respawns every MCP child and invalidates the model's prompt cache,
+  // and a link that moves three families is still one fact about one box — so if
+  // the image reconcile above already reloaded (or bounced, which respawns the
+  // children with the dashboard), this one reports rather than pays for a
+  // second. Whichever family asks first pays; the rest report.
+  const respawnedForProviders = await refreshProviderToolsIfSetChanged(
+    providersBefore,
+    await readUsableProviderIds(),
+    { alreadyReloaded: respawnedMcpChildren },
+  );
+
   // And the coding-agent family, which the token just written may have made
-  // runnable. ONE respawn between the two: `reload.mcp` kills and respawns every
-  // MCP child and invalidates the model's prompt cache, and a link that moves
-  // both families is still one fact about one box — so if the image reconcile
-  // above already reloaded (or bounced, which respawns the children with the
-  // dashboard), this one reports rather than pays for a second.
+  // runnable — last in the chain, so it sees whether either neighbour already
+  // paid for the respawn it needs.
   const codingReadyAfter = await codingAgentReady();
   if (codingReadyBefore !== null && codingReadyAfter !== null) {
     await refreshCodingAgentToolsIfReadinessChanged(
       codingReadyBefore,
       codingReadyAfter,
-      { alreadyReloaded: respawnedMcpChildren },
+      { alreadyReloaded: respawnedMcpChildren || respawnedForProviders },
     );
   }
 

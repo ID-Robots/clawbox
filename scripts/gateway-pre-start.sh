@@ -233,7 +233,8 @@ if isinstance(primary_model, str) and primary_model.lower() in (
 # surfaces as a FailoverError days into use. The chat-model pick route already
 # rewrites `openai/<gpt>` -> `codex/<gpt>`, but only when the user re-picks the
 # model; existing configs never re-pick, so migrate primary + fallbacks here on
-# gateway start. Mirrors CODEX_SUPPORTED_MODEL_RE / hasOpenAiApiKeyProfile /
+# gateway start. Mirrors CODEX_SUPPORTED_MODEL_RE in
+# src/lib/subscription-surface.ts, and hasOpenAiApiKeyProfile /
 # hasCodexOauthProfile in src/app/setup-api/chat/model/route.ts. Guarded on
 # "codex OAuth present AND no OpenAI API key" so dual-auth / API-key boxes,
 # where openai/* is a valid keyed route, are left untouched.
