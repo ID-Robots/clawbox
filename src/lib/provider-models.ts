@@ -21,12 +21,13 @@ export interface ProviderModelOption {
   label: string;
   hint: string;
   /**
-   * Whether a SUBSCRIPTION (OAuth sign-in) credential can route this model,
-   * as opposed to an API key. Anthropic ships two catalogues — the API one
-   * (9 models today, including Claude Mythos 5 and Claude Fable 5) and the
-   * Claude-subscription one (5 models, which has neither) — and a picker
-   * that renders the first while the customer is on the Subscription tab
-   * offers models their plan cannot run.
+   * Whether a SUBSCRIPTION (OAuth sign-in) credential can route this model, as
+   * opposed to an API key. A provider's subscription can put it on a different
+   * or a smaller set than its API key does, and a picker that renders the API
+   * set while the customer is on the Subscription tab offers models their plan
+   * cannot run. Which set applies is {@link SUBSCRIPTION_SURFACE}'s answer,
+   * and it is the transport that decides — read the history note there before
+   * assuming any particular provider narrows.
    *
    * `undefined` means UNKNOWN, not "yes": the device could not enumerate the
    * subscription surface (cold start, CLI failure), so nothing is marked and
@@ -128,19 +129,45 @@ export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
 // header dropdown all gate on the same set.
 /**
  * What SUBSCRIPTION (OAuth sign-in) changes about the models a provider can
- * run. Two shapes, because two different things happen:
+ * run. Three shapes, because three different things happen:
  *
  *  * `catalogProvider` — the whole namespace moves. OpenAI's ChatGPT sign-in
  *    routes through `codex`: different catalogue, different credential, and a
  *    different `<provider>/<id>` written to config (see the configure route's
  *    `subscriptionOverride`). The picker swaps catalogues wholesale.
- *  * `surfaceProvider` — the namespace STAYS, the set narrows. Anthropic's
- *    Claude sign-in still writes `anthropic/<id>`, but only the models the
- *    openclaw anthropic plugin's second catalogue (`claude-cli`) carries
- *    actually route. Claude Mythos 5 and Claude Fable 5 are API-key-only.
- *    The picker keeps the API catalogue and marks the rest unavailable —
- *    swapping wholesale here would drop rows silently, which is the same
- *    lie in the other direction.
+ *  * `surfaceProvider` — the namespace STAYS, the set narrows. The provider's
+ *    subscription credential is carried by a SECOND, smaller catalogue of the
+ *    same plugin, and only what that catalogue lists actually routes. The
+ *    picker keeps the main catalogue and marks the rest unavailable — swapping
+ *    wholesale here would drop rows silently, which is the same lie in the
+ *    other direction.
+ *  * `nativeRouting` — the namespace stays and NOTHING narrows. The provider's
+ *    own plugin carries the subscription credential on the provider's own
+ *    transport, so the set it can run is the provider's own catalogue. There
+ *    is no second, smaller catalogue to enumerate, and therefore no narrowing
+ *    this box can observe.
+ *
+ * WHY ANTHROPIC MOVED (this history matters — read it before "restoring" the
+ * old value). Anthropic used to be `surfaceProvider: "claude-cli"`, and that
+ * was CORRECT when it was written and verified on a device: a Claude
+ * subscription was routed by a `models.providers.anthropic` openai-compat
+ * override, whose turns left the box as `POST /v1/chat/completions`, and the
+ * only Anthropic catalogue reachable that way was the plugin's `claude-cli`
+ * one — 5 models, no Fable, no Mythos, no Haiku.
+ *
+ * PR #532 changed the transport out from under that rule. A subscription
+ * anthropic save no longer writes the openai-compat override; it hands the
+ * provider to the native anthropic plugin, whose turns leave as
+ * `POST /v1/messages` with `anthropic-beta: oauth-2025-04-20`. That transport
+ * serves the FULL anthropic catalogue on a subscription credential — which is
+ * why the same Claude sign-in has always run claude-fable-5 on the Hermes
+ * edition, which routed natively all along.
+ *
+ * So the narrowing did not become wrong through carelessness; it became STALE.
+ * `nativeRouting` is set from the same table the transport decision reads
+ * ({@link routesSubscriptionNatively}, which the configure route imports
+ * instead of keeping its own copy) precisely so the next transport change
+ * cannot silently invalidate the availability stamp again.
  *
  * One table because this is one fact. It used to be spelled three ways in
  * three files, none of which knew about the others.
@@ -148,10 +175,52 @@ export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
 export const SUBSCRIPTION_SURFACE: Readonly<Record<string, {
   catalogProvider?: string;
   surfaceProvider?: string;
+  nativeRouting?: boolean;
 }>> = Object.freeze({
   openai: { catalogProvider: "codex" },
-  anthropic: { surfaceProvider: "claude-cli" },
+  anthropic: { nativeRouting: true },
 });
+
+/**
+ * Does this provider+authMode pair route through the provider's OWN plugin
+ * rather than through a `models.providers.<p>` openai-compat override?
+ *
+ * Anthropic, and deliberately NOT "every provider that has an OAuth flow".
+ * `OAUTH_PROVIDERS` also carries google (Gemini Code Assist), and google's
+ * subscription reaches the configure route's `applyCloudProviderTransport` the
+ * same way anthropic's does — but nothing gives it a native route to fall back
+ * on. `setProviderPlugins` toggles the anthropic plugin and no other, and the
+ * google branch there records that the native google plugin's auth fails at
+ * call time. Dropping google's override would hand its turns to a route no one
+ * has evidence about and no device to test on: the same mistake as the bug
+ * #532 fixed, pointed the other way. Google stays on the override until
+ * someone proves the native path on hardware.
+ *
+ * It lives HERE, in the table, rather than as a Set inside the configure
+ * route, because the transport decision and the availability stamp are the
+ * same fact. They were two facts in two files for exactly one release, and in
+ * that release the stamp described a transport the box no longer used.
+ */
+export function routesSubscriptionNatively(provider: string, authMode: string): boolean {
+  return authMode === "subscription" && SUBSCRIPTION_SURFACE[provider]?.nativeRouting === true;
+}
+
+/**
+ * The provider id whose catalogue IS the subscription surface for `provider`,
+ * or null when its subscription does not put it on a nameable surface (OpenAI
+ * swaps the whole namespace instead — see `catalogProvider` above).
+ *
+ * For a natively-routed provider this is the provider ITSELF: its subscription
+ * runs on its own plugin, so its own catalogue is the set. That is not a
+ * no-op — it keeps the gate pointed at a real, enumerated list, so an id that
+ * is in NO Anthropic catalogue is still refused rather than silently pinned.
+ */
+export function subscriptionSurfaceProvider(provider: string): string | null {
+  const entry = SUBSCRIPTION_SURFACE[provider];
+  if (!entry) return null;
+  if (entry.nativeRouting) return provider;
+  return entry.surfaceProvider ?? null;
+}
 
 /**
  * Can this credential run this model? The one greying-out rule, named once.
@@ -176,15 +245,20 @@ export function isModelUsableOnSubscription(
 }
 
 /**
- * The provider id of the narrowed catalogue a subscription puts `provider` on,
- * or null when its subscription does not narrow this catalogue (OpenAI swaps
- * the whole namespace instead — see `catalogProvider` above).
+ * The surface a refusal should NAME, so it can say which catalogue it is
+ * refusing against rather than telling the customer their provider is
+ * misconfigured when it is not.
  *
- * Exists so a refusal can NAME the surface it is refusing against, rather than
- * telling the customer their provider is misconfigured when it is not.
+ * Null for a natively-routed provider as well as for an unlisted one: there
+ * the surface is the provider's own catalogue, and "claude-fable-5 is not on
+ * the anthropic surface (anthropic)" names nothing the customer can act on.
+ * {@link subscriptionSurfaceProvider} is the one to ask for the id to
+ * enumerate; this one is only for wording.
  */
 export function subscriptionSurfaceLabel(provider: string): string | null {
-  return SUBSCRIPTION_SURFACE[provider]?.surfaceProvider ?? null;
+  const entry = SUBSCRIPTION_SURFACE[provider];
+  if (!entry || entry.nativeRouting) return null;
+  return entry.surfaceProvider ?? null;
 }
 
 export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;

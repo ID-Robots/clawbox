@@ -573,9 +573,9 @@ export default function AIModelsStep({
     if (authMode === "subscription" && selectedProvider) {
       // SUBSCRIPTION_SURFACE is the one table for "what does signing in change
       // about which models this provider can run". `catalogProvider` is its
-      // wholesale-swap column (openai -> codex); the narrowing column
-      // (anthropic -> claude-cli) is applied by the catalog route as a stamp,
-      // not by swapping, because the save namespace does not move with it.
+      // wholesale-swap column (openai -> codex); its other columns are applied
+      // by the catalog route as an `availableOnSubscription` stamp, not by
+      // swapping, because the save namespace does not move with them.
       const swap = SUBSCRIPTION_SURFACE[selectedProvider]?.catalogProvider;
       if (swap) return swap;
     }

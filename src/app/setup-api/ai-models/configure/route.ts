@@ -61,7 +61,14 @@ import {
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
-import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
+import {
+  isValidModelId,
+  isCatalogProvider,
+  GOOGLE_MODELS,
+  ANTHROPIC_MODELS,
+  extractProviderModelId,
+  routesSubscriptionNatively,
+} from "@/lib/provider-models";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 import {
   isClaudeSubscriptionOnly,
@@ -1035,31 +1042,21 @@ async function writeOpenAICompatProvider(opts: {
 }
 
 /**
- * Providers whose SUBSCRIPTION credential is routed by the provider's own
- * OpenClaw plugin instead of by a `models.providers.<p>` openai-compat
- * override.
+ * Which providers route a SUBSCRIPTION credential through their own OpenClaw
+ * plugin instead of through a `models.providers.<p>` openai-compat override
+ * is decided by `SUBSCRIPTION_SURFACE` in provider-models.ts, and
+ * {@link routesSubscriptionNatively} is imported from there.
  *
- * Anthropic, and deliberately NOT "every provider that has an OAuth flow".
- * `OAUTH_PROVIDERS` also carries google (Gemini Code Assist), and google's
- * subscription reaches {@link applyCloudProviderTransport} the same way
- * anthropic's does — but nothing gives it a native route to fall back on.
- * `setProviderPlugins` toggles the anthropic plugin and no other, and the
- * google branch below records that the native google plugin's auth fails at
- * call time. Dropping google's override would hand its turns to a route this
- * change has no evidence about and no device to test on: the same mistake as
- * the bug being fixed here, pointed the other way. Google stays on the
- * override until someone proves the native path on hardware.
- *
- * A Set rather than a literal comparison so the next provider to earn a native
- * subscription route is added HERE, where the reason it qualifies is written
- * down, rather than by widening a condition somewhere further down the file.
+ * It used to be a `NATIVE_SUBSCRIPTION_ROUTING` Set right here, next to the
+ * transport it selects — which read as the tidy choice and was the bug. The
+ * model picker's `availableOnSubscription` stamp answers a question that only
+ * has an answer once you know the transport ("which models can this
+ * credential run?"), and it was computed from a separate table in a separate
+ * file. When #532 moved anthropic's subscription onto the native route, the
+ * stamp kept describing the override that had just been removed and greyed
+ * out three models the box had started being able to run. One table, so the
+ * next transport change moves the stamp with it.
  */
-const NATIVE_SUBSCRIPTION_ROUTING: ReadonlySet<string> = new Set(["anthropic"]);
-
-/** Does this provider+authMode pair route through the native plugin? */
-function routesSubscriptionNatively(provider: string, authMode: string): boolean {
-  return authMode === "subscription" && NATIVE_SUBSCRIPTION_ROUTING.has(provider);
-}
 
 /**
  * Take a `models.providers.<p>` openai-compat override back out.
@@ -1734,10 +1731,12 @@ export async function POST(request: Request) {
     }
 
     // Claude: only a SUBSCRIPTION save can create the hazard here. An API-key
-    // save writes the anthropic key that makes the API-only models routable,
-    // so after it lands the box is not subscription-only and there is nothing
-    // to refuse — refusing there would block the very switch the message
-    // recommends ("switch Anthropic to API-key mode for the API-only models").
+    // save writes the anthropic key, so after it lands the box is not
+    // subscription-only and there is nothing to refuse. That mattered more
+    // when the surface was narrower than the API catalogue and the refusal
+    // recommended switching to a key; since #532 the subscription routes
+    // natively on the same catalogue, and what is left to refuse is an id no
+    // Anthropic catalogue on this box carries at all.
     if (authMode === "subscription") {
       const offSurface = await offSurfaceClaudeModelMessage(
         settledProvider,
@@ -2140,7 +2139,7 @@ export async function POST(request: Request) {
       // Google's OpenAI-compat endpoint instead — for the SUBSCRIPTION
       // (Gemini Code Assist OAuth) sign-in too. Google is the one sibling of
       // the anthropic bug fixed here, and it is deliberately left alone: see
-      // NATIVE_SUBSCRIPTION_ROUTING for why taking its override away without
+      // `routesSubscriptionNatively` for why taking its override away without
       // a device to prove the native route on would repeat the same mistake.
       const googleWroteOverride = await applyCloudProviderTransport({
         provider: "google",

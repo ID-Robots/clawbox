@@ -8,7 +8,7 @@ import {
   CATALOG_PROVIDERS,
   isCatalogProvider,
   PROVIDER_CATALOGS,
-  SUBSCRIPTION_SURFACE,
+  subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
 
 export const dynamic = "force-dynamic";
@@ -156,16 +156,20 @@ interface OpenclawListResponse {
 // credentials route this model", and during setup no credential is written
 // yet, so every entry comes back false. Gating the picker on it would empty
 // the list at exactly the moment the customer needs it. The auth-mode surface
-// (SUBSCRIPTION_SURFACE.surfaceProvider) is the part that IS knowable in the
-// wizard, and it is what this route stamps instead.
+// (SUBSCRIPTION_SURFACE) is the part that IS knowable in the wizard, and it is
+// what this route stamps instead.
 //
 // anthropic's surface, concretely: `openclaw models list --provider anthropic`
-// is the API-key catalogue (9 models on 2026.7.1, claude-mythos-5 and
-// claude-fable-5 among them). The Claude-subscription surface is the same
-// plugin's second catalogue, provider id `claude-cli` (5 models: opus-4-8/4-7/
-// 4-6, sonnet-5, sonnet-4-6) — no Mythos, no Fable, no Haiku. Verified on a
-// 2026.7.1-2 device against both `openclaw models list` outputs and
-// dist/extensions/anthropic/openclaw.plugin.json.
+// is the plugin's catalogue (9 models on 2026.7.1, claude-mythos-5 and
+// claude-fable-5 among them), and since PR #532 a Claude SUBSCRIPTION routes
+// through that same native plugin — `POST /v1/messages` with
+// `anthropic-beta: oauth-2025-04-20` — so the surface IS this catalogue and
+// there is no second one to enumerate. It used to be the plugin's `claude-cli`
+// catalogue (5 models, no Mythos/Fable/Haiku), which was correct while the
+// transport was the openai-compat override #532 removed; the stamp described
+// that transport and went stale with it. See SUBSCRIPTION_SURFACE for the
+// history and for why `nativeRouting` now comes from the same table the
+// transport decision reads.
 
 interface OpenRouterListResponse {
   data: Array<{
@@ -249,8 +253,15 @@ function compareCatalogModels(a: CatalogModel, b: CatalogModel): number {
  * the first three minutes after every reboot.
  */
 async function fetchSubscriptionSurfaceIds(provider: string): Promise<Set<string> | null> {
-  const surfaceProvider = SUBSCRIPTION_SURFACE[provider]?.surfaceProvider;
+  const surfaceProvider = subscriptionSurfaceProvider(provider);
   if (!surfaceProvider) return null;
+  // A natively-routed provider's surface is its OWN catalogue, which this
+  // refresh is already fetching. Enumerating it again would spend a second
+  // multi-minute `openclaw models list` on the identical list, and — worse —
+  // publish it to `<provider>.json` unmerged and unsanitized, clobbering the
+  // payload the picker and the server-side guard both read. `buildPayload`
+  // stamps that case from the merged list instead.
+  if (surfaceProvider === provider) return null;
   const cached = memCache.get(surfaceProvider) ?? await readDiskCache(surfaceProvider);
   if (cached && Date.now() - cached.fetchedAt < REFRESH_INTERVAL_MS && cached.models.length > 0) {
     memCache.set(surfaceProvider, cached);
@@ -408,6 +419,20 @@ function buildPayload(
   // this stamp was built for.
   if (surfaceIds) {
     merged = merged.map((m) => ({ ...m, availableOnSubscription: surfaceIds.has(m.id) }));
+  } else if (subscriptionSurfaceProvider(provider) === provider) {
+    // The surface IS this catalogue — a natively-routed subscription runs on
+    // the provider's own plugin, so THIS list is the set it can run and every
+    // row is stamped usable. Asked as "is the surface me?" rather than
+    // "is this a subscription?" because a payload is built once and served to
+    // both auth modes; the stamp answers what a SUBSCRIPTION could route, and
+    // `isModelUsableOnSubscription` is what decides whether that applies to
+    // the box in front of the customer.
+    //
+    // Stamped `true` rather than left undefined so the two gates cannot
+    // disagree: the server-side guard in subscription-surface.ts reads this
+    // very payload back off disk, and a row the picker offers must be a row
+    // that route accepts.
+    merged = merged.map((m) => ({ ...m, availableOnSubscription: true }));
   }
   const fallbackDefault = DEFAULT_MODEL_BY_PROVIDER[provider];
   const defaultModelId = merged.find((m) => m.id === fallbackDefault)?.id
@@ -537,11 +562,16 @@ export function refreshInBackground(provider: string): void {
     fetcher = fetchOpenclawCatalog(provider);
   }
 
-  // The two enumerations are independent — the surface list never reads the
-  // API list — and each costs minutes of Jetson CPU. Start both now, and
-  // publish the main catalogue the moment IT lands: making the picker wait on
-  // the surface would double the first-boot window the whole async-first
-  // design in this file's header exists to shrink.
+  // A provider whose subscription narrows to a SECOND catalogue needs that
+  // catalogue enumerated too. The two enumerations are independent — the
+  // surface list never reads the main one — and each costs minutes of Jetson
+  // CPU, so start both now and publish the main catalogue the moment IT lands:
+  // making the picker wait on the surface would double the first-boot window
+  // the whole async-first design in this file's header exists to shrink.
+  //
+  // Resolves to null immediately for a natively-routed provider, which has no
+  // second catalogue — `buildPayload` stamps that case from the merged list on
+  // the first publish, so those boxes are never served an unstamped payload.
   const surface = fetchSubscriptionSurfaceIds(provider);
 
   const publish = async (models: CatalogModel[], surfaceIds: Set<string> | null) => {
