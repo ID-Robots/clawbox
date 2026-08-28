@@ -220,8 +220,15 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   }
 
   const engineById = (id: VoiceEngineId) => status.engines.find(e => e.id === id) ?? null;
-  /** The engine that goes first: `cloud` (explicit, legacy) reads as cloud-first. */
-  const source: VoiceEngineId = status.choice === "local" ? "local" : "cloud";
+  /**
+   * The engine that goes first. `cloud` (explicit, legacy) reads as
+   * cloud-first; `auto` reads as whatever the box resolved it to, because on a
+   * box with no cloud voice `auto` means "the local one" — and a select that
+   * showed the disabled "not available" option as chosen, over a list of cloud
+   * voices the box cannot speak with, would be describing a different box.
+   */
+  const source: VoiceEngineId =
+    status.choice === "local" || (status.choice === "auto" && status.preferredEngine === "local") ? "local" : "cloud";
   const cloud = engineById("cloud");
   const local = engineById("local");
   const voice = status.voice[source];

@@ -226,12 +226,20 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
   await openChatPopup(page);
+  await expect(page.getByTestId("chat-popup")).toBeVisible();
   await expect(page.getByText("Hello from the fake gateway")).toBeVisible();
 
+  // Push the popup into the bottom-right corner of a viewport that is barely
+  // taller than the popup itself. The provider pill sits in the composer row
+  // under the textarea, so with the popup's bottom edge 20px above the
+  // viewport's there is no room for a list to drop DOWN from it — the popover
+  // has to flip upward, and stay inside the viewport when it does. (The popup
+  // must stay on screen for the pill to be clickable at all: a popup placed
+  // any lower would put the composer, and the pill, below the fold.)
   await page.getByTestId("chat-popup").evaluate((el) => {
     Object.assign(el.style, {
-      left: "128px",
-      top: "180px",
+      left: "216px",
+      top: "20px",
       right: "auto",
       bottom: "auto",
       width: "416px",
@@ -240,6 +248,8 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   });
 
   const providerTrigger = page.getByRole("button", { name: "Chat provider" });
+  await expect(providerTrigger).toBeInViewport();
+  const triggerBox = await providerTrigger.boundingBox();
   await providerTrigger.click();
 
   const listbox = page.getByRole("listbox", { name: "Chat provider" });
@@ -263,6 +273,10 @@ test("chat popup provider dropdown stays visible at viewport edges", async ({ pa
   expect(bounds.top).toBeGreaterThanOrEqual(8);
   expect(bounds.right).toBeLessThanOrEqual(bounds.viewportWidth - 8);
   expect(bounds.bottom).toBeLessThanOrEqual(bounds.viewportHeight - 8);
+  // Inside the viewport BECAUSE it flipped: the list sits above the pill it
+  // opened from, not squeezed into the 20px under it.
+  expect(triggerBox).not.toBeNull();
+  expect(bounds.bottom).toBeLessThanOrEqual(triggerBox!.y);
 });
 
 test("chat popup opens Local AI settings when local AI is not configured", async ({ page }) => {
@@ -296,5 +310,15 @@ test("chat popup opens Local AI settings when local AI is not configured", async
 
   const settingsWindow = page.getByTestId("chrome-window-settings");
   await expect(settingsWindow).toBeVisible();
-  await expect(settingsWindow.getByText("No local model configured")).toBeVisible();
+
+  // Settings opens straight on Local AI — not on Providers, where the window
+  // opens by default. The sidebar row carries the reason the chat sent us here
+  // as its sr-only subtitle, and the pane is the on-device inventory, in
+  // which the model the chat could not switch to reads as absent.
+  const localAiNav = settingsWindow.getByRole("navigation").getByRole("button", { name: /Local AI/ });
+  await expect(localAiNav).toContainText("Not configured");
+  const localAi = settingsWindow.getByTestId("local-ai-panel");
+  await expect(localAi).toContainText("AI that runs on this box, and what each part is doing right now.");
+  await expect(localAi.getByTestId("local-model-llamacpp").getByText("Not installed", { exact: true })).toBeVisible();
+  await expect(settingsWindow.getByTestId("ai-provider-list")).toHaveCount(0);
 });
