@@ -1135,7 +1135,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
             id: "kokoro", name: "Kokoro", kind: "tts", runtime: "systemd user service",
             installed: false, enabled: null, running: "not-installed",
             diskBytes: null, memoryBytes: null, control: "none",
-            detail: "Not installed on this box. Speech falls back to Piper.",
+            detail: "Not installed on this box. Speech uses the cloud voice.",
           },
         ],
         unavailable: [],
@@ -1158,7 +1158,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           {
             id: "local", providerId: "tts-local-cli", label: "On this box",
             configured: true, proven: true, usable: true,
-            detail: "Speaks on the box itself. Nothing leaves it. Installed: Piper.",
+            detail: "Speaks on the box itself. Nothing leaves it. Installed: Kokoro.",
           },
           {
             id: "cloud", providerId: "openai", label: "ClawBox cloud",

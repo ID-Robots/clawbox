@@ -2,24 +2,33 @@
 # ClawBox on-device text-to-speech — the single entrypoint OpenClaw calls.
 #
 # Wired in as the `tts-local-cli` provider command by step_openclaw_tts in
-# install.sh, so every spoken reply on the box runs through here: no network
-# round-trip, no per-character cost.
+# install.sh, so every spoken reply the box makes for itself runs through
+# here: no network round-trip, no per-character cost.
 #
 #   clawbox-tts.sh [--voice <voice>] <text> <output-path>
 #   clawbox-tts.sh --set-voice <voice>     # persist this user's voice
 #   clawbox-tts.sh --get-voice
 #
-# Engine chain, in order:
-#   1. Kokoro on CUDA — the default voice. Talks to the persistent
-#      kokoro-server unix socket when it is up (model already resident on the
-#      GPU), cold-starts the `kokoro` CLI when it is not.
-#   2. Piper on CPU — small, no GPU, always available once installed.
+# The engine is Kokoro on CUDA, and only Kokoro. The chain, in order:
+#   1. The persistent kokoro-server unix socket when it is up — the model is
+#      already resident on the GPU and a healthy answer is ~2s.
+#   2. A cold start of the `kokoro` CLI when it is not — torch CUDA init plus
+#      the Kokoro-82M load, tens of seconds on an Orin Nano.
 #   3. Non-zero exit, with every reason it got there on stderr.
 #
-# Degrading rather than dying is the whole point of this file. Until TASK-383
-# the box called kokoro-tts.sh, which printed "Kokoro TTS failed" and exited 1:
-# a missing model, a busy GPU, or a language Kokoro cannot speak all reached
-# the user as silence with no explanation of which one it was.
+# There is deliberately no second engine behind Kokoro. Until 2026-08 this
+# file fell through to Piper on the CPU, and the owner removed it: the voice
+# chain is cloud → Kokoro, with no CPU engine in between. A fallback that
+# silently took over on every Kokoro failure is what hid a broken GPU install
+# for a whole release (TASK-420) — speech kept working, on the wrong engine,
+# and nobody noticed. So a Kokoro failure is now REPORTED upstream rather
+# than absorbed here: this script exits 1 with the reasons, OpenClaw surfaces
+# them in the gateway log as `CLI TTS exit 1: <stderr>`, and the gateway's own
+# fallback — the cloud voice — takes over from there. That report is the
+# fix's whole value, which is why the one thing this script must never do is
+# exit 0 without audio: a silent success is indistinguishable from a working
+# TTS to everything upstream, and it is the bug this file replaced (the old
+# kokoro-tts.sh printed "Kokoro TTS failed" for every cause alike).
 #
 # Why the memory guard (CLAWBOX_TTS_MIN_FREE_MB): TASK-382 measured
 # kokoro-torch on CUDA peaking at 2259-2636 MB on an Orin Nano whose 7607 MB is
@@ -27,11 +36,13 @@
 # the agent and faster-whisper are resident too. Trying the allocation anyway
 # does not fail politely — it OOM-kills whatever the kernel picks, which on
 # this hardware has been the user's own session. So we read MemAvailable first
-# and go straight to Piper (136-243 MB) when the headroom is not there.
-# The default 3000 MB is the measured 2636 MB peak rounded up, plus room for
-# the CUDA context and allocator fragmentation.
+# and refuse, with a reason, when the headroom is not there — that refusal
+# reaches the gateway like any other Kokoro failure. The default 3000 MB is
+# the measured 2636 MB peak rounded up, plus room for the CUDA context and
+# allocator fragmentation.
 #
-# NOT `set -e`: this script's job is to keep going when an engine fails.
+# NOT `set -e`: a failed engine call has to reach the reasons list and the
+# exit-1 report at the bottom, not kill the script mid-way with nothing said.
 set -uo pipefail
 
 CLAWBOX_TTS_DEFAULT_VOICE="${CLAWBOX_TTS_DEFAULT_VOICE:-af_heart}"
@@ -51,9 +62,9 @@ KOKORO_SOCKET="${KOKORO_SOCKET:-/tmp/kokoro-server.sock}"
 # nothing else. OpenClaw execs this script directly, with no login shell and no
 # profile, so `command -v kokoro` failed on a box where Kokoro was fully
 # installed and spoke correctly from an interactive shell: every reply came out
-# of Piper with "kokoro: 'kokoro' is not installed" (TASK-420, measured on a
-# real Orin). Installing the engine was not enough; it also has to be findable
-# from the environment the gateway hands us.
+# of the CPU fallback of the time with "kokoro: 'kokoro' is not installed"
+# (TASK-420, measured on a real Orin). Installing the engine was not enough;
+# it also has to be findable from the environment the gateway hands us.
 #
 # An explicit KOKORO_BIN still wins. It is how a per-channel provider `env` can
 # point at another build, and how the tests aim this at a stub.
@@ -82,9 +93,9 @@ resolve_kokoro_bin
 # That library ships inside the nvidia-cusparselt-cu12 wheel, under user-site,
 # where no loader looks by default. install-voice.sh appends the export to
 # ~/.bashrc and writes it into kokoro-server.service — neither of which reaches
-# here, for the same reason the PATH above does not. And because the engines'
+# here, for the same reason the PATH above does not. And because the engine's
 # own output is discarded, that ImportError arrived as nothing more than
-# "kokoro failed", with Piper quietly taking over.
+# "kokoro failed", with the CPU fallback of the time quietly taking over.
 #
 # Derived from $HOME and whichever python user-site is actually on the box
 # rather than pinned to /home/clawbox and python3.10, and only directories that
@@ -105,45 +116,43 @@ kokoro_ld_path() {
 KOKORO_LD_PATH="${KOKORO_LD_PATH:-$(kokoro_ld_path)}"
 
 # ── The time budget ─────────────────────────────────────────────────────────
-# Every engine gets its own slice, and the caller's timeout has to be larger
-# than all of them added together. It was not: KOKORO_TIMEOUT and the
-# provider's timeoutMs were both 120s, two constants that happened to be equal,
-# so OpenClaw killed this process at the exact moment Kokoro gave up and Piper
-# was never reached. A hung GPU — precisely the case the fallback exists for —
-# was still silence.
+# Every step gets its own slice, and the caller's timeout has to be larger
+# than all of them added together. It was not, once: KOKORO_TIMEOUT and the
+# provider's timeoutMs were both 120s, two constants that happened to be
+# equal, so OpenClaw killed this process at the exact moment Kokoro gave up —
+# and nothing after that point, not even the reasons, ever reached the
+# gateway. A hung GPU was silence with no diagnostic.
 #
-# The slices are small on purpose. A spoken reply that takes even half a minute
-# has already failed as an interaction, so the budget is sized to fail over
-# quickly rather than to let a wedged engine use its full rope:
+# The slices are small on purpose. A spoken reply that takes even half a
+# minute has already failed as an interaction, so the budget is sized to give
+# up quickly and hand the failure upstream (where the cloud voice is waiting)
+# rather than to let a wedged engine use its full rope:
 #
 #   KOKORO_SERVER_TIMEOUT  10s  the model is already resident on the GPU and a
 #                               healthy answer is ~2s; 10s means wedged.
 #   KOKORO_TIMEOUT         40s  cold start, so it pays torch CUDA init plus the
 #                               Kokoro-82M load on an Orin Nano.
-#   PIPER_TIMEOUT          15s  CPU, 63MB model, RTF well under 1 — generous.
 #   CONVERT_TIMEOUT        10s  ffmpeg on a few seconds of audio. It had no
 #                               bound at all before, which was its own hang.
 #
-# Worst case walks all four: server wedged, cold start wedged, then Piper, then
+# Worst case walks all three: server wedged, cold start wedged, then
 # conversion. tts_provider_timeout_ms() adds a margin on top of that sum, and
 # install.sh asks this script for the number instead of keeping its own copy —
 # so changing a slice here moves the caller's timeout with it and this cannot
-# quietly come back.
+# quietly come back. The budget is the sum of the slices that are actually
+# handed to `timeout` below and nothing else; a slice for an engine that no
+# longer runs would only be rope the caller pays for and nobody uses.
 KOKORO_SERVER_TIMEOUT="${KOKORO_SERVER_TIMEOUT:-10}"
 KOKORO_TIMEOUT="${KOKORO_TIMEOUT:-40}"
-PIPER_TIMEOUT="${PIPER_TIMEOUT:-15}"
 CONVERT_TIMEOUT="${CONVERT_TIMEOUT:-10}"
 TTS_BUDGET_MARGIN_SECONDS="${TTS_BUDGET_MARGIN_SECONDS:-25}"
 
 tts_budget_seconds() {
-  printf '%s' "$((KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + PIPER_TIMEOUT + CONVERT_TIMEOUT))"
+  printf '%s' "$((KOKORO_SERVER_TIMEOUT + KOKORO_TIMEOUT + CONVERT_TIMEOUT))"
 }
 tts_provider_timeout_ms() {
   printf '%s' "$(( ($(tts_budget_seconds) + TTS_BUDGET_MARGIN_SECONDS) * 1000 ))"
 }
-
-PIPER_BIN="${PIPER_BIN:-/home/clawbox/.local/share/piper/piper}"
-PIPER_VOICE_DIR="${PIPER_VOICE_DIR:-/home/clawbox/.local/share/piper/voices}"
 
 FFMPEG_BIN="${FFMPEG_BIN:-ffmpeg}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
@@ -152,11 +161,17 @@ REASONS=()
 note() { REASONS+=("$1"); }
 
 # ── Voice catalogue ─────────────────────────────────────────────────────────
-# One name per voice the box offers, mapped onto whatever each engine calls it.
-# An empty Kokoro mapping is not an error — it is the documented way a voice
-# says "I cannot be spoken on the GPU path, use the fallback". Bulgarian is
-# deferred for this release precisely because Kokoro has no Bulgarian voice
-# (TASK-382), and this table is where that fact lives.
+# One name per voice the box offers, mapped onto what Kokoro calls it. The
+# OpenAI-style aliases (alloy, onyx, ...) are here so a caller configured for
+# the cloud voice keeps working when the box speaks for itself.
+#
+# Every voice in this table has a Kokoro voice behind it. There is no
+# Bulgarian entry: Kokoro has no Bulgarian voice (TASK-382), the Piper voice
+# that used to stand in for it went with Piper, and listing a voice no engine
+# can speak would only turn `--set-voice` into a way of muting the box. The
+# empty mapping in kokoro_voice_for is kept as a guard for exactly that shape
+# of mistake, and try_kokoro turns it into a stated reason rather than a
+# mispronounced English rendering.
 
 kokoro_voice_for() {
   case "$1" in
@@ -166,46 +181,19 @@ kokoro_voice_for() {
     am_adam) printf 'am_adam' ;;
     bf_emma) printf 'bf_emma' ;;
     bm_george) printf 'bm_george' ;;
-    bg_dimitar) printf '' ;;
     *) printf '' ;;
   esac
 }
 
-piper_voice_for() {
-  case "$1" in
-    bg_dimitar) printf 'bg_BG-dimitar-medium' ;;
-    bf_emma|bm_george) printf 'en_GB-alba-medium' ;;
-    *) printf 'en_US-lessac-medium' ;;
-  esac
-}
-
-# Piper model ids are <lang>_<REGION>-<name>-<quality>, so the language falls
-# out of the id and no second table has to be kept in sync with the first. A
-# voice added to piper_voice_for above inherits the substitution behaviour
-# below for free.
-piper_language_of() { printf '%s' "${1%%_*}"; }
-
-# Any installed model for this language, in a deterministic order. Used only
-# when the voice's own model is absent.
-piper_model_for_language() {
-  local lang="$1" f
-  for f in "$PIPER_VOICE_DIR/${lang}_"*.onnx; do
-    [ -f "$f" ] || continue
-    basename "$f" .onnx
-    return 0
-  done
-  return 1
-}
-
 is_known_voice() {
   case "$1" in
-    af_heart|alloy|echo|fable|nova|shimmer|am_michael|onyx|af_bella|am_adam|bf_emma|bm_george|bg_dimitar) return 0 ;;
+    af_heart|alloy|echo|fable|nova|shimmer|am_michael|onyx|af_bella|am_adam|bf_emma|bm_george) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 list_voices() {
-  echo "af_heart am_michael af_bella am_adam bf_emma bm_george bg_dimitar"
+  echo "af_heart am_michael af_bella am_adam bf_emma bm_george"
 }
 
 # ── Voice selection ─────────────────────────────────────────────────────────
@@ -285,11 +273,11 @@ available_mb() {
 }
 
 # ── Output encoding ─────────────────────────────────────────────────────────
-# Both engines produce WAV natively, so the default configured outputFormat is
-# wav and the common path needs no ffmpeg at all. Only a non-WAV destination
-# pulls ffmpeg in, and if it is missing that counts as this engine failing —
-# writing WAV bytes into a file called .mp3 is exactly the "broken audio"
-# outcome the fallback chain exists to avoid.
+# Kokoro produces WAV natively, so the default configured outputFormat is wav
+# and the common path needs no ffmpeg at all. Only a non-WAV destination pulls
+# ffmpeg in, and if it is missing that counts as the run failing — writing WAV
+# bytes into a file called .mp3 is exactly the "broken audio" outcome this
+# script exists to avoid, and a stated failure lets the cloud voice answer.
 
 # Reasons go through note(), never through stdout: this script's stdout is the
 # output path and nothing else.
@@ -397,7 +385,7 @@ try_kokoro() {
   local text="$1" wav="$2" voice="$3" kvoice avail
   kvoice="$(kokoro_voice_for "$voice")"
   if [ -z "$kvoice" ]; then
-    note "kokoro: no Kokoro voice for '$voice' (Bulgarian is deferred this release)"
+    note "kokoro: no Kokoro voice is mapped for '$voice'"
     return 1
   fi
 
@@ -438,62 +426,6 @@ try_kokoro() {
     note "kokoro: '$KOKORO_BIN' is not installed"
   fi
   return 1
-}
-
-# ── Piper (CPU) ─────────────────────────────────────────────────────────────
-
-try_piper() {
-  local text="$1" wav="$2" voice="$3" pvoice model
-  pvoice="$(piper_voice_for "$voice")"
-  model="$PIPER_VOICE_DIR/$pvoice.onnx"
-
-  if [ ! -x "$PIPER_BIN" ]; then
-    note "piper: binary not found at $PIPER_BIN"
-    return 1
-  fi
-  # A voice whose own model is not on disk must not become silence — that is
-  # the bug this whole file exists to fix, and it would come back through the
-  # voice table rather than through the engines. Two different substitutions,
-  # and the difference between them is the whole point:
-  #
-  #   same language  -> acceptable. en_GB-alba-medium missing, en_US-lessac
-  #                     installed: the user hears the right words in a
-  #                     slightly different accent, and is told so.
-  #   cross language -> refused. Bulgarian read aloud by an English model is
-  #                     broken audio, which is worse than no audio.
-  if [ ! -f "$model" ]; then
-    local lang substitute
-    lang="$(piper_language_of "$pvoice")"
-    substitute="$(piper_model_for_language "$lang")"
-    if [ -z "$substitute" ]; then
-      note "piper: no voice model for language '$lang' at $PIPER_VOICE_DIR (wanted $pvoice)"
-      return 1
-    fi
-    echo "clawbox-tts: voice model $pvoice is not installed, speaking '$voice' with $substitute instead" >&2
-    pvoice="$substitute"
-    model="$PIPER_VOICE_DIR/$pvoice.onnx"
-  fi
-
-  local piper_dir
-  piper_dir="$(dirname "$PIPER_BIN")"
-  # The release tarball ships its own onnxruntime and espeak-ng data next to
-  # the binary. An empty entry in LD_LIBRARY_PATH means "the current
-  # directory" to the loader, which is not somewhere to resolve .so files.
-  local ld="$piper_dir"
-  [ -n "${LD_LIBRARY_PATH:-}" ] && ld="$piper_dir:$LD_LIBRARY_PATH"
-
-  if ! printf '%s' "$text" | LD_LIBRARY_PATH="$ld" \
-      timeout "$PIPER_TIMEOUT" "$PIPER_BIN" -m "$model" -f "$wav" >/dev/null 2>&1; then
-    note "piper: $PIPER_BIN exited non-zero using $pvoice"
-    return 1
-  fi
-  if ! audio_ok "$wav"; then
-    note "piper: produced no audio using $pvoice"
-    rm -f "$wav"
-    return 1
-  fi
-  ENGINE_USED="piper"
-  return 0
 }
 
 # ── Entry ───────────────────────────────────────────────────────────────────
@@ -572,14 +504,8 @@ VOICE="$(resolve_voice "$REQUESTED_VOICE")"
 TMPWAV="$(mktemp "${TMPDIR:-/tmp}/clawbox-tts_XXXXXX.wav")"
 trap 'rm -f "$TMPWAV"' EXIT
 
-if try_kokoro "$TEXT" "$TMPWAV" "$VOICE" || try_piper "$TEXT" "$TMPWAV" "$VOICE"; then
+if try_kokoro "$TEXT" "$TMPWAV" "$VOICE"; then
   if emit "$TMPWAV" "$OUTPUT"; then
-    # A fallback that leaves no trace is indistinguishable from a healthy GPU
-    # path. Say so once, on stderr, so a box quietly living on the CPU engine
-    # is visible in the gateway log instead of only in the audio.
-    if [ "$ENGINE_USED" = "piper" ] && [ "${#REASONS[@]}" -gt 0 ]; then
-      echo "clawbox-tts: fell back to Piper — ${REASONS[*]}" >&2
-    fi
     echo "$OUTPUT"
     exit 0
   fi
@@ -587,12 +513,15 @@ if try_kokoro "$TEXT" "$TMPWAV" "$VOICE" || try_piper "$TEXT" "$TMPWAV" "$VOICE"
 fi
 
 # Never exit 0 without audio: a silent success is indistinguishable from a
-# working TTS to everything upstream, which is the bug this file replaces.
+# working TTS to everything upstream, which is the bug this file replaced.
+# There is no engine to try after Kokoro, on purpose (see the header): the
+# reasons go to stderr, OpenClaw logs them as `CLI TTS exit 1: <stderr>`, and
+# its fallback provider — the cloud voice — answers the reply instead.
 {
-  echo "clawbox-tts: no engine could speak this text (voice '$VOICE')."
+  echo "clawbox-tts: Kokoro could not speak this text (voice '$VOICE') — no on-device fallback, the gateway's cloud voice takes over."
   for r in "${REASONS[@]}"; do
     echo "  - $r"
   done
-  echo "  Install Piper with: sudo bash scripts/install-voice.sh --piper-only"
+  echo "  Check the Kokoro install with: sudo bash ${CLAWBOX_ROOT:-/home/clawbox/clawbox}/install.sh --step openclaw_tts"
 } >&2
 exit 1

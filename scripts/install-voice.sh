@@ -4,10 +4,10 @@
 # Runs as clawbox user. Requires espeak-ng to be installed (system package).
 set -euo pipefail
 
-# Overridable for the same reason PIPER_DIR is: the tests run the real script
-# end-to-end so they fail when the shipped artifact drifts, and they cannot
-# write into a real /home/clawbox. install.sh does not export either name, so a
-# device always takes these defaults.
+# Overridable because the tests run the real script end-to-end so they fail
+# when the shipped artifact drifts, and they cannot write into a real
+# /home/clawbox. install.sh does not export either name, so a device always
+# takes these defaults.
 CLAWBOX_USER="${CLAWBOX_USER:-clawbox}"
 CLAWBOX_HOME="${CLAWBOX_HOME:-/home/${CLAWBOX_USER}}"
 WORKSPACE="$CLAWBOX_HOME/.openclaw/workspace"
@@ -117,167 +117,22 @@ kokoro_expected_cusparselt_dir() {
   esac
 }
 
-# ── Piper (CPU fallback engine) ─────────────────────────────────────────────
-# Piper is what keeps a spoken reply from becoming silence. Kokoro owns the
-# default voice, but it needs CUDA and peaks around 2.6 GB on a 7.6 GB board
-# (TASK-382); when it cannot run, scripts/openclaw/clawbox-tts.sh falls through
-# to Piper at 136-243 MB. That fallback only exists if Piper is actually on the
-# box, so this install is not optional and not "nice to have".
-#
-# Artifacts are pinned by sha256 to the exact bytes TASK-382 measured, matching
-# scripts/bench/tts-bench.py. These are an executable and model weights fetched
-# over the network onto a customer device; an unpinned download here is a
-# supply-chain hole.
-PIPER_VERSION="${PIPER_VERSION:-2023.11.14-2}"
-PIPER_DIR="${PIPER_DIR:-$CLAWBOX_HOME/.local/share/piper}"
-PIPER_VOICE_DIR="${PIPER_VOICE_DIR:-$PIPER_DIR/voices}"
-PIPER_VOICES_BASE="${PIPER_VOICES_BASE:-https://huggingface.co/rhasspy/piper-voices/resolve/main}"
-PIPER_TARBALL_SHA256="fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb"
-PIPER_EN_ONNX_SHA256="5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"
-PIPER_EN_JSON_SHA256="efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"
-PIPER_BG_ONNX_SHA256="4972fe764468e8501416407ad81662de94cc6c9cdc680fcf807daef04e319f13"
-PIPER_BG_JSON_SHA256="ec9a9abdd17384d3db225e83085b2f68b790b112f058417c3a8a2ac58b79e7f0"
-# Bulgarian is DEFERRED for this release (Yanko, 2026-08-19): Kokoro has no
-# Bulgarian voice, and shipping the Piper one by default would quietly make
-# Bulgarian TTS a feature nobody signed off. The download is kept here, behind
-# an opt-in, so enabling it later is a flag and not a code change.
-INSTALL_BG_VOICE="${CLAWBOX_TTS_INSTALL_BG_VOICE:-false}"
-
-# Verify a file against a pinned digest. Returns 1 on any mismatch so callers
-# can re-download rather than trusting whatever is on disk.
-piper_digest_ok() {
-  local file="$1" want="$2" have
-  [ -f "$file" ] || return 1
-  have=$(sha256sum "$file" 2>/dev/null | cut -d" " -f1)
-  [ "$have" = "$want" ]
-}
-
-# Download to a .part and only move it into place once the digest matches, so
-# an interrupted or tampered fetch never leaves something the next run trusts.
-piper_fetch() {
-  local url="$1" dest="$2" want="$3"
-  if piper_digest_ok "$dest" "$want"; then
-    return 0
-  fi
-  rm -f "$dest" "$dest.part"
-  # No timeouts here meant a stalled TCP connection blocked forever, and this
-  # runs from step_post_update on every in-app update of a shipped device: one
-  # dead transfer hung the whole update with no bound and no diagnostic.
-  # --speed-limit/--speed-time abort a connection that has effectively stopped
-  # without killing a slow-but-progressing download, which a flat --max-time
-  # would; only then can --retry actually do anything.
-  curl -fsSL --retry 3 --retry-delay 5 \
-    --connect-timeout 20 --speed-limit 1024 --speed-time 60 \
-    -o "$dest.part" "$url" || {
-    echo "  ERROR: download failed: $url" >&2
-    rm -f "$dest.part"
-    return 1
-  }
-  if ! piper_digest_ok "$dest.part" "$want"; then
-    echo "  ERROR: $(basename "$dest") sha256 does not match the pin — refusing it" >&2
-    rm -f "$dest.part"
-    return 1
-  fi
-  mv "$dest.part" "$dest"
-}
-
-piper_install_voice() {
-  local voice="$1" repo_path="$2" onnx_sha="$3" json_sha="$4"
-  piper_fetch "$PIPER_VOICES_BASE/$repo_path/$voice.onnx" "$PIPER_VOICE_DIR/$voice.onnx" "$onnx_sha" || return 1
-  piper_fetch "$PIPER_VOICES_BASE/$repo_path/$voice.onnx.json" "$PIPER_VOICE_DIR/$voice.onnx.json" "$json_sha" || return 1
-  echo "  Piper voice ready: $voice"
-}
-
-# The reason install_piper_engine stopped, in the verdict vocabulary. Set on
-# every path it can leave by, and turned into a published verdict by exactly one
-# caller below.
-PIPER_VERDICT_HINT="ready"
-
-install_piper_engine() {
-  local arch
-  arch=$(uname -m)
-  if [ "$arch" != "aarch64" ]; then
-    # Only the aarch64 artifact is pinned, and ClawBox is aarch64 hardware.
-    # Guessing a digest for another arch would defeat the point of pinning.
-    echo "  Skipping Piper: no pinned artifact for $arch (ClawBox ships aarch64)"
-    PIPER_VERDICT_HINT="skipped:arch-$arch"
-    return 0
-  fi
-
-  mkdir -p "$PIPER_DIR" "$PIPER_VOICE_DIR"
-
-  if [ -x "$PIPER_DIR/piper" ]; then
-    echo "  Piper binary already installed"
-  else
-    local tarball="$PIPER_DIR/piper_linux_aarch64.tar.gz"
-    echo "  Downloading Piper $PIPER_VERSION..."
-    piper_fetch \
-      "https://github.com/rhasspy/piper/releases/download/$PIPER_VERSION/piper_linux_aarch64.tar.gz" \
-      "$tarball" "$PIPER_TARBALL_SHA256" || { PIPER_VERDICT_HINT="failed:download"; return 1; }
-    # The tarball unpacks a top-level piper/ directory, so extract one level up.
-    tar -xzf "$tarball" -C "$(dirname "$PIPER_DIR")" || {
-      echo "  ERROR: could not unpack Piper" >&2
-      PIPER_VERDICT_HINT="failed:unpack"
-      return 1
-    }
-    rm -f "$tarball"
-    # A discarded chmod hid a missing binary: if the release layout ever
-    # changes, tar still succeeds and this printed "installed" for a directory
-    # with no piper in it. The failure then surfaced much later as
-    # "piper: binary not found", at the moment a user expected speech.
-    if [ ! -f "$PIPER_DIR/piper" ]; then
-      echo "  ERROR: the Piper tarball did not contain piper at $PIPER_DIR/piper" >&2
-      PIPER_VERDICT_HINT="failed:layout"
-      return 1
-    fi
-    if ! chmod +x "$PIPER_DIR/piper"; then
-      echo "  ERROR: could not make $PIPER_DIR/piper executable" >&2
-      PIPER_VERDICT_HINT="failed:not-executable"
-      return 1
-    fi
-    echo "  Piper binary installed at $PIPER_DIR/piper"
-  fi
-
-  piper_install_voice "en_US-lessac-medium" "en/en_US/lessac/medium" \
-    "$PIPER_EN_ONNX_SHA256" "$PIPER_EN_JSON_SHA256" \
-    || { PIPER_VERDICT_HINT="failed:voice-en"; return 1; }
-
-  if [ "$INSTALL_BG_VOICE" = "true" ]; then
-    piper_install_voice "bg_BG-dimitar-medium" "bg/bg_BG/dimitar/medium" \
-      "$PIPER_BG_ONNX_SHA256" "$PIPER_BG_JSON_SHA256" \
-      || { PIPER_VERDICT_HINT="failed:voice-bg"; return 1; }
-  fi
-
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PIPER_DIR" 2>/dev/null || true
-}
-
-# Install the CPU fallback and PUBLISH what happened. The engine half above is
-# free to grow new early returns; this wrapper is the only writer, so a new one
-# cannot ship without a verdict.
-#
-# The verdict is never more optimistic than the exit status: a non-zero return
-# that named no reason still publishes `failed:*`. Reading "it worked" off a
-# return code without checking the outcome is how this file shipped a Piper
-# `return 0` that means "there is no artifact for this board" as if it were an
-# installed engine.
-install_piper() {
-  local rc=0
-  PIPER_VERDICT_HINT="ready"
-  install_piper_engine || rc=$?
-  if [ "$rc" -ne 0 ]; then
-    case "$PIPER_VERDICT_HINT" in
-      failed:*) ;;
-      *) PIPER_VERDICT_HINT="failed:install" ;;
-    esac
-  fi
-  piper_report "$PIPER_VERDICT_HINT"
-  return "$rc"
-}
+# ── One engine, on purpose ──────────────────────────────────────────────────
+# Kokoro on CUDA is the box's only on-device voice. There used to be a Piper
+# CPU fallback installed here, pinned by sha256 and run by clawbox-tts.sh
+# whenever Kokoro failed; the owner removed it (2026-08). The voice chain is
+# cloud → Kokoro with no second CPU engine in between: a Kokoro that is
+# missing or broken is REPORTED — as a verdict in $TTS_STATUS_FILE here, and as
+# an exit-1 failure the gateway hands to its cloud voice at speech time —
+# instead of being papered over by an engine that quietly kept the box
+# talking while the GPU install was broken for a whole release (TASK-420).
+# Nothing in this file downloads an artifact by hand any more; pip is the only
+# fetch left.
 
 # Deploy the TTS entrypoint + engine scripts into the workspace the gateway
-# runs from. Split out of the big install so --piper-only can call it too: the
-# updater re-runs that cheap path on every update, and a box whose
-# clawbox-tts.sh is stale is a box whose fallback chain is stale.
+# runs from. Split out of the big install so --tts-only can call it too: the
+# updater re-runs that path on every update, and a box whose clawbox-tts.sh is
+# stale is a box whose speech path is stale.
 # Returns non-zero if ANY required piece did not land. A device that keeps a
 # stale or half-copied speech install while the updater reports success is the
 # same class of bug as a silent TTS failure, one layer further out.
@@ -315,12 +170,14 @@ deploy_voice_scripts() {
 }
 
 # ── Kokoro (GPU TTS) ────────────────────────────────────────────────────────
-# Kokoro is the DEFAULT voice (TASK-382 benchmarked it on real Orin hardware,
-# TASK-383 shipped it), but until TASK-420 nothing on the install path actually
-# installed it: install.sh called this script with --piper-only and then printed
-# "Kokoro GPU, Piper fallback". Every shipped box spoke through the CPU
-# fallback. The pieces below are functions, not inline steps, because both the
-# full pipeline install and --tts-only run them and neither may drift.
+# Kokoro is the box's ONLY voice (TASK-382 benchmarked it on real Orin
+# hardware, TASK-383 shipped it as the default, and the CPU fallback that used
+# to sit behind it is gone — see above). Until TASK-420 nothing on the install
+# path actually installed it: install.sh called this script with a
+# fallback-only flag and then printed "Kokoro GPU". Every shipped box spoke
+# through the CPU fallback. The pieces below are functions, not inline steps,
+# because both the full pipeline install and --tts-only run them and neither
+# may drift.
 
 # CUDA detection: nvcc on PATH, else the standard Jetson location (exported so
 # later steps find it). Returns 0 only when CUDA is genuinely usable — the
@@ -370,11 +227,13 @@ pip_as_clawbox() {
 #   -bash: -c: line 7: unexpected EOF while looking for matching `"'
 #   -bash: -c: line 8: syntax error: unexpected end of file
 # on every box where $ld resolved, which is every box that has CUDA. The model
-# pre-download was charged with the failure, the Piper fallback absorbed it, and
-# the flash still reported success — so shipped hardware ran CPU TTS while the
-# install said "Kokoro GPU". `import torch` on such a box fails with
-# `ImportError: libcusparseLt.so.0`, the exact library this export exists to
-# find, which is how the missing export was confirmed on device.
+# pre-download was charged with the failure, the CPU fallback of the time
+# absorbed it, and the flash still reported success — so shipped hardware ran
+# CPU TTS while the install said "Kokoro GPU". `import torch` on such a box
+# fails with `ImportError: libcusparseLt.so.0`, the exact library this export
+# exists to find, which is how the missing export was confirmed on device.
+# (That fallback is gone now for exactly this reason: a failure Kokoro cannot
+# hide behind is a failure that gets fixed.)
 clawbox_python() {
   local ld payload='exec python3 -'
   ld=$(kokoro_ld_path present)
@@ -523,38 +382,26 @@ activate_user_units() {
 #   skipped:*   NOT applicable to this board (no CUDA, no Jetson build for this
 #               architecture). Nothing was asked for and nothing is missing.
 #   failed:*    requested and NOT delivered. The owner asked for GPU TTS, the
-#               box is answering speech on the Piper CPU fallback instead, and
-#               something is broken that a human has to fix.
+#               box has no on-device voice until it is fixed (spoken replies
+#               fall back to the gateway's cloud voice), and something is
+#               broken that a human has to fix.
 #
 # `failed:*` reaching only stdout is precisely how a hard failure shipped as a
 # soft fallback: the step logged an ERROR line, returned, and the flash printed
 # success. A verdict nobody can read after the fact is not a report.
-# The verdicts this run has reached, held in memory so the file can be rewritten
-# from BOTH of them every time either half reports. Publishing them
-# independently would mean whichever engine finished last erased the other's
-# answer, which is a worse report than no report at all.
 #
-# They also decide the exit status below, so a run that cannot WRITE the file
-# still tells its caller the truth about the box.
+# Kokoro is the only engine, so KOKORO= is the only engine key this file
+# writes. A release that still shipped the CPU fallback also wrote PIPER=; that
+# line is neither read nor carried forward now — there is no engine behind it
+# — so an old file is simply overwritten with the one verdict that means
+# something. The verdict also decides the exit status below, so a run that
+# cannot WRITE the file still tells its caller the truth about the box.
 TTS_KOKORO_VERDICT=""
-TTS_PIPER_VERDICT=""
 
-# Seed the in-memory verdicts from a file a PREVIOUS run published, so a mode
-# that installs only one engine (--piper-only, the full pipeline path) adds its
-# answer instead of blanking the other engine's. Without this, the entrypoint
-# refresh an operator runs from clawbox-tts.sh's own hint would leave a working
-# Kokoro box with no GPU verdict at all: an error path destroying a result that
-# actually succeeded.
-tts_status_load() {
-  [ -r "$TTS_STATUS_FILE" ] || return 0
-  TTS_KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
-  TTS_PIPER_VERDICT=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
-}
-
-# Rewrite $TTS_STATUS_FILE from every verdict known so far. A key with no
-# verdict is OMITTED rather than written as a placeholder: install.sh's health
-# check treats an ABSENT engine verdict as a failed check, and inventing a value
-# for an engine nobody asked about would launder that silence into an answer.
+# Rewrite $TTS_STATUS_FILE from the verdict known so far. A key with no verdict
+# is OMITTED rather than written as a placeholder: install.sh's health check
+# treats an ABSENT verdict as a failed check, and inventing a value would
+# launder that silence into an answer.
 tts_status_publish() {
   local dir
   dir=$(dirname "$TTS_STATUS_FILE")
@@ -564,12 +411,11 @@ tts_status_publish() {
   # pass.
   if { mkdir -p "$dir" \
       && { [ -z "$TTS_KOKORO_VERDICT" ] || printf 'KOKORO=%s\n' "$TTS_KOKORO_VERDICT"
-           [ -z "$TTS_PIPER_VERDICT" ] || printf 'PIPER=%s\n' "$TTS_PIPER_VERDICT"
            printf 'TIMESTAMP=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)"; } \
            > "$TTS_STATUS_FILE"; } 2>/dev/null; then
     chmod 644 "$TTS_STATUS_FILE" 2>/dev/null || true
   else
-    echo "  Warning: could not publish the TTS verdicts to $TTS_STATUS_FILE -" >&2
+    echo "  Warning: could not publish the TTS verdict to $TTS_STATUS_FILE -" >&2
     echo "           install.sh cannot health-check a result it cannot read" >&2
   fi
 }
@@ -580,28 +426,12 @@ kokoro_report() {
   tts_status_publish
 }
 
-# The Piper half's verdict, in the same three states and for the same reason.
-# It had none: kokoro_report was the ONLY writer of this file, so a box whose
-# CPU engine failed while Kokoro legitimately reported `skipped:no-cuda` had
-# nothing anywhere to say it could no longer speak, and finished provisioning as
-# "All checks healthy".
-piper_report() {
-  TTS_PIPER_VERDICT="$1"
-  echo "CLAWBOX_TTS_PIPER=$1"
-  tts_status_publish
-}
-
-# `ready` is the only verdict that means "this engine can speak". `skipped:*` is
-# a board that was never going to run it and `failed:*` is one that was asked
-# and could not - neither of those is an engine, and neither may be read as one.
-tts_verdict_is_ready() { [ "$1" = "ready" ]; }
-tts_verdict_is_failure() { case "$1" in failed:*) return 0 ;; *) return 1 ;; esac; }
-
-# Install the GPU Kokoro stack. NEVER fatal: every exit path leaves Piper and
-# the deployed scripts untouched, because a box that lost its voice to a failed
-# GPU install is strictly worse than a box on the CPU fallback. The return code
-# is the contract with install.sh's step_openclaw_tts, which uses it to decide
-# whether it may claim Kokoro in its summary:
+# Install the GPU Kokoro stack. NEVER fatal: every exit path leaves the
+# deployed scripts untouched and publishes a verdict, because the failure has
+# to reach install.sh's summary and health check rather than abort the install
+# half-way with the box unreachable. The return code is the contract with
+# install.sh's step_openclaw_tts, which uses it to decide whether it may claim
+# Kokoro in its summary:
 #   0   Kokoro ready
 #   10  skipped, no CUDA toolkit
 #   11  skipped, no Jetson build for this architecture
@@ -610,9 +440,8 @@ install_kokoro_tts() {
   local arch
   arch=$(uname -m)
   if [ "$arch" != "aarch64" ]; then
-    # $JETSON_TORCH_URL is an aarch64 wheel and install_piper already refuses
-    # to guess for other arches. Installing "something" here and reporting
-    # Kokoro is the exact lie TASK-420 removes.
+    # $JETSON_TORCH_URL is an aarch64 wheel. Installing "something" here and
+    # reporting Kokoro is the exact lie TASK-420 removes.
     echo "  Skipping Kokoro: no Jetson CUDA build for $arch (ClawBox ships aarch64)"
     kokoro_report "skipped:arch-$arch"
     return 11
@@ -628,17 +457,17 @@ install_kokoro_tts() {
     echo "  Kokoro already installed by a previous run — skipping the GPU install"
   else
     if ! install_cuda_torch; then
-      echo "  ERROR: CUDA PyTorch install failed — leaving TTS on the Piper fallback" >&2
+      echo "  ERROR: CUDA PyTorch install failed — this box has no on-device voice until it is fixed" >&2
       kokoro_report "failed:torch"
       return 12
     fi
     if ! install_kokoro_packages; then
-      echo "  ERROR: Kokoro package install failed — leaving TTS on the Piper fallback" >&2
+      echo "  ERROR: Kokoro package install failed — this box has no on-device voice until it is fixed" >&2
       kokoro_report "failed:packages"
       return 12
     fi
     if ! kokoro_predownload_model; then
-      echo "  ERROR: Kokoro model pre-download failed — leaving TTS on the Piper fallback" >&2
+      echo "  ERROR: Kokoro model pre-download failed — this box has no on-device voice until it is fixed" >&2
       kokoro_report "failed:model"
       return 12
     fi
@@ -659,9 +488,11 @@ install_kokoro_tts() {
   kokoro_report "ready"
 }
 
-# --tts-only installs exactly what on-device TTS needs: the Piper CPU fallback,
-# the workspace scripts OpenClaw execs, and the CUDA Kokoro stack with its
-# on-demand server unit.
+# --tts-only installs exactly what on-device TTS needs: the workspace scripts
+# OpenClaw execs, and the CUDA Kokoro stack with its on-demand server unit.
+# There is no second engine to install — Kokoro is the box's only voice, and a
+# Kokoro that is missing is reported (verdict file, exit status) rather than
+# papered over by a CPU fallback.
 #
 # It deliberately does NOT run the STT half of this file — faster-whisper, the
 # CTranslate2 CUDA source build, the Whisper model download — which is roughly
@@ -669,13 +500,12 @@ install_kokoro_tts() {
 # install AND every in-app update; an hour of source builds per update is not
 # something a shipped device can absorb.
 #
-# Piper goes first so a Kokoro failure can never take the fallback with it.
+# The scripts go first so a Kokoro failure can never take the entrypoint with
+# it: clawbox-tts.sh is what turns "Kokoro is down" into an exit-1 report the
+# gateway can hand to its cloud voice, instead of a missing command.
 if [ "${1:-}" = "--tts-only" ]; then
-  echo "=== On-device TTS (Kokoro GPU + Piper fallback) ==="
-  tts_status_load
+  echo "=== On-device TTS (Kokoro GPU) ==="
 
-  PIPER_RC=0
-  install_piper || PIPER_RC=$?
   DEPLOY_RC=0
   deploy_voice_scripts || DEPLOY_RC=$?
 
@@ -684,82 +514,49 @@ if [ "${1:-}" = "--tts-only" ]; then
 
   # The exit status is the contract with install.sh's step_openclaw_tts:
   #
-  #   0        Kokoro is the engine and it is ready.
-  #   10 / 11  Kokoro does not apply to this board; the box speaks on Piper.
-  #   12       Kokoro was REQUESTED and did not install; the box speaks on Piper.
-  #   1        the Piper half did not complete, but an engine survives.
-  #   13       NO usable engine at all - this box answers speech with SILENCE.
+  #   0        Kokoro is ready.
+  #   10 / 11  Kokoro does not apply to this board (no CUDA, no Jetson build).
+  #            The box has no on-device voice by design; the cloud voice speaks.
+  #   12       Kokoro was REQUESTED and did not install. Same outcome for the
+  #            listener, but this one is a defect a human has to fix.
+  #   1        the voice scripts did not deploy; Kokoro's own verdict stands in
+  #            $TTS_STATUS_FILE.
   #
-  # 13 is new, and it exists because the guard below used to be a bare `exit 1`
-  # placed BEFORE `exit "$KOKORO_RC"`. Any Piper problem therefore overwrote the
-  # GPU verdict, 12 included - the hard-failure code that was landed precisely
-  # so a failed engine could not ship as a soft fallback - and install.sh's
-  # handler for 1 printed a warning and recorded nothing. A board with no CUDA
-  # (install-x64.sh, or an Orin with no nvcc) whose Piper download flaked
-  # therefore finished provisioning as "All checks healthy" and then answered
-  # every spoken request with silence.
-  #
-  # Which engines survived is read from the published VERDICTS, not from the
-  # return codes: install_piper returns 0 for a board with no pinned artifact
-  # too, and a board with no artifact has no engine however cleanly it declined
-  # to install one.
-  if ! tts_verdict_is_ready "$TTS_KOKORO_VERDICT" && ! tts_verdict_is_ready "$TTS_PIPER_VERDICT"; then
-    if tts_verdict_is_failure "$TTS_KOKORO_VERDICT" || tts_verdict_is_failure "$TTS_PIPER_VERDICT"; then
-      echo "=== NO WORKING TTS ENGINE (Kokoro: ${TTS_KOKORO_VERDICT:-unreported}, Piper: ${TTS_PIPER_VERDICT:-unreported}) ===" >&2
-      echo "=== This box will answer every spoken request with SILENCE ===" >&2
-      exit 13
-    fi
-    # Both halves declined for the board itself: no Jetson CUDA build and no
-    # pinned Piper artifact for this architecture. Nothing was asked for and
-    # nothing is missing, which is the same rule `skipped:*` has always carried
-    # - failing every install-x64.sh run would only teach everyone to ignore
-    # this check.
-    echo "=== No on-device TTS engine applies to this board (Kokoro: $TTS_KOKORO_VERDICT, Piper: $TTS_PIPER_VERDICT) ==="
-    exit "$KOKORO_RC"
+  # There is no 13 ("no engine at all") any more. It existed to tell "the CPU
+  # fallback is gone too" apart from "Kokoro failed but the fallback survives";
+  # with one engine those are the same fact, and 12 carries it. A hard Kokoro
+  # failure outranks a deploy failure, because 12 is the code install.sh
+  # records as "the engine you asked for did not arrive" and nothing may
+  # overwrite it — the lesson of the bare `exit 1` that once sat before
+  # `exit "$KOKORO_RC"` and laundered a mute box into a warning.
+  if [ "$KOKORO_RC" -eq 12 ]; then
+    echo "=== Kokoro GPU TTS was requested and did NOT install — this box has no on-device voice ===" >&2
+    exit 12
   fi
-
-  if [ "$PIPER_RC" -ne 0 ] || [ "$DEPLOY_RC" -ne 0 ]; then
-    # An engine survives, so this is a degraded box rather than a mute one - but
-    # it is still a provisioning failure, and install.sh records it as one.
-    echo "=== Piper fallback INCOMPLETE - the box has no CPU fallback behind Kokoro ===" >&2
+  if [ "$DEPLOY_RC" -ne 0 ]; then
+    echo "=== Voice scripts INCOMPLETE — the workspace copy of the TTS scripts did not deploy (Kokoro: ${TTS_KOKORO_VERDICT:-unreported}) ===" >&2
     exit 1
   fi
   if [ "$KOKORO_RC" -eq 0 ]; then
-    echo "=== On-device TTS ready (Kokoro GPU, Piper fallback) ==="
+    echo "=== On-device TTS ready (Kokoro GPU) ==="
   else
-    echo "=== On-device TTS ready on Piper CPU only (Kokoro unavailable) ==="
+    echo "=== No on-device TTS engine applies to this board (Kokoro: $TTS_KOKORO_VERDICT) — spoken replies use the gateway's cloud voice ==="
   fi
   exit "$KOKORO_RC"
 fi
 
-# --piper-only installs just the CPU fallback and refreshes the entrypoint. It
-# is a small pinned download, unlike the CUDA torch/CTranslate2 build below, so
-# it is safe to run unattended on a box that already works. install.sh moved to
-# --tts-only above, but this stays: clawbox-tts.sh names it in its
-# "Piper not installed" hint, and older devices' scripts call it.
-if [ "${1:-}" = "--piper-only" ]; then
-  echo "=== Voice fallback (Piper) ==="
-  # Seeded so publishing the Piper verdict cannot blank a Kokoro verdict an
-  # earlier run left behind: this mode installs one engine and must report on
-  # one engine.
-  tts_status_load
-  PIPER_ONLY_RC=0
-  install_piper || PIPER_ONLY_RC=1
-  deploy_voice_scripts || PIPER_ONLY_RC=1
-  if [ "$PIPER_ONLY_RC" -ne 0 ]; then
-    echo "=== Piper fallback INCOMPLETE — the box may answer speech with silence ===" >&2
-    exit 1
-  fi
-  echo "=== Piper fallback ready ==="
-  exit 0
-fi
+# Any other option is refused rather than silently taken as "run the full
+# pipeline install": that path builds CTranslate2 from source and takes about
+# an hour, and the fallback-only flag an earlier release accepted here used to
+# land on it. There is no such mode any more, and a caller that still asks for
+# one should hear that instead of getting an hour of builds.
+case "${1:-}" in
+  --*)
+    echo "install-voice.sh: unknown option '$1' (the only mode flag is --tts-only; no flag runs the full STT+TTS install)" >&2
+    exit 2 ;;
+esac
 
 echo "=== Voice Pipeline Installer (GPU-Accelerated) ==="
-
-# Same reason as the two single-engine modes above: this path installs Piper and
-# publishes its verdict, so it must carry forward any Kokoro verdict already on
-# disk rather than blank it.
-tts_status_load
 
 # ── Detect CUDA availability ────────────────────────────────────────────────
 
@@ -778,21 +575,21 @@ fi
 KOKORO_FULL_OK=$HAS_CUDA
 
 if $HAS_CUDA; then
-  echo "[1/8] Installing CUDA-enabled PyTorch for Jetson..."
+  echo "[1/7] Installing CUDA-enabled PyTorch for Jetson..."
   install_cuda_torch || { KOKORO_FULL_OK=false; echo "  Warning: CUDA PyTorch install reported an error"; }
 else
-  echo "[1/8] No CUDA detected, using CPU PyTorch..."
+  echo "[1/7] No CUDA detected, using CPU PyTorch..."
 fi
 
 # ── Step 2: Install faster-whisper ───────────────────────────────────────────
 
-echo "[2/8] Installing faster-whisper (STT)..."
+echo "[2/7] Installing faster-whisper (STT)..."
 su - "$CLAWBOX_USER" -c "$PIP install --user faster-whisper" 2>&1 | tail -3
 
 # ── Step 3: Build CTranslate2 with CUDA (if available) ──────────────────────
 
 if $HAS_CUDA; then
-  echo "[3/8] Building CTranslate2 with CUDA support..."
+  echo "[3/7] Building CTranslate2 with CUDA support..."
   BUILD_DIR="/tmp/CTranslate2"
   if [ ! -f "$CLAWBOX_HOME/.local/lib/libctranslate2.so" ]; then
     rm -rf "$BUILD_DIR"
@@ -823,17 +620,17 @@ if $HAS_CUDA; then
     echo "  CTranslate2 already installed"
   fi
 else
-  echo "[3/8] Skipping CTranslate2 CUDA build (no CUDA)"
+  echo "[3/7] Skipping CTranslate2 CUDA build (no CUDA)"
 fi
 
 # ── Step 4: Install Kokoro TTS ───────────────────────────────────────────────
 
-echo "[4/8] Installing Kokoro TTS..."
+echo "[4/7] Installing Kokoro TTS..."
 install_kokoro_packages || { KOKORO_FULL_OK=false; echo "  Warning: Kokoro package install reported an error"; }
 
 # ── Step 5: Pre-download models ─────────────────────────────────────────────
 
-echo "[5/8] Pre-downloading Whisper model (base)..."
+echo "[5/7] Pre-downloading Whisper model (base)..."
 # Clear corrupted cache (0-byte blobs from failed/rate-limited HF downloads)
 WHISPER_CACHE="$CLAWBOX_HOME/.cache/huggingface/hub/models--Systran--faster-whisper-base"
 if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -type f -empty | grep -q .; then
@@ -855,7 +652,7 @@ model = WhisperModel('base', device='$DEVICE', compute_type='$COMPUTE')
 print('Whisper base model ready on $DEVICE')
 " 2>&1 | tail -3
 
-echo "[6/8] Pre-downloading Kokoro model..."
+echo "[6/7] Pre-downloading Kokoro model..."
 if kokoro_predownload_model; then
   if $KOKORO_FULL_OK; then
     kokoro_mark_installed
@@ -864,12 +661,9 @@ else
   echo "  Warning: Kokoro model pre-download reported an error"
 fi
 
-# ── Step 6: Deploy scripts ───────────────────────────────────────────────────
+# ── Step 7: Deploy scripts ───────────────────────────────────────────────────
 
-echo "[7/8] Installing Piper CPU fallback..."
-install_piper
-
-echo "[8/8] Deploying voice server scripts..."
+echo "[7/7] Deploying voice server scripts..."
 SCRIPTS_DST="$WORKSPACE/scripts"
 deploy_voice_scripts
 
@@ -907,6 +701,6 @@ else
   echo "  Mode: CPU"
 fi
 echo "  STT: Whisper (base) via on-demand server (~1.8s)"
-echo "  TTS: Kokoro-82M via on-demand server (~2s), Piper CPU fallback"
+echo "  TTS: Kokoro-82M via on-demand server (~2s) — the only on-device engine; a Kokoro failure is reported to the gateway, not hidden"
 echo "  TTS entrypoint: $WORKSPACE/scripts/openclaw/clawbox-tts.sh"
 echo "  Services: kokoro-server, whisper-server (on-demand, auto-stop after idle)"
