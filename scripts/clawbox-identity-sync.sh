@@ -54,6 +54,26 @@ restart_openclaw_gateway() {
   return 1
 }
 
+# Is there a systemd MANAGER to talk to — not merely a systemctl binary?
+#
+# `command -v systemctl` is not that question. Plenty of containers ship
+# /usr/bin/systemctl with no manager behind it, and on one of those every
+# restart attempt fails for a reason that is not the device's: the harness
+# switch would 502 on a box where there is no gateway to refresh in the first
+# place. That is the false-FAILURE twin of the bug this file is fixing.
+#
+# `is-system-running` answers by TEXT, not by exit status, because the status is
+# non-zero for `degraded` — an ordinary state on these devices, and one where
+# systemd is very much running. Only "no answer at all" and an explicit
+# `offline` mean there is no manager.
+systemd_manager_available() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  case "$(systemctl is-system-running 2>/dev/null)" in
+    ""|offline|unknown) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 should_refresh_openclaw() {
   if [ "$TARGET_HARNESS" = "openclaw" ]; then
     return 0
@@ -83,10 +103,11 @@ if [ -d "$OC_WS" ]; then
   if should_refresh_openclaw; then
     if restart_openclaw_gateway; then
       echo "[identity-sync] clawbox-gateway restarted; OpenClaw has re-read the identity files"
-    elif ! command -v systemctl >/dev/null 2>&1; then
-      # No init to ask - a dev checkout or a container. There is no running
-      # gateway holding a stale copy either, so nothing was left undone.
-      echo "[identity-sync] no systemctl on this host; skipping the gateway refresh"
+    elif ! systemd_manager_available; then
+      # No init to ask - a dev checkout, or a container with the binary but no
+      # manager. There is no running gateway holding a stale copy either, so
+      # nothing was left undone.
+      echo "[identity-sync] no systemd manager on this host; skipping the gateway refresh"
     else
       echo "[identity-sync] could not restart clawbox-gateway: OpenClaw would keep" >&2
       echo "  answering as whoever it was before this sync. Refusing to report success." >&2

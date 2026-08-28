@@ -148,6 +148,8 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
     targetUrl: string;
     sameOrigin: boolean;
     hotspotSsid: string | null;
+    /** A saved-but-not-applied hotspot toggle, carried across the reconnect. */
+    notice?: string | null;
   } | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
@@ -345,6 +347,11 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       // apRestarted:false, and the owner is told rather than shown "Settings
       // saved!". The text comes from the route, like the error text above it.
       const apFailed = hotspotData.apAction === "failed";
+      const apWarning = apFailed
+        ? (typeof hotspotData.warning === "string" && hotspotData.warning.trim()
+          ? hotspotData.warning
+          : t("credentials.failedSaveHotspot"))
+        : null;
       const currentHost = window.location.hostname.toLowerCase();
       const hostnameChanged =
         currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
@@ -364,17 +371,17 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
             : new URL("/setup", window.location.href).toString(),
           sameOrigin: !hostnameChanged,
           hotspotSsid: apRestarted && submission.hotspotEnabled ? submission.hotspotName : null,
+          // A rename plus a failed AP toggle is the one combination where the
+          // warning would otherwise be lost: this origin is about to stop
+          // answering, so it travels with the reconnect instead of being held
+          // on a page the box is leaving.
+          notice: apWarning,
         });
         return;
       }
 
-      if (apFailed) {
-        setStatus({
-          type: "info",
-          message: typeof hotspotData.warning === "string" && hotspotData.warning.trim()
-            ? hotspotData.warning
-            : t("credentials.failedSaveHotspot"),
-        });
+      if (apWarning) {
+        setStatus({ type: "info", message: apWarning });
         // No auto-advance: the one thing that must not happen here is the
         // message being replaced by the next step before it has been read.
         return;
@@ -476,6 +483,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
           targetUrl={handoff.targetUrl}
           sameOrigin={handoff.sameOrigin}
           hotspotSsid={handoff.hotspotSsid}
+          notice={handoff.notice ?? null}
           onContinue={onNext}
         />
       )}

@@ -11,6 +11,11 @@ import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import CredentialsStep from "@/components/CredentialsStep";
 
 const STRINGS: Record<string, string> = {
+  "credentials.handoffTitle": "Applying your settings",
+  "credentials.handoffDesc": "Waiting for this ClawBox to answer again",
+  "credentials.handoffApplying": "Applying",
+  "settings.waitingOnline": "Waiting",
+  "settings.backOnline": "Back online",
   "credentials.settingsSaved": "Settings saved! Continuing...",
   "credentials.failedSaveHotspot": "Failed to save hotspot settings",
   "credentials.writeDownContinue": "I've saved them — continue",
@@ -29,6 +34,7 @@ const AP_WARNING =
   + "hotspot. The new settings apply the next time it starts.";
 
 let fetchMock: ReturnType<typeof vi.fn>;
+let originalLocation: PropertyDescriptor | null = null;
 let hotspotPostBody: Record<string, unknown>;
 
 beforeEach(() => {
@@ -55,6 +61,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  // `vi.unstubAllGlobals` does not reach a defineProperty on window.location,
+  // and a leaked origin would silently change what the NEXT test's save decides.
+  if (originalLocation) Object.defineProperty(window, "location", originalLocation);
+  originalLocation = null;
 });
 
 function field(container: HTMLElement, selector: string): HTMLInputElement {
@@ -64,12 +74,18 @@ function field(container: HTMLElement, selector: string): HTMLInputElement {
 }
 
 /** Fill Step 3 and take it all the way through the write-down dialog. */
-async function saveStep(onNext: () => void) {
+async function saveStep(onNext: () => void, hostname?: string) {
   const { container } = render(<CredentialsStep onNext={onNext} />);
   await waitFor(() => {
     expect(fetchMock).toHaveBeenCalledWith("/setup-api/system/hostname", expect.any(Object));
   });
 
+  if (hostname) {
+    const nameDiscloser = container.querySelector<HTMLButtonElement>('[aria-controls="cred-hostname-panel"]');
+    if (nameDiscloser) fireEvent.click(nameDiscloser);
+    const nameField = container.querySelector<HTMLInputElement>("#cred-hostname");
+    if (nameField) fireEvent.change(nameField, { target: { value: hostname } });
+  }
   fireEvent.change(field(container, "#cred-password"), { target: { value: SYSTEM_PASSWORD } });
   fireEvent.change(field(container, "#cred-confirm"), { target: { value: SYSTEM_PASSWORD } });
   const discloser = container.querySelector<HTMLButtonElement>('[aria-controls="hotspot-secret-panel"]');
@@ -107,6 +123,36 @@ describe("Step 3 — a hotspot save whose AP toggle failed", () => {
     // The success path advances on a 1.5s timer; this one must not.
     await new Promise((r) => setTimeout(r, 2_000));
     expect(onNext).not.toHaveBeenCalled();
+  });
+
+  it("carries the warning into the reconnect when the device was also renamed", async () => {
+    // The one combination where the message would otherwise be lost: this
+    // origin is about to stop answering, so the reconnect cannot wait for the
+    // customer to read something on a page the box is leaving. It rides along
+    // in the overlay instead — the instruction slot is free precisely here,
+    // because a toggle that threw restarted no AP and there is no network to
+    // rejoin.
+    // The step only offers a handoff for a same-scheme, same-port *.local
+    // rename, so every field that guard reads has to be present.
+    originalLocation = Object.getOwnPropertyDescriptor(window, "location") ?? null;
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        protocol: "http:",
+        port: "",
+        hostname: "clawbox.local",
+        host: "clawbox.local",
+        origin: "http://clawbox.local",
+        href: "http://clawbox.local/setup",
+        replace: vi.fn(),
+        assign: vi.fn(),
+      },
+    });
+    await saveStep(vi.fn(), "newname");
+    // The overlay, not the inline status: proof this went down the handoff path
+    // rather than passing for the ordinary reason.
+    await waitFor(() => expect(screen.getByText("Applying your settings")).toBeInTheDocument());
+    expect(screen.getByText(AP_WARNING)).toBeInTheDocument();
   });
 
   it("still reports a deferral as a clean save", async () => {

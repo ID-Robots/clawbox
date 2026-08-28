@@ -724,14 +724,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hotspotApWarning, setHotspotApWarning] = useState<string | null>(null);
   const [hotspotSSIDInput, setHotspotSSIDInput] = useState("ClawBox-Setup");
   const [hotspotSSIDSaving, setHotspotSSIDSaving] = useState(false);
-  const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [hotspotHasPassword, setHotspotHasPassword] = useState(false);
   const [hotspotActive, setHotspotActive] = useState<boolean | null>(null);
   const [hotspotBlockedBy, setHotspotBlockedBy] = useState<string | null>(null);
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [hotspotPasswordShow, setHotspotPasswordShow] = useState(false);
   const [hotspotPasswordSaving, setHotspotPasswordSaving] = useState(false);
-  const [hotspotPasswordStatus, setHotspotPasswordStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
+  const [hotspotPasswordStatus, setHotspotPasswordStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [hotspotConfirmEnable, setHotspotConfirmEnable] = useState(false);
   const [savedNetworks, setSavedNetworks] = useState<{ name: string; priority: number; device: string | null }[]>([]);
   const [savedEditing, setSavedEditing] = useState<string | null>(null);
@@ -1208,10 +1208,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         throw new Error(data.error || "Failed");
       }
       setHotspotSSID(next);
-      const apWarning = await readHotspotVerdict(res);
-      setHotspotSSIDStatus(apWarning
-        ? { type: "info", message: apWarning }
-        : { type: "success", message: "Hotspot name updated" });
+      // The AP verdict lives in ONE place — the card-level warning — and is
+      // written on every AP outcome, `null` included. Setting it only on
+      // failure would leave a stale warning from an earlier failed toggle
+      // sitting over a save that has since worked, which is the same class of
+      // wrong answer this PR is about. The field status stays about the field:
+      // the name WAS saved, whatever the radio did.
+      setHotspotApWarning(await readHotspotVerdict(res));
+      setHotspotSSIDStatus({ type: "success", message: "Hotspot name updated" });
     } catch (err) {
       setHotspotSSIDStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -1242,10 +1246,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       setHotspotHasPassword(true);
       setHotspotPassword("");
-      const apWarning = await readHotspotVerdict(res);
-      setHotspotPasswordStatus(apWarning
-        ? { type: "info", message: apWarning }
-        : { type: "success", message: "Hotspot password updated" });
+      // Same rule as the SSID save above: one home for the AP verdict, written
+      // on every outcome so a later success clears an earlier failure.
+      setHotspotApWarning(await readHotspotVerdict(res));
+      setHotspotPasswordStatus({ type: "success", message: "Hotspot password updated" });
     } catch (err) {
       setHotspotPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {

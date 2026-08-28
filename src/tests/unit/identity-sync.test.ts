@@ -39,6 +39,33 @@ function installFake(name: string, exitCode: number): void {
   );
 }
 
+/**
+ * A fake systemctl that answers `is-system-running` and every other verb
+ * separately, because the script has to tell those two apart.
+ *
+ * @param manager what `is-system-running` PRINTS. `"offline"` — or nothing at
+ *   all — is a container carrying the binary with no manager behind it;
+ *   `"degraded"` is a real, running systemd that happens to exit non-zero, an
+ *   ordinary state on these devices and the reason the script reads the word
+ *   rather than the status.
+ * @param verbExit what every other verb returns.
+ */
+function installSystemctl(manager: string, verbExit: number): void {
+  writeFileSync(
+    path.join(binDir, "systemctl"),
+    [
+      "#!/usr/bin/env bash",
+      'if [ "$1" = "is-system-running" ]; then',
+      manager ? `  echo ${manager}` : '  echo "Failed to connect to bus" >&2',
+      // `running` is the only state systemd itself exits 0 for.
+      manager === "running" ? "  exit 0" : "  exit 1",
+      "fi",
+      `exit ${verbExit}`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+}
+
 function runSync(target = "openclaw"): { status: number | null; stdout: string; stderr: string } {
   const result = spawnSync("bash", [SCRIPT, target], {
     encoding: "utf-8",
@@ -76,7 +103,7 @@ afterEach(() => {
 describe("clawbox-identity-sync.sh — the OpenClaw gateway refresh", () => {
   it("succeeds when the gateway restart worked", () => {
     installFake("sudo", 0);
-    installFake("systemctl", 0);
+    installSystemctl("running", 0);
 
     const run = runSync();
     expect(run.status).toBe(0);
@@ -88,7 +115,7 @@ describe("clawbox-identity-sync.sh — the OpenClaw gateway refresh", () => {
     // disk changed and the running agent did not, which is the one outcome
     // that must not be reported as a completed sync.
     installFake("sudo", 1);
-    installFake("systemctl", 1);
+    installSystemctl("running", 1);
 
     const run = runSync();
     expect(run.status).not.toBe(0);
@@ -98,11 +125,46 @@ describe("clawbox-identity-sync.sh — the OpenClaw gateway refresh", () => {
 
   it("falls back to the user unit when sudo is refused", () => {
     installFake("sudo", 1);
-    installFake("systemctl", 0);
+    installSystemctl("running", 0);
 
     const run = runSync();
     expect(run.status).toBe(0);
     expect(run.stdout).toContain("[identity-sync] done");
+  }, SHELL_TIMEOUT_MS);
+
+  it("skips, rather than fails, when systemctl exists but no manager does", () => {
+    // A container ships /usr/bin/systemctl with nothing behind it. Failing here
+    // would 502 the harness switch on a host that has no running gateway to
+    // refresh at all - the false-FAILURE twin of the bug this file fixes.
+    installFake("sudo", 1);
+    installSystemctl("offline", 1);
+
+    const run = runSync();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("no systemd manager on this host");
+    expect(run.stdout).toContain("[identity-sync] done");
+  }, SHELL_TIMEOUT_MS);
+
+  it("treats a systemctl that cannot reach the bus at all as no manager", () => {
+    installFake("sudo", 1);
+    installSystemctl("", 1);
+
+    const run = runSync();
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("no systemd manager on this host");
+  }, SHELL_TIMEOUT_MS);
+
+  it("still FAILS on a DEGRADED systemd whose restart was refused", () => {
+    // `is-system-running` exits non-zero for `degraded`, which is an everyday
+    // state on these devices with a real manager running. Reading the exit
+    // status instead of the word would route every degraded box into the skip
+    // above and hand back the exact silence this change removes.
+    installFake("sudo", 1);
+    installSystemctl("degraded", 1);
+
+    const run = runSync();
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toMatch(/could not restart clawbox-gateway/);
   }, SHELL_TIMEOUT_MS);
 
   it("does not refresh — or fail — when the target harness is Hermes", () => {
@@ -110,7 +172,7 @@ describe("clawbox-identity-sync.sh — the OpenClaw gateway refresh", () => {
     // the target argument exists to prevent, so a dead systemctl is irrelevant
     // here and must not fail the switch.
     installFake("sudo", 1);
-    installFake("systemctl", 1);
+    installSystemctl("running", 1);
 
     const run = runSync("hermes");
     expect(run.status).toBe(0);
