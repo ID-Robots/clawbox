@@ -25,7 +25,7 @@ jobs:
       # Cache Playwright browser binaries between runs (~250MB Chromium download).
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package.json') }}
@@ -51,7 +51,7 @@ jobs:
       # to disk unless experimental.turbopackFileSystemCacheForBuild is on; this
       # step is where that cache would land too, once it is enabled.)
       - name: Cache Next.js build cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: .next/cache
           key: nextjs-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**', 'public/**', 'next.config.ts', 'tsconfig.json') }}

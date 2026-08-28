@@ -137,7 +137,10 @@ function watch(
     child.stdout.on("data", onData);
     child.stderr.on("data", onData);
     child.on("error", (err) => { clearTimeout(ctrlC); reject(err); });
-    child.on("exit", (code, signal) => { clearTimeout(ctrlC); resolve({ out, code, signal }); });
+    // `close`, not `exit`: the process can be gone while its piped stdout is
+    // still delivering, and a watch resolved on `exit` could hand back an
+    // `out` missing the last lines the view wrote on its way down.
+    child.on("close", (code, signal) => { clearTimeout(ctrlC); resolve({ out, code, signal }); });
   });
 }
 

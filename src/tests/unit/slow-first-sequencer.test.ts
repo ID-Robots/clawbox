@@ -28,7 +28,9 @@ function spec(project: string, rel: string): TestSpecification {
   } as unknown as TestSpecification;
 }
 
-const rel = (s: TestSpecification) => path.relative(REPO, s.moduleId);
+// Forward slashes whatever the host separator: SLOW_FIRST and the expected
+// values are written with `/`, and the sequencer normalises its own paths.
+const rel = (s: TestSpecification) => path.relative(REPO, s.moduleId).split(path.sep).join("/");
 
 describe("SlowFirstSequencer", () => {
   it("names files that exist, so a rename cannot silently drop one out of the fast lane", () => {
