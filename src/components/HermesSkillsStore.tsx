@@ -210,6 +210,21 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           throw new Error(COPY.nameConflict(String(data.conflictsWith || skill.name)));
         }
         if (res.status === 502 && data?.code === 'incomplete_install') {
+          // Two device states share this code. `preexisting` means the skill was
+          // already installed before this request, so the rollback deliberately
+          // left the customer's copy alone — and the translated copy for the
+          // other state ("Nothing was installed. Check your internet connection
+          // and try again.") is false twice over: it IS installed, and the retry
+          // it invites re-enters this branch, because the installer meets the
+          // surviving lock entry and exits 0 without fetching anything. The
+          // route's own sentence is the one that matches the device, the same
+          // way `rollback_incomplete` below takes it.
+          if (data.preexisting) {
+            // The row they are being told to remove is the one on screen: the
+            // Installed tab still holds the pre-request list.
+            await installed.refresh();
+            throw new Error(String(data.error || COPY.installFailed));
+          }
           throw new Error(COPY.installIncomplete((data.missingFiles as string[]) || []));
         }
         // A rollback the device could not finish leaves a lock entry THIS

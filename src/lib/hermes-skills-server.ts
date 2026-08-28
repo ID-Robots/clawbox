@@ -640,11 +640,23 @@ let installedCacheAt = 0;
 /**
  * What the skill directory is doing after a removal.
  *
- * Three states, not two, because "not known to be there" is not "gone": a lock
- * entry that names no `install_path` gives the removal nothing to aim at, so
- * nothing about the directory was checked and nothing about it may be claimed.
+ * Four states, not two, because "not known to be there" is not "gone" — and
+ * because there are two different ways not to know, which a caller writing a
+ * sentence for the customer cannot tell apart from one label:
+ *
+ * - `unchecked` — nothing ever looked. A lock entry that names no
+ *   `install_path` gives the removal nothing to aim at, so nothing about the
+ *   directory was checked and nothing about it may be claimed.
+ * - `unknown` — something looked and the device would not answer: the removal
+ *   believed it worked and the confirming `stat` failed with anything other
+ *   than ENOENT (see `pathState`). The entry DOES name a location here, and the
+ *   files are most likely still at it.
+ *
+ * They were one value, and the install route's refusal named the first as the
+ * cause of both — telling a customer whose skill was still on the device that
+ * the entry named no location. Neither surface has to guess now.
  */
-export type SkillRemovalDir = 'present' | 'absent' | 'unknown';
+export type SkillRemovalDir = 'present' | 'absent' | 'unchecked' | 'unknown';
 
 /** What a removal ACHIEVED, as opposed to what the CLI printed about it. */
 export interface SkillRemovalVerdict {
@@ -696,10 +708,10 @@ export async function verifySkillRemoval(
   entry: HubLockEntry | undefined,
 ): Promise<SkillRemovalVerdict> {
   const installPath = entry?.install_path;
-  // `unknown` until something actually looks. With no `install_path` there is
+  // `unchecked` until something actually looks. With no `install_path` there is
   // nothing to look at, and the honest answer is not `absent`: the CLI may well
   // have left a directory behind at a location this route was never told.
-  let dir: SkillRemovalDir = 'unknown';
+  let dir: SkillRemovalDir = 'unchecked';
   if (installPath) {
     // Two things can leave the directory behind, so both are checked: a path
     // `removeSkillDir` will not resolve (it answers false and removes nothing),
@@ -710,8 +722,9 @@ export async function verifySkillRemoval(
     if (!removed) {
       dir = 'present';
     } else if (abs !== null) {
-      // A stat that could not answer keeps `unknown`: it is the one honest
-      // label for "the removal claimed to work and nothing could confirm it".
+      // A stat that could not answer is `unknown`, NOT `unchecked`: the check
+      // ran, the entry named the location it ran on, and only the answer is
+      // missing. Nothing may call that "no location was named".
       dir = await pathState(abs);
     }
   }
@@ -719,9 +732,10 @@ export async function verifySkillRemoval(
   // Read the lock AFTER the CLI, never before: it is the only thing that says
   // whether the store will still list this skill.
   const lockEntry = Object.prototype.hasOwnProperty.call(await readHubLock(), lockKey);
-  // `unknown` alone is not a failure. The store lists what the lock lists, so a
-  // vanished lock entry means the customer sees nothing and has nothing to act
-  // on; refusing here would report a failure over a removal that did its job.
+  // Neither unanswered state is a failure on its own. The store lists what the
+  // lock lists, so a vanished lock entry means the customer sees nothing and
+  // has nothing to act on; refusing here would report a failure over a removal
+  // that did its job.
   return { clean: !lockEntry && dir !== 'present', lockEntry, dir };
 }
 
