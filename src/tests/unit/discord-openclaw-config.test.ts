@@ -595,6 +595,42 @@ describe("config containers that arrive as something other than a plain object",
     expect(written.gateway?.controlUi?.allowedOrigins).toContain("http://clawbox-test.local");
   });
 
+  // The ROOT is a container too, and it is the one every helper stands on. A
+  // file holding `[]` parses fine, so the channel, the secrets block and the
+  // trust entry are all attached to an array and the write lands as `[]`.
+  const MALFORMED_ROOT = [
+    ["the whole file is an array", "[]"],
+    ["the whole file is a string", '"nope"'],
+    ["the whole file is a number", "3"],
+    ["the whole file is null", "null"],
+  ] as const;
+
+  it.each(MALFORMED_ROOT)("still writes a usable config when %s", async (_why, raw) => {
+    mockFs.readFile.mockResolvedValue(raw);
+
+    await openclawConfig.setDiscordToken(TOKEN);
+
+    const written = writtenJsonConfig();
+    expect(Array.isArray(written)).toBe(false);
+    expect(written.channels.discord).toMatchObject({ enabled: true });
+    expect(roundTrippedTrustEntry("discord")).toEqual({ enabled: true });
+  });
+
+  // readConfigStrict answers the opposite question and must give the opposite
+  // answer: it exists so a caller about to SKIP a repair is never told "already
+  // clean" by a file it could not read.
+  it.each(MALFORMED_ROOT)("readConfigStrict refuses when %s", async (_why, raw) => {
+    mockFs.readFile.mockResolvedValue(raw);
+
+    await expect(openclawConfig.readConfigStrict()).rejects.toThrow();
+  });
+
+  it("readConfigStrict still returns a well-formed config", async () => {
+    mockFs.readFile.mockResolvedValue(JSON.stringify({ gateway: { port: 18789 } }));
+
+    await expect(openclawConfig.readConfigStrict()).resolves.toEqual({ gateway: { port: 18789 } });
+  });
+
   it("keeps the rest of a well-formed gateway block", async () => {
     mockFs.readFile.mockResolvedValue(JSON.stringify({ gateway: { port: 18789 } }));
 

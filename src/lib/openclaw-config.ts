@@ -762,10 +762,23 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
   return null;
 }
 
+/** A JSON value that can hold named keys — i.e. not an array, null or a primitive. */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function readConfig(): Promise<OpenClawConfig> {
   try {
     const raw = await fs.readFile(CONFIG_PATH, "utf-8");
-    return JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    // The ROOT is a container too, and it is the one every helper below stands
+    // on. A file holding `[]` parses fine, so without this the writers attach
+    // their keys to an array and `JSON.stringify` drops all of them; a root
+    // string or number makes the first assignment throw in strict mode. Either
+    // way a caller that only ever reads gets `{}`, which is what this function
+    // already promises for every other unusable file. See
+    // {@link ensurePlainObject}.
+    return isPlainObject(parsed) ? (parsed as OpenClawConfig) : {};
   } catch {
     return {};
   }
@@ -797,11 +810,17 @@ export async function readConfigStrict(): Promise<OpenClawConfig> {
     if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
     throw err;
   }
-  return JSON.parse(raw);
-}
-
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+  const parsed: unknown = JSON.parse(raw);
+  // Deliberately the OPPOSITE of readConfig's answer for the same file. This
+  // function exists so a caller about to skip a repair cannot be told "already
+  // clean" by a config it could not read, and a root array or primitive is
+  // exactly that: parseable, and not a config. Normalising it to `{}` here
+  // would hand back the false "nothing to remove" this variant was written to
+  // prevent.
+  if (!isPlainObject(parsed)) {
+    throw new Error("openclaw.json does not contain a configuration object");
+  }
+  return parsed as OpenClawConfig;
 }
 
 /**
