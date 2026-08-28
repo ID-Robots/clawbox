@@ -83,6 +83,9 @@ describe("Settings → Voice on the OpenClaw edition", () => {
 
     await waitFor(() => expect(screen.queryByTestId("voice-output-loading")).toBeNull());
     expect(screen.queryByTestId("voice-output-unsupported")).toBeNull();
-    expect(screen.getByText("ClawBox cloud")).toBeInTheDocument();
+    // The cloud voice is named on the order cards ("Primary: … · Fallback: …"),
+    // so a substring match rather than a whole-element one.
+    expect(screen.getByTestId("voice-speaking-now")).toBeInTheDocument();
+    expect(screen.getAllByText(/ClawBox cloud/).length).toBeGreaterThan(0);
   });
 });

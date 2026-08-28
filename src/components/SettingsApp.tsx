@@ -231,7 +231,6 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // (CHANNEL_ITEMS) rather than each claiming a sidebar row of its own.
   { id: "channels", icon: "forum", labelKey: "settings.channels" },
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
-  { id: "localModels", icon: "deployed_code", labelKey: "settings.localModels" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
@@ -405,8 +404,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
     if (next === "remote" && requireLoginFor("remote")) return;
-    // The old Local AI section is the Local tab of the merged AI page now.
-    if (next === "localAi") {
+    // The old Local AI and Local Models sections are the Local tab of the
+    // merged AI page now: the on-device model's setup and the inventory of
+    // everything running on the box belong under one roof.
+    if (next === "localAi" || next === "localModels") {
       setAiTab("local");
       next = "ai";
     }
@@ -427,7 +428,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const apply = (s: unknown) => {
       if (!isSection(s)) return;
       let next: Section = s;
-      if (next === "localAi") {
+      if (next === "localAi" || next === "localModels") {
         setAiTab("local");
         next = "ai";
       }
@@ -2570,7 +2571,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const activeSection = isMobile ? (mobileSection ?? section) : section;
   // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
-  const navSection: Section = isChannelSection(activeSection) ? "channels" : activeSection === "localAi" ? "ai" : activeSection;
+  const navSection: Section = isChannelSection(activeSection)
+    ? "channels"
+    : activeSection === "localAi" || activeSection === "localModels" ? "ai" : activeSection;
   const visibleNavItems = NAV_ITEMS;
   const resetProgressSteps = [
     {
@@ -3727,8 +3730,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <VoiceOutputPanel active={activeSection === "voice"} />
         )}
 
-        {activeSection === "localModels" && (
-          <LocalModelsPanel active={activeSection === "localModels"} />
+        {/* The on-device inventory — every engine on the box and what it is
+            doing — lives under the Local tab with the model setup above it. */}
+        {activeSection === "ai" && aiTab === "local" && (
+          <LocalModelsPanel active={localTabOpen} />
         )}
 
         {/* ─── Accounts (the hub) ───

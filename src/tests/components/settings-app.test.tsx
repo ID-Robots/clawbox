@@ -673,6 +673,8 @@ describe("SettingsApp merged AI page", () => {
     expect(labels.some((l) => l.includes("settings.aiModels"))).toBe(true);
     expect(labels.some((l) => l.includes("settings.localAi"))).toBe(false);
     expect(labels.some((l) => l.includes("settings.aiProvider"))).toBe(false);
+    // The on-device inventory lives under the Local tab too.
+    expect(labels.some((l) => l.includes("settings.localModels"))).toBe(false);
   });
 
   it("shows the provider list and opens the Local tab from the old localAi deep link", async () => {
@@ -686,6 +688,8 @@ describe("SettingsApp merged AI page", () => {
     fireEvent.click(screen.getByTestId("settings-ai-tab-local"));
     expect(screen.getByTestId("settings-ai-tab-local")).toHaveAttribute("aria-selected", "true");
     expect(await screen.findByTestId("settings-local-ai-step")).toBeInTheDocument();
+    // The inventory of everything on the box renders on the same tab.
+    expect(await screen.findByTestId("local-models-loading")).toBeInTheDocument();
 
     // Back to cloud, then the legacy deep link must land on Local again.
     fireEvent.click(screen.getByTestId("settings-ai-tab-cloud"));
