@@ -2,7 +2,7 @@ import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { setHermesEnvValues } from "@/lib/hermes-env";
@@ -228,10 +228,23 @@ export async function applyClawaiToHermes(
       // configure route returns it as `{ error }`, and the clawai poll route
       // re-throws it unchanged), so the raw stream stops here: `hermes config
       // set` is a Python CLI and a crash prints /home/clawbox/.hermes at the
-      // customer. The journal keeps the whole thing.
-      console.error(`[hermes/clawai] ${args.join(" ")} exit`, r.code, r.stderr);
+      // customer.
+      //
+      // The journal gets the diagnosis but NOT the credential, and that needs
+      // saying twice because the token appears in two places at once. One of
+      // these steps is `config set providers.clawai.api_key <device token>`, so
+      // the KEY is logged and the value is not; and an argparse usage error
+      // prints the argv it choked on, so the stream is redacted before either
+      // the log or the parser sees it — the same order the `hermes auth add`
+      // callers use.
+      // Passed as ARGUMENTS rather than interpolated into the message: a
+      // template built from argv is a tainted format string, and CodeQL is
+      // right that a value flowing into the shape of a log line is a different
+      // risk from one flowing into its data.
+      console.error("[hermes/clawai] config write failed", args[1], args[2], r.code, redactKey(r.stderr, trimmed));
       throw new ClawaiApplyError(
-        safeHermesFailureMessage(r.stdout, r.stderr) || "Failed to configure ClawBox AI",
+        safeHermesFailureMessage(redactKey(r.stdout, trimmed), redactKey(r.stderr, trimmed))
+          || "Failed to configure ClawBox AI",
       );
     }
   }

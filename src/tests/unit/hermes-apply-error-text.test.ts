@@ -169,6 +169,33 @@ describe("linking ClawBox AI on Hermes", () => {
     expectCustomerSafe(await messageFor(() => applyClawaiToHermes("claw_token_abc", "flash")));
   });
 
+  it("puts the device token in neither the banner nor the journal", async () => {
+    // One of the `config set` steps is `providers.clawai.api_key <token>`, so
+    // the argv carries the credential — and an argparse usage error prints the
+    // argv back. Both the log line and the thrown message have to be clean.
+    const token = "claw_device_token_0123456789";
+    const journal = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // Fail the ONE step that carries the credential, so the assertions are
+      // about that step rather than about whichever `set` happens to be first.
+      cliMock.mockImplementation(async (args: string[]) =>
+        args[1] === "set" && args[2] === "providers.clawai.api_key"
+          ? {
+            code: 2,
+            stdout: "",
+            stderr: `hermes config set: error: unrecognized arguments: ${token}`,
+          }
+          : { code: 0, stdout: "", stderr: "" });
+      const message = await messageFor(() => applyClawaiToHermes(token, "flash"));
+      expect(message).not.toContain(token);
+      expect(journal.mock.calls.flat().join(" ")).not.toContain(token);
+      // The log still says WHICH write failed — redaction, not silence.
+      expect(journal.mock.calls.flat().join(" ")).toContain("providers.clawai.api_key");
+    } finally {
+      journal.mockRestore();
+    }
+  });
+
   it("stays a ClawaiApplyError, so the configure route still classifies it", async () => {
     cliMock.mockImplementation(async (args: string[]) =>
       args[1] === "set"
