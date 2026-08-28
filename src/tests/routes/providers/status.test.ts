@@ -217,6 +217,25 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(body.defaultProvider).toBe("anthropic");
   });
 
+  it("does not call OpenAI connected when its slot only carries ClawBox AI's own token", async () => {
+    // ClawBox AI's image generation and cloud voice are registered under the
+    // `openai` provider (its OpenAI-compatible routes on our proxy) with the
+    // claw_ token. A box with nothing but ClawBox AI linked read
+    // "OpenAI: Connected" — seen on a live box.
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      models: { providers: {
+        deepseek: { apiKey: "claw_box_token" },
+        openai: { apiKey: "claw_box_token", models: [{ id: "gpt-image-1-mini", baseUrl: "https://clawbox.com/api/ai" }] },
+      } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+    });
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "clawai")!.state).toBe("connected");
+    expect(rowFor(body, "openai")!.state).toBe("disconnected");
+  });
+
   it("collapses the wire spellings of one vendor onto one row", async () => {
     // `deepseek` is ClawBox AI's provider id in openclaw.json, and `codex` is
     // the ChatGPT-subscription spelling of OpenAI. Two rows for one vendor in a

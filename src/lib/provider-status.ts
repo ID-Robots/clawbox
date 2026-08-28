@@ -240,6 +240,11 @@ async function readHermesStatus(): Promise<UnstampedSummary> {
   return { harness: "hermes", providers, defaultProvider, degraded: payload.stale };
 }
 
+/** The `claw_` prefix is the ClawBox AI portal token format (see clawkeep.ts). */
+export function isClawboxAiToken(value: string): boolean {
+  return value.trim().startsWith("claw_");
+}
+
 /**
  * OpenClaw: `openclaw.json` is the whole answer. A provider is connected when
  * the gateway holds an auth profile for it or a key under its provider
@@ -260,7 +265,16 @@ async function readOpenclawStatus(): Promise<UnstampedSummary> {
     const key = (definition as { apiKey?: unknown })?.apiKey;
     if (typeof key !== "string" || !key.trim()) continue;
     const id = normalizeProviderId(wireId);
-    if (id) credentialed.add(id);
+    if (!id) continue;
+    // ClawBox AI's images and cloud voice ride in the `openai` slot — its
+    // OpenAI-compatible routes on our proxy, keyed with the claw_ token. That
+    // is a ClawBox AI credential wherever it sits, not an OpenAI account, and
+    // a box with only ClawBox AI linked was reading "OpenAI: Connected".
+    if (isClawboxAiToken(key)) {
+      credentialed.add(CLAWAI_PROVIDER);
+      continue;
+    }
+    credentialed.add(id);
   }
   // The ClawBox AI credential can live in the config store instead of the
   // config file (a box migrated from a Hermes install), and `hasClawaiToken`
