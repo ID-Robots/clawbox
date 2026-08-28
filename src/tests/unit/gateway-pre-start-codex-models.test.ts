@@ -2,11 +2,12 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { CODEX_MODELS } from "@/lib/provider-models";
+import { CODEX_SUPPORTED_MODEL_RE } from "@/lib/subscription-surface";
 
 // gateway-pre-start.sh rewrites `openai/<gpt>` -> `codex/<gpt>` on boxes with
 // ChatGPT (Codex OAuth) auth and no OpenAI API key. Its `_CODEX_SUPPORTED`
 // tuple is a hand-maintained MIRROR of CODEX_SUPPORTED_MODEL_RE in
-// src/app/setup-api/chat/model/route.ts — the script's own comment says so.
+// src/lib/subscription-surface.ts — the script's own comment says so.
 //
 // The two drifted: the regex learned gpt-5.6-{sol,terra,luna} (PR #271) but
 // the tuple did not, so a subscription box whose stored model was
@@ -17,7 +18,6 @@ import { CODEX_MODELS } from "@/lib/provider-models";
 // silently drift again.
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
-const MODEL_ROUTE = path.resolve(process.cwd(), "src/app/setup-api/chat/model/route.ts");
 
 /** The model ids listed in pre-start's `_CODEX_SUPPORTED` tuple. */
 function readPreStartSupportedModels(): string[] {
@@ -27,18 +27,12 @@ function readPreStartSupportedModels(): string[] {
   return [...match[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 }
 
-/** CODEX_SUPPORTED_MODEL_RE as written in the chat-model route. */
-function readRouteSupportedModelRe(): RegExp {
-  const src = readFileSync(MODEL_ROUTE, "utf-8");
-  const match = src.match(/const CODEX_SUPPORTED_MODEL_RE = (\/.+\/);/);
-  if (!match) throw new Error("CODEX_SUPPORTED_MODEL_RE not found in chat/model/route.ts");
-  const body = match[1].slice(1, match[1].lastIndexOf("/"));
-  return new RegExp(body);
-}
-
 describe("gateway-pre-start.sh codex model migration", () => {
   const preStartModels = readPreStartSupportedModels();
-  const routeRe = readRouteSupportedModelRe();
+  // Imported, not scraped out of a route file: the allowlist is shared by both
+  // write paths to the primary model now, so there is a real module to pin
+  // against and no regex to go stale when the constant moves house again.
+  const routeRe = CODEX_SUPPORTED_MODEL_RE;
 
   it("mirrors CODEX_SUPPORTED_MODEL_RE — every listed id is route-supported", () => {
     for (const id of preStartModels) {

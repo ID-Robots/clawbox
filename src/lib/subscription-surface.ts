@@ -63,6 +63,54 @@ export async function readSubscriptionSurfaceIds(
   }
 }
 
+/**
+ * Models selectable while the device is on ChatGPT/Codex subscription auth.
+ *
+ * GPT-5.6 Sol/Terra/Luna are subscription-eligible — OpenClaw's ChatGPT route
+ * catalog carries all three, and `openai/gpt-5.6-sol` is the documented
+ * default for a fresh Codex OAuth setup. Keeping them out of this allowlist
+ * rejected them locally with "not supported with ChatGPT subscription auth"
+ * before the request ever reached OpenAI. GPT-5.6 is a limited preview, so
+ * per-account access still varies: let the pick through and surface the
+ * upstream access error instead of pre-rejecting it here. `-pro` tiers stay
+ * out — those remain API-key only.
+ *
+ * It lives here, beside the Claude rule, for the same reason that one does:
+ * both write paths to `agents.defaults.model.primary` have to apply it, and a
+ * second copy in the second route is a copy that can drift.
+ * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of this list
+ * in `_CODEX_SUPPORTED`, pinned by
+ * `src/tests/unit/gateway-pre-start-codex-models.test.ts`.
+ */
+export const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+
+/**
+ * The refusal for a model id the ChatGPT subscription cannot run, as a
+ * message — or null when the target is fine, or is not on the ChatGPT surface
+ * at all.
+ *
+ * The `codex/` NAMESPACE is the subscription test, which is why this takes no
+ * config and no getter: ClawBox writes that namespace only for an OpenAI save
+ * in subscription mode (`PROVIDERS.openai.subscriptionOverride`), while an
+ * API-key save writes `openai/`, where the `-pro` tiers route perfectly well.
+ * So "provider is codex" already means "this box reaches OpenAI through a
+ * ChatGPT account", with no profile inspection needed.
+ *
+ * Unlike the Claude surface this is a static allowlist rather than a cache
+ * read, so there is no UNKNOWN case: the ChatGPT route catalogue is fixed by
+ * the plugin, not enumerated per box.
+ */
+export function offSurfaceCodexModelMessage(
+  provider: string | null | undefined,
+  modelId: string,
+): string | null {
+  if (provider !== "codex") return null;
+  if (CODEX_SUPPORTED_MODEL_RE.test(modelId)) return null;
+  return `${modelId} is not supported with ChatGPT subscription auth. `
+    + "Use GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, or GPT-5.4 Mini, "
+    + "or switch OpenAI to API-key mode for Pro/API-only models.";
+}
+
 /** Auth-profile modes that mean "this provider has a bearer key of its own". */
 const KEY_MODES = new Set(["token", "api_key", "api-key"]);
 
