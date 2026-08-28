@@ -52,6 +52,8 @@ const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status ===
 /** See install-tts-no-engine.test.ts: keeps the isolated stub PATH usable on Windows. */
 const HOST_PATH_SUFFIX = process.platform === "win32" ? `${path.delimiter}${process.env.PATH ?? ""}` : "";
 
+/** Lift a multi-line shell function verbatim out of a shipped script, so the
+ *  test executes the real body rather than a paraphrase of it. */
 function extractShellFn(source: string, name: string): string {
   const start = source.indexOf(`${name}() {`);
   if (start < 0) throw new Error(`${name} not found`);
@@ -77,12 +79,16 @@ function extractShellFnOrStub(source: string, name: string, stub: string): strin
   return source.includes(`${name}() {`) ? extractShellFn(source, name) : `${name}() { ${stub}; }`;
 }
 
+/** Read a pinned constant (e.g. PIPER_EN_ONNX_SHA256) out of the real script,
+ *  so a fixture cannot drift away from the digest the installer enforces. */
 function shellConst(name: string): string {
   const m = new RegExp(`^${name}="([^"]+)"`, "m").exec(INSTALL_VOICE_SH);
   if (!m) throw new Error(`${name} not found in install-voice.sh`);
   return m[1];
 }
 
+/** Write an executable bash stub onto the isolated PATH the script under test
+ *  will resolve its commands from. */
 function writeExec(file: string, body: string) {
   writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 }
@@ -497,6 +503,11 @@ describe.skipIf(!hasBash)("step_openclaw_tts records a box with no engine as a f
 
 // ── 5. The health check is the last layer that called it healthy ────────────
 
+/**
+ * Run the real step_validate_services against a verdict file of the test's
+ * choosing, with every probe but the TTS one stubbed out. `null` writes no file
+ * at all, which is the "the step left no record" case.
+ */
 function runValidator(contents: string | null): { status: number; out: string } {
   const ttsStatus = path.join(root, "validator-tts-status");
   if (contents !== null) writeFileSync(ttsStatus, contents);
