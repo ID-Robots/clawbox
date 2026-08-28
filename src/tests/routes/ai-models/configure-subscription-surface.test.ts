@@ -421,6 +421,31 @@ describe("POST /setup-api/ai-models/configure and the ChatGPT subscription surfa
     ).toBe(`openai/${OFF_SURFACE}`);
   });
 
+  it("does not forget the local model's claim on the primary slot when it refuses", async () => {
+    // `local_ai_was_default` is what re-promotes the local model when it is
+    // switched back on. Clearing it used to happen the moment the request was
+    // parsed, so a save this route then REFUSED still changed how a later
+    // local re-enable behaves — a rejection with a side effect, which is the
+    // one thing the guards above exist to prevent.
+    vi.mocked(getAll).mockResolvedValue({ local_ai_was_default: true });
+
+    const res = await configurePost(chatgptSignIn({ model: OFF_SURFACE }));
+
+    expect(res.status).toBe(400);
+    expect(setMany).not.toHaveBeenCalled();
+  });
+
+  it("forgets it once the cloud save actually lands", async () => {
+    vi.mocked(getAll).mockResolvedValue({ local_ai_was_default: true });
+
+    const res = await configurePost(chatgptSignIn({ model: ON_SURFACE }));
+
+    expect(res.status).toBe(200);
+    expect(setMany).toHaveBeenCalledWith(
+      expect.objectContaining({ local_ai_was_default: undefined }),
+    );
+  });
+
   it("lets the ChatGPT default through when nothing is typed", async () => {
     // The PROVIDERS-table subscription override is `codex/gpt-5.5`, which is
     // on-surface — the guard must not turn a plain sign-in into a 400.
