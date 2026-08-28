@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { ensureHermesGateway } from "@/lib/hermes-telegram";
+import { ensureChannelPlugin, waitForChannelConnected } from "@/lib/openclaw-channels";
+import { restartGateway } from "@/lib/openclaw-config";
+import {
+  WHATSAPP_CHANNEL_ID,
+  setOpenclawWhatsappEnabled,
+} from "@/lib/openclaw-whatsapp";
 import {
   isWhatsappMode,
   normalizeWhatsappNumber,
@@ -22,6 +28,99 @@ interface ConfigureBody {
   enabled?: unknown;
 }
 
+/** Bounce the gateway; report rather than throw when it will not. */
+async function applyRestart(): Promise<boolean> {
+  try {
+    await restartGateway();
+    return true;
+  } catch (err) {
+    // The config change is already on disk, so a service failure is a warning
+    // rather than a failed save — the contract every channel route here shares.
+    console.error("[whatsapp/configure] gateway restart failed:", err);
+    return false;
+  }
+}
+
+/**
+ * The OpenClaw leg.
+ *
+ * Two things are genuinely different from Hermes and both are refusals rather
+ * than silent no-ops:
+ *
+ *  * there is no allowlist and no mode. OpenClaw admits senders through its own
+ *    owner-approved pairing, which ClawBox does not write, so accepting numbers
+ *    here would hand back a list the owner believes is in force. Same posture
+ *    as /discord/configure, which reports `allowlistSupported: false`.
+ *  * enabling the channel means installing its plugin first. OpenClaw's stock
+ *    extensions contain no WhatsApp at all, and a `channels.whatsapp` block
+ *    with no plugin to own it is the "no-channel-owner" state the Discord work
+ *    was built to remove.
+ *
+ * And the save does not call itself a success until the gateway says the
+ * channel is up — the same contract, and the same warning vocabulary, as
+ * /discord/configure.
+ */
+async function configureOpenclaw(body: ConfigureBody): Promise<NextResponse> {
+  if (body.allowedUsers !== undefined || body.mode !== undefined) {
+    return NextResponse.json(
+      {
+        error: "allowlist_unsupported",
+        code: "allowlist_unsupported",
+        allowlistSupported: false,
+      },
+      { status: 400 },
+    );
+  }
+  if (typeof body.enabled !== "boolean") {
+    return NextResponse.json({ error: "Nothing to update" }, { status: 400 });
+  }
+
+  // Turning the channel OFF needs no plugin, no verification and no waiting:
+  // the honest end state is "not receiving", and that is what it becomes.
+  if (!body.enabled) {
+    await setOpenclawWhatsappEnabled(false);
+    const stopped = await applyRestart();
+    return NextResponse.json({
+      success: true,
+      restarted: stopped,
+      allowlistSupported: false,
+      warning: stopped ? undefined : "restart_pending",
+    });
+  }
+
+  const plugin = await ensureChannelPlugin(WHATSAPP_CHANNEL_ID);
+  await setOpenclawWhatsappEnabled(true);
+
+  const restarted = await applyRestart();
+
+  const live = restarted ? await waitForChannelConnected(WHATSAPP_CHANNEL_ID) : null;
+
+  // Root cause first, exactly as on the Discord route: a plugin that never
+  // installed explains every state below it.
+  const warning = !plugin.ok
+    ? plugin.reason === "install_timeout"
+      ? "plugin_install_timeout"
+      : "plugin_install_failed"
+    : !restarted
+      ? "restart_pending"
+      : !live
+        ? "channel_unverified"
+        : !live.connected
+          ? "not_connected"
+          : undefined;
+
+  return NextResponse.json({
+    // A WhatsApp channel that is enabled but not connected is normally waiting
+    // for a QR scan, not broken — but it is still not receiving anything, and
+    // this route does not get to call that a success.
+    success: warning === undefined,
+    ...(warning === undefined ? {} : { code: warning }),
+    restarted,
+    allowlistSupported: false,
+    warning,
+  });
+}
+
 export async function POST(request: Request) {
   try {
     let parsed: unknown;
@@ -40,15 +139,12 @@ export async function POST(request: Request) {
     }
     const body = parsed as ConfigureBody;
 
-    // Pairing is a QR scan performed by `hermes whatsapp`, a zero-flag TTY
-    // wizard (see src/lib/hermes-whatsapp.ts). This route owns access control
-    // and enablement only — it never claims to pair anything.
+    // Pairing is a QR scan, driven by /whatsapp/pair on both harnesses. This
+    // route owns access control and enablement only — it never claims to pair
+    // anything.
     const harness = await getActiveHarness();
     if (harness !== "hermes") {
-      return NextResponse.json(
-        { error: "WhatsApp is only available on the Hermes edition", supported: false },
-        { status: 501 },
-      );
+      return configureOpenclaw(body);
     }
 
     const update: WhatsappConfigUpdate = {};

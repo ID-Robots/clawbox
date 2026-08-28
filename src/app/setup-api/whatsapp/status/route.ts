@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { hermesGatewayStatus } from "@/lib/hermes-telegram";
 import { readHermesWhatsappStatus } from "@/lib/hermes-whatsapp";
+import { readOpenclawWhatsappStatus } from "@/lib/openclaw-whatsapp";
 
 export const dynamic = "force-dynamic";
 
@@ -45,17 +46,28 @@ export async function GET() {
   try {
     const harness = await getActiveHarness();
 
-    // OpenClaw documents a WhatsApp channel, but it is a separately-installed
-    // plugin whose only login path is an interactive QR command, and none of it
-    // is verifiable from a ClawBox build. Writing a channels.whatsapp block we
-    // have never seen a gateway accept is the one genuinely dangerous option:
-    // OpenClaw refuses to start on ANY unknown key, so a wrong guess here would
-    // silently take Telegram down with it. Report the honest state instead.
+    // OpenClaw: the channel is the @openclaw/whatsapp plugin, and the gateway
+    // is what knows about it. This branch used to answer `supported: false` on
+    // the reasoning that "none of it is verifiable from a ClawBox build" —
+    // true before `openclaw gateway call` gave us the plugin's own login and
+    // status surfaces non-interactively. See src/lib/openclaw-whatsapp.ts.
     if (harness !== "hermes") {
+      const status = await readOpenclawWhatsappStatus();
       return NextResponse.json({
-        supported: false,
+        supported: true,
         harness,
-        state: "unsupported",
+        ...status,
+        // OpenClaw admits senders through its own owner-approved pairing, so
+        // there is no allowlist for the panel to offer and no mode to pick —
+        // exactly as on the Discord panel.
+        allowlistSupported: false,
+        mode: null,
+        allowedUsers: [],
+        allowAllUsers: false,
+        // The same rule as the Hermes branch below: "receiving" may be true
+        // ONLY when the transport is genuinely up. A stored link and an enabled
+        // channel are not evidence that anything reaches the owner's phone.
+        receiving: status.connected,
       });
     }
 

@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { whatsappSessionDirs } from "@/lib/hermes-whatsapp";
 import { unpairWhatsapp } from "@/lib/whatsapp-pairing";
+import { restartGateway } from "@/lib/openclaw-config";
+import { logoutOpenclawWhatsapp, setOpenclawWhatsappEnabled } from "@/lib/openclaw-whatsapp";
 
 export const dynamic = "force-dynamic";
 
@@ -20,11 +22,25 @@ export const dynamic = "force-dynamic";
 export async function POST() {
   try {
     const harness = await getActiveHarness();
+
     if (harness !== "hermes") {
-      return NextResponse.json(
-        { error: "WhatsApp is only available on the Hermes edition", supported: false },
-        { status: 501 },
-      );
+      // Both halves, and the channel is switched off even when the logout
+      // fails: credentials without the channel disabled is a gateway retrying a
+      // login it cannot complete, which is the half-applied state this route
+      // exists to avoid. The failure is still reported — it is not swallowed.
+      let logoutError: unknown = null;
+      try {
+        await logoutOpenclawWhatsapp();
+      } catch (err) {
+        logoutError = err;
+      }
+      await setOpenclawWhatsappEnabled(false);
+      await restartGateway().catch((err) => {
+        console.error("[whatsapp/unpair] gateway restart failed:", err);
+      });
+      if (logoutError) throw logoutError;
+      console.info("[whatsapp/unpair] logged out and disabled the channel");
+      return NextResponse.json({ success: true });
     }
 
     await unpairWhatsapp(whatsappSessionDirs());
