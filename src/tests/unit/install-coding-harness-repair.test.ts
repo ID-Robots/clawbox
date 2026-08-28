@@ -254,6 +254,20 @@ describe("the agent is told the harness exists now", () => {
     expect(run.stdout).toMatch(/No agent running/);
   }, SHELL_TIMEOUT_MS);
 
+  it("counts a PARTIAL refresh as a refusal on a dual box", () => {
+    // Both harnesses run on the dual edition. One agent refreshed and one not
+    // is one harness still blind, and reporting that as a clean refresh is the
+    // exact shape this change exists to remove.
+    const run = runStep({
+      activeUnits: ["clawbox-gateway.service", "clawbox-hermes-dashboard.service"],
+      failingRestarts: ["clawbox-hermes-dashboard.service"],
+    });
+    expect(run.status).toBe(0);
+    expect(restarts(run)).toHaveLength(2);
+    expect(run.stderr).toMatch(/could not restart clawbox-hermes-dashboard\.service/);
+    expect(run.stderr).toMatch(/after its next restart/);
+  }, SHELL_TIMEOUT_MS);
+
   it("says so when the restart was refused, without failing the repair", () => {
     // The harness IS repaired and the Coding app works; calling that a failed
     // repair would be the opposite lie. It must not be silent either.

@@ -4592,22 +4592,26 @@ install_claude_ds_wrapper() {
 # would resurrect a unit the owner or the SKU deliberately put down, which is
 # the whole reason the Hermes edition masks clawbox-gateway.
 refresh_agent_coding_tools() {
-  local unit restarted=false found=false
+  local unit failed=false found=false
   for unit in clawbox-gateway.service clawbox-hermes-dashboard.service; do
     systemctl is-active --quiet "$unit" 2>/dev/null || continue
     found=true
     if systemctl restart "$unit" >/dev/null 2>&1; then
       echo "  Restarted $unit so the agent re-probes and offers the coding tools"
-      restarted=true
     else
       echo "  WARN: could not restart $unit — the agent will keep answering that it has no coding tools" >&2
+      failed=true
     fi
   done
   if [ "$found" = false ]; then
     echo "  No agent running; it will probe the harness when it next starts"
     return 0
   fi
-  [ "$restarted" = true ]
+  # EVERY running agent, not "at least one". On the dual edition both units are
+  # up, and one that could not be restarted is one harness still blind — a
+  # partial refresh reported as a whole one is the shape this whole change is
+  # about.
+  [ "$failed" = false ]
 }
 
 step_coding_harness() {
