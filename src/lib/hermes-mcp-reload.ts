@@ -33,16 +33,41 @@ import { dashboardRpc } from "@/lib/hermes-dashboard-rpc";
 const RELOAD_PARAMS = { confirm: true } as const;
 
 /**
- * True when Hermes agreed to reload, false when it could not be asked.
+ * Statuses that mean the dashboard CARRIED THE RELOAD OUT.
+ *
+ * Deliberately generous on synonyms, because the two mistakes cost different
+ * things. Calling a real reload a refusal costs one honest log line on a box
+ * that is fine. Calling a refusal a reload costs the silence this whole
+ * mechanism exists to remove: the tool list stays stale, and the one line that
+ * would tell an operator so is the line that says the opposite.
+ */
+const ACTED_STATUSES = new Set(["ok", "reloaded", "success", "completed", "done"]);
+
+/**
+ * True when Hermes agreed to reload, false when it could not be asked OR said no.
  *
  * Never throws, and deliberately does not distinguish between the ways "no"
- * happens — no dashboard, a socket that died, an error frame. A caller that
- * cannot fix any of those does not benefit from telling them apart; what it
- * does with the false is say so in its own words.
+ * happens — no dashboard, a socket that died, an error frame, a dashboard that
+ * wants a human. A caller that cannot fix any of those does not benefit from
+ * telling them apart; what it does with the false is say so in its own words.
+ *
+ * READS THE VERDICT, NOT THE RETURN. `dashboardRpc` maps an error frame to null,
+ * so the transport cases were always honest — but `{ status: "confirm_required" }`
+ * is a perfectly ordinary non-error reply that means NOTHING HAPPENED (see
+ * `RELOAD_PARAMS`), and a `result !== null` test scored it as success. That is
+ * the "reported from the fact that a call returned, not from what it returned"
+ * shape, in the one helper all four refresh call sites depend on.
+ *
+ * A reply that names NO status stays a success: that is the historical reading,
+ * and only a frame that names a state is allowed to contradict it — a dashboard
+ * that answers `{}` must not start reporting a refusal that never happened.
  */
 export async function reloadMcpServers(): Promise<boolean> {
   const result = await dashboardRpc("reload.mcp", RELOAD_PARAMS).catch(() => null);
-  return result !== null;
+  if (result === null || result === undefined) return false;
+  const status = (result as { status?: unknown }).status;
+  if (typeof status !== "string") return true;
+  return ACTED_STATUSES.has(status.trim().toLowerCase());
 }
 
 /**

@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
 // keeps the credential in its own pooled-auth store (~/.hermes), NOT ClawBox's
@@ -52,6 +53,11 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid API key" }, { status: 400 });
   }
 
+  // Taken BEFORE the credential lands, because that is the only moment it can
+  // still say what the agent's `ai_set_provider` enum was built from. See
+  // `provider-mcp-refresh.ts` for why the enum is not advisory.
+  const providersBefore = await readUsableProviderIds();
+
   try {
     const r = await runHermesCli(
       ["auth", "add", provider, "--type", "api-key", "--api-key", apiKey],
@@ -87,6 +93,16 @@ export async function POST(request: Request) {
   // model list, so the cached catalogue is now wrong — the panel's very next
   // request must see the provider as usable rather than wait out FRESH_MS.
   invalidateModelOptions();
+
+  // …and the RUNNING AGENT, which the line above does not reach. The ClawBox MCP
+  // server read the provider list once, while it booted, and turned it into
+  // `ai_set_provider`'s enum; without this the owner adds a provider, the panel
+  // offers it, `ai_list_models` lists it, and the tool that switches to it
+  // cannot be handed the id. Awaited rather than left floating so it is ordered
+  // against the response and nothing outlives it unwatched; it cannot fail the
+  // save, because the credential is already stored and the helper swallows
+  // everything.
+  await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
 
   return NextResponse.json({ ok: true, provider });
 }

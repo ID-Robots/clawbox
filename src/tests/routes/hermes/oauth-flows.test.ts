@@ -22,6 +22,19 @@ vi.mock("@/lib/hermes-dashboard-auth", () => ({
   dashboardFetch: vi.fn(),
 }));
 
+// A completed sign-in also re-advertises the provider list to the running MCP
+// server, which reads the catalogue either side of the exchange. That is a
+// different property with its own suite
+// (src/tests/routes/hermes/provider-mcp-refresh.test.ts); here it is stubbed so
+// this one keeps pinning what it says it pins — the RELAY. The stub also keeps
+// the fixture honest: `dashboardFetch` is mocked with a single `Response`
+// INSTANCE per test, and a body can only be read once, so a second reader would
+// empty the reply the relay is being asserted on.
+vi.mock("@/lib/provider-mcp-refresh", () => ({
+  readUsableProviderIds: vi.fn(async () => null),
+  refreshProviderToolsIfSetChanged: vi.fn(async () => false),
+}));
+
 const SESSION_ID = "0f6c1c2e-1111-2222-3333-444455556666";
 
 /** Cookie header for the current fixture; set in beforeEach. */
