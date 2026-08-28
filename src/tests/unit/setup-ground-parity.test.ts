@@ -26,6 +26,16 @@ type Rule = { selector: string; decls: Map<string, string> };
 /** At-rules that wrap ordinary rules; anything else with a block is skipped. */
 const CONDITIONAL_GROUPS = ["@media", "@supports", "@layer", "@container"];
 
+/**
+ * Flatten the stylesheet into rules, twice over.
+ *
+ * `base` is everything outside a media query — the cascade a desktop browser
+ * applies, which is what the parity assertions ask about. `all` additionally
+ * includes the bodies of conditional groups, so the teal sweep cannot be
+ * dodged by hiding a colour inside an `@media`. At-rules that are not
+ * conditional groups (`@keyframes`, `@font-face`, `@theme`) are skipped whole:
+ * their contents are not rules that match an element.
+ */
 function parseRules(input: string): { base: Rule[]; all: Rule[] } {
   const source = input.replace(/\/\*[\s\S]*?\*\//g, "");
   const base: Rule[] = [];
@@ -98,6 +108,13 @@ class UnsupportedSelector extends Error {}
 const NON_MATCHING_PSEUDOS =
   /^::|^:(hover|active|focus|focus-visible|focus-within|disabled|checked|fullscreen|first-child|last-child|nth-child|placeholder|target|visited)\b/;
 
+/**
+ * Match one compound selector (`.a[b="c"]:not(.d)`) against a single element.
+ *
+ * Throws `UnsupportedSelector` rather than guessing at a construct it has not
+ * been taught — an id, an unknown pseudo-class, a malformed attribute — so a
+ * wrong answer is never quietly produced.
+ */
 function matchesCompound(compound: string, el: El): boolean {
   let rest = compound;
   while (rest.length > 0) {
@@ -181,6 +198,7 @@ function matchesComplex(selector: string, path: Path): boolean {
   }
 }
 
+/** Specificity as one comparable number: ids ≫ classes/attrs/pseudos ≫ tags. */
 function specificityOf(selector: string): number {
   const ids = (selector.match(/#[A-Za-z0-9_-]+/g) ?? []).length;
   // `:not()` contributes its argument's specificity, not its own — so the
@@ -194,20 +212,22 @@ function specificityOf(selector: string): number {
 function declaredOn(prop: string, path: Path, rules: Rule[]): string | undefined {
   let winner: string | undefined;
   let best = -1;
-  rules.forEach((rule) => {
-    if (!rule.decls.has(prop)) return;
+  for (const rule of rules) {
+    if (!rule.decls.has(prop)) continue;
+    // Within one selector LIST the HIGHEST-specificity match decides, not the
+    // first — `.a, .b.c { … }` on an element matching both weighs as `.b.c`.
+    let score = -1;
     for (const selector of rule.selector.split(",")) {
       const trimmed = selector.trim();
-      if (!trimmed) continue;
-      if (!matchesComplex(trimmed, path)) continue;
-      const score = specificityOf(trimmed);
-      if (score >= best) {
-        best = score;
-        winner = rule.decls.get(prop);
-      }
-      break;
+      if (!trimmed || !matchesComplex(trimmed, path)) continue;
+      score = Math.max(score, specificityOf(trimmed));
     }
-  });
+    // `>=`, so a later rule of equal weight wins: that is source order.
+    if (score >= 0 && score >= best) {
+      best = score;
+      winner = rule.decls.get(prop);
+    }
+  }
   return winner;
 }
 
@@ -228,6 +248,11 @@ function resolve(prop: string, path: Path, rules: Rule[] = baseRules): string | 
   return undefined;
 }
 
+/**
+ * Replace every `var(--x)` in a value with what `--x` resolves to on `path`,
+ * falling back to the `var()` fallback when it resolves to nothing. Bounded,
+ * so a token that references itself cannot spin.
+ */
 function substitute(value: string, path: Path, rules: Rule[], depth = 0): string {
   if (depth > 10 || !value.includes("var(")) return value;
   const replaced = value.replace(/var\(\s*(--[A-Za-z0-9_-]+)\s*(?:,([^)]*))?\)/g, (_m, name, fallback) => {

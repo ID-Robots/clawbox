@@ -954,7 +954,7 @@ h6 {
   z-index: 1;
 }
 
-/* ════════════════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════════════
    HERMES CO-BRANDING — scoped to the wizard shell
    ONE GROUND, BOTH EDITIONS. Setup is the same product on a Hermes box and on
    an OpenClaw box, so it is painted on the same ground: --ground #0a0f1a and
@@ -980,15 +980,15 @@ h6 {
    1.08:1 apart, the single most important thing a setup wizard communicates,
    destroyed to make a tint.
 
-   Contrast on the shared ground #0a0f1a: agent ink 15.91:1, ink-2 10.31:1,
-   ink-3 7.08:1, warn 11.48:1, live 11.00:1 — every one of them ABOVE what it
+   Contrast on the shared ground #0a0f1a: agent ink 15.90:1, ink-2 10.31:1,
+   ink-3 7.08:1, warn 11.48:1, live 10.99:1 — every one of them ABOVE what it
    measured on the teal ground, because #0a0f1a is the darker of the two.
    --agent-on-ink, --agent-card and --agent-muted were teal literals whose
    only meaning was "against the teal ground"; they now point at the shared
    ground and the shared plates. That is a hue-only move: #0e2423 → #172030
    and #182c2a → #1e2939 sit within 0.0005 relative luminance of the values
    they replace, so an agent panel keeps exactly the lift it had.
-   ════════════════════════════════════════════════════════════════════════ */
+   ═══════════════════════════════════════════════════════════════════════ */
 /* `.reconnect-stage[data-agent="hermes"]`: the reconnect/handoff overlays
    portal onto document.body, OUTSIDE `.setup-shell`, so ancestry can never
    deliver this layer to them. The overlay carries the edition marker itself
