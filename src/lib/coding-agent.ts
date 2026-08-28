@@ -69,6 +69,7 @@ import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts } from "@/lib/coding-agent-artifacts";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { projectPath, validateProjectId } from "@/lib/code-projects";
@@ -662,6 +663,10 @@ export function runnerPath(): string {
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
+    // Chromium ships as a snap on this device; without /snap/bin a run's
+    // `which chromium` answers "not installed" and the run burns minutes
+    // stubbing out a browser it actually has (seen on run-3750zcwc).
+    "/snap/bin",
   ].join(":");
 }
 
@@ -899,45 +904,48 @@ const waiters = new Map<string, Set<() => void>>();
 let flushTimer: NodeJS.Timeout | null = null;
 let dirty = false;
 let exitHookInstalled = false;
-/** Records loadRuns() settled as failed because the previous server died with them. */
-let repairedAtLoad = 0;
 
 /**
- * Load the store, and settle anything the previous web server left behind.
- * `live` is empty when this process starts, so every "running" record on disk
- * belongs to a process that no longer exists — systemd kills the whole cgroup
- * when clawbox-setup restarts at the end of an update.
+ * Load the store. READ-ONLY on purpose: settling stale records lives in
+ * reconcileAfterRestart(), called from the boot hook of the ONE process that
+ * owns runs. When the settle lived here, any other process that imported this
+ * module against the real root — a test worker, a script — would take a run
+ * the live web server was still driving for a dead server's leftover and
+ * stamp it failed on disk (measured on this box: run-0nxtbhb1, 2026-08-27).
  */
 function loadRuns(): CodingRun[] {
   if (runs) return runs;
   runs = readAll();
-  repairedAtLoad = 0;
-  for (const run of runs) {
-    if (run.status === "running" && !live.has(run.id)) {
-      run.status = "failed";
-      run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
-      run.completedAt = Date.now();
-      repairedAtLoad += 1;
-    }
-  }
-  if (repairedAtLoad > 0) {
-    try {
-      writeAll(runs);
-    } catch (err) {
-      console.error("[coding-agent] could not repair the runs file:", err instanceof Error ? err.message : err);
-    }
-  }
   return runs;
 }
 
 /**
- * Called from the boot hook so a stale "running" run is settled before anyone
- * asks. Returns how many were settled — the one signal an operator gets that
- * a restart killed work in progress.
+ * Settle anything the previous web server left behind, from the boot hook
+ * (src/instrumentation.ts) — before anyone asks. `live` is empty when this
+ * process starts, so every "running" record on disk belongs to a process that
+ * no longer exists: systemd kills the whole cgroup when clawbox-setup
+ * restarts at the end of an update. Returns how many were settled — the one
+ * signal an operator gets that a restart killed work in progress.
  */
 export function reconcileAfterRestart(): number {
-  loadRuns();
-  return repairedAtLoad;
+  const list = loadRuns();
+  let repaired = 0;
+  for (const run of list) {
+    if (run.status === "running" && !live.has(run.id)) {
+      run.status = "failed";
+      run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
+      run.completedAt = Date.now();
+      repaired += 1;
+    }
+  }
+  if (repaired > 0) {
+    try {
+      writeAll(list);
+    } catch (err) {
+      console.error("[coding-agent] could not repair the runs file:", err instanceof Error ? err.message : err);
+    }
+  }
+  return repaired;
 }
 
 function persist(immediate = false): void {
@@ -1008,6 +1016,9 @@ export function clearFinishedRuns(): number {
   const keep = list.filter((r) => r.status === "running");
   const removed = list.length - keep.length;
   if (removed === 0) return 0;
+  for (const r of list) {
+    if (r.status !== "running") removeArtifacts(r.id);
+  }
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
@@ -1019,6 +1030,16 @@ export function clearFinishedRuns(): number {
 
 export function runningCount(): number {
   return loadRuns().filter((r) => r.status === "running").length;
+}
+
+/**
+ * The working folder of the run executing right now, or null. The browser
+ * route uses it to scope file:// navigation to the page a run is building —
+ * the ONLY file:// anything may open through the desktop browser.
+ */
+export function activeRunDirectory(): string | null {
+  const running = loadRuns().find((r) => r.status === "running");
+  return running ? running.directory : null;
 }
 
 /**
@@ -1069,7 +1090,9 @@ function newRunId(): string {
   return `run-${n.toString(36).padStart(8, "0").slice(-8)}`;
 }
 
-export const RUN_ID_RE = /^run-[a-z0-9]{8}$/;
+// Owned by the artifacts leaf module (both sides of the runner validate ids);
+// re-exported here under the name the routes have always imported.
+export const RUN_ID_RE = ARTIFACT_RUN_ID_RE;
 
 function normalizeTask(task: unknown): string {
   if (typeof task !== "string") throw new CodingAgentError("invalid", "A task is required.");
@@ -1081,7 +1104,8 @@ function normalizeTask(task: unknown): string {
   return cleaned;
 }
 
-function isInside(child: string, parent: string): boolean {
+/** Path containment (parent itself counts). Exported for the browser route's file:// scope check. */
+export function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
@@ -1241,6 +1265,11 @@ export const HEADLESS_BRIEF = [
   "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
   "When sub-agents are available to you, use them: hand searching and mapping to the explorer, running builds and tests to the tester, and a last read-through to the reviewer before you report done. Do the writing yourself.",
   "Verify your work where you can (run the build or the tests you have).",
+  "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open it with browser_view_local (it takes a file path in your folder) and read the description of what actually renders before you report done.",
+  "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
+  "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
+  "The folder named in CLAWBOX_RUN_ARTIFACTS_DIR is this run's evidence folder, shown to the owner with the run's details. Screenshots land there automatically; save test output there too, and move any verification script you wrote there instead of deleting it.",
+  "A short task is not a small task: deliver the complete, polished result the task implies — real styling, sensible edge handling, a finished feel — never a minimal stub.",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
 
@@ -1301,8 +1330,51 @@ export function denyRulesCover(rules: readonly string[], directory: string): boo
   });
 }
 
+/**
+ * The browser family a run may call through the clawbox MCP server — and the
+ * ONLY MCP tools a run may call: --strict-mcp-config keeps other servers out,
+ * the browser profile keeps the rest of the clawbox tool set unregistered,
+ * and this allow-list is what approves the calls in headless mode.
+ * Exported for the contract test.
+ */
+export const MCP_BROWSER_TOOLS = [
+  "mcp__clawbox__browser_view_local",
+  "mcp__clawbox__browser_open",
+  "mcp__clawbox__browser_navigate",
+  "mcp__clawbox__browser_screenshot",
+  "mcp__clawbox__browser_close",
+  "mcp__clawbox__browser_click",
+  "mcp__clawbox__browser_type",
+  "mcp__clawbox__browser_keypress",
+  "mcp__clawbox__browser_scroll",
+] as const;
+
+/**
+ * The MCP config a run gets: the clawbox server in its browser-only profile.
+ * No token in here — argv is world-readable in /proc, so the server reads
+ * data/.mcp-token itself through its normal file fallback. Exported for the
+ * contract test.
+ */
+export function buildRunMcpConfig(run: { id: string; directory: string }): string {
+  return JSON.stringify({
+    mcpServers: {
+      clawbox: {
+        command: path.join(homeDir(), ".bun", "bin", "bun"),
+        args: ["run", path.join(CONFIG_ROOT, "mcp", "clawbox-mcp.ts")],
+        env: {
+          CLAWBOX_API_BASE: `http://127.0.0.1:${process.env.PORT || "80"}`,
+          CLAWBOX_ROOT: CONFIG_ROOT,
+          CLAWBOX_MCP_PROFILE: "browser",
+          CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
+          CLAWBOX_RUN_DIR: run.directory,
+        },
+      },
+    },
+  });
+}
+
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; run?: { id: string; directory: string } }): string[] {
   const args = [
     "-p",
     "--verbose",
@@ -1313,6 +1385,17 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--append-system-prompt", HEADLESS_BRIEF,
   ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
+  if (opts.run) {
+    // Exactly one MCP server — ours, in its browser-only profile. Strict, so
+    // servers an owner configured for their own interactive claude-ds
+    // sessions (~/.claude-ds) never leak into a delegated run.
+    args.push("--strict-mcp-config");
+    args.push("--mcp-config", buildRunMcpConfig(opts.run));
+    // acceptEdits only covers the working folder; without this, the run's own
+    // Write into its evidence folder is denied — the brief's promise broken
+    // (measured on run-yuyqta4t: pomodoro-verification.md refused).
+    args.push("--add-dir", artifactsDir(opts.run.id));
+  }
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
   args.push("--tools", toolsFor(true));
@@ -1326,14 +1409,14 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // still denied with the lists absent). The FILE rules still ship, and a
     // deny rule outranks any allow, so the credential stores stay closed.
     // Full access is about commands, not secrets.
-    args.push("--allowedTools", "Bash(*)");
+    args.push("--allowedTools", "Bash(*)", ...(opts.run ? MCP_BROWSER_TOOLS : []));
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
 }
 
 /** The environment a run gets — and nothing else. Exported for the contract test. */
-export function buildRunEnv(opts: { effort?: CodingEffort } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -1357,6 +1440,9 @@ export function buildRunEnv(opts: { effort?: CodingEffort } = {}): Record<string
   // The owner's setting wins over anything inherited: this is the knob the
   // Coding Agent app writes, and a stale shell variable must not override it.
   if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
+  // The run's evidence folder — the brief tells the run to save proof of its
+  // work here, and the browser MCP layer saves screenshots into it.
+  if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
   return env;
 }
 
@@ -1798,13 +1884,22 @@ function spawnRun(
   setprivPath: string,
   settings: { effort: CodingEffort; maxTurns: number },
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, run: { id: run.id, directory: run.directory } }));
+  // One evidence path everywhere — env, MCP config and --add-dir must never
+  // disagree about where it is. Creation is best-effort: the MCP layer also
+  // mkdirs lazily, so a failure here degrades evidence, never the run.
+  const evidenceDir = artifactsDir(run.id);
+  try {
+    ensureArtifactsDir(run.id);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: no artifacts folder:`, err instanceof Error ? err.message : err);
+  }
   const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
     // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
     // no use for.
-    env: buildRunEnv({ effort: settings.effort }) as NodeJS.ProcessEnv,
+    env: buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir }) as NodeJS.ProcessEnv,
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -1999,10 +2094,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
 
   list.unshift(run);
-  // Never drop a running run; trim the oldest finished ones.
+  // Never drop a running run; trim the oldest finished ones. A dropped
+  // record takes its evidence folder with it — unreachable artifacts would
+  // sit on the flash forever.
   while (list.length > MAX_RUNS_KEPT) {
     const idx = findLastFinished(list);
     if (idx < 0) break;
+    removeArtifacts(list[idx].id);
     list.splice(idx, 1);
   }
   persist(true);
@@ -2075,6 +2173,5 @@ export function _resetCodingAgentStateForTests(): void {
     flushTimer = null;
   }
   dirty = false;
-  repairedAtLoad = 0;
   runs = null;
 }

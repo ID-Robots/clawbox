@@ -516,6 +516,69 @@ describe("the capabilities a run starts with", () => {
   });
 });
 
+describe("what a run can verify with", () => {
+  beforeEach(() => readyDevice());
+
+  it("wires the clawbox MCP server in its browser-only profile, with no secret in argv", async () => {
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    await finished(run.id);
+
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    expect(argv).toContain("--strict-mcp-config");
+    const cfg = JSON.parse(argv[argv.indexOf("--mcp-config") + 1]);
+    const server = cfg.mcpServers.clawbox;
+    expect(server.args.at(-1)).toBe(path.join(root, "mcp", "clawbox-mcp.ts"));
+    expect(server.env.CLAWBOX_MCP_PROFILE).toBe("browser");
+    expect(server.env.CLAWBOX_RUN_DIR).toBe(run.directory);
+    expect(server.env.CLAWBOX_RUN_ARTIFACTS_DIR).toBe(path.join(root, "data", "coding-agent-artifacts", run.id));
+    // argv is world-readable in /proc: the bearer must never ride in it. The
+    // server reads data/.mcp-token itself through its file fallback.
+    expect(argv.join(" ")).not.toContain("the-mcp-bearer-token-value");
+
+    // The browser family is approved for headless mode; nothing else MCP is.
+    for (const tool of lib.MCP_BROWSER_TOOLS) expect(argv).toContain(tool);
+    expect(argv.filter((a) => a.startsWith("mcp__"))).toHaveLength(lib.MCP_BROWSER_TOOLS.length);
+
+    // The run's own environment names the evidence folder, which exists, and
+    // its PATH reaches the snap-installed Chromium.
+    const env = Object.fromEntries(
+      fs.readFileSync(envFile(), "utf-8").split("\n").filter((l) => l.includes("=")).map((l) => {
+        const i = l.indexOf("=");
+        return [l.slice(0, i), l.slice(i + 1)];
+      }),
+    );
+    expect(env.CLAWBOX_RUN_ARTIFACTS_DIR).toBe(path.join(root, "data", "coding-agent-artifacts", run.id));
+    expect(fs.existsSync(env.CLAWBOX_RUN_ARTIFACTS_DIR)).toBe(true);
+    expect(env.PATH.split(":")).toContain("/snap/bin");
+
+    // acceptEdits covers only the working folder; the evidence folder must be
+    // an additional directory or the run's own Write into it is denied.
+    expect(argv[argv.indexOf("--add-dir") + 1]).toBe(path.join(root, "data", "coding-agent-artifacts", run.id));
+  });
+
+  it("keeps the evidence folder writable under the file deny rules", async () => {
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    await finished(run.id);
+    const rules = lib.fileDenyRules();
+    expect(lib.denyRulesCover(rules, path.join(root, "data", "coding-agent-artifacts", run.id, "shot-001.png"))).toBe(false);
+    // The neighbours stay closed.
+    expect(lib.denyRulesCover(rules, path.join(root, "data", "config.json"))).toBe(true);
+  });
+
+  it("removes a cleared run's evidence folder and keeps everything else", async () => {
+    const artifactsLib = await import("@/lib/coding-agent-artifacts");
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    await finished(run.id);
+    const dir = artifactsLib.ensureArtifactsDir(run.id);
+    fs.writeFileSync(path.join(dir, "shot-001.png"), "png");
+    expect(lib.clearFinishedRuns()).toBe(1);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+});
+
 describe("retrying a transient upstream failure", () => {
   beforeEach(() => readyDevice());
 
@@ -911,7 +974,8 @@ describe("after a restart", () => {
     lib = await import("@/lib/coding-agent");
     // The count is the operator's only signal that a restart killed work.
     expect(lib.reconcileAfterRestart()).toBe(1);
-    expect(lib.reconcileAfterRestart()).toBe(1);
+    // Idempotent: the second sweep finds nothing left to settle.
+    expect(lib.reconcileAfterRestart()).toBe(0);
     const run = lib.getRun("run-lostrun1");
     expect(run?.status).toBe("failed");
     expect(run?.error).toMatch(/restarted/);

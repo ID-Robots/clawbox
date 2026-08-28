@@ -54,7 +54,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
 - **KV Store**: `kv/` — key-value store for UI state
 - **Code**: `code/` — code project management (init, file ops, search, build/deploy)
-- **Coding agent**: `coding-agent/status`, `coding-agent/enable`, `coding-agent/run`, `coding-agent/runs`, `coding-agent/stop` — a headless Claude Code run (`claude-ds -p`) the assistant delegates a whole task to; runs live in the web server and persist in `data/coding-agent-runs.json`. `enable` is owner-only (refuses the MCP bearer) because it is the consent for a delegated shell; `run` answers 409 while the switch is off.
+- **Coding agent**: `coding-agent/status`, `coding-agent/enable`, `coding-agent/run`, `coding-agent/runs`, `coding-agent/stop`, `coding-agent/artifacts` — a headless Claude Code run (`claude-ds -p`) the assistant delegates a whole task to; runs live in the web server and persist in `data/coding-agent-runs.json`. `enable` is owner-only (refuses the MCP bearer) because it is the consent for a delegated shell; `run` answers 409 while the switch is off. Each run gets an evidence folder (`data/coding-agent-artifacts/<runId>/`) for the screenshots and test output it saves; `artifacts` serves one such file (images inline, everything else as plain text — agent-written HTML must never execute in the app's origin), and the runs listing decorates each run with the folder's contents at read time.
 - **Other**: `vnc/`, `code-server/`, `webapps/`, `mascot-lines/`
 
 All dynamic API routes use `export const dynamic = "force-dynamic"` to prevent caching.
@@ -81,7 +81,9 @@ Handles two concerns:
 - **`email-pending.ts`** — outgoing drafts waiting for the owner's approval (`data/email-pending.json`, 0600, capped; a full queue refuses rather than evicting).
 - **`owner-session.ts`** — "is the PERSON asking, or the agent?". Accepts a session cookie only, and is what stops the MCP bearer from opening the approval gate.
 - **`coding-harness.ts`** — the one name for the `claude-ds` wrapper (Claude Code on the box's ClawBox AI plan) and where install.sh puts it.
-- **`coding-agent.ts`** — the coding agent runner: spawns `claude-ds -p` with an explicit environment, `acceptEdits`, a Bash allow/deny-list and file deny rules, parses the `stream-json` output into a persisted run record, enforces the owner's switch, readiness, one-run-at-a-time and the working-folder rules, settles runs lost to a restart.
+- **`coding-agent.ts`** — the coding agent runner: spawns `claude-ds -p` with an explicit environment, `acceptEdits`, a Bash allow/deny-list and file deny rules, parses the `stream-json` output into a persisted run record, enforces the owner's switch, readiness, one-run-at-a-time and the working-folder rules, settles runs lost to a restart. Wires the clawbox MCP server into each run (`--strict-mcp-config`, browser-only profile, no secret in argv) so a run can drive the device's Chromium to verify its work.
+- **`coding-agent-artifacts.ts`** — the run evidence store: per-run folder under `data/coding-agent-artifacts/`, listing/serving-path validation (traversal- and symlink-proof), removal when a run record is dropped.
+- **`vision-describe.ts`** — text eyes for image-blind run models: describes a screenshot through the box's resolved vision model, answering `{ text, error }` instead of throwing.
 - **`coding-agent-notify.ts`** — the finish notice: desktop toast plus a template-only Telegram message to approved senders. Never the task or the summary.
 - **`hermes-env.ts`** — writes `~/.hermes/.env` with Hermes' own `save_env_value` semantics. Needed because `hermes config set` routes no `EMAIL_*` key to `.env` and would put a mailbox password in `config.yaml` instead.
 - **`hermes-email.ts`** — Hermes' native inbound email adapter (opt-in, allowlist-only).

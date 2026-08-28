@@ -38,7 +38,12 @@ export interface ResolvedVisionModel {
   reason: "env-override" | "proxy-allows" | "proxy-refuses" | "probe-failed";
 }
 
-function proxyUrl(): string {
+/**
+ * The ClawBox AI proxy base, env-overridable, trailing slash stripped (a
+ * doubled slash 404s on the proxy). Exported so every caller resolves it one
+ * way — vision-describe reuses this rather than carrying a copy.
+ */
+export function clawboxAiProxyUrl(): string {
   return (process.env.CLAWBOX_AI_PROXY_URL?.trim() || DEFAULT_PROXY_URL).replace(/\/+$/, "");
 }
 
@@ -51,7 +56,7 @@ export async function resolveVisionModelId(
     return { id: preferred, verified: false, reason: "env-override" };
   }
   try {
-    const res = await fetchImpl(`${proxyUrl()}/chat/completions`, {
+    const res = await fetchImpl(`${clawboxAiProxyUrl()}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

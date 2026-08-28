@@ -26,7 +26,12 @@ import { ToolError, toolErrorResult } from "./errors";
 import { PARAM_NAME_RE, TOOL_NAME_RE, type Shape } from "./schema";
 
 export type Ed = "openclaw" | "hermes";
-export type Profile = "core" | "full";
+// What the SERVER runs as. `browser` is the coding-agent run profile: only
+// tools declaring `family: "browser"` register, so a delegated run drives
+// Chromium to verify its work without inheriting the assistant's device-wide
+// tool set (email, power, files, …). Distinct from the per-tool declarations
+// below — one axis is the server's mode, the other is what a tool claims.
+export type Profile = "core" | "full" | "browser";
 
 export interface ToolOpts {
   /** Editions this tool is registered on. Default: both. */
@@ -38,7 +43,14 @@ export interface ToolOpts {
   /** Reaches the public internet. */
   openWorld?: boolean;
   /** "core" tools survive CLAWBOX_MCP_PROFILE=core. Default "full". */
-  profile?: Profile;
+  profile?: "core" | "full";
+  /**
+   * Tools declaring "browser" are the ONLY ones a `browser`-profile server
+   * registers. A declaration, not a naming convention: a future tool that
+   * happens to be named browser_something stays out of delegated runs unless
+   * its author states it belongs there.
+   */
+  family?: "browser";
   /** Output cap in characters. Default 4000. */
   maxChars?: number;
 }
@@ -218,6 +230,7 @@ export function createRegistrar(server: McpServer, edition: Ed, profile: Profile
     tool(name, description, shape, opts, handler) {
       if (opts.editions && !opts.editions.includes(edition)) return;
       if (profile === "core" && opts.profile !== "core") return;
+      if (profile === "browser" && opts.family !== "browser") return;
 
       const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
       const info: RegisteredToolInfo = {

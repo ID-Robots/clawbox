@@ -10,6 +10,9 @@
 // browser_launch is gone: it was a byte-identical alias of browser_open, and
 // two tools with one behaviour is precisely the tie a small model breaks wrongly.
 
+import fs from "fs";
+import path from "path";
+import { pathToFileURL } from "url";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
@@ -21,6 +24,56 @@ interface BrowserReply {
   url?: string;
   title?: string;
   error?: string;
+  description?: string | null;
+  descriptionError?: string | null;
+}
+
+// ── Coding-agent run context ─────────────────────────────────────────────────
+//
+// When the coding-agent runner spawns this server (CLAWBOX_MCP_PROFILE=browser)
+// it names the run's working folder and evidence folder. In that context the
+// calling model CANNOT see images (DeepSeek through the proxy — an image block
+// arrives as "[Unsupported Image]"), so the capturing tools ask the backend to
+// describe the frame it captures (describe: true) and every reply swaps the
+// inline screenshot for the PNG archived into the evidence folder plus that
+// written description.
+
+interface RunContext {
+  workingDir: string;
+  artifactsDir: string;
+}
+
+/**
+ * All-or-nothing: the runner sets BOTH variables. Anything less is no run
+ * context, so a stray variable can never produce a chimera — an inline image
+ * the run's model cannot read, or a local-view tool outside any run.
+ */
+function runContext(): RunContext | null {
+  const workingDir = process.env.CLAWBOX_RUN_DIR?.trim();
+  const artifactsDir = process.env.CLAWBOX_RUN_ARTIFACTS_DIR?.trim();
+  return workingDir && artifactsDir ? { workingDir, artifactsDir } : null;
+}
+
+let shotCounter = 0;
+
+/** Archive one screenshot into the run's evidence folder; null when it cannot be saved. */
+function saveShot(base64: string): string | null {
+  const dir = runContext()?.artifactsDir;
+  if (!dir) return null;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    let name: string;
+    let file: string;
+    do {
+      shotCounter += 1;
+      name = `shot-${String(shotCounter).padStart(3, "0")}.png`;
+      file = path.join(dir, name);
+    } while (fs.existsSync(file));
+    fs.writeFileSync(file, Buffer.from(base64, "base64"));
+    return name;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -97,21 +150,94 @@ async function act(action: string, params: Record<string, unknown> = {}): Promis
   return browserCall(action, { sessionId: id, ...params });
 }
 
-function withScreenshot(message: string, reply: BrowserReply): ToolResult {
+function headerLines(message: string, reply: BrowserReply): string[] {
   const lines = [message];
   if (reply.url) lines.push(`URL: ${reply.url}`);
   if (reply.title) lines.push(`Title: ${reply.title}`);
-  const content: ToolResult["content"] = [{ type: "text", text: lines.join("\n") }];
+  return lines;
+}
+
+function withScreenshot(message: string, reply: BrowserReply): ToolResult {
+  const content: ToolResult["content"] = [{ type: "text", text: headerLines(message, reply).join("\n") }];
   if (reply.screenshot) content.push({ type: "image", data: reply.screenshot, mimeType: "image/png" });
   return { content };
 }
 
+/**
+ * Interaction replies inside a run: no screenshot, no vision call. Measured
+ * on run-yuyqta4t: describing every keypress produced 99 archived screenshots
+ * and most of the run's $6 — the agent asks for a described look
+ * (browser_screenshot) at the states that matter instead.
+ */
+function briefResult(message: string, reply: BrowserReply): ToolResult {
+  if (!runContext()) return withScreenshot(message, reply);
+  const lines = headerLines(message, reply);
+  lines.push("Use browser_screenshot when you want this state described.");
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
+/**
+ * The reply of the capturing tools. Outside a run: text + inline image, as
+ * always. Inside a run the call already asked the backend to describe the
+ * frame it captured (describe: true) — archive that same frame, relay the
+ * words, no image.
+ */
+function pageResult(message: string, reply: BrowserReply): ToolResult {
+  if (!runContext()) return withScreenshot(message, reply);
+  const lines = headerLines(message, reply);
+  const saved = reply.screenshot ? saveShot(reply.screenshot) : null;
+  if (saved) lines.push(`Screenshot archived to this run's evidence folder as ${saved}.`);
+  if (reply.description) {
+    lines.push(`What the page shows: ${reply.description}`);
+  } else {
+    const reason = reply.descriptionError ? ` (${reply.descriptionError})` : "";
+    lines.push(`No vision description is available${reason}. Rely on the URL, the title and your knowledge of the code.`);
+  }
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
+/** In run context, the capturing actions describe the frame they capture. */
+function describeParam(): { describe?: true } {
+  return runContext() ? { describe: true } : {};
+}
+
 export function registerBrowserTools(reg: Registrar): void {
+  // Registered only inside a coding-agent run (the runner names the working
+  // and evidence folders): a tool that exists but answers "no run active" on
+  // the assistant's own server would trip Hermes' circuit breaker for nothing.
+  const run = runContext();
+  if (run) {
+    // The route's realpath check against the ACTIVE run is the one containment
+    // implementation; this rule only turns its refusal into a clear next step.
+    const viewLocalRules: ErrorRule[] = [
+      {
+        status: 400,
+        match: /blocked file address|file not found/i,
+        code: "BAD_ARGUMENT",
+        message: "That path is outside this run's working folder, or the file does not exist.",
+        next: "Pass a file inside the folder you were started in, e.g. index.html.",
+      },
+    ];
+    reg.tool(
+      "browser_view_local",
+      "Open a page from this run's working folder in the device browser and get a written description of what actually renders. Use it to verify every page you build before reporting done. Pass the path of an HTML file inside your folder.",
+      { path: zText(512, "HTML file to view, relative to the working folder (e.g. index.html) or absolute inside it.") },
+      { editions: ["openclaw", "hermes"], family: "browser", readOnly: false },
+      async ({ path: given }: { path: string }) => {
+        const abs = path.isAbsolute(given) ? given : path.join(run.workingDir, given);
+        const fileUrl = pathToFileURL(abs).href;
+        const id = await ensureSession();
+        const reply = await browserCall("navigate", { sessionId: id, url: fileUrl, ...describeParam() }, viewLocalRules);
+        return pageResult(`Viewing ${given}.`, reply);
+      },
+    );
+  }
+
   reg.tool(
     "browser_open",
     "Open the web browser on the ClawBox desktop and optionally go to a page. Use this whenever the user asks to open the browser, open a site, or look something up on the web. It drives the real window the user can see, and returns a picture of the page.",
     { url: zText(2_000, "Page to open, starting with http:// or https://. Omit to just open the browser.").optional() },
-    { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true },
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true },
     async ({ url }: { url?: string }) => {
       if (url && !/^https?:\/\//i.test(url)) {
         throw new ToolError(
@@ -126,8 +252,8 @@ export function registerBrowserTools(reg: Registrar): void {
         sessionId = null;
       }
       const id = await ensureSession(url, true);
-      const reply = await browserCall("screenshot", { sessionId: id });
-      return withScreenshot(url ? `Opened ${url} in the browser on the desktop.` : "Opened the browser on the desktop.", reply);
+      const reply = await browserCall("screenshot", { sessionId: id, ...describeParam() });
+      return pageResult(url ? `Opened ${url} in the browser on the desktop.` : "Opened the browser on the desktop.", reply);
     },
   );
 
@@ -135,12 +261,12 @@ export function registerBrowserTools(reg: Registrar): void {
     "browser_navigate",
     "Send the browser that is already open to a different page. Returns a picture of the loaded page. If the browser is not open yet, use browser_open.",
     { url: zText(2_000, "Page to go to, starting with http:// or https://") },
-    { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true },
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: false, openWorld: true },
     async ({ url }: { url: string }) => {
       if (!/^https?:\/\//i.test(url)) {
         throw new ToolError("BAD_ARGUMENT", "That is not a web address.", "Pass a full address starting with https://.");
       }
-      return withScreenshot(`Went to ${url}.`, await act("navigate", { url }));
+      return pageResult(`Went to ${url}.`, await act("navigate", { url, ...describeParam() }));
     },
   );
 
@@ -148,15 +274,15 @@ export function registerBrowserTools(reg: Registrar): void {
     "browser_screenshot",
     "Take a picture of the page currently loaded in the desktop browser. Use it to see what a page says before acting on it. To photograph the whole desktop instead, use screen_capture.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: true },
-    async () => withScreenshot("The page currently in the browser.", await act("screenshot")),
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: true },
+    async () => pageResult("The page currently in the browser.", await act("screenshot", describeParam())),
   );
 
   reg.tool(
     "browser_close",
     "Stop controlling the desktop browser. The window itself stays open for the user. Call this when you are finished with a browsing task.",
     {},
-    { editions: ["openclaw", "hermes"], readOnly: false },
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: false },
     async () => {
       if (sessionId) {
         await browserCall("close", { sessionId }).catch(() => { /* already gone */ });
@@ -176,21 +302,21 @@ export function registerBrowserTools(reg: Registrar): void {
       y: zInt(0, 10_000, 0, "Vertical position in pixels from the top edge."),
       button: zEnumOf(["left", "right", "middle"], "Which mouse button.").default("left"),
     },
-    { editions: ["openclaw"], readOnly: false },
+    { editions: ["openclaw"], family: "browser", readOnly: false },
     async ({ x, y, button }: { x: number; y: number; button: string }) =>
-      withScreenshot(`Clicked at ${x},${y}.`, await act("click", { x, y, button })),
+      briefResult(`Clicked at ${x},${y}.`, await act("click", { x, y, button })),
   );
 
   reg.tool(
     "browser_type",
     "Type text into the field that is focused in the desktop browser. Click the field with browser_click first. The text itself is never echoed back, because this is the tool that types passwords.",
     { text: zText(2_000, "The text to type into the focused field.") },
-    { editions: ["openclaw"], readOnly: false },
+    { editions: ["openclaw"], family: "browser", readOnly: false },
     async ({ text: value }: { text: string }) => {
       const reply = await act("type", { text: value });
       // Deliberately reports a COUNT, not the text: echoing it put passwords
       // and one-time codes into the model's context and the session transcript.
-      return withScreenshot(`Typed ${value.length} characters into the page.`, reply);
+      return briefResult(`Typed ${value.length} characters into the page.`, reply);
     },
   );
 
@@ -203,8 +329,8 @@ export function registerBrowserTools(reg: Registrar): void {
         "Which key to press.",
       ),
     },
-    { editions: ["openclaw"], readOnly: false },
-    async ({ key }: { key: string }) => withScreenshot(`Pressed ${key}.`, await act("keydown", { key })),
+    { editions: ["openclaw"], family: "browser", readOnly: false },
+    async ({ key }: { key: string }) => briefResult(`Pressed ${key}.`, await act("keydown", { key })),
   );
 
   reg.tool(
@@ -216,9 +342,9 @@ export function registerBrowserTools(reg: Registrar): void {
       scroll_y: zInt(-20_000, 20_000, 600, "How far to scroll vertically, in pixels. Positive is down."),
       scroll_x: zInt(-20_000, 20_000, 0, "How far to scroll horizontally, in pixels."),
     },
-    { editions: ["openclaw"], readOnly: false },
+    { editions: ["openclaw"], family: "browser", readOnly: false },
     async ({ x, y, scroll_y, scroll_x }: { x: number; y: number; scroll_y: number; scroll_x: number }) =>
-      withScreenshot(
+      briefResult(
         `Scrolled ${scroll_y >= 0 ? "down" : "up"} ${Math.abs(scroll_y)} pixels.`,
         await act("scroll", { x, y, deltaY: scroll_y, deltaX: scroll_x }),
       ),
