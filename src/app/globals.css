@@ -1525,3 +1525,53 @@ input[type="range"].appearance-none::-moz-range-track {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.82); }
 }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Coding agent card (CodingAgentActivityPill): "agent working" motion.
+   Three signs of life while a delegated run is in flight — the 🤖 breathes,
+   three dots step beside the status word, and the in-progress item of the
+   run's plan pulses. Opacity and transform ONLY: the Jetson's compositor
+   animates those without a repaint, and this card sits in a chat beside a
+   run that is already using the box. The card adds these classes while the
+   run is live and drops them when it settles, so a finished card is still.
+   ───────────────────────────────────────────────────────────────────────── */
+@keyframes coding-agent-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@keyframes coding-agent-dot {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+.coding-agent-pulse {
+  animation: coding-agent-breathe 1.6s ease-in-out infinite;
+}
+.coding-agent-working {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  vertical-align: middle;
+}
+/* One flat class per dot rather than a descendant rule: the setup-ground
+   parity test parses every selector in this file with its own small engine,
+   which reads classes, attributes and a few pseudo-classes but no combinators.
+   The stagger is an inline animation-delay on the second and third dot. */
+.coding-agent-working-dot {
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: coding-agent-dot 1.2s ease-in-out infinite;
+}
+/* Reduced motion: every one of these holds its resting frame. The blanket
+   0.01ms rule above catches them too; this is the card's own guard, so its
+   motion can be read — and tested — in one place. */
+@media (prefers-reduced-motion: reduce) {
+  .coding-agent-pulse,
+  .coding-agent-working-dot {
+    animation: none;
+  }
+  .coding-agent-pulse { opacity: 1; }
+  .coding-agent-working-dot { opacity: 0.6; }
+}

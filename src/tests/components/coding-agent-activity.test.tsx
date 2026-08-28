@@ -654,7 +654,7 @@ describe("the plan and the signs of life", () => {
     }
     const guard = /@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/.exec(block)?.[1] ?? "";
     expect(guard).toContain(".coding-agent-pulse");
-    expect(guard).toContain(".coding-agent-working > span");
+    expect(guard).toContain(".coding-agent-working-dot");
     expect(guard).toContain("animation: none");
   });
 });
