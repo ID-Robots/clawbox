@@ -177,14 +177,18 @@ const RETRY_NETWORK = "Check this ClawBox's network connection and try again.";
  * request that cannot be satisfied (409).
  */
 function noFinding(r: ChildResult, what: string, reach: "local" | "network"): BackupOutcome {
+  // Only a call that actually STARTED can support a claim about the network.
+  // A spawn that never began says nothing about GitHub — it is a fault on this
+  // box — so it must carry neither `gh_unreachable` nor the "check your
+  // connection" remedy. One expression, used for both, because the review on
+  // this PR caught the reason and the advice disagreeing: the reason had it
+  // right and the advice told an owner with an ENOMEM to go and check their
+  // uplink, which is the wrong-remedy defect this whole change removes.
+  const reachedNetwork = reach === "network" && !r.startFailed;
   return {
     pushed: false,
-    // `gh_unreachable` is a claim about the NETWORK, and only a call that
-    // actually started and then hung supports it. A spawn that never began
-    // says nothing about GitHub — it is a fault on this box — so it keeps the
-    // neutral reason and leans on `transient` for its 503.
-    reason: reach === "network" && !r.startFailed ? "gh_unreachable" : "failed",
-    detail: failureDetail(r, what, reach === "network" ? RETRY_NETWORK : RETRY_LOCAL),
+    reason: reachedNetwork ? "gh_unreachable" : "failed",
+    detail: failureDetail(r, what, reachedNetwork ? RETRY_NETWORK : RETRY_LOCAL),
     transient: true,
   };
 }

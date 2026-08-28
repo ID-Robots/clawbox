@@ -192,6 +192,10 @@ describe("a call that left the box and could not start is reported as a fault, n
     expect(outcome.detail ?? "").toMatch(/EAGAIN/);
     // Nothing about the request was wrong, so the route must not answer 409.
     expect(outcome.transient).toBe(true);
+    // Raised by review on this PR. A create that never started never reached
+    // the uplink, so "check your network connection" is the wrong remedy —
+    // the same wrong-remedy defect this PR removes, one line over.
+    expect(outcome.detail ?? "").not.toMatch(/network/i);
   });
 
   it("does not hand back runChild's placeholder when `git push` failed to spawn", async () => {
@@ -204,6 +208,7 @@ describe("a call that left the box and could not start is reported as a fault, n
     expect(outcome.detail ?? "").not.toBe("could not start");
     expect(outcome.detail ?? "").toMatch(/EAGAIN/);
     expect(outcome.transient).toBe(true);
+    expect(outcome.detail ?? "").not.toMatch(/network/i);
   });
 
   it("never renders a blank message for a create that wrote to neither stream", async () => {
