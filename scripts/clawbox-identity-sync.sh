@@ -66,12 +66,27 @@ restart_openclaw_gateway() {
 # non-zero for `degraded` — an ordinary state on these devices, and one where
 # systemd is very much running. Only "no answer at all" and an explicit
 # `offline` mean there is no manager.
-systemd_manager_available() {
-  command -v systemctl >/dev/null 2>&1 || return 1
-  case "$(systemctl is-system-running 2>/dev/null)" in
+systemd_scope_running() {
+  local answer
+  case "$1" in
+    user) answer="$(systemctl --user is-system-running 2>/dev/null)" ;;
+    *)    answer="$(systemctl is-system-running 2>/dev/null)" ;;
+  esac
+  case "$answer" in
     ""|offline|unknown) return 1 ;;
     *) return 0 ;;
   esac
+}
+
+# BOTH scopes, because restart_openclaw_gateway tries both. A host with an
+# offline system manager and a reachable USER manager that refused the unit has
+# had its refresh refused, not skipped — and reporting that as "nothing to do
+# here" is the same silence this file exists to remove, one level up.
+systemd_manager_available() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  systemd_scope_running system && return 0
+  systemd_scope_running user && return 0
+  return 1
 }
 
 should_refresh_openclaw() {
