@@ -7,6 +7,7 @@
 
 set -u
 
+NETWORK_READINESS_LIB="/usr/local/libexec/clawbox/network-readiness.sh"
 IFACE="${1:-}"
 ACTION="${2:-}"
 WIFI_IFACE="${NETWORK_INTERFACE:-wlP1p1s0}"
@@ -14,6 +15,37 @@ AP_PROFILE="ClawBox-Setup"
 LOG_TAG="clawbox-failover"
 
 log() { logger -t "$LOG_TAG" -- "$*"; }
+
+if [ ! -r "$NETWORK_READINESS_LIB" ]; then
+  log "Network readiness helper is unavailable; leaving the Gateway unchanged"
+  exit 0
+fi
+
+# NetworkManager runs this dispatcher as root. Never honor test overrides from
+# its environment when selecting route/probe commands or destinations.
+unset CLAWBOX_IP_BIN CLAWBOX_CURL_BIN CLAWBOX_NETWORK_PROBE_IP CLAWBOX_NETWORK_PROBE_URL
+# shellcheck source=/usr/local/libexec/clawbox/network-readiness.sh
+source "$NETWORK_READINESS_LIB"
+
+schedule_channel_recovery() {
+  systemctl restart clawbox-channel-recovery.timer >/dev/null 2>&1 || \
+    log "Could not schedule channel recovery"
+}
+
+restart_gateway_on_ready_route() {
+  if ! clawbox_network_ready; then
+    log "Replacement public route is not ready; leaving clawbox-gateway running"
+    return 1
+  fi
+  if systemctl is-active --quiet clawbox-gateway.service; then
+    log "Public route ready — restarting clawbox-gateway to rebind sockets"
+    systemctl restart clawbox-gateway.service >/dev/null 2>&1 || {
+      log "Gateway restart failed"
+      return 1
+    }
+  fi
+  schedule_channel_recovery
+}
 
 # Only react to ethernet up/down events.
 case "$IFACE" in
@@ -25,11 +57,8 @@ esac
 # interface. Existing sockets bound to the WiFi IP would otherwise be sent
 # down Eth as asymmetric traffic and silently fail.
 if [ "$ACTION" = "up" ]; then
-  if systemctl is-active --quiet clawbox-gateway.service; then
-    log "Ethernet '$IFACE' up — restarting clawbox-gateway to rebind sockets"
-    systemctl restart clawbox-gateway.service >/dev/null 2>&1 || \
-      log "Gateway restart failed"
-  fi
+  log "Ethernet '$IFACE' up — checking replacement route before Gateway restart"
+  restart_gateway_on_ready_route || true
   exit 0
 fi
 
@@ -43,15 +72,8 @@ fi
 
 log "Ethernet '$IFACE' down — attempting WiFi failover"
 
-# Kill TCP sockets the OpenClaw gateway holds bound to the now-dead interface
-# IPs. HTTP/2 keep-alives to OpenAI/Anthropic/Telegram look ESTABLISHED but
-# silently blackhole until TCP times out (~120s). A service restart drops them
-# and forces fresh connections on the surviving interface.
-if systemctl is-active --quiet clawbox-gateway.service; then
-  log "Restarting clawbox-gateway to drop sockets bound to dead $IFACE"
-  systemctl restart clawbox-gateway.service >/dev/null 2>&1 || \
-    log "Gateway restart failed"
-fi
+# Do not restart the Gateway yet. Starting network-dependent providers without
+# a replacement route can turn a short link outage into a process crash loop.
 
 # If the AP is currently active on the WiFi radio, take it down so the radio is free.
 if nmcli -t -f NAME,DEVICE connection show --active | grep -qE "^${AP_PROFILE}:${WIFI_IFACE}$"; then
@@ -63,7 +85,8 @@ fi
 if nmcli -t -f TYPE,STATE,DEVICE device status | grep -qE "^wifi:connected:${WIFI_IFACE}$"; then
   active_wifi=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | awk -F: -v i="$WIFI_IFACE" -v ap="$AP_PROFILE" '$2=="802-11-wireless" && $3==i && $1!=ap {print $1; exit}')
   if [ -n "$active_wifi" ]; then
-    log "Already on WiFi '$active_wifi' — no failover needed"
+    log "Already on WiFi '$active_wifi' — rebinding Gateway on the proven route"
+    restart_gateway_on_ready_route || true
     exit 0
   fi
 fi
@@ -83,6 +106,7 @@ for profile in "${profiles[@]}"; do
   log "Trying WiFi profile '$profile'"
   if nmcli connection up "$profile" ifname "$WIFI_IFACE" >/dev/null 2>&1; then
     log "Connected to '$profile' — failover complete"
+    restart_gateway_on_ready_route || true
     exit 0
   fi
 done

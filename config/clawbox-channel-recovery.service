@@ -1,0 +1,19 @@
+[Unit]
+Description=Recover breaker-suppressed OpenClaw channels after network return
+After=network-online.target clawbox-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=clawbox
+Group=clawbox
+WorkingDirectory=/home/clawbox
+Environment=HOME=/home/clawbox
+Environment=PATH=/home/clawbox/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/clawbox/clawbox/scripts/recover-openclaw-channels.sh
+TimeoutStartSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/home/clawbox/.openclaw

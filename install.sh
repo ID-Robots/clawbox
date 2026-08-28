@@ -495,9 +495,16 @@ EXPECTED_INSTALLED_SERVICES=(
 # registered in one of the two lists above.
 EDITION_SCOPED_UNITS=(
   clawbox-gateway.service                 # openclaw + dual (removed on hermes)
+  clawbox-channel-recovery.service        # openclaw + dual
+  clawbox-channel-recovery.timer          # openclaw + dual
   clawbox-hermes-dashboard.service        # hermes + dual
   clawbox-hermes-dashboard-proxy.service  # hermes + dual
 )
+
+if has_openclaw_harness; then
+  EXPECTED_ACTIVE_SERVICES+=(clawbox-channel-recovery.timer)
+  EXPECTED_INSTALLED_SERVICES+=(clawbox-channel-recovery.service)
+fi
 
 # Hermes harness editions (hermes + the premium dual) run the Hermes dashboard
 # and its auth proxy.
@@ -2998,6 +3005,13 @@ install_root_libexec() {
       install -o root -g root -m 0755 "$PROJECT_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src"
     fi
   done
+  # Shared network readiness logic is sourced by the root NetworkManager
+  # dispatcher and by unprivileged Gateway/channel wrappers. Keep the runtime
+  # copy outside the clawbox-writable project tree.
+  if [ -f "$PROJECT_DIR/scripts/network-readiness.sh" ]; then
+    install -o root -g root -m 0644 "$PROJECT_DIR/scripts/network-readiness.sh" \
+      "$ROOT_LIBEXEC_DIR/network-readiness.sh"
+  fi
   # The limits the scripts above read. Root-owned for the same reason they are.
   install -d -o root -g root -m 0755 /etc/clawbox
   if [ -f "$PROJECT_DIR/config/clawbox-resource-limits.env" ]; then
@@ -3345,6 +3359,7 @@ step_systemd_services() {
     # Timer-driven one-shot (no [Install]); enabled via its .timer below.
     [[ "$svc" == "clawbox-ap-watchdog.service" ]] && continue
     [[ "$svc" == "clawbox-codex-auth-sync.service" ]] && continue
+    [[ "$svc" == "clawbox-channel-recovery.service" ]] && continue
     systemctl enable "$svc"
   done
   # Start the heartbeat timer immediately so the portal sees the device
@@ -3362,6 +3377,11 @@ step_systemd_services() {
   # this release strips any refresh_token 3.1.11 planted in its mirrors without
   # waiting for a reboot — that token is what burns the OAuth family.
   systemctl enable --now clawbox-codex-auth-sync.timer
+  if has_openclaw_harness; then
+    # Bounded no-op while channels are healthy; repairs only accounts stopped
+    # specifically by OpenClaw's restart-loop breaker after network recovery.
+    systemctl enable --now clawbox-channel-recovery.timer
+  fi
   # Clean up older installs that enabled on-demand units at boot.
   systemctl disable --now clawbox-browser.service >/dev/null 2>&1 || true
   # Migration: prior installs enabled clawbox-tunnel by default, which loops
@@ -3441,14 +3461,20 @@ step_nm_dispatcher() {
   local DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
   local SRC="$PROJECT_DIR/scripts/nm-dispatcher-failover.sh"
   local DEST="$DISPATCHER_DIR/90-clawbox-failover"
+  local HELPER_SRC="$PROJECT_DIR/scripts/network-readiness.sh"
+  local HELPER_DEST="$ROOT_LIBEXEC_DIR/network-readiness.sh"
   if [ ! -f "$SRC" ]; then
     echo "  Skipping NM dispatcher: $SRC missing"
     return
   fi
+  if [ ! -f "$HELPER_SRC" ]; then
+    echo "  Skipping NM dispatcher: $HELPER_SRC missing"
+    return 1
+  fi
+  install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
+  install -o root -g root -m 0644 "$HELPER_SRC" "$HELPER_DEST"
   mkdir -p "$DISPATCHER_DIR"
-  cp "$SRC" "$DEST"
-  chown root:root "$DEST"
-  chmod 0755 "$DEST"
+  install -o root -g root -m 0755 "$SRC" "$DEST"
   echo "  NetworkManager failover dispatcher installed"
 }
 

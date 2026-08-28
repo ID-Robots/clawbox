@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically reconcile OpenClaw channel recovery
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Unit=clawbox-channel-recovery.service
+
+[Install]
+WantedBy=timers.target
