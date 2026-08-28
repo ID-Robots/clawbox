@@ -26,9 +26,8 @@ const NEEDS_API_KEY = translations.en["ai.modelNeedsApiKey"];
  *
  * The wizard's own help line sends the customer here ("switch between the
  * curated models from the chat window anytime"), so the unfiltered surface was
- * the one it advertised: on a Claude-subscription box the header offered
- * Claude Mythos 5 / Claude Fable 5, which the `claude-cli` surface does not
- * carry, as ordinary pickable rows.
+ * the one it advertised: on a subscription box the header offered models the
+ * box's enumerated surface does not carry as ordinary pickable rows.
  *
  * The header does not hide them — a silently missing row is the same lie in
  * the other direction. It greys them out and says why, exactly as the wizard

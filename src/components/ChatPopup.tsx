@@ -26,6 +26,7 @@ import {
   type EmailBatchDraft,
   type EmailBatchOutcome,
 } from '@/lib/chat-email-batch'
+import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
 import { FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
@@ -2504,10 +2505,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * Drafts already inside a live card are left alone (`shownDraftIds`). That is
    * what stops a second turn's mail from being folded into a card the owner is
    * part-way through reading — it gets its own card, with its own consent.
+   *
+   * THIS IS THE COLLECT ITSELF, and it is deliberately unconditional: every
+   * caller has already decided that it wants to look. See `settleEmailDrafts`
+   * for the turn-end caller and `recoverEmailDrafts` for the scheduled one.
    */
-  const settleEmailDrafts = useCallback(async () => {
-    if (!emailSendSeenRef.current) return
-    emailSendSeenRef.current = false
+  const collectEmailDrafts = useCallback(async () => {
     try {
       // `no-store`, and not because the route is slow to change: the route's
       // `dynamic = "force-dynamic"` governs Next's own render cache and does
@@ -2553,7 +2556,67 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // is concerned, and Settings → Email is unaffected.
     }
   }, [])
+
+  /**
+   * The turn-end caller: collect at once, but only for a turn that asked to
+   * send mail.
+   *
+   * The flag is still checked and cleared here, and it still means what it
+   * meant — except that it is now about IMMEDIACY rather than about whether
+   * the drafts are ever seen. A turn that queued mail must show its card the
+   * moment it finishes, not on the next tick; a turn that did not must not
+   * make a request just because it ended. Everything the flag used to hide
+   * for good is now picked up by `recoverEmailDrafts` instead.
+   *
+   * Check-and-clear is kept because there are FOUR turn-end call sites (the
+   * adapter's done and error paths, and the gateway's) and more than one can
+   * run for a single turn.
+   */
+  const settleEmailDrafts = useCallback(async () => {
+    if (!emailSendSeenRef.current) return
+    emailSendSeenRef.current = false
+    await collectEmailDrafts()
+  }, [collectEmailDrafts])
   useEffect(() => { settleEmailDraftsRef.current = settleEmailDrafts }, [settleEmailDrafts])
+
+  /**
+   * The scheduled caller: look regardless of what this browser saw.
+   *
+   * WHY THIS EXISTS. The card used to appear only for a turn that this surface
+   * watched call `email_send`, on the reasoning that nothing else could put a
+   * draft in the queue. Four things can, and each one stranded mail on disk
+   * with no way to approve it from the conversation:
+   *
+   *   - the owner cancelled the card (the drafts stay queued, by design);
+   *   - the page reloaded, and `emailBatches` is component state;
+   *   - the turn was somebody else's — a cron run, an inbound-email
+   *     auto-answer, Telegram, another session;
+   *   - the tool event never streamed, so the flag was never set.
+   *
+   * Looking repeatedly is safe because `batchFromPending` filters against
+   * `shownDraftIds` and returns null when everything waiting is already on
+   * screen: a draft is offered once, and a second look adds nothing. That
+   * dedup — not the flag — is what now carries "one card per draft", so it
+   * must not be weakened.
+   */
+  const recoverEmailDrafts = useCallback(() => { void collectEmailDrafts() }, [collectEmailDrafts])
+
+  /**
+   * Ask on open, then on the shared schedule.
+   *
+   * `installPendingRefresh` is the same helper Settings → Email uses, so the
+   * two surfaces cannot drift into disagreeing about how often they re-read
+   * the queue — or about not polling behind a hidden tab. Installed only while
+   * the panel is open, for the same reason Settings installs it only while its
+   * email section is on screen.
+   */
+  useEffect(() => {
+    if (!isOpen) return
+    // The open itself is the first ask: this is the reload case, where the
+    // queue may already hold mail nobody in this page has seen.
+    recoverEmailDrafts()
+    return installPendingRefresh(recoverEmailDrafts)
+  }, [isOpen, recoverEmailDrafts])
 
   /**
    * Send the drafts the owner ticked — one request, whatever N is.

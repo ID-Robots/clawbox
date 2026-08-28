@@ -85,6 +85,15 @@ The **id vs name** split is the trap: `skill_install` takes the full store id
 (`official/pdf`), `skill_uninstall` takes the short lock name (`pdf`).
 `skill_install` returns the lock name so the model never has to guess it.
 
+The second trap is **which** installed skills can be removed. A device has three
+origins — `builtin` (shipped with it), `hub` (installed from the store) and
+`local` (a skill directory that is neither: written by the agent, hand-copied,
+or left behind by a failed install rollback). `hermes skills uninstall` works
+off the hub lock, so only `hub` is removable, and that is the single rule
+`skill_list`'s "from the store" mark, `skill_uninstall`'s pre-condition and the
+Skills page's Remove button all use. A `local` skill gets its own refusal: it is
+on the device, it is not built in, and only deleting its folder there removes it.
+
 `skill_install` also carries a `confirm` flag, and it is the one argument the
 model must never set on its own judgement (TASK-452). When the device's scanner
 flags a skill the install route answers 409 with what the skill can do; the tool

@@ -19,8 +19,10 @@ import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import {
+  CODEX_SUPPORTED_MODEL_RE,
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
+  offSurfaceCodexModelMessage,
   readSubscriptionSurfaceIds,
   subscriptionOnlyProviders,
 } from "@/lib/subscription-surface";
@@ -80,16 +82,9 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
 };
 
-// Models selectable while the device is on ChatGPT/Codex subscription auth.
-// GPT-5.6 Sol/Terra/Luna are subscription-eligible — OpenClaw's ChatGPT route
-// catalog carries all three, and `openai/gpt-5.6-sol` is the documented
-// default for a fresh Codex OAuth setup. Keeping them out of this allowlist
-// rejected them locally with "not supported with ChatGPT subscription auth"
-// before the request ever reached OpenAI. GPT-5.6 is a limited preview, so
-// per-account access still varies: let the pick through and surface the
-// upstream access error instead of pre-rejecting it here. `-pro` tiers stay
-// out — those remain API-key only.
-const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+// CODEX_SUPPORTED_MODEL_RE moved to @/lib/subscription-surface: the wizard/
+// Settings save writes the same `codex/` namespace and has to apply the same
+// allowlist, and a second copy of it there would be a copy that can drift.
 const OPENAI_PRO_MODEL_RE = /^gpt-5\.[45]-pro$/;
 
 function isLocalModel(model: string | null | undefined): boolean {
@@ -202,6 +197,27 @@ async function refuseOffSurfaceClaudeModel(
     },
     getSurfaceIds,
   );
+  if (!message) return null;
+  return NextResponse.json({ error: message }, { status: 400 });
+}
+
+/**
+ * Refuses a `codex/` model the ChatGPT subscription cannot run, or null when
+ * the target is fine (or is not on the ChatGPT surface at all).
+ *
+ * A helper for the same reason `refuseOffSurfaceClaudeModel` is one: this rule
+ * has to hold at BOTH guard sites. It used to be an inline block in the
+ * custom-model branch only, which left the other two doors — an id that
+ * matches `state.options`, and `{"source":"primary"}` — writing an
+ * API-key-only id straight into `agents.defaults.model.primary` and then
+ * arming `agentRuntime.id=codex` on top of it, over a response that says the
+ * switch worked.
+ */
+function refuseUnsupportedCodexModel(
+  provider: string | null | undefined,
+  modelId: string,
+): NextResponse | null {
+  const message = offSurfaceCodexModelMessage(provider, modelId);
   if (!message) return null;
   return NextResponse.json({ error: message }, { status: 400 });
 }
@@ -520,11 +536,6 @@ export async function POST(request: Request) {
         let effectiveModel = requestedModel;
         let effectiveProvider = parsed.provider;
         let effectiveModelId = parsed.modelId;
-        if (parsed.provider === "codex" && !CODEX_SUPPORTED_MODEL_RE.test(parsed.modelId)) {
-          return NextResponse.json({
-            error: `${parsed.modelId} is not supported with ChatGPT subscription auth. Use GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, or GPT-5.4 Mini, or switch OpenAI to API-key mode for Pro/API-only models.`,
-          }, { status: 400 });
-        }
         if (parsed.provider === "openai") {
           const openclawConfig = await getAuthConfig();
           const hasOpenAiKey = !!openclawConfig && hasOpenAiApiKeyProfile(openclawConfig);
@@ -544,13 +555,20 @@ export async function POST(request: Request) {
             }, { status: 400 });
           }
         }
-        // Refuse BEFORE the openai-compat auto-extend below: that path writes
-        // `models.providers.anthropic.models`, and a rejection that has
-        // already had a side effect is not a rejection. Without this, an id
-        // from a stale tab either pinned the box to a model that cannot route
-        // or - when the providerDef was thin - drew a 409 "isn't fully
+        // Both surface rules judge the EFFECTIVE id — the one this request
+        // will actually write — not the one that arrived: the openai block
+        // above can move the pick into the `codex/` namespace, where a
+        // different catalogue applies.
+        //
+        // And both refuse BEFORE the openai-compat auto-extend below: that
+        // path writes `models.providers.anthropic.models`, and a rejection
+        // that has already had a side effect is not a rejection. Without this,
+        // an id from a stale tab either pinned the box to a model that cannot
+        // route or - when the providerDef was thin - drew a 409 "isn't fully
         // configured. Re-save it in Settings", the wrong next step for a box
         // whose settings are fine.
+        const unsupportedCodex = refuseUnsupportedCodexModel(effectiveProvider, effectiveModelId);
+        if (unsupportedCodex) return unsupportedCodex;
         const offSurface = await refuseOffSurfaceClaudeModel(
           effectiveProvider,
           effectiveModelId,
@@ -596,46 +614,61 @@ export async function POST(request: Request) {
           const providerDef = openclawConfig.models?.providers?.[providerId] as
             | { models?: { id?: string; name?: string }[]; apiKey?: string; baseUrl?: string; api?: string }
             | undefined;
-          // The reroute (ai-models/configure) writes baseUrl + api + apiKey
-          // alongside models. If the endpoint, api type, or inline key is missing
-          // (legacy or half-written state), appending only `.models` would leave
-          // a provider that can't authenticate — make the user re-save rather
-          // than switch the primary onto an incomplete provider.
-          if (!providerDef?.apiKey || !providerDef?.baseUrl || !providerDef?.api) {
-            return NextResponse.json(
-              { error: `${labelForProvider(providerId, providerId)} isn't fully configured. Re-save it in Settings, then pick the model again.` },
-              { status: 409 },
-            );
-          }
-          const existingModels = providerDef.models ?? [];
-          const configuredIds = existingModels
-            .map((m) => m?.id)
-            .filter((id): id is string => typeof id === "string" && id.length > 0);
-          // Append whenever the requested slug isn't already there — even for a
-          // freshly-configured provider whose seed providerDef has only the
-          // user's chosen default (the earlier `length > 0` guard silently fell
-          // back to local on the first switch after a clean setup).
-          if (!configuredIds.includes(effectiveModelId)) {
-            // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
-            // modalities, cost) up from its bundled provider catalog by id.
-            const nextModels = [
-              ...existingModels,
-              { id: effectiveModelId, name: effectiveModelId },
-            ];
-            try {
-              await runOpenclawConfigSet([
-                `models.providers.${providerId}.models`,
-                JSON.stringify(nextModels),
-                "--json",
-              ]);
-            } catch (err) {
-              console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
+          // A SUBSCRIPTION box has no `models.providers.<p>` entry at all, and
+          // that is the fixed state, not a broken one: the openai-compat
+          // override is an API-key construction, and writing an OAuth token
+          // into it made every Anthropic turn 429 (see ai-models/configure).
+          // Routing belongs to the native plugin, whose own catalog resolves
+          // any id — the same reason clawai/openai/codex skip this block
+          // entirely. Without this the 409 below would fire on every model
+          // switch such a box makes, because there is correctly nothing to
+          // extend. An entry that EXISTS but is half-written still 409s.
+          const nativeSubscriptionRouting =
+            !providerDef
+            && subscriptionOnlyProviders(openclawConfig.auth?.profiles, normalizeProvider)
+              .includes(providerId);
+          if (!nativeSubscriptionRouting) {
+            // The reroute (ai-models/configure) writes baseUrl + api + apiKey
+            // alongside models. If the endpoint, api type, or inline key is
+            // missing (legacy or half-written state), appending only `.models`
+            // would leave a provider that can't authenticate — make the user
+            // re-save rather than switch the primary onto an incomplete provider.
+            if (!providerDef?.apiKey || !providerDef?.baseUrl || !providerDef?.api) {
               return NextResponse.json(
-                {
-                  error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
-                },
-                { status: 502 },
+                { error: `${labelForProvider(providerId, providerId)} isn't fully configured. Re-save it in Settings, then pick the model again.` },
+                { status: 409 },
               );
+            }
+            const existingModels = providerDef.models ?? [];
+            const configuredIds = existingModels
+              .map((m) => m?.id)
+              .filter((id): id is string => typeof id === "string" && id.length > 0);
+            // Append whenever the requested slug isn't already there — even for a
+            // freshly-configured provider whose seed providerDef has only the
+            // user's chosen default (the earlier `length > 0` guard silently fell
+            // back to local on the first switch after a clean setup).
+            if (!configuredIds.includes(effectiveModelId)) {
+              // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
+              // modalities, cost) up from its bundled provider catalog by id.
+              const nextModels = [
+                ...existingModels,
+                { id: effectiveModelId, name: effectiveModelId },
+              ];
+              try {
+                await runOpenclawConfigSet([
+                  `models.providers.${providerId}.models`,
+                  JSON.stringify(nextModels),
+                  "--json",
+                ]);
+              } catch (err) {
+                console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
+                return NextResponse.json(
+                  {
+                    error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
+                  },
+                  { status: 502 },
+                );
+              }
             }
           }
         }
@@ -673,9 +706,23 @@ export async function POST(request: Request) {
     // Second site, on the RESOLVED target — the openai guard above is applied
     // twice for the same reason. An id that matched `state.options`, or one
     // restored by `{"source":"primary"}`, never went through the branch above.
+    //
+    // Re-parsed rather than reusing `targetParsed`: the openai block above can
+    // rewrite `targetModel` into the `codex/` namespace, and each rule has to
+    // judge the id on the namespace it will actually be WRITTEN under, not the
+    // one it arrived in. (No id survives that remap that the codex rule then
+    // refuses — the remap itself tests the allowlist — but a guard that only
+    // holds because of a condition two blocks away is a guard waiting to
+    // break.)
+    const resolvedParsed = parseModelSlug(targetModel);
+    const targetUnsupportedCodex = refuseUnsupportedCodexModel(
+      resolvedParsed?.provider,
+      resolvedParsed?.modelId ?? "",
+    );
+    if (targetUnsupportedCodex) return targetUnsupportedCodex;
     const targetOffSurface = await refuseOffSurfaceClaudeModel(
-      targetParsed?.provider,
-      targetParsed?.modelId ?? "",
+      resolvedParsed?.provider,
+      resolvedParsed?.modelId ?? "",
       getAuthConfig,
       getSurfaceIds,
     );

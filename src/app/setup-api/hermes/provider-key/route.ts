@@ -2,8 +2,9 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
 // keeps the credential in its own pooled-auth store (~/.hermes), NOT ClawBox's
@@ -26,16 +27,13 @@ const API_KEY_PROVIDERS = new Set([
 // as a flag.
 const API_KEY_RE = /^[!-~]{8,512}$/;
 
-/**
- * Take the pasted key out of any text on its way to a person or a log.
- *
- * The key is validated to printable non-space ASCII, so a plain substring swap
- * is exact — there is no encoding of it in the CLI's output that this would
- * miss and no regex escaping to get wrong.
- */
-function redactKey(text: string, apiKey: string): string {
-  return apiKey ? text.split(apiKey).join("<redacted>") : text;
-}
+// `redactKey` — take the pasted key out of any text on its way to a person or a
+// log — now lives beside the parser it runs in front of. It moved because
+// `applyCloudProviderKeyToHermes` runs the SAME `hermes auth add` for the
+// Settings/wizard panel and needed the same redaction; a second copy would have
+// been a second place to forget it. The key is validated to printable non-space
+// ASCII below, so a plain substring swap is exact — no encoding of it in the
+// CLI's output that this would miss, and no regex escaping to get wrong.
 
 export async function POST(request: Request) {
   let body: { provider?: string; apiKey?: string };
@@ -54,6 +52,11 @@ export async function POST(request: Request) {
   if (!apiKey || !API_KEY_RE.test(apiKey) || apiKey.startsWith("-")) {
     return NextResponse.json({ error: "Invalid API key" }, { status: 400 });
   }
+
+  // Taken BEFORE the credential lands, because that is the only moment it can
+  // still say what the agent's `ai_set_provider` enum was built from. See
+  // `provider-mcp-refresh.ts` for why the enum is not advisory.
+  const providersBefore = await readUsableProviderIds();
 
   try {
     const r = await runHermesCli(
@@ -90,6 +93,16 @@ export async function POST(request: Request) {
   // model list, so the cached catalogue is now wrong — the panel's very next
   // request must see the provider as usable rather than wait out FRESH_MS.
   invalidateModelOptions();
+
+  // …and the RUNNING AGENT, which the line above does not reach. The ClawBox MCP
+  // server read the provider list once, while it booted, and turned it into
+  // `ai_set_provider`'s enum; without this the owner adds a provider, the panel
+  // offers it, `ai_list_models` lists it, and the tool that switches to it
+  // cannot be handed the id. Awaited rather than left floating so it is ordered
+  // against the response and nothing outlives it unwatched; it cannot fail the
+  // save, because the credential is already stored and the helper swallows
+  // everything.
+  await refreshProviderToolsIfSetChanged(providersBefore, await readUsableProviderIds());
 
   return NextResponse.json({ ok: true, provider });
 }

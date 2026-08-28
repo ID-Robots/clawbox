@@ -30,12 +30,22 @@ interface ProviderDefaultHeroProps {
    * dashboard) — an action that cannot land anywhere is worse than no action.
    */
   onChangeModel?: () => void;
+  /**
+   * A short trailing clause after the model id, for a panel that has something
+   * edition-specific to say about how switching works (Hermes does; OpenClaw
+   * does not). It is a PROP rather than a `t()` call in here because the copy
+   * is the one part of this card that is not shared — baking Hermes' sentence
+   * into a component both editions render is how a shared card becomes a
+   * Hermes card again.
+   */
+  note?: string;
 }
 
 export default function ProviderDefaultHero({
   row,
   model,
   onChangeModel,
+  note,
 }: ProviderDefaultHeroProps) {
   const { t } = useT();
 
@@ -66,15 +76,13 @@ export default function ProviderDefaultHero({
           </span>
         </span>
 
-        <span className="text-xs text-[var(--text-secondary)] truncate">
-          {model ? (
-            <>
-              <span className="font-mono">{model}</span>
-              {" · "}
-            </>
-          ) : null}
-          {t("hermesProvider.hero.nativeSwitch")}
-        </span>
+        {(model || note) && (
+          <span className="text-xs text-[var(--text-secondary)] truncate">
+            {model ? <span className="font-mono">{model}</span> : null}
+            {model && note ? " · " : null}
+            {note}
+          </span>
+        )}
 
         <ProviderConnectionLabel state={row.state} className="mt-[2px]" />
       </div>
@@ -85,7 +93,7 @@ export default function ProviderDefaultHero({
           onClick={onChangeModel}
           className="shrink-0 whitespace-nowrap bg-transparent border-none p-0 text-xs font-semibold text-[var(--coral-bright)] cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--coral-bright)] rounded-[var(--r-1)]"
         >
-          {t("hermesProvider.hero.changeModel")}
+          {t("settings.providers.changeModel")}
         </button>
       )}
     </div>

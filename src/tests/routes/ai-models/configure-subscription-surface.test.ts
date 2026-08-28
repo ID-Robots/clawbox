@@ -62,6 +62,13 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
+  // The configure route imports this to remove a stale openai-compat override.
+  // A factory mock replaces the whole module, so an export the route imports but
+  // the factory omits fails module loading the moment a test reaches it.
+  runOpenclawConfigUnset: vi.fn(),
+  // The configure route reads the config STRICTLY before it removes an
+  // openai-compat override, so the mock has to carry both readers.
+  readConfigStrict: vi.fn().mockResolvedValue({}),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
@@ -94,6 +101,7 @@ import { promises as nodeFsPromises } from "fs";
 import { getAll, setMany } from "@/lib/config-store";
 import {
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -108,23 +116,58 @@ const mockFs = vi.mocked(fsp);
 const mockSurfaceRead = vi.mocked(nodeFsPromises.readFile);
 const mockSpawn = vi.mocked(childProcess.spawn);
 
-/** Model ids the `claude-cli` (Claude-subscription) surface really carries. */
+/**
+ * Model ids the Claude-subscription surface really carries. Since PR #532 that
+ * is anthropic's OWN catalogue — a subscription routes through the native
+ * plugin on `POST /v1/messages`, which serves the whole list. It used to be
+ * the plugin's smaller `claude-cli` catalogue, which was right while the
+ * transport was the openai-compat override #532 removed.
+ */
 const SURFACE_IDS = [
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-fable-5",
+  "claude-mythos-5",
+  "claude-haiku-4-5",
+];
+
+/**
+ * The ids the plugin's OTHER catalogue carries — the pre-#532 surface. A box
+ * has both files on disk; which one the guard opens is the whole question, so
+ * the fixture answers by PATH rather than handing the same list to every read.
+ * A path-agnostic fixture would pass whichever cache the guard chose.
+ */
+const CLAUDE_CLI_SURFACE_IDS = [
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-sonnet-5",
   "claude-sonnet-4-6",
 ];
 
+/** An id no Anthropic catalogue on this box carries — a plausible typo. */
+const OFF_CATALOGUE_ID = "claude-fabel-5";
+
 /** The catalog route's disk cache for a surface provider, as it writes it. */
-function surfaceCache(ids: string[]) {
+function surfaceCache(ids: string[], provider = "anthropic") {
   return JSON.stringify({
-    provider: "claude-cli",
+    provider,
     models: ids.map((id) => ({ id, label: id, contextWindow: 200_000 })),
     defaultModelId: ids[0],
     allowCustom: false,
     fetchedAt: Date.now(),
   });
+}
+
+/** Whichever cache file the guard actually opened. */
+function cacheFileFor(filePath: string) {
+  if (filePath.includes("claude-cli")) return surfaceCache(CLAUDE_CLI_SURFACE_IDS, "claude-cli");
+  if (filePath.includes("anthropic")) return surfaceCache(SURFACE_IDS, "anthropic");
+  // Anything else is a cache this guard has no business opening, and answering
+  // it with the Anthropic catalogue would let a wrong-file read pass as a
+  // right one — which is the exact failure these fixtures exist to catch.
+  throw new Error(`unexpected subscription-surface cache read: ${filePath}`);
 }
 
 /** A spawned `openclaw` that exits 0 immediately — the happy-path stand-in. */
@@ -136,6 +179,60 @@ function successfulChild(): ChildProcess {
   emitter.kill = vi.fn();
   queueMicrotask(() => emitter.emit("close", 0));
   return emitter;
+}
+
+/** A POST to the configure route carrying `body` as JSON. */
+function jsonRequest(body: unknown): Request {
+  return new Request("http://localhost/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Every mock this route needs, back to its happy-path default, plus a freshly
+ * imported handler. Module-level because BOTH subscription surfaces are tested
+ * here and a second copy of this setup is a copy that can drift.
+ */
+async function primeConfigureRoute(): Promise<(request: Request) => Promise<Response>> {
+  vi.resetModules();
+  vi.clearAllMocks();
+
+  mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
+  mockFs.writeFile.mockResolvedValue();
+  mockFs.rename.mockResolvedValue();
+  mockFs.chown.mockResolvedValue();
+  mockFs.mkdir.mockResolvedValue(undefined);
+  mockFs.rm.mockResolvedValue(undefined);
+  mockFs.unlink.mockResolvedValue(undefined);
+  mockSurfaceRead.mockImplementation(
+    ((filePath: string) => Promise.resolve(cacheFileFor(String(filePath)))) as never,
+  );
+
+  vi.mocked(getAll).mockResolvedValue({});
+  vi.mocked(setMany).mockResolvedValue();
+  vi.mocked(readConfig).mockResolvedValue({} as never);
+  vi.mocked(readConfigStrict).mockResolvedValue({} as never);
+  vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
+  vi.mocked(restartGateway).mockResolvedValue();
+  vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
+  vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
+  vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
+  vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
+  vi.mocked(unpairLocal).mockResolvedValue(undefined);
+  mockSpawn.mockImplementation(() => successfulChild());
+  vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));
+
+  return (await import("@/app/setup-api/ai-models/configure/route")).POST;
+}
+
+/** Nothing was written: not the credential file, not one config key. */
+function expectNoSideEffects() {
+  expect(mockFs.writeFile).not.toHaveBeenCalled();
+  expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+  expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  expect(restartGateway).not.toHaveBeenCalled();
 }
 
 /**
@@ -151,15 +248,6 @@ function successfulChild(): ChildProcess {
 describe("POST /setup-api/ai-models/configure and the Claude subscription surface", () => {
   let configurePost: (request: Request) => Promise<Response>;
 
-  /** A POST to this route carrying `body` as JSON. */
-  function jsonRequest(body: unknown): Request {
-    return new Request("http://localhost/test", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
   /** The wizard's Claude sign-in save, with `body` overriding its fields. */
   function subscribe(body: Record<string, unknown> = {}) {
     return jsonRequest({
@@ -170,42 +258,8 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     });
   }
 
-  /** Nothing was written: not the credential file, not one config key. */
-  function expectNoSideEffects() {
-    expect(mockFs.writeFile).not.toHaveBeenCalled();
-    expect(runOpenclawConfigSet).not.toHaveBeenCalled();
-    expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
-    expect(restartGateway).not.toHaveBeenCalled();
-  }
-
   beforeEach(async () => {
-    vi.resetModules();
-    vi.clearAllMocks();
-
-    mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
-    mockFs.writeFile.mockResolvedValue();
-    mockFs.rename.mockResolvedValue();
-    mockFs.chown.mockResolvedValue();
-    mockFs.mkdir.mockResolvedValue(undefined);
-    mockFs.rm.mockResolvedValue(undefined);
-    mockFs.unlink.mockResolvedValue(undefined);
-    mockSurfaceRead.mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
-
-    vi.mocked(getAll).mockResolvedValue({});
-    vi.mocked(setMany).mockResolvedValue();
-    vi.mocked(readConfig).mockResolvedValue({} as never);
-    vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
-    vi.mocked(restartGateway).mockResolvedValue();
-    vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);
-    vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
-    vi.mocked(applyModelOverrideToAllAgentSessions).mockResolvedValue({ filesUpdated: 0, sessionsUpdated: 0 });
-    vi.mocked(setProviderPlugins).mockResolvedValue(undefined);
-    vi.mocked(unpairLocal).mockResolvedValue(undefined);
-    mockSpawn.mockImplementation(() => successfulChild());
-    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));
-
-    const mod = await import("@/app/setup-api/ai-models/configure/route");
-    configurePost = mod.POST;
+    configurePost = await primeConfigureRoute();
   });
 
   afterEach(() => {
@@ -213,13 +267,24 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     vi.unstubAllGlobals();
   });
 
-  it("refuses a typed custom Claude id the subscription surface does not carry", async () => {
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+  it.each(["claude-fable-5", "claude-mythos-5", "claude-haiku-4-5"])(
+    "accepts %s — the native subscription route serves it",
+    async (model) => {
+      // The owner's report, on the OTHER write path: these were refused here
+      // too, because both routes read the same stale surface.
+      const res = await configurePost(subscribe({ model }));
+
+      expect(res.status).toBe(200);
+    },
+  );
+
+  it("refuses a typed custom Claude id no catalogue on this box carries", async () => {
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(400);
     const { error } = await res.json();
-    // Name the surface, exactly as the chat-header refusal does.
-    expect(error).toContain("claude-cli");
+    expect(error).toContain(OFF_CATALOGUE_ID);
+    // It lists what IS available, so a typo is self-correcting.
     expect(error).toContain("claude-fable-5");
     // A rejection that has already persisted the credential is not a
     // rejection — it is a half-applied save the customer cannot see.
@@ -261,7 +326,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-ant-test",
-      model: "claude-fable-5",
+      model: OFF_CATALOGUE_ID,
     }));
 
     expect(res.status).toBe(200);
@@ -273,7 +338,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
       auth: { profiles: { "anthropic:key": { provider: "anthropic", mode: "api_key" } } },
     } as never);
 
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(200);
   });
@@ -282,7 +347,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // UNKNOWN is not "no" — the same rule the pickers and the chat route obey.
     mockSurfaceRead.mockRejectedValue(new Error("ENOENT") as never);
 
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(200);
   });
@@ -290,7 +355,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   it("lets the pick through when the cached surface is empty", async () => {
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(200);
   });
@@ -306,5 +371,134 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
 
     expect(res.status).toBe(200);
     expect(mockSurfaceRead).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The same gap, the other subscription.
+ *
+ * The Claude guard above was added here because the chat header refused an id
+ * this route accepted. That is exactly true of ChatGPT as well: an OpenAI
+ * subscription save swaps the namespace to `codex/`, whose catalogue is
+ * narrower than the OpenAI one — the `-pro` tiers are API-key only and 400 on
+ * the ChatGPT-account route. `/setup-api/chat/model` has refused that class
+ * since it was written; this route validated the typed id for SHAPE only, so
+ * the wizard and Settings would pin the box to precisely the id the chat
+ * header rejects, and every turn afterwards fails upstream.
+ *
+ * It is also what ARMS the chat route's own second-site gap: an off-surface
+ * `codex/*` id has to get into `agents.defaults.model.primary` before the
+ * header can restore it, and this save is the only way in.
+ */
+describe("POST /setup-api/ai-models/configure and the ChatGPT subscription surface", () => {
+  let configurePost: (request: Request) => Promise<Response>;
+
+  /** An API-key-only model: the `-pro` tiers 400 on the ChatGPT-account route. */
+  const OFF_SURFACE = "gpt-5.4-pro";
+  /** Available on every ChatGPT tier including Free. */
+  const ON_SURFACE = "gpt-5.5";
+
+  /**
+   * The wizard's ChatGPT sign-in save, with `body` overriding its fields.
+   *
+   * The access token has to be JWT-SHAPED: the route rejects a codex
+   * subscription save whose credential is not three dot-separated segments,
+   * long before either surface guard. Payload is `{"sub":"test"}` — a shape,
+   * not a credential.
+   */
+  function chatgptSignIn(body: Record<string, unknown> = {}) {
+    return jsonRequest({
+      provider: "openai",
+      apiKey: "eyJhbGciOiJub25lIn0.eyJzdWIiOiJ0ZXN0In0.unsigned",
+      authMode: "subscription",
+      ...body,
+    });
+  }
+
+  beforeEach(async () => {
+    configurePost = await primeConfigureRoute();
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("refuses a typed custom id the ChatGPT subscription cannot run", async () => {
+    const res = await configurePost(chatgptSignIn({ model: OFF_SURFACE }));
+
+    expect(res.status).toBe(400);
+    const { error } = await res.json();
+    expect(error).toContain(OFF_SURFACE);
+    // The same wording the chat header uses, so the two write paths cannot
+    // disagree about what the customer is told.
+    expect(error).toContain("ChatGPT subscription auth");
+    // A refusal that has already persisted the OAuth token is not a refusal.
+    expectNoSideEffects();
+  });
+
+  it("accepts a typed custom id the ChatGPT subscription can run", async () => {
+    const res = await configurePost(chatgptSignIn({ model: ON_SURFACE }));
+
+    expect(res.status).toBe(200);
+    expect(
+      findConfigSet(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        "agents.defaults.model.primary",
+      )?.value,
+    ).toBe(`codex/${ON_SURFACE}`);
+  });
+
+  it("leaves an OpenAI API-key save alone", async () => {
+    // API-key mode is the very thing the refusal message recommends, and it
+    // writes the `openai/` namespace, where the -pro tiers route fine.
+    const res = await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-test",
+      model: OFF_SURFACE,
+    }));
+
+    expect(res.status).toBe(200);
+    expect(
+      findConfigSet(
+        vi.mocked(runOpenclawConfigSet),
+        vi.mocked(runOpenclawConfigSetBatch),
+        "agents.defaults.model.primary",
+      )?.value,
+    ).toBe(`openai/${OFF_SURFACE}`);
+  });
+
+  it("does not forget the local model's claim on the primary slot when it refuses", async () => {
+    // `local_ai_was_default` is what re-promotes the local model when it is
+    // switched back on. Clearing it used to happen the moment the request was
+    // parsed, so a save this route then REFUSED still changed how a later
+    // local re-enable behaves — a rejection with a side effect, which is the
+    // one thing the guards above exist to prevent.
+    vi.mocked(getAll).mockResolvedValue({ local_ai_was_default: true });
+
+    const res = await configurePost(chatgptSignIn({ model: OFF_SURFACE }));
+
+    expect(res.status).toBe(400);
+    expect(setMany).not.toHaveBeenCalled();
+  });
+
+  it("forgets it once the cloud save actually lands", async () => {
+    vi.mocked(getAll).mockResolvedValue({ local_ai_was_default: true });
+
+    const res = await configurePost(chatgptSignIn({ model: ON_SURFACE }));
+
+    expect(res.status).toBe(200);
+    expect(setMany).toHaveBeenCalledWith(
+      expect.objectContaining({ local_ai_was_default: undefined }),
+    );
+  });
+
+  it("lets the ChatGPT default through when nothing is typed", async () => {
+    // The PROVIDERS-table subscription override is `codex/gpt-5.5`, which is
+    // on-surface — the guard must not turn a plain sign-in into a 400.
+    const res = await configurePost(chatgptSignIn());
+
+    expect(res.status).toBe(200);
   });
 });

@@ -19,6 +19,18 @@ const HOTSPOT_ENV_PATH = path.join(
 let getCache: { body: unknown; at: number } | null = null;
 const GET_TTL_MS = 3_000;
 
+/**
+ * What the save did to the access point, as one word.
+ *
+ *  * `restarted` — the AP was bounced, so this connection has just dropped.
+ *  * `deferred`  — deliberately not bounced (the radio is a client right now);
+ *                  the saved settings apply at the next AP start.
+ *  * `stopped`   — the owner turned the hotspot off and it went down.
+ *  * `failed`    — the toggle threw; the settings are saved, the radio is not
+ *                  in the state the owner asked for, and `warning` says so.
+ */
+type HotspotApAction = "restarted" | "deferred" | "stopped" | "failed";
+
 export async function GET() {
   if (getCache && Date.now() - getCache.at < GET_TTL_MS) {
     return NextResponse.json(getCache.body);
@@ -126,7 +138,16 @@ export async function POST(request: Request) {
     });
 
     // Start or stop the AP service based on enabled state.
-    let apRestarted = false;
+    //
+    // FOUR OUTCOMES, NOT ONE BOOLEAN. `apRestarted: false` used to mean all of
+    // "we deliberately held off", "we stopped the AP as asked" and "the toggle
+    // THREW and nothing happened" — three different facts, and only one of them
+    // is fine. The deferral is a designed behaviour the wizard must treat as
+    // success; the throw is a box whose hotspot is not in the state its owner
+    // just asked for, reported to that owner as "Settings saved". So the verdict
+    // is named, and a failure carries its reason.
+    let apAction: HotspotApAction = isEnabled ? "deferred" : "stopped";
+    let apWarning: string | null = null;
     try {
       if (isEnabled) {
         // Single-radio guard: if the box is currently a WiFi *client* (it joined
@@ -150,7 +171,7 @@ export async function POST(request: Request) {
             "start",
             "clawbox-root-update@restart_ap.service",
           ]);
-          apRestarted = true;
+          apAction = "restarted";
         }
       } else {
         // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
@@ -163,12 +184,29 @@ export async function POST(request: Request) {
       }
     } catch (apErr) {
       console.warn("[hotspot] Failed to toggle AP:", apErr);
-      // Non-fatal: settings are saved for next AP start
+      // Still not fatal — the settings ARE saved and apply at the next AP start
+      // — but it stops being invisible.
+      apAction = "failed";
+      apWarning = isEnabled
+        ? "Your hotspot settings were saved, but this ClawBox could not restart "
+          + "its hotspot. The new settings apply the next time it starts."
+        : "Your hotspot settings were saved, but this ClawBox could not switch "
+          + "its hotspot off. It may still be broadcasting until the next restart.";
     }
+
+    // The GET handler caches for 3s, which is long enough to answer the reload
+    // that follows this save with the settings it just replaced.
+    getCache = null;
 
     // apRestarted tells the wizard whether the connection was actually dropped
     // (so it should show the reconnect handoff) vs. saved without disruption.
-    return NextResponse.json({ success: true, apRestarted });
+    // Kept, and now derived from the verdict rather than being it.
+    return NextResponse.json({
+      success: true,
+      apRestarted: apAction === "restarted",
+      apAction,
+      ...(apWarning ? { warning: apWarning } : {}),
+    });
   } catch (err) {
     return NextResponse.json(
       {

@@ -4,13 +4,17 @@ import fs from "fs";
 import path from "path";
 import * as childProcess from "child_process";
 
-// The subscription surface has to be CACHED like every other catalogue this
-// route enumerates. It is credential-independent, and each enumeration is
-// another multi-minute `openclaw models list` on a Jetson — but the reason it
-// rides the DISK cache rather than a process-local map is restarts: a
-// memory-only cache would leave the Anthropic picker unmarked (every model
-// pickable, i.e. the defect this stamp exists to fix) for the first minutes
-// after every reboot.
+// The subscription STAMP has to survive a restart. Enumerating a catalogue is
+// a multi-minute `openclaw models list` on a Jetson, so a memory-only cache
+// would leave the Anthropic picker unstamped for the first minutes after every
+// reboot — and an unstamped picker is the state this whole mechanism exists to
+// replace.
+//
+// This used to be a test about caching a SECOND catalogue (`claude-cli`).
+// Since PR #532 a Claude subscription routes natively and there is no second
+// catalogue: the surface is the anthropic list itself. The property under test
+// is unchanged and so is the customer-visible failure it prevents — only the
+// list that carries it moved.
 //
 // Its own file because the route's `memCache` is module-level: a fresh module
 // is the only way to observe the cold path and the warm path in one test.
@@ -49,13 +53,8 @@ const ANTHROPIC_LIST = {
     { key: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200_000 },
   ],
 };
-const CLAUDE_CLI_LIST = {
-  count: 1,
-  models: [
-    { key: "claude-cli/claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Claude CLI)", contextWindow: 200_000 },
-  ],
-};
 
+/** The `--provider <id>` a recorded `openclaw models list` spawn was given. */
 function providerOf(call: unknown[]): string {
   const args = call[1] as string[];
   return args[args.indexOf("--provider") + 1];
@@ -67,22 +66,18 @@ describe("catalog refresh — the subscription surface is cached", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     fs.rmSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true, force: true });
-    mockSpawn.mockImplementation(((_bin: string, args: string[]) => {
-      const provider = args[args.indexOf("--provider") + 1];
-      return fakeChild(provider === "claude-cli" ? CLAUDE_CLI_LIST : ANTHROPIC_LIST);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockSpawn.mockImplementation((() => fakeChild(ANTHROPIC_LIST)) as any);
   });
 
   it("enumerates it once, then serves it from cache on the next refresh", async () => {
     refreshInBackground("anthropic");
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(1));
 
-    // Persisted, so it survives the restart a process-local cache would not.
-    await vi.waitFor(() => expect(fs.existsSync(cacheFile("claude-cli"))).toBe(true));
-    // The main catalogue is published UNSTAMPED first (so the picker stops
-    // serving `warming` without waiting on the surface), then republished with
-    // the stamp — so wait for the content, not merely for the file.
+    // Persisted WITH the stamp, so it survives the restart a process-local
+    // cache would not. The payload is published unstamped first (so the picker
+    // stops serving `warming` as early as possible), then republished — so
+    // wait for the content, not merely for the file.
     await vi.waitFor(() => {
       const cached = JSON.parse(fs.readFileSync(cacheFile("anthropic"), "utf8"));
       const byId = Object.fromEntries(
@@ -92,9 +87,9 @@ describe("catalog refresh — the subscription surface is cached", () => {
       expect(byId["claude-sonnet-4-6"]).toBe(true);
       // ANTHROPIC_MODELS' curated entries get appended by
       // augmentWithStaticCatalog for the thin-enumeration case, and they are
-      // stamped too — claude-haiku-4-5 is API-key-only, and leaving it
-      // unstamped would make it pickable in exactly that case.
-      expect(byId["claude-haiku-4-5"]).toBe(false);
+      // stamped too — leaving one unstamped where the rest are stamped is a
+      // difference the pickers would render, for no reason the box can name.
+      expect(byId["claude-haiku-4-5"]).toBe(true);
     });
 
     // Ask again. `refreshing` single-flights per provider and clears a tick

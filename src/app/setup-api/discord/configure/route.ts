@@ -12,7 +12,17 @@ import {
   fetchDiscordIntents,
   isSafeDiscordToken,
 } from "@/lib/discord-api";
-import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
+import {
+  EnvSecretProviderConflictError,
+  restartGateway,
+  setDiscordToken,
+} from "@/lib/openclaw-config";
+import {
+  type ChannelPluginFailure,
+  type ChannelStatus,
+  ensureChannelPlugin,
+  waitForChannelConnected,
+} from "@/lib/openclaw-channels";
 import {
   DiscordEmptyAllowlistError,
   ensureHermesGateway,
@@ -120,6 +130,54 @@ async function applyAllowlist(
     }
     throw err;
   }
+}
+
+/** OpenClaw's id for this channel — the plugin's, the config key's and the CLI's. */
+const DISCORD_CHANNEL_ID = "discord";
+
+/**
+ * How many times to ask the gateway whether the channel came up, and how long
+ * to wait between asks.
+ *
+ * Each probe pays OpenClaw's CLI cold start (~10-12 s on a Jetson), so this is
+ * a wall-clock budget of roughly a minute — enough for a gateway restarted a
+ * moment ago to finish booting and log the channel in, and short enough that a
+ * save still answers while the owner is looking at it.
+ */
+const CHANNEL_VERIFY_ATTEMPTS = 5;
+const CHANNEL_VERIFY_DELAY_MS = 3_000;
+
+/**
+ * Warnings this route can return, beyond the allowlist/member ones that predate
+ * it. The first three are BLOCKING: they mean the channel is not reachable, and
+ * the save does not get to call itself a success.
+ */
+type ChannelWarning =
+  | "plugin_install_failed"
+  | "plugin_install_timeout"
+  | "token_unresolved"
+  | "channel_unverified"
+  | "not_connected";
+
+function pluginWarning(reason: ChannelPluginFailure): ChannelWarning {
+  // "unsupported_channel" cannot be reached from here — Discord is in the
+  // official-plugin map — but folding it in keeps the mapping total rather than
+  // leaving a hole a future channel falls through.
+  return reason === "install_timeout" ? "plugin_install_timeout" : "plugin_install_failed";
+}
+
+/**
+ * What the gateway's own view of the channel says, worst-first.
+ *
+ * `null` from the probe is UNKNOWN, not "fine": a wedged CLI and a healthy
+ * channel are not the same answer, and reporting the second for the first is
+ * the dishonesty this whole path exists to remove.
+ */
+function channelWarning(status: ChannelStatus | null): ChannelWarning | undefined {
+  if (!status) return "channel_unverified";
+  if (status.tokenStatus === "configured_unavailable") return "token_unresolved";
+  if (!status.connected) return "not_connected";
+  return undefined;
 }
 
 /** Restart the harness' gateway; report rather than throw when it will not. */
@@ -299,12 +357,41 @@ export async function POST(request: Request) {
     // never lose the credential the user just pasted.
     await set("discord_bot_token", rawToken);
 
+    // OpenClaw ships NO Discord channel in its stock extensions — the gateway
+    // logs "no channel plugin is installed or loadable (no-channel-owner)" and
+    // carries on. Installing the official plugin is part of saving the channel,
+    // and it has to happen BEFORE setDiscordToken: `plugins install` writes
+    // plugins.entries.discord into the same openclaw.json that the channel
+    // write read-modify-writes, so the other order drops the enable.
+    let installFailure: ChannelPluginFailure | null = null;
+    if (harness !== "hermes") {
+      const plugin = await ensureChannelPlugin(DISCORD_CHANNEL_ID);
+      if (!plugin.ok) installFailure = plugin.reason;
+    }
+
     if (harness === "hermes") {
       await setHermesDiscordToken(rawToken, request.signal);
     } else {
       // OpenClaw: channel config + the EnvironmentFile the gateway resolves
       // `channels.discord.token` from.
-      await setDiscordToken(rawToken);
+      try {
+        await setDiscordToken(rawToken);
+      } catch (err) {
+        if (err instanceof EnvSecretProviderConflictError) {
+          // Nothing was written — the writer refuses a reference it knows the
+          // gateway cannot resolve rather than repointing a secrets provider
+          // the operator owns. So there is nothing to restart and nothing to
+          // verify: report the cause and stop.
+          console.error("[discord/configure] refusing an unresolvable token reference:", err.message);
+          return NextResponse.json({
+            success: false,
+            code: "token_unresolved",
+            warning: "token_unresolved",
+            restarted: false,
+          });
+        }
+        throw err;
+      }
     }
 
     const selection = requestedIds ?? (directory ? defaultSelection(directory) : []);
@@ -315,16 +402,56 @@ export async function POST(request: Request) {
 
     const restarted = await applyRestart(harness, request.signal, rawToken);
 
+    // ── Did the channel actually come up? ──────────────────────────────────
+    //
+    // Everything above this line is a WRITE. A save that stops there is exactly
+    // the report that hid both defects for weeks: the credential was stored,
+    // the gateway was bounced, `{success:true}` went back, and the bot was in a
+    // restart loop the whole time. So ask the gateway.
+    //
+    // Only on OpenClaw: Hermes has no `openclaw` binary to ask, and its own
+    // /discord/status probe already maps that harness' four states.
+    let liveStatus: ChannelStatus | null = null;
+    if (harness !== "hermes" && restarted) {
+      liveStatus = await waitForChannelConnected(DISCORD_CHANNEL_ID, {
+        attempts: CHANNEL_VERIFY_ATTEMPTS,
+        delayMs: CHANNEL_VERIFY_DELAY_MS,
+      });
+    }
+
+    // Root cause first: a plugin that never installed explains every state
+    // below it, and "restart pending" explains a channel that is not up. Only
+    // when both of those are fine is the gateway's own verdict the answer.
+    const blocking: ChannelWarning | "restart_pending" | undefined =
+      harness === "hermes"
+        ? !restarted
+          ? "restart_pending"
+          : undefined
+        : installFailure
+          ? pluginWarning(installFailure)
+          : !restarted
+            ? "restart_pending"
+            : channelWarning(liveStatus);
+
     // Warning precedence: a bot nobody may talk to is a bigger problem than a
-    // pending restart, and a missing member list is the least of the three.
+    // channel that has not come up, and a missing member list is the least of
+    // them.
     const warning =
       allowlist.warning ??
-      (!restarted ? "restart_pending" : undefined) ??
+      blocking ??
       (directory === null ? "members_unavailable" : undefined) ??
       (intents && !intents.serverMembers ? "server_members_intent" : undefined);
 
+    // `success` means the channel is REACHABLE, not "the files were written".
+    // The Hermes leg keeps its older contract: it has its own live status probe
+    // and no CLI here to ask, so a restart it could not apply stays a warning.
+    const success = harness === "hermes" || blocking === undefined;
+
     return NextResponse.json({
-      success: true,
+      success,
+      // A machine-readable reason for the client to translate. Blocking only —
+      // `warning` still carries the advisory ones.
+      ...(success ? {} : { code: blocking }),
       restarted,
       username: bot.displayName,
       botId: bot.id,

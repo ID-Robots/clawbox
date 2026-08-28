@@ -118,6 +118,27 @@ describe("cloudflared — startTunnelService", () => {
     });
     await expect(cloudflared.startTunnelService()).resolves.not.toThrow();
   });
+
+  it("reports that boot-start was NOT recorded when enable fails", async () => {
+    // Non-fatal is not the same as unreported. The tunnel is up, and it will be
+    // down again after the next reboot — two facts, and the caller only ever
+    // got the first one.
+    execFileMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("enable")) return { error: new Error("Failed to enable") };
+      return { stdout: "" };
+    });
+    const result = await cloudflared.startTunnelService();
+    expect(result.bootPersisted).toBe(false);
+    expect(result.bootPersistWarning).toMatch(/reboot/i);
+  });
+
+  it("reports a clean start as persisted, with nothing to warn about", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    expect(await cloudflared.startTunnelService()).toEqual({
+      bootPersisted: true,
+      bootPersistWarning: null,
+    });
+  });
 });
 
 describe("cloudflared — stopTunnelService", () => {
@@ -127,6 +148,36 @@ describe("cloudflared — stopTunnelService", () => {
     const calls = execFileMock.mock.calls.map(([cmd, args]) => `${cmd} ${args.join(" ")}`);
     expect(calls).toContain("sudo -n /usr/bin/systemctl stop clawbox-tunnel.service");
     expect(calls).toContain("sudo -n /usr/bin/systemctl disable clawbox-tunnel.service");
+  });
+
+  it("reports that the OFF was NOT recorded when disable fails", async () => {
+    // The one that matters. A stop whose `disable` failed leaves a box that
+    // starts publishing a public *.trycloudflare.com address again at the next
+    // power cycle — after its owner switched Remote Access off and was told it
+    // worked.
+    execFileMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("disable")) return { error: new Error("Failed to disable") };
+      return { stdout: "" };
+    });
+    const result = await cloudflared.stopTunnelService();
+    expect(result.bootPersisted).toBe(false);
+    expect(result.bootPersistWarning).toMatch(/reboot/i);
+  });
+
+  it("still throws when the stop itself fails — that is not a warning", async () => {
+    execFileMock.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes("stop")) return { error: new Error("Failed to stop") };
+      return { stdout: "" };
+    });
+    await expect(cloudflared.stopTunnelService()).rejects.toThrow(/Failed to stop/);
+  });
+
+  it("reports a clean stop as persisted", async () => {
+    execFileMock.mockReturnValue({ stdout: "" });
+    expect(await cloudflared.stopTunnelService()).toEqual({
+      bootPersisted: true,
+      bootPersistWarning: null,
+    });
   });
 });
 

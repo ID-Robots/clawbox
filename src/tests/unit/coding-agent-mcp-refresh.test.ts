@@ -142,4 +142,19 @@ describe("refreshCodingAgentToolsIfReadinessChanged", () => {
     await refreshCodingAgentToolsIfReadinessChanged(false, true);
     expect(logSpy).not.toHaveBeenCalled();
   });
+
+  it("does not claim success when the dashboard only asked for confirmation", async () => {
+    // The same shape one layer down, and the reason it survived: an error frame
+    // becomes null, but `{ status: "confirm_required" }` is a perfectly ordinary
+    // non-error reply that means `reload.mcp` DID NOTHING — it is what the
+    // dashboard answers when `approvals.mcp_reload_confirm` wants a human. A
+    // helper that reads "a frame came back" as "it worked" then logs "asked the
+    // agent to reload its MCP servers" over a box whose tool list never moved,
+    // and the one line that would tell an operator #514's bug is still
+    // happening is the line that says it isn't.
+    mockRpc.mockResolvedValue({ status: "confirm_required" });
+    await refreshCodingAgentToolsIfReadinessChanged(false, true);
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalled();
+  });
 });

@@ -30,6 +30,8 @@ import {
 } from "@/lib/email-config";
 import { refreshEmailToolsIfReadabilityChanged } from "@/lib/email-mcp-refresh";
 import { clearPending } from "@/lib/email-pending";
+import { clearPrompts } from "@/lib/email-approval-prompts";
+import { retireAllChatPrompts } from "@/lib/email-approval";
 import { ImapError, verifyImap } from "@/lib/imap-client";
 import { getActiveHarness } from "@/lib/harness";
 import {
@@ -244,7 +246,13 @@ export async function DELETE(request: Request) {
     await clearEmailSettings();
     // Drafts waiting on an account that no longer exists can never be approved,
     // and they hold agent-composed text. Disconnecting drops them.
+    // Order matters: the buttons can only be found while the store still holds
+    // the chat and message ids, so the chat is tidied BEFORE the records go.
+    // Clearing first would leave live controls in the owner's Telegram whose
+    // only possible answer is an error.
+    await retireAllChatPrompts();
     clearPending();
+    clearPrompts();
     if ((await getActiveHarness()) === "hermes") {
       try {
         await clearHermesEmail();

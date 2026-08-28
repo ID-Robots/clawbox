@@ -21,6 +21,7 @@ import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
+import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
@@ -31,9 +32,7 @@ import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { BuildDriftBanner, BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
-import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { useReconnect } from "@/hooks/useReconnect";
-import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import { isGenerationLocale } from "@/lib/mascot-phrases";
 
@@ -126,6 +125,37 @@ interface LostDraft {
   body: string;
 }
 
+/**
+ * "Approve from Telegram", as the panel sees it.
+ *
+ * `ownerChats` is a COUNT and never the ids: the panel only needs to warn that
+ * nobody is paired yet, and publishing the household's Telegram user ids into
+ * the DOM to say so would be a worse trade than the warning is worth.
+ */
+interface ChatApprovalState {
+  enabled: boolean;
+  botConfigured: boolean;
+  botUsername: string | null;
+  ownerChats: number;
+}
+
+/** One shape, one parser. Two hand-rolled copies drift the moment a field moves. */
+function parseChatApprovalState(d: unknown): ChatApprovalState {
+  const r = (typeof d === "object" && d !== null ? d : {}) as Record<string, unknown>;
+  return {
+    enabled: r.enabled === true,
+    botConfigured: r.botConfigured === true,
+    botUsername: typeof r.botUsername === "string" ? r.botUsername : null,
+    ownerChats: typeof r.ownerChats === "number" ? r.ownerChats : 0,
+  };
+}
+
+// How often the open approvals strip re-reads the queue, and the focus /
+// visible-edge / not-behind-a-hidden-tab rules around it, now live in
+// `@/lib/email-pending-refresh` — shared with the chat surface's batch card,
+// which asks the same question about the same queue and must not answer it on
+// a different schedule.
+
 interface SwapStats { used: number; total: number; percent: number }
 interface DiskMount { filesystem: string; size: string; used: string; avail: string; usePercent: number; mountpoint: string }
 interface NetworkIface { name: string; ip: string; rx: number; tx: number }
@@ -201,14 +231,19 @@ interface WhatsappStatus {
   receiving?: boolean;
 }
 
+/** A PNG data URL that actually carries an image. Mirrors the server's guard. */
+const WHATSAPP_QR_DATA_URL_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+
 /** Phases of GET /setup-api/whatsapp/pair. Mirrors WhatsappPairPhase server-side. */
 type WhatsappPairPhase = "idle" | "preparing" | "starting" | "waiting" | "scanned" | "paired" | "error";
 
 /** Shape of GET/POST /setup-api/whatsapp/pair, normalised client-side. */
 interface WhatsappPairSnapshot {
   phase: WhatsappPairPhase;
-  /** Raw Baileys payload. Rendered as a QR; never shown as text. */
+  /** Raw Baileys payload (Hermes). Rendered as a QR; never shown as text. */
   qr: string | null;
+  /** Pre-rendered PNG data URL (OpenClaw, whose plugin draws the code itself). */
+  qrImage: string | null;
   /** Distinct QR payloads this session — proof the rotation is live. */
   qrCount: number;
   restarts: number;
@@ -697,6 +732,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hotspotEnabled, setHotspotEnabled] = useState<boolean | null>(null);
   const [hotspotSSID, setHotspotSSID] = useState("ClawBox-Setup");
   const [hotspotToggling, setHotspotToggling] = useState(false);
+  // The hotspot route saves the SETTINGS and then tries to move the radio, and
+  // those are two different outcomes. It used to answer both with
+  // `{ success: true, apRestarted: false }`, so a toggle whose AP command threw
+  // flipped this switch and said nothing — a box still broadcasting behind a
+  // control that reads "off". It now names the verdict; this is where a failed
+  // one is shown.
+  const [hotspotApWarning, setHotspotApWarning] = useState<string | null>(null);
   const [hotspotSSIDInput, setHotspotSSIDInput] = useState("ClawBox-Setup");
   const [hotspotSSIDSaving, setHotspotSSIDSaving] = useState(false);
   const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -1111,8 +1153,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
+  /**
+   * What a 200 from the hotspot route actually achieved.
+   *
+   * `apAction` separates the three things the old `apRestarted: false` collapsed
+   * into one: a deliberate deferral (the radio is a client, so bouncing the AP
+   * would sever this connection), a clean stop, and a toggle that THREW. Only
+   * the last one is a problem, and only it carries a `warning`.
+   */
+  const readHotspotVerdict = async (res: Response): Promise<string | null> => {
+    const data = await res.json().catch(() => ({})) as { apAction?: unknown; warning?: unknown };
+    if (data.apAction !== "failed") return null;
+    return typeof data.warning === "string" && data.warning.trim()
+      ? data.warning
+      : "Your hotspot settings were saved, but the hotspot itself did not change.";
+  };
+
   const performHotspotToggle = async (newEnabled: boolean) => {
     setHotspotToggling(true);
+    setHotspotApWarning(null);
     try {
       const res = await fetch("/setup-api/system/hotspot", {
         method: "POST",
@@ -1120,7 +1179,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: hotspotSSID, enabled: newEnabled }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
+      // The switch follows the SAVED setting, which did change. What may not
+      // have changed is the radio, and that is what the warning is for — the
+      // "off" case especially, where a box goes on broadcasting behind a
+      // control that says it stopped.
       setHotspotEnabled(newEnabled);
+      setHotspotApWarning(await readHotspotVerdict(res));
     } catch { /* leave state unchanged */ } finally {
       setHotspotToggling(false);
     }
@@ -1161,6 +1225,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         throw new Error(data.error || "Failed");
       }
       setHotspotSSID(next);
+      // The AP verdict lives in ONE place — the card-level warning — and is
+      // written on every AP outcome, `null` included. Setting it only on
+      // failure would leave a stale warning from an earlier failed toggle
+      // sitting over a save that has since worked, which is the same class of
+      // wrong answer this PR is about. The field status stays about the field:
+      // the name WAS saved, whatever the radio did.
+      setHotspotApWarning(await readHotspotVerdict(res));
       setHotspotSSIDStatus({ type: "success", message: "Hotspot name updated" });
     } catch (err) {
       setHotspotSSIDStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
@@ -1192,6 +1263,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       setHotspotHasPassword(true);
       setHotspotPassword("");
+      // Same rule as the SSID save above: one home for the AP verdict, written
+      // on every outcome so a later success clears an earlier failure.
+      setHotspotApWarning(await readHotspotVerdict(res));
       setHotspotPasswordStatus({ type: "success", message: "Hotspot password updated" });
     } catch (err) {
       setHotspotPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
@@ -1550,6 +1624,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailReconfigure, setEmailReconfigure] = useState(false);
   const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const emailSaveControllerRef = useRef<AbortController | null>(null);
+  const [chatApproval, setChatApproval] = useState<ChatApprovalState | null>(null);
+  const [chatApprovalToken, setChatApprovalToken] = useState("");
+  const [chatApprovalBusy, setChatApprovalBusy] = useState(false);
 
   const refreshEmailStatus = useCallback(async () => {
     try {
@@ -1608,11 +1685,90 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  const refreshChatApproval = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/email/chat-approval", { cache: "no-store" });
+      if (!r.ok) return;
+      setChatApproval(parseChatApprovalState(await r.json()));
+    } catch {
+      // keep the last known state
+    }
+  }, []);
+
   useEffect(() => {
     if (section !== "email" && !isMobile) return;
     refreshEmailStatus();
     refreshEmailPending();
-  }, [section, isMobile, refreshEmailStatus, refreshEmailPending]);
+    refreshChatApproval();
+  }, [section, isMobile, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+
+  /**
+   * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
+   *
+   * The approval strip used to be fetched on mount and after this panel's own
+   * buttons, and nowhere else — so a draft approved ANYWHERE ELSE went on being
+   * listed here as if it were still waiting. That was true of the chat card and
+   * of a second browser tab already, and it is unavoidable now that a draft can
+   * be approved from Telegram, where this page is not even open.
+   *
+   * A stale entry in an approvals list is not a cosmetic bug: the owner reads
+   * it as "this message has not gone out", and the honest answers are either to
+   * re-approve something already sent or to delete a draft that no longer
+   * exists. So the strip re-reads the server whenever this tab could have
+   * missed something — when it comes back to the foreground, and on a slow tick
+   * while it is being looked at.
+   *
+   * Only while the section is actually on screen, and stopped the moment it is
+   * not: this is a Jetson serving its own UI, and a poll that runs behind a
+   * hidden tab is a poll nobody is reading.
+   *
+   * Which is why the guard is `emailPanelVisible` and not the `&& !isMobile`
+   * shape the one-shot fetches above use. That shape inverts on a phone —
+   * `!isMobile` is false, so the early return never fires and the section is
+   * never consulted — and the WhatsApp heartbeat above learned the same lesson
+   * the expensive way: an interval that could not be stopped by browsing away.
+   * An extra GET on mount costs nothing; a timer that never stops does.
+   */
+  const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
+
+  useEffect(() => {
+    if (!emailPanelVisible) return;
+    // The pacing — interval, focus, visible-edge, and never behind a hidden tab
+    // — is `installPendingRefresh`, shared with the chat surface's batch card so
+    // the two cannot drift into disagreeing about how fresh this list is.
+    return installPendingRefresh(() => {
+      refreshEmailStatus();
+      refreshEmailPending();
+      // The panel's own state can go stale the same way: an owner who pairs
+      // with the approvals bot in Telegram while this is open should stop
+      // being told nobody can be asked.
+      refreshChatApproval();
+    });
+  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+
+  /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
+  const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
+    setChatApprovalBusy(true);
+    setEmailMsg(null);
+    try {
+      const r = await fetch("/setup-api/email/chat-approval", {
+        method: body === null ? "DELETE" : "POST",
+        headers: { "Content-Type": "application/json" },
+        ...(body === null ? {} : { body: JSON.stringify(body) }),
+      });
+      const d = await r.json().catch(() => null);
+      if (!r.ok) {
+        setEmailMsg({ type: "error", message: typeof d?.error === "string" ? d.error : t("settings.failedSave") });
+        return;
+      }
+      setChatApproval(parseChatApprovalState(d));
+      setChatApprovalToken("");
+    } catch {
+      setEmailMsg({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      setChatApprovalBusy(false);
+    }
+  };
 
   /**
    * Open the setup form on what is actually saved, rather than on the defaults.
@@ -1898,6 +2054,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         ? (phase as WhatsappPairPhase)
         : "idle",
       qr: typeof raw.qr === "string" && raw.qr.length > 0 ? raw.qr : null,
+      // Prefix AND payload. `"data:image/png;base64,"` on its own is a valid
+      // data URL for an empty image, and would render a blank square the owner
+      // is invited to scan. Same rule as readQrDataUrl() server-side.
+      qrImage: WHATSAPP_QR_DATA_URL_RE.test(String(raw.qrImage ?? "")) ? (raw.qrImage as string) : null,
       qrCount: typeof raw.qrCount === "number" ? raw.qrCount : 0,
       restarts: typeof raw.restarts === "number" ? raw.restarts : 0,
       error: typeof raw.error === "string" ? raw.error : null,
@@ -1921,7 +2081,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       // Show "preparing" the instant the click lands: on a box with no
       // node_modules the POST below does not return until npm has finished,
       // and a dead button for two minutes reads as a broken one.
-      setWaPair({ phase: "preparing", qr: null, qrCount: 0, restarts: 0, error: null, user: null });
+      setWaPair({ phase: "preparing", qr: null, qrImage: null, qrCount: 0, restarts: 0, error: null, user: null });
       try {
         const res = await fetch("/setup-api/whatsapp/pair", {
           method: "POST",
@@ -1933,6 +2093,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           setWaPair({
             phase: "error",
             qr: null,
+            qrImage: null,
             qrCount: 0,
             restarts: 0,
             error: typeof data?.error === "string" ? data.error : "start_failed",
@@ -1942,7 +2103,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         }
         setWaPair(readPairSnapshot(data));
       } catch {
-        setWaPair({ phase: "error", qr: null, qrCount: 0, restarts: 0, error: "start_failed", user: null });
+        setWaPair({ phase: "error", qr: null, qrImage: null, qrCount: 0, restarts: 0, error: "start_failed", user: null });
       } finally {
         setWaPairBusy(false);
       }
@@ -2169,6 +2330,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (warning === "no_allowed_users") return t("settings.discordSavedNoUsers");
     if (warning === "members_unavailable") return t("settings.discordMembersUnavailable");
     if (warning === "server_members_intent") return t("settings.discordMembersUnavailable");
+    // The OpenClaw channel-plugin states. The two install failures share one
+    // sentence on purpose — the codes differ so a support log can tell a
+    // refused install from a slow one, but the remedy the owner acts on is the
+    // same: check the connection and save again.
+    if (warning === "plugin_install_failed" || warning === "plugin_install_timeout") {
+      return t("settings.discordSavePluginFailed");
+    }
+    if (warning === "token_unresolved") return t("settings.discordSaveTokenUnresolved");
+    if (warning === "channel_unverified") return t("settings.discordSaveUnverified");
+    if (warning === "not_connected") return t("settings.discordSaveNotConnected");
     return null;
   };
 
@@ -2202,6 +2373,19 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               : [],
           );
           setDcStatus({ type: "error", message: t("settings.discordStateIntentsMissingHint") });
+          return;
+        }
+        // A blocking channel state: the credential IS saved, the channel is
+        // just not reachable yet, and the panel can say which of the four
+        // reasons it was. Falling through to "failed to save" here would be
+        // both wrong (it did save) and unactionable.
+        const blocked = discordWarningText(data.code);
+        if (blocked) {
+          setDcStatus({ type: "error", message: blocked });
+          setDcConfigured(true);
+          setDcToken("");
+          setDcReconfigure(false);
+          refreshDiscordStatus();
           return;
         }
         // The route already phrases its other errors for a person (bad token vs
@@ -2977,6 +3161,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${hotspotEnabled ? "translate-x-5" : "translate-x-0"}`} />
                 </button>
               </div>
+              {hotspotApWarning && (
+                <div className="mt-3"><StatusMessage type="info" message={hotspotApWarning} /></div>
+              )}
               {hotspotEnabled && hotspotActive !== false && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">
                   {t("settings.hotspotDesc", { ssid: hotspotSSID })}
@@ -3261,96 +3448,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <div className="max-w-xl space-y-5">
             <AiProviderList />
 
-            {/* Provider status card — suppressed on the Hermes edition, where the
-                AI Providers hero below already names the active provider, its
-                model and its connection. Kept verbatim on openclaw/dual, which
-                have no hero. */}
-            {edition !== "hermes" && (
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
-              </div>
-              {aiProvider === null ? (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
-                  </div>
-                </div>
-              ) : aiProvider.connected ? (
-                (() => {
-                  const isClawai = aiProvider.provider === "clawai";
-                  const cardClass = `flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5${
-                    isClawai ? " hover:bg-green-500/[0.1] hover:border-green-500/25 transition-colors cursor-pointer no-underline group" : ""
-                  }`;
-                  const inner = (
-                    <>
-                      <div className="relative w-10 h-10 rounded-full bg-green-500/15 border border-green-400/10 flex items-center justify-center shrink-0">
-                        <AIProviderIcon provider={aiProvider.provider} size={24} />
-                        <span className="absolute -right-1 -bottom-1 w-5 h-5 rounded-full bg-[#10261d] border border-green-500/25 flex items-center justify-center">
-                          <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }}>check</span>
-                        </span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm text-[var(--text-primary)] font-medium truncate">{aiProvider.providerLabel}</span>
-                          {(() => {
-                            const tier = isClawai ? normalizeClawboxAiTier(aiProvider.clawaiTier) : null;
-                            if (!tier) return null;
-                            return (
-                              <span
-                                className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
-                                  tier === "pro"
-                                    ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
-                                    : "bg-orange-500/15 border-orange-400/30 text-orange-200"
-                                }`}
-                              >
-                                {CLAWBOX_AI_TIER_LABEL[tier]}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                          <span className="text-xs text-green-400/80">
-                            {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
-                          </span>
-                        </div>
-                      </div>
-                      {isClawai && (
-                        <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:text-green-400 transition-all shrink-0" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
-                      )}
-                    </>
-                  );
-                  return isClawai ? (
-                    <a
-                      href={PORTAL_DASHBOARD_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={cardClass}
-                      aria-label="Open ClawBox AI portal dashboard"
-                    >
-                      {inner}
-                    </a>
-                  ) : (
-                    <div className={cardClass}>{inner}</div>
-                  );
-                })()
-              ) : (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>link_off</span>
-                  </div>
-                  <div>
-                    <div className="text-sm text-[var(--text-muted)]">{t("settings.noProviderConnected")}</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.selectProvider")}</div>
-                  </div>
-                </div>
-              )}
-            </div>
-            )}
+            {/* No status card here. The AI Providers panel below opens with the
+                hero, which names the active provider, its model and its
+                connection — this card said the same three things one card
+                higher. It was already suppressed on the Hermes edition for
+                exactly that reason; the hero now renders on every edition, so
+                the reason applies everywhere and the twin is gone. The two
+                affordances only this card carried both survive inside the
+                panel: the plan picker shows the ClawBox AI tier and links the
+                portal dashboard. */}
 
             <I18nProvider><AIModelsStep
               embedded
@@ -3922,6 +4028,77 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               </div>
             )}
 
+            {/* Approve from chat. Shown only once an account exists AND the
+                owner has asked to be asked -- with askBeforeSend off there is
+                nothing to approve, and offering the switch would suggest
+                otherwise. */}
+            {emailStatus?.configured && emailStatus.askBeforeSend && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-chat-approval">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailChatApproval")}</label>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.emailChatApprovalHelp")}</p>
+
+                {chatApproval?.botConfigured ? (
+                  <div className="space-y-3">
+                    <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          data-testid="settings-email-chat-approval-toggle"
+                          checked={chatApproval.enabled}
+                          disabled={chatApprovalBusy}
+                          onChange={(e) => submitChatApproval({ enabled: e.target.checked })}
+                          className="mt-0.5 accent-[var(--coral-bright)]"
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailChatApprovalOn")}</span>
+                          <span className="block text-xs text-[var(--text-secondary)] mt-0.5 break-words">
+                            {t("settings.emailChatApprovalConnected", { bot: chatApproval.botUsername ?? "" })}
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                    {chatApproval.ownerChats === 0 && (
+                      <p className="text-xs text-amber-300/90" data-testid="settings-email-chat-approval-no-peers">
+                        {t("settings.emailChatApprovalNoPeers")}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => submitChatApproval(null)}
+                      disabled={chatApprovalBusy}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50 px-0"
+                    >
+                      {t("settings.emailChatApprovalDisconnect")}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <input
+                      type="password"
+                      data-testid="settings-email-chat-approval-token"
+                      value={chatApprovalToken}
+                      onChange={(e) => setChatApprovalToken(e.target.value)}
+                      placeholder={t("settings.emailChatApprovalToken")}
+                      autoComplete="off"
+                      className="w-full px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-base text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => submitChatApproval({ botToken: chatApprovalToken.trim(), enabled: true })}
+                      disabled={chatApprovalBusy || chatApprovalToken.trim().length === 0}
+                      className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                    >
+                      {chatApprovalBusy && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {t("settings.emailChatApprovalConnect")}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Setup */}
             {(emailStatus === null || !emailStatus.configured || emailReconfigure) && (
               <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
@@ -4342,20 +4519,37 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                             these payloads run past 200 characters, and at 256px
                             a denser correction level shrinks each module below
                             what a phone reads at arm's length. */}
-                        {waPair?.phase === "waiting" && waPair.qr && (
+                        {waPair?.phase === "waiting" && (waPair.qr || waPair.qrImage) && (
                           <div className="mt-3" aria-live="polite">
                             <div className="text-sm text-[var(--text-primary)] font-medium">{t("settings.whatsappPairScanTitle")}</div>
                             <div className="flex justify-center my-4">
                               <div className="bg-white rounded-xl p-3" data-testid="whatsapp-qr">
-                                <QRCodeSVG
-                                  value={waPair.qr}
-                                  size={256}
-                                  level="L"
-                                  marginSize={4}
-                                  bgColor="#ffffff"
-                                  fgColor="#000000"
-                                  title={t("settings.whatsappPairQrLabel")}
-                                />
+                                {/* Two harnesses, one card. The Hermes bridge emits the raw
+                                    Baileys payload, so we draw the code ourselves; the
+                                    OpenClaw plugin renders it and hands back a PNG, so
+                                    there is nothing to draw and re-encoding it would only
+                                    lose fidelity. `qr` wins when both are somehow present:
+                                    a vector at any zoom beats a fixed bitmap. */}
+                                {waPair.qr ? (
+                                  <QRCodeSVG
+                                    value={waPair.qr}
+                                    size={256}
+                                    level="L"
+                                    marginSize={4}
+                                    bgColor="#ffffff"
+                                    fgColor="#000000"
+                                    title={t("settings.whatsappPairQrLabel")}
+                                  />
+                                ) : (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={waPair.qrImage as string}
+                                    alt={t("settings.whatsappPairQrLabel")}
+                                    width={256}
+                                    height={256}
+                                    className="block"
+                                  />
+                                )}
                               </div>
                             </div>
                             <p className="text-xs text-[var(--text-secondary)] leading-relaxed">{t("settings.whatsappPairScanHint")}</p>

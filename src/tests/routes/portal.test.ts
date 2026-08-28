@@ -101,14 +101,35 @@ describe("/setup-api/portal/start", () => {
 
   it("starts the systemd unit and returns success", async () => {
     cloudflaredMock.isInstalled.mockResolvedValue(true);
-    cloudflaredMock.startTunnelService.mockResolvedValue(undefined);
+    cloudflaredMock.startTunnelService.mockResolvedValue({
+      bootPersisted: true,
+      bootPersistWarning: null,
+    });
 
     const mod = await import("@/app/setup-api/portal/start/route");
     const res = await mod.POST();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ success: true });
+    expect(body).toEqual({ success: true, bootPersisted: true });
     expect(cloudflaredMock.startTunnelService).toHaveBeenCalledTimes(1);
+  });
+
+  it("says so when the unit started but boot-start was not recorded", async () => {
+    cloudflaredMock.isInstalled.mockResolvedValue(true);
+    cloudflaredMock.startTunnelService.mockResolvedValue({
+      bootPersisted: false,
+      bootPersistWarning: "Remote access is running, but ... after the next reboot.",
+    });
+
+    const mod = await import("@/app/setup-api/portal/start/route");
+    const res = await mod.POST();
+    // Still 200 — the tunnel IS up, and calling that a failure would be the
+    // opposite lie. What changes is that the second fact travels with it.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.bootPersisted).toBe(false);
+    expect(body.warning).toMatch(/reboot/);
   });
 
   it("returns 500 when systemctl restart throws", async () => {
@@ -127,14 +148,39 @@ describe("/setup-api/portal/start", () => {
 
 describe("/setup-api/portal/stop", () => {
   it("stops the systemd unit and returns success", async () => {
-    cloudflaredMock.stopTunnelService.mockResolvedValue(undefined);
+    cloudflaredMock.stopTunnelService.mockResolvedValue({
+      bootPersisted: true,
+      bootPersistWarning: null,
+    });
     cloudflaredMock.getTunnelServiceState.mockResolvedValue("inactive");
 
     const mod = await import("@/app/setup-api/portal/stop/route");
     const res = await mod.POST();
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.success ?? body.ok ?? true).toBeTruthy();
+    expect(body.success).toBe(true);
+    expect(body.bootPersisted).toBe(true);
+    expect(body.warning).toBeUndefined();
     expect(cloudflaredMock.stopTunnelService).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not answer a stop that will undo itself with a bare success", async () => {
+    // `systemctl stop` worked, `systemctl disable` did not: the tunnel is down
+    // now and comes back at the next boot, still publishing this box to the
+    // public internet. The old answer to this was byte-identical to the answer
+    // for a clean stop.
+    cloudflaredMock.stopTunnelService.mockResolvedValue({
+      bootPersisted: false,
+      bootPersistWarning:
+        "Remote access is stopped, but ... after the next reboot.",
+    });
+    cloudflaredMock.getTunnelServiceState.mockResolvedValue("inactive");
+
+    const mod = await import("@/app/setup-api/portal/stop/route");
+    const res = await mod.POST();
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.bootPersisted).toBe(false);
+    expect(body.warning).toMatch(/reboot/);
   });
 });

@@ -9,7 +9,20 @@
  * the screen anyway, one panel over. One parser, every surface.
  *
  * The grep that says the surfaces are all accounted for:
+ *   grep -rn "\.std\(out\|err\)" src --include=*.ts --include=*.tsx
+ *
+ * That grep is WIDER than the one this header used to record, and the widening
+ * is the point. The old one —
+ *
  *   grep -rn "stderr" src/app/setup-api/hermes --include=route.ts
+ *
+ * — was scoped to a single directory, and named itself a completeness proof
+ * while three libraries outside it (`hermes-cloud-provider`, `hermes-clawai`,
+ * `hermes-config-yaml`) were handing the same raw stream to the same browser
+ * through /setup-api/ai-models/configure. A proof that only looks where the
+ * bug was first found proves nothing about where it also lives. The wide form
+ * is noisier — it lists the plumbing that merely COLLECTS a stream — but every
+ * site that RENDERS one is in its output.
  */
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 
@@ -271,6 +284,28 @@ export function hermesFailureMessage(stdout: string, stderr: string): string {
  */
 export function safeHermesFailureMessage(stdout: string, stderr: string): string {
   return sanitizeErrorMessage(hermesFailureMessage(stdout, stderr)) ?? "";
+}
+
+/**
+ * Blank a secret out of a stream before anything else looks at it.
+ *
+ * Argv is the leak: `hermes auth add … --api-key <key>` puts the credential on
+ * the command line, and an argparse usage error prints the command line back.
+ * None of the rules above would catch it — the key is not a path, not a URL,
+ * and `sanitizeErrorMessage`'s credential test knows only the `sk-`/`claw_`
+ * prefixes, which a bring-your-own-key provider need not use.
+ *
+ * So the caller that HAS the secret removes it, and does so BEFORE the parser
+ * rather than after: the cap and the line filter both work on the text a person
+ * will see, and a key spliced out afterwards would already have been counted
+ * (or, worse, have been the 400 characters that survived).
+ *
+ * Lives here rather than beside one route because two callers now need it —
+ * /setup-api/hermes/provider-key and `applyCloudProviderKeyToHermes`, which
+ * runs the very same `auth add` for the wizard's Settings panel.
+ */
+export function redactKey(text: string, apiKey: string): string {
+  return apiKey ? text.split(apiKey).join("<redacted>") : text;
 }
 
 /**

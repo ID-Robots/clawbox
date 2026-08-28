@@ -74,9 +74,7 @@ export const de: Record<string, string> = {
   "hermesProvider.title": "KI-Anbieter",
   "hermesProvider.intro":
     "Dieses Gerät läuft mit Hermes. Verbinden Sie Anbieter und wählen Sie den Standard — Status, Anmeldung und Wechsel finden alle hier statt.",
-  "hermesProvider.radioGroupLabel": "KI-Anbieter",
   "hermesProvider.hero.nativeSwitch": "wechselt nativ über Hermes",
-  "hermesProvider.hero.changeModel": "Modell ändern",
   "hermesProvider.continue": "Weiter",
   "hermesProvider.connected.affirmation": "Verbunden",
 

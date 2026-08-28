@@ -16,6 +16,14 @@ vi.mock("@/lib/openclaw-config", () => ({
   setDiscordToken: vi.fn(),
   restartGateway: vi.fn(),
 }));
+// On OpenClaw the channel is a separately-installed plugin, and the save is not
+// finished until the gateway reports the channel up. Both live here; the
+// default in beforeEach is the happy path so the assertions below stay about
+// what they were about.
+vi.mock("@/lib/openclaw-channels", () => ({
+  ensureChannelPlugin: vi.fn(),
+  waitForChannelConnected: vi.fn(),
+}));
 vi.mock("@/lib/hermes-discord", async () => {
   const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
   return {
@@ -35,6 +43,7 @@ vi.mock("@/lib/hermes-discord", async () => {
 import { set } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
+import { ensureChannelPlugin, waitForChannelConnected } from "@/lib/openclaw-channels";
 import { setHermesDiscordToken } from "@/lib/hermes-discord";
 
 const mockSet = vi.mocked(set);
@@ -42,6 +51,8 @@ const mockHarness = vi.mocked(getActiveHarness);
 const mockSetDiscordToken = vi.mocked(setDiscordToken);
 const mockRestartGateway = vi.mocked(restartGateway);
 const mockSetHermesToken = vi.mocked(setHermesDiscordToken);
+const mockEnsureChannelPlugin = vi.mocked(ensureChannelPlugin);
+const mockWaitForChannel = vi.mocked(waitForChannelConnected);
 
 const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
@@ -76,6 +87,15 @@ describe("POST /setup-api/discord/configure", () => {
     mockSetDiscordToken.mockResolvedValue();
     mockRestartGateway.mockResolvedValue();
     mockSetHermesToken.mockResolvedValue();
+    mockEnsureChannelPlugin.mockResolvedValue({ ok: true, installed: false });
+    mockWaitForChannel.mockResolvedValue({
+      configured: true,
+      running: true,
+      connected: true,
+      tokenStatus: "available",
+      restartPending: false,
+      lastError: null,
+    });
 
     POST = (await import("@/app/setup-api/discord/configure/route")).POST;
   });
@@ -195,7 +215,7 @@ describe("POST /setup-api/discord/configure", () => {
       expect(order).toEqual(["store", "harness"]);
     });
 
-    it("reports a restart failure as a saved-with-warning, not an error", async () => {
+    it("reports a restart failure as restart_pending, and not as a success", async () => {
       mockRestartGateway.mockRejectedValue(new Error("systemctl: unit is masked"));
 
       const res = await POST(req({ botToken: TOKEN }));
@@ -205,7 +225,17 @@ describe("POST /setup-api/discord/configure", () => {
       // A machine token, not a sentence: the panel maps it to a translated
       // string. The English phrase this used to return was the one piece of
       // Discord copy that never went through i18n.
-      expect(body).toMatchObject({ success: true, restarted: false, warning: "restart_pending" });
+      //
+      // `success` is false because the channel is not receiving anything: the
+      // config is on disk and the gateway is still running the old one. It used
+      // to answer `success: true` here, which is how a box with a bot that had
+      // never connected reported a clean save.
+      expect(body).toMatchObject({
+        success: false,
+        restarted: false,
+        warning: "restart_pending",
+        code: "restart_pending",
+      });
     });
   });
 

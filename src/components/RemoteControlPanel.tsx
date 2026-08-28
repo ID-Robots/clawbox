@@ -25,6 +25,11 @@ export default function RemoteControlPanel() {
   const [loading, setLoading] = useState(true);
   const [action, setAction] = useState<"idle" | "starting" | "stopping" | "regenerating">("idle");
   const [error, setError] = useState<string | null>(null);
+  // A start/stop that WORKED but could not be recorded for the next boot.
+  // Not an error — the unit is in the state the owner asked for — but the
+  // owner has to know a reboot will undo it, which a silent `{success:true}`
+  // never told them.
+  const [bootWarning, setBootWarning] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // Inline autoinstall — replaces the old "run sudo bash install.sh ..."
   // warning text with a one-click button. Posts to the generic install
@@ -60,6 +65,12 @@ export default function RemoteControlPanel() {
     return fallback;
   }, []);
 
+  /** Carry a 200's `warning` (a failed enable/disable) into the panel. */
+  const readBootWarning = useCallback(async (res: Response) => {
+    const data = await res.json().catch(() => null) as { warning?: unknown } | null;
+    setBootWarning(typeof data?.warning === "string" && data.warning.trim() ? data.warning : null);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -88,11 +99,13 @@ export default function RemoteControlPanel() {
   const handleStart = async () => {
     setAction("starting");
     setError(null);
+    setBootWarning(null);
     try {
       const res = await fetch("/setup-api/portal/start", { method: "POST" });
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, t("remoteControl.startFailed")));
       }
+      await readBootWarning(res);
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.startFailed"));
@@ -107,6 +120,7 @@ export default function RemoteControlPanel() {
   const handleRegenerate = async () => {
     setAction("regenerating");
     setError(null);
+    setBootWarning(null);
     // Optimistically clear the URL so the UI flips to the "negotiating" state
     // without waiting for the next poll to observe it.
     setStatus(prev => prev ? { ...prev, tunnel: { ...prev.tunnel, url: null } } : prev);
@@ -115,6 +129,7 @@ export default function RemoteControlPanel() {
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, t("remoteControl.startFailed")));
       }
+      await readBootWarning(res);
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.startFailed"));
@@ -126,11 +141,13 @@ export default function RemoteControlPanel() {
   const handleStop = async () => {
     setAction("stopping");
     setError(null);
+    setBootWarning(null);
     try {
       const res = await fetch("/setup-api/portal/stop", { method: "POST" });
       if (!res.ok) {
         throw new Error(await readErrorMessage(res, t("remoteControl.stopFailed")));
       }
+      await readBootWarning(res);
       await fetchStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("remoteControl.stopFailed"));
@@ -210,6 +227,7 @@ export default function RemoteControlPanel() {
       </div>
 
       {error && <StatusMessage type="error" message={error} />}
+      {bootWarning && <StatusMessage type="info" message={bootWarning} />}
 
       {!tunnelInstalled && (
         <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">

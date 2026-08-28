@@ -115,6 +115,8 @@ const RUNS_PAGE = 10;
 /** Where the preview script lives on the device. */
 const CLAWBOX_ROOT = "/home/clawbox/clawbox";
 const POLL_MS = 5_000;
+/** How often to ask again while the GitHub answer is one we do not trust. */
+const GITHUB_REPROBE_MS = 15_000;
 
 function Switch({
   checked, busy, disabled, label, onChange,
@@ -273,6 +275,19 @@ export default function CodingAgentApp() {
 
   useEffect(() => { void load(); }, [load]);
 
+  /** Just the GitHub half of `load()`. The re-probe below wants this one answer
+   *  refreshed and nothing else: re-running the whole load on a timer would also
+   *  overwrite the run list and fight the folder draft for no reason. */
+  const loadGithub = useCallback(async () => {
+    try {
+      const g = await fetch("/setup-api/coding-agent/git", { cache: "no-store" });
+      if (g.ok) setGithub(await g.json() as GitHubState);
+    } catch {
+      // A failed re-probe is not new information — the card already says the
+      // uplink is down. Leave the badge alone and ask again next tick.
+    }
+  }, []);
+
   // A running run changes every few seconds; nothing else here does.
   const anyRunning = runs.some((r) => r.status === "running");
   useEffect(() => {
@@ -280,6 +295,23 @@ export default function CodingAgentApp() {
     const id = setInterval(() => { void load(); }, POLL_MS);
     return () => clearInterval(id);
   }, [anyRunning, load]);
+
+  // `githubStatus()` refuses to cache an `unreachable` answer, and says why:
+  // "caching one would outlive the outage that produced it and go on refusing
+  // backups after the uplink came back". Holding it in React state and never
+  // asking again is that same cache one layer out — the card went on saying
+  // "GitHub unreachable" for as long as the panel stayed mounted, with no
+  // refresh affordance, long after the uplink was back.
+  //
+  // Only the inconclusive reason re-probes. "not_installed" and "not_runnable"
+  // are properties of the box, not of this moment, and polling them would be a
+  // timer with nothing to learn.
+  const githubInconclusive = github?.reason === "unreachable";
+  useEffect(() => {
+    if (!githubInconclusive) return;
+    const id = setInterval(() => { void loadGithub(); }, GITHUB_REPROBE_MS);
+    return () => clearInterval(id);
+  }, [githubInconclusive, loadGithub]);
 
   // While a device login is showing its code, ask github.com (through the
   // box) whether it was entered. A transient fetch failure keeps polling —
@@ -508,6 +540,9 @@ export default function CodingAgentApp() {
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.backupFailed"));
+      // A refused backup is the other moment the card's GitHub row can be
+      // stale — a 503 usually means the probe would answer differently now.
+      void loadGithub();
     } finally {
       setBusy(null);
     }
@@ -526,6 +561,9 @@ export default function CodingAgentApp() {
       setConfirmSignOut(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.githubOutFailed"));
+      // Same reason: a logout that failed leaves the row showing whatever it
+      // showed before, which may no longer be true.
+      void loadGithub();
     } finally {
       setBusy(null);
     }

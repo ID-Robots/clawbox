@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
-import AIProviderIcon from "./AIProviderIcon";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
+import ProviderRadioRow from "./ProviderRadioRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
@@ -933,19 +933,6 @@ export default function HermesProviderConfig({
   const selectCls =
     "w-full rounded-lg bg-[var(--bg-deep)] border border-[var(--border-subtle)] px-3 py-2.5 text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]";
   const labelCls = "block text-xs font-semibold uppercase tracking-wide text-[var(--text-secondary)] mb-1.5";
-  // The default row's cyan tint OUTRANKS the coral selection wash. They are
-  // usually the same row; when they are not — the customer has clicked a
-  // provider they have yet to sign into — "what is running" is the more useful
-  // of the two to be able to find again.
-  const rowCls = (isSelected: boolean, isDefault: boolean) =>
-    `flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-gray-800 last:border-b-0 transition-colors cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-      isDefault
-        ? "bg-[var(--cyan-veil)]"
-        : isSelected
-          ? "bg-orange-500/5"
-          : "hover:bg-[var(--surface-card)]"
-    }`;
-
   /** A row's connection state, pulsing while its "make default" call is out. */
   const rowStatus = (id: string) => {
     const row = statusById.get(id);
@@ -1039,6 +1026,7 @@ export default function HermesProviderConfig({
             // hides (default-model picking is a post-setup, Settings concern).
             // Offer it only where that dropdown exists.
             onChangeModel={embedded && defaultHasRow ? changeModel : undefined}
+            note={t("hermesProvider.hero.nativeSwitch")}
           />
         )}
 
@@ -1046,7 +1034,7 @@ export default function HermesProviderConfig({
             connection state on the right. */}
         <div
           role="radiogroup"
-          aria-label={t("hermesProvider.radioGroupLabel")}
+          aria-label={t("settings.providers.radioGroupLabel")}
           aria-describedby={`${uid}-intro`}
           className="border border-[var(--border-subtle)] rounded-lg bg-[var(--bg-deep)]/50 overflow-hidden"
         >
@@ -1064,40 +1052,19 @@ export default function HermesProviderConfig({
             statusSlot={rowStatus(CLAWAI_PROVIDER)}
           />
           {HERMES_PANEL_PROVIDERS.map((provider) => {
-            const isSelected = selectedProvider === provider.id;
             const descriptionKey = PROVIDER_DESCRIPTION_KEYS[provider.id];
-            const isDefault = statusById.get(provider.id)?.isDefault ?? false;
             return (
-              <label key={provider.id} className={rowCls(isSelected, isDefault)}>
-                <input
-                  type="radio"
-                  name="hermes-ai-provider"
-                  value={provider.id}
-                  checked={isSelected}
-                  onChange={() => choose(provider.id)}
-                  className="sr-only"
-                />
-                <span
-                  aria-hidden="true"
-                  className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 ${
-                    isSelected ? "border-[var(--coral-bright)]" : "border-gray-600"
-                  }`}
-                >
-                  {isSelected && <span className="w-2.5 h-2.5 rounded-full bg-orange-500" />}
-                </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-lg bg-white/[0.06] shrink-0">
-                  <AIProviderIcon provider={provider.id} size={22} />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <span className="flex items-center gap-2 text-sm font-medium text-gray-200">
-                    {provider.name}
-                  </span>
-                  <span className="block text-xs text-[var(--text-muted)]">
-                    {descriptionKey ? t(descriptionKey) : provider.description}
-                  </span>
-                </div>
-                {rowStatus(provider.id)}
-              </label>
+              <ProviderRadioRow
+                key={provider.id}
+                radioName="hermes-ai-provider"
+                value={provider.id}
+                selected={selectedProvider === provider.id}
+                onSelect={() => choose(provider.id)}
+                isDefault={statusById.get(provider.id)?.isDefault ?? false}
+                name={provider.name}
+                description={descriptionKey ? t(descriptionKey) : provider.description}
+                statusSlot={rowStatus(provider.id)}
+              />
             );
           })}
         </div>

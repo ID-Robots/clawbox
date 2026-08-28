@@ -15,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const store: Record<string, unknown> = {};
 const rpcMock = vi.hoisted(() => vi.fn());
 const statusMock = vi.hoisted(() => vi.fn());
+const optionsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/config-store", () => ({
   get: vi.fn(async (key: string) => store[key] ?? null),
@@ -30,7 +31,16 @@ vi.mock("@/lib/hermes-cli", () => ({
 // The box already draws, so the image family cannot be what asks for a reload
 // below — anything this test counts belongs to the coding-agent family.
 vi.mock("@/lib/harness/hermes-features", () => ({ hermesAgentDrawsImages: vi.fn(async () => true) }));
-vi.mock("@/lib/hermes-model-options", () => ({ invalidateModelOptions: vi.fn() }));
+vi.mock("@/lib/hermes-model-options", () => ({
+  invalidateModelOptions: vi.fn(),
+  // Connecting ClawBox AI also credentials the `clawai` provider, so the fourth
+  // boot-time snapshot — `ctx.providers` — moves on this path too. Answering
+  // the same catalogue either side of the write keeps THAT family out of the
+  // reload counts below, so anything this suite counts still belongs to the
+  // coding-agent family. The provider family has its own suite in
+  // src/tests/unit/provider-mcp-refresh.test.ts.
+  getModelOptions: optionsMock,
+}));
 vi.mock("@/lib/hermes-env", () => ({ setHermesEnvValues: vi.fn() }));
 vi.mock("@/lib/hermes-image-plugin", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/hermes-image-plugin")>()),
@@ -67,10 +77,35 @@ function reloadCount(): number {
   return rpcMock.mock.calls.filter((call) => call[0] === "reload.mcp").length;
 }
 
+/** A catalogue that names the same providers before and after the write. */
+function unchangedCatalogue() {
+  return {
+    providers: [
+      {
+        id: "clawai",
+        name: "ClawBox AI",
+        authenticated: true,
+        verified: null,
+        isUserDefined: false,
+        source: "dashboard",
+        total: 1,
+        models: [{ id: "deepseek-v4-flash", description: "" }],
+      },
+    ],
+    current: { provider: "clawai", model: "deepseek-v4-flash" },
+    reasoning: "",
+    fetchedAt: Date.now(),
+    source: "dashboard" as const,
+    stale: false,
+  };
+}
+
 beforeEach(() => {
   for (const key of Object.keys(store)) delete store[key];
   rpcMock.mockReset();
   statusMock.mockReset();
+  optionsMock.mockReset();
+  optionsMock.mockImplementation(async () => unchangedCatalogue());
   rpcMock.mockImplementation(async (method: string) =>
     method === "image.generate" ? { available: true } : { status: "ok" },
   );
@@ -94,5 +129,25 @@ describe("POST /setup-api/hermes/clawai", () => {
     const response = await POST(post({ tier: "pro" }));
     expect(response.status).toBe(200);
     expect(reloadCount()).toBe(0);
+  });
+
+  it("still asks only ONCE when the link moves the providers too", async () => {
+    // Connecting ClawBox AI credentials the `clawai` provider AND makes the
+    // coding agent runnable. `reload.mcp` is global — it rebuilds every
+    // family's tool list — so a link that moves three families is still one
+    // fact about one box and must cost one prompt-cache invalidation.
+    let seen = 0;
+    optionsMock.mockImplementation(async () => {
+      const payload = unchangedCatalogue();
+      // Before the link this box had no credentialed provider and was on none.
+      if (seen++ === 0) {
+        payload.providers = [];
+        payload.current = { provider: "", model: "" };
+      }
+      return payload;
+    });
+    const response = await POST(post({ token: PASTED, tier: "flash" }));
+    expect(response.status).toBe(200);
+    expect(reloadCount()).toBe(1);
   });
 });

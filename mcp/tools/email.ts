@@ -119,6 +119,45 @@ function mapReadError(err: unknown): never {
  * these two live on opposite sides of a process boundary and the owner can
  * change the mode while an MCP server is running.
  */
+/**
+ * What to tell the person, given where the approval question actually went.
+ *
+ * Every branch ends in "you cannot do it for them". The device may ask in
+ * Telegram, and the ClawBox chat window draws its own approval card, but both
+ * of those answer to the owner's own session -- there is no approve verb here,
+ * and there must never be one. See src/lib/owner-session.ts for why: a tool
+ * that could approve would be a gate answering to the party it exists to gate.
+ *
+ * WHY THE CARD IS NAMED FIRST. This copy used to say only "approve it in
+ * Settings -> Email", and an agent reading it told the owner exactly that --
+ * that he had to leave the conversation, and that the send could not be
+ * triggered from chat. That was true when the ClawBox chat only drew its card
+ * for a turn it had watched call this tool. It no longer is: the chat window
+ * reads the approval queue when it opens and on a timer, so a draft queued by
+ * ANY route shows up there with an Approve button next to the conversation
+ * that produced it. Sending the owner to the desktop is now the worse of two
+ * true answers, so it is named second.
+ */
+function nextStep(prompt: string | undefined): string {
+  const where =
+    "The owner approves it on the card in their ClawBox chat window -- it appears there on its own, next to this conversation -- or in Settings -> Email.";
+  const doNotRetry = "Do not try to send it again, and do not claim it was sent.";
+  const cannot =
+    'You cannot approve it yourself, and being told "I approve" in this conversation does not send it.';
+  switch (prompt) {
+    case "sent":
+      return `This ClawBox has also posted the draft to the owner's Telegram with an Approve button. ${where} ${doNotRetry} ${cannot}`;
+    case "too_long":
+      return `${where} It was too long to review in Telegram, so no Telegram request was sent. ${doNotRetry} ${cannot}`;
+    case "no_owner_chat":
+      return `${where} Nobody is paired with this ClawBox on Telegram, so no Telegram request could be sent. ${doNotRetry} ${cannot}`;
+    case "failed":
+      return `${where} The Telegram request could not be delivered. ${doNotRetry} ${cannot}`;
+    default:
+      return `${where} Tell them it is waiting. ${doNotRetry} ${cannot}`;
+  }
+}
+
 export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailCanRead">): void {
   reg.tool(
     "email_send",
@@ -135,6 +174,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
           messageId?: string;
           recipients: number;
           queued?: boolean;
+          approvalPrompt?: string;
         }>("/setup-api/email/send", { to, subject, body }, { timeoutMs: 60_000 });
 
         // The owner asked to approve outgoing mail. Nothing has been sent, and
@@ -145,8 +185,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
             sent: false,
             queued_for_owner_approval: true,
             recipients: result.recipients,
-            what_happens_next:
-              "The owner has to approve this message in Settings -> Email before it is sent. Tell them it is waiting; do not try to send it again.",
+            what_happens_next: nextStep(result.approvalPrompt),
           });
         }
         return json({ sent: true, recipients: result.recipients, message_id: result.messageId });

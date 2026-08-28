@@ -15,6 +15,7 @@ import {
   Alert,
   EmptyState,
   ExternalLink,
+  ExternalUrl,
   FOCUS_RING,
   GhostButton,
   Section,
@@ -399,16 +400,16 @@ function SecurityCard({ detail }: { detail: HermesSkillDetail }) {
                 <dt className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
                   {prov.sourceUrlVerified ? COPY.provSource : COPY.provSourceUnverified}
                 </dt>
-                <dd className="truncate">
-                  <ExternalLink href={prov.sourceUrl}>{prov.sourceUrl.replace(/^https:\/\//, '')}</ExternalLink>
+                <dd className="min-w-0">
+                  <ExternalUrl href={prov.sourceUrl} />
                 </dd>
               </div>
             )}
             {prov?.repoUrl && prov.repoUrl !== prov.sourceUrl && (
               <div className="min-w-0">
                 <dt className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">{COPY.provRepo}</dt>
-                <dd className="truncate">
-                  <ExternalLink href={prov.repoUrl}>{prov.repoUrl.replace(/^https:\/\//, '')}</ExternalLink>
+                <dd className="min-w-0">
+                  <ExternalUrl href={prov.repoUrl} />
                 </dd>
               </div>
             )}
@@ -417,8 +418,8 @@ function SecurityCard({ detail }: { detail: HermesSkillDetail }) {
                 <dt className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
                   {COPY.provDetailPage}
                 </dt>
-                <dd className="truncate">
-                  <ExternalLink href={prov.detailUrl}>{prov.detailUrl.replace(/^https:\/\//, '')}</ExternalLink>
+                <dd className="min-w-0">
+                  <ExternalUrl href={prov.detailUrl} />
                 </dd>
               </div>
             )}
@@ -427,8 +428,8 @@ function SecurityCard({ detail }: { detail: HermesSkillDetail }) {
                 <dt className="text-[10px] uppercase tracking-wider text-[var(--text-secondary)]">
                   {COPY.provHomepage}
                 </dt>
-                <dd className="truncate">
-                  <ExternalLink href={prov.homepage}>{prov.homepage.replace(/^https:\/\//, '')}</ExternalLink>
+                <dd className="min-w-0">
+                  <ExternalUrl href={prov.homepage} />
                 </dd>
               </div>
             )}

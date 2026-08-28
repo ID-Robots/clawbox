@@ -93,8 +93,9 @@ export default function ReconnectStage({
       data-agent={hermes ? "hermes" : undefined}
       // The wizard's own ground token, not a hardcoded near-black: #0d1117
       // matched nothing in the palette. --ground is the page ground the rest
-      // of setup paints (#0a0f1a), and on Hermes the token layer keyed on
-      // data-agent above re-points it to the Hermes ground (#041c1c).
+      // of setup paints (#0a0f1a) — and it is the SAME ground on both
+      // editions. The data-agent marker above still delivers the agent's ink
+      // (--agent-live) to this overlay; it no longer delivers a background.
       style={{ zIndex: 2147483647, background: "var(--ground)" }}
       role="status"
       aria-live="polite"

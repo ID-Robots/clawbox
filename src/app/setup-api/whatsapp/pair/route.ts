@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { getPairingManager } from "@/lib/whatsapp-pairing";
+import { getOpenclawWhatsappPairing } from "@/lib/openclaw-whatsapp";
 
 export const dynamic = "force-dynamic";
 
@@ -14,27 +15,30 @@ export const dynamic = "force-dynamic";
  *        what reaps the bridge, without the client having to promise anything.
  * DELETE cancel. Stops the bridge; never touches creds.json.
  *
- * The snapshot carries the raw Baileys QR payload. That is not a secret in the
- * credential sense — it is a short-lived, single-use linking nonce — but it is
- * live pairing material, so this route stays behind the same session gate as
- * the rest of /setup-api/whatsapp (src/middleware.ts) and is never logged.
+ * The snapshot carries live pairing material — the raw Baileys QR payload on
+ * Hermes, a rendered PNG of the same nonce on OpenClaw. Neither is a secret in
+ * the credential sense (both are short-lived and single-use), but both are
+ * enough to link a device, so this route stays behind the same session gate as
+ * the rest of /setup-api/whatsapp (src/middleware.ts) and neither is ever
+ * logged.
  */
 
-async function requireHermes(): Promise<NextResponse | null> {
+/**
+ * The pairing session for whichever harness is active.
+ *
+ * Both managers expose the same `start`/`poll`/`stop` contract and the same
+ * phases, so this route reads identically on either. What differs is only what
+ * is underneath: a Baileys bridge this repo spawns (Hermes), or the gateway's
+ * own `web.login.*` RPC (OpenClaw).
+ */
+async function activePairing() {
   const harness = await getActiveHarness();
-  if (harness !== "hermes") {
-    return NextResponse.json(
-      { error: "WhatsApp is only available on the Hermes edition", supported: false },
-      { status: 501 },
-    );
-  }
-  return null;
+  return harness === "hermes" ? getPairingManager() : getOpenclawWhatsappPairing();
 }
 
 export async function POST(request: Request) {
   try {
-    const blocked = await requireHermes();
-    if (blocked) return blocked;
+    const pairing = await activePairing();
 
     let force = false;
     try {
@@ -44,7 +48,7 @@ export async function POST(request: Request) {
       // A bodyless start is the common case, not an error.
     }
 
-    const snapshot = await getPairingManager().start({ force });
+    const snapshot = await pairing.start({ force });
     return NextResponse.json({ supported: true, ...snapshot });
   } catch (err) {
     // Machine-readable code out, real cause to the server log. The panel maps
@@ -58,9 +62,7 @@ export async function POST(request: Request) {
 
 export async function GET() {
   try {
-    const blocked = await requireHermes();
-    if (blocked) return blocked;
-    return NextResponse.json({ supported: true, ...getPairingManager().poll() });
+    return NextResponse.json({ supported: true, ...(await activePairing()).poll() });
   } catch (err) {
     console.error("[whatsapp/pair] status read failed:", err);
     return NextResponse.json({ error: "status_failed" }, { status: 500 });
@@ -69,9 +71,7 @@ export async function GET() {
 
 export async function DELETE() {
   try {
-    const blocked = await requireHermes();
-    if (blocked) return blocked;
-    return NextResponse.json({ supported: true, ...getPairingManager().stop() });
+    return NextResponse.json({ supported: true, ...(await activePairing()).stop() });
   } catch (err) {
     console.error("[whatsapp/pair] cancel failed:", err);
     return NextResponse.json({ error: "cancel_failed" }, { status: 500 });

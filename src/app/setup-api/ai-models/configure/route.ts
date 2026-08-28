@@ -11,10 +11,12 @@ import {
   findOpenclawBin,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
+  runOpenclawConfigUnset,
   type OpenclawConfigSetArgs,
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
+  readConfigStrict as readOpenClawConfigStrict,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
@@ -59,13 +61,21 @@ import {
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
-import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
+import {
+  isValidModelId,
+  isCatalogProvider,
+  GOOGLE_MODELS,
+  ANTHROPIC_MODELS,
+  extractProviderModelId,
+  routesSubscriptionNatively,
+} from "@/lib/provider-models";
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
+  offSurfaceCodexModelMessage,
 } from "@/lib/subscription-surface";
 // The model name on this route arrives in the request body. For a local
 // provider it is the whole of `apiKey`, which nothing further constrains, and
@@ -1048,6 +1058,117 @@ async function writeOpenAICompatProvider(opts: {
   await ensureFallbackModel(opts.defaultModel);
 }
 
+/**
+ * Which providers route a SUBSCRIPTION credential through their own OpenClaw
+ * plugin instead of through a `models.providers.<p>` openai-compat override
+ * is decided by `SUBSCRIPTION_SURFACE` in provider-models.ts, and
+ * {@link routesSubscriptionNatively} is imported from there.
+ *
+ * It used to be a `NATIVE_SUBSCRIPTION_ROUTING` Set right here, next to the
+ * transport it selects — which read as the tidy choice and was the bug. The
+ * model picker's `availableOnSubscription` stamp answers a question that only
+ * has an answer once you know the transport ("which models can this
+ * credential run?"), and it was computed from a separate table in a separate
+ * file. When #532 moved anthropic's subscription onto the native route, the
+ * stamp kept describing the override that had just been removed and greyed
+ * out three models the box had started being able to run. One table, so the
+ * next transport change moves the stamp with it.
+ */
+
+/**
+ * Take a `models.providers.<p>` openai-compat override back out.
+ *
+ * Only ever called on the subscription path, and only when the device actually
+ * has one: `openclaw config unset` exits 1 with "Config path not found" on an
+ * absent path (verified on 2026.7.1-2), and a removal that genuinely fails must
+ * stay loud — reporting success while the poisoned override is still on disk is
+ * the failure mode this whole fix exists to remove.
+ */
+async function clearOpenAICompatProvider(provider: string): Promise<void> {
+  const configPath = `models.providers.${provider}`;
+  // STRICT read, because this check can only ever decide to do NOTHING. The
+  // ordinary `readConfig` answers `{}` to an EACCES or a half-written file just
+  // as it does to a clean config, and `{}` here reads as "no override to
+  // remove" — so an unreadable config would skip the repair, return 200, and
+  // leave the poisoned override exactly where it was. That is the failure this
+  // whole fix exists to remove, so an unreadable config throws instead.
+  const config = await readOpenClawConfigStrict();
+  if (!config.models?.providers?.[provider]) return;
+  await runOpenclawConfigUnset(configPath, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
+  console.log(`[AI Config] Removed stale openai-compat override ${logSafe(configPath)}`);
+}
+
+/**
+ * Decide how a cloud provider's turns leave the box, and write that decision.
+ *
+ * Every caller of {@link writeOpenAICompatProvider} goes through here, because
+ * that helper is an API-KEY construction and nothing in its signature says so:
+ * it pins the provider to `api: "openai-completions"` and inlines the
+ * credential, so each turn goes out as `POST <baseUrl>/chat/completions` with a
+ * bearer token and none of the provider-native headers.
+ *
+ * A Claude Pro/Max subscription credential is not an API key, and that surface
+ * does not accept one. Anthropic answers 429 to an OAuth access token on
+ * `/chat/completions` no matter how much quota is left — proven on a device
+ * against one token inside one minute: `/v1/chat/completions` 429,
+ * `/v1/messages` with `anthropic-beta: oauth-2025-04-20` 200 with a real
+ * completion, `/v1/messages` without that header 429. The override made the
+ * subscription look permanently rate-limited on the OpenClaw edition while the
+ * same sign-in worked on Hermes, which routes natively.
+ *
+ * The override also FREEZES the credential. `apiKey` is written inline at save
+ * time, and a subscription access token is short-lived — so even a save that
+ * worked for a while expired within hours and never self-healed, because an
+ * inline key never goes back through the auth profile that holds the refresh
+ * token. An affected device was found with an inline token six hours dead.
+ *
+ * So on an anthropic subscription save the override is not written, and any
+ * override the device already had is removed — the second half matters as much
+ * as the first, because a box configured with an API key and later switched to
+ * a subscription kept the old entry (nothing here ever deleted one) and stayed
+ * broken. Routing then belongs to the anthropic plugin, which is what
+ * `setProviderPlugins` enables a few steps later.
+ */
+/**
+ * True when the save wrote the openai-compat override, false when it handed the
+ * provider to its native plugin.
+ *
+ * A boolean, and reported by the CALLER rather than logged here, because both
+ * halves are needed to keep the log line clean under CodeQL: `opts` carries the
+ * request body's apiKey and authMode, so anything read back off it — or
+ * returned from a function that took it — is taint-tracked to `request.json()`
+ * and trips js/log-injection, which does not recognise `logSafe` as a barrier.
+ * A boolean carries no text into the line; the caller picks between two string
+ * literals and names its own provider, which is a literal there too.
+ */
+async function applyCloudProviderTransport(opts: {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  authMode: string;
+  defaultModel: string;
+  curatedModels: readonly { id: string }[];
+}): Promise<boolean> {
+  if (!routesSubscriptionNatively(opts.provider, opts.authMode)) {
+    await writeOpenAICompatProvider(opts);
+    return true;
+  }
+
+  await clearOpenAICompatProvider(opts.provider);
+  // Same two writes the non-provider `else` branch below makes: cloud providers
+  // auto-detect their catalog in merge mode, and the primary still needs a
+  // fallback behind it.
+  await applyConfigSetGroups([
+    {
+      ops: [["models.mode", "merge"]],
+      // Non-fatal: merge is the default behavior anyway
+      onError: () => {},
+    },
+  ]);
+  await ensureFallbackModel(opts.defaultModel);
+  return false;
+}
+
 export async function POST(request: Request) {
   // Hoisted so the catch can classify the failure without re-parsing the body —
   // a local-model or wrong-edition failure must not be reported as a credential
@@ -1284,11 +1405,26 @@ export async function POST(request: Request) {
     // `local_ai_was_default` is the flag POST /setup-api/local-ai leaves behind
     // when it clears a `model.provider` that pointed at the local model.
     const localWasDefaultBeforeDisable = isLocalScope && configStore.local_ai_was_default === true;
-    if (!isLocalScope && configStore.local_ai_was_default === true) {
-      // The owner has since chosen a different provider on purpose. Re-enabling
-      // the local model later must not evict that choice.
+    /**
+     * Forget that the local model used to be the default, because the owner has
+     * now chosen a cloud provider on purpose and re-enabling local later must
+     * not evict that choice.
+     *
+     * Called where the cloud save LANDS, not here. It used to run the moment
+     * the request was parsed, so a save the route went on to REFUSE — an
+     * off-surface Claude or ChatGPT id, a Hermes provider that needs its own
+     * panel — still changed how a later local re-enable behaves. A rejection
+     * that has already had a side effect is not a rejection: the same rule the
+     * subscription-surface guards below are placed to obey.
+     *
+     * Reading `configStore`, the snapshot taken at the top of the request, so
+     * it stays the same question it was then; `shouldPromoteLocalToPrimary`
+     * below reads that snapshot too and is unaffected by when this runs.
+     */
+    const forgetLocalWasDefault = async () => {
+      if (isLocalScope || configStore.local_ai_was_default !== true) return;
       await setMany({ local_ai_was_default: undefined });
-    }
+    };
     const shouldPromoteLocalToPrimary =
       isLocalScope && (!configStore.ai_model_configured || body.activate === true || localWasDefaultBeforeDisable);
 
@@ -1514,6 +1650,7 @@ export async function POST(request: Request) {
         }
         if (isClawAI) {
           await applyClawaiToHermes(clawboxAiToken, resolvedClawboxTier ?? CLAWBOX_AI_DEFAULT_TIER);
+          await forgetLocalWasDefault();
           return NextResponse.json({ success: true });
         }
         if (authMode !== "subscription" && normalizedApiKey) {
@@ -1525,8 +1662,12 @@ export async function POST(request: Request) {
             apiKey: normalizedApiKey,
           });
           if (result.activated) {
+            await forgetLocalWasDefault();
             return NextResponse.json({ success: true });
           }
+          // 409, not success: the key is stored but no model is picked, so this
+          // save has not chosen a provider yet and must not evict the local
+          // model's claim on the primary slot.
           return NextResponse.json(
             { error: "Key saved. Open the Hermes provider panel to pick a model for it." },
             { status: 409 },
@@ -1544,44 +1685,79 @@ export async function POST(request: Request) {
           || err instanceof HermesLocalApplyError
           || err instanceof ClawaiApplyError
         ) {
-          // Author-controlled, non-credential message — safe to echo.
+          // Safe to echo because each of these classes now CLEANS its message
+          // before constructing itself — `safeHermesFailureMessage` for a
+          // `hermes` stream, `sanitizeErrorMessage` for an fs error — and falls
+          // back to a fixed sentence when nothing survives.
+          //
+          // The comment here used to read "Author-controlled, non-credential
+          // message — safe to echo", and it was false for all three: every one
+          // of them was built from a raw `hermes` stderr or a raw Node fs
+          // error, and this line published it to the save banner. The claim is
+          // now an invariant the throw sites keep rather than an assumption
+          // this one makes.
           return NextResponse.json({ error: err.message }, { status: 502 });
         }
         throw err; // unexpected — fall to the outer catch, which classifies it
       }
     }
 
-    // ── The Claude subscription surface ─────────────────────────────────────
+    // ── The subscription surfaces ───────────────────────────────────────────
     // This route is the SECOND write path to `agents.defaults.model.primary`;
-    // /setup-api/chat/model is the first, and the guard there exists "for ids
+    // /setup-api/chat/model is the first, and the guards there exist "for ids
     // that arrive some other way". This is that other way. The shape check
     // above deliberately does not consult the curated list ("users can type
     // newer model IDs we haven't added yet"), and the wizard's picker exempts
-    // a typed custom id from its own greying-out rule, so without this a
-    // Claude-subscription box can be pinned from Settings to exactly the model
-    // the chat header refuses — one the `claude-cli` surface cannot route.
+    // a typed custom id from its own greying-out rule, so without these a
+    // subscription box can be pinned from Settings to exactly the model the
+    // chat header refuses — one its subscription cannot route.
     //
     // Judged on the SETTLED `config.defaultModel`, after every branch above
     // has had its say, so the PROVIDERS-table default is covered as well as a
     // typed id: one check for every value this save can write to primary.
+    // Split once, so both rules judge the same value and cannot disagree about
+    // what this save is going to write.
     //
-    // AFTER the Hermes branch, because the question it asks is about
+    // AFTER the Hermes branch, because the questions they ask are about
     // `openclaw.json` and a Hermes box has none — and that branch refuses a
     // subscription save outright anyway. BEFORE `writeAuthProfiles` below,
     // because a refusal that has already persisted a credential is not a
     // refusal, it is a half-applied save. Nothing between here and there
     // writes anything (the OAuth handoff file is consumed only on success).
+    const settledSlash = config.defaultModel.indexOf("/");
+    const settledProvider = settledSlash > 0 ? config.defaultModel.slice(0, settledSlash) : null;
+    const settledModelId = config.defaultModel.slice(settledSlash + 1);
+
+    // ChatGPT: the same gap as the Claude one below, on the other
+    // subscription — and the one that ARMS it, because an off-surface
+    // `codex/*` id has to reach `agents.defaults.model.primary` before the
+    // chat header can restore it, and this save is the only way in.
+    // `isValidModelId` above checks SHAPE only and `resolveEntitledCodexModel`
+    // runs solely in the nothing-was-typed branch, so `gpt-5.4-pro` typed into
+    // the custom-model field was written as `codex/gpt-5.4-pro` — precisely
+    // the id /setup-api/chat/model has refused since it was written. Every
+    // turn afterwards fails upstream.
     //
-    // Only a SUBSCRIPTION save can create the hazard. An API-key save writes
-    // the anthropic key that makes the API-only models routable, so after it
-    // lands the box is not subscription-only and there is nothing to refuse —
-    // refusing there would block the very switch the message recommends
-    // ("switch Anthropic to API-key mode for the API-only models").
+    // Not gated on `authMode`, because the NAMESPACE is the gate: ClawBox
+    // writes `codex/` only for an OpenAI save in subscription mode, and an
+    // API-key save writes `openai/`, where the -pro tiers route fine — which
+    // is exactly the switch the refusal recommends.
+    const offSurfaceCodex = offSurfaceCodexModelMessage(settledProvider, settledModelId);
+    if (offSurfaceCodex) {
+      return NextResponse.json({ error: offSurfaceCodex }, { status: 400 });
+    }
+
+    // Claude: only a SUBSCRIPTION save can create the hazard here. An API-key
+    // save writes the anthropic key, so after it lands the box is not
+    // subscription-only and there is nothing to refuse. That mattered more
+    // when the surface was narrower than the API catalogue and the refusal
+    // recommended switching to a key; since #532 the subscription routes
+    // natively on the same catalogue, and what is left to refuse is an id no
+    // Anthropic catalogue on this box carries at all.
     if (authMode === "subscription") {
-      const slash = config.defaultModel.indexOf("/");
       const offSurface = await offSurfaceClaudeModelMessage(
-        slash > 0 ? config.defaultModel.slice(0, slash) : null,
-        config.defaultModel.slice(slash + 1),
+        settledProvider,
+        settledModelId,
         async () => {
           // Ask about the profiles this save is ABOUT TO leave behind, not the
           // ones already on disk: this sign-in is what writes the OAuth
@@ -1830,6 +2006,8 @@ export async function POST(request: Request) {
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
+      // The cloud save has landed — see `forgetLocalWasDefault`.
+      await forgetLocalWasDefault();
     }
 
     // Connecting a provider is the owner saying "use this one": a provider the
@@ -1970,40 +2148,53 @@ export async function POST(request: Request) {
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
       // OpenRouter has no native OpenClaw adapter, so without this explicit
-      // provider entry the chat turn silently returns usage 0/0/0.
-      await writeOpenAICompatProvider({
+      // provider entry the chat turn silently returns usage 0/0/0 — and no
+      // OAuth flow either (it is absent from OAUTH_PROVIDERS), so every save
+      // that reaches here is key-based and keeps the override.
+      const openrouterWroteOverride = await applyCloudProviderTransport({
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      console.log(`[AI Config] Set openrouter provider (openai-compat): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set openrouter provider (${openrouterWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
-      // Google's OpenAI-compat endpoint instead.
-      await writeOpenAICompatProvider({
+      // Google's OpenAI-compat endpoint instead — for the SUBSCRIPTION
+      // (Gemini Code Assist OAuth) sign-in too. Google is the one sibling of
+      // the anthropic bug fixed here, and it is deliberately left alone: see
+      // `routesSubscriptionNatively` for why taking its override away without
+      // a device to prove the native route on would repeat the same mistake.
+      const googleWroteOverride = await applyCloudProviderTransport({
         provider: "google",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: GOOGLE_MODELS,
       });
-      console.log(`[AI Config] Set google provider (openai-compat): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set google provider (${googleWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else if (isAnthropic) {
-      // Native anthropic plugin reads a per-agent sqlite auth store that
-      // ClawBox's file auth profile doesn't populate, so it fails with
-      // "No API key found" at call time. Route through Anthropic's OpenAI-compat
-      // endpoint with the key inline instead.
-      await writeOpenAICompatProvider({
+      // With an API KEY: the native anthropic plugin reads a per-agent sqlite
+      // auth store that ClawBox's file auth profile doesn't populate, so it
+      // fails with "No API key found" at call time — route through Anthropic's
+      // OpenAI-compat endpoint with the key inline instead.
+      //
+      // With a Claude Pro/Max SUBSCRIPTION: that same override is what made
+      // every turn 429. applyCloudProviderTransport keeps the two apart; see
+      // its doc comment for the transport proof.
+      const anthropicWroteOverride = await applyCloudProviderTransport({
         provider: "anthropic",
         baseUrl: "https://api.anthropic.com/v1",
         apiKey: normalizedApiKey,
+        authMode,
         defaultModel: config.defaultModel,
         curatedModels: ANTHROPIC_MODELS,
       });
-      console.log(`[AI Config] Set anthropic provider (openai-compat): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set anthropic provider (${anthropicWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.

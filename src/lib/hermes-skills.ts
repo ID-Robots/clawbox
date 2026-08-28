@@ -39,6 +39,27 @@ export interface HermesSkill {
 
 export type SkillOrigin = 'builtin' | 'hub' | 'local';
 
+/**
+ * Can `hermes skills uninstall` remove a skill with this origin?
+ *
+ * `builtin` shipped with the device, `hub` came from the store, and `local` is a
+ * skill directory that is NEITHER — written by the agent, hand-copied, or left
+ * behind by a failed install rollback or a partial removal. The CLI works off
+ * the hub LOCK, so only `hub` can be removed; the other two need someone to
+ * delete the folder on the device.
+ *
+ * This is one exported rule rather than a comparison repeated per call site
+ * because BOTH surfaces that answer the question read it — the Skills page
+ * (src/components/HermesSkillsStore.tsx) and the agent's skill_list /
+ * skill_uninstall (mcp/tools/skills.ts) — and one device state that gets two
+ * answers is a bug the customer sees as their own page and their assistant
+ * disagreeing. That is exactly what happened: the MCP side had spelled the rule
+ * "not builtin", which put `local` on the removable side.
+ */
+export function isRemovableOrigin(origin?: string): boolean {
+  return origin === 'hub';
+}
+
 /** Card payload for the Installed grid — everything comes from disk. */
 export interface InstalledHermesSkill {
   /** Skill name — the lock.json key and the `uninstall` positional argument. */
@@ -512,4 +533,55 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Split a source URL into a `{ head, tail }` pair for display, where `tail`
+ * holds the part that IDENTIFIES this specific skill.
+ *
+ * WHY this exists: the store paints a skill's "Source" link as the raw URL
+ * under a CSS `truncate` (overflow-ellipsis, end-clipped). Every browse.sh
+ * skill's per-skill URL is real and distinct —
+ *   https://github.com/browserbase/browse.sh/blob/main/skills/seatguru.com/get-seat-map-dog7jd/SKILL.md
+ * — but they share a ~48-char prefix, and the tail that tells one skill from
+ * the next is exactly the half the ellipsis eats. So on screen every skill's
+ * Source read the same `github.com/browserbase/browse.sh/blob/main/skill…`,
+ * which looks like the collection, not the skill (verified on-device: the
+ * catalog holds 440 DISTINCT browse.sh source_urls, so the href was never the
+ * bug — the rendering was). Pinning `tail` and letting only `head` clip keeps
+ * the identifying segment on screen at any width, and the two parts still
+ * concatenate to the exact URL, so nothing is invented or hidden.
+ *
+ * `tail` is the last path segment, or the last TWO when the final one is a
+ * generic in-repo filename (SKILL.md, README, index.*, or any bare `*.md`) that
+ * would identify nothing on its own. A URL with no path (a bare host, a
+ * homepage) has no boilerplate to elide and comes back entirely as `tail`.
+ */
+export function sourceUrlParts(url: string): { head: string; tail: string } {
+  const noScheme = url.replace(/^https?:\/\//i, '');
+  const cut = noScheme.search(/[?#]/);
+  // The path only — a `?query`/`#hash` is not part of the boilerplate to elide,
+  // and rides along on the tail via the offset slice below.
+  const pathPart = cut === -1 ? noScheme : noScheme.slice(0, cut);
+  const segs = pathPart.split('/').filter(Boolean);
+  const host = segs[0] ?? '';
+  const pathSegs = segs.slice(1);
+  // Only a DEEP path carries the shared boilerplate the clip was eating. A bare
+  // host or a shallow `host/a/b` already fits and identifies itself, so it is
+  // returned whole (head empty) rather than split for the sake of it.
+  if (pathSegs.length < 3) return { head: '', tail: noScheme };
+  const GENERIC_FILE = /^(?:skill\.md|readme(?:\.[a-z0-9]+)?|index\.[a-z0-9]+|[a-z0-9._-]+\.md)$/i;
+  const last = pathSegs[pathSegs.length - 1];
+  const tailCount = GENERIC_FILE.test(last) && pathSegs.length >= 2 ? 2 : 1;
+  const tailSegs = pathSegs.slice(pathSegs.length - tailCount);
+  // Split by OFFSET, not by re-joining: the marker is the slash-prefixed tail
+  // segments, and everything from it onward (a trailing slash, the query/hash
+  // suffix) is the tail. `head + tail === noScheme` byte-for-byte for every
+  // input — including a deep URL ending in `/` — because nothing is rebuilt
+  // from the boolean-filtered segments; the original string is only sliced.
+  const marker = `/${tailSegs.join('/')}`;
+  const idx = pathPart.lastIndexOf(marker);
+  const head = noScheme.slice(0, idx + 1);
+  const tail = noScheme.slice(idx + 1);
+  return { head, tail };
 }

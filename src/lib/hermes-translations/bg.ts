@@ -62,9 +62,7 @@ export const bg: Record<string, string> = {
   "hermesProvider.title": "AI доставчици",
   "hermesProvider.intro":
     "Това устройство работи с Hermes. Свържете доставчици и изберете основния — състояние, вход и превключване са тук.",
-  "hermesProvider.radioGroupLabel": "AI доставчик",
   "hermesProvider.hero.nativeSwitch": "превключва се директно през Hermes",
-  "hermesProvider.hero.changeModel": "Смяна на модела",
   "hermesProvider.continue": "Продължи",
   "hermesProvider.connected.affirmation": "Свързано",
 

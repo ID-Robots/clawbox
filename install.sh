@@ -1618,19 +1618,20 @@ step_openclaw_setup() {
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
-  # Only 12 ("Kokoro was requested and did not install"), 13 ("this box has no
-  # working TTS engine at all") and 14 ("the TTS install did not complete, but
-  # an engine survives") are tolerated here, and only because the step has
-  # already recorded each of them with record_provision_failure, so the summary,
-  # the exit status, the provisioning marker and step_validate_services' TTS
-  # probe all carry them. A box that could not install its speech engines must
-  # still finish provisioning and come up reachable — that is how it gets fixed.
+  # Only 12 ("Kokoro was requested and did not install"), 13 ("this box has NO
+  # working on-device TTS engine") and 14 ("the voice scripts did not deploy;
+  # Kokoro's own verdict stands") are tolerated here, and only because the step
+  # has already recorded each of them with record_provision_failure, so the
+  # summary, the exit status, the provisioning marker and step_validate_services'
+  # TTS probe all carry them. A box that could not install its speech engine
+  # must still finish provisioning and come up reachable — that is how it gets
+  # fixed.
   #
   # They are three DIFFERENT facts and they are kept apart on purpose. Folding
-  # 14 into 13 would print "this box has no working TTS engine" over a box whose
-  # GPU engine is running perfectly and has merely lost its fallback — a failure
-  # report over something that actually succeeded, which is the same class of
-  # untrue status line this whole block exists to stop.
+  # 14 into 13 would print "this box has NO working on-device TTS engine" over a
+  # box whose Kokoro is running perfectly and has merely lost its script deploy
+  # — a failure report over something that actually succeeded, which is the same
+  # class of untrue status line this whole block exists to stop.
   #
   # Every OTHER non-zero return stays FATAL, exactly as it was before this
   # tolerance existed. Those are the provider-configuration failures — no
@@ -2604,28 +2605,92 @@ step_openclaw_tts() {
   local VOICE_RC=0
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
     bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
+
+  # WHETHER this box has its engine is a fact the run just PUBLISHED; $VOICE_RC
+  # only says how far it got. Reading the first off the second is the defect
+  # this step was built around and then reproduced one line lower: exit 1 means
+  # "the voice scripts did not deploy; Kokoro's own verdict stands", and the
+  # engine line below printed "Kokoro GPU TTS NOT installed" over a box whose
+  # GPU engine had installed, warmed up and written KOKORO=ready — while
+  # step_validate_services, reading the same file, scored that engine as
+  # present. One run, two mutually exclusive facts.
+  #
+  # `tr -d '\r'` for the same reason install.sh's own probe does it: the file
+  # is also restored from tarballs and edited by hand, and a CRLF `ready\r` is
+  # not `ready`. Absent or unreadable leaves it empty, and every claim below
+  # then falls back to what the exit code carries — nothing to read is not
+  # licence to invent.
+  #
+  # KOKORO= is the only key read. An older release's second key is ignored:
+  # install-voice.sh no longer writes it, and a stale line left in the file by
+  # an earlier run is never read as an engine.
+  local KOKORO_VERDICT=""
+  if [ -r "$TTS_STATUS_FILE" ]; then
+    KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+  fi
+
   local KOKORO_READY=false KOKORO_REASON=""
   # The status this STEP returns, separate from whether TTS could be configured.
-  # A Kokoro that was asked for and did not arrive is a failure of this step;
-  # the box has no on-device voice until it is fixed, and its spoken replies
-  # fall back to the gateway's cloud voice — see the block under VOICE_RC=12
-  # below.
+  # A Kokoro that was asked for and did not arrive is a failure of this step
+  # (12), and so is a board that declines the only engine there is (13): either
+  # way the box has no on-device voice until it is fixed. This installer cannot
+  # know whether the cloud voice exists — that needs the ClawBox AI link, which
+  # happens after install — so neither is graded clean; both are recorded.
   local TTS_RC=0
   case "$VOICE_RC" in
     0)  KOKORO_READY=true ;;
-    10) KOKORO_REASON="no CUDA toolkit on this board" ;;
-    11) KOKORO_REASON="no Jetson CUDA build for this CPU architecture" ;;
+    13)
+        # An older install-voice.sh used 10 and 11 for the same fact; the
+        # current one emits only 13.
+        #
+        # ——— This board declines the only on-device engine ————————————
+        # Kokoro published `skipped:<reason>` — no CUDA toolkit, no Jetson
+        # build for this CPU architecture — and there is no second engine to
+        # carry the box, so NO on-device engine can speak. Every shipped
+        # ClawBox is a Jetson a Kokoro build exists for, so a skipped Kokoro
+        # on real hardware means something is wrong: it is recorded as a
+        # provisioning failure, never graded clean. "The cloud voice speaks
+        # for it" is not a fact this installer can check — that voice needs
+        # the ClawBox AI link, which happens after install.
+        #
+        # It used to arrive as a bare `exit 1` from the removed second
+        # engine's guard, which overwrote whatever Kokoro had reported and
+        # landed in the 1 arm below — a warning, TTS_RC left at 0,
+        # PROVISION_FAILURES left empty, and "=== ClawBox Setup Complete ==="
+        # printed over a mute box.
+        #
+        # Non-fatal, for the same reason 12 is: a box that cannot speak must
+        # still finish provisioning and come up reachable so it can be fixed.
+        #
+        # The engine is named with the reason it is absent. "No engine" is not
+        # an actionable report on its own — a board that declined for want of
+        # CUDA and one whose download failed lead to different fixes. The
+        # verdict is what the run published, so it is what gets printed.
+        case "$KOKORO_VERDICT" in
+          skipped:?*) KOKORO_REASON="this board declines Kokoro: ${KOKORO_VERDICT#skipped:}" ;;
+          *)          KOKORO_REASON="the voice install reported no working engine (Kokoro: ${KOKORO_VERDICT:-no verdict published}), see the log above" ;;
+        esac
+        TTS_RC=13
+        echo "  ############################################################" >&2
+        echo "  # This box has NO working on-device TTS engine." >&2
+        echo "  # Kokoro (GPU), the only on-device engine, is absent: ${KOKORO_VERDICT:-no verdict published}" >&2
+        echo "  # The cloud voice speaks for this box once it is linked to" >&2
+        echo "  # ClawBox AI; until then spoken requests go unanswered." >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+        echo "  ############################################################" >&2
+        record_provision_failure openclaw_tts
+        ;;
     12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
         # ── A hard failure must stop arriving as a soft fallback ─────────────
         # This is the branch that made a shipped defect invisible. Kokoro's
         # model pre-download died on a shell syntax error, this step printed one
         # ERROR line, returned 0, and the flash reported "Setup: 1/1 succeeded"
-        # — so every box installed in that window ran the CPU fallback of the
-        # time while the install claimed GPU TTS, and nobody noticed because
-        # speech still worked. 10 and 11 deliberately do NOT come through here:
-        # "this board has no CUDA" is a box that was never going to have
-        # Kokoro, which is a different fact from "the GPU engine you asked for
-        # did not install".
+        # — so every box installed in that window ran the removed second
+        # engine while the install claimed GPU TTS, and nobody noticed because
+        # speech still worked. 13 deliberately does NOT come through here:
+        # "this board declines Kokoro" is recorded too, but it is a different
+        # fact from "the GPU engine you asked for did not install" and leads
+        # to a different fix.
         #
         # Non-fatal stays non-fatal — the caller decides, the provider is still
         # configured below, and the box's spoken replies fall back to the
@@ -2637,29 +2702,6 @@ step_openclaw_tts() {
         echo "  # Kokoro GPU TTS was REQUESTED and did NOT install." >&2
         echo "  # This box has no on-device voice; spoken replies fall back" >&2
         echo "  # to the gateway's cloud voice until it is fixed." >&2
-        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
-        echo "  ############################################################" >&2
-        record_provision_failure openclaw_tts
-        ;;
-    13) KOKORO_REASON="the voice install reported no working engine, see the log above"
-        # ——— The voice install reported NO working engine ————————————
-        # The Kokoro-only install-voice.sh no longer emits this code: with a
-        # single engine, "Kokoro failed" and "no engine" are the same fact and
-        # travel as 12. The arm stays so a voice script that DOES report a box
-        # with no engine — an older release's, or a future one's — is recorded
-        # as exactly that rather than falling to the unknown-code arm below.
-        #
-        # It used to arrive as a bare `exit 1` from the CPU-fallback guard,
-        # which overwrote whatever the GPU half had reported and landed in the
-        # branch below — a warning, TTS_RC left at 0, PROVISION_FAILURES left
-        # empty, and "=== ClawBox Setup Complete ===" printed over a mute box.
-        #
-        # Non-fatal, for the same reason 12 is: a box that cannot speak must
-        # still finish provisioning and come up reachable so it can be fixed.
-        TTS_RC=13
-        echo "  ############################################################" >&2
-        echo "  # This box has NO working on-device TTS engine." >&2
-        echo "  # Spoken replies depend entirely on the gateway's cloud voice." >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
         record_provision_failure openclaw_tts
@@ -2698,13 +2740,31 @@ step_openclaw_tts() {
         record_provision_failure openclaw_tts
         ;;
   esac
-  if [ "$KOKORO_READY" = true ]; then
+  # The GPU engine, named from the verdict where there is one. KOKORO_READY (an
+  # inference from $VOICE_RC) is only the answer when the run published nothing.
+  local KOKORO_HAVE="$KOKORO_READY"
+  case "$KOKORO_VERDICT" in
+    ready) KOKORO_HAVE=true ;;
+    ?*)    KOKORO_HAVE=false
+           # Reached by every non-zero exit that published a verdict, and by a
+           # clean exit only if the verdict contradicts it, which the contract
+           # does not allow — but "the file says the engine is not there"
+           # beats "the status code implied it was", and the reason has to
+           # come from somewhere when the exit code named none.
+           [ -n "$KOKORO_REASON" ] || KOKORO_REASON="the voice install published KOKORO=$KOKORO_VERDICT"
+           ;;
+  esac
+  if [ "$KOKORO_HAVE" != true ]; then
+    # No engine claim here: on VOICE_RC=1 with no verdict on file Kokoro's
+    # state is unknown, so naming an engine would be a guess. The summary at
+    # the end of the step says what is actually known.
+    echo "  Kokoro GPU TTS NOT installed: $KOKORO_REASON"
+  elif [ "$VOICE_RC" -eq 0 ]; then
     echo "  Kokoro GPU TTS installed"
   else
-    # No engine claim here: on VOICE_RC=1 Kokoro's state is in the verdict
-    # file, not the exit code, so naming an engine would be a guess. The
-    # summary at the end of the step says what is actually known.
-    echo "  Kokoro GPU TTS NOT installed: $KOKORO_REASON"
+    # The engine is there and the run still did not finish clean, so what is
+    # missing is the deploy behind it — say that rather than deny the engine.
+    echo "  Kokoro GPU TTS installed, but the voice install did not complete ($KOKORO_REASON)"
   fi
 
   # Seed-if-unset, same contract as the primary model above: an owner who has
@@ -2790,29 +2850,39 @@ step_openclaw_tts() {
   # Only claim Kokoro when Kokoro is genuinely there. This line asserting
   # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three
   # freshly flashed boxes printed it while running entirely on the CPU
-  # fallback of the time.
-  if [ "$KOKORO_READY" = true ]; then
+  # fallback of the time. Claimed from the VERDICT, not the exit code, and only
+  # on a clean exit: a ready Kokoro behind a failed script deploy is named in
+  # the 1 arm below, in those words.
+  if [ "$KOKORO_HAVE" = true ] && [ "$VOICE_RC" -eq 0 ]; then
     echo "  On-device TTS configured (Kokoro GPU)"
   else
-    # Each arm names only what its exit code actually carries. 10, 11 and 12
-    # all mean Kokoro is not on this box — by design or by defect — and with
-    # no second engine that means no on-device voice at all: spoken replies
-    # fall back to the gateway's cloud voice, and the line says so instead of
-    # naming an engine the box does not have.
+    # Each arm names only what its exit code actually carries. 12 and 13 both
+    # mean Kokoro is not on this box — by defect, or because the board declines
+    # it — and with no second engine that means no on-device voice at all; the
+    # line says so instead of naming an engine the box does not have.
     case "$VOICE_RC" in
-      10|11|12)
+      12)
         echo "  On-device TTS configured, but Kokoro is not available on this box ($KOKORO_REASON) — spoken replies fall back to the gateway's cloud voice"
         ;;
       1)
         # Kokoro's verdict stands here — install-voice.sh returns 12, not 1,
         # when the engine itself failed — so "NO engine is confirmed
         # installed", which is where this case used to land, would be a
-        # failure report over something that may well have succeeded. It
-        # still says nothing about the engine's state: the verdict file does.
-        echo "  On-device TTS configured, but the voice install did not complete ($KOKORO_REASON)"
+        # failure report over something that may well have succeeded. The
+        # exit code says nothing about the engine's state, but the VERDICT
+        # does, and an operator reading this line is about to be told by
+        # step_validate_services what it says — so when the file names a
+        # ready Kokoro, say it here too. NOT by setting KOKORO_READY: that
+        # would route into the "(Kokoro GPU)" line above and claim a clean
+        # install over a deploy that did not land.
+        if [ "$KOKORO_VERDICT" = "ready" ]; then
+          echo "  On-device TTS configured — Kokoro GPU is ready, but the voice install did not complete ($KOKORO_REASON)"
+        else
+          echo "  On-device TTS configured, but the voice install did not complete ($KOKORO_REASON)"
+        fi
         ;;
       13)
-        echo "  On-device TTS configured, but this box has NO working on-device engine — spoken replies depend entirely on the gateway's cloud voice ($KOKORO_REASON)"
+        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI"
         ;;
       *)
         echo "  On-device TTS configured, but NO engine is confirmed installed ($KOKORO_REASON)"
@@ -3517,7 +3587,21 @@ step_post_update() {
   # the tts-local-cli provider. Without this call the whole of TASK-383 would
   # be fresh-install-only, and every already-shipped box would keep answering
   # a spoken request with silence.
-  step_openclaw_tts || echo "  Warning: openclaw_tts step failed (non-fatal)"
+  # The SAME tolerance table step_openclaw_setup applies to this step, and for
+  # the same reason: 12, 13 and 14 are three different facts about a box's
+  # speech and the update path has to keep them apart too. A single
+  # `|| echo "(non-fatal)"` — indistinguishable from the fourteen lines around
+  # it — reported "this box has no working TTS engine" in the same words as a
+  # skipped VNC refresh, on the very path that reaches ALREADY-SHIPPED boxes.
+  local TTS_UPDATE_RC=0
+  step_openclaw_tts || TTS_UPDATE_RC=$?
+  case "$TTS_UPDATE_RC" in
+    0) ;;
+    12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; the update continues)" ;;
+    13) echo "  Warning: this box has NO working on-device TTS engine (recorded above; the update continues)" ;;
+    14) echo "  Warning: the TTS install did not complete (recorded above; the update continues)" ;;
+    *)  echo "  Warning: openclaw_tts returned $TTS_UPDATE_RC, which is not in its contract (non-fatal)" ;;
+  esac
   # Re-assert the gateway service after an in-app update. The full update
   # syncs repo files and rebuilds before this continuation runs; older devices
   # can therefore reach the new UI while the gateway is still using stale
@@ -4464,27 +4548,131 @@ install_claude_ds_wrapper() {
 # step_post_update calls THIS and not the bigger step: an in-app update should
 # deliver the harness without also reinstalling the Codex and Gemini CLIs on
 # every box that updates.
+# Tell a RUNNING agent that the coding harness exists now.
+#
+# The agent offers coding_agent_run / _status / _stop only when the ClawBox MCP
+# server says the harness is ready, and it asks exactly ONCE — in
+# `buildContext` while it boots (mcp/lib/context.ts probes
+# /setup-api/coding-agent/status; mcp/tools/coding-agent.ts returns without
+# declaring anything when the answer is no). The server is then a long-lived
+# stdio child of the agent, so a harness installed underneath it is invisible
+# until something respawns the server.
+#
+# The web server already covers the two paths where readiness flips from ITS
+# side — see src/lib/coding-agent-mcp-refresh.ts, hung off the enable route and
+# the ClawBox AI connect path. This step is the third path, and it had nothing:
+# a full install and step_post_update both happen to restart the agent shortly
+# afterwards (step_start_services / step_gateway_setup), and the STANDALONE
+# `--step coding_harness` — the repair checkReadiness() itself tells the owner
+# to run — did not.
+#
+# ONLY units that are ALREADY ACTIVE are touched. An agent that is stopped, or
+# masked by the edition lock, re-probes when it next starts; starting one here
+# would resurrect a unit the owner or the SKU deliberately put down, which is
+# the whole reason the Hermes edition masks clawbox-gateway.
+refresh_agent_coding_tools() {
+  local unit failed=false found=false
+  for unit in clawbox-gateway.service clawbox-hermes-dashboard.service; do
+    systemctl is-active --quiet "$unit" 2>/dev/null || continue
+    found=true
+    # try-restart, not restart. The probe above and the action below are two
+    # commands, and a unit that stops in between would be STARTED by `restart` —
+    # exactly the thing this function must never do. `try-restart` acts only on a
+    # unit that is running at the moment it runs, and exits 0 when there is
+    # nothing to do, so the invariant does not depend on the gap being small.
+    if systemctl try-restart "$unit" >/dev/null 2>&1; then
+      # "Asked", not "Restarted". try-restart exits 0 both when it restarted the
+      # unit and when the unit had stopped in the meantime and it did nothing —
+      # so claiming a restart here would be this PR's own bug in miniature. What
+      # is true in both cases is that the request was made and the agent will
+      # re-probe, now or at its next start.
+      echo "  Asked $unit to restart so the agent re-probes and offers the coding tools"
+    else
+      echo "  WARN: could not restart $unit — the agent will keep answering that it has no coding tools" >&2
+      failed=true
+    fi
+  done
+  if [ "$found" = false ]; then
+    echo "  No agent running; it will probe the harness when it next starts"
+    return 0
+  fi
+  # EVERY running agent, not "at least one". On the dual edition both units are
+  # up, and one that could not be restarted is one harness still blind — a
+  # partial refresh reported as a whole one is the shape this whole change is
+  # about.
+  [ "$failed" = false ]
+}
+
 step_coding_harness() {
+  # Whether the harness was ALREADY usable decides two things below: nothing
+  # needs telling if nothing changed, and a step that changed nothing and fixed
+  # nothing must not report that it did.
+  local was_ready=false
+  if [ -x "$CLAWBOX_HOME/.local/bin/claude-ds" ] && as_clawbox_login "command -v claude" &>/dev/null; then
+    was_ready=true
+  fi
+
   # Test mode has no network for claude.ai and no reason to download a binary,
   # but the wrapper is a file copy — install it so e2e-install exercises the
   # real delivery path instead of skipping the whole step.
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping the Claude Code download"
   else
+    # Still swallowed here: a download that failed is not the verdict, the
+    # probe below is. What changed is that the verdict is now the EXIT STATUS
+    # as well as a line of text.
     ensure_claude_code || true
   fi
   install_claude_ds_wrapper || true
   ensure_clawbox_bashrc_path
 
-  # Say plainly whether the harness can actually run. Without this the only
-  # symptom of a failed CLI install is the wrapper telling the owner to run
-  # this very step again — a loop with no diagnosis in it.
   if is_test_mode; then
-    :
-  elif as_clawbox_login "command -v claude" &>/dev/null; then
-    echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
-  else
-    echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is"
+    return 0
+  fi
+
+  # Say plainly whether the harness can actually run — and MEAN it in the exit
+  # status. This step is what src/lib/coding-agent.ts tells the owner to run
+  # when the Coding app refuses ("Run: sudo bash install.sh --step
+  # coding_harness"), and it used to exit 0 whatever happened: on a box where
+  # the CLI install failed (no network, or Anthropic geo-blocking the region)
+  # the owner ran the documented repair, was told nothing had gone wrong, and
+  # went back to an app refusing in exactly the same words. A repair that
+  # cannot repair has to SAY so.
+  # BOTH halves are reported, then one return. An early return after the first
+  # would hide the second, and this step exists to tell an owner what is wrong —
+  # sending them back for a second run to discover the other half is the same
+  # repair loop in slower motion.
+  local harness_missing=false
+  if ! as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  WARN: Claude Code is NOT installed — the Coding app will refuse until it is" >&2
+    echo "  Claude Code is downloaded from https://claude.ai/install.sh, so check this" >&2
+    echo "  box's internet access (and whether the installer is available in this" >&2
+    echo "  region), then run the step again." >&2
+    harness_missing=true
+  fi
+  if [ ! -x "$CLAWBOX_HOME/.local/bin/claude-ds" ]; then
+    echo "  WARN: the claude-ds wrapper is NOT at $CLAWBOX_HOME/.local/bin/claude-ds — the Coding app will refuse until it is" >&2
+    harness_missing=true
+  fi
+  if [ "$harness_missing" = true ]; then
+    echo "  This step did NOT repair the coding harness." >&2
+    return 1
+  fi
+
+  echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
+
+  # Only on the transition. A reload respawns every MCP child and invalidates
+  # the model's prompt cache, and this step runs on every install and every
+  # in-app update — the same rule, and the same reason for it, as the guard in
+  # refreshCodingAgentToolsIfReadinessChanged.
+  if [ "$was_ready" = false ]; then
+    # A refusal here is REPORTED (on stderr, inside the helper) and does not
+    # fail the step: the harness itself IS repaired and the Coding app works,
+    # so a non-zero exit would be the opposite lie. The agent re-probes at its
+    # next start either way.
+    if ! refresh_agent_coding_tools; then
+      echo "  The agent will offer the coding tools after its next restart" >&2
+    fi
   fi
 }
 
@@ -4856,18 +5044,22 @@ step_validate_services() {
     # Probe: on-device TTS delivered the engine it was asked for.
     #
     # scripts/install-voice.sh publishes its verdict to $TTS_STATUS_FILE for
-    # exactly this check. The distinction the file carries is the whole point:
-    # `skipped:*` means this board was never going to run Kokoro (no CUDA, no
-    # Jetson build for its architecture) and is a PASS — such a box has no
-    # on-device voice by design and speaks through the gateway's cloud voice —
-    # while `failed:*` means the GPU engine was requested and did not arrive,
-    # and someone has to fix it.
+    # exactly this check. The distinction the file carries tells an operator
+    # WHAT to fix, and here it decides the wording, not the outcome: `ready` is
+    # the only verdict that passes. `skipped:*` means this board declines
+    # Kokoro (no CUDA, no Jetson build for its architecture), and with one
+    # engine that is a box with NO on-device voice — a mute box, recorded and
+    # named the way step_openclaw_tts records its 13. It does not pass:
+    # whether the cloud voice exists is not a fact this installer can check
+    # (that needs the ClawBox AI link, which happens after install), and every
+    # shipped ClawBox is a Jetson a Kokoro build exists for, so a skipped
+    # Kokoro on real hardware means something is wrong. `failed:*` means the
+    # GPU engine was requested and did not arrive, and someone has to fix it.
     #
-    # Kokoro is the ONLY engine this probe reads. A release that still shipped
-    # the Piper CPU fallback also published a PIPER= line and this probe scored
-    # it; the owner removed that engine (2026-08), install-voice.sh no longer
-    # writes the key, and a stale line left in the file by an earlier run is
-    # ignored rather than read as an engine that exists.
+    # Kokoro is the ONLY engine this probe reads. An older release's second
+    # key is ignored: install-voice.sh no longer writes it, and a stale line
+    # left in the file by an earlier run is never read as an engine that
+    # exists.
     #
     # An ABSENT verdict fails too. The TTS step runs before this check on both
     # the install and the update path, so nothing here can assert "Kokoro is
@@ -4881,22 +5073,61 @@ step_validate_services() {
       # Read fresh from the file on every pass, never from an earlier answer.
       local tts_state=""
       if [ -r "$TTS_STATUS_FILE" ]; then
-        tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
+        # `tr -d '\r'`: the file is written by a shell on the device, but it is
+        # also restored from tarballs and edited by hand, and a CRLF line ends
+        # the verdict as `ready\r` — a value that is neither `ready` nor any
+        # other word in the vocabulary. Parse the line rather than merely
+        # refusing it; what a garbled value must NOT do is score a pass, and
+        # that is what the `*)` arm below is for.
+        tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
       fi
       # `ready` is the only verdict that means "this engine can speak".
-      # `skipped:*` is a board that was never going to run it, `failed:*` is
-      # one that was asked and could not, and an EMPTY string is a step that
-      # reported nothing at all — which fails. ONE line about this box's
-      # speech, so the check probe_count counts as one contributes at most one.
+      # `skipped:*` is a board that declines it — with one engine, a box with
+      # no voice — `failed:*` is one that was asked and could not, and an
+      # EMPTY string is a step that reported nothing at all; all three fail.
+      # ONE line about this box's speech, so the check probe_count counts as
+      # one contributes at most one.
+      #
+      # The vocabulary is closed: `ready`, `skipped:<reason>`, `failed:<reason>`,
+      # or nothing at all. Anything else — a truncated write (tts_status_publish
+      # truncates the file with `>` rather than writing-then-renaming, so a box
+      # that lost power mid-publish can leave one), a typo, a stray line — used
+      # to match no arm and fall out of the chain as a silent PASS, while the
+      # strictly LESS informative absent verdict correctly failed. Unparseable
+      # is at least as suspicious as absent, so it lands in the `*)` arm and
+      # fails — without asserting an engine state it could not read.
+      #
+      # `?*`, not `*`: a bare `skipped:` or `failed:` carries no reason, and a
+      # truncated write is exactly how one appears. "This board declines the
+      # engine" is a claim, and a claim with its reason cut off is not evidence
+      # for it either.
+      #
+      # Unreadable is decided FIRST, before any arm names an engine state:
+      # "this box has NO working on-device TTS engine" is a claim about an
+      # engine that may be running perfectly, and a verdict this probe could
+      # not parse is no evidence for it.
       local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
-      case "$tts_state" in
-        "")
-          failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
-          ;;
-        failed:*)
-          failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")
-          ;;
-      esac
+      local tts_verdict_unreadable=false
+      case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
+      if [ "$tts_verdict_unreadable" = true ]; then
+        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: $tts_state) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
+      else
+        case "$tts_state" in
+          "")
+            failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
+            ;;
+          ready)
+            ;;
+          skipped:?*)
+            # The mute box: the same recorded, named, non-fatal fact as
+            # step_openclaw_tts's 13, checked again here from the file.
+            failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+            ;;
+          failed:?*)
+            failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")
+            ;;
+        esac
+      fi
     fi
 
     # Probe 3 (hermes only): the OpenClaw gateway must be GONE. This is the only
@@ -5077,6 +5308,43 @@ if [ "${1:-}" = "--step" ]; then
     echo "Available steps: ${DISPATCH_STEPS[*]}" >&2
     exit 1
   fi
+  # ── A dispatched step's recorded failures must not die with it ─────────────
+  # `"step_x"; exit 0` threw away everything record_provision_failure collected.
+  # step_post_update returns 0 whatever its fixups reported, so an in-app update
+  # whose TTS step left the box MUTE — exit 13, recorded inside
+  # step_openclaw_tts precisely so it would be carried — finished as a
+  # successful update with nothing in $PROVISION_STATUS_FILE, the marker the
+  # dashboard and the flash host read. The full-install path has printed this
+  # summary since the marker existed; the dispatch path never reached it.
+  #
+  # An EXIT trap, not `"step_x" || rc=$?`: the OR-list form would switch set -e
+  # OFF for the entire body of the dispatched step, so every guard inside it
+  # that relies on errexit to stop would run on instead. The trap also catches
+  # the step that dies mid-way under errexit, which is the case that reported
+  # nothing at all.
+  #
+  # Only `incomplete` is ever published here. One dispatched step finishing
+  # cleanly is not evidence that the whole box provisioned, so a clean run
+  # writes nothing and leaves the marker to the full install that owns it.
+  dispatch_provision_verdict() {
+    local rc=$?
+    trap - EXIT
+    if [ "${#PROVISION_FAILURES[@]}" -gt 0 ]; then
+      echo "  ############################################################"
+      echo "  # PROVISIONING INCOMPLETE — step $local_step reported errors."
+      echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
+      echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step ${PROVISION_FAILURES[0]}"
+      echo "  ############################################################"
+      write_provision_status incomplete "${PROVISION_FAILURES[*]}" || true
+      # Same stdout contract as the full install: the flash host greps these
+      # two lines, and the prefix and the verdict word are byte-identical.
+      echo "[provision-status] INCOMPLETE (${PROVISION_FAILURES[*]})"
+      echo "[provision-run] $PROVISION_RUN_ID"
+      if [ "$rc" -eq 0 ]; then rc=1; fi
+    fi
+    exit "$rc"
+  }
+  trap dispatch_provision_verdict EXIT
   "step_${local_step}"
   exit 0
 fi
@@ -5171,7 +5439,15 @@ log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install
 
 log "Installing the ClawBox coding harness (claude-ds)..."
-step_coding_harness
+# Guarded, and it has to be. The step now FAILS when the harness did not end up
+# usable — that is the whole point of the change, because this step is the
+# repair src/lib/coding-agent.ts tells the owner to run and it must not report
+# success while the Coding app still refuses. But the harness is OPTIONAL: a box
+# with no Claude Code boots, serves its dashboard and runs its agent. Under the
+# `set -euo pipefail` at the top of this file an unguarded call would turn a
+# region-blocked download into an ABORTED INSTALL, which is the opposite defect.
+step_coding_harness \
+  || echo "  Warning: the coding harness did not install; the Coding app will refuse until it does"
 
 log "Installing VNC server..."
 step_vnc_install

@@ -474,14 +474,13 @@ describe("SettingsApp desktop nav overflow contract", () => {
 });
 
 /**
- * TASK follow-up: the AI section's own "Status" card duplicated the new AI
- * Providers hero on the Hermes edition — same provider, same model, same
- * "connected", stacked directly above it. The owner's goal this round was to
- * kill redundant provider sections, so the card is suppressed on hermes (the
- * hero is the single source there) and kept verbatim on openclaw and dual,
- * which have no hero.
+ * TASK follow-up: the AI section's own "Status" card duplicated the AI
+ * Providers hero — same provider, same model, same "connected", stacked
+ * directly above it. It was suppressed on hermes only because that was the one
+ * edition with a hero; now that the OpenClaw panel opens with the same hero,
+ * the reason applies on every edition and the card is gone from all of them.
  */
-describe("SettingsApp — AI section Status card is not doubled on Hermes", () => {
+describe("SettingsApp — the AI section never doubles the provider hero", () => {
   function stubForEdition(edition: "hermes" | "openclaw") {
     vi.stubGlobal(
       "fetch",
@@ -560,13 +559,16 @@ describe("SettingsApp — AI section Status card is not doubled on Hermes", () =
     });
   });
 
-  it("keeps the Status card on openclaw — there is no hero there", async () => {
+  it("hides it on openclaw too — the same hero now opens that panel", async () => {
     stubForEdition("openclaw");
     render(<SettingsApp ui={defaultUi} />);
 
-    // OpenClaw renders the picker, not the hero, so its Status card must stay.
-    expect(await screen.findByText("settings.status")).toBeInTheDocument();
-    expect(screen.queryByTestId("provider-default-hero")).not.toBeInTheDocument();
+    // The OpenClaw panel opens with the hero the Hermes one already had...
+    expect(await screen.findByTestId("provider-default-hero")).toBeInTheDocument();
+    // ...so the card that said the same three things one card higher is gone.
+    await waitFor(() => {
+      expect(screen.queryByText("settings.status")).not.toBeInTheDocument();
+    });
   });
 });
 

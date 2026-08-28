@@ -1,7 +1,7 @@
 import { promises as fsp } from "fs";
 import path from "path";
 import { DATA_DIR } from "@/lib/config-store";
-import { SUBSCRIPTION_SURFACE, subscriptionSurfaceLabel } from "@/lib/provider-models";
+import { subscriptionSurfaceLabel, subscriptionSurfaceProvider } from "@/lib/provider-models";
 
 /**
  * Server-side reads of the SUBSCRIPTION facts the UI already gets stamped into
@@ -47,8 +47,14 @@ interface CachedSurface {
 export async function readSubscriptionSurfaceIds(
   provider: string,
 ): Promise<Set<string> | null> {
-  const surfaceProvider = SUBSCRIPTION_SURFACE[provider]?.surfaceProvider;
+  const surfaceProvider = subscriptionSurfaceProvider(provider);
   if (!surfaceProvider) return null;
+  // No short-circuit when the surface is the provider ITSELF, unlike the
+  // catalog route's own copy of this lookup. There, resolving to the provider
+  // means "do not enumerate a second time"; here it means "open the file the
+  // route already wrote", which is exactly the list the pickers were stamped
+  // from. Making this one bail too would take the guard back to UNKNOWN on
+  // every box and stop refusing ids that are in no catalogue at all.
   try {
     const raw = await fsp.readFile(path.join(CACHE_DIR, `${surfaceProvider}.json`), "utf8");
     const parsed = JSON.parse(raw) as CachedSurface;
@@ -61,6 +67,54 @@ export async function readSubscriptionSurfaceIds(
     // Missing, unreadable, or half-written cache. Unknown, not "no".
     return null;
   }
+}
+
+/**
+ * Models selectable while the device is on ChatGPT/Codex subscription auth.
+ *
+ * GPT-5.6 Sol/Terra/Luna are subscription-eligible — OpenClaw's ChatGPT route
+ * catalog carries all three, and `openai/gpt-5.6-sol` is the documented
+ * default for a fresh Codex OAuth setup. Keeping them out of this allowlist
+ * rejected them locally with "not supported with ChatGPT subscription auth"
+ * before the request ever reached OpenAI. GPT-5.6 is a limited preview, so
+ * per-account access still varies: let the pick through and surface the
+ * upstream access error instead of pre-rejecting it here. `-pro` tiers stay
+ * out — those remain API-key only.
+ *
+ * It lives here, beside the Claude rule, for the same reason that one does:
+ * both write paths to `agents.defaults.model.primary` have to apply it, and a
+ * second copy in the second route is a copy that can drift.
+ * `scripts/gateway-pre-start.sh` keeps a hand-maintained mirror of this list
+ * in `_CODEX_SUPPORTED`, pinned by
+ * `src/tests/unit/gateway-pre-start-codex-models.test.ts`.
+ */
+export const CODEX_SUPPORTED_MODEL_RE = /^(?:gpt-5\.6-(?:sol|terra|luna)|gpt-5\.5|gpt-5\.4(?:-mini)?)$/;
+
+/**
+ * The refusal for a model id the ChatGPT subscription cannot run, as a
+ * message — or null when the target is fine, or is not on the ChatGPT surface
+ * at all.
+ *
+ * The `codex/` NAMESPACE is the subscription test, which is why this takes no
+ * config and no getter: ClawBox writes that namespace only for an OpenAI save
+ * in subscription mode (`PROVIDERS.openai.subscriptionOverride`), while an
+ * API-key save writes `openai/`, where the `-pro` tiers route perfectly well.
+ * So "provider is codex" already means "this box reaches OpenAI through a
+ * ChatGPT account", with no profile inspection needed.
+ *
+ * Unlike the Claude surface this is a static allowlist rather than a cache
+ * read, so there is no UNKNOWN case: the ChatGPT route catalogue is fixed by
+ * the plugin, not enumerated per box.
+ */
+export function offSurfaceCodexModelMessage(
+  provider: string | null | undefined,
+  modelId: string,
+): string | null {
+  if (provider !== "codex") return null;
+  if (CODEX_SUPPORTED_MODEL_RE.test(modelId)) return null;
+  return `${modelId} is not supported with ChatGPT subscription auth. `
+    + "Use GPT-5.6 Sol/Terra/Luna, GPT-5.5, GPT-5.4, or GPT-5.4 Mini, "
+    + "or switch OpenAI to API-key mode for Pro/API-only models.";
 }
 
 /** Auth-profile modes that mean "this provider has a bearer key of its own". */
@@ -128,9 +182,15 @@ export function isClaudeSubscriptionOnly(
  * carry, as a message — or null when the target is fine (not Claude, not a
  * Claude-subscription box, or the surface could not be read).
  *
- * Anthropic's subscription keeps the `anthropic/` namespace but narrows the
- * set: only the plugin's `claude-cli` catalogue routes, so claude-mythos-5 /
- * claude-fable-5 / the Haikus are API-key-only.
+ * The set it judges against is {@link subscriptionSurfaceProvider}'s, which
+ * since PR #532 is anthropic's OWN catalogue: a Claude subscription is routed
+ * by the native anthropic plugin on `POST /v1/messages`, which serves the full
+ * catalogue. It used to be the plugin's smaller `claude-cli` catalogue, and
+ * while the openai-compat override was the transport that was right — see the
+ * history note on SUBSCRIPTION_SURFACE. What survives the change is the reason
+ * this guard exists at all: a model id in NO Anthropic catalogue must not be
+ * written to `agents.defaults.model.primary`, because that failure is silent,
+ * sticky, and survives a reboot.
  *
  * It lives here, not in a route, because there are TWO write paths to
  * `agents.defaults.model.primary` and each of them has more than one door:
@@ -163,8 +223,18 @@ export async function offSurfaceClaudeModelMessage(
   if (!(await isClaudeSubscription())) return null;
   const surfaceIds = await getSurfaceIds();
   if (!surfaceIds || surfaceIds.has(modelId)) return null;
+  const choices = `Pick one of ${[...surfaceIds].sort().join(", ")}`;
   const surface = subscriptionSurfaceLabel("anthropic");
-  return `${modelId} is not on the Claude subscription surface (${surface}). `
-    + `Pick one of ${[...surfaceIds].sort().join(", ")}, `
-    + "or switch Anthropic to API-key mode for the API-only models.";
+  // A NAMED narrower surface can be named, and the customer has a second
+  // lever: an API key reaches the models that surface omits. When the
+  // subscription routes natively there is no narrower surface and no such
+  // lever — the id is simply in no Anthropic catalogue this box knows — so
+  // recommending API-key mode would send them after a fix that changes
+  // nothing.
+  if (surface) {
+    return `${modelId} is not on the Claude subscription surface (${surface}). `
+      + `${choices}, or switch Anthropic to API-key mode for the API-only models.`;
+  }
+  return `${modelId} is not in the Anthropic model catalogue this box enumerated. `
+    + `${choices}, or check the id for a typo.`;
 }

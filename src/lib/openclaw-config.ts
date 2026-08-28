@@ -134,7 +134,7 @@ async function withConfigMutationRetry(
   throw lastError ?? new Error(`${label} exhausted retries`);
 }
 
-interface SpawnOpenclawOptions {
+export interface SpawnOpenclawOptions {
   /** Per-call timeout in ms. Default 30_000 (Jetson CLI cold-start is ~10-12s). */
   timeoutMs?: number;
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
@@ -218,6 +218,22 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
       }
     });
   });
+}
+
+/**
+ * Public face of {@link spawnOpenclaw} for other libs in this repo.
+ *
+ * Exported as a named wrapper rather than by exporting `spawnOpenclaw` itself
+ * so the edition guard, the timeout and the stdio rules stay in ONE place: a
+ * caller that wants `--json` output gets the same "drain stdout or the child
+ * deadlocks" handling every internal caller already has, and the
+ * OpenclawUnavailableError guard cannot be routed around.
+ */
+export function spawnOpenclawCli(
+  args: string[],
+  options: SpawnOpenclawOptions = {},
+): Promise<string> {
+  return spawnOpenclaw(args, options);
 }
 
 /**
@@ -362,6 +378,40 @@ export async function runOpenclawConfigSetBatch(
     "runOpenclawConfigSetBatch",
   );
 }
+
+/**
+ * Run `openclaw config unset <path>`, with the same conflict retry as
+ * {@link runOpenclawConfigSet}.
+ *
+ * `config set` has no way to say "remove this key": a `null` or `{}` value
+ * leaves the path present, and a present-but-empty `models.providers.<p>` is
+ * still read by the gateway as a provider definition. Removal needs the CLI's
+ * own `unset` verb — and it races the gateway's config reload exactly like a
+ * set does, so it gets the same retry rather than a bare spawn.
+ *
+ * NOT safe to call unconditionally: verified against OpenClaw 2026.7.1-2, the
+ * CLI exits 1 with "Config path not found: <path>. Nothing was changed." when
+ * the path is absent. Callers must check the config first and only unset a path
+ * that is actually there, so a real removal failure stays loud.
+ */
+export async function runOpenclawConfigUnset(
+  configPath: string,
+  options: OpenclawConfigSetOptions = {},
+): Promise<void> {
+  await withConfigMutationRetry(
+    (timeoutMs) =>
+      spawnOpenclaw(["config", "unset", configPath], {
+        timeoutMs,
+        uid: options.uid,
+        gid: options.gid,
+        cwd: options.cwd,
+        env: options.env,
+      }).then(() => undefined),
+    options,
+    "runOpenclawConfigUnset",
+  );
+}
+
 export const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
@@ -605,6 +655,25 @@ export interface OpenClawConfig {
       [key: string]: unknown;
     };
   };
+  /**
+   * Where a `token: {source, provider, id}` reference is resolved FROM.
+   * OpenClaw looks the `provider` name up in here; there is no implicit
+   * default, so a reference without a matching entry is unresolvable at
+   * runtime. See {@link envSecretRef}.
+   */
+  secrets?: {
+    providers?: Record<string, { source?: string; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
+  /**
+   * Plugin registry. `entries.<id>.enabled` is what makes the gateway TRUST an
+   * external (non-bundled) plugin; without it a configured channel is refused
+   * even though the package is installed. See {@link trustChannelPlugin}.
+   */
+  plugins?: {
+    entries?: Record<string, { enabled?: boolean; [key: string]: unknown }>;
+    [key: string]: unknown;
+  };
   tools?: {
     profile?: string;
     web?: { search?: { enabled?: boolean } };
@@ -700,13 +769,127 @@ export function inferConfiguredLocalModel(config: OpenClawConfig): { provider: "
   return null;
 }
 
+/** A JSON value that can hold named keys — i.e. not an array, null or a primitive. */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export async function readConfig(): Promise<OpenClawConfig> {
   try {
     const raw = await fs.readFile(CONFIG_PATH, "utf-8");
-    return JSON.parse(raw);
+    const parsed: unknown = JSON.parse(raw);
+    // The ROOT is a container too, and it is the one every helper below stands
+    // on. A file holding `[]` parses fine, so without this the writers attach
+    // their keys to an array and `JSON.stringify` drops all of them; a root
+    // string or number makes the first assignment throw in strict mode. Either
+    // way a caller that only ever reads gets `{}`, which is what this function
+    // already promises for every other unusable file. See
+    // {@link ensurePlainObject}.
+    return isPlainObject(parsed) ? (parsed as OpenClawConfig) : {};
   } catch {
     return {};
   }
+}
+
+/**
+ * {@link readConfig}, except that only an ENOENT is allowed to mean "there is
+ * no config".
+ *
+ * `readConfig` answers `{}` to every failure alike — a missing file, an EACCES,
+ * a file caught half-written by a concurrent `config set`. That is the right
+ * default for the many callers asking "is X switched on?", where UNKNOWN and NO
+ * lead to the same harmless place.
+ *
+ * It is the wrong default for a caller that is about to SKIP a repair because
+ * the thing it repairs reads as already absent. There, `{}` from an unreadable
+ * file is indistinguishable from a genuinely clean config, so the repair is
+ * quietly declared unnecessary and the route reports success while the state it
+ * promised to remove is still on disk.
+ *
+ * So: ENOENT returns `{}` (there is nothing to read, and nothing to repair),
+ * and every other read or parse failure throws.
+ */
+export async function readConfigStrict(): Promise<OpenClawConfig> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(CONFIG_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw err;
+  }
+  const parsed: unknown = JSON.parse(raw);
+  // Deliberately the OPPOSITE of readConfig's answer for the same file. This
+  // function exists so a caller about to skip a repair cannot be told "already
+  // clean" by a config it could not read, and a root array or primitive is
+  // exactly that: parseable, and not a config. Normalising it to `{}` here
+  // would hand back the false "nothing to remove" this variant was written to
+  // prevent.
+  if (!isPlainObject(parsed)) {
+    throw new Error("openclaw.json does not contain a configuration object");
+  }
+  return parsed as OpenClawConfig;
+}
+
+/**
+ * Return `container[key]` as a plain object, REPLACING first whatever else is
+ * there — an array, a string, a number, a boolean.
+ *
+ * `??=` is not enough for this, and the difference does not show up until the
+ * write has already been reported as successful:
+ *
+ *   * `[]` is not nullish, so `config.plugins ??= {}` keeps the array. The next
+ *     assignment attaches a NAMED PROPERTY to it, and `JSON.stringify` — which
+ *     is how every config write in this module reaches disk — drops named
+ *     properties of arrays. The save writes a config missing the very key it
+ *     was called to add, and answers 200.
+ *   * `[].entries` is not nullish either: it is `Array.prototype.entries`. So
+ *     `plugins.entries ??= {}` keeps the intrinsic and the channel's trust
+ *     entry is written onto a shared JS function. Measured: after one such
+ *     save, an unrelated `[].entries.discord` reads `{"enabled":true}` for the
+ *     rest of the server process's life.
+ *   * a string or a number is worse again — assigning a property to a
+ *     primitive THROWS in strict mode (ES modules always are), so the save dies
+ *     halfway as an opaque 500.
+ *
+ * Replacing rather than refusing is deliberate, and it is the opposite of the
+ * choice {@link envSecretRef} makes one screen down. A non-object `secrets` is
+ * the operator's own credential wiring: we cannot interpret it, and overwriting
+ * it would break channels that resolve through it today, so that path refuses
+ * and writes nothing. A non-object `plugins`/`channels`/`agents`/`gateway` is
+ * not a shape OpenClaw's schema can load at all — the gateway exits 78/CONFIG
+ * on it — so there is no working configuration to protect, and refusing would
+ * only leave the box stuck in the state it is already broken in. Normalising
+ * repairs it inside the same atomic write.
+ */
+function ensurePlainObject(container: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = container[key];
+  if (isPlainObject(existing)) return existing;
+  const replacement: Record<string, unknown> = {};
+  container[key] = replacement;
+  return replacement;
+}
+
+/** The config as a bag of keys, for the container helpers above. */
+function asBag(config: OpenClawConfig): Record<string, unknown> {
+  return config as Record<string, unknown>;
+}
+
+/**
+ * The existing block for one channel, as something safe to spread.
+ *
+ * Every channel writer here rebuilds the block as `{...existing, enabled, …}`
+ * so it can drop the keys it re-secures. Spreading a STRING splits it into
+ * indexed characters (`"on"` becomes `{"0":"o","1":"n"}`), and one key OpenClaw
+ * does not know takes the whole gateway down with exit 78/CONFIG — every other
+ * channel with it. A block that is not a plain object carries nothing worth
+ * merging, so it is treated as absent.
+ */
+function existingChannelBlock(
+  channels: Record<string, unknown>,
+  channelId: string,
+): Record<string, unknown> {
+  const existing = channels[channelId];
+  return isPlainObject(existing) ? existing : {};
 }
 
 async function writeConfig(config: OpenClawConfig): Promise<void> {
@@ -780,14 +963,14 @@ export async function ensureCompactionReserveFloor(
   reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
 ): Promise<void> {
   const config = await readConfig();
-  config.agents ??= {};
-  config.agents.defaults ??= {};
-  config.agents.defaults.compaction ??= {};
+  const agents = ensurePlainObject(asBag(config), "agents");
+  const defaults = ensurePlainObject(agents, "defaults");
+  const compaction = ensurePlainObject(defaults, "compaction");
   if (
-    typeof config.agents.defaults.compaction.reserveTokensFloor !== "number" ||
-    config.agents.defaults.compaction.reserveTokensFloor < reserveTokensFloor
+    typeof compaction.reserveTokensFloor !== "number" ||
+    compaction.reserveTokensFloor < reserveTokensFloor
   ) {
-    config.agents.defaults.compaction.reserveTokensFloor = reserveTokensFloor;
+    compaction.reserveTokensFloor = reserveTokensFloor;
     await writeConfig(config);
   }
 }
@@ -799,8 +982,8 @@ export async function ensureCompactionReserveFloor(
  */
 export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
   const config = await readConfig();
-  const gateway = (config.gateway ?? {}) as Record<string, unknown>;
-  const controlUi = (gateway.controlUi ?? {}) as Record<string, unknown>;
+  const gateway = ensurePlainObject(asBag(config), "gateway");
+  const controlUi = ensurePlainObject(gateway, "controlUi");
   const existing = Array.isArray(controlUi.allowedOrigins)
     ? (controlUi.allowedOrigins as unknown[]).filter((v): v is string => typeof v === "string")
     : [];
@@ -813,16 +996,15 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
     "http://10.43.0.1", // alt subnet when home network collides with 10.42.0.0/24
   ]);
   controlUi.allowedOrigins = Array.from(origins);
-  gateway.controlUi = controlUi;
-  config.gateway = gateway;
   await writeConfig(config);
 }
 
+/** OpenClaw's id for the Telegram channel — the config key's, and the plugin's. */
+const TELEGRAM_CHANNEL_ID = "telegram";
+
 export async function setTelegramToken(botToken: string): Promise<void> {
   const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
+  const channels = ensurePlainObject(asBag(config), "channels");
   // Do NOT set `dmPolicy` or `allowFrom` here. OpenClaw's default
   // (`dmPolicy: "pairing"`) requires the owner to approve every new sender
   // via an in-Telegram pairing code before the agent responds. Writing
@@ -831,8 +1013,12 @@ export async function setTelegramToken(botToken: string): Promise<void> {
   // finds the handle. Reconfiguring a bot token on a device with those
   // values already stored should re-secure the channel, so strip them here
   // too rather than merging on top of the stale insecure config.
-  const { dmPolicy: _dmPolicy, allowFrom: _allowFrom, ...rest } = config.channels.telegram ?? {};
-  config.channels.telegram = {
+  const {
+    dmPolicy: _dmPolicy,
+    allowFrom: _allowFrom,
+    ...rest
+  } = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
+  channels[TELEGRAM_CHANNEL_ID] = {
     ...rest,
     enabled: true,
     botToken,
@@ -853,17 +1039,15 @@ export async function getTelegramProgressStreaming(): Promise<boolean> {
 
 export async function setTelegramProgressStreaming(enabled: boolean): Promise<void> {
   const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
-  const existing = config.channels.telegram ?? {};
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const existing = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
   if (enabled) {
     // Restore OpenClaw's default by dropping our override entirely.
     const { streaming: _streaming, ...rest } = existing;
-    config.channels.telegram = { ...rest };
+    channels[TELEGRAM_CHANNEL_ID] = { ...rest };
   } else {
     // Final-answer-only: suppress the progress/preview draft.
-    config.channels.telegram = { ...existing, streaming: { mode: "off" } };
+    channels[TELEGRAM_CHANNEL_ID] = { ...existing, streaming: { mode: "off" } };
   }
   // Note: unlike setTelegramToken this does not strip dmPolicy/allowFrom — it's
   // a preference toggle, not a token re-secure; gateway-pre-start.sh already
@@ -878,16 +1062,119 @@ export async function setTelegramProgressStreaming(enabled: boolean): Promise<vo
 // (`token: {source:"env", provider:"default", id:"DISCORD_BOT_TOKEN"}`), not as
 // a literal string like `channels.telegram.botToken`. So writing the config is
 // only half the job — DISCORD_BOT_TOKEN also has to be present in the gateway
-// PROCESS environment, or the config validates, the gateway starts, and the bot
-// silently never logs in.
+// PROCESS environment, and `secrets.providers.default` has to exist for the
+// reference to resolve at all (see envSecretRef below), or the config
+// validates, the gateway starts, and the bot silently never logs in.
 //
 // That is what `data/discord.env` is for: clawbox-gateway.service loads it with
 // `EnvironmentFile=-`, the same mechanism it already uses for network.env.
 // systemd re-reads EnvironmentFile on every start, so the restart that follows
 // a save is what picks the value up.
 
+// === Env-backed credentials (SecretRefs) ====================================
+//
+// A channel whose credential lives in the gateway's PROCESS environment is
+// configured with a reference, not a literal:
+//
+//     token: { source: "env", provider: "default", id: "DISCORD_BOT_TOKEN" }
+//
+// OpenClaw resolves that through `resolveProviderRefs()`, which switches on
+// `secrets.providers[<provider>].source`. THERE IS NO IMPLICIT DEFAULT
+// PROVIDER — grepping the shipped runtime for one finds nothing. A config that
+// carries the reference and no `secrets` block therefore validates, starts the
+// channel, and then kills it on first use:
+//
+//     Discord bot token configured for account "default" is unavailable;
+//     resolve SecretRefs against the active runtime snapshot before using this
+//     account.
+//
+// which on a live box was a restart loop behind a panel reporting success.
+// Adding the provider and restarting fixed it immediately.
+
+/** The single provider name every env SecretRef this repo writes points at. */
+export const ENV_SECRET_PROVIDER = "default";
+
+/**
+ * Mint an env SecretRef for `envVar`, installing the provider it resolves
+ * through into `config` as a side effect.
+ *
+ * THE CHOKEPOINT. The reference and the provider that makes it resolvable are
+ * produced by one call, so a channel added later cannot repeat this bug by
+ * writing the reference and forgetting the provider — the two cannot be
+ * written apart. Grep `source: "env"` across `src/` and this is the only
+ * production writer of one; `gateway-proxy.ts` only ever READS the shape.
+ *
+ * CREATE-IF-ABSENT, never rewrite, and REFUSE on a conflict.
+ *
+ * `secrets.providers` is shared config: the name is a plain map key and
+ * OpenClaw resolves purely on the entry's `source` (resolveProviderRefs
+ * switches on it and uses the name only for the lookup and the error text). So
+ * an entry already there was put there by whoever administers the box, and
+ * silently repointing it at the environment because one channel wanted that is
+ * how a change that "fixed Discord" would quietly break somebody else's file-
+ * or exec-backed secrets.
+ *
+ * Writing the reference anyway is not the safe fallback either. It produces a
+ * channel that is configured, enabled, and cannot start — the exact state this
+ * change exists to remove — and it does it to a config the operator owns, on a
+ * box where their other secrets already resolve. Refusing costs the owner one
+ * actionable message; writing costs them a channel that lies about itself.
+ *
+ * The caller turns this into `token_unresolved` for the panel, having written
+ * nothing.
+ *
+ * (A malformed provider entry is a separate and harsher failure: OpenClaw
+ * validates the whole config on boot, so one out-of-schema `secrets` value
+ * makes the gateway exit 78/CONFIG and roll openclaw.json back to
+ * `.last-good` — taking every other channel with it. We never write that shape;
+ * the note is here because it is what makes `secrets` worth leaving alone.)
+ */
+export class EnvSecretProviderConflictError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly conflictingSource: string,
+  ) {
+    super(
+      `Secret provider "${provider}" has source "${conflictingSource}", so an environment-backed ` +
+        `reference cannot resolve through it.`,
+    );
+    this.name = "EnvSecretProviderConflictError";
+  }
+}
+
+export function envSecretRef(
+  config: OpenClawConfig,
+  envVar: string,
+): { source: "env"; provider: string; id: string } {
+  // Everything here came off disk via readConfig(), which returns whatever the
+  // file parsed to. A `secrets` that is a string, or a provider entry that is
+  // null, must produce the typed refusal the caller already handles — not a
+  // TypeError that becomes an opaque 500 halfway through a save.
+  if (config.secrets !== undefined && !isPlainObject(config.secrets)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, typeof config.secrets);
+  }
+  const secrets = (config.secrets ??= {});
+  if (secrets.providers !== undefined && !isPlainObject(secrets.providers)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, typeof secrets.providers);
+  }
+  const providers = (secrets.providers ??= {});
+
+  const existing = providers[ENV_SECRET_PROVIDER];
+  if (existing === undefined) {
+    providers[ENV_SECRET_PROVIDER] = { source: "env" };
+  } else if (!isPlainObject(existing)) {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, existing === null ? "null" : typeof existing);
+  } else if (existing.source !== "env") {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, String(existing.source));
+  }
+  return { source: "env", provider: ENV_SECRET_PROVIDER, id: envVar };
+}
+
 /** Env var the gateway resolves the Discord credential from. */
 export const DISCORD_TOKEN_ENV_VAR = "DISCORD_BOT_TOKEN";
+
+/** OpenClaw's id for the Discord channel — the config key's, and the plugin's. */
+const DISCORD_CHANNEL_ID = "discord";
 
 // The data dir is re-derived here rather than imported from config-store, and
 // that is load-bearing, not a style choice. This module is imported (via
@@ -966,22 +1253,67 @@ export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
  *   * a literal `botToken` left by any other writer is dropped, so the env
  *     reference is the only credential path and a stale copy cannot outlive it.
  */
+/**
+ * Mark the channel plugin `channelId` as trusted, in whatever config object the
+ * caller is about to write.
+ *
+ * INSTALLATION AND TRUST ARE DIFFERENT FACTS. `openclaw plugins install` puts
+ * the package in OpenClaw's own store AND writes `plugins.entries.<id>` — but
+ * that entry lives in the same openclaw.json every other route in this repo
+ * read-modify-writes. A route that read the file before a channel save and
+ * wrote it after drops the entry without touching anything it meant to, and the
+ * gateway then refuses the channel it is still configured for:
+ *
+ *     channels.discord: channel is configured, but external plugin "discord" is
+ *     installed without explicit trust. Add plugins.entries.discord.enabled=true.
+ *
+ * Measured on a live box: the channel connected, a config write two minutes
+ * later dropped the entry, and `channels status` answered `unknown channel:
+ * discord` from then on while the panel's card sat at "unknown". Restoring the
+ * entry brought it back to connected across a full restart.
+ *
+ * So ClawBox writes the trust entry ITSELF, in the same atomic write as the
+ * channel block — the same reasoning as {@link envSecretRef}: the facts that
+ * have to be true together are written together, and cannot be separated by a
+ * concurrent writer.
+ *
+ * Merges rather than replaces, because the entry is shared config and may carry
+ * keys this repo knows nothing about.
+ */
+export function trustChannelPlugin(config: OpenClawConfig, channelId: string): void {
+  // `??=` cannot be used for either container: `"plugins": []` is not nullish
+  // and neither is `[].entries` (it is `Array.prototype.entries`), so the entry
+  // would be attached to an array — dropped by `JSON.stringify` on the way to
+  // disk — or onto a JS intrinsic. Both look like a successful save and leave
+  // the gateway answering `unknown channel` for a channel it is configured for,
+  // which is the failure this whole function exists to prevent. See
+  // {@link ensurePlainObject}.
+  const plugins = ensurePlainObject(asBag(config), "plugins");
+  const entries = ensurePlainObject(plugins, "entries");
+  const existing = entries[channelId];
+  entries[channelId] = { ...(isPlainObject(existing) ? existing : {}), enabled: true };
+}
+
 export async function setDiscordToken(botToken: string): Promise<void> {
   const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
+  const channels = ensurePlainObject(asBag(config), "channels");
   const {
     dmPolicy: _dmPolicy,
     allowFrom: _allowFrom,
     botToken: _legacyLiteralToken,
     ...rest
-  } = config.channels.discord ?? {};
-  config.channels.discord = {
+  } = existingChannelBlock(channels, DISCORD_CHANNEL_ID);
+  channels[DISCORD_CHANNEL_ID] = {
     ...rest,
     enabled: true,
-    token: { source: "env", provider: "default", id: DISCORD_TOKEN_ENV_VAR },
+    // envSecretRef also installs `secrets.providers.default`, without which
+    // this reference is unresolvable at runtime — see its doc comment.
+    token: envSecretRef(config, DISCORD_TOKEN_ENV_VAR),
   };
+  // Same write, deliberately: an installed-but-untrusted plugin is a channel
+  // the gateway refuses, and leaving the entry to survive on its own is what
+  // let a later read-modify-write silently take Discord back down.
+  trustChannelPlugin(config, DISCORD_CHANNEL_ID);
   await writeConfig(config);
   // Config first, secret second: a half-applied save that has the reference but
   // not the value is a bot that does not log in, which the status route reports
