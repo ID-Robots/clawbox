@@ -398,6 +398,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.providers.needsReauth": "Needs sign-in",
     "settings.providers.unknown": "Unknown",
     "settings.providers.default": "Default",
+    "settings.providers.radioGroupLabel": "AI Provider",
+    "settings.providers.changeModel": "Change model",
     "settings.providers.degraded": "Couldn't reach the agent — some states may be out of date",
     "settings.providers.loadFailed": "Couldn't load provider status",
     "settings.providers.defaultFailed": "Couldn't change the default: {message}",

@@ -86,9 +86,7 @@ export const zh: Record<string, string> = {
   "hermesProvider.title": "AI 提供商",
   "hermesProvider.intro":
     "本设备运行在 Hermes 上。连接提供商并选择默认项——状态、登录与切换都在这里完成。",
-  "hermesProvider.radioGroupLabel": "AI 服务商",
   "hermesProvider.hero.nativeSwitch": "通过 Hermes 原生切换",
-  "hermesProvider.hero.changeModel": "更换模型",
   "hermesProvider.continue": "继续",
   "hermesProvider.connected.affirmation": "已连接",
 

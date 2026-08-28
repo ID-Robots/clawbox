@@ -71,9 +71,7 @@ export const sv: Record<string, string> = {
   "hermesProvider.title": "AI-leverantörer",
   "hermesProvider.intro":
     "Den här enheten körs på Hermes. Anslut leverantörer och välj standardvalet — status, inloggning och byte sker allt här.",
-  "hermesProvider.radioGroupLabel": "AI-leverantör",
   "hermesProvider.hero.nativeSwitch": "växlar nativt via Hermes",
-  "hermesProvider.hero.changeModel": "Byt modell",
   "hermesProvider.continue": "Fortsätt",
   "hermesProvider.connected.affirmation": "Ansluten",
 

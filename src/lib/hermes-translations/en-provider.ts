@@ -13,9 +13,7 @@ export const providerEn: Record<string, string> = {
   "hermesProvider.title": "AI Providers",
   "hermesProvider.intro":
     "This device runs on Hermes. Connect providers and pick the default — status, sign-in and switching all live here.",
-  "hermesProvider.radioGroupLabel": "AI Provider",
   "hermesProvider.hero.nativeSwitch": "switches natively through Hermes",
-  "hermesProvider.hero.changeModel": "Change model",
   "hermesProvider.continue": "Continue",
   "hermesProvider.connected.affirmation": "Connected",
 
