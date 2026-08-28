@@ -1,5 +1,6 @@
 /**
- * GH-01d. The GitHub row of the Coding Agent card.
+ * GH-01d. The GitHub row of the Coding Agent settings — Settings → Coding
+ * Agent (CodingAgentSettingsPanel), where the card moved from the app.
  *
  * #518 split one failure into three reasons and added all three to this
  * component's GitHubState type — and then branched on only one of them.
@@ -16,7 +17,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import CodingAgentApp from "@/components/CodingAgentApp";
+import CodingAgentSettingsPanel from "@/components/CodingAgentSettingsPanel";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -31,7 +32,7 @@ function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
-/** The device answering the three loads the card makes, with `git` under test. */
+/** The device answering the two loads the panel makes, with `git` under test. */
 function stubFetch(github: Record<string, unknown>) {
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
     const url = input.toString();
@@ -60,7 +61,7 @@ afterEach(() => {
 describe("a gh that is installed but will not run", () => {
   it("does not say 'not connected' — that is not what was found", async () => {
     stubFetch({ installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND, reason: "not_runnable" });
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
 
     const badge = await screen.findByTestId("coding-agent-github-not-runnable");
     expect(badge).toBeTruthy();
@@ -69,7 +70,7 @@ describe("a gh that is installed but will not run", () => {
 
   it("says gh would not start and points at permissions, in real English copy", async () => {
     stubFetch({ installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND, reason: "not_runnable" });
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
 
     const badge = await screen.findByTestId("coding-agent-github-not-runnable");
     // A missing key would render the key itself; this pins real copy.
@@ -79,7 +80,7 @@ describe("a gh that is installed but will not run", () => {
 
   it("does not offer Connect, which opens the one remedy that cannot work", async () => {
     stubFetch({ installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND, reason: "not_runnable" });
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
 
     await screen.findByTestId("coding-agent-github-not-runnable");
     const connect = screen.queryByTestId("coding-agent-github-connect");
@@ -91,7 +92,7 @@ describe("a gh that is installed but will not run", () => {
 describe("the reasons that already worked keep working", () => {
   it("still shows the unreachable badge for a network fault", async () => {
     stubFetch({ installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND, reason: "unreachable" });
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
 
     expect(await screen.findByTestId("coding-agent-github-unreachable")).toBeTruthy();
     expect(screen.queryByTestId("coding-agent-github-not-runnable")).toBeNull();
@@ -99,7 +100,7 @@ describe("the reasons that already worked keep working", () => {
 
   it("still offers Connect to a gh that simply has nobody logged in", async () => {
     stubFetch({ installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND });
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
 
     const connect = await screen.findByTestId("coding-agent-github-connect");
     expect((connect as HTMLButtonElement).disabled).toBe(false);
@@ -108,7 +109,7 @@ describe("the reasons that already worked keep working", () => {
 
   it("still shows the account when one is connected", async () => {
     stubFetch({ installed: true, connected: true, login: "yalexx", loginCommand: LOGIN_COMMAND });
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
 
     expect((await screen.findByTestId("coding-agent-github-login")).textContent).toBe("yalexx");
     expect(screen.queryByTestId("coding-agent-github-not-runnable")).toBeNull();

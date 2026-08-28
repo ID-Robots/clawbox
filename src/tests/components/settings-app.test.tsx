@@ -681,6 +681,20 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(labels.findIndex((l) => l.includes("settings.localAi"))).toBe(labels.findIndex((l) => l.includes("settings.providers")) + 1);
   });
 
+  it("carries Coding Agent directly beneath Local AI, and opens its settings panel there", async () => {
+    // The coding agent's switch, folder, effort and GitHub account moved out
+    // of the desktop app into Settings; the app links here by section id.
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const labels = navButtons(container).map((b) => b.textContent ?? "");
+    expect(labels.findIndex((l) => l.includes("settings.codingAgent"))).toBe(labels.findIndex((l) => l.includes("settings.localAi")) + 1);
+
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "codingAgent" } }));
+    expect(await screen.findByTestId("coding-agent-settings-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-switch")).toBeInTheDocument();
+    const entry = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.codingAgent"))!;
+    expect(entry.className).toContain("coral-bright");
+  });
+
   it("opens on Providers with the provider list, and Local AI shows the grouped on-device page", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     expect(await screen.findByTestId("ai-provider-list")).toBeInTheDocument();

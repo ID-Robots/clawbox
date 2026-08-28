@@ -371,12 +371,17 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                     )}
 
                     {entry.managedBy === "clawkeep" ? (
+                      // The index this row embeds for is managed in Memory
+                      // Shard now; ClawKeep only keeps a card pointing there.
+                      // Opening ClawKeep would cost the owner a second click
+                      // to reach the thing they were sent to manage.
                       <button
                         type="button"
-                        onClick={() => dispatchOpenApp("clawkeep")}
+                        onClick={() => dispatchOpenApp("memory-shard")}
                         className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
+                        data-testid={`local-model-manage-${entry.id}`}
                       >
-                        {t("localModels.menu.manageInClawKeep")}
+                        {t("localModels.menu.manageInMemoryShard")}
                       </button>
                     ) : actions.length > 0 && (
                       <div className="relative shrink-0" ref={open ? menuRef : undefined}>

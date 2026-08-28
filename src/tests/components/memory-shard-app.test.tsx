@@ -1,27 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import ClawKeepApp from "@/components/ClawKeepApp";
+import MemoryShardApp from "@/components/MemoryShardApp";
 import { I18nProvider } from "@/lib/i18n";
 
 /**
- * TASK-398, added UI scope, on the surface the owner actually uses.
+ * TASK-398, added UI scope, on the surface the owner actually uses — now its
+ * own window. These are the memory-index assertions that used to drive
+ * ClawKeepApp, mounted on Memory Shard instead: the routes, the copy and the
+ * controls are the same, only the window changed.
  *
  * The point of the panel is that a customer can see whether their notes are
  * embedded on the box or in somebody's cloud, and can reindex without SSH.
- * Driven through ClawKeepApp so the assertions cover the wiring too — a panel
- * that renders beautifully but is never mounted fails this task.
  */
-
-const BASE_STATUS = {
-  paired: false,
-  configured: false,
-  server: "https://portal.example",
-  lastBackupAtMs: 0,
-  openclawInstalled: true,
-  daemonInstalled: true,
-  schedule: { enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0, retentionKeepLast: 0 },
-  nextRunAtMs: 0,
-};
 
 const LOCAL_MEMORY = {
   available: true,
@@ -66,12 +56,15 @@ function installFetch() {
       return ok({ schedule: body, nextRunAtMs: Date.now() + 3_600_000 });
     }
     if (url.includes("/setup-api/clawkeep/memory")) return ok(memory);
-    if (url.includes("/setup-api/clawkeep")) return ok(BASE_STATUS);
     return ok({});
   }));
 }
 
-describe("the memory index panel in ClawKeep", () => {
+function mount() {
+  return render(<I18nProvider><MemoryShardApp /></I18nProvider>);
+}
+
+describe("the Memory Shard app", () => {
   beforeEach(() => {
     memory = { ...LOCAL_MEMORY };
     indexCalls = [];
@@ -86,39 +79,39 @@ describe("the memory index panel in ClawKeep", () => {
   });
 
   it("says out loud that the embedding is happening on the device", async () => {
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     // The privacy claim is the feature. If this reads "Cloud" on a local
     // embedder, or reads nothing, the panel is worse than not shipping it.
-    // ClawKeep is a heavy mount, and this file runs beside 500 others on a
-    // six-core Jetson: the default one-second wait was the only thing that
-    // ever failed here, and only under that load.
+    // This file runs beside 500 others on a six-core Jetson: the default
+    // one-second wait was the only thing that ever failed here, and only
+    // under that load.
     expect(await screen.findByText("On device", {}, { timeout: 5000 })).toBeTruthy();
     expect(await screen.findByText("Embedding with qwen3-embedding:0.6b", {}, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByText("Healthy")).toBeTruthy();
   });
 
-  it("cannot take ClawKeep down when the route answers something else", async () => {
+  it("keeps its loading line when the route answers something else, rather than throwing", async () => {
     // Exactly what the e2e mock does: any unrecognised /setup-api/* path is
     // answered `{}` with HTTP 200. That used to be adopted as a status, and
     // the first render read `status.run.status` off undefined and threw —
-    // which is why every ClawKeep e2e test failed with the window never
-    // appearing at all. A panel must not cost the customer the app it is in.
+    // back then it took the whole ClawKeep window down. Now that the panel is
+    // the window, the rule is the same: an answer it does not recognise is
+    // ignored, not rendered.
     memory = {} as Record<string, unknown>;
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
-    // ClawKeep itself still renders...
-    expect(await screen.findByRole("button", { name: "Pair with portal" })).toBeTruthy();
-    // ...and the panel stays on its loading line rather than inventing a state.
+    mount();
+    expect(screen.getByTestId("memory-shard-app")).toBeTruthy();
+    await waitFor(() => expect(fetch).toHaveBeenCalled());
     expect(screen.getByText(/Memory index — Loading/)).toBeTruthy();
   });
 
   it("shows a cloud embedder as cloud", async () => {
     memory = { ...LOCAL_MEMORY, provider: "openai", model: "text-embedding-3-large", location: "cloud" };
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     expect(await screen.findByText("Cloud")).toBeTruthy();
   });
 
   it("shows the index it actually has, not a spinner", async () => {
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     await screen.findByText("On device");
     expect(screen.getByText("41")).toBeTruthy();
     expect(screen.getByText("318")).toBeTruthy();
@@ -127,13 +120,13 @@ describe("the memory index panel in ClawKeep", () => {
   });
 
   it("runs an incremental index from the button, without a confirmation", async () => {
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
     await waitFor(() => expect(indexCalls).toEqual([{ mode: "incremental" }]));
   });
 
   it("asks before a full reindex, and only sends it once confirmed", async () => {
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     fireEvent.click(await screen.findByRole("button", { name: "Full reindex" }));
     // A full reindex re-embeds everything on an 8 GB box. It must not be one
     // stray click away.
@@ -146,13 +139,22 @@ describe("the memory index panel in ClawKeep", () => {
 
   it("tells the customer when a run was declined because one is already going", async () => {
     indexStatus = 409;
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
     expect(await screen.findByText(/Indexing is already running/)).toBeTruthy();
   });
 
+  it("lets the customer dismiss that notice, since nothing else in this window clears it", async () => {
+    indexStatus = 409;
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    await screen.findByText(/Indexing is already running/);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText(/Indexing is already running/)).toBeNull();
+  });
+
   it("saves the schedule the moment it is switched on, so it cannot be half-applied", async () => {
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     await screen.findByText("On device");
     fireEvent.click(screen.getByLabelText("Automatic indexing"));
     await waitFor(() => expect(scheduleCalls).toEqual([
@@ -169,7 +171,7 @@ describe("the memory index panel in ClawKeep", () => {
     // sanitises it to 03:00 and the panel adopts that — the field jumps to a
     // time the customer never chose, mid-keystroke.
     memory = { ...LOCAL_MEMORY, schedule: { enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 } };
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     const time = await screen.findByLabelText("Time");
     fireEvent.change(time, { target: { value: "" } });
     await waitFor(() => expect((time as HTMLInputElement).value).toBe(""));
@@ -183,7 +185,7 @@ describe("the memory index panel in ClawKeep", () => {
 
   it("names the weekday picker as a group, since no single control owns that label", async () => {
     memory = { ...LOCAL_MEMORY, schedule: { enabled: true, frequency: "weekly", timeOfDay: "03:00", weekday: 2 } };
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     const group = await screen.findByRole("group", { name: "Day" });
     expect(group).toBeTruthy();
     // And the chosen day is announced as chosen, not merely coloured.
@@ -198,7 +200,7 @@ describe("the memory index panel in ClawKeep", () => {
       indexIdentity: "mismatched",
       error: "The index does not match the configured embedding model. Run a full reindex.",
     };
-    render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+    mount();
     expect(await screen.findByText(/does not match the configured embedding model/)).toBeTruthy();
     expect(screen.getByText("Needs attention")).toBeTruthy();
   });

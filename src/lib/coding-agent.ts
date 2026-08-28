@@ -72,9 +72,9 @@ import { CONFIG_ROOT, DATA_DIR, get as configGet, set as configSet } from "@/lib
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
-import { projectPath, validateProjectId } from "@/lib/code-projects";
+import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
-import { commitRunWork } from "@/lib/coding-git";
+import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -646,7 +646,7 @@ export async function setTokenLimit(limit: number | null): Promise<number | null
 }
 
 
-  /**
+/**
  * Folder names directly inside the owner's default project folder.
  *
  * The assistant could only ever see code projects — the 15 under
@@ -655,8 +655,28 @@ export async function setTokenLimit(limit: number | null): Promise<number | null
  * Names only: this is a picker, not a file listing.
  */
 export async function listProjectFolders(): Promise<string[]> {
+  return (await readProjectFolders())?.names ?? [];
+}
+
+/**
+ * The owner's folder and the names in it. Null when no folder is set; a
+ * folder that is set but cannot be read answers with no names, so the caller
+ * can still say WHICH folder it looked in.
+ */
+async function readProjectFolders(): Promise<{ base: string; names: string[] } | null> {
   const base = await getDefaultDirectory();
-  if (!base) return [];
+  if (!base) return null;
+  return { base, names: await readFolderNames(base) };
+}
+
+/**
+ * The one readdir behind every listing: the folder names directly inside
+ * `base`, or none when it cannot be read.
+ *
+ * `isDirectory()` on the Dirent, deliberately: a symlink is never followed,
+ * so a link out of the folder is not offered as a project in it.
+ */
+async function readFolderNames(base: string): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(base, { withFileTypes: true });
     return entries
@@ -667,6 +687,178 @@ export async function listProjectFolders(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Where code projects live: the folders code_project_init scaffolds and a run
+ * given a project id works in. The code project library keeps this path to
+ * itself (its one exported path helper, projectPath, answers per id), and
+ * resolveWorkingDirectory below spells it out again for the same reason — a
+ * listing needs the folder, not one project in it.
+ */
+const CODE_PROJECTS_DIR = path.join(DATA_DIR, "code-projects");
+
+/** Where a listed project comes from: the owner's folder, or data/code-projects. */
+export type CodingProjectKind = "folder" | "codeProject";
+
+/** One project of the owner's, as the Coding Agent app lists it. */
+export interface CodingProject {
+  /** The folder's name — the name a run is given. For a code project, its id. */
+  folder: string;
+  /** The absolute folder. */
+  directory: string;
+  kind: CodingProjectKind;
+  /** From project.json when the folder is a code project; the folder name otherwise. */
+  name: string;
+  lastCommit: LastCommit | null;
+  /** Registered on the desktop as a web app (data/webapps/<folder>/meta.json). */
+  onDesktop: boolean;
+  /** The newest run that worked in this folder, if any has. */
+  latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+}
+
+/** A folder that may be a project, before describeProject has looked. */
+interface ProjectCandidate {
+  base: string;
+  folder: string;
+  kind: CodingProjectKind;
+}
+
+/**
+ * Every project the owner has, from both places one can be:
+ *
+ * - a folder directly inside their project folder with a `.git` DIRECTORY of
+ *   its own. That test, and not "any folder", because a folder with its own
+ *   history is what a run leaves behind (coding-git.ts commits every run's
+ *   work) and what the owner can get back to. A `.git` FILE — a worktree or
+ *   submodule pointer into somebody else's repository — is not counted, for
+ *   the same reason the committer refuses such a folder;
+ * - a code project under data/code-projects. That is where the New app
+ *   wizard's handoff lands ("scaffold it as a code project"), and it can
+ *   never be the owner's folder, because resolveWorkingDirectory refuses
+ *   anything inside the checkout — so a list of the owner's folder alone
+ *   could never show the app the wizard had just asked for. A code project
+ *   counts once it has a project.json, which code_project_init writes before
+ *   any run commits, so the app appears while it is being built and not only
+ *   after.
+ *
+ * `directory` stays the owner's folder alone: it is what the empty state
+ * names as the place to build in.
+ *
+ * One `git log -1` per project, a few at a time: the app asks on its poll,
+ * and a hundred concurrent spawns on a Jetson is a stall, not a listing.
+ */
+export async function listProjects(): Promise<{ directory: string | null; projects: CodingProject[] }> {
+  const [folders, codeProjects] = await Promise.all([readProjectFolders(), readFolderNames(CODE_PROJECTS_DIR)]);
+  const candidates: ProjectCandidate[] = folders
+    ? folders.names.map((folder) => ({ base: folders.base, folder, kind: "folder" as const }))
+    : [];
+  for (const folder of codeProjects) candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
+  const described = await mapLimit(candidates, 4, describeProject);
+
+  // Once per real folder. config.json is a file the owner can edit, so the
+  // project folder can be pointed at data/code-projects by hand, and every
+  // project would then be listed twice. The owner's folder was described
+  // first, so its row is the one kept.
+  const seen = new Set<string>();
+  const projects: CodingProject[] = [];
+  for (const d of described) {
+    if (!d || seen.has(d.real)) continue;
+    seen.add(d.real);
+    projects.push(d.project);
+  }
+  projects.sort((a, b) => (b.lastCommit?.date ?? 0) - (a.lastCommit?.date ?? 0) || a.name.localeCompare(b.name));
+  return { directory: folders?.base ?? null, projects };
+}
+
+async function describeProject({ base, folder, kind }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
+  const directory = path.join(base, folder);
+  const [dotGit, metaName] = await Promise.all([
+    fs.promises.stat(path.join(directory, ".git")).catch(() => null),
+    projectNameOf(directory, folder),
+  ]);
+  const hasGit = dotGit?.isDirectory() === true;
+  // A plain folder is a project by its history alone; a code project by its
+  // project.json as well, since the scaffold comes before the first commit.
+  if (!hasGit && !(kind === "codeProject" && metaName !== null)) return null;
+  const [commit, onDesktop, real] = await Promise.all([
+    // Only a folder with its own history is asked. `git log` in one without
+    // walks UP to the nearest repository — for a code project, ClawBox's own
+    // checkout — and would present the OS's last commit as the app's.
+    hasGit ? lastCommit(directory) : Promise.resolve(null),
+    isOnDesktop(folder),
+    // A run records the folder it worked in symlink-resolved; match both
+    // spellings so a project reached through a link still shows its run.
+    fs.promises.realpath(directory).catch(() => directory),
+  ]);
+  // loadRuns() is newest first, so the first match is the latest run. A run
+  // given a project id recorded the id as well as the folder.
+  const run = loadRuns().find((r) =>
+    r.directory === real || r.directory === directory || (kind === "codeProject" && r.projectId === folder),
+  ) ?? null;
+  return {
+    real,
+    project: {
+      folder,
+      directory,
+      kind,
+      name: metaName ?? folder,
+      lastCommit: commit,
+      onDesktop,
+      latestRun: run
+        ? { id: run.id, status: run.status, task: run.task, startedAt: run.startedAt, completedAt: run.completedAt }
+        : null,
+    },
+  };
+}
+
+/**
+ * The project's name from its project.json, bounded like a name the code
+ * project library would accept — the file may have been written by hand —
+ * or the folder's own name when the file has no usable one. Null when there
+ * is no such file at all: that is what tells a code project from a folder
+ * that merely sits under data/code-projects.
+ */
+async function projectNameOf(directory: string, folder: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await fs.promises.readFile(path.join(directory, "project.json"), "utf-8");
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const name = typeof parsed === "object" && parsed !== null ? (parsed as { name?: unknown }).name : undefined;
+    if (typeof name === "string" && name.trim()) return name.trim().slice(0, MAX_PROJECT_NAME_LENGTH);
+  } catch {
+    // Not JSON, or not the shape expected: the folder's own name will do.
+  }
+  return folder;
+}
+
+/**
+ * Whether the desktop knows this folder as a web app. A folder name that is
+ * not a valid app id cannot be one, and is never spliced into a path under
+ * data/webapps to find out.
+ */
+async function isOnDesktop(folder: string): Promise<boolean> {
+  if (!validateProjectId(folder)) return false;
+  const meta = await fs.promises.stat(path.join(WEBAPPS_DIR, folder, "meta.json")).catch(() => null);
+  return meta?.isFile() === true;
+}
+
+/** `Promise.all` with at most `limit` items in flight. Order is preserved. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 // ─── Readiness ───────────────────────────────────────────────────────────────

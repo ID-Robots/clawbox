@@ -15,6 +15,10 @@ export const settingsSecurityEn: Record<string, string> = {
   "settings.localAi": "Local AI",
   "settings.localModels": "Local Models",
   "settings.voice": "Voice",
+  // Settings → Coding Agent: the page the Coding Agent app's own settings
+  // moved to. The hint is the one sentence under the title.
+  "settings.codingAgent": "Coding Agent",
+  "settings.codingAgentHint": "Let the assistant hand whole coding tasks to a Claude Code run on this box, and set how far a run may go.",
 
   // === System password card ===
   "settings.security.passwordLabel": "Password",

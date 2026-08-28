@@ -7,6 +7,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
 import { I18nProvider } from "@/lib/i18n";
+import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
 const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false });
@@ -16,11 +17,12 @@ const VNCApp = dynamic(() => import("@/components/VNCApp"), { ssr: false });
 const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: false });
 const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
 const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false });
+const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ssr: false });
 
 // Apps that exist on only ONE harness. This page is reachable directly
 // ("Open in new tab"), so without the same gate the desktop applies, /app/store
 // would render the whole OpenClaw App Store on a Hermes device.
-const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw"];
+const OPENCLAW_ONLY_APP_IDS = ["store", "openclaw", "memory-shard"];
 const HERMES_ONLY_APP_IDS = ["hermes-skills"];
 
 const APP_TITLES: Record<string, string> = {
@@ -33,6 +35,7 @@ const APP_TITLES: Record<string, string> = {
   store: "App Store",
   openclaw: "OpenClaw",
   "hermes-skills": "Hermes Skills",
+  "memory-shard": "Memory Shard",
 };
 
 export default function StandaloneAppPage() {
@@ -49,6 +52,19 @@ export default function StandaloneAppPage() {
     void fetchHarness().then((d) => { if (alive) setHarness(d?.active || "unknown"); });
     return () => { alive = false; };
   }, []);
+
+  // `/app/settings?section=…` opens Settings on that section. There is no
+  // desktop here to dispatch the open-section event for it, so the section
+  // rides in the URL — this is where a link from another standalone page (the
+  // Coding Agent's "Settings") lands — and is handed over the same two ways
+  // the desktop uses, so it reaches Settings whether it has mounted yet or
+  // not: the dynamic import usually resolves after this effect, and reads the
+  // pending value; if it beat us, it hears the event.
+  useEffect(() => {
+    if (id !== "settings") return;
+    const section = new URLSearchParams(window.location.search).get(STANDALONE_SETTINGS_SECTION_PARAM);
+    if (section) handoffSettingsSection(section);
+  }, [id]);
 
   const renderApp = () => {
     const appId = id ?? "";
@@ -78,6 +94,8 @@ export default function StandaloneAppPage() {
         return <CodingAgentApp />;
       case "files":
         return <FilesApp />;
+      case "memory-shard":
+        return <MemoryShardApp />;
       case "browser":
         return <BrowserApp />;
       case "vnc":

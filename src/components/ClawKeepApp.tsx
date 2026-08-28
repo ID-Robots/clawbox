@@ -4,11 +4,17 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { backupSourceFor } from "@/lib/harness/backup-source";
-import type {
-  ClawKeepMemoryStatus,
-  MemoryIndexMode,
-  MemoryIndexSchedule,
-} from "@/lib/clawkeep-memory";
+import { dispatchOpenApp } from "@/lib/ui-events";
+import {
+  CARD,
+  ConfirmDialog,
+  Stat,
+  WEEKDAY_LABEL_KEYS,
+  formatBytes,
+  formatNextRun,
+  jsonOrError,
+  timeAgo,
+} from "./clawkeep-ui";
 
 /**
  * Is anything still missing before a backup can run?
@@ -139,8 +145,6 @@ interface BackupResponse {
   stderrTail: string;
 }
 
-const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
-
 /**
  * The name of the agent this box runs, for the strings that name it.
  *
@@ -164,47 +168,6 @@ function useAgentLabel(): string {
 
 function agentLabelFor(agent: ClawKeepStatus["agent"]): string {
   return agent === "hermes" ? "Hermes" : "OpenClaw";
-}
-
-type Translator = (key: string, params?: Record<string, string | number>) => string;
-
-function timeAgo(ms: number, t: Translator): string {
-  if (!ms) return t("clawkeep.never");
-  const diff = Date.now() - ms;
-  if (diff < 0) return t("clawkeep.inFuture");
-  const minutes = Math.floor(diff / 60_000);
-  const hours = Math.floor(diff / 3_600_000);
-  const days = Math.floor(diff / 86_400_000);
-  if (minutes < 1) return t("clawkeep.justNow");
-  if (minutes < 60) return t("clawkeep.minutesAgo", { count: minutes });
-  if (hours < 24) return t("clawkeep.hoursAgo", { count: hours });
-  return t("clawkeep.daysAgo", { count: days });
-}
-
-function formatBytes(n: number): string {
-  if (!n || n < 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let i = 0;
-  let v = n;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i++;
-  }
-  return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-async function jsonOrError<T>(resp: Response): Promise<T> {
-  if (!resp.ok) {
-    let detail = resp.statusText;
-    try {
-      const body = (await resp.json()) as { error?: string };
-      if (body.error) detail = body.error;
-    } catch {
-      /* ignore */
-    }
-    throw new Error(detail || `HTTP ${resp.status}`);
-  }
-  return (await resp.json()) as T;
 }
 
 export default function ClawKeepApp() {
@@ -640,8 +603,12 @@ export default function ClawKeepApp() {
           {/* The memory index IS OpenClaw's — its own store and its own
               embedding provider (`clawkeep-memory.ts`). Hermes has no
               equivalent, so this stays keyed to the OpenClaw CLI even now that
-              the backup itself works on both. */}
-          {status.openclawInstalled && <MemoryIndexCard onError={setError} />}
+              the backup itself works on both. The ACTIVE harness matters too:
+              the desktop hides Memory Shard while Hermes runs the box, even
+              when the openclaw CLI is still installed, and a button that opens
+              an app the desktop will not show is a dead button. Same policy as
+              OPENCLAW_ONLY_APP_IDS in page.tsx. */}
+          {status.openclawInstalled && status.agent !== "hermes" && <MemoryShardCard />}
 
           <BackupContentsCard status={status} />
 
@@ -714,29 +681,6 @@ export default function ClawKeepApp() {
     </div>
     </AgentLabelContext.Provider>
   );
-}
-
-const WEEKDAY_LABEL_KEYS = [
-  "clawkeep.weekday.sun",
-  "clawkeep.weekday.mon",
-  "clawkeep.weekday.tue",
-  "clawkeep.weekday.wed",
-  "clawkeep.weekday.thu",
-  "clawkeep.weekday.fri",
-  "clawkeep.weekday.sat",
-];
-
-function formatNextRun(ms: number, t: Translator): string {
-  if (!ms) return "—";
-  const diff = ms - Date.now();
-  if (diff <= 0) return t("clawkeep.anyMoment");
-  const totalMin = Math.round(diff / 60_000);
-  const days = Math.floor(totalMin / (60 * 24));
-  const hours = Math.floor((totalMin % (60 * 24)) / 60);
-  const mins = totalMin % 60;
-  if (days > 0) return t("clawkeep.inDays", { days, hours });
-  if (hours > 0) return t("clawkeep.inHours", { hours, mins });
-  return t("clawkeep.inMinutes", { mins });
 }
 
 function ScheduleCard({
@@ -913,430 +857,29 @@ function ScheduleCard({
 }
 
 /**
- * Memory index — embedding health, indexing controls and the managed schedule.
+ * Where the memory index went.
  *
- * Lives in ClawKeep because that is where an owner already comes to think
- * about "what does this box remember and where does it go" (TASK-398, added UI
- * scope). Deliberately NOT gated on ClawKeep pairing: the memory index is
- * entirely local, and an unpaired box still has one.
- *
- * Everything it shows comes from `openclaw memory status` through
- * /setup-api/clawkeep/memory, which already strips paths, provider errors and
- * raw CLI output before they reach the browser.
+ * The index panel used to be a card in this window (TASK-398). It is now the
+ * Memory Shard app, because an owner who is reindexing after a model change
+ * is not thinking about backups, and a window that mixed the two kept getting
+ * scrolled past. This card stays so that the place people learned to look
+ * still leads there in one click.
  */
-/**
- * Is this actually a memory status?
- *
- * Load-bearing, and not defensive programming for its own sake: every e2e
- * ClawKeep test failed on this. Their mock answers any unrecognised
- * `/setup-api/*` path with `{}` and HTTP 200, `jsonOrError` accepted it, and
- * the first render then read `status.run.status` off `undefined` and threw —
- * taking the ENTIRE ClawKeep window down, backups and all, because one
- * subordinate panel got an answer it did not expect.
- *
- * The same thing happens in the field whenever this route answers something
- * else: an older build behind a proxy, a truncated response, a schema that
- * moves on. A panel is not allowed to cost the customer the app it lives in.
- */
-function isMemoryStatus(body: unknown): body is ClawKeepMemoryStatus {
-  if (!body || typeof body !== "object") return false;
-  const b = body as Partial<ClawKeepMemoryStatus>;
-  return typeof b.health === "string"
-    && typeof b.location === "string"
-    && !!b.run && typeof b.run === "object" && typeof b.run.status === "string"
-    && !!b.schedule && typeof b.schedule === "object" && typeof b.schedule.enabled === "boolean";
-}
-
-function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
+function MemoryShardCard() {
   const { t } = useT();
-  const [status, setStatus] = useState<ClawKeepMemoryStatus | null>(null);
-  const [busy, setBusy] = useState<MemoryIndexMode | null>(null);
-  const [confirmFull, setConfirmFull] = useState(false);
-  const [draft, setDraft] = useState<MemoryIndexSchedule | null>(null);
-  const [savingSchedule, setSavingSchedule] = useState(false);
-
-  // Read through refs, not through the closure: `load` is called from an
-  // interval, and a poll that started before the user touched the schedule
-  // would otherwise still be holding `savingSchedule === false` and would
-  // stamp the pre-edit value back over the control.
-  const savingScheduleRef = useRef(false);
-  const loadInFlightRef = useRef(false);
-
-  const load = useCallback(async () => {
-    // The status route can block for up to 90s on a cache miss while the CLI
-    // probe runs, and the fast tick is 3s. Without this guard the ticks stack
-    // concurrent probes on an 8 GB box, which is exactly what they are
-    // competing with the indexer for.
-    if (loadInFlightRef.current) return;
-    loadInFlightRef.current = true;
-    try {
-      const body = await jsonOrError<unknown>(await fetch("/setup-api/clawkeep/memory"));
-      // Anything that is not a memory status is ignored outright rather than
-      // rendered. The panel keeps its last good reading, or stays on its
-      // loading line, and the rest of ClawKeep is untouched.
-      if (!isMemoryStatus(body)) return;
-      setStatus(body);
-      // Only adopt the server's schedule while the user is not mid-edit, or a
-      // poll landing between two clicks would throw their change away.
-      setDraft((prev) => (prev && savingScheduleRef.current ? prev : body.schedule));
-    } catch {
-      // A failed poll is not worth a red banner: the panel keeps the last good
-      // reading and the next tick corrects it.
-    } finally {
-      loadInFlightRef.current = false;
-    }
-  }, []);
-
-  // Poll fast while a run is in flight so "running" turns into a real outcome
-  // on its own, and slowly the rest of the time — the status probe shells out
-  // to the OpenClaw CLI and this box has 8 GB. The first read happens here too
-  // rather than in an effect of its own, which also keeps this off
-  // react-hooks/set-state-in-effect.
-  const running = status?.run.status === "running";
-  useEffect(() => {
-    void load();
-    const id = setInterval(() => { void load(); }, running ? 3_000 : 30_000);
-    return () => clearInterval(id);
-  }, [load, running]);
-
-  const startIndex = async (mode: MemoryIndexMode) => {
-    setBusy(mode);
-    try {
-      const res = await fetch("/setup-api/clawkeep/memory/index", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode }),
-      });
-      if (res.status === 409) {
-        // Single-flight declined it. Say so plainly instead of leaving the
-        // button looking like it did nothing.
-        onError(t("clawkeep.memory.alreadyRunning"));
-      } else {
-        await jsonOrError<unknown>(res);
-      }
-      await load();
-    } catch {
-      onError(t("clawkeep.memory.startFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const saveSchedule = async (next: MemoryIndexSchedule) => {
-    setDraft(next);
-    savingScheduleRef.current = true;
-    setSavingSchedule(true);
-    try {
-      const body = await jsonOrError<{ schedule: MemoryIndexSchedule; nextRunAtMs: number }>(
-        await fetch("/setup-api/clawkeep/memory/schedule", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(next),
-        }),
-      );
-      setDraft(body.schedule);
-      setStatus((prev) => prev ? { ...prev, schedule: body.schedule, nextRunAtMs: body.nextRunAtMs } : prev);
-    } catch {
-      onError(t("clawkeep.memory.scheduleSaveFailed"));
-      await load();
-    } finally {
-      savingScheduleRef.current = false;
-      setSavingSchedule(false);
-    }
-  };
-
-  if (!status) {
-    return (
-      <div className={`${CARD} text-sm text-[var(--text-muted)]`}>
-        {t("clawkeep.memory.title")} — {t("clawkeep.loading")}
-      </div>
-    );
-  }
-
-  const schedule = draft ?? status.schedule;
-  const health = status.health;
-  const healthTone =
-    health === "healthy" ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
-    : health === "degraded" ? "text-amber-200 border-amber-500/40 bg-amber-500/10"
-    : health === "unavailable" ? "text-red-300 border-red-500/40 bg-red-500/10"
-    : "text-[var(--text-secondary)] border-white/10 bg-white/5";
-  const runLine =
-    status.run.status === "running" ? t("clawkeep.memory.runRunning")
-    : status.run.status === "succeeded" ? t("clawkeep.memory.runSucceeded", { when: timeAgo(status.run.finishedAtMs, t) })
-    : status.run.status === "failed" ? (status.run.error || t("clawkeep.memory.runFailed"))
-    : t("clawkeep.memory.runNever");
-
   return (
-    <div className={`${CARD} space-y-4`}>
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-gray-100">🧠 {t("clawkeep.memory.title")}</h3>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
-            {status.provider
-              ? t("clawkeep.memory.usingModel", { model: status.model || status.provider })
-              : t("clawkeep.memory.noModel")}
-          </p>
-        </div>
-        <div className="flex flex-col items-end gap-1 shrink-0">
-          {/* The whole point of the local embedder: say out loud whether the
-              text being embedded left the box. */}
-          <span className={`px-2 py-0.5 rounded-md border text-[11px] font-medium ${
-            status.location === "local"
-              ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
-              : status.location === "cloud"
-              ? "text-sky-300 border-sky-500/40 bg-sky-500/10"
-              : "text-[var(--text-secondary)] border-white/10 bg-white/5"
-          }`}>
-            {status.location === "local" ? t("clawkeep.memory.onDevice")
-              : status.location === "cloud" ? t("clawkeep.memory.cloud")
-              : status.location === "disabled" ? t("clawkeep.memory.disabled")
-              : t("clawkeep.memory.unknown")}
-          </span>
-          <span className={`px-2 py-0.5 rounded-md border text-[11px] ${healthTone}`}>
-            {t(`clawkeep.memory.health.${health}`)}
-          </span>
-        </div>
-      </div>
-
-      {status.error && (
-        <p className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/25 rounded-md px-2.5 py-2">
-          {status.error}
-        </p>
-      )}
-
-      <div className="grid grid-cols-3 gap-3">
-        <Stat label={t("clawkeep.memory.files")} value={`${status.files}`} />
-        <Stat label={t("clawkeep.memory.chunks")} value={`${status.chunks}`} />
-        <Stat label={t("clawkeep.memory.sources")} value={`${status.sourceCount}`} />
-        <Stat label={t("clawkeep.memory.pending")} value={`${status.pendingFiles}`} />
-        <Stat label={t("clawkeep.memory.failed")} value={`${status.failedItems}`} />
-        <Stat label={t("clawkeep.memory.indexSize")} value={status.indexBytes ? formatBytes(status.indexBytes) : "—"} />
-      </div>
-
-      <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-muted)] border-t border-white/5 pt-3">
-        <span>{t("clawkeep.memory.lastRun")}: <span className={status.run.status === "failed" ? "text-red-300" : "text-gray-200"}>{runLine}</span></span>
-        {/* The fingerprint is what makes "this index belongs to this model"
-            checkable without printing a path or a key. */}
-        {status.fingerprint && (
-          <span className="font-mono tabular-nums" title={t("clawkeep.memory.fingerprintHelp")}>
-            {t("clawkeep.memory.fingerprint")} {status.fingerprint}
-          </span>
-        )}
-      </div>
-
-      <div className="flex gap-2">
-        <button
-          type="button"
-          disabled={busy !== null || running}
-          onClick={() => void startIndex("incremental")}
-          className="flex-1 px-3 py-2 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-        >
-          {running ? t("clawkeep.memory.indexing") : t("clawkeep.memory.indexNow")}
-        </button>
-        <button
-          type="button"
-          disabled={busy !== null || running}
-          onClick={() => setConfirmFull(true)}
-          className="flex-1 px-3 py-2 rounded-md border border-white/10 bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-        >
-          {t("clawkeep.memory.fullReindex")}
-        </button>
-      </div>
-
-      <div className="space-y-3 border-t border-white/5 pt-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h4 className="text-xs font-semibold text-gray-100">{t("clawkeep.memory.schedule")}</h4>
-            <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-              {schedule.enabled
-                ? t("clawkeep.memory.nextRun", { when: formatNextRun(status.nextRunAtMs, t) })
-                : t("clawkeep.memory.scheduleOff")}
-            </p>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              className="sr-only peer"
-              aria-label={t("clawkeep.memory.schedule")}
-              checked={schedule.enabled}
-              disabled={savingSchedule}
-              onChange={(e) => void saveSchedule({ ...schedule, enabled: e.target.checked })}
-            />
-            <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors" />
-            <span className="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-4" />
-          </label>
-        </div>
-
-        {schedule.enabled && (
-          <div className="space-y-3">
-            <div className="flex gap-2">
-              {(["daily", "weekly"] as const).map((freq) => (
-                <button
-                  key={freq}
-                  type="button"
-                  disabled={savingSchedule}
-                  onClick={() => void saveSchedule({ ...schedule, frequency: freq })}
-                  className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 ${
-                    schedule.frequency === freq
-                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                      : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                  }`}
-                >
-                  {freq === "daily" ? t("clawkeep.schedule.daily") : t("clawkeep.schedule.weekly")}
-                </button>
-              ))}
-            </div>
-            <div className="flex items-center gap-3">
-              <label htmlFor="clawkeep-memory-time" className="text-xs text-[var(--text-muted)] w-16">
-                {t("clawkeep.schedule.time")}
-              </label>
-              <input
-                id="clawkeep-memory-time"
-                type="time"
-                value={schedule.timeOfDay}
-                disabled={savingSchedule}
-                onChange={(e) => {
-                  // A half-entered time arrives as "" (or out of range). Sent
-                  // as-is, the server sanitises it to 03:00 and the field
-                  // jumps to a time the customer never chose, mid-keystroke.
-                  const next = e.target.value;
-                  setDraft({ ...schedule, timeOfDay: next });
-                  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(next)) {
-                    void saveSchedule({ ...schedule, timeOfDay: next });
-                  }
-                }}
-                className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
-              />
-              <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
-            </div>
-            {schedule.frequency === "weekly" && (
-              <div className="flex items-center gap-3">
-                <span id="clawkeep-memory-day-label" className="text-xs text-[var(--text-muted)] w-16">
-                  {t("clawkeep.schedule.day")}
-                </span>
-                <div className="flex gap-1 flex-wrap" role="group" aria-labelledby="clawkeep-memory-day-label">
-                  {WEEKDAY_LABEL_KEYS.map((labelKey, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      aria-pressed={schedule.weekday === idx}
-                      disabled={savingSchedule}
-                      onClick={() => void saveSchedule({ ...schedule, weekday: idx })}
-                      className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer disabled:opacity-50 ${
-                        schedule.weekday === idx
-                          ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                          : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                      }`}
-                    >
-                      {t(labelKey)}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {confirmFull && (
-        <ConfirmDialog
-          title={t("clawkeep.memory.confirmFullTitle")}
-          body={t("clawkeep.memory.confirmFullBody")}
-          confirmLabel={t("clawkeep.memory.fullReindex")}
-          onCancel={() => setConfirmFull(false)}
-          onConfirm={() => {
-            setConfirmFull(false);
-            void startIndex("full");
-          }}
-        />
-      )}
-    </div>
-  );
-}
-
-function ConfirmDialog({
-  title,
-  body,
-  confirmLabel,
-  danger,
-  onCancel,
-  onConfirm,
-}: {
-  title: string;
-  body: React.ReactNode;
-  confirmLabel: string;
-  danger?: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const { t } = useT();
-  // Esc closes via a global listener (the dialog itself doesn't focus a
-  // text input, so an inline onKeyDown wouldn't fire reliably). Enter is
-  // handled by whichever button has focus — autoFocus puts it on Confirm
-  // but tabbing to Cancel and pressing Enter must cancel, not confirm.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
-
-  const confirmClasses = danger
-    ? "bg-red-500 hover:bg-red-400 text-white"
-    : "bg-emerald-500 hover:bg-emerald-400 text-black";
-
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="clawkeep-confirm-title"
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
-      onClick={onCancel}
-    >
-      <div
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
+    <div className={`${CARD} flex items-center justify-between gap-3`} data-testid="clawkeep-memory-shard-card">
+      <p className="text-sm text-[var(--text-secondary)]">
+        🧠 {t("clawkeep.memory.movedTo", { app: t("app.memoryShard") })}
+      </p>
+      <button
+        type="button"
+        onClick={() => dispatchOpenApp("memory-shard")}
+        className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/10 bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-white/20 transition-colors cursor-pointer"
       >
-        <div className="flex items-center gap-3 px-5 pt-5">
-          <div
-            className={`shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${
-              danger ? "bg-red-500/15 text-red-300" : "bg-emerald-500/15 text-emerald-300"
-            }`}
-            aria-hidden="true"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 22 }}>
-              {danger ? "warning" : "help"}
-            </span>
-          </div>
-          <h2 id="clawkeep-confirm-title" className="text-base font-semibold text-gray-100 break-words">
-            {title}
-          </h2>
-        </div>
-        <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
-          {body}
-        </div>
-        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
-          >
-            {t("clawkeep.cancel")}
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            autoFocus
-            className={`px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer ${confirmClasses}`}
-          >
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
+        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">memory</span>
+        {t("clawkeep.memory.openShard", { app: t("app.memoryShard") })}
+      </button>
     </div>
   );
 }
@@ -1938,16 +1481,6 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
           </li>
         )}
       </ul>
-    </div>
-  );
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  // Wrapper div is load-bearing — each `<Stat>` is one cell of a 3-col grid.
-  return (
-    <div>
-      <div className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</div>
-      <div className="mt-1 text-base font-semibold text-gray-100 truncate">{value}</div>
     </div>
   );
 }

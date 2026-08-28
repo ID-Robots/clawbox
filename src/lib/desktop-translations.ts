@@ -10,6 +10,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "app.openclaw": "OpenClaw",
     "app.terminal": "Terminal",
     "app.codingAgent": "Coding Agent",
+    "app.memoryShard": "Memory Shard",
     "app.files": "Files",
     "app.store": "Store",
     "app.systemUpdate": "System Update",

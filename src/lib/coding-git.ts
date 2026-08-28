@@ -263,3 +263,28 @@ export async function commitRunWork(input: {
   const sha = await git(dir, ["rev-parse", "--short", "HEAD"]);
   return { committed: true, sha: sha.stdout || "unknown", initialized };
 }
+
+/** The newest commit of a folder's own history, for a list row. */
+export interface LastCommit {
+  subject: string;
+  /** When it was made, in Unix milliseconds. */
+  date: number;
+}
+
+/**
+ * The most recent commit in the repository at `dir`, or null when there is
+ * none to show — a freshly `git init`ed folder, or a HEAD git cannot read.
+ *
+ * Read-only, and through the same argv runner as everything above: the
+ * folder name is the owner's and is never quoted by us. `%ct` rather than a
+ * formatted date so the app can say "3h ago" itself, the way it already does
+ * for a run's last activity.
+ */
+export async function lastCommit(dir: string): Promise<LastCommit | null> {
+  const r = await git(path.resolve(dir), ["log", "-1", "--format=%s%n%ct"]);
+  if (r.code !== 0 || !r.stdout) return null;
+  const [subject = "", seconds = ""] = r.stdout.split("\n");
+  const ts = Number(seconds.trim());
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  return { subject: subject.trim(), date: ts * 1000 };
+}

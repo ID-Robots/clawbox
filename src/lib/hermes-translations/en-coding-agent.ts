@@ -51,6 +51,11 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.noticeDismiss": "Dismiss",
 
   "codingAgent.switchLabel": "Let the assistant delegate coding work",
+  // The app's header, now that the switch lives in Settings: a read-only
+  // chip saying what the route said, and the link to where it is changed.
+  "codingAgent.stateOn": "On",
+  "codingAgent.stateOff": "Off",
+  "codingAgent.openSettings": "Settings",
 
   "codingAgent.folderLabel": "Project folder",
   "codingAgent.folderPlaceholder": "/home/clawbox/Projects",
@@ -67,9 +72,19 @@ export const codingAgentEn: Record<string, string> = {
   // does not pretend there is one.
   "codingAgent.effortLabel": "Effort",
   "codingAgent.effort.low": "Low",
+  // The picker offers three levels, but a box that stored "medium" or "high"
+  // before it narrowed still has to name what is in force.
+  "codingAgent.effort.medium": "Medium",
+  "codingAgent.effort.high": "High",
   "codingAgent.effort.xhigh": "Very high",
   "codingAgent.effort.max": "Max",
   "codingAgent.effortFailed": "Could not change the thinking effort.",
+  // The ceilings a run stops at. Neither has a time or a price behind it.
+  "codingAgent.turnsLabel": "Steps per run",
+  "codingAgent.turnsFailed": "Could not change the step limit.",
+  "codingAgent.tokensLabel": "Token limit (optional)",
+  "codingAgent.tokensPlaceholder": "no limit",
+  "codingAgent.tokensFailed": "Could not change the token limit.",
   "codingAgent.thinking": "thinking · {n} tokens",
   "codingAgent.tokensWord": "tokens",
   "codingAgent.updated": "updated",
@@ -126,4 +141,37 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.loadFailed": "Could not read the coding agent settings.",
   "codingAgent.toggleFailed": "Could not change the coding agent setting.",
   "codingAgent.stopFailed": "Could not stop the run.",
+
+  // The Projects section — every folder with a git history of its own in
+  // the owner's project folder — and the New app wizard, which ends in the
+  // mascot chat: the assistant scaffolds, delegates and verifies, and the
+  // owner carries on there. `newHanded` is the last thing the card says.
+  "codingAgent.projectsTitle": "Projects",
+  "codingAgent.projectFolderUnset": "Choose a project folder in Settings, and every project with its own git history will be listed here.",
+  "codingAgent.noProjects": "No projects yet. Tap New app, or ask your assistant to build something in {folder}.",
+  "codingAgent.onDesktop": "on desktop",
+  "codingAgent.runInProgress": "run in progress",
+  "codingAgent.open": "Open",
+  "codingAgent.copyFolder": "Copy the folder name",
+  "codingAgent.copied": "Copied",
+  "codingAgent.noCommits": "No commits yet",
+  "codingAgent.newApp": "New app",
+  "codingAgent.newTitle": "A new app for your desktop",
+  "codingAgent.newNameLabel": "Name",
+  "codingAgent.newNamePlaceholder": "Pomodoro timer",
+  "codingAgent.newWhatLabel": "What should it do?",
+  "codingAgent.newWhatPlaceholder": "A timer with 25-minute work blocks and 5-minute breaks, and a sound when each one ends.",
+  "codingAgent.newTemplateLabel": "Start from",
+  "codingAgent.newTemplateApp": "Starter app — HTML, CSS and JS files",
+  "codingAgent.newTemplateBlank": "Blank page — one HTML file",
+  "codingAgent.newCreate": "Create",
+  "codingAgent.newNameRequired": "Give the app a name.",
+  "codingAgent.newNameTooLong": "The name can be at most {max} characters.",
+  "codingAgent.newWhatRequired": "Say what the app should do.",
+  "codingAgent.newWhatTooLong": "Keep the description to {max} characters.",
+  "codingAgent.newHanded": "Handed to the assistant — continue in the chat.",
+  // Shown on the standalone /app/coding page instead of the New button:
+  // there is no chat there to hand the message to.
+  "codingAgent.newNeedsDesktop": "A new app starts in the chat, which lives on the desktop. Open the Coding agent there to ask for one.",
+  "codingAgent.codeProject": "code project",
 };

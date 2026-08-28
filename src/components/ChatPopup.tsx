@@ -28,7 +28,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
+import { CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -3045,6 +3045,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     window.addEventListener(FIX_ERROR_EVENT, handler)
     return () => window.removeEventListener(FIX_ERROR_EVENT, handler)
+  }, [])
+
+  // A message handed over by another app — the Coding Agent's New wizard —
+  // goes through the SAME queue as a fix-error prompt, and for the same
+  // reasons: the drain effect is the one send path, so the text is sent as
+  // the owner's turn in order with anything they typed, and the greet is
+  // marked done so loadHistory cannot race it with a stray "hi".
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const text = (e as CustomEvent<ChatMessageDetail>).detail?.text
+      if (typeof text !== 'string' || !text.trim()) return
+      greetedRef.current = true
+      setQueuedSends(prev => [...prev, { id: uuid(), text: text.trim(), attachments: [] }])
+    }
+    window.addEventListener(CHAT_MESSAGE_EVENT, handler)
+    return () => window.removeEventListener(CHAT_MESSAGE_EVENT, handler)
   }, [])
 
   // Drain queued sends on connect; flush them as system errors on error

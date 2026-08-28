@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import LocalAiPanel from "@/components/LocalAiPanel";
+import { OPEN_APP_EVENT } from "@/lib/ui-events";
 
 function model(over: Record<string, unknown>) {
   return {
@@ -112,7 +113,7 @@ describe("LocalAiPanel", () => {
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
   });
 
-  it("turns Local AI off through its own route, and leaves the memory index to ClawKeep", async () => {
+  it("turns Local AI off through its own route, and sends the memory index to Memory Shard", async () => {
     stubFetch({ llmDefault: true });
     renderPanel();
     await screen.findByTestId("local-ai-group-llm");
@@ -120,7 +121,18 @@ describe("LocalAiPanel", () => {
     fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
     fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-turn-off"));
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/local-ai", body: { action: "disable" } }));
-    // The embedding row has no menu of its own — ClawKeep manages it.
+    // The embedding row has no menu of its own — its one button opens the app
+    // that owns the index. That is Memory Shard, not ClawKeep: ClawKeep only
+    // keeps a card pointing there, which would be a second hop.
     expect(screen.queryByTestId("local-model-menu-embedding")).not.toBeInTheDocument();
+    const opened: string[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener(OPEN_APP_EVENT, onOpen);
+    try {
+      fireEvent.click(screen.getByTestId("local-model-manage-embedding"));
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, onOpen);
+    }
+    expect(opened).toEqual(["memory-shard"]);
   });
 });

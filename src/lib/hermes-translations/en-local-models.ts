@@ -32,7 +32,7 @@ export const localModelsEn: Record<string, string> = {
   "localModels.menu.makePrimary": "Make primary",
   "localModels.menu.useAsFallback": "Use as fallback",
   "localModels.menu.turnOffLocalAi": "Turn off Local AI",
-  "localModels.menu.manageInClawKeep": "Manage in ClawKeep",
+  "localModels.menu.manageInMemoryShard": "Manage in Memory Shard",
   "localModels.localOnly.title": "Local-only mode",
   "localModels.localOnly.hint": "Route everything to the local model. Disables all cloud AI providers, fallbacks included.",
 
