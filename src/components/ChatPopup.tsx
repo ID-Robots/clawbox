@@ -553,11 +553,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // driven by the device's run record rather than the tool pills. Only probed
   // while the chat is open, and only polled while a run is actually in flight.
   const { runs: codingRuns, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
-  // Partitioned ONCE so "every run renders on exactly one surface" is
-  // structural: in flight → the pinned bar, settled → the transcript.
-  const liveCodingRuns = codingRuns.filter(r => r.status === 'running')
-  const settledCodingRuns = codingRuns.filter(r => r.status !== 'running')
-  // One card builder for both surfaces.
+  // Every run — live or settled — renders as a card IN the transcript, where
+  // the conversation that started it lives. A pinned bar above the messages
+  // was tried and rejected by the owner: it covered the chat rather than
+  // being part of it.
   const codingAgentCard = (run: CodingAgentActivity) => (
     <CodingAgentActivityPill
       key={run.id}
@@ -3859,27 +3858,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </button>
       </div>
 
-      {/* A run in flight is PINNED above the transcript — the owner sees what
-          the coding agent is working on without scrolling, wherever the
-          conversation has moved on to. The card returns to the transcript
-          below once the run settles. */}
-      {liveCodingRuns.length > 0 && (
-        <div
-          data-testid="coding-agent-pinned"
-          style={{
-            flexShrink: 0,
-            padding: '8px 14px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 6,
-            borderBottom: '1px solid rgba(255,255,255,0.07)',
-            background: 'rgba(249,115,22,0.05)',
-          }}
-        >
-          {liveCodingRuns.map(codingAgentCard)}
-        </div>
-      )}
-
       {/* Messages area */}
       <div style={{
         flex: 1, overflowY: 'auto', padding: '12px 14px',
@@ -4150,10 +4128,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             fed by the device's run record. They stay after the run ends and
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
-            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts.
-            Runs still in flight render in the PINNED bar above the transcript
-            instead, and drop back in here when they settle. */}
-        {settledCodingRuns.map(codingAgentCard)}
+            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
+        {codingRuns.map(codingAgentCard)}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one
