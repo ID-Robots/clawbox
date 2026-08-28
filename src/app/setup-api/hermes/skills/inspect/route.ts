@@ -426,10 +426,27 @@ async function remoteDocs(id: string, signal: AbortSignal): Promise<NextResponse
   const cliId = cliInstallIdentifier(id, record?.source);
   // Queued (max 2 children) and cancelled with the request: clicking through a
   // dozen cards must not leave a dozen Python processes resident on a Jetson.
-  const r = await runSkillsCli(["skills", "inspect", cliId], {
-    timeoutMs: 45_000,
-    signal,
-  });
+  //
+  // `hermes skills inspect` on a browse.sh/github row goes over the
+  // unauthenticated GitHub API and measures ~60 s on a loaded box — past this
+  // 45 s cap — so runHermesCli SIGKILLs it and throws "hermes timed out". That
+  // is the same jargon Report B flagged on the install surface; here it is only
+  // the docs BODY that failed (the metadata is already painted from the
+  // catalog), so a timeout is not an error page, it is the identical
+  // non-alarming note a non-zero exit already yields. A real cancellation
+  // (SkillsCliAborted, the client navigated away) still propagates untouched.
+  let r: Awaited<ReturnType<typeof runSkillsCli>>;
+  try {
+    r = await runSkillsCli(["skills", "inspect", cliId], {
+      timeoutMs: 45_000,
+      signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && /timed out/i.test(err.message)) {
+      return NextResponse.json({ error: "Could not load the full documentation" }, { status: 504 });
+    }
+    throw err;
+  }
   if (r.code !== 0) {
     // Never surface raw stderr (it can carry the binary path).
     return NextResponse.json({ error: "Could not load skill details" }, { status: 502 });
