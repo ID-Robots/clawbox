@@ -197,8 +197,11 @@ describe("OpenclawWhatsappPairing", () => {
           releaseWait = resolve;
         }),
       );
-      // Let the tick fire and block inside the wait.
+      // Let the tick fire and block inside the wait. Asserting the call
+      // happened is what makes this a race test: without it, the expectations
+      // below are satisfied by stop() alone even if tick() never ran.
       await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
 
       pairing.stop();
       releaseWait(rpcOk({ qrDataUrl: QR_B }));

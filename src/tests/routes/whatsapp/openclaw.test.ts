@@ -262,6 +262,16 @@ describe("POST /setup-api/whatsapp/unpair — OpenClaw", () => {
     expect(mockSetEnabled).toHaveBeenCalledWith(false);
   });
 
+  it("ends a live pairing session so no QR outlives the link", async () => {
+    // The keepalive calls web.login.wait every few seconds. Left running
+    // through an unpair it would keep asking about a channel that is now off,
+    // and an in-flight answer would put a QR back on screen for a link the
+    // owner just removed.
+    await POST_unpair();
+
+    expect(mockPairing.mock.results[0].value.stop).toHaveBeenCalled();
+  });
+
   it("still turns the channel off when the logout fails", async () => {
     // Creds without the channel switched off is a gateway retrying a login it
     // cannot complete; the two have to move together.
