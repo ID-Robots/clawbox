@@ -493,6 +493,8 @@ export const de: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Abbrechen",
   "codingAgent.githubDeviceTerminal": "Stattdessen das Terminal verwenden",
   "codingAgent.githubStartFailed": "GitHub-Anmeldung konnte nicht gestartet werden",
+  "codingAgent.harnessTest": "Harness testen",
+  "codingAgent.harnessTestFailed": "Der Harness-Test konnte nicht gestartet werden",
   "codingAgent.deniedHelp": "Der Coding-Agent darf nur einen festen Satz Befehle in seinem eigenen Ordner ausführen. Das ist die Schutzgrenze bei der Arbeit, kein Fehler — der Lauf findet meist einen anderen Weg.",
   "codingAgent.stop": "Stoppen",
   "codingAgent.openLive": "Live ansehen",

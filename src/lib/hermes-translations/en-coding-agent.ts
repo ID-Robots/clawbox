@@ -83,6 +83,8 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Cancel",
   "codingAgent.githubDeviceTerminal": "Use the Terminal instead",
   "codingAgent.githubStartFailed": "Could not start the GitHub login",
+  "codingAgent.harnessTest": "Test harness",
+  "codingAgent.harnessTestFailed": "Could not start the harness test",
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
   "codingAgent.stop": "Stop",

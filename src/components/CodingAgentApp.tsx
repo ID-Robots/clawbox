@@ -185,6 +185,26 @@ function firstLine(text: string, max = 100): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/** Single-quote a value for the terminal command line. */
+function quoted(v: string): string {
+  return `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * The canned smoke task the Test harness button dispatches: one tiny page,
+ * verified through the browser stack, in a dedicated scratch project. It
+ * exercises the whole delegation pipeline — spawn, brief, browser MCP,
+ * vision description, evidence folder, summary — and says so plainly, so the
+ * "a short task is not a small task" bar in the brief does not inflate it.
+ */
+const HARNESS_TEST_PROJECT = "harness-test";
+const HARNESS_TEST_TASK =
+  "Harness self-test — a smoke test of the tooling, not a real feature. "
+  + "Make index.html in this folder show the text HARNESS OK, centered, white on #1a1a2e, nothing else. "
+  + "Then open it with browser_view_local and confirm the description shows that text. "
+  + "Keep it minimal and fast: no polish, no extra features, no sub-agents. "
+  + "Report what you built and what the description confirmed.";
+
 const STATUS_CLASS: Record<Run["status"], string> = {
   running: "text-amber-400 border-amber-400/40",
   completed: "text-emerald-400 border-emerald-400/40",
@@ -368,7 +388,6 @@ export default function CodingAgentApp() {
    * which drops the owner into that exact session to carry on by hand.
    */
   const openInTerminal = (run: Run) => {
-    const quoted = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
     let command: string;
     if (run.status === "running" && run.transcriptPath) {
       command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
@@ -410,6 +429,63 @@ export default function CodingAgentApp() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "cancel" }),
     }).catch(() => { /* the pending code simply expires */ });
+  };
+
+  /**
+   * One tap of "is the harness healthy?": dispatch the canned smoke task into
+   * its scratch project through the same routes a real delegation uses, then
+   * open the live terminal view on it the moment its transcript exists. The
+   * result lands in Recent runs — evidence folder, summary and all.
+   */
+  const testHarness = async () => {
+    setBusy("harness-test");
+    setError(null);
+    try {
+      // Scaffold the scratch project; an "already exists" answer is fine and
+      // the run below is where a real failure would surface.
+      await fetch("/setup-api/code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "init", projectId: HARNESS_TEST_PROJECT, name: "Harness Test" }),
+      }).catch(() => { /* the run request reports anything that matters */ });
+      const res = await fetch("/setup-api/coding-agent/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.harnessTestFailed")));
+      const data = await res.json() as { run?: { id?: string } };
+      setShowRuns(true);
+      void load();
+      if (data.run?.id) void openHarnessLive(data.run.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** Open the live view once the run's transcript exists — the session id
+   *  lands a few seconds after spawn. Settled-before-transcript or a timeout
+   *  just skips the popup; the run is in the list either way. */
+  const openHarnessLive = async (id: string) => {
+    for (let i = 0; i < 12; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        const res = await fetch(`/setup-api/coding-agent/runs?id=${encodeURIComponent(id)}`, { cache: "no-store" });
+        if (!res.ok) continue;
+        const data = await res.json() as { run?: Run };
+        if (data.run?.transcriptPath) {
+          window.dispatchEvent(new CustomEvent("clawbox:open-terminal", {
+            detail: { command: `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(data.run.transcriptPath)}` },
+          }));
+          return;
+        }
+        if (data.run && data.run.status !== "running") return;
+      } catch {
+        // Transient; try again.
+      }
+    }
   };
 
   /** The terminal fallback — the flow this card ran before it grew its own. */
@@ -752,21 +828,35 @@ export default function CodingAgentApp() {
             </span>
           </button>
 
-          {showRuns && runs.length > 0 && (
-            <div className="flex justify-end mt-2">
+          {showRuns && (
+            <div className="flex items-center justify-between mt-2">
+              {/* One tap dispatches the canned smoke run and opens its live
+                  view. Off while anything is running — one run at a time is
+                  the runner's rule, not just this button's. */}
               <button
                 type="button"
-                onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
-                disabled={busy === "clear"}
-                data-testid="coding-agent-clear"
-                className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
-                  confirmClear
-                    ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
-                    : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-                }`}
+                onClick={() => void testHarness()}
+                disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
+                data-testid="coding-agent-harness-test"
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
               >
-                {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
+                {t("codingAgent.harnessTest")}
               </button>
+              {runs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
+                  disabled={busy === "clear"}
+                  data-testid="coding-agent-clear"
+                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
+                    confirmClear
+                      ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
+                      : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+                  }`}
+                >
+                  {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
+                </button>
+              )}
             </div>
           )}
 

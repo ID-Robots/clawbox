@@ -102,6 +102,14 @@ function stubFetch(
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ run: { ...RUN, status: "stopped" } });
     }
+    if (url === "/setup-api/code" && init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      return json({ success: true });
+    }
+    if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      return json({ started: true, run: { ...RUN, id: "run-smoke001", status: "running" } }, 202);
+    }
     return json({ error: "unexpected" }, 404);
   }));
 }
@@ -315,5 +323,38 @@ describe("CodingAgentApp", () => {
       expect(await screen.findByText(translations.en["codingAgent.noRuns"])).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: translations.en["codingAgent.stop"] })).not.toBeInTheDocument();
     });
+  });
+});
+
+describe("the harness self-test", () => {
+  it("dispatches the canned smoke run into its scratch project and opens the live view", async () => {
+    stubFetch({ enabled: true, readiness: READY }, []);
+    const opened: string[] = [];
+    const onTerminal = (e: Event) => opened.push((e as CustomEvent<{ command: string }>).detail.command);
+    window.addEventListener("clawbox:open-terminal", onTerminal);
+    try {
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
+      await waitFor(() => {
+        expect(posts.some((p) => p.url === "/setup-api/code"
+          && (p.body as { projectId?: string }).projectId === "harness-test")).toBe(true);
+        expect(posts.some((p) => p.url === "/setup-api/coding-agent/run"
+          && (p.body as { projectId?: string }).projectId === "harness-test")).toBe(true);
+      });
+      const runPost = posts.find((p) => p.url === "/setup-api/coding-agent/run");
+      // The task names itself a smoke test, so the brief's "complete, polished
+      // app" bar does not inflate it into a real feature build.
+      expect(String((runPost?.body as { task?: string }).task)).toContain("smoke test");
+    } finally {
+      window.removeEventListener("clawbox:open-terminal", onTerminal);
+    }
+  });
+
+  it("is not offered while a run is already in flight — one run at a time is the runner's rule", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null }]);
+    render(<CodingAgentApp />);
+    await openRuns();
+    expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
   });
 });

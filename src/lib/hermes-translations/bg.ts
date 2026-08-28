@@ -481,6 +481,8 @@ export const bg: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Отказ",
   "codingAgent.githubDeviceTerminal": "Използвай Терминала вместо това",
   "codingAgent.githubStartFailed": "Влизането в GitHub не можа да започне",
+  "codingAgent.harnessTest": "Тествай харнеса",
+  "codingAgent.harnessTestFailed": "Тестът на харнеса не можа да започне",
   "codingAgent.deniedHelp": "Кодиращият агент може да изпълнява само определен набор команди в собствената си папка. Това е защитата, която работи, а не грешка — изпълнението обикновено намира друг начин.",
   "codingAgent.stop": "Спри",
   "codingAgent.openLive": "Наблюдавай на живо",

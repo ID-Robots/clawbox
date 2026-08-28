@@ -505,6 +505,8 @@ export const zh: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "取消",
   "codingAgent.githubDeviceTerminal": "改用终端",
   "codingAgent.githubStartFailed": "无法开始 GitHub 登录",
+  "codingAgent.harnessTest": "测试运行框架",
+  "codingAgent.harnessTestFailed": "无法启动框架测试",
   "codingAgent.deniedHelp": "编码助手只能在自己的文件夹内运行固定的一组命令。这是安全限制在起作用，并非故障——运行通常会找到其他办法。",
   "codingAgent.stop": "停止",
   "codingAgent.openLive": "实时查看",

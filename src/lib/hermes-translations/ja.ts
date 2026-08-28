@@ -496,6 +496,8 @@ export const ja: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "キャンセル",
   "codingAgent.githubDeviceTerminal": "代わりにターミナルを使う",
   "codingAgent.githubStartFailed": "GitHub ログインを開始できませんでした",
+  "codingAgent.harnessTest": "ハーネスをテスト",
+  "codingAgent.harnessTestFailed": "ハーネステストを開始できませんでした",
   "codingAgent.deniedHelp": "コーディングエージェントは自分のフォルダー内で決められたコマンドしか実行できません。これは安全のための制限が働いた結果であり、不具合ではありません。多くの場合、実行は別の方法を見つけます。",
   "codingAgent.stop": "停止",
   "codingAgent.openLive": "ライブで見る",

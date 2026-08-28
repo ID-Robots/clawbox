@@ -494,6 +494,8 @@ export const nl: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Annuleren",
   "codingAgent.githubDeviceTerminal": "Gebruik in plaats daarvan de Terminal",
   "codingAgent.githubStartFailed": "Kon de GitHub-aanmelding niet starten",
+  "codingAgent.harnessTest": "Harness testen",
+  "codingAgent.harnessTestFailed": "Kon de harnesstest niet starten",
   "codingAgent.deniedHelp": "De coding agent mag alleen een vaste set opdrachten in zijn eigen map uitvoeren. Dit is de veiligheidsgrens die werkt, geen fout — de run vindt meestal een andere weg.",
   "codingAgent.stop": "Stoppen",
   "codingAgent.openLive": "Live volgen",

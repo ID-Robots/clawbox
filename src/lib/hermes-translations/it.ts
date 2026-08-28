@@ -505,6 +505,8 @@ export const it: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Annulla",
   "codingAgent.githubDeviceTerminal": "Usa invece il Terminale",
   "codingAgent.githubStartFailed": "Impossibile avviare l'accesso a GitHub",
+  "codingAgent.harnessTest": "Prova l'harness",
+  "codingAgent.harnessTestFailed": "Impossibile avviare il test dell'harness",
   "codingAgent.deniedHelp": "L'agente di codice può eseguire solo un insieme fisso di comandi nella propria cartella. È il limite di sicurezza che funziona, non un errore: l'esecuzione di solito trova un'altra strada.",
   "codingAgent.stop": "Interrompi",
   "codingAgent.openLive": "Guarda dal vivo",

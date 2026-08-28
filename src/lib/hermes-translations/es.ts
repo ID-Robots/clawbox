@@ -489,6 +489,8 @@ export const es: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Cancelar",
   "codingAgent.githubDeviceTerminal": "Usar el Terminal en su lugar",
   "codingAgent.githubStartFailed": "No se pudo iniciar el acceso a GitHub",
+  "codingAgent.harnessTest": "Probar el harness",
+  "codingAgent.harnessTestFailed": "No se pudo iniciar la prueba del harness",
   "codingAgent.deniedHelp": "El agente de código solo puede ejecutar un conjunto fijo de comandos dentro de su propia carpeta. Es el límite de seguridad funcionando, no un fallo: la ejecución suele encontrar otra vía.",
   "codingAgent.stop": "Detener",
   "codingAgent.openLive": "Ver en vivo",

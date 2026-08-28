@@ -490,6 +490,8 @@ export const sv: Record<string, string> = {
   "codingAgent.githubDeviceCancel": "Avbryt",
   "codingAgent.githubDeviceTerminal": "Använd terminalen i stället",
   "codingAgent.githubStartFailed": "Kunde inte starta GitHub-inloggningen",
+  "codingAgent.harnessTest": "Testa harnesset",
+  "codingAgent.harnessTestFailed": "Kunde inte starta harnesstestet",
   "codingAgent.deniedHelp": "Kodagenten får bara köra en fast uppsättning kommandon i sin egen mapp. Det är säkerhetsgränsen som fungerar, inte ett fel — körningen hittar oftast en annan väg.",
   "codingAgent.stop": "Stoppa",
   "codingAgent.openLive": "Följ live",
