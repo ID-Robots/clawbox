@@ -34,8 +34,8 @@
   /* Design tokens — matching clawbox.com dark sections */
   --bg-deep: #111827;
   /* The inset colour at the alpha a gradient fades OUT to, so a tinted card can
-     dissolve into the page without hardcoding the hex twice. Re-pointed with
-     --bg-deep under the Hermes ground below. */
+     dissolve into the page without hardcoding the hex twice. One value on both
+     editions: the Hermes layer below no longer re-points any ground token. */
   --bg-deep-veil: rgba(17, 24, 39, 0.4);
   --bg-surface: #172030;
   --bg-elevated: #1e2939;
@@ -399,10 +399,14 @@ h6 {
   --dd-accent-hot: rgba(62, 240, 139, 0.26);
   --dd-accent-ring: rgba(18, 214, 164, 0.60);
 }
-/* The Hermes plate. [data-agent="hermes"] .setup-shell re-points --bg-elevated,
-   but the popover is portaled OUT of .setup-shell, so it would otherwise open
-   as a ClawBox-blue card wearing a Hermes accent. */
-.header-dropdown-popover[data-agent="hermes"] {
+/* The Hermes plate — CHAT ONLY. The popover portals to <body>, so it carries
+   the edition marker itself and no ancestor selector can scope it; the
+   `:not(--field)` is what keeps this plate out of the setup wizard. The
+   wizard's provider picker is the only `field` popover in the product, and
+   setup is ONE ground on both editions — there the list opens on the shared
+   plate, wearing the Hermes accent from the rule above. Chat is where the
+   agent's own surfaces live, and they stay. */
+.header-dropdown-popover[data-agent="hermes"]:not(.header-dropdown-popover--field) {
   background: #182c2a;
   border-color: rgba(255, 230, 203, 0.15);
 }
@@ -950,49 +954,56 @@ h6 {
   z-index: 1;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════
+/* ════════════════════════════════════════════════════════════════════════
    HERMES CO-BRANDING — scoped to the wizard shell
-   ClawBox owns the frame and the wayfinding; Hermes owns the ground and the
-   agent's own surfaces. A pixel changes for Hermes if and only if it
-   describes the AGENT; it does not change if it describes the SETUP.
+   ONE GROUND, BOTH EDITIONS. Setup is the same product on a Hermes box and on
+   an OpenClaw box, so it is painted on the same ground: --ground #0a0f1a and
+   the surfaces mixed from it, declared once in :root and never re-pointed
+   here. Hermes enters as IDENTITY — the co-branding lockup, the agent's own
+   ink, the agent's green on the reconnect overlay — never as a second
+   background.
+
+   What this block used to do and no longer does: it re-pointed --ground and
+   eight surface tokens to a teal set (#041c1c and the plates mixed from it).
+   The hue was picked to hold luminance, so no pairing failed contrast — but
+   it gave the two editions two different-coloured wizards, and one wizard on
+   one ground is worth more than a tint.
 
    Palette source: hermes-agent/web/src/themes/presets.ts (defaultTheme,
    label "Hermes Teal") and web/src/index.css. NOT the Docusaurus theme —
    that is the marketing site, and it is where the gold came from.
 
-   #0a0f1a → #041c1c is 1.06:1. The HUE moves, the LUMINANCE does not, so
-   every contrast pairing in the wizard survives untouched: coral is 6.31:1
-   on the new ground, cyan 11.01:1, body ink 16.91:1.
-   ═══════════════════════════════════════════════════════════════════════ */
+   The --agent-* names are ADDITIVE: they add a vocabulary, they never replace
+   a shared one. --coral-bright and --cyan-bright are deliberately NOT
+   redefined — coral means ACTION and cyan means DONE on every box, under
+   every harness. Re-pointing them once put the wizard's two opposed states
+   1.08:1 apart, the single most important thing a setup wizard communicates,
+   destroyed to make a tint.
+
+   Contrast on the shared ground #0a0f1a: agent ink 15.91:1, ink-2 10.31:1,
+   ink-3 7.08:1, warn 11.48:1, live 11.00:1 — every one of them ABOVE what it
+   measured on the teal ground, because #0a0f1a is the darker of the two.
+   --agent-on-ink, --agent-card and --agent-muted were teal literals whose
+   only meaning was "against the teal ground"; they now point at the shared
+   ground and the shared plates. That is a hue-only move: #0e2423 → #172030
+   and #182c2a → #1e2939 sit within 0.0005 relative luminance of the values
+   they replace, so an agent panel keeps exactly the lift it had.
+   ════════════════════════════════════════════════════════════════════════ */
 /* `.reconnect-stage[data-agent="hermes"]`: the reconnect/handoff overlays
    portal onto document.body, OUTSIDE `.setup-shell`, so ancestry can never
    deliver this layer to them. The overlay carries the edition marker itself
-   (ReconnectStage sets data-agent="hermes" from the wizard's edition). */
+   (ReconnectStage sets data-agent="hermes" from the wizard's edition) and it
+   paints `var(--ground)`, which is now the same ground on both editions — it
+   is here for the agent's ink, not for a ground. */
 [data-agent="hermes"] .setup-shell,
 .reconnect-stage[data-agent="hermes"] {
-  /* 1. the ground and the surfaces mixed from it */
-  --ground: #041c1c;
-  --ground-fade: rgba(4, 28, 28, 0.88);
-  --ground-0: rgba(4, 28, 28, 0);
-  --surface-card: rgba(14, 36, 35, 0.75);
-  --surface-card-strong: rgba(14, 36, 35, 0.9);
-  --bg-surface: #132826;
-  --bg-elevated: #182c2a;
-  --bg-deep: #0e2423;
-  --bg-deep-veil: rgba(14, 36, 35, 0.4);
-
-  /* 2. the agent tokens are ADDITIVE. --coral-bright and --cyan-bright are
-     deliberately NOT redefined: coral means ACTION and cyan means DONE on
-     every box, under every harness. Re-pointing them once put the wizard's
-     two opposed states 1.08:1 apart — the single most important thing a
-     setup wizard communicates, destroyed to make a tint. */
   --agent-ink: #ffe6cb;                    /* midground: text AND accent */
   --agent-ink-2: rgba(255, 230, 203, 0.8);
   --agent-ink-3: rgba(255, 230, 203, 0.65);
-  --agent-on-ink: #041c1c;                 /* text ON a cream plate */
+  --agent-on-ink: var(--ground);           /* text ON a cream plate */
   --agent-line: rgba(255, 230, 203, 0.15); /* the one hairline weight */
-  --agent-card: #0e2423;
-  --agent-muted: #182c2a;
+  --agent-card: var(--bg-surface);         /* a panel lifted off that ground */
+  --agent-muted: var(--bg-elevated);
   --agent-warn: #ffbd38;                   /* the ONLY sanctioned gold */
   --agent-live: #4ade80;
   --agent-term-bg: #000000;
