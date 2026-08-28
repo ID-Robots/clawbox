@@ -1,0 +1,500 @@
+// Approving a queued email from the chat the owner is already in.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT THIS IS ALLOWED TO BE, AND WHAT IT MUST NEVER BECOME
+//
+// src/lib/owner-session.ts explains why the approval queue answers to a browser
+// session cookie and refuses the MCP bearer: the agent holds that bearer, and
+// "a prompt-injected agent would queue a draft and approve it in the next tool
+// call, and the owner would see nothing but a sent message."
+//
+// This file adds a SECOND owner-authenticated path. It does not widen the
+// first. In particular there is no tool, no MCP verb and no route the agent can
+// call that ends in a send — the agent cannot approve by asking, and it cannot
+// approve by reporting that the owner said "I approve". The only thing that
+// sends a draft from here is a callback_query that Telegram delivered to a bot
+// ClawBox owns exclusively, from a user id that is already on the owner
+// allowlist for this device.
+//
+// If a future change adds a way for the agent to reach applyApprovalCallback()
+// — a tool, an unauthenticated route, a "simulate tap" debug verb — the gate is
+// gone. See email-approval-telegram.ts for why the bot has to be a separate
+// one, which is the part that makes the inbound stream unreachable from the
+// agent.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// WHAT IS FROZEN AT THE MOMENT THE QUESTION IS ASKED
+//
+// One prompt names ONE draft id and the fingerprint that draft had when the
+// question was posted — the mechanism the desktop batch card uses (#498), not a
+// parallel one. A draft the agent queues while the owner is reading has a
+// different id, is in no prompt, and cannot ride along on a tap. A draft whose
+// content changed no longer matches the fingerprint and is refused rather than
+// sent. There is deliberately no "approve everything waiting" button;
+// email-pending.ts:129 explains why that shortcut must not exist.
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE FULL TEXT, OR NO BUTTON AT ALL
+//
+// The reading is the safety mechanism: it is what lets a person catch an
+// injected instruction before it is mailed to a stranger. So the question
+// carries the whole draft — every recipient, the subject and the entire body.
+// When that does not fit in one Telegram message the feature STANDS DOWN for
+// that draft and says so; it never offers a one-tap send for text the owner was
+// only shown part of.
+
+import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
+import { claimPendingIfUnchanged, draftFingerprint, removePending, type PendingEmail } from "@/lib/email-pending";
+import {
+  advanceOffset,
+  claimPrompt,
+  countPrompts,
+  createPrompt,
+  readOffset,
+  recordPromptMessage,
+  removePromptsForDraft,
+  type ApprovalPrompt,
+} from "@/lib/email-approval-prompts";
+import {
+  answerCallback,
+  CHAT_ID_RE,
+  clearApprovalKeyboard,
+  fetchApprovalUpdates,
+  replyInChat,
+  safeBotToken,
+  sendApprovalMessage,
+  TelegramApiError,
+  type TelegramCallbackQuery,
+  type TelegramUpdate,
+} from "@/lib/email-approval-telegram";
+import { get as configGet } from "@/lib/config-store";
+import { getActiveHarness } from "@/lib/harness";
+import { readHermesApprovedUsers } from "@/lib/hermes-telegram";
+import { readTelegramAllowFrom } from "@/lib/openclaw-config";
+import { sendMail, SmtpError } from "@/lib/smtp-client";
+
+/** Config keys. Both are owner-only to write; see the chat-approval route. */
+export const CHAT_APPROVAL_ENABLED_KEY = "email_chat_approval";
+export const CHAT_APPROVAL_TOKEN_KEY = "email_approval_bot_token";
+
+/**
+ * OFF unless the owner turned it on. The device that has never been configured
+ * behaves exactly as it does today: the draft waits in Settings → Email.
+ */
+export const CHAT_APPROVAL_DEFAULT = false;
+
+/** Approved senders are the household, not a mailing list. Mirrors coding-agent-notify. */
+const MAX_OWNER_CHATS = 5;
+
+/**
+ * Telegram's hard limit is 4096 characters for a message. The margin is for the
+ * header lines this file adds around the draft; a draft that only fits because
+ * the header was short is a draft one edit away from being silently truncated.
+ */
+const MAX_PROMPT_CHARS = 3_800;
+
+const APPROVE_PREFIX = "ea:";
+const REJECT_PREFIX = "er:";
+
+/** Telegram's own ceiling for callback_data. Nothing longer can be one of ours. */
+const MAX_CALLBACK_DATA = 64;
+
+/** What a tap did, for the log and for the tests. Never surfaced to the agent. */
+export type CallbackOutcome =
+  | "sent"
+  | "rejected"
+  | "not_owner"
+  | "unknown_button"
+  | "expired"
+  | "gone"
+  | "changed"
+  | "unconfigured"
+  | "send_failed";
+
+export type PromptOutcome =
+  | { kind: "sent"; chats: number }
+  | { kind: "off" }
+  | { kind: "unconfigured" }
+  | { kind: "no_owner_chat" }
+  | { kind: "too_long" }
+  | { kind: "failed"; error: string };
+
+// ── Is this device using chat approval at all? ───────────────────────────────
+
+export async function approvalBotToken(): Promise<string | null> {
+  return safeBotToken(await configGet(CHAT_APPROVAL_TOKEN_KEY));
+}
+
+/**
+ * Enabled means BOTH switched on AND holding a usable token. A toggle with no
+ * bot behind it would queue drafts nobody is ever asked about, which is worse
+ * than the feature being off — the owner would be waiting for a message that
+ * cannot arrive.
+ */
+export async function chatApprovalEnabled(): Promise<boolean> {
+  const flag = await configGet(CHAT_APPROVAL_ENABLED_KEY);
+  const on = typeof flag === "boolean" ? flag : CHAT_APPROVAL_DEFAULT;
+  if (!on) return false;
+  return (await approvalBotToken()) !== null;
+}
+
+/**
+ * Who may press the button.
+ *
+ * Read from the HARNESS's own allowlist, not from a list this feature keeps:
+ * the people allowed to talk to this ClawBox over Telegram are already written
+ * down, by the pairing flow the owner has already been through, and a second
+ * list would be a second thing to get out of step. A Telegram user id is global
+ * — the same number identifies the owner to every bot — so the ids the main bot
+ * has approved are exactly the ids that may approve mail here.
+ */
+export async function ownerChatIds(): Promise<string[]> {
+  const harness = await getActiveHarness();
+  const raw =
+    harness === "hermes"
+      ? (await readHermesApprovedUsers()).map((u) => u.id)
+      : await readTelegramAllowFrom();
+  const seen = new Set<string>();
+  const ids: string[] = [];
+  for (const id of raw) {
+    const trimmed = typeof id === "string" ? id.trim() : "";
+    if (!CHAT_ID_RE.test(trimmed) || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    ids.push(trimmed);
+    if (ids.length >= MAX_OWNER_CHATS) break;
+  }
+  return ids;
+}
+
+// ── Asking ───────────────────────────────────────────────────────────────────
+
+/**
+ * The question, in full.
+ *
+ * Exported so a test can pin what it contains — and, more to the point, what it
+ * must not omit. Every recipient and the entire body are here because a person
+ * approving a message they have only seen the first line of is not consenting
+ * to it.
+ */
+export function buildPromptText(draft: PendingEmail): string {
+  const to = draft.to.join(", ");
+  return [
+    "ClawBox wants to send an email on your behalf.",
+    "",
+    `To: ${to}`,
+    `Subject: ${draft.subject}`,
+    "",
+    draft.body,
+    "",
+    "Approve only if you recognise this message.",
+  ].join("\n");
+}
+
+/**
+ * Ask the owner, in chat, about one freshly-queued draft.
+ *
+ * Never throws. A question that could not be delivered must not turn a
+ * successfully-queued draft into a failed send — the draft is on disk either
+ * way and Settings → Email still works. The RESULT is returned rather than
+ * swallowed so the send route can tell the agent the truth about whether the
+ * owner was actually asked.
+ */
+export async function sendApprovalPrompt(draft: PendingEmail): Promise<PromptOutcome> {
+  try {
+    const token = await approvalBotToken();
+    if (!token || !(await chatApprovalEnabled())) return { kind: "off" };
+
+    const text = buildPromptText(draft);
+    if (text.length > MAX_PROMPT_CHARS) {
+      // Deliberately not truncated. See the header: no one-tap send for text
+      // the owner was shown only part of.
+      return { kind: "too_long" };
+    }
+
+    const chats = await ownerChatIds();
+    if (chats.length === 0) return { kind: "no_owner_chat" };
+
+    const created = createPrompt({ draftId: draft.id, fingerprint: draftFingerprint(draft) });
+    if (!created) return { kind: "failed", error: "Too many approval requests are already waiting." };
+    // Already asked. Asking again would leave two live buttons for one email.
+    if (!created.created) return { kind: "sent", chats: created.prompt.messages.length };
+    const prompt = created.prompt;
+
+    let delivered = 0;
+    let lastError = "";
+    for (const chatId of chats) {
+      try {
+        const messageId = await sendApprovalMessage(token, chatId, text, [
+          { text: "Approve & send", callback_data: `${APPROVE_PREFIX}${prompt.handle}` },
+          { text: "Delete draft", callback_data: `${REJECT_PREFIX}${prompt.handle}` },
+        ]);
+        recordPromptMessage(prompt.handle, { chatId, messageId });
+        delivered += 1;
+      } catch (err) {
+        // Telegram's own words, which is what tells an owner they have not
+        // pressed Start on the approvals bot yet. Never the token.
+        lastError = err instanceof TelegramApiError ? err.message : "Could not reach Telegram";
+      }
+    }
+
+    if (delivered === 0) {
+      // Nobody was asked, so nothing is outstanding. Leaving the prompt behind
+      // would keep the poller awake for a button that exists nowhere.
+      removePromptsForDraft(draft.id);
+      return { kind: "failed", error: lastError || "Could not reach Telegram" };
+    }
+
+    startApprovalPoller();
+    return { kind: "sent", chats: delivered };
+  } catch (err) {
+    console.error("[email/approval] could not ask in chat:", err instanceof Error ? err.message : err);
+    return { kind: "failed", error: "Could not ask in chat" };
+  }
+}
+
+/**
+ * A draft was decided somewhere else — the desktop panel, the chat card, a
+ * reject. Take its buttons out of the chat so the owner is not left holding a
+ * control whose only possible answer is "that is no longer waiting".
+ *
+ * Best effort and never throws: this is tidying, and a failure here must not
+ * fail an approval that has already happened.
+ */
+export async function retireChatPrompt(draftId: string): Promise<void> {
+  try {
+    const prompts = removePromptsForDraft(draftId);
+    if (prompts.length === 0) return;
+    const token = await approvalBotToken();
+    if (!token) return;
+    for (const prompt of prompts) {
+      for (const message of prompt.messages) {
+        await clearApprovalKeyboard(token, message.chatId, message.messageId).catch(() => undefined);
+      }
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+// ── Answering ────────────────────────────────────────────────────────────────
+
+/**
+ * One tap.
+ *
+ * THE ORDER OF THE CHECKS IS THE SECURITY PROPERTY, so it is spelled out:
+ *
+ *   1. The button has to be one of ours. An unknown payload is answered and
+ *      dropped without touching any state.
+ *   2. The presser has to be the owner. This is checked BEFORE the prompt is
+ *      claimed, so a stranger who somehow learns a handle cannot burn the
+ *      owner's question by pressing it — they get a refusal and the button
+ *      stays live for the person it was meant for.
+ *   3. The prompt is claimed — read-and-removed in one synchronous step, so a
+ *      double tap finds nothing the second time.
+ *   4. The DRAFT is claimed with the fingerprint recorded in step 3, which is
+ *      what stops a draft queued after the question from riding along, and is
+ *      the authoritative single-send lock (email-pending.ts:302).
+ *   5. Only then is the SMTP client handed anything.
+ */
+export async function applyApprovalCallback(query: TelegramCallbackQuery): Promise<CallbackOutcome> {
+  const token = await approvalBotToken();
+  const data = typeof query.data === "string" ? query.data : "";
+  const approve = data.startsWith(APPROVE_PREFIX);
+  const reject = data.startsWith(REJECT_PREFIX);
+
+  const say = async (text: string): Promise<void> => {
+    if (!token) return;
+    await answerCallback(token, query.id, text).catch(() => undefined);
+  };
+
+  // The length bound is Telegram's own: callback_data may not exceed 64 bytes,
+  // so anything longer did not come from a button we posted and is not worth
+  // carrying into a file lookup.
+  if ((!approve && !reject) || data.length > MAX_CALLBACK_DATA) {
+    await say("That button is not one this ClawBox is waiting on.");
+    return "unknown_button";
+  }
+  const handle = data.slice((approve ? APPROVE_PREFIX : REJECT_PREFIX).length);
+
+  // (2) — before (3), on purpose.
+  const owners = await ownerChatIds();
+  const presser = String(query.from.id);
+  if (!owners.includes(presser)) {
+    // Logged without the handle: this is the one line that survives a refused
+    // tap, and it should say that a stranger pressed, not which draft.
+    console.error("[email/approval] refused a tap from a user who is not on the owner allowlist");
+    await say("This ClawBox does not take approvals from this account.");
+    return "not_owner";
+  }
+
+  const prompt = claimPrompt(handle);
+  if (!prompt) {
+    await say("That approval request has already been answered or has expired.");
+    return "expired";
+  }
+
+  if (reject) {
+    removePending(prompt.draftId);
+    await say("Draft deleted. Nothing was sent.");
+    await settle(token, prompt, "Deleted. This message was not sent.");
+    return "rejected";
+  }
+
+  const settings = await getEmailCredentials();
+  if (!settings) {
+    await say("This ClawBox has no email account connected.");
+    await settle(token, prompt, "Not sent: this ClawBox has no email account connected.");
+    return "unconfigured";
+  }
+
+  // (4) The authoritative claim. A mismatch leaves the draft IN the queue —
+  // it has not been consented to, and deleting text the owner never agreed to
+  // lose is not ours to do.
+  const claim = claimPendingIfUnchanged(prompt.draftId, prompt.fingerprint);
+  if (!claim.ok) {
+    const text =
+      claim.reason === "gone"
+        ? "That draft is no longer waiting — it was already sent or deleted."
+        : "That draft changed after this message was posted, so it was NOT sent. Approve it in Settings → Email.";
+    await say(text);
+    await settle(token, prompt, text);
+    return claim.reason === "gone" ? "gone" : "changed";
+  }
+
+  const draft = claim.draft;
+  try {
+    await sendMail(toSmtpConfig(settings), {
+      from: settings.address,
+      fromName: settings.fromName || "ClawBox",
+      to: draft.to,
+      subject: draft.subject,
+      text: draft.body,
+    });
+    await say("Sent.");
+    await settle(token, prompt, `Sent to ${draft.to.length} recipient(s).`);
+    return "sent";
+  } catch (err) {
+    const kind = err instanceof SmtpError ? err.kind : "network";
+    // Never the recipient, never the subject, never a line of the body — the
+    // same rule the pending route's log follows.
+    console.error(`[email/approval] approved send failed: kind=${kind} host=${settings.smtpHost}`);
+    const reason = err instanceof SmtpError ? err.message : "Could not send the message.";
+    await say(`Not sent: ${reason}`);
+    // The draft was claimed before the send and is out of the queue — the same
+    // trade the desktop path makes, for the same reason (never send twice). It
+    // is not lost: the message above this reply still holds the whole draft,
+    // which is exactly why the question is never overwritten with its verdict.
+    await settle(token, prompt, `Not sent: ${reason} The draft above is no longer queued.`);
+    return "send_failed";
+  }
+}
+
+/** Retire the buttons and post the verdict under the question. Best effort. */
+async function settle(token: string | null, prompt: ApprovalPrompt, verdict: string): Promise<void> {
+  if (!token) return;
+  for (const message of prompt.messages) {
+    await clearApprovalKeyboard(token, message.chatId, message.messageId).catch(() => undefined);
+    await replyInChat(token, message.chatId, verdict, message.messageId).catch(() => undefined);
+  }
+}
+
+// ── The poller ───────────────────────────────────────────────────────────────
+//
+// It runs ONLY while a question is outstanding. A box with the feature switched
+// on and nothing queued makes no requests to Telegram at all — there is nothing
+// for anyone to answer, so there is nothing to listen for.
+
+const RETRY_MIN_MS = 5_000;
+const RETRY_MAX_MS = 60_000;
+
+/**
+ * The shortest a poll cycle may take.
+ *
+ * getUpdates is a LONG poll: it is supposed to hold the connection open for
+ * POLL_TIMEOUT_S and hand back nothing. When it does not — a proxy that closes
+ * idle connections early, a Telegram edge that answers at once, a stub in a
+ * test — a loop with no floor becomes a tight one, and a tight loop against
+ * Telegram is how a bot gets rate-limited off the network. One second costs a
+ * tap nothing: the long poll is what makes it fast, and this only applies when
+ * the long poll did not happen.
+ */
+const MIN_CYCLE_MS = 1_000;
+
+let running = false;
+let stopRequested = false;
+
+export function approvalPollerRunning(): boolean {
+  return running;
+}
+
+/**
+ * Start listening, if a question is outstanding and nothing is listening yet.
+ *
+ * Idempotent: called after every prompt is posted and once at boot, and a
+ * second caller must not open a second long poll against the same bot — two
+ * pollers on one token is the exact conflict that made a shared bot impossible
+ * in the first place.
+ */
+export function startApprovalPoller(): void {
+  if (running) return;
+  running = true;
+  stopRequested = false;
+  void pollLoop().finally(() => {
+    running = false;
+  });
+}
+
+/** For shutdown and for the tests. */
+export function stopApprovalPoller(): void {
+  stopRequested = true;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    // Never hold the process open for a poll that nobody is waiting on.
+    if (typeof timer === "object" && "unref" in timer) timer.unref();
+  });
+}
+
+async function pollLoop(): Promise<void> {
+  let backoff = RETRY_MIN_MS;
+  while (!stopRequested) {
+    let token: string | null = null;
+    try {
+      token = await approvalBotToken();
+      if (!token || !(await chatApprovalEnabled()) || countPrompts() === 0) return;
+    } catch {
+      return;
+    }
+
+    const startedAt = Date.now();
+    try {
+      const updates = await fetchApprovalUpdates(token, readOffset());
+      backoff = RETRY_MIN_MS;
+      for (const update of updates) {
+        // Advance FIRST. A tap that throws while being handled must not be
+        // replayed on the next poll: the draft may already be on the wire, and
+        // "send it again to be sure" is the one outcome this feature may never
+        // produce.
+        advanceOffset(update.update_id + 1);
+        await handleUpdate(update);
+      }
+      const elapsed = Date.now() - startedAt;
+      if (elapsed < MIN_CYCLE_MS) await delay(MIN_CYCLE_MS - elapsed);
+    } catch (err) {
+      console.error("[email/approval] poll failed:", err instanceof Error ? err.message : err);
+      await delay(backoff);
+      backoff = Math.min(backoff * 2, RETRY_MAX_MS);
+    }
+  }
+}
+
+async function handleUpdate(update: TelegramUpdate): Promise<void> {
+  if (!update.callback_query) return;
+  try {
+    await applyApprovalCallback(update.callback_query);
+  } catch (err) {
+    console.error("[email/approval] could not handle a tap:", err instanceof Error ? err.message : err);
+  }
+}

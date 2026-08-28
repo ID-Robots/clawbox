@@ -65,6 +65,19 @@ export async function register() {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }
   try {
+    // A question asked in chat outlives the process that asked it: the button
+    // is still sitting in the owner's Telegram. Nothing listens for the answer
+    // unless something starts listening, so a box that reboots with an
+    // approval outstanding has to pick the poll back up here or the owner taps
+    // into silence. Starts nothing when the feature is off or nothing is
+    // waiting -- see startApprovalPoller.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const emailApproval = require('./lib/email-approval')
+    emailApproval.startApprovalPoller()
+  } catch (err) {
+    console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Memory indexing is armed the same way, from its own persisted schedule.
     // Rebuilding the timer at every boot is what makes the schedule survive a
     // reboot and an update without a crontab entry to duplicate or orphan.

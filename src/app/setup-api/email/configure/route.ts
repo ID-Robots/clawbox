@@ -30,6 +30,7 @@ import {
 } from "@/lib/email-config";
 import { refreshEmailToolsIfReadabilityChanged } from "@/lib/email-mcp-refresh";
 import { clearPending } from "@/lib/email-pending";
+import { clearPrompts } from "@/lib/email-approval-prompts";
 import { ImapError, verifyImap } from "@/lib/imap-client";
 import { getActiveHarness } from "@/lib/harness";
 import {
@@ -245,6 +246,9 @@ export async function DELETE(request: Request) {
     // Drafts waiting on an account that no longer exists can never be approved,
     // and they hold agent-composed text. Disconnecting drops them.
     clearPending();
+    // The questions about those drafts go with them: a button that can only
+    // answer "there is no email account" is worse than no button.
+    clearPrompts();
     if ((await getActiveHarness()) === "hermes") {
       try {
         await clearHermesEmail();

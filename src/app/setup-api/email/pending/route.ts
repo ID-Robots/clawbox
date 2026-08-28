@@ -42,6 +42,11 @@ import {
   restorePending,
   type PendingEmail,
 } from "@/lib/email-pending";
+// A draft decided here must not leave a live button in the owner's chat. The
+// button could not send it twice — claimPending already made that impossible —
+// but a control whose only possible answer is "that is no longer waiting" is a
+// control that should not still be there.
+import { retireChatPrompt } from "@/lib/email-approval";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
@@ -89,9 +94,11 @@ export async function POST(request: Request) {
   if (!id) return NextResponse.json({ error: "A draft id is required" }, { status: 400 });
 
   if (action === "reject") {
-    return removePending(id)
-      ? NextResponse.json({ success: true, rejected: true })
-      : NextResponse.json({ error: "That draft is no longer waiting.", kind: "gone" }, { status: 404 });
+    if (!removePending(id)) {
+      return NextResponse.json({ error: "That draft is no longer waiting.", kind: "gone" }, { status: 404 });
+    }
+    await retireChatPrompt(id);
+    return NextResponse.json({ success: true, rejected: true });
   }
 
   if (action !== "approve") {
@@ -115,6 +122,10 @@ export async function POST(request: Request) {
   if (!draft) {
     return NextResponse.json({ error: "That draft is no longer waiting.", kind: "gone" }, { status: 404 });
   }
+  // After the claim and before the send: the draft can no longer be sent by a
+  // tap, so the button is already dead and taking it away now is honest either
+  // way the send goes.
+  await retireChatPrompt(draft.id);
 
   try {
     const { messageId } = await sendMail(
@@ -275,6 +286,10 @@ async function approveBatch(request: Request, raw: unknown): Promise<NextRespons
       restorePending(draft);
       break;
     }
+    // Only now, past the point where restorePending could put it back: a draft
+    // that goes back into the queue keeps its chat button, because it is still
+    // waiting and the owner can still answer it.
+    await retireChatPrompt(draft.id);
 
     try {
       const { messageId } = await sendMail(
