@@ -195,6 +195,45 @@ describe("the question", () => {
   });
 });
 
+describe("who is asked, and who may answer", () => {
+  it("reports how many chats actually got the question, not how many were tried", async () => {
+    const openclaw = await import("@/lib/openclaw-config");
+    vi.mocked(openclaw.readTelegramAllowFrom).mockResolvedValue(["6001", "6002"]);
+    await enableChatApproval();
+    vi.mocked(telegram.sendApprovalMessage)
+      .mockRejectedValueOnce(new telegram.TelegramApiError("bot was blocked by the user", 403))
+      .mockResolvedValueOnce(321);
+
+    expect(await approval.sendApprovalPrompt(queueDraft())).toEqual({ kind: "sent", chats: 1 });
+    // One chat has it, so the question is live and worth listening for.
+    expect(prompts.countPrompts()).toBe(1);
+  });
+
+  it("reads the allowlist from Hermes when that is the harness", async () => {
+    const harness = await import("@/lib/harness");
+    const hermes = await import("@/lib/hermes-telegram");
+    vi.mocked(harness.getActiveHarness).mockResolvedValue("hermes");
+    vi.mocked(hermes.readHermesApprovedUsers).mockResolvedValue([{ id: "7001", name: "owner" }]);
+
+    expect(await approval.ownerChatIds()).toEqual(["7001"]);
+  });
+
+  it("lets the sixth paired owner approve, even though only five are messaged", async () => {
+    // The cap is a delivery cap. Using it to trim the authorization list would
+    // make "may I approve?" depend on the order the harness lists people in.
+    const openclaw = await import("@/lib/openclaw-config");
+    const household = ["6001", "6002", "6003", "6004", "6005", "6006"];
+    vi.mocked(openclaw.readTelegramAllowFrom).mockResolvedValue(household);
+    await enableChatApproval();
+
+    expect(await approval.ownerChatIds()).toEqual(household);
+    await approval.sendApprovalPrompt(queueDraft());
+    expect(telegram.sendApprovalMessage).toHaveBeenCalledTimes(5);
+
+    expect(await approval.applyApprovalCallback(tap(`ea:${postedHandle()}`, "6006"))).toBe("sent");
+  });
+});
+
 describe("who may press the button", () => {
   it("refuses a tap from a Telegram account that is not on the owner allowlist", async () => {
     await enableChatApproval();
@@ -361,6 +400,21 @@ describe("after the tap", () => {
 
     expect(pending.listPending()).toEqual([]);
     expect(prompts.countPrompts()).toBe(0);
+  });
+
+  it("refuses to delete a draft that changed after the question was posted", async () => {
+    await enableChatApproval();
+    await approval.sendApprovalPrompt(queueDraft());
+    const handle = postedHandle();
+    const file = path.join(root, "data", "email-pending.json");
+    const stored = JSON.parse(fs.readFileSync(file, "utf-8"));
+    stored[0].body = "Something the owner never read.";
+    fs.writeFileSync(file, JSON.stringify(stored));
+
+    // Same rule as Approve: throwing away words the owner never agreed to lose
+    // is not ours to do.
+    expect(await approval.applyApprovalCallback(tap(`er:${handle}`))).toBe("changed");
+    expect(pending.countPending()).toBe(1);
   });
 
   it("deletes the draft, and sends nothing, when the owner says no", async () => {

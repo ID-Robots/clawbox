@@ -106,26 +106,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Bot API method names are letters only. Nothing else can reshape a path. */
+const METHOD_RE = /^[A-Za-z]+$/;
+
 /**
  * One Bot API method call.
  *
- * `token` must already have been through safeBotToken(). Errors never carry the
- * token or the response body: this repo is public and these messages reach the
- * UI verbatim.
+ * BOTH path segments are rebuilt here out of characters a pattern allows,
+ * rather than trusted from the caller. The token has already been through
+ * safeBotToken() on the way out of config, and this is a second, LOCAL check at
+ * the one place a string becomes a URL — so the guarantee does not depend on
+ * every future caller remembering it, and so the sanitizer is visible to CodeQL
+ * at the sink rather than several frames away.
+ *
+ * Errors never carry the token or the response body: this repo is public and
+ * these messages reach the UI verbatim.
  */
 async function call(
   token: string,
   method: string,
   payload: Record<string, unknown>,
   timeoutMs = CALL_TIMEOUT_MS,
+  signal?: AbortSignal,
 ): Promise<unknown> {
+  const safeToken = safeBotToken(token);
+  if (!safeToken) throw new TelegramApiError("This is not a usable bot token", 0);
+  const safeMethod = METHOD_RE.exec(method)?.[0];
+  if (!safeMethod) throw new TelegramApiError("Unsupported Telegram method", 0);
+
   let res: Response;
   try {
-    res = await fetch(`${TELEGRAM_API_BASE}/bot${token}/${method}`, {
+    res = await fetch(`${TELEGRAM_API_BASE}/bot${safeToken}/${safeMethod}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
     });
   } catch {
     throw new TelegramUnavailableError();
@@ -175,13 +190,27 @@ export async function sendApprovalMessage(
   const result = await call(token, "sendMessage", {
     chat_id: chatId,
     text,
-    disable_web_page_preview: true,
+    // Bot API 7.0 replaced disable_web_page_preview with this object.
+    link_preview_options: { is_disabled: true },
     reply_markup: { inline_keyboard: [buttons] },
   });
-  if (!isRecord(result) || typeof result.message_id !== "number") {
+  if (!isRecord(result)) throw new TelegramApiError("Telegram did not confirm the message", 200);
+  return asMessageId(result.message_id);
+}
+
+/**
+ * A message id we are willing to keep.
+ *
+ * This number is the ONE piece of network data that reaches the prompt store on
+ * disk, so it is rebuilt here as a bounded integer rather than passed through:
+ * whatever the response held, what gets written is a small whole number this
+ * function produced.
+ */
+export function asMessageId(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     throw new TelegramApiError("Telegram did not confirm the message", 200);
   }
-  return result.message_id;
+  return Math.trunc(value);
 }
 
 /**
@@ -215,8 +244,13 @@ export async function replyInChat(
   await call(token, "sendMessage", {
     chat_id: chatId,
     text,
-    disable_web_page_preview: true,
-    ...(replyToMessageId === undefined ? {} : { reply_to_message_id: replyToMessageId }),
+    link_preview_options: { is_disabled: true },
+    // reply_parameters replaced reply_to_message_id in Bot API 7.0.
+    // allow_sending_without_reply matters here: an owner who deletes the
+    // question must still be told what happened to the mail.
+    ...(replyToMessageId === undefined
+      ? {}
+      : { reply_parameters: { message_id: replyToMessageId, allow_sending_without_reply: true } }),
   });
 }
 
@@ -245,7 +279,11 @@ export async function answerCallback(token: string, callbackId: string, text: st
  * asking Telegram for nothing else means an owner who types at it cannot put
  * their words, or anyone else's, into this process at all.
  */
-export async function fetchApprovalUpdates(token: string, offset: number): Promise<TelegramUpdate[]> {
+export async function fetchApprovalUpdates(
+  token: string,
+  offset: number,
+  signal?: AbortSignal,
+): Promise<TelegramUpdate[]> {
   const result = await call(
     token,
     "getUpdates",
@@ -257,6 +295,10 @@ export async function fetchApprovalUpdates(token: string, offset: number): Promi
     // The request itself is allowed to sit for the poll window plus a margin;
     // the shared 10s timeout would abort every long poll before it returned.
     (POLL_TIMEOUT_S + 10) * 1000,
+    // A stop request must not have to wait out a 25-second long poll: at
+    // shutdown that is an open TLS request on an embedded board, and in a test
+    // it is a cycle still running after the temp root has been deleted.
+    signal,
   );
   if (!Array.isArray(result)) return [];
   return result.filter(isUpdate);

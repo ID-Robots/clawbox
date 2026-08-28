@@ -29,6 +29,7 @@ import fs from "fs";
 import path from "path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
+import { CHAT_ID_RE } from "@/lib/email-approval-telegram";
 
 const PROMPTS_PATH = path.join(DATA_DIR, "email-approval-prompts.json");
 
@@ -176,13 +177,24 @@ export function createPrompt(
   return { prompt, created: true };
 }
 
-/** Note where the question was posted, so the outcome can be edited in later. */
+/**
+ * Note where the question was posted, so the outcome can be edited in later.
+ *
+ * The message id is the one value here that came off the network, so it is
+ * rebuilt as a bounded whole number before it reaches the disk rather than
+ * written through. The chat id is checked against the same pattern the owner
+ * allowlist is read with. What lands in the file is what these two lines
+ * produced, not what a response contained.
+ */
 export function recordPromptMessage(handle: string, message: PromptMessage, now = Date.now()): void {
+  if (!CHAT_ID_RE.test(message.chatId)) return;
+  if (!Number.isSafeInteger(message.messageId) || message.messageId <= 0) return;
+  const safe: PromptMessage = { chatId: message.chatId, messageId: Math.trunc(message.messageId) };
   const store = readStore(now);
   const prompt = store.prompts.find((p) => p.handle === handle);
   if (!prompt) return;
-  if (prompt.messages.some((m) => m.chatId === message.chatId && m.messageId === message.messageId)) return;
-  prompt.messages.push(message);
+  if (prompt.messages.some((m) => m.chatId === safe.chatId && m.messageId === safe.messageId)) return;
+  prompt.messages.push(safe);
   writeStore(store);
 }
 

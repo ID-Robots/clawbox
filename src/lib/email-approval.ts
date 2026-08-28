@@ -44,12 +44,13 @@
 // only shown part of.
 
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
-import { claimPendingIfUnchanged, draftFingerprint, removePending, type PendingEmail } from "@/lib/email-pending";
+import { claimPendingIfUnchanged, draftFingerprint, type PendingEmail } from "@/lib/email-pending";
 import {
   advanceOffset,
   claimPrompt,
   countPrompts,
   createPrompt,
+  listPrompts,
   readOffset,
   recordPromptMessage,
   removePromptsForDraft,
@@ -83,8 +84,18 @@ export const CHAT_APPROVAL_TOKEN_KEY = "email_approval_bot_token";
  */
 export const CHAT_APPROVAL_DEFAULT = false;
 
-/** Approved senders are the household, not a mailing list. Mirrors coding-agent-notify. */
-const MAX_OWNER_CHATS = 5;
+/**
+ * How many chats one question is POSTED to. A delivery cap, deliberately not an
+ * authorization cap: mirrors coding-agent-notify, where a notice to the
+ * household is not a mailing list.
+ *
+ * It is applied at the fan-out and NOWHERE ELSE. Using it to trim the list that
+ * decides who may press the button would make authorization depend on the order
+ * the harness happens to list paired users in, and would answer a sixth owner
+ * with "this ClawBox does not take approvals from this account" — which reads
+ * like a pairing failure rather than the cap it is.
+ */
+const MAX_PROMPT_CHATS = 5;
 
 /**
  * Telegram's hard limit is 4096 characters for a message. The margin is for the
@@ -139,7 +150,7 @@ export async function chatApprovalEnabled(): Promise<boolean> {
 }
 
 /**
- * Who may press the button.
+ * Who may press the button. THE WHOLE allowlist, never a truncation of it.
  *
  * Read from the HARNESS's own allowlist, not from a list this feature keeps:
  * the people allowed to talk to this ClawBox over Telegram are already written
@@ -161,7 +172,6 @@ export async function ownerChatIds(): Promise<string[]> {
     if (!CHAT_ID_RE.test(trimmed) || seen.has(trimmed)) continue;
     seen.add(trimmed);
     ids.push(trimmed);
-    if (ids.length >= MAX_OWNER_CHATS) break;
   }
   return ids;
 }
@@ -211,7 +221,8 @@ export async function sendApprovalPrompt(draft: PendingEmail): Promise<PromptOut
       return { kind: "too_long" };
     }
 
-    const chats = await ownerChatIds();
+    // The cap lives here, at the fan-out, and only here.
+    const chats = (await ownerChatIds()).slice(0, MAX_PROMPT_CHATS);
     if (chats.length === 0) return { kind: "no_owner_chat" };
 
     const created = createPrompt({ draftId: draft.id, fingerprint: draftFingerprint(draft) });
@@ -276,6 +287,23 @@ export async function retireChatPrompt(draftId: string): Promise<void> {
   }
 }
 
+/**
+ * Take every outstanding question out of the chat.
+ *
+ * For the moment the mail account is disconnected: the drafts go, so the
+ * buttons have to go with them, and they can only be found while the store
+ * still holds the chat and message ids. Clearing the records first would leave
+ * live controls in the owner's Telegram whose only possible answer is an error.
+ */
+export async function retireAllChatPrompts(): Promise<void> {
+  try {
+    const outstanding = listPrompts();
+    for (const prompt of outstanding) await retireChatPrompt(prompt.draftId);
+  } catch {
+    // best-effort
+  }
+}
+
 // ── Answering ────────────────────────────────────────────────────────────────
 
 /**
@@ -334,7 +362,21 @@ export async function applyApprovalCallback(query: TelegramCallbackQuery): Promi
   }
 
   if (reject) {
-    removePending(prompt.draftId);
+    // The same rule the approve path uses, and for the same reason: a draft
+    // whose text changed is not the draft the owner read, and throwing away
+    // words they never agreed to lose is not ours to do. There is no edit path
+    // today; the point is that the day one arrives, both buttons already mean
+    // "this exact message".
+    const dropped = claimPendingIfUnchanged(prompt.draftId, prompt.fingerprint);
+    if (!dropped.ok) {
+      const text =
+        dropped.reason === "gone"
+          ? "That draft is no longer waiting — it was already sent or deleted."
+          : "That draft changed after this message was posted, so it was NOT deleted. Handle it in Settings → Email.";
+      await say(text);
+      await settle(token, prompt, text);
+      return dropped.reason === "gone" ? "gone" : "changed";
+    }
     await say("Draft deleted. Nothing was sent.");
     await settle(token, prompt, "Deleted. This message was not sent.");
     return "rejected";
@@ -422,6 +464,8 @@ const MIN_CYCLE_MS = 1_000;
 
 let running = false;
 let stopRequested = false;
+/** Aborts the long poll that is in flight right now, if there is one. */
+let pollAbort: AbortController | null = null;
 
 export function approvalPollerRunning(): boolean {
   return running;
@@ -439,14 +483,25 @@ export function startApprovalPoller(): void {
   if (running) return;
   running = true;
   stopRequested = false;
+  // pollLoop clears the flag on every exit path of its own; this is the
+  // backstop for a throw that escapes it entirely.
   void pollLoop().finally(() => {
     running = false;
   });
 }
 
-/** For shutdown and for the tests. */
+/**
+ * For shutdown and for the tests.
+ *
+ * Aborting matters as much as the flag. Without it the loop stays parked in a
+ * long poll for up to POLL_TIMEOUT_S after being told to stop — which at
+ * shutdown is an open TLS request on an embedded board, and in a test is a
+ * cycle that can still write to a CLAWBOX_ROOT the teardown has deleted.
+ */
 export function stopApprovalPoller(): void {
   stopRequested = true;
+  pollAbort?.abort();
+  pollAbort = null;
 }
 
 function delay(ms: number): Promise<void> {
@@ -463,14 +518,24 @@ async function pollLoop(): Promise<void> {
     let token: string | null = null;
     try {
       token = await approvalBotToken();
-      if (!token || !(await chatApprovalEnabled()) || countPrompts() === 0) return;
+      // Release the slot in the SAME turn as the decision to stop. Leaving it
+      // to the .finally() below puts a microtask between "this loop is going to
+      // exit" and "running is false", and a startApprovalPoller() landing in
+      // that window declines to start — leaving a question outstanding with
+      // nothing listening for its answer.
+      if (!token || !(await chatApprovalEnabled()) || countPrompts() === 0) {
+        running = false;
+        return;
+      }
     } catch {
+      running = false;
       return;
     }
 
     const startedAt = Date.now();
+    pollAbort = new AbortController();
     try {
-      const updates = await fetchApprovalUpdates(token, readOffset());
+      const updates = await fetchApprovalUpdates(token, readOffset(), pollAbort.signal);
       backoff = RETRY_MIN_MS;
       for (const update of updates) {
         // Advance FIRST. A tap that throws while being handled must not be
@@ -483,11 +548,17 @@ async function pollLoop(): Promise<void> {
       const elapsed = Date.now() - startedAt;
       if (elapsed < MIN_CYCLE_MS) await delay(MIN_CYCLE_MS - elapsed);
     } catch (err) {
+      // A stop request aborts the request in flight, and the failure it causes
+      // is not news. Leave without waiting out a backoff nobody is waiting for.
+      if (stopRequested) break;
       console.error("[email/approval] poll failed:", err instanceof Error ? err.message : err);
       await delay(backoff);
       backoff = Math.min(backoff * 2, RETRY_MAX_MS);
+    } finally {
+      pollAbort = null;
     }
   }
+  running = false;
 }
 
 async function handleUpdate(update: TelegramUpdate): Promise<void> {

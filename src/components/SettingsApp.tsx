@@ -140,6 +140,17 @@ interface ChatApprovalState {
   ownerChats: number;
 }
 
+/** One shape, one parser. Two hand-rolled copies drift the moment a field moves. */
+function parseChatApprovalState(d: unknown): ChatApprovalState {
+  const r = (typeof d === "object" && d !== null ? d : {}) as Record<string, unknown>;
+  return {
+    enabled: r.enabled === true,
+    botConfigured: r.botConfigured === true,
+    botUsername: typeof r.botUsername === "string" ? r.botUsername : null,
+    ownerChats: typeof r.ownerChats === "number" ? r.ownerChats : 0,
+  };
+}
+
 /**
  * How often the open approvals strip re-reads the queue.
  *
@@ -1734,13 +1745,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     try {
       const r = await fetch("/setup-api/email/chat-approval", { cache: "no-store" });
       if (!r.ok) return;
-      const d = await r.json();
-      setChatApproval({
-        enabled: d?.enabled === true,
-        botConfigured: d?.botConfigured === true,
-        botUsername: typeof d?.botUsername === "string" ? d.botUsername : null,
-        ownerChats: typeof d?.ownerChats === "number" ? d.ownerChats : 0,
-      });
+      setChatApproval(parseChatApprovalState(await r.json()));
     } catch {
       // keep the last known state
     }
@@ -1808,12 +1813,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setEmailMsg({ type: "error", message: typeof d?.error === "string" ? d.error : t("settings.failedSave") });
         return;
       }
-      setChatApproval({
-        enabled: d?.enabled === true,
-        botConfigured: d?.botConfigured === true,
-        botUsername: typeof d?.botUsername === "string" ? d.botUsername : null,
-        ownerChats: typeof d?.ownerChats === "number" ? d.ownerChats : 0,
-      });
+      setChatApproval(parseChatApprovalState(d));
       setChatApprovalToken("");
     } catch {
       setEmailMsg({ type: "error", message: t("settings.failedSave") });
@@ -4317,7 +4317,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       onChange={(e) => setChatApprovalToken(e.target.value)}
                       placeholder={t("settings.emailChatApprovalToken")}
                       autoComplete="off"
-                      className="w-full px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-sm text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+                      className="w-full px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-base text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
                     />
                     <button
                       type="button"
