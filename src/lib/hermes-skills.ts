@@ -539,8 +539,9 @@ export function formatBytes(bytes: number): string {
 export function sourceUrlParts(url: string): { head: string; tail: string } {
   const noScheme = url.replace(/^https?:\/\//i, '');
   const cut = noScheme.search(/[?#]/);
+  // The path only — a `?query`/`#hash` is not part of the boilerplate to elide,
+  // and rides along on the tail via the offset slice below.
   const pathPart = cut === -1 ? noScheme : noScheme.slice(0, cut);
-  const suffix = cut === -1 ? '' : noScheme.slice(cut); // ?query / #hash, kept on the tail
   const segs = pathPart.split('/').filter(Boolean);
   const host = segs[0] ?? '';
   const pathSegs = segs.slice(1);
@@ -551,11 +552,15 @@ export function sourceUrlParts(url: string): { head: string; tail: string } {
   const GENERIC_FILE = /^(?:skill\.md|readme(?:\.[a-z0-9]+)?|index\.[a-z0-9]+|[a-z0-9._-]+\.md)$/i;
   const last = pathSegs[pathSegs.length - 1];
   const tailCount = GENERIC_FILE.test(last) && pathSegs.length >= 2 ? 2 : 1;
-  const headSegs = pathSegs.slice(0, pathSegs.length - tailCount);
   const tailSegs = pathSegs.slice(pathSegs.length - tailCount);
-  // head ends with the slash that precedes the tail; head + tail reads back as
-  // the scheme-stripped URL, so the split is presentational only.
-  const head = `${[host, ...headSegs].join('/')}/`;
-  const tail = `${tailSegs.join('/')}${suffix}`;
+  // Split by OFFSET, not by re-joining: the marker is the slash-prefixed tail
+  // segments, and everything from it onward (a trailing slash, the query/hash
+  // suffix) is the tail. `head + tail === noScheme` byte-for-byte for every
+  // input — including a deep URL ending in `/` — because nothing is rebuilt
+  // from the boolean-filtered segments; the original string is only sliced.
+  const marker = `/${tailSegs.join('/')}`;
+  const idx = pathPart.lastIndexOf(marker);
+  const head = noScheme.slice(0, idx + 1);
+  const tail = noScheme.slice(idx + 1);
   return { head, tail };
 }

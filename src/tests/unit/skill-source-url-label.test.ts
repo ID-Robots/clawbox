@@ -85,4 +85,18 @@ describe('sourceUrlParts — the identifying tail of a skill source URL', () => 
     expect(tail).toBe('b/skill.md?ref=main');
     expect(head + tail).toBe('example.com/a/b/skill.md?ref=main');
   });
+
+  it('preserves a trailing slash on a deep path (head + tail stays exact)', () => {
+    // Regression: reconstructing head by re-joining Boolean-filtered segments
+    // dropped the trailing "/". The offset split keeps it on the tail.
+    const { head, tail } = sourceUrlParts('https://example.com/a/b/c/');
+    expect(tail).toBe('c/');
+    expect(head + tail).toBe('example.com/a/b/c/');
+  });
+
+  it('preserves a trailing slash that precedes a query', () => {
+    const { head, tail } = sourceUrlParts('https://example.com/a/b/c/?x=1');
+    expect(tail).toBe('c/?x=1');
+    expect(head + tail).toBe('example.com/a/b/c/?x=1');
+  });
 });
