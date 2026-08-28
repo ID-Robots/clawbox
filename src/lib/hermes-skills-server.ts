@@ -24,6 +24,7 @@ import path from 'path';
 import { NextResponse } from 'next/server';
 import type { InstalledHermesSkill, ScanFinding, SkillOrigin } from '@/lib/hermes-skills';
 import { parseSkillFrontmatter, type SkillFrontmatter } from '@/lib/hermes-skill-frontmatter';
+import { removeSkillDir } from '@/lib/hermes-skill-manifest';
 import { getActiveHarness } from '@/lib/harness';
 import { hermesConfigGet } from '@/lib/hermes-config-cache';
 import { isValidSkillName } from '@/lib/hermes-skills';
@@ -97,14 +98,20 @@ export async function readHubLock(): Promise<Record<string, HubLockEntry>> {
 }
 
 /**
- * The lock entry stored under exactly `key`, or undefined.
+ * The lock entry stored under exactly `key` in a lock ALREADY READ, or
+ * undefined.
  *
  * Every lookup into `installed` goes through here because the key is caller
  * data: a plain `installed[key]` answers '__proto__', 'constructor' and
  * 'toString' out of Object.prototype even for a lock that lists none of them,
  * and an inherited member is not an installed skill.
+ *
+ * It takes the lock rather than reading one so a caller can ask about a
+ * SNAPSHOT: the install route reads the lock before the CLI runs, to tell an
+ * entry this request created from one that was already there, and a fresh
+ * `readHubLock()` afterwards would answer about a file the CLI has rewritten.
  */
-function ownEntry(
+export function hubLockEntry(
   installed: Record<string, HubLockEntry>,
   key: string,
 ): HubLockEntry | undefined {
@@ -597,7 +604,7 @@ export async function updateLockFiles(name: string, files: string[]): Promise<bo
   // Object.prototype, which is truthy, and the assignment below would then hang
   // a `files` property off every object in the process. Object.entries() only
   // ever yields own enumerable keys, so no inherited member can be selected.
-  const entry = ownEntry(installed, name);
+  const entry = hubLockEntry(installed, name);
   if (!entry) return false;
   entry.files = files.slice(0, 500).sort();
   try {
@@ -617,6 +624,106 @@ export function lockInstallDir(entry: HubLockEntry | undefined): string | null {
 let installedCache: { key: string; value: InstalledHermesSkill[] } | null = null;
 const INSTALLED_TTL_MS = 10_000;
 let installedCacheAt = 0;
+
+// ── Removing a skill: the post-condition both routes need ───────────────────
+//
+// Removing a Hermes skill has TWO halves. `hermes skills uninstall` drops the
+// LOCK ENTRY — what every store surface lists — and is supposed to delete the
+// DIRECTORY, which is what the agent actually loads. It exits 0 whether it did
+// either, so neither half may be inferred from its exit code, and a directory
+// left behind is loaded by the agent with no lock entry to show for it.
+//
+// PR #517 established that for the install route's rollback and left the
+// uninstall route checking only the lock. One implementation, used by both, is
+// what stops the two answering differently about the same device state.
+
+/**
+ * What the skill directory is doing after a removal.
+ *
+ * Three states, not two, because "not known to be there" is not "gone": a lock
+ * entry that names no `install_path` gives the removal nothing to aim at, so
+ * nothing about the directory was checked and nothing about it may be claimed.
+ */
+export type SkillRemovalDir = 'present' | 'absent' | 'unknown';
+
+/** What a removal ACHIEVED, as opposed to what the CLI printed about it. */
+export interface SkillRemovalVerdict {
+  /** No lock entry survived and no directory is known to have. */
+  clean: boolean;
+  /** The hub lock still lists the skill — every store surface calls it installed. */
+  lockEntry: boolean;
+  /** The skill directory is still on disk — the agent would load it. */
+  dir: SkillRemovalDir;
+}
+
+/**
+ * Is this path there? Three answers, because a failed `stat` has two meanings.
+ *
+ * ENOENT is the only one that proves absence. EACCES, ENOTDIR, EIO and a
+ * timed-out network mount all mean the question could not be answered — and on
+ * this device family that is not hypothetical: the root-owned subtree that
+ * defeats the CLI's own `fs.rm` is exactly the kind of tree a stat can fail on.
+ * Reading any of them as "not there" is how a caller ends up deleting an
+ * installation it could not see.
+ */
+export type PathState = 'present' | 'absent' | 'unknown';
+
+export async function pathState(p: string): Promise<PathState> {
+  try {
+    await fs.stat(p);
+    return 'present';
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === 'ENOENT' ? 'absent' : 'unknown';
+  }
+}
+
+/**
+ * Take the second swing at the directory, then report what is left of the skill.
+ *
+ * Call this AFTER `hermes skills uninstall` has run and only once the lock half
+ * is believed to have worked: it deletes the directory the entry names, and
+ * deleting the files under a lock entry that survived would manufacture exactly
+ * the half-removed state this exists to detect.
+ *
+ * The lock question is asked about the KEY, never the identifier. The key came
+ * out of the lock, so the CLI can only have removed that one key; matching on
+ * the identifier as well scans every other entry and can therefore only produce
+ * FALSE failures — a second copy of the same store id under a different name
+ * would report a completed removal as incomplete.
+ */
+export async function verifySkillRemoval(
+  lockKey: string,
+  entry: HubLockEntry | undefined,
+): Promise<SkillRemovalVerdict> {
+  const installPath = entry?.install_path;
+  // `unknown` until something actually looks. With no `install_path` there is
+  // nothing to look at, and the honest answer is not `absent`: the CLI may well
+  // have left a directory behind at a location this route was never told.
+  let dir: SkillRemovalDir = 'unknown';
+  if (installPath) {
+    // Two things can leave the directory behind, so both are checked: a path
+    // `removeSkillDir` will not resolve (it answers false and removes nothing),
+    // and a removal it believes it made — `fs.rm` on a tree it cannot fully
+    // traverse, the root-owned subdirectory case this device family produces.
+    const removed = await removeSkillDir(SKILLS_DIR, installPath);
+    const abs = lockInstallDir(entry);
+    if (!removed) {
+      dir = 'present';
+    } else if (abs !== null) {
+      // A stat that could not answer keeps `unknown`: it is the one honest
+      // label for "the removal claimed to work and nothing could confirm it".
+      dir = await pathState(abs);
+    }
+  }
+  invalidateInstalledCache();
+  // Read the lock AFTER the CLI, never before: it is the only thing that says
+  // whether the store will still list this skill.
+  const lockEntry = Object.prototype.hasOwnProperty.call(await readHubLock(), lockKey);
+  // `unknown` alone is not a failure. The store lists what the lock lists, so a
+  // vanished lock entry means the customer sees nothing and has nothing to act
+  // on; refusing here would report a failure over a removal that did its job.
+  return { clean: !lockEntry && dir !== 'present', lockEntry, dir };
+}
 
 /** Drop the installed-skill caches — called right after an install/uninstall. */
 export function invalidateInstalledCache(): void {

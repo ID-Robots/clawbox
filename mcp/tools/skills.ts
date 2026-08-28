@@ -168,6 +168,18 @@ const uninstallRules = (name: string): ErrorRule[] => [
     next: BUILTIN_NEXT,
   },
   {
+    // The lock entry went, the directory did not. Retrying cannot help: the CLI
+    // has nothing left to uninstall and the files it could not delete are the
+    // whole problem, so a person has to deal with them on the device.
+    status: 409,
+    match: /"code"\s*:\s*"removal_incomplete"/,
+    code: "CONFLICT",
+    message: `The device removed "${name}" from the store but could not delete its files.`,
+    next:
+      "Do NOT retry — there is nothing left in the store to remove. Tell the user the skill's "
+      + "folder is still on the device and has to be deleted there.",
+  },
+  {
     status: 502,
     code: "CONFLICT",
     message: "The device could not remove that skill.",

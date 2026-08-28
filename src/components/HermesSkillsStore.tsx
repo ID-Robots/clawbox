@@ -212,6 +212,15 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         if (res.status === 502 && data?.code === 'incomplete_install') {
           throw new Error(COPY.installIncomplete((data.missingFiles as string[]) || []));
         }
+        // A rollback the device could not finish leaves a lock entry THIS
+        // request created, and the message tells the customer to remove it from
+        // this very store. The Installed tab still holds the pre-request list,
+        // so the row they are being sent to is not on screen until the list is
+        // re-read — the generic throw below goes straight to the error toast.
+        if (res.status === 409 && data?.code === 'rollback_incomplete') {
+          await installed.refresh();
+          throw new Error(String(data.error || COPY.installFailed));
+        }
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
         setProgressAutoClear(key, { status: 'success' }, 2000);
         // The detail answer changes completely once a skill is on disk (full
@@ -245,6 +254,13 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
           body: JSON.stringify({ id: name }),
         });
         const data = await res.json().catch(() => ({}));
+        // The mirror image on the way out: the lock entry went and the files did
+        // not, so the skill comes back into the list as a local one the store
+        // cannot offer to remove. The customer has to be able to see that.
+        if (res.status === 409 && data?.code === 'removal_incomplete') {
+          await installed.refresh();
+          throw new Error(String(data.error || COPY.uninstallFailed));
+        }
         if (!res.ok) throw new Error(data?.error || `HTTP ${res.status}`);
         const timer = timers.current.get(key);
         if (timer) clearTimeout(timer);

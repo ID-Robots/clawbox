@@ -12,18 +12,21 @@ import {
 } from "@/lib/hermes-skill-cli-outcome";
 import {
   type HubLockEntry,
-  SKILLS_DIR,
+  type SkillRemovalVerdict,
   hermesSkillsGuard,
+  hubLockEntry,
   invalidateInstalledCache,
   isInHubLock,
   lockInstallDir,
   officialSkillDir,
+  pathState,
   readHubLock,
   readScanReport,
   readShadowableSkillNames,
   resolveLockKey,
   scanReportFromLock,
   updateLockFiles,
+  verifySkillRemoval,
 } from "@/lib/hermes-skills-server";
 import { getCatalogRecord } from "@/lib/hermes-skill-index";
 import {
@@ -38,7 +41,6 @@ import {
   githubTreeManifest,
   listSkillFiles,
   referencedSupportPaths,
-  removeSkillDir,
   repairFromGithub,
 } from "@/lib/hermes-skill-manifest";
 import { auditSkillInstall } from "@/lib/hermes-skill-audit";
@@ -80,8 +82,11 @@ import { auditSkillInstall } from "@/lib/hermes-skill-audit";
 //     installer's collision guard only reads the hub lock, which never contains
 //     bundled skills. Now: refused up front, with the option of a distinct name.
 //
-// Every refusal cleans up after itself: the CLI's uninstall drops the lock
-// entry, and the install directory is removed directly in case it did not.
+// Every refusal cleans up after ITSELF: the CLI's uninstall drops the lock
+// entry, and the install directory is removed directly in case it did not — but
+// only for an install this request actually made. A skill the device already
+// had is left exactly as it was found, because a request to install something
+// is never a licence to delete it.
 
 /** How long the Hermes CLI gets for one install (scan + fetch on a Jetson). */
 const INSTALL_TIMEOUT_MS = 120_000;
@@ -156,6 +161,12 @@ export async function POST(request: Request) {
   // A bare ClawHub slug has to be sent as `clawhub/<slug>` or the CLI resolves
   // nothing — see cliInstallIdentifier(). `id` itself stays as the customer
   // typed/clicked it for the catalog lookup, the lock check and the audit log.
+  //
+  // The lock is read FIRST, as it was before this request. `rollback()` may only
+  // undo what this request did, and once the CLI has run nothing is left to say
+  // which entries it found and which it wrote — the installer will not overwrite
+  // its own entry, it prints "is already installed" and exits 0.
+  const preLock = await readHubLock();
   const cliId = cliInstallIdentifier(id, record?.source);
   const args = ["skills", "install", cliId, "--yes"];
   if (confirmDangerous) args.push("--force");
@@ -204,7 +215,23 @@ export async function POST(request: Request) {
     });
   }
   const lockName = (await resolveLockKey(id)) || (cliId !== id ? await resolveLockKey(cliId) : null) || fallbackName;
-  const entry = (await readHubLock())[lockName];
+  const entry = hubLockEntry(await readHubLock(), lockName);
+
+  // Was this install already on the device before the request? Then it is not
+  // this route's to remove. Asked about the KEY the install landed under,
+  // against the PRE-request lock, so a second copy of the same id under another
+  // key cannot be mistaken for it.
+  //
+  // The one pre-existing entry that IS still this route's to clear up is a
+  // phantom a previous failed rollback left behind: an entry whose directory is
+  // PROVABLY gone — an ENOENT, and nothing else. Everything else is left alone:
+  // an entry that names no `install_path`, and a stat that failed for any other
+  // reason (EACCES on the root-owned subtree this device family produces, EIO,
+  // a stalled mount). "Could not check" has never been a licence to delete.
+  const preEntry = hubLockEntry(preLock, lockName);
+  const preDir = lockInstallDir(preEntry);
+  const preInstalled =
+    preEntry !== undefined && (preDir === null || (await pathState(preDir)) !== "absent");
 
   // ── 3. Did the scanner flag it? ──────────────────────────────────────────
   const report = scanReportFromLock(entry);
@@ -225,6 +252,18 @@ export async function POST(request: Request) {
     : null;
 
   if (warning && !confirmDangerous) {
+    // The skill was already here, and the installer exited 0 without touching
+    // it. There is nothing to refuse and nothing to undo — and undoing it would
+    // uninstall a skill the customer already had, possibly one they had
+    // confirmed through this very dialog. `caution` is outside CLEAN_VERDICTS,
+    // so on ClawHub that is most of the catalogue.
+    if (preInstalled) {
+      return await alreadyInstalled(warning, {
+        id,
+        name: lockName,
+        findingCount: findings.length,
+      });
+    }
     const undo = await rollback(lockName, entry);
     // A refusal we could not carry out is not the refusal the caller expects:
     // answering `dangerous_skill` here would invite a confirmation that walks
@@ -248,23 +287,30 @@ export async function POST(request: Request) {
   // ── 4. Did every file actually land? ─────────────────────────────────────
   const completeness = await verifyAndRepair(entry, record);
   if (completeness && completeness.missing.length > 0) {
-    const undo = await rollback(lockName, entry);
-    if (!undo.clean) {
-      return await rollbackIncomplete(undo, {
-        id,
-        name: lockName,
-        // Deliberately not "the download was incomplete": the same branch is
-        // reached when the installer met a lock entry a previous rollback could
-        // not remove, exited 0 without fetching anything, and there was no
-        // download to blame. What is true in both cases is that the files are
-        // not there.
-        cause: `Some of "${lockName}"'s files are missing from the device, so it was not installed.`,
-        source: entry?.source,
-        trust: entry?.trust_level,
-        scanVerdict: verdict,
-        missingFiles: completeness.missing.slice(0, 20),
-        warning,
-      });
+    const missingFiles = completeness.missing.slice(0, 20);
+    // Same rule at the second gate: an installation this request did not make is
+    // not this request's to delete. A short file list is a reason to tell the
+    // customer, not a licence to remove what they had — and the repair above has
+    // already had its go at completing it.
+    if (!preInstalled) {
+      const undo = await rollback(lockName, entry);
+      if (!undo.clean) {
+        return await rollbackIncomplete(undo, {
+          id,
+          name: lockName,
+          // Deliberately not "the download was incomplete": the same branch is
+          // reached when the installer met a lock entry a previous rollback could
+          // not remove, exited 0 without fetching anything, and there was no
+          // download to blame. What is true in both cases is that the files are
+          // not there.
+          cause: `Some of "${lockName}"'s files are missing from the device, so it was not installed.`,
+          source: entry?.source,
+          trust: entry?.trust_level,
+          scanVerdict: verdict,
+          missingFiles,
+          warning,
+        });
+      }
     }
     await auditSkillInstall({
       action: "install-incomplete",
@@ -273,13 +319,21 @@ export async function POST(request: Request) {
       source: entry?.source,
       trust: entry?.trust_level,
       verdict,
-      missingFiles: completeness.missing.slice(0, 20),
+      missingFiles,
     });
     return NextResponse.json(
       {
-        error: "The download was incomplete — the skill was not installed.",
+        // Two different true sentences, because the device is in two different
+        // states: nothing of this request's survives the rollback above, but a
+        // pre-existing install is still there and still the customer's.
+        error: preInstalled
+          ? `Some of "${lockName}"'s files are missing from the device. It was already `
+            + `installed before this request, so it was left in place — remove it from the `
+            + `Skills store and install it again.`
+          : "The download was incomplete — the skill was not installed.",
         code: "incomplete_install",
-        missingFiles: completeness.missing.slice(0, 20),
+        ...(preInstalled ? { preexisting: true } : {}),
+        missingFiles,
         expectedCount: completeness.expectedCount,
         presentCount: completeness.presentCount,
         manifestOrigin: completeness.origin,
@@ -534,22 +588,44 @@ async function findShadowConflict(
 }
 
 /**
- * What the skill directory is doing after a rollback.
+ * The 409 for a flagged skill the device ALREADY had.
  *
- * Three states, not two, because "not known to be there" is not "gone": a lock
- * entry that names no `install_path` gives the removal nothing to aim at, so
- * nothing about the directory was checked and nothing about it may be claimed.
+ * Not `dangerous_skill`: that answer says an install was refused, invites a
+ * confirmation, and — before this — was returned after a rollback had removed
+ * the customer's existing installation. Nothing was installed here and nothing
+ * was removed, so the honest answer is the one the CLI itself gave, with the
+ * scan verdict attached so the store can still say why the device is unhappy
+ * about a skill the customer is keeping.
  */
-type RollbackDir = "present" | "absent" | "unknown";
-
-/** What a rollback ACHIEVED, as opposed to what the CLI printed about it. */
-interface RollbackVerdict {
-  /** No lock entry survived and no directory is known to have. */
-  clean: boolean;
-  /** The hub lock still lists the skill — every store surface calls it installed. */
-  lockEntry: boolean;
-  /** The skill directory is still on disk — the agent would load it. */
-  dir: RollbackDir;
+async function alreadyInstalled(
+  warning: SkillDangerWarning,
+  ctx: { id: string; name: string; findingCount: number },
+): Promise<NextResponse> {
+  await auditSkillInstall({
+    action: "install-already-installed",
+    id: ctx.id,
+    name: ctx.name,
+    source: warning.source,
+    trust: warning.trust,
+    verdict: warning.verdict,
+    findingCount: ctx.findingCount,
+    capabilities: warning.capabilities.map((c) => c.id),
+    severities: warning.severityCounts,
+  });
+  return NextResponse.json(
+    {
+      error:
+        `"${ctx.name}" is already installed on this device, so nothing was installed or `
+        + `removed. Its security scan returned a ${warning.verdict ?? "failing"} verdict — `
+        + `remove it from the Skills store if you no longer want it.`,
+      code: "already_installed",
+      requiresConfirmation: false,
+      removed: false,
+      name: ctx.name,
+      warning,
+    },
+    { status: 409 },
+  );
 }
 
 /**
@@ -572,11 +648,17 @@ interface RollbackVerdict {
  * installed from the hub, and the route said it had refused the install.
  *
  * So: read the outcome, both halves of it, and let the caller answer honestly.
+ *
+ * ONLY for an install THIS request made. Both call sites check the pre-request
+ * lock first: `hermes skills install` on a skill the device already has exits 0
+ * printing "is already installed" and writes nothing, which used to make the
+ * scan gate uninstall the customer's existing copy and then report that it had
+ * refused an install.
  */
 async function rollback(
   lockName: string,
   entry: HubLockEntry | undefined,
-): Promise<RollbackVerdict> {
+): Promise<SkillRemovalVerdict> {
   try {
     await runHermesCli(["skills", "uninstall", lockName], {
       timeoutMs: UNINSTALL_TIMEOUT_MS,
@@ -585,39 +667,9 @@ async function rollback(
   } catch (err) {
     console.error("[hermes skills install] rollback uninstall failed", err);
   }
-  const installPath = entry?.install_path;
-  // `unknown` until something actually looks. With no `install_path` there is
-  // nothing to look at, and the honest answer is not `absent`: the CLI may well
-  // have left a directory behind at a location this route was never told.
-  let dir: RollbackDir = "unknown";
-  if (installPath) {
-    // Two things can leave the directory behind, so both are checked: a path
-    // `removeSkillDir` will not resolve (it answers false and removes nothing),
-    // and a removal it believes it made — `fs.rm` on a tree it cannot fully
-    // traverse, the root-owned subdirectory case this device family produces.
-    const removed = await removeSkillDir(SKILLS_DIR, installPath);
-    const abs = lockInstallDir(entry);
-    const stillThere = !removed || (abs !== null && (await pathExists(abs)));
-    dir = stillThere ? "present" : "absent";
-  }
-  invalidateInstalledCache();
-  // Read the lock AFTER the CLI, never before: it is the only thing that says
-  // whether the store will still list this skill.
-  const lockEntry = await isInHubLock(lockName, entry?.identifier);
-  // `unknown` alone is not a failure. The store lists what the lock lists, so a
-  // vanished lock entry means the customer sees nothing and has nothing to act
-  // on; refusing here would report a failure over a rollback that did its job —
-  // the mirror image of the bug this whole change exists to fix.
-  return { clean: !lockEntry && dir !== "present", lockEntry, dir };
-}
-
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    await fs.stat(p);
-    return true;
-  } catch {
-    return false;
-  }
+  // The directory half and the post-condition, shared with the uninstall route
+  // so the two surfaces cannot answer differently about one device state.
+  return await verifySkillRemoval(lockName, entry);
 }
 
 /**
@@ -631,7 +683,7 @@ async function pathExists(p: string): Promise<boolean> {
  * carried, so no surface loses what it already showed.
  */
 async function rollbackIncomplete(
-  left: RollbackVerdict,
+  left: SkillRemovalVerdict,
   ctx: {
     id: string;
     name: string;
