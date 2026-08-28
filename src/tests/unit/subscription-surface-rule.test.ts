@@ -37,10 +37,15 @@ describe("isModelUsableOnSubscription", () => {
 });
 
 describe("subscriptionSurfaceLabel", () => {
-  it("names the surface a provider narrows to, so an error can say which one", () => {
-    expect(subscriptionSurfaceLabel("anthropic")).toBe(
-      SUBSCRIPTION_SURFACE.anthropic.surfaceProvider,
-    );
+  it("names nothing for a provider whose subscription routes NATIVELY", () => {
+    // Since PR #532 anthropic is that provider: its subscription runs on its
+    // own plugin, so its surface is its own catalogue. "not on the anthropic
+    // surface (anthropic)" names nothing a customer can act on, so the
+    // refusal wording drops the parenthetical instead. The id to ENUMERATE
+    // still exists — see subscriptionSurfaceProvider — the gate is narrowed,
+    // not removed.
+    expect(subscriptionSurfaceLabel("anthropic")).toBeNull();
+    expect(SUBSCRIPTION_SURFACE.anthropic.surfaceProvider).toBeUndefined();
   });
 
   it("is null for a provider whose subscription does not narrow the set", () => {

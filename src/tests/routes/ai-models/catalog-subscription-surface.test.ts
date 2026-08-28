@@ -3,21 +3,31 @@ import { EventEmitter } from "events";
 import * as childProcess from "child_process";
 import fs from "fs";
 import path from "path";
+import { isModelUsableOnSubscription } from "@/lib/provider-models";
 
-// Owner-reported from a live first-boot run: "some models like Mythos are not
-// available", on step 4's Anthropic → Subscription tab.
+// HOW MANY catalogues this route enumerates for a provider, and which.
 //
-// The cause is that Anthropic ships TWO catalogues and this route only ever
-// read one. `openclaw models list --provider anthropic` is the API-KEY
-// catalogue — 9 models on OpenClaw 2026.7.1, claude-mythos-5 and
-// claude-fable-5 among them. The Claude-subscription surface is the same
-// plugin's second catalogue, provider id `claude-cli`, and it carries 5:
-// opus-4-8 / 4-7 / 4-6, sonnet-5, sonnet-4-6. No Mythos. No Fable. No Haiku.
+// It used to ask TWO for anthropic: the plugin's own list, plus the plugin's
+// second `claude-cli` list, which was the surface a Claude SUBSCRIPTION could
+// route while the transport was a `models.providers.anthropic` openai-compat
+// override. That was right then. PR #532 replaced the override with the native
+// anthropic plugin (`POST /v1/messages`), which serves the plugin's own
+// catalogue on a subscription credential — so the second enumeration now
+// describes a transport the box no longer uses, and the models it omits
+// (Fable, Mythos, Haiku) are models the box can in fact run.
 //
-// So the refresh has to ask BOTH, and stamp each API-catalogue model with
-// whether the subscription surface carries it. Anything it cannot enumerate
-// stays unstamped — unknown is not "no", and a picker that strikes out a
-// working model is the same lie in the other direction.
+// One catalogue, then — and every row on it stamped usable, including the
+// three the owner reported greyed out.//
+// Verified on the affected box (OpenClaw 2026.7.1-2, Claude subscription):
+// claude-fable-5 and claude-haiku-4-5 both answer over
+// POST https://api.anthropic.com/v1/messages with status=200 and a real
+// completion, fallbackUsed=false. claude-mythos-5 reaches the same endpoint
+// and comes back `not_found_error: model: claude-mythos-5` — an id the
+// provider does not serve, NOT an auth or entitlement refusal, and not
+// something an API key would fix. The old rule greyed it out for a reason
+// ("requires API key") that was never true of it. Stamping it usable is the
+// honest answer to the question this flag asks — whether the SUBSCRIPTION
+// narrows the catalogue — and the 404 surfaces loudly at turn time.
 
 vi.mock("child_process", () => ({ spawn: vi.fn() }));
 
@@ -50,21 +60,49 @@ function fakeChild(json: unknown) {
   return child;
 }
 
+/**
+ * `openclaw models list --provider anthropic` as a 2026.7.1 device answers it,
+ * trimmed: the plugin's own catalogue, Fable and Mythos included. Since #532
+ * this is what a subscription credential routes on.
+ */
 const ANTHROPIC_LIST = {
-  count: 2,
+  count: 3,
   models: [
     { key: "anthropic/claude-sonnet-4-6", name: "Claude Sonnet 4.6", contextWindow: 200_000 },
     { key: "anthropic/claude-mythos-5", name: "Claude Mythos 5", contextWindow: 1_000_000 },
+    { key: "anthropic/claude-fable-5", name: "Claude Fable 5", contextWindow: 1_000_000 },
   ],
 };
 
-const CLAUDE_CLI_LIST = {
-  count: 1,
-  models: [
-    { key: "claude-cli/claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Claude CLI)", contextWindow: 200_000 },
-  ],
-};
+/**
+ * Refresh anthropic and return the stamped payload the route publishes.
+ *
+ * The refresh is re-issued inside the poll rather than fired once: the route
+ * single-flights per provider through a module-level `refreshing` set that
+ * clears a tick after the last publish, so a call made while a previous test's
+ * refresh is still settling is silently dropped.
+ */
+async function stampedCatalogue(): Promise<Record<string, boolean | undefined>> {
+  const cacheFile = path.join(DATA_DIR, "catalog-cache", "anthropic.json");
+  let byId: Record<string, boolean | undefined> = {};
+  await vi.waitFor(() => {
+    if (!fs.existsSync(cacheFile)) {
+      refreshInBackground("anthropic");
+      throw new Error("not published yet");
+    }
+    const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+    byId = Object.fromEntries(
+      (cached.models as Array<{ id: string; availableOnSubscription?: boolean }>)
+        .map((m) => [m.id, m.availableOnSubscription]),
+    );
+    // Published unstamped first so the picker stops serving `warming` early —
+    // wait for the stamped republish, not merely for the file.
+    expect(byId["claude-sonnet-4-6"]).toBe(true);
+  }, { timeout: 5000, interval: 25 });
+  return byId;
+}
 
+/** The `--provider <id>` a recorded `openclaw models list` spawn was given. */
 function providerOf(call: unknown[]): string {
   const args = call[1] as string[];
   return args[args.indexOf("--provider") + 1];
@@ -73,36 +111,51 @@ function providerOf(call: unknown[]): string {
 describe("catalog refresh — subscription surface", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    // The route persists every catalogue it enumerates, surface included, so a
-    // cache left by an earlier run would (correctly) suppress the spawn these
-    // tests are counting.
+    // The route persists every catalogue it enumerates, so a cache left by an
+    // earlier run would (correctly) suppress the spawn these tests count.
     fs.rmSync(path.join(DATA_DIR, "catalog-cache"), { recursive: true, force: true });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mockSpawn.mockImplementation((() => fakeChild(ANTHROPIC_LIST)) as any);
   });
 
-  it("enumerates the Claude-subscription surface alongside the Anthropic API catalogue", async () => {
-    mockSpawn.mockImplementation(((_bin: string, args: string[]) => {
-      const provider = args[args.indexOf("--provider") + 1];
-      return fakeChild(provider === "claude-cli" ? CLAUDE_CLI_LIST : ANTHROPIC_LIST);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any);
+  it("enumerates the Anthropic catalogue ONCE — it is the surface, natively routed", async () => {
+    await stampedCatalogue();
+    // A beat, so a second spawn has room to show up if one were still issued.
+    await new Promise((resolve) => setTimeout(resolve, 250));
 
-    refreshInBackground("anthropic");
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(2));
-
-    const providers = mockSpawn.mock.calls.map(providerOf);
-    expect(providers).toContain("anthropic");
-    expect(providers).toContain("claude-cli");
+    expect(mockSpawn.mock.calls.map(providerOf)).toEqual(["anthropic"]);
+    // Nothing is written under the old surface id: a payload published there
+    // would be an unmerged, unsanitized copy of a list nothing reads any more.
+    expect(fs.existsSync(path.join(DATA_DIR, "catalog-cache", "claude-cli.json"))).toBe(false);
   });
 
-  it("does not go looking for a second surface for a provider that has only one", async () => {
-    mockSpawn.mockImplementation(((_bin: string, args: string[]) => {
-      const provider = args[args.indexOf("--provider") + 1];
-      return fakeChild(provider === "claude-cli" ? CLAUDE_CLI_LIST : ANTHROPIC_LIST);
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    }) as any);
+  it.each(["claude-fable-5", "claude-mythos-5"])(
+    "stamps %s usable — the models the owner saw greyed out",
+    async (id) => {
+      const byId = await stampedCatalogue();
 
-    refreshInBackground("google");
-    await vi.waitFor(() => expect(mockSpawn).toHaveBeenCalledTimes(1));
-    expect(providerOf(mockSpawn.mock.calls[0])).toBe("google");
+      expect(byId[id]).toBe(true);
+      expect(isModelUsableOnSubscription({ availableOnSubscription: byId[id] }, true)).toBe(true);
+    },
+  );
+
+  it("stamps the curated rows too, so a thin enumeration does not grey them", async () => {
+    const byId = await stampedCatalogue();
+
+    // claude-haiku-4-5 is in ANTHROPIC_MODELS but not in the live list above,
+    // so augmentWithStaticCatalog appends it. It was stamped FALSE before —
+    // the third model the owner reported — because `claude-cli` did not carry
+    // it. The native route does.
+    expect(byId["claude-haiku-4-5"]).toBe(true);
+  });
+
+  it("does not go looking for a second surface for a provider that has none", async () => {
+    await vi.waitFor(() => {
+      if (mockSpawn.mock.calls.length === 0) refreshInBackground("google");
+      expect(mockSpawn).toHaveBeenCalled();
+    }, { timeout: 5000, interval: 25 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+
+    expect(mockSpawn.mock.calls.map(providerOf)).toEqual(["google"]);
   });
 });
