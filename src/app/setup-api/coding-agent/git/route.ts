@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
+import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
 import { CodingAgentError, resolveWorkingDirectory } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
@@ -99,7 +99,9 @@ export async function POST(request: Request) {
       // request that was fine.
       const retryable = outcome.reason === "gh_unreachable" || outcome.transient === true;
       return NextResponse.json(
-        { error: outcome.detail ?? outcome.reason, kind: outcome.reason },
+        // `kind` keeps the token — the card branches on it. `error` is the
+        // half a person reads, and must never be an identifier.
+        { error: outcome.detail ?? BACKUP_MESSAGE[outcome.reason], kind: outcome.reason },
         { status: retryable ? 503 : 409 },
       );
     }
