@@ -1634,6 +1634,21 @@ export async function openLauncher(page: Page) {
 
   const button = page.locator('[data-testid="shelf-launcher-button"]:visible').first();
   await waitForHydration(button);
-  await button.click({ force: true });
+  // Click until the launcher is actually there. A forced click can land in the
+  // gap between hydration and the shelf's handlers being wired (React attaches
+  // its root listener before every component has subscribed to it), and with
+  // a second browser competing for CPU that gap is wide enough to lose the
+  // click entirely — the old single click + 15 s wait was the one flake that
+  // kept the e2e job on one worker. Re-checking before each retry keeps a
+  // late-arriving open from being toggled shut by the next click.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (await launcher.isVisible().catch(() => false)) return;
+    await button.click({ force: true });
+    const shown = await launcher
+      .waitFor({ state: "visible", timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (shown) return;
+  }
   await expect(launcher).toBeVisible();
 }

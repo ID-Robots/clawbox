@@ -36,8 +36,15 @@ jobs:
       - name: Sudoers allow-list coverage
         run: bun run check:sudoers
 
+      # CI's variant of `bun run test:coverage`: the same suite, the same
+      # thresholds, only the reporters differ. The full set (text, html, clover,
+      # json-summary) is for a person looking at a checkout; here nothing reads
+      # the ~550-file html tree, the clover XML or the text table — the only
+      # consumer is "Parse coverage" below, which reads coverage-summary.json.
+      # Writing the other ~590 files and printing the table bought nothing but a
+      # few seconds and 600 lines of job log nobody scrolls through.
       - name: Test
-        run: bun run test:coverage
+        run: bun run test:coverage:ci
 
       # Always parse coverage so the PR comment can show numbers even on failure.
       - name: Parse coverage
@@ -53,6 +60,8 @@ jobs:
               w('branches',s.branches.pct);
               w('functions',s.functions.pct);
               w('lines',s.lines.pct);
+              // The text table no longer prints in CI, so leave the totals in the log.
+              console.log('coverage: statements '+s.statements.pct+'%, branches '+s.branches.pct+'%, functions '+s.functions.pct+'%, lines '+s.lines.pct+'%');
             "
           else
             echo "found=false" >> "$GITHUB_OUTPUT"

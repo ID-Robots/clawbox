@@ -74,7 +74,15 @@ Expect ~15-25 min for the first run on x86 (qemu slowdown dominates).
 Subsequent runs with `CLAWBOX_E2E_SKIP_SETUP=1` are fast.
 
 On real Jetson hardware (arm64 host), no emulation is needed and the full
-run finishes in ~3-5 min.
+run finishes in ~3-5 min. On the native arm64 CI runner a green run measures
+~6-7 min end to end (PR #558).
+
+A broken install fails fast: `waitForInstallComplete()` asks systemd on every
+poll whether `clawbox-bootstrap.service` has failed and gives up within one
+5-second poll of that, with the tail of the install log in the error — before
+this, a bootstrap that exited at minute 3 was reported at the 40-minute
+deadline (41 min on PR #558). The deadline stays as the backstop for an
+installer that hangs without failing.
 
 ## Real AI providers
 

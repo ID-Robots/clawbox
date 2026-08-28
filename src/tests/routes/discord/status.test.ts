@@ -9,6 +9,15 @@ vi.setConfig({ testTimeout: 30_000 });
 
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
+// The OpenClaw branch asks the gateway for the channel's row through
+// `openclaw channels status` — a full CLI cold start, 8-10 s per call on a
+// Jetson that has the binary. Left unmocked, every case here paid for one
+// (65 s for the file on the box), and on a machine without `openclaw` the same
+// cases silently exercised the spawn-failure path instead. The row's mapping
+// is pinned by status-openclaw-state.test.ts; this file is about the Discord
+// bot probe, so the gateway answers "could not be asked" (null) unless a case
+// says otherwise.
+vi.mock("@/lib/openclaw-channels", () => ({ readChannelStatus: vi.fn() }));
 vi.mock("@/lib/hermes-discord", async () => {
   const actual = await vi.importActual<typeof import("@/lib/hermes-discord")>("@/lib/hermes-discord");
   return {
@@ -30,9 +39,11 @@ vi.mock("@/lib/hermes-discord", async () => {
 
 import { get } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
+import { readChannelStatus } from "@/lib/openclaw-channels";
 
 const mockGet = vi.mocked(get);
 const mockHarness = vi.mocked(getActiveHarness);
+const mockChannel = vi.mocked(readChannelStatus);
 
 const TOKEN = "clawbox-test-not-a-real-discord-bot-token-000000";
 
@@ -58,6 +69,7 @@ describe("GET /setup-api/discord/status — OpenClaw", () => {
 
     mockHarness.mockResolvedValue("openclaw");
     mockGet.mockResolvedValue(TOKEN);
+    mockChannel.mockResolvedValue(null);
 
     GET = (await import("@/app/setup-api/discord/status/route")).GET;
   });
@@ -82,7 +94,11 @@ describe("GET /setup-api/discord/status — OpenClaw", () => {
       username: "clawbot",
       botId: "42",
       tokenRejected: false,
+      // The gateway was asked and could not answer: unknown, never "offline".
+      verified: false,
+      state: null,
     });
+    expect(mockChannel).toHaveBeenCalledWith("discord");
   });
 
   it("keeps a legacy discriminator in the reported name", async () => {

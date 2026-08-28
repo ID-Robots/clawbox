@@ -81,12 +81,29 @@ describe("network", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // doScan() sleeps a real 3 s after `nmcli device wifi rescan` so the driver
+    // has results to list — every scan below paid for it, ten of them, and
+    // the box was never asked anything real. The clock is faked instead and
+    // scan() runs it forward; the settle itself stays the product's.
+    vi.useFakeTimers();
     process.env.CLAWBOX_ROOT = "/tmp/clawbox-test-nonexistent-" + Math.random().toString(36).slice(2);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
+
+  /**
+   * scanWifi() with the post-rescan settle elapsed on the fake clock. The
+   * execFile mock answers through microtasks, so every timer the scan sets is
+   * already pending by the time the runner looks for one.
+   */
+  async function scan(): ReturnType<typeof network.scanWifi> {
+    const pending = network.scanWifi();
+    await vi.runAllTimersAsync();
+    return pending;
+  }
 
   describe("scanWifi", () => {
     it("returns cached results if fresh", async () => {
@@ -98,13 +115,13 @@ describe("network", () => {
       network = await import("@/lib/network");
 
       // First call populates cache
-      const result1 = await network.scanWifi();
+      const result1 = await scan();
       expect(result1).toHaveLength(1);
       expect(result1[0].ssid).toBe("HomeNet");
 
       // Second call should use cache (no additional exec calls)
       const callCount = mockExecFile.mock.calls.length;
-      const result2 = await network.scanWifi();
+      const result2 = await scan();
       expect(result2).toEqual(result1);
       // Should not have made more calls
       expect(mockExecFile.mock.calls.length).toBe(callCount);
@@ -120,7 +137,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(3);
       expect(result[0]).toEqual({ ssid: "Network1", signal: 85, security: "WPA2", freq: "5180" });
@@ -138,7 +155,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("OtherNet");
@@ -154,7 +171,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].signal).toBe(90);
@@ -170,7 +187,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("My:Network:Name");
@@ -186,7 +203,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("ValidNet");
@@ -202,7 +219,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("ValidNet");
@@ -218,7 +235,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result).toHaveLength(1);
       expect(result[0].ssid).toBe("GoodNet");
@@ -234,7 +251,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      const result = await network.scanWifi();
+      const result = await scan();
 
       expect(result[0].ssid).toBe("High");
       expect(result[1].ssid).toBe("Mid");
@@ -260,7 +277,7 @@ describe("network", () => {
       });
 
       network = await import("@/lib/network");
-      await network.scanWifi();
+      await scan();
 
       const status = network.getScanStatus();
 
@@ -280,7 +297,7 @@ describe("network", () => {
       network = await import("@/lib/network");
 
       // Populate cache
-      await network.scanWifi();
+      await scan();
 
       const callCount = mockExecFile.mock.calls.length;
 

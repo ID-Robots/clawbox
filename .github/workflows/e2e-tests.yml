@@ -25,7 +25,7 @@ jobs:
       # Cache Playwright browser binaries between runs (~250MB Chromium download).
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package.json') }}
@@ -38,6 +38,25 @@ jobs:
       - name: Install Playwright system dependencies
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         run: bunx playwright install-deps chromium
+
+      # `next build` (run by playwright.config.ts's webServer) keeps its
+      # incremental state in .next/cache; restoring it lets the build's type
+      # check pick up where the last run left off instead of checking every
+      # file from scratch. The key names every build input, so an exact hit is
+      # a cache for these very sources; restore-keys fall back to the newest
+      # cache for the same lockfile, which is still valid — the compiler
+      # verifies each cached file against the source it sees, so a stale entry
+      # is recomputed, never trusted. Saved after the job by actions/cache.
+      # (Next 16 builds with Turbopack, whose own compiler cache is not written
+      # to disk unless experimental.turbopackFileSystemCacheForBuild is on; this
+      # step is where that cache would land too, once it is enabled.)
+      - name: Cache Next.js build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**', 'public/**', 'next.config.ts', 'tsconfig.json') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
 
       - name: Run E2E tests with coverage
         id: e2e

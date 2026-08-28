@@ -1,11 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 
 // Every test here spawns the real checker over the real src/ and mcp/ trees,
 // which takes ~5 s on a Jetson Orin Nano — right on the default 5 s test
 // timeout, so the suite failed on the device it protects while passing in CI.
 // The budget is per test; the checker's own OK line is still the assertion.
 vi.setConfig({ testTimeout: 60_000 });
-import { spawnSync } from "child_process";
+import { execFile, spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -37,6 +37,56 @@ function run(root: string, args: string[] = []) {
   });
 }
 
+interface Checked {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/** run(), off the worker thread, so that scans of the same tree can overlap. */
+function runAsync(root: string, args: string[] = []): Promise<Checked> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "bash",
+      [CHECKER, ...args],
+      { encoding: "utf-8", env: { ...process.env, CLAWBOX_REPO_ROOT: root }, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        // A non-zero exit is the checker's answer, not a failure to run it:
+        // execFile reports it as an error whose `code` is the exit status.
+        // Anything else (no bash, output over maxBuffer) has no such status
+        // and IS a failure to run.
+        const status = err ? (err as { code?: unknown }).code : 0;
+        if (typeof status !== "number") {
+          reject(err);
+          return;
+        }
+        resolve({ status, stdout, stderr });
+      },
+    );
+  });
+}
+
+/**
+ * The tree as it ships, scanned once per file rather than once per test.
+ *
+ * Four tests read the checker's verdict on the REAL repo — the pass line, the
+ * --list dump (twice) and the --json report. They differ only in how the same
+ * scan is printed, and each was paying for the whole scan (~5 s on the box,
+ * ~1.5 s in CI). Three modes, three scans, started side by side: the checker
+ * is one single-threaded perl pass, so they overlap where a core is free.
+ * Every test that mutates a fixture still scans its own fixture.
+ */
+let shipped: Promise<{ check: Checked; list: Checked; json: Checked }>;
+beforeAll(() => {
+  if (!CAN_RUN) return;
+  shipped = Promise.all([runAsync(REPO), runAsync(REPO, ["--list"]), runAsync(REPO, ["--json"])]).then(
+    ([check, list, json]) => ({ check, list, json }),
+  );
+  // A scan that could not run still fails the tests that await it; this only
+  // keeps the rejection from surfacing as an unhandled one first.
+  void shipped.catch(() => undefined);
+}, 120_000);
+
 let fixture: string;
 
 /**
@@ -63,6 +113,15 @@ afterEach(() => {
 });
 
 const grants = () => path.join(fixture, "config/clawbox-sudoers");
+/**
+ * The fixture scanned before anything touched it. Two tests assert exactly
+ * that it passes — that the fixture is not itself the thing under test, and
+ * that the bare-unit twins the shipped list carries are accepted — and one
+ * scan answers both; the second keeps the first's verdict. Any test that
+ * changes its fixture uses run() and pays for its own.
+ */
+let pristine: ReturnType<typeof run> | null = null;
+const runPristine = () => (pristine ??= run(fixture));
 const appendGrant = (line: string) => fs.appendFileSync(grants(), `${line}\n`);
 const dropGrant = (needle: string) =>
   fs.writeFileSync(
@@ -71,14 +130,14 @@ const dropGrant = (needle: string) =>
   );
 
 d("check-sudoers-coverage", () => {
-  it("passes on the repo as it ships", () => {
-    const r = run(REPO);
+  it("passes on the repo as it ships", async () => {
+    const r = (await shipped).check;
     expect(r.stderr + r.stdout).toMatch(/OK — \d+ grants, \d+ resolved sudo invocations, 0 gaps/);
     expect(r.status).toBe(0);
   });
 
   it("passes on the fixture, so the fixture itself is not the thing under test", () => {
-    expect(run(fixture).status).toBe(0);
+    expect(runPristine().status).toBe(0);
   });
 
   it("fails when a sudo call has no grant", () => {
@@ -114,7 +173,7 @@ d("check-sudoers-coverage", () => {
   // sudoers matches arguments as exact strings; only one spelling is ever called.
   it("accepts the bare-unit twin of a grant that is used", () => {
     expect(fs.readFileSync(grants(), "utf-8")).toMatch(/systemctl restart clawbox-gateway$/m);
-    expect(run(fixture).status).toBe(0);
+    expect(runPristine().status).toBe(0);
   });
 
   // Fail-closed: a sudo call the checker cannot read is never quietly a pass.
@@ -228,8 +287,8 @@ d("check-sudoers-coverage", () => {
   // root-steps.test.ts, which reads both drop-ins; the tests above prove the
   // checker is what fails CI when one comes back.
 
-  it("lists what it matched", () => {
-    const r = run(REPO, ["--list"]);
+  it("lists what it matched", async () => {
+    const r = (await shipped).list;
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/GRANTS \(\d+\):/);
     expect(r.stdout).toContain("/usr/local/libexec/clawbox/optimize-ollama.sh");
@@ -237,8 +296,8 @@ d("check-sudoers-coverage", () => {
     expect(r.stdout).toMatch(/RESOLVED CALL SITES:/);
   });
 
-  it("reports machine-readably", () => {
-    const r = run(REPO, ["--json"]);
+  it("reports machine-readably", async () => {
+    const r = (await shipped).json;
     expect(r.status).toBe(0);
     const report = JSON.parse(r.stdout);
     expect(report.uncovered).toEqual([]);
@@ -254,15 +313,10 @@ d("check-sudoers-coverage", () => {
 });
 
 describe("the call sites the allow-list has to cover", () => {
-  const listed = () => {
-    const r = run(REPO, ["--list"]);
-    return r.stdout;
-  };
-
   // Every path the task brief names, traced end to end. If one of these stops
   // being covered the device loses that feature to a password prompt.
-  it.runIf(CAN_RUN)("covers the wizard, updater, power, wifi, desktop and factory-reset paths", () => {
-    const out = listed();
+  it.runIf(CAN_RUN)("covers the wizard, updater, power, wifi, desktop and factory-reset paths", async () => {
+    const out = (await shipped).list.stdout;
     for (const expected of [
       // setup wizard: hostname + hotspot hand-off, and the chpasswd hand-off
       "sudo /usr/bin/systemctl start clawbox-root-update@set_hostname.service",
