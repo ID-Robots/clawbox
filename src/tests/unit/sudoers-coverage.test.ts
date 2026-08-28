@@ -338,7 +338,7 @@ const exempting = (perl: string) => (src: string) => {
  * A sudo call whose unit comes out of a helper — the shape that slipped
  * through. The CALL text is fixed; only the helper decides which units exist.
  */
-function writeUnitProbe(hermes: string, openclaw: string, extraBody = "") {
+function writeUnitProbe(hermes: string, openclaw: string, extraBody = "", returnLine = "") {
   fs.writeFileSync(
     path.join(fixture, "scripts/zz-probe.ts"),
     [
@@ -346,7 +346,8 @@ function writeUnitProbe(hermes: string, openclaw: string, extraBody = "") {
       "",
       "function zzUnits(edition: string): string[] {",
       ...(extraBody ? [extraBody] : []),
-      `  return edition === "hermes" ? ["${hermes}"] : ["${openclaw}"];`,
+      returnLine
+        || `  return edition === "hermes" ? ["${hermes}"] : ["${openclaw}"];`,
       "}",
       "",
       "export function zzRestart(edition: string) {",
@@ -434,6 +435,48 @@ d("a declaration is verified against its producer", () => {
       declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
     );
     expect(r.stderr).not.toMatch(/not-a-unit/);
+    expect(r.status).toBe(0);
+  });
+
+  // Comments are stripped before any symbol is looked up, so a commented-out
+  // return contributes nothing. Pinned here rather than left implicit: the
+  // stripping happens in verify_declaration and is passed DOWN into the
+  // resolver, so resolving against the raw source instead would silently bring
+  // this back — as a phantom unit reported uncovered, which is the direction
+  // that pressures the next author into adding a grant.
+  it("does not read units out of commented-out code", () => {
+    writeUnitProbe(
+      "zz-hermes.service",
+      "zz-openclaw.service",
+      '  // return ["cr-line-comment.service"];\n'
+      + '  /* return ["cr-block-comment.service"]; */',
+    );
+    grantRestart("zz-openclaw.service");
+    grantRestart("zz-hermes.service");
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
+    );
+    expect(r.stderr).not.toMatch(/cr-line-comment|cr-block-comment/);
+    expect(r.status).toBe(0);
+  });
+
+  it("does not read units out of a comment inside the return expression", () => {
+    writeUnitProbe(
+      "zz-hermes.service",
+      "zz-openclaw.service",
+      "",
+      '  return edition === "hermes"\n'
+      + '    ? ["zz-hermes.service"] // ["cr-trailing.service"]\n'
+      + '    : /* ["cr-inline.service"] */ ["zz-openclaw.service"];',
+    );
+    grantRestart("zz-openclaw.service");
+    grantRestart("zz-hermes.service");
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
+    );
+    expect(r.stderr).not.toMatch(/cr-trailing|cr-inline/);
     expect(r.status).toBe(0);
   });
 
