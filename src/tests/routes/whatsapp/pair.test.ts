@@ -6,6 +6,7 @@ const openclawStart = vi.fn(async () => ({ phase: "waiting", qr: null, qrImage: 
 const openclawPoll = vi.fn(() => ({ phase: "waiting", qr: null, qrImage: null }));
 const openclawStop = vi.fn(() => ({ phase: "idle", qr: null, qrImage: null }));
 const openclawLogout = vi.fn(async () => {});
+const openclawSetEnabled = vi.fn(async () => {});
 vi.mock("@/lib/openclaw-whatsapp", () => ({
   WHATSAPP_CHANNEL_ID: "whatsapp",
   getOpenclawWhatsappPairing: () => ({
@@ -14,7 +15,7 @@ vi.mock("@/lib/openclaw-whatsapp", () => ({
     stop: openclawStop,
   }),
   logoutOpenclawWhatsapp: openclawLogout,
-  setOpenclawWhatsappEnabled: vi.fn(async () => {}),
+  setOpenclawWhatsappEnabled: openclawSetEnabled,
 }));
 vi.mock("@/lib/openclaw-config", () => ({ restartGateway: vi.fn(async () => {}) }));
 
@@ -200,6 +201,9 @@ describe("POST /setup-api/whatsapp/unpair", () => {
 
     expect(unpair).not.toHaveBeenCalled();
     expect(openclawLogout).toHaveBeenCalled();
+    // Both halves move together: a session dropped while the channel stays on
+    // leaves the gateway retrying a login it cannot complete.
+    expect(openclawSetEnabled).toHaveBeenCalledWith(false);
   });
 
   it("reports a failure instead of claiming success", async () => {

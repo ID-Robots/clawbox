@@ -24,17 +24,23 @@ export async function POST() {
     const harness = await getActiveHarness();
 
     if (harness !== "hermes") {
-      // Both halves, and the channel is switched off even when the logout
-      // fails: credentials without the channel disabled is a gateway retrying a
-      // login it cannot complete, which is the half-applied state this route
-      // exists to avoid. The failure is still reported — it is not swallowed.
+      // Config first, destructive step second — the same ordering rule
+      // setDiscordToken follows. A failed config write must not come after a
+      // session that is already gone: that would leave the channel enabled
+      // with nothing to authenticate as, which is the half-applied state this
+      // route exists to avoid. This way the worst case is a channel switched
+      // off with its session intact, which the owner can simply re-enable.
+      await setOpenclawWhatsappEnabled(false);
+
+      // The logout still has to happen, and its failure is reported rather
+      // than swallowed — but the channel is already off, so a gateway that
+      // cannot drop the session is not left retrying a login with it.
       let logoutError: unknown = null;
       try {
         await logoutOpenclawWhatsapp();
       } catch (err) {
         logoutError = err;
       }
-      await setOpenclawWhatsappEnabled(false);
       await restartGateway().catch((err) => {
         console.error("[whatsapp/unpair] gateway restart failed:", err);
       });

@@ -176,6 +176,16 @@ export class OpenclawWhatsappPairing {
   private snap: OpenclawWhatsappSnapshot = { ...IDLE };
   private lastPollAt = 0;
   private waiting = false;
+  /**
+   * Bumped every time a new login replaces the current one.
+   *
+   * `web.login.wait` can be in flight for tens of seconds, and `start({force})`
+   * or `stop()` can land in the middle of it. Without this, the old wait's
+   * answer — a QR for a session the gateway has already torn down — would be
+   * written into the new snapshot, and the panel would show a code that can
+   * never be scanned.
+   */
+  private epoch = 0;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private readonly now: () => number;
 
@@ -206,6 +216,8 @@ export class OpenclawWhatsappPairing {
     if (this.snap.phase === "paired" && !opts.force) return this.peek();
     if (this.snap.phase === "waiting" && !opts.force) return this.peek();
 
+    this.epoch += 1;
+    const epoch = this.epoch;
     this.snap = { ...IDLE, phase: "starting", startedAt: this.now() };
     this.ensureTicking();
 
@@ -215,8 +227,10 @@ export class OpenclawWhatsappPairing {
         { force: opts.force === true, timeoutMs: LOGIN_START_MS },
         LOGIN_START_MS,
       );
+      if (epoch !== this.epoch) return this.peek();
       this.apply(result);
     } catch (err) {
+      if (epoch !== this.epoch) return this.peek();
       this.snap = {
         ...this.snap,
         phase: "error",
@@ -228,6 +242,9 @@ export class OpenclawWhatsappPairing {
   }
 
   stop(): OpenclawWhatsappSnapshot {
+    // Bump first: a wait already in flight belongs to the session being ended,
+    // and must not resurrect it by writing a QR into the idle snapshot.
+    this.epoch += 1;
     this.clearTicking();
     this.snap = { ...IDLE };
     return this.peek();
@@ -296,6 +313,7 @@ export class OpenclawWhatsappPairing {
     }
 
     this.waiting = true;
+    const epoch = this.epoch;
     try {
       const result = await gatewayCall(
         "web.login.wait",
@@ -305,7 +323,9 @@ export class OpenclawWhatsappPairing {
         },
         LOGIN_WAIT_MS + 5_000,
       );
-      this.apply(result);
+      // Discard an answer that belongs to a session which has since been
+      // replaced or stopped.
+      if (epoch === this.epoch) this.apply(result);
     } catch (err) {
       // A wait that failed is not a login that failed: the gateway may simply
       // have been busy. Keep the QR on screen and try again next tick, which is

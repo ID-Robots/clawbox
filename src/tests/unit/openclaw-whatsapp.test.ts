@@ -180,6 +180,37 @@ describe("OpenclawWhatsappPairing", () => {
     }
   });
 
+  it("discards a wait that belongs to a session already stopped", async () => {
+    // `web.login.wait` can be in flight for tens of seconds. Without the epoch
+    // guard its answer — a QR for a login the gateway has since torn down —
+    // landed in the idle snapshot, and the panel showed a code that could
+    // never be scanned.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
+      const pairing = new lib.OpenclawWhatsappPairing();
+      await pairing.start();
+
+      let releaseWait: (value: string) => void = () => {};
+      mockSpawn.mockReturnValueOnce(
+        new Promise<string>((resolve) => {
+          releaseWait = resolve;
+        }),
+      );
+      // Let the tick fire and block inside the wait.
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+
+      pairing.stop();
+      releaseWait(rpcOk({ qrDataUrl: QR_B }));
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(pairing.peek().phase).toBe("idle");
+      expect(pairing.peek().qrImage).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops cleanly", async () => {
     mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: QR_A }));
     const pairing = new lib.OpenclawWhatsappPairing();

@@ -89,25 +89,36 @@ async function configureOpenclaw(body: ConfigureBody): Promise<NextResponse> {
   }
 
   const plugin = await ensureChannelPlugin(WHATSAPP_CHANNEL_ID);
+  if (!plugin.ok) {
+    // Stop here rather than enabling anyway. Unlike Discord there is no
+    // credential to persist for a later retry — the only thing a write would
+    // add is `channels.whatsapp.enabled` with no plugin to own it, which is
+    // precisely the no-channel-owner state this work exists to remove. And a
+    // gateway restart for a channel that cannot load buys nothing.
+    return NextResponse.json({
+      success: false,
+      code: plugin.reason === "install_timeout" ? "plugin_install_timeout" : "plugin_install_failed",
+      warning: plugin.reason === "install_timeout" ? "plugin_install_timeout" : "plugin_install_failed",
+      restarted: false,
+      allowlistSupported: false,
+    });
+  }
+
   await setOpenclawWhatsappEnabled(true);
 
   const restarted = await applyRestart();
 
   const live = restarted ? await waitForChannelConnected(WHATSAPP_CHANNEL_ID) : null;
 
-  // Root cause first, exactly as on the Discord route: a plugin that never
-  // installed explains every state below it.
-  const warning = !plugin.ok
-    ? plugin.reason === "install_timeout"
-      ? "plugin_install_timeout"
-      : "plugin_install_failed"
-    : !restarted
-      ? "restart_pending"
-      : !live
-        ? "channel_unverified"
-        : !live.connected
-          ? "not_connected"
-          : undefined;
+  // Root cause first, exactly as on the Discord route. The plugin failures are
+  // already returned above, so what remains is the gateway's own verdict.
+  const warning = !restarted
+    ? "restart_pending"
+    : !live
+      ? "channel_unverified"
+      : !live.connected
+        ? "not_connected"
+        : undefined;
 
   return NextResponse.json({
     // A WhatsApp channel that is enabled but not connected is normally waiting
