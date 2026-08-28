@@ -116,23 +116,58 @@ const mockFs = vi.mocked(fsp);
 const mockSurfaceRead = vi.mocked(nodeFsPromises.readFile);
 const mockSpawn = vi.mocked(childProcess.spawn);
 
-/** Model ids the `claude-cli` (Claude-subscription) surface really carries. */
+/**
+ * Model ids the Claude-subscription surface really carries. Since PR #532 that
+ * is anthropic's OWN catalogue — a subscription routes through the native
+ * plugin on `POST /v1/messages`, which serves the whole list. It used to be
+ * the plugin's smaller `claude-cli` catalogue, which was right while the
+ * transport was the openai-compat override #532 removed.
+ */
 const SURFACE_IDS = [
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-fable-5",
+  "claude-mythos-5",
+  "claude-haiku-4-5",
+];
+
+/**
+ * The ids the plugin's OTHER catalogue carries — the pre-#532 surface. A box
+ * has both files on disk; which one the guard opens is the whole question, so
+ * the fixture answers by PATH rather than handing the same list to every read.
+ * A path-agnostic fixture would pass whichever cache the guard chose.
+ */
+const CLAUDE_CLI_SURFACE_IDS = [
   "claude-opus-4-8",
   "claude-opus-4-7",
   "claude-sonnet-5",
   "claude-sonnet-4-6",
 ];
 
+/** An id no Anthropic catalogue on this box carries — a plausible typo. */
+const OFF_CATALOGUE_ID = "claude-fabel-5";
+
 /** The catalog route's disk cache for a surface provider, as it writes it. */
-function surfaceCache(ids: string[]) {
+function surfaceCache(ids: string[], provider = "anthropic") {
   return JSON.stringify({
-    provider: "claude-cli",
+    provider,
     models: ids.map((id) => ({ id, label: id, contextWindow: 200_000 })),
     defaultModelId: ids[0],
     allowCustom: false,
     fetchedAt: Date.now(),
   });
+}
+
+/** Whichever cache file the guard actually opened. */
+function cacheFileFor(filePath: string) {
+  if (filePath.includes("claude-cli")) return surfaceCache(CLAUDE_CLI_SURFACE_IDS, "claude-cli");
+  if (filePath.includes("anthropic")) return surfaceCache(SURFACE_IDS, "anthropic");
+  // Anything else is a cache this guard has no business opening, and answering
+  // it with the Anthropic catalogue would let a wrong-file read pass as a
+  // right one — which is the exact failure these fixtures exist to catch.
+  throw new Error(`unexpected subscription-surface cache read: ${filePath}`);
 }
 
 /** A spawned `openclaw` that exits 0 immediately — the happy-path stand-in. */
@@ -171,7 +206,9 @@ async function primeConfigureRoute(): Promise<(request: Request) => Promise<Resp
   mockFs.mkdir.mockResolvedValue(undefined);
   mockFs.rm.mockResolvedValue(undefined);
   mockFs.unlink.mockResolvedValue(undefined);
-  mockSurfaceRead.mockResolvedValue(surfaceCache(SURFACE_IDS) as never);
+  mockSurfaceRead.mockImplementation(
+    ((filePath: string) => Promise.resolve(cacheFileFor(String(filePath)))) as never,
+  );
 
   vi.mocked(getAll).mockResolvedValue({});
   vi.mocked(setMany).mockResolvedValue();
@@ -230,13 +267,24 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     vi.unstubAllGlobals();
   });
 
-  it("refuses a typed custom Claude id the subscription surface does not carry", async () => {
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+  it.each(["claude-fable-5", "claude-mythos-5", "claude-haiku-4-5"])(
+    "accepts %s — the native subscription route serves it",
+    async (model) => {
+      // The owner's report, on the OTHER write path: these were refused here
+      // too, because both routes read the same stale surface.
+      const res = await configurePost(subscribe({ model }));
+
+      expect(res.status).toBe(200);
+    },
+  );
+
+  it("refuses a typed custom Claude id no catalogue on this box carries", async () => {
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(400);
     const { error } = await res.json();
-    // Name the surface, exactly as the chat-header refusal does.
-    expect(error).toContain("claude-cli");
+    expect(error).toContain(OFF_CATALOGUE_ID);
+    // It lists what IS available, so a typo is self-correcting.
     expect(error).toContain("claude-fable-5");
     // A rejection that has already persisted the credential is not a
     // rejection — it is a half-applied save the customer cannot see.
@@ -278,7 +326,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-ant-test",
-      model: "claude-fable-5",
+      model: OFF_CATALOGUE_ID,
     }));
 
     expect(res.status).toBe(200);
@@ -290,7 +338,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
       auth: { profiles: { "anthropic:key": { provider: "anthropic", mode: "api_key" } } },
     } as never);
 
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(200);
   });
@@ -299,7 +347,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     // UNKNOWN is not "no" — the same rule the pickers and the chat route obey.
     mockSurfaceRead.mockRejectedValue(new Error("ENOENT") as never);
 
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(200);
   });
@@ -307,7 +355,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
   it("lets the pick through when the cached surface is empty", async () => {
     mockSurfaceRead.mockResolvedValue(surfaceCache([]) as never);
 
-    const res = await configurePost(subscribe({ model: "claude-fable-5" }));
+    const res = await configurePost(subscribe({ model: OFF_CATALOGUE_ID }));
 
     expect(res.status).toBe(200);
   });
