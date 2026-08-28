@@ -21,11 +21,13 @@ import { isAllowedPath, filterAllowedPaths, assertPathAllowed, SECRET_NAME_RE } 
 const HERMES = "/home/clawbox/.hermes";
 const OPENCLAW = "/home/clawbox/.openclaw";
 const CLAWKEEP = "/home/clawbox/.clawkeep";
-// Built the way config-store builds DATA_DIR (path.join off the default root,
-// which is what applies when CLAWBOX_ROOT is unset) so these expectations hold
-// on a developer's machine as well as on the device. The credential-store paths
-// above stay literal — those are matched by regex, not by path arithmetic.
-const DATA = path.join("/home/clawbox/clawbox", "data");
+// Built the way config-store builds DATA_DIR: path.join off CLAWBOX_ROOT,
+// which the suite pins to a temp dir (vitest.config.ts keeps tests off the
+// real device state), so these expectations follow the SAME root the guard
+// resolved. The property under test is descendant-blocking of the data dir,
+// wherever it lives. The credential-store paths above stay literal — those
+// are matched by regex, not by path arithmetic.
+const DATA = path.join(process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox", "data");
 
 describe("mcp path guard — credential directories", () => {
   it("blocks the ~/.hermes directory itself", () => {
