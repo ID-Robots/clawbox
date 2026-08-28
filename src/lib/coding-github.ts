@@ -26,6 +26,8 @@
 import path from "path";
 import {
   type ChildResult,
+  failureDetail,
+  inconclusive,
   killedDetail,
   runChild,
   startedMissing,
@@ -104,6 +106,28 @@ export type BackupFailure =
   /** git or gh refused; detail carries what it said. */
   | "failed";
 
+/**
+ * What each refusal reads as when nothing more specific is known.
+ *
+ * It lives here, next to the type, because both halves of the problem need it:
+ * `backupToGitHub` had two refusals that carried no detail at all — `no_gh` and
+ * `not_connected`, the two branches #518 rewrote when it split `no_gh` away
+ * from `gh_unreachable` — and the route answers `detail ?? reason`, so those two
+ * reached the owner's error banner as the literal token `not_connected`.
+ *
+ * `Record<BackupFailure, string>` is the part that fixes the class rather than
+ * the two instances: adding a reason without a sentence for it is a compile
+ * error, not a bug an owner finds.
+ */
+export const BACKUP_MESSAGE: Record<BackupFailure, string> = {
+  no_gh: "The GitHub CLI is not installed on this ClawBox, so there is nothing to back up with.",
+  gh_unreachable: "Could not reach GitHub from this ClawBox. Check the network connection and try again.",
+  not_connected: "No GitHub account is connected yet. Use Connect on the Coding Agent card to sign in first.",
+  nothing_to_push: "The folder has no commits yet, so there is nothing to back up.",
+  not_a_repo: "This folder is not its own git repository, so it cannot be backed up on its own.",
+  failed: "The backup did not finish. Try again.",
+};
+
 export type DisconnectOutcome =
   | { ok: true; detail?: undefined; kind?: undefined }
   /** `kind` so the route can answer a network fault as one (503, retry) rather
@@ -136,13 +160,33 @@ function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: numb
   });
 }
 
+/** Advice for a call that never left the box, and for one that tried to. */
+const RETRY_LOCAL = "Try again.";
+const RETRY_NETWORK = "Check this ClawBox's network connection and try again.";
+
 /**
- * The refusal for a local git call that carried no finding — killed by our own
- * timer, or never started. `transient` is what tells the route this is a fault
- * to retry (503) and not a request that cannot be satisfied (409).
+ * The refusal for a call that carried NO FINDING — one our own timer killed, or
+ * one that never started at all. `inconclusive()` is the single question worth
+ * asking here, and asking only `wasKilled()` is what this whole follow-up is
+ * about: that helper is defined as `!r.startFailed && r.code === null`, so it
+ * deliberately answers false for a spawn that failed, and every guard built on
+ * it alone lets a `git` that could not be forked fall through to the line below
+ * — which then reads the null code as a fact about the owner's folder.
+ *
+ * `transient` is what tells the route this is a fault to retry (503) and not a
+ * request that cannot be satisfied (409).
  */
-function transientGit(r: ChildResult, what: string): BackupOutcome {
-  return { pushed: false, reason: "failed", detail: killedDetail(r, what, "Try again."), transient: true };
+function noFinding(r: ChildResult, what: string, reach: "local" | "network"): BackupOutcome {
+  return {
+    pushed: false,
+    // `gh_unreachable` is a claim about the NETWORK, and only a call that
+    // actually started and then hung supports it. A spawn that never began
+    // says nothing about GitHub — it is a fault on this box — so it keeps the
+    // neutral reason and leans on `transient` for its 503.
+    reason: reach === "network" && !r.startFailed ? "gh_unreachable" : "failed",
+    detail: failureDetail(r, what, reach === "network" ? RETRY_NETWORK : RETRY_LOCAL),
+    transient: true,
+  };
 }
 
 /**
@@ -229,7 +273,11 @@ export async function disconnectGitHub(): Promise<DisconnectOutcome> {
       detail: `${killedDetail(r, "Signing out of GitHub")} Then read the connection again.`,
     };
   }
-  if (r.code !== 0) return { ok: false, kind: "failed", detail: (r.stderr || r.stdout).slice(0, 300) };
+  // Never the raw `(stderr || stdout)`: a non-zero exit that wrote to neither
+  // stream renders the empty string, and the route hands `detail` straight to
+  // the owner's error banner. failureDetail() is the one place that guarantees
+  // a sentence.
+  if (r.code !== 0) return { ok: false, kind: "failed", detail: failureDetail(r, "Signing out of GitHub") };
   return { ok: true };
 }
 
@@ -266,16 +314,20 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
       detail: "Could not reach GitHub from this ClawBox. Check the network connection and try again.",
     };
   }
-  if (!status.installed) return { pushed: false, reason: "no_gh" };
-  if (!status.connected) return { pushed: false, reason: "not_connected" };
+  // Both of these carry a sentence for the same reason every other refusal in
+  // this function does: the route answers `detail ?? reason` and the card shows
+  // `data.error` verbatim, so a refusal with no detail reaches the owner as the
+  // literal token `no_gh`.
+  if (!status.installed) return { pushed: false, reason: "no_gh", detail: BACKUP_MESSAGE.no_gh };
+  if (!status.connected) return { pushed: false, reason: "not_connected", detail: BACKUP_MESSAGE.not_connected };
 
   // Its OWN repository or nothing — the same rule as the per-run commit, and
   // for the same reason: a code project sits inside the ClawBox checkout.
   const top = await run("git", ["-C", dir, "rev-parse", "--show-toplevel"]);
-  // A killed probe is not evidence about the folder. Reading it as one would
-  // tell the owner their repository is not a repository.
-  if (wasKilled(top)) {
-    return transientGit(top, "Reading the folder's git repository");
+  // A probe that carried no finding is not evidence about the folder. Reading
+  // one as evidence would tell the owner their repository is not a repository.
+  if (inconclusive(top)) {
+    return noFinding(top, "Reading the folder's git repository", "local");
   }
   if (top.code !== 0 || path.resolve(top.stdout || "") !== dir) {
     return { pushed: false, reason: "not_a_repo", detail: "This folder is not its own git repository." };
@@ -283,31 +335,32 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
 
   const head = await run("git", ["-C", dir, "rev-parse", "--verify", "HEAD"]);
   // "No commits yet" is a claim about the folder. A killed probe made no such
-  // finding, and saying it would tell an owner with a full history that their
-  // work is empty.
-  if (wasKilled(head)) {
-    return transientGit(head, "Reading the folder's commits");
+  // finding, and neither did one that never started — saying it would tell an
+  // owner with a full history that their work is empty.
+  if (inconclusive(head)) {
+    return noFinding(head, "Reading the folder's commits", "local");
   }
   if (head.code !== 0) return { pushed: false, reason: "nothing_to_push", detail: "The folder has no commits yet." };
 
   const branchOut = await run("git", ["-C", dir, "rev-parse", "--abbrev-ref", "HEAD"]);
   // The "main" fallback is a guess, and the push below turns it into
   // `--set-upstream origin main`. Fine when git actually answered and simply
-  // had no name to give; wrong when the probe was killed, which would push a
-  // `develop` checkout to `main` and bind it there over a transient fault.
-  if (wasKilled(branchOut)) {
-    return transientGit(branchOut, "Reading the folder's branch");
+  // had no name to give; wrong when the probe told us nothing, which would push
+  // a `develop` checkout to `main` and bind it there over a transient fault.
+  if (inconclusive(branchOut)) {
+    return noFinding(branchOut, "Reading the folder's branch", "local");
   }
   const branch = branchOut.code === 0 && branchOut.stdout ? branchOut.stdout : "main";
 
   const hasRemote = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
   // The consequential one. A non-zero code here means "no remote yet", and the
   // branch below acts on it by CREATING a repository on GitHub. A killed probe
-  // returns the same null code, so reading it as "no remote" would create a
-  // second repository for a folder that already has one — an irreversible
-  // guess made from a transient fault.
-  if (wasKilled(hasRemote)) {
-    return transientGit(hasRemote, "Reading the folder's git remote");
+  // returns the same null code — and so does one that could not be forked at
+  // all, which is why this asks `inconclusive` and not `wasKilled`. Reading
+  // either as "no remote" would create a SECOND repository for a folder that
+  // already has one: an irreversible guess made from a transient fault.
+  if (inconclusive(hasRemote)) {
+    return noFinding(hasRemote, "Reading the folder's git remote", "local");
   }
   let created = false;
   let repo = hasRemote.code === 0 ? hasRemote.stdout : "";
@@ -322,23 +375,20 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
       { cwd: dir, timeoutMs: PUSH_TIMEOUT_MS },
     );
     if (create.code !== 0) {
-      // A killed create is a NETWORK fault, and the detail below already says
-      // so — "check this ClawBox's network connection and try again". Leaving
-      // the reason as "failed" made the route answer 409, a non-retryable
-      // client error, to its own retry advice. gh_unreachable is what 503 is
-      // wired to, and it is the true statement about a call that hung on the
-      // uplink for three minutes.
-      if (wasKilled(create)) {
-        return {
-          pushed: false,
-          reason: "gh_unreachable",
-          detail: killedDetail(create, "Creating the repository on GitHub"),
-          transient: true,
-        };
+      // A create that carried no finding is a FAULT, not a refusal: killed on
+      // the uplink after three minutes, or never forked at all. Leaving the
+      // reason as "failed" with no `transient` made the route answer 409, a
+      // non-retryable client error, to its own retry advice. `wasKilled` alone
+      // covered only the first half — a failed spawn fell through to the line
+      // below and was reported as GitHub refusing, carrying runChild's
+      // five-word "could not start" placeholder as the owner's message.
+      if (inconclusive(create)) {
+        return noFinding(create, "Creating the repository on GitHub", "network");
       }
       // GitHub itself refusing — a name already taken, a scope missing — IS a
-      // request that cannot be satisfied as it stands. That one keeps its 409.
-      return { pushed: false, reason: "failed", detail: (create.stderr || create.stdout).slice(0, 400) };
+      // request that cannot be satisfied as it stands. That one keeps its 409,
+      // and failureDetail keeps its message from ever being blank.
+      return { pushed: false, reason: "failed", detail: failureDetail(create, "Creating the repository on GitHub") };
     }
     created = true;
     const url = await run("git", ["-C", dir, "remote", "get-url", "origin"]);
@@ -353,16 +403,12 @@ export async function backupToGitHub(directory: string): Promise<BackupOutcome> 
   );
   if (push.code !== 0) {
     // Same rule as the create above: the push is the other call that leaves
-    // the box, and a killed one is the network, not the request.
-    if (wasKilled(push)) {
-      return {
-        pushed: false,
-        reason: "gh_unreachable",
-        detail: killedDetail(push, "Pushing to GitHub"),
-        transient: true,
-      };
+    // the box, and one that produced no finding is the machine or the network,
+    // not the request.
+    if (inconclusive(push)) {
+      return noFinding(push, "Pushing to GitHub", "network");
     }
-    return { pushed: false, reason: "failed", detail: (push.stderr || push.stdout).slice(0, 400) };
+    return { pushed: false, reason: "failed", detail: failureDetail(push, "Pushing to GitHub") };
   }
   return { pushed: true, repo, created, branch };
 }
