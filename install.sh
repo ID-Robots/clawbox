@@ -4602,7 +4602,12 @@ refresh_agent_coding_tools() {
     # unit that is running at the moment it runs, and exits 0 when there is
     # nothing to do, so the invariant does not depend on the gap being small.
     if systemctl try-restart "$unit" >/dev/null 2>&1; then
-      echo "  Restarted $unit so the agent re-probes and offers the coding tools"
+      # "Asked", not "Restarted". try-restart exits 0 both when it restarted the
+      # unit and when the unit had stopped in the meantime and it did nothing —
+      # so claiming a restart here would be this PR's own bug in miniature. What
+      # is true in both cases is that the request was made and the agent will
+      # re-probe, now or at its next start.
+      echo "  Asked $unit to restart so the agent re-probes and offers the coding tools"
     else
       echo "  WARN: could not restart $unit — the agent will keep answering that it has no coding tools" >&2
       failed=true

@@ -295,6 +295,11 @@ describe("the agent is told the harness exists now", () => {
     expect(run.status).toBe(0);
     expect(starts(run)).toEqual([]);
     expect(refreshes(run)).toContain("systemctl try-restart clawbox-gateway.service");
+    // And it claims only what it knows. `try-restart` exits 0 both when it
+    // restarted the unit and when it found nothing to do, so "Restarted ..."
+    // would be this PR's own bug in miniature.
+    expect(run.stdout).toMatch(/Asked clawbox-gateway\.service to restart/);
+    expect(run.stdout).not.toMatch(/Restarted clawbox-gateway\.service/);
   }, SHELL_TIMEOUT_MS);
 
   it("counts a PARTIAL refresh as a refusal on a dual box", () => {
