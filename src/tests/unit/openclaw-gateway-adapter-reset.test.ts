@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { OpenClawGatewayAdapter, type GatewayLink } from "@/lib/harness/openclaw-gateway-adapter";
-import type { HarnessCapabilities } from "@/lib/harness/capabilities";
+import type { HarnessCapabilities } from "@/lib/harness/transport";
 
 /**
  * The one wire frame that starts a fresh agent thread. It used to be pinned

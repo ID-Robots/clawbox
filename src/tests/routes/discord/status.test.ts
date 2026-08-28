@@ -1,5 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
+// Every case re-imports the route (vi.resetModules, so its module-level cache
+// starts empty), and under a parallel full run on a six-core Jetson that import
+// alone can outlast the 5 s default while the box is saturated — every case then
+// fails at exactly 5 000 ms and passes at once when run alone. The budget is per
+// case; the assertions are unchanged.
+vi.setConfig({ testTimeout: 30_000 });
+
 vi.mock("@/lib/config-store", () => ({ get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
 vi.mock("@/lib/hermes-discord", async () => {

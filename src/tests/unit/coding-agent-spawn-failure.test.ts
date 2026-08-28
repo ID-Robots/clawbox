@@ -20,7 +20,13 @@ import { EventEmitter } from "events";
 import { saveEnv } from "@/tests/helpers/env";
 
 const spawnMock = vi.hoisted(() => vi.fn());
-vi.mock("child_process", () => ({ spawn: spawnMock }));
+// Partial, not a bare `{ spawn }`: the runner's import graph now reaches
+// openclaw-config (through harness/credentials, for the vision model a run's
+// screenshots are described with), which promisifies execFile at module load.
+vi.mock("child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("child_process")>();
+  return { ...actual, spawn: spawnMock };
+});
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 
 type Lib = typeof import("@/lib/coding-agent");

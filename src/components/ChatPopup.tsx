@@ -1959,6 +1959,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const resetSessionRef = useRef(resetSession)
   useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
 
+  // "New chat" — the Hermes edition's form of the strip's + button. There is
+  // no OpenClaw chat UI to open on that edition, so the button keeps its old
+  // meaning there: reset this popup's own thread (the Hermes adapter clears
+  // the transcript on disk without reaching for a gateway that is not there).
+  const [startingSession, setStartingSession] = useState(false)
+  const startNewSession = useCallback(async () => {
+    setStartingSession(true)
+    try {
+      await resetSession()
+    } catch (err) {
+      // Blanking the view on a failed reset is the worst outcome: the agent
+      // still holds the thread, but the user believes it is gone.
+      setMessages(prev => [...prev, {
+        role: 'system',
+        text: `Could not start a new chat: ${err instanceof Error ? err.message : 'unknown error'}`,
+        timestamp: Date.now(),
+        variant: 'error',
+      }])
+    } finally {
+      setStartingSession(false)
+    }
+  }, [resetSession])
+
   /**
    * The "+" in the strip opens the gateway's OWN chat UI in a new browser tab —
    * the same page OpenClawApp iframes, with the gateway URL and token in the
@@ -3654,9 +3677,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
         <button
           onPointerDown={stopHeaderDrag}
-          onClick={openInOpenclaw}
-          title="Open in OpenClaw"
-          aria-label="Open in OpenClaw"
+          onClick={harnessId === 'hermes' ? () => { void startNewSession() } : openInOpenclaw}
+          disabled={harnessId === 'hermes' && startingSession}
+          title={harnessId === 'hermes' ? 'New chat' : 'Open in OpenClaw'}
+          aria-label={harnessId === 'hermes' ? 'New chat' : 'Open in OpenClaw'}
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', padding: 4, borderRadius: 6,
@@ -3666,7 +3690,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1h5" />
+            {harnessId === 'hermes'
+              ? <path d="M12 5v14M5 12h14" />
+              : <path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1h5" />}
           </svg>
         </button>
         {!mobile && (
