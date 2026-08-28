@@ -260,21 +260,39 @@ describe("env SecretRef provider (the chokepoint)", () => {
     });
   });
 
-  it("does not rewrite a provider somebody else configured", async () => {
+  it("refuses, and writes NOTHING, when the provider cannot resolve an env ref", async () => {
     // `secrets.providers` is shared config and the entry is not ours to
-    // repoint. Silently turning a file-backed provider into an env-backed one
+    // repoint — silently turning a file-backed provider into an env-backed one
     // because Discord wanted that would break whatever else resolved through
-    // it — the same shape as the authMode-only guard that broke Google in #532.
-    // The reference simply will not resolve, and the gateway says so
-    // (`tokenStatus: "configured_unavailable"` -> `token_unresolved`).
+    // it (the same shape as the authMode-only guard that broke Google in #532).
+    //
+    // But writing the reference anyway is worse than useless. Measured live:
+    // with `default` set to source "file", the gateway crashed on boot, was
+    // restarted six times, and tripped OpenClaw's restart-loop breaker, which
+    // then suppressed EVERY channel's auto-start — Telegram included. So the
+    // write is refused before it reaches disk.
     mockFs.readFile.mockResolvedValue(
       JSON.stringify({ secrets: { providers: { default: { source: "file", path: "/run/secrets" } } } }),
     );
 
-    await openclawConfig.setDiscordToken(TOKEN);
+    await expect(openclawConfig.setDiscordToken(TOKEN)).rejects.toBeInstanceOf(
+      openclawConfig.EnvSecretProviderConflictError,
+    );
 
-    expect(writtenJsonConfig().secrets).toEqual({
-      providers: { default: { source: "file", path: "/run/secrets" } },
-    });
+    // Neither the config nor the credential file was touched: a half-applied
+    // save here is an outage for channels that were working.
+    expect(mockFs.writeFile).not.toHaveBeenCalled();
+    expect(mockFs.rename).not.toHaveBeenCalled();
+  });
+
+  it("does not name the token in the refusal", async () => {
+    mockFs.readFile.mockResolvedValue(
+      JSON.stringify({ secrets: { providers: { default: { source: "exec" } } } }),
+    );
+
+    const err = (await openclawConfig.setDiscordToken(TOKEN).catch((e: Error) => e)) as Error;
+
+    expect(err.message).not.toContain(TOKEN);
+    expect(err.message).toContain("exec");
   });
 });

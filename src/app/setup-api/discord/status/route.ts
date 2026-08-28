@@ -274,9 +274,12 @@ export async function GET() {
       // offer here and no "denied" state to report.
       allowlistSupported: false,
       tokenRejected: bot.rejected,
-      // Discord's own answer stays authoritative for the display name; the
-      // gateway's is the fallback for a device that cannot reach Discord.
-      username: bot.info?.displayName ?? channel?.botUsername ?? undefined,
+      // Discord's own answer is the ONLY source for the display name. The
+      // gateway's account row carries no bot identity unless `channels status`
+      // is given `--probe`, and that probe is itself a call to Discord — so on
+      // a device that cannot reach Discord there is no second opinion to fall
+      // back to. See readChannelStatus() for why we do not pay for `--probe`.
+      username: bot.info?.displayName,
       botId: bot.info?.id,
     });
   } catch (err) {

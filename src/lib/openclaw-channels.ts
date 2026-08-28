@@ -204,8 +204,6 @@ export interface ChannelStatus {
   restartPending: boolean;
   /** The gateway's own last error for this account, verbatim, or null. */
   lastError: string | null;
-  /** Who the gateway is connected AS, when it knows (Discord bot username). */
-  botUsername: string | null;
 }
 
 function readBoolean(value: unknown): boolean {
@@ -235,7 +233,6 @@ function readLastError(value: unknown): string | null {
  * `connected` key at all — from being reported as connected.
  */
 export function parseChannelRow(row: Record<string, unknown>): ChannelStatus {
-  const bot = row.bot as { username?: unknown } | undefined;
   return {
     configured: readBoolean(row.configured),
     running: readBoolean(row.running),
@@ -243,7 +240,6 @@ export function parseChannelRow(row: Record<string, unknown>): ChannelStatus {
     tokenStatus: readTokenStatus(row.tokenStatus),
     restartPending: readBoolean(row.restartPending),
     lastError: readLastError(row.lastError),
-    botUsername: typeof bot?.username === "string" ? bot.username : null,
   };
 }
 
@@ -254,6 +250,13 @@ export function parseChannelRow(row: Record<string, unknown>): ChannelStatus {
  * `null` means UNKNOWN and must never be flattened into "offline" by a caller
  * that then reports it as a verdict — a wedged CLI, a gateway still booting and
  * a genuinely dead channel are three different things to tell the owner.
+ *
+ * Deliberately WITHOUT `--probe`. The probe is what adds `bot`/`application` to
+ * the account row, and it is tempting for a display name — but it makes the
+ * gateway call Discord, so it answers only when the caller could have asked
+ * Discord itself, and it triples the CLI's own gateway timeout (10 s -> 30 s),
+ * which is well past the budget below. Everything this function maps —
+ * `connected`, `running`, `tokenStatus`, `lastError` — is present without it.
  */
 export async function readChannelStatus(
   channelId: string,
@@ -291,9 +294,9 @@ export async function readChannelStatus(
     channels?: Record<string, unknown>;
   };
 
-  // Prefer the per-ACCOUNT row: it is the only one that carries `connected`,
-  // `tokenStatus` and the bot identity. The channel-level row is the fallback
-  // for a payload that has no accounts yet.
+  // Prefer the per-ACCOUNT row: it is the only one that carries `connected`
+  // and `tokenStatus`. The channel-level row — which has neither — is the
+  // fallback for a payload that has no accounts yet.
   const accounts = payload.channelAccounts?.[channelId];
   if (Array.isArray(accounts) && accounts.length > 0) {
     const first = accounts[0];

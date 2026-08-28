@@ -970,27 +970,52 @@ export const ENV_SECRET_PROVIDER = "default";
  * written apart. Grep `source: "env"` across `src/` and this is the only
  * production writer of one; `gateway-proxy.ts` only ever READS the shape.
  *
- * CREATE-IF-ABSENT, never rewrite. `secrets.providers` is shared config: the
- * name is a plain map key and OpenClaw resolves purely on the entry's `source`
- * (resolveProviderRefs switches on it and uses the name only for the lookup and
- * the error text). So an entry already there was put there by whoever
- * administers the box, and silently repointing it at the environment because
- * one channel wanted that is how a change that "fixed Discord" would quietly
- * break somebody's file- or exec-backed secrets.
+ * CREATE-IF-ABSENT, never rewrite, and REFUSE on a conflict.
  *
- * When the entry exists and is NOT env-backed, the reference we return will not
- * resolve — and that is reported rather than hidden: the gateway answers
- * `tokenStatus: "configured_unavailable"`, which /discord/configure surfaces as
- * `token_unresolved` and /discord/status maps to a channel that is not
- * connected. An honest dead end beats a silent rewrite of config we do not own.
+ * `secrets.providers` is shared config: the name is a plain map key and
+ * OpenClaw resolves purely on the entry's `source` (resolveProviderRefs
+ * switches on it and uses the name only for the lookup and the error text). So
+ * an entry already there was put there by whoever administers the box, and
+ * silently repointing it at the environment because one channel wanted that is
+ * how a change that "fixed Discord" would quietly break somebody else's file-
+ * or exec-backed secrets.
+ *
+ * Writing the reference anyway is not the safe fallback either. Measured on a
+ * live box: with `default` set to `source: "file"`, the gateway does not merely
+ * fail to resolve the Discord token — it CRASHES ON BOOT, restarts six times,
+ * and trips OpenClaw's restart-loop breaker, which then suppresses every
+ * channel's auto-start. Telegram went down with it and needed a manual restart
+ * after the breaker window. A config we know cannot resolve is an outage for
+ * channels that were working, so it is refused before it reaches disk.
+ *
+ * The caller turns this into `token_unresolved` for the panel, having written
+ * nothing.
  */
+export class EnvSecretProviderConflictError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly conflictingSource: string,
+  ) {
+    super(
+      `Secret provider "${provider}" has source "${conflictingSource}", so an environment-backed ` +
+        `reference cannot resolve through it.`,
+    );
+    this.name = "EnvSecretProviderConflictError";
+  }
+}
+
 export function envSecretRef(
   config: OpenClawConfig,
   envVar: string,
 ): { source: "env"; provider: string; id: string } {
   const secrets = (config.secrets ??= {});
   const providers = (secrets.providers ??= {});
-  providers[ENV_SECRET_PROVIDER] ??= { source: "env" };
+  const existing = providers[ENV_SECRET_PROVIDER];
+  if (existing === undefined) {
+    providers[ENV_SECRET_PROVIDER] = { source: "env" };
+  } else if (existing.source !== "env") {
+    throw new EnvSecretProviderConflictError(ENV_SECRET_PROVIDER, String(existing.source));
+  }
   return { source: "env", provider: ENV_SECRET_PROVIDER, id: envVar };
 }
 

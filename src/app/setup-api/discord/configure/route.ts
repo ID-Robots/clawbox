@@ -12,7 +12,11 @@ import {
   fetchDiscordIntents,
   isSafeDiscordToken,
 } from "@/lib/discord-api";
-import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
+import {
+  EnvSecretProviderConflictError,
+  restartGateway,
+  setDiscordToken,
+} from "@/lib/openclaw-config";
 import {
   type ChannelPluginFailure,
   type ChannelStatus,
@@ -370,7 +374,25 @@ export async function POST(request: Request) {
     } else {
       // OpenClaw: channel config + the EnvironmentFile the gateway resolves
       // `channels.discord.token` from.
-      await setDiscordToken(rawToken);
+      try {
+        await setDiscordToken(rawToken);
+      } catch (err) {
+        if (err instanceof EnvSecretProviderConflictError) {
+          // Nothing was written — the writer refuses a reference it knows the
+          // gateway cannot resolve, because on a live box that config did not
+          // just break Discord, it crash-looped the gateway and tripped the
+          // restart breaker that suppresses EVERY channel. So there is nothing
+          // to restart and nothing to verify: report the cause and stop.
+          console.error("[discord/configure] refusing an unresolvable token reference:", err.message);
+          return NextResponse.json({
+            success: false,
+            code: "token_unresolved",
+            warning: "token_unresolved",
+            restarted: false,
+          });
+        }
+        throw err;
+      }
     }
 
     const selection = requestedIds ?? (directory ? defaultSelection(directory) : []);

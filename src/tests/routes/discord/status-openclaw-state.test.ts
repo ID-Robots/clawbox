@@ -62,7 +62,6 @@ function row(over: Partial<NonNullable<Awaited<ReturnType<typeof readChannelStat
     tokenStatus: "available" as const,
     restartPending: false,
     lastError: null,
-    botUsername: "HermesBotTest",
     ...over,
   };
 }
@@ -149,6 +148,31 @@ describe("GET /setup-api/discord/status — OpenClaw connection state", () => {
     expect(body.configured).toBe(true);
   });
 
+  it("names no bot at all when Discord is unreachable, rather than inventing one", async () => {
+    // The gateway is NOT a second opinion on the bot's display name. Its
+    // account row carries `bot`/`application` only when `channels status` is
+    // run with `--probe`, and that probe is the gateway calling Discord — so it
+    // answers only in the case where this route could have asked Discord
+    // itself. Verified on a live connected bot (192.168.50.71): without
+    // `--probe` the account row's keys are accountId, configured, connected,
+    // enabled, lastError, running, tokenStatus … and no `bot`.
+    //
+    // So the offline answer is "no name", and the card must render around that
+    // instead of showing a name nothing confirmed.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("getaddrinfo ENOTFOUND discord.com");
+      }),
+    );
+
+    const body = await (await GET()).json();
+
+    expect(body.username).toBeUndefined();
+    // The channel state still comes through — losing the name loses nothing else.
+    expect(body.state).toBe("connected");
+  });
+
   it("still reports a rejected token when the channel probe says nothing", async () => {
     mockChannel.mockResolvedValue(null);
     vi.stubGlobal(
@@ -160,20 +184,5 @@ describe("GET /setup-api/discord/status — OpenClaw connection state", () => {
 
     expect(body.tokenRejected).toBe(true);
     expect(body.state).toBeNull();
-  });
-
-  it("falls back to the name the gateway is connected as when Discord is unreachable", async () => {
-    // Discord's own answer stays authoritative for the display name; this is
-    // the offline case, where the gateway is the only thing that knows.
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("getaddrinfo ENOTFOUND discord.com");
-      }),
-    );
-
-    const body = await (await GET()).json();
-
-    expect(body.username).toBe("HermesBotTest");
   });
 });

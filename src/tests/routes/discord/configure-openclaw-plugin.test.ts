@@ -19,10 +19,18 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 vi.mock("@/lib/config-store", () => ({ set: vi.fn(), get: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
-vi.mock("@/lib/openclaw-config", () => ({
-  setDiscordToken: vi.fn(),
-  restartGateway: vi.fn(),
-}));
+vi.mock("@/lib/openclaw-config", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>(
+    "@/lib/openclaw-config",
+  );
+  return {
+    // The real error class: the route branches on `instanceof`, so a stub would
+    // turn the one refusal that protects the gateway into a generic 500.
+    EnvSecretProviderConflictError: actual.EnvSecretProviderConflictError,
+    setDiscordToken: vi.fn(),
+    restartGateway: vi.fn(),
+  };
+});
 vi.mock("@/lib/openclaw-channels", () => ({
   ensureChannelPlugin: vi.fn(),
   waitForChannelConnected: vi.fn(),
@@ -39,7 +47,11 @@ vi.mock("@/lib/hermes-discord", async () => {
 });
 
 import { getActiveHarness } from "@/lib/harness";
-import { setDiscordToken, restartGateway } from "@/lib/openclaw-config";
+import {
+  EnvSecretProviderConflictError,
+  restartGateway,
+  setDiscordToken,
+} from "@/lib/openclaw-config";
 import { ensureChannelPlugin, waitForChannelConnected } from "@/lib/openclaw-channels";
 import { set } from "@/lib/config-store";
 
@@ -69,7 +81,6 @@ function connected() {
     tokenStatus: "available" as const,
     restartPending: false,
     lastError: null,
-    botUsername: "clawbot",
   };
 }
 
@@ -176,6 +187,35 @@ describe("POST /setup-api/discord/configure (OpenClaw channel plugin)", () => {
     expect(body.success).toBe(false);
     expect(body.restarted).toBe(false);
     expect(body.warning).toBe("restart_pending");
+  });
+
+  it("refuses an unresolvable token reference without restarting anything", async () => {
+    // The writer throws rather than putting a reference on disk that the
+    // gateway cannot resolve. Live, that config crash-looped the gateway and
+    // tripped the breaker that suppresses every channel — so the route must not
+    // "carry on and let the probe report it", it must stop.
+    mockSetDiscordToken.mockRejectedValue(new EnvSecretProviderConflictError("default", "file"));
+
+    const res = await POST(req({ botToken: TOKEN }));
+    const body = await res.json();
+
+    expect(body).toMatchObject({
+      success: false,
+      code: "token_unresolved",
+      warning: "token_unresolved",
+      restarted: false,
+    });
+    expect(mockRestart).not.toHaveBeenCalled();
+    expect(mockWait).not.toHaveBeenCalled();
+  });
+
+  it("does not leak the refusal's internals to the client", async () => {
+    mockSetDiscordToken.mockRejectedValue(new EnvSecretProviderConflictError("default", "exec"));
+
+    const body = await (await POST(req({ botToken: TOKEN }))).json();
+
+    expect(JSON.stringify(body)).not.toContain(TOKEN);
+    expect(body.error).toBeUndefined();
   });
 
   it("leaves the Hermes path alone — it has no openclaw CLI to install into", async () => {

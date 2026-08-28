@@ -155,7 +155,21 @@ describe("readChannelStatus", () => {
     lib = await import("@/lib/openclaw-channels");
   });
 
-  it("reads the account row the gateway publishes", async () => {
+  it("reads the account row the gateway publishes, and nothing a probe would add", async () => {
+    // The `bot` key below is what `channels status --probe` adds; a plain
+    // `channels status` never emits it. Verified against a live connected bot
+    // (192.168.50.71), whose un-probed account row carries exactly:
+    //   accountId, configured, connected, enabled, lastConnectedAt,
+    //   lastDisconnect, lastError, lastEventAt, lastInboundAt, lastOutboundAt,
+    //   lastStartAt, lastStopAt, lastTransportActivityAt, reconnectAttempts,
+    //   restartPending, running, tokenSource, tokenStatus
+    // — no `bot`, no `probe`.
+    //
+    // It is included here anyway to pin that ChannelStatus does NOT grow a
+    // field out of it. A mapped `botUsername` looked useful and was dead: this
+    // function is never called with --probe, so it was always null, and the
+    // status route's fallback onto it was unreachable code behind a test that
+    // only passed because its own fixture invented the value.
     mockSpawn.mockResolvedValueOnce(
       channelStatusJson("discord", {
         configured: true,
@@ -175,7 +189,6 @@ describe("readChannelStatus", () => {
       tokenStatus: "available",
       restartPending: false,
       lastError: null,
-      botUsername: "HermesBotTest",
     });
   });
 

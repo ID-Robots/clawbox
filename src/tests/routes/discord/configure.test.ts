@@ -95,7 +95,6 @@ describe("POST /setup-api/discord/configure", () => {
       tokenStatus: "available",
       restartPending: false,
       lastError: null,
-      botUsername: "clawbot",
     });
 
     POST = (await import("@/app/setup-api/discord/configure/route")).POST;
