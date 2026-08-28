@@ -33,6 +33,7 @@
 import {
   type SpawnOpenclawOptions,
   openclawIsAbsent,
+  readConfig,
   spawnOpenclawCli,
 } from "@/lib/openclaw-config";
 
@@ -114,9 +115,36 @@ function findChannelOwner(rows: PluginRow[], channelId: string): PluginRow | nul
   return null;
 }
 
-function isEnabled(row: PluginRow): boolean {
-  if (typeof row.enabled === "boolean") return row.enabled;
-  return row.status === "enabled";
+/**
+ * Is the plugin switched on in the config THE GATEWAY READS?
+ *
+ * Not the same question as `plugins list --json`'s `enabled` field, and the
+ * difference is a live bug this caught. On a box where the package was already
+ * installed but `plugins.entries.discord` had gone missing, the CLI reported
+ *
+ *     {"id":"discord","enabled":true,"status":"loaded","origin":"global"}
+ *
+ * — that is the plugin's DISCOVERY state, the default for a globally installed
+ * package — while the gateway brought up no Discord channel at all. Running
+ * `plugins enable discord` wrote `plugins.entries.discord = {enabled:true}`,
+ * and after a restart the bot connected. So the config entry is what decides,
+ * and it is what we check.
+ *
+ * This only ever bit the SECOND save: the first one installs the plugin, and
+ * `plugins install` writes the entry itself.
+ */
+async function pluginEnabledInConfig(pluginId: string): Promise<boolean> {
+  try {
+    const config = await readConfig();
+    const entries = (config.plugins as { entries?: Record<string, { enabled?: unknown }> } | undefined)
+      ?.entries;
+    return entries?.[pluginId]?.enabled === true;
+  } catch {
+    // readConfig already swallows its own errors; this is belt-and-braces.
+    // Unknown reads as "not enabled", so we run the idempotent enable rather
+    // than skip it.
+    return false;
+  }
 }
 
 /** A timeout from spawnOpenclawCli names itself; nothing else does. */
@@ -161,29 +189,40 @@ export async function ensureChannelPlugin(
     owner = null;
   }
 
-  if (owner) {
-    if (isEnabled(owner)) return { ok: true, installed: false };
+  let installed = false;
+  if (!owner) {
     try {
-      const id = typeof owner.id === "string" ? owner.id : channelId;
-      await spawnOpenclawCli(["plugins", "enable", id], { timeoutMs: PLUGIN_QUERY_TIMEOUT_MS });
-      return { ok: true, installed: false };
+      await spawnOpenclawCli(["plugins", "install", spec], {
+        timeoutMs: options.timeoutMs ?? PLUGIN_INSTALL_TIMEOUT_MS,
+      });
+      installed = true;
+    } catch (err) {
+      // npm's output can be long and is not phrased for a settings panel, so
+      // the caller gets a code and the log gets the cause.
+      console.error(`[openclaw-channels] installing ${spec} failed:`, err);
+      return { ok: false, reason: isTimeout(err) ? "install_timeout" : "install_failed" };
+    }
+  }
+
+  // Installed is not the same as LOADED. The gateway brings a channel up only
+  // when openclaw.json carries `plugins.entries.<id>.enabled`, and that entry
+  // can be absent while the package sits on disk and `plugins list` calls it
+  // enabled — see pluginEnabledInConfig. `plugins enable` is idempotent and is
+  // skipped when the entry is already there, so the common path pays a file
+  // read rather than a CLI cold start.
+  const pluginId = typeof owner?.id === "string" ? owner.id : channelId;
+  if (!(await pluginEnabledInConfig(pluginId))) {
+    try {
+      await spawnOpenclawCli(["plugins", "enable", pluginId], {
+        timeoutMs: PLUGIN_QUERY_TIMEOUT_MS,
+      });
     } catch (err) {
       console.error(`[openclaw-channels] enabling the ${channelId} plugin failed:`, err);
       return { ok: false, reason: "install_failed" };
     }
   }
 
-  try {
-    await spawnOpenclawCli(["plugins", "install", spec], {
-      timeoutMs: options.timeoutMs ?? PLUGIN_INSTALL_TIMEOUT_MS,
-    });
-    return { ok: true, installed: true };
-  } catch (err) {
-    // npm's output can be long and is not phrased for a settings panel, so the
-    // caller gets a code and the log gets the cause.
-    console.error(`[openclaw-channels] installing ${spec} failed:`, err);
-    return { ok: false, reason: isTimeout(err) ? "install_timeout" : "install_failed" };
-  }
+  return { ok: true, installed };
 }
 
 /**

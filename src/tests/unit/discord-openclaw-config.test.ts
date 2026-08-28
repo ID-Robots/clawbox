@@ -266,11 +266,10 @@ describe("env SecretRef provider (the chokepoint)", () => {
     // because Discord wanted that would break whatever else resolved through
     // it (the same shape as the authMode-only guard that broke Google in #532).
     //
-    // But writing the reference anyway is worse than useless. Measured live:
-    // with `default` set to source "file", the gateway crashed on boot, was
-    // restarted six times, and tripped OpenClaw's restart-loop breaker, which
-    // then suppressed EVERY channel's auto-start — Telegram included. So the
-    // write is refused before it reaches disk.
+    // Writing the reference anyway is not the safe fallback either: it produces
+    // a channel that is configured, enabled and cannot start — the exact state
+    // this change exists to remove — on a box whose other secrets resolve fine.
+    // So the write is refused before it reaches disk.
     mockFs.readFile.mockResolvedValue(
       JSON.stringify({ secrets: { providers: { default: { source: "file", path: "/run/secrets" } } } }),
     );

@@ -980,16 +980,20 @@ export const ENV_SECRET_PROVIDER = "default";
  * how a change that "fixed Discord" would quietly break somebody else's file-
  * or exec-backed secrets.
  *
- * Writing the reference anyway is not the safe fallback either. Measured on a
- * live box: with `default` set to `source: "file"`, the gateway does not merely
- * fail to resolve the Discord token — it CRASHES ON BOOT, restarts six times,
- * and trips OpenClaw's restart-loop breaker, which then suppresses every
- * channel's auto-start. Telegram went down with it and needed a manual restart
- * after the breaker window. A config we know cannot resolve is an outage for
- * channels that were working, so it is refused before it reaches disk.
+ * Writing the reference anyway is not the safe fallback either. It produces a
+ * channel that is configured, enabled, and cannot start — the exact state this
+ * change exists to remove — and it does it to a config the operator owns, on a
+ * box where their other secrets already resolve. Refusing costs the owner one
+ * actionable message; writing costs them a channel that lies about itself.
  *
  * The caller turns this into `token_unresolved` for the panel, having written
  * nothing.
+ *
+ * (A malformed provider entry is a separate and harsher failure: OpenClaw
+ * validates the whole config on boot, so one out-of-schema `secrets` value
+ * makes the gateway exit 78/CONFIG and roll openclaw.json back to
+ * `.last-good` — taking every other channel with it. We never write that shape;
+ * the note is here because it is what makes `secrets` worth leaving alone.)
  */
 export class EnvSecretProviderConflictError extends Error {
   constructor(

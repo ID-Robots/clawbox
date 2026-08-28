@@ -20,12 +20,18 @@ vi.mock("@/lib/openclaw-config", async () => {
   const actual = await vi.importActual<typeof import("@/lib/openclaw-config")>(
     "@/lib/openclaw-config",
   );
-  return { ...actual, spawnOpenclawCli: vi.fn() };
+  return { ...actual, spawnOpenclawCli: vi.fn(), readConfig: vi.fn() };
 });
 
-import { spawnOpenclawCli } from "@/lib/openclaw-config";
+import { readConfig, spawnOpenclawCli } from "@/lib/openclaw-config";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
+const mockReadConfig = vi.mocked(readConfig);
+
+/** openclaw.json with the given plugin ids switched on in `plugins.entries`. */
+function configWithEnabled(...ids: string[]) {
+  return { plugins: { entries: Object.fromEntries(ids.map((id) => [id, { enabled: true }])) } };
+}
 
 /** `plugins list --json` output with the given plugin ids present and enabled. */
 function pluginsListJson(entries: { id: string; channelIds?: string[]; enabled?: boolean }[]) {
@@ -53,18 +59,59 @@ describe("ensureChannelPlugin", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // Default: the gateway config already carries the entry, so the common path
+    // does not shell out to `plugins enable`.
+    mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
     lib = await import("@/lib/openclaw-channels");
   });
 
-  it("is a no-op when the channel's plugin is already installed", async () => {
+  it("is a no-op when the plugin is installed AND switched on in the config", async () => {
     mockSpawn.mockResolvedValueOnce(pluginsListJson([{ id: "discord" }]));
 
     const result = await lib.ensureChannelPlugin("discord");
 
     expect(result).toEqual({ ok: true, installed: false });
-    // One call — the probe. Nothing was installed.
+    // One call — the probe. Nothing was installed and nothing was enabled.
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(mockSpawn.mock.calls[0][0]).toEqual(["plugins", "list", "--json"]);
+  });
+
+  it("enables a plugin the GATEWAY CONFIG does not carry, however `plugins list` describes it", async () => {
+    // The live regression. `plugins list --json` reported the package as
+    // {enabled: true, status: "loaded"} — its discovery default — while
+    // openclaw.json had no plugins.entries.discord, and the gateway brought up
+    // no Discord channel at all. Trusting the CLI's field here is what let a
+    // second save report a plugin that was never loaded.
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "discord", enabled: true }]))
+      .mockResolvedValueOnce('Enabled plugin "discord". Restart the gateway to apply.');
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: false });
+    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "enable", "discord"]);
+  });
+
+  it("enables under the OWNING plugin's id, not the channel's", async () => {
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "openclaw-discord", channelIds: ["discord"] }]))
+      .mockResolvedValueOnce("ok");
+
+    await lib.ensureChannelPlugin("discord");
+
+    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "enable", "openclaw-discord"]);
+  });
+
+  it("reports install_failed when the enable fails", async () => {
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "discord" }]))
+      .mockRejectedValueOnce(new Error("config write refused"));
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({
+      ok: false,
+      reason: "install_failed",
+    });
   });
 
   it("installs the official npm plugin when the channel has none", async () => {
@@ -76,6 +123,19 @@ describe("ensureChannelPlugin", () => {
 
     expect(result).toEqual({ ok: true, installed: true });
     expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "install", "@openclaw/discord"]);
+    // `plugins install` writes plugins.entries.<id> itself, so no second write.
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+  });
+
+  it("still switches a freshly installed plugin on if the installer left no entry", async () => {
+    mockReadConfig.mockResolvedValue(configWithEnabled());
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: discord.")
+      .mockResolvedValueOnce("ok");
+
+    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[2][0]).toEqual(["plugins", "enable", "discord"]);
   });
 
   it("installs the WhatsApp plugin the same way — nothing is special-cased to Discord", async () => {
@@ -92,6 +152,7 @@ describe("ensureChannelPlugin", () => {
   it("matches a plugin that OWNS the channel under a different plugin id", async () => {
     // The registry keys plugins by their own id; the channel they own is in
     // `channelIds`. Matching on the plugin id alone would reinstall forever.
+    mockReadConfig.mockResolvedValue(configWithEnabled("openclaw-discord"));
     mockSpawn.mockResolvedValueOnce(
       pluginsListJson([{ id: "openclaw-discord", channelIds: ["discord"] }]),
     );
@@ -100,14 +161,7 @@ describe("ensureChannelPlugin", () => {
     expect(mockSpawn).toHaveBeenCalledTimes(1);
   });
 
-  it("enables a plugin that is installed but disabled", async () => {
-    mockSpawn
-      .mockResolvedValueOnce(pluginsListJson([{ id: "discord", enabled: false }]))
-      .mockResolvedValueOnce("Enabled plugin: discord");
 
-    expect(await lib.ensureChannelPlugin("discord")).toEqual({ ok: true, installed: false });
-    expect(mockSpawn.mock.calls[1][0]).toEqual(["plugins", "enable", "discord"]);
-  });
 
   it("reports install_failed rather than throwing", async () => {
     mockSpawn
@@ -152,6 +206,9 @@ describe("readChannelStatus", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // Default: the gateway config already carries the entry, so the common path
+    // does not shell out to `plugins enable`.
+    mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
     lib = await import("@/lib/openclaw-channels");
   });
 
@@ -236,6 +293,9 @@ describe("waitForChannelConnected", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
+    // Default: the gateway config already carries the entry, so the common path
+    // does not shell out to `plugins enable`.
+    mockReadConfig.mockResolvedValue(configWithEnabled("discord", "whatsapp"));
     lib = await import("@/lib/openclaw-channels");
   });
 

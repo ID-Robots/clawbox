@@ -379,10 +379,9 @@ export async function POST(request: Request) {
       } catch (err) {
         if (err instanceof EnvSecretProviderConflictError) {
           // Nothing was written — the writer refuses a reference it knows the
-          // gateway cannot resolve, because on a live box that config did not
-          // just break Discord, it crash-looped the gateway and tripped the
-          // restart breaker that suppresses EVERY channel. So there is nothing
-          // to restart and nothing to verify: report the cause and stop.
+          // gateway cannot resolve rather than repointing a secrets provider
+          // the operator owns. So there is nothing to restart and nothing to
+          // verify: report the cause and stop.
           console.error("[discord/configure] refusing an unresolvable token reference:", err.message);
           return NextResponse.json({
             success: false,
