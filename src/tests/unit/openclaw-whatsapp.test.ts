@@ -16,13 +16,13 @@ vi.mock("@/lib/openclaw-config", async () => {
   );
   return { ...actual, openclawIsAbsent: () => false, spawnOpenclawCli: vi.fn() };
 });
-vi.mock("@/lib/openclaw-channels", () => ({ readChannelStatus: vi.fn() }));
+vi.mock("@/lib/openclaw-channels", () => ({ readChannelRow: vi.fn() }));
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readChannelStatus } from "@/lib/openclaw-channels";
+import { readChannelRow } from "@/lib/openclaw-channels";
 
 const mockSpawn = vi.mocked(spawnOpenclawCli);
-const mockChannel = vi.mocked(readChannelStatus);
+const mockChannel = vi.mocked(readChannelRow);
 
 const QR_A = "data:image/png;base64,AAAA";
 const QR_B = "data:image/png;base64,BBBB";
@@ -233,19 +233,22 @@ describe("readOpenclawWhatsappStatus", () => {
     lib = await import("@/lib/openclaw-whatsapp");
   });
 
+  /** The gateway's real WhatsApp account row, narrowed to what we read. */
   function row(over: Record<string, unknown> = {}) {
     return {
+      accountId: "default",
+      enabled: true,
       configured: true,
-      running: true,
+      linked: true,
+      statusState: "ready",
       connected: true,
-      tokenStatus: null,
-      restartPending: false,
+      running: true,
       lastError: null,
       ...over,
-    } as NonNullable<Awaited<ReturnType<typeof readChannelStatus>>>;
+    };
   }
 
-  it("reports a live channel as paired and connected", async () => {
+  it("reports a linked, connected channel as paired", async () => {
     mockChannel.mockResolvedValue(row());
     expect(await lib.readOpenclawWhatsappStatus()).toEqual({
       state: "paired",
@@ -256,13 +259,42 @@ describe("readOpenclawWhatsappStatus", () => {
   });
 
   it("does not call an unconnected channel 'receiving' material", async () => {
-    mockChannel.mockResolvedValue(row({ connected: false }));
+    mockChannel.mockResolvedValue(row({ connected: false, running: false }));
     expect((await lib.readOpenclawWhatsappStatus()).connected).toBe(false);
   });
 
-  it("reports an enabled-but-unlinked channel distinctly", async () => {
-    mockChannel.mockResolvedValue(row({ configured: false, connected: false }));
-    expect((await lib.readOpenclawWhatsappStatus()).state).toBe("enabled_not_paired");
+  it("does NOT call an installed-but-unscanned channel paired", async () => {
+    // The bug this pins, caught on hardware. Installing the plugin and
+    // enabling the channel makes the gateway report `configured: true` with
+    // NOTHING scanned — `configured` means "there is an account entry", not
+    // "a device is linked". Reading it as paired told the panel a phone was
+    // connected when no QR had ever been shown.
+    //
+    // `linked` is the field that answers the question, and the gateway
+    // publishes `statusState: "not-linked"` and `lastError: "not linked"`
+    // alongside it.
+    mockChannel.mockResolvedValue(
+      row({
+        configured: true,
+        linked: false,
+        statusState: "not-linked",
+        connected: false,
+        running: false,
+        lastError: "not linked",
+      }),
+    );
+
+    const status = await lib.readOpenclawWhatsappStatus();
+    expect(status.paired).toBe(false);
+    expect(status.state).toBe("enabled_not_paired");
+    expect(status.connected).toBe(false);
+  });
+
+  it("reports a channel that is off at all as not_configured", async () => {
+    mockChannel.mockResolvedValue(
+      row({ enabled: false, configured: false, linked: false, connected: false, running: false }),
+    );
+    expect((await lib.readOpenclawWhatsappStatus()).state).toBe("not_configured");
   });
 
   it("never invents a link when the gateway could not be asked", async () => {

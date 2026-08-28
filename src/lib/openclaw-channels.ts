@@ -327,12 +327,31 @@ export function parseChannelRow(row: Record<string, unknown>): ChannelStatus {
  */
 export async function readChannelStatus(
   channelId: string,
+  options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
+): Promise<ChannelStatus | null> {
+  const row = await readChannelRow(channelId, options);
+  return row ? parseChannelRow(row) : null;
+}
+
+/**
+ * The gateway's row for `channelId`, unparsed.
+ *
+ * {@link readChannelStatus} narrows this to the fields every channel shares.
+ * Channels that publish more than that read the row directly instead of having
+ * their extra fields flattened away — WhatsApp's `linked` is the case that
+ * forced this: it is the only honest answer to "is a device paired", and
+ * `configured` (which the common shape does carry) means merely "there is an
+ * account entry". Reading `configured` as paired reported a linked phone on a
+ * box where no QR had ever been shown.
+ */
+export async function readChannelRow(
+  channelId: string,
   // `captureStdout` is deliberately not offerable: this function's whole job is
   // to parse the CLI's `--json`, and a caller that turned stdout off would get
   // an empty string and a silent `null` — "the gateway said nothing" — for a
   // channel that is perfectly healthy.
   options: Omit<SpawnOpenclawOptions, "captureStdout"> = {},
-): Promise<ChannelStatus | null> {
+): Promise<Record<string, unknown> | null> {
   if (openclawIsAbsent()) return null;
   let parsed: unknown;
   try {
@@ -371,11 +390,11 @@ export async function readChannelStatus(
   const accounts = payload.channelAccounts?.[channelId];
   if (Array.isArray(accounts) && accounts.length > 0) {
     const first = accounts[0];
-    if (first && typeof first === "object") return parseChannelRow(first as Record<string, unknown>);
+    if (first && typeof first === "object") return first as Record<string, unknown>;
   }
 
   const channel = payload.channels?.[channelId];
-  if (channel && typeof channel === "object") return parseChannelRow(channel as Record<string, unknown>);
+  if (channel && typeof channel === "object") return channel as Record<string, unknown>;
 
   return null;
 }

@@ -34,7 +34,7 @@
 // env-backed credential here and nothing for envSecretRef() to mint.
 
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
-import { readChannelStatus } from "@/lib/openclaw-channels";
+import { readChannelRow } from "@/lib/openclaw-channels";
 
 /** OpenClaw's id for this channel — the plugin's, the config key's, the CLI's. */
 export const WHATSAPP_CHANNEL_ID = "whatsapp";
@@ -372,20 +372,29 @@ export interface OpenclawWhatsappStatus {
  * can act as", which is exactly the question.
  */
 export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStatus> {
-  const channel = await readChannelStatus(WHATSAPP_CHANNEL_ID);
-  if (!channel) {
+  const row = await readChannelRow(WHATSAPP_CHANNEL_ID);
+  if (!row) {
     // Unknown, not "off". Reported as not_configured because that is the only
     // honest thing the panel can offer an action for, and the status card's
     // `receiving: false` says the rest.
     return { state: "not_configured", enabled: false, paired: false, connected: false };
   }
-  const paired = channel.configured;
-  const enabled = channel.configured || channel.running;
+
+  // `linked` is the ONLY honest answer to "is a phone paired". `configured`
+  // means "the gateway has an account entry for this channel", which becomes
+  // true the moment the plugin loads and the channel is enabled — with nothing
+  // scanned. Reading that as paired is exactly the lie this work removes; the
+  // gateway says so itself alongside it, with `statusState: "not-linked"` and
+  // `lastError: "not linked"`.
+  const paired = row.linked === true;
+  const connected = row.connected === true;
+  const enabled = row.enabled === true || row.configured === true || row.running === true;
+
   return {
     state: !enabled ? "not_configured" : paired ? "paired" : "enabled_not_paired",
     enabled,
     paired,
-    connected: channel.connected,
+    connected,
   };
 }
 
