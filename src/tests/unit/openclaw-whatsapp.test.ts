@@ -79,6 +79,24 @@ describe("OpenclawWhatsappPairing", () => {
     expect(snap.phase).toBe("starting");
   });
 
+  it("rejects a data URL with no image in it", async () => {
+    // `"data:image/png;base64,"` is a well-formed data URL for an EMPTY image.
+    // It passes a prefix check, and would put a blank square on screen in the
+    // waiting phase — a QR the owner is invited to scan and cannot.
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: "data:image/png;base64," }));
+
+    const snap = await new lib.OpenclawWhatsappPairing().start();
+
+    expect(snap.qrImage).toBeNull();
+    expect(snap.phase).toBe("starting");
+  });
+
+  it("rejects a payload outside the base64 alphabet", async () => {
+    mockSpawn.mockResolvedValueOnce(rpcOk({ qrDataUrl: "data:image/png;base64,<script>" }));
+
+    expect((await new lib.OpenclawWhatsappPairing().start()).qrImage).toBeNull();
+  });
+
   it("names a missing plugin, because that one is fixed by saving, not rescanning", async () => {
     mockSpawn.mockResolvedValueOnce(rpcError("web login provider is not available"));
 

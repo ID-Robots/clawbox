@@ -214,6 +214,9 @@ interface WhatsappStatus {
   receiving?: boolean;
 }
 
+/** A PNG data URL that actually carries an image. Mirrors the server's guard. */
+const WHATSAPP_QR_DATA_URL_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+
 /** Phases of GET /setup-api/whatsapp/pair. Mirrors WhatsappPairPhase server-side. */
 type WhatsappPairPhase = "idle" | "preparing" | "starting" | "waiting" | "scanned" | "paired" | "error";
 
@@ -2121,10 +2124,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         ? (phase as WhatsappPairPhase)
         : "idle",
       qr: typeof raw.qr === "string" && raw.qr.length > 0 ? raw.qr : null,
-      qrImage:
-        typeof raw.qrImage === "string" && raw.qrImage.startsWith("data:image/png;base64,")
-          ? raw.qrImage
-          : null,
+      // Prefix AND payload. `"data:image/png;base64,"` on its own is a valid
+      // data URL for an empty image, and would render a blank square the owner
+      // is invited to scan. Same rule as readQrDataUrl() server-side.
+      qrImage: WHATSAPP_QR_DATA_URL_RE.test(String(raw.qrImage ?? "")) ? (raw.qrImage as string) : null,
       qrCount: typeof raw.qrCount === "number" ? raw.qrCount : 0,
       restarts: typeof raw.restarts === "number" ? raw.restarts : 0,
       error: typeof raw.error === "string" ? raw.error : null,

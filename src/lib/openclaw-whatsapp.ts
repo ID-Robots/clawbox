@@ -149,11 +149,22 @@ async function gatewayCall(
   return payload;
 }
 
+/**
+ * A PNG data URL with an actual payload.
+ *
+ * The prefix alone is not enough: `"data:image/png;base64,"` is a well-formed
+ * data URL for an empty image, and it would put a blank square on screen in the
+ * `waiting` phase — a QR the owner cannot scan, with nothing saying why. The
+ * base64 body is required, and its alphabet checked, because this string ends
+ * up as an `<img src>` in the panel.
+ */
+const QR_DATA_URL_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+
 function readQrDataUrl(result: WebLoginResult): string | null {
   const value = result.qrDataUrl;
-  // The schema the gateway validates against pins this prefix; re-checking it
-  // here is what stops anything else reaching an <img src> in the panel.
-  return typeof value === "string" && value.startsWith("data:image/png;base64,") ? value : null;
+  // The schema the gateway validates against pins the prefix; re-checking the
+  // whole shape here is what stops anything else reaching an <img src>.
+  return typeof value === "string" && QR_DATA_URL_RE.test(value) ? value : null;
 }
 
 /**
