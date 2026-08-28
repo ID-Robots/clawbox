@@ -335,12 +335,6 @@ export const bg: Record<string, string> = {
   "skills.relative.months.other": "преди {n} месеца",
   "skills.relative.years": "преди {n} г",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "Език",
-  "localModels.kind.tts": "Изходяща реч",
-  "localModels.kind.stt": "Входяща реч",
-  "localModels.kind.embedding": "Памет",
-
   // === Run state ===
   "localModels.run.running": "Включен",
   "localModels.run.idle": "Изключен",
@@ -353,9 +347,6 @@ export const bg: Record<string, string> = {
   "localModels.unavailable": "Състоянието на следните не можа да бъде прочетено: {list}.",
   "localModels.disk": "Диск {size}",
   "localModels.memoryInUse": "Използвана памет {size}",
-  "localModels.managedInClawKeep": "Управлява се в ClawKeep.",
-  "localModels.managedInLocalAi": "Управлява се в Настройки → Локален AI.",
-  "localModels.toggleLabel": "{name} е включен",
   "localModels.footer": "Каквото изключите, остава изключено и след рестарт.",
   "localModels.group.llm": "Модел на AI агента",
   "localModels.group.tts": "Глас (текст към реч)",

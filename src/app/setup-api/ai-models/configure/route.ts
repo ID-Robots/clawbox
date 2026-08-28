@@ -60,7 +60,7 @@ import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/op
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
-import { normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 import {
@@ -950,11 +950,6 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
  * switch too: a provider the gateway would quietly route to when the primary
  * fails is exactly what "switched off" promises cannot happen.
  */
-async function readDisabledProviders(): Promise<Set<string>> {
-  const config = await getAll().catch(() => ({} as Record<string, unknown>));
-  return parseDisabledProviders(config.ai_disabled_providers);
-}
-
 /**
  * The local model that should back up `primaryModel`, or null when there is
  * none to use.
@@ -963,6 +958,11 @@ async function readDisabledProviders(): Promise<Set<string>> {
  * of config can learn the answer BEFORE it writes, and fold the fallback into
  * the same batch instead of paying another CLI start-up for it (TASK-483).
  */
+/** The switched-off providers, read from the store this route already loads. */
+async function readDisabledProviders(): Promise<Set<string>> {
+  return parseDisabledProviders((await getAll())[DISABLED_PROVIDERS_KEY]);
+}
+
 async function pickLocalFallbackModel(
   primaryModel?: string | null,
   preferredLocalModel?: string,

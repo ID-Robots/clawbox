@@ -21,6 +21,7 @@ import {
 import {
   applyCheck,
   buildVoiceOutputStatus,
+  cloudSpeechTarget,
   forgetEngineCheck,
   failedVoiceCheck,
   isVoiceChoice,
@@ -234,12 +235,11 @@ async function handleVoice(engine: unknown, voice: unknown) {
     if (!isCloudVoice(voice)) {
       return NextResponse.json({ error: "The cloud voice does not have that voice." }, { status: 400 });
     }
-    const { config, probe } = await probeBox();
-    const cloud = buildVoiceOutputStatus(config, probe, await readVoiceState()).engines.find(e => e.id === "cloud");
-    if (!cloud?.providerId || !cloud.configured) {
+    const target = cloudSpeechTarget(await readConfig());
+    if (!target) {
       return NextResponse.json({ error: "That voice is not available on this box." }, { status: 409 });
     }
-    await runOpenclawConfigSet([`messages.tts.providers.${cloud.providerId}.voice`, voice]);
+    await runOpenclawConfigSet([`messages.tts.providers.${target.providerId}.voice`, voice]);
   } else {
     return NextResponse.json({ error: "Pick the voice on this box or the cloud voice." }, { status: 400 });
   }

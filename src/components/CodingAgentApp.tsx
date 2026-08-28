@@ -456,8 +456,8 @@ export default function CodingAgentApp() {
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.harnessTestFailed")));
       const data = await res.json() as { run?: { id?: string } };
       setShowRuns(true);
+      pendingLiveOpen.current = data.run?.id ?? null;
       void load();
-      if (data.run?.id) void openHarnessLive(data.run.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
     } finally {
@@ -466,27 +466,21 @@ export default function CodingAgentApp() {
   };
 
   /** Open the live view once the run's transcript exists — the session id
-   *  lands a few seconds after spawn. Settled-before-transcript or a timeout
-   *  just skips the popup; the run is in the list either way. */
-  const openHarnessLive = async (id: string) => {
-    for (let i = 0; i < 12; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      try {
-        const res = await fetch(`/setup-api/coding-agent/runs?id=${encodeURIComponent(id)}`, { cache: "no-store" });
-        if (!res.ok) continue;
-        const data = await res.json() as { run?: Run };
-        if (data.run?.transcriptPath) {
-          window.dispatchEvent(new CustomEvent("clawbox:open-terminal", {
-            detail: { command: `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(data.run.transcriptPath)}` },
-          }));
-          return;
-        }
-        if (data.run && data.run.status !== "running") return;
-      } catch {
-        // Transient; try again.
-      }
+   *  lands a few seconds after spawn, and the poll above (`load` every
+   *  POLL_MS while a run is live) is already watching for it. A run that
+   *  settles before its transcript appears just skips the popup; it is in
+   *  the list either way. */
+  const pendingLiveOpen = useRef<string | null>(null);
+  useEffect(() => {
+    const id = pendingLiveOpen.current;
+    if (!id) return;
+    const run = runs.find((r) => r.id === id);
+    if (!run) return;
+    if (run.transcriptPath || run.status !== "running") {
+      pendingLiveOpen.current = null;
+      if (run.transcriptPath && run.status === "running") openInTerminal(run);
     }
-  };
+  }, [runs]);
 
   /** The terminal fallback — the flow this card ran before it grew its own. */
   const connectGithubTerminal = () => {

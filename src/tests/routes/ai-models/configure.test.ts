@@ -34,6 +34,7 @@ vi.mock("@/lib/clawkeep", () => ({
 // Connecting a provider re-enables it. The switch itself is exercised by the
 // providers/enabled route tests; here only the call matters.
 vi.mock("@/lib/provider-enablement", () => ({
+  getDisabledProviders: async () => new Set<string>(),
   setProviderEnabled: vi.fn(async () => ({ ok: true })),
 }));
 

@@ -17,7 +17,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
-import { normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import {
   isClaudeSubscriptionOnly,
   offSurfaceClaudeModelMessage,
@@ -334,7 +334,7 @@ async function loadChatModelState() {
   // disappears reads as "not connected" and sends the owner to re-enter a key
   // that is fine. Matched on the canonical id the status strip uses, so the
   // `codex` and `openai` rows both follow the one "OpenAI" switch.
-  const disabledProviders = parseDisabledProviders(configStore.ai_disabled_providers);
+  const disabledProviders = parseDisabledProviders(configStore[DISABLED_PROVIDERS_KEY]);
   const applyOwnerSwitch = (option: ChatModelOption): ChatModelOption => {
     const canonical = normalizeProviderId(option.provider);
     return canonical && disabledProviders.has(canonical)

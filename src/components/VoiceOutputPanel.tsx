@@ -7,7 +7,7 @@ import type {
   VoiceEngineId,
   VoiceOutputStatus,
 } from "@/lib/voice-output";
-import { SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
+import { CLOUD_VOICES, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
 
 /**
  * Settings → Voice: three dropdowns and a sentence to hear.
@@ -31,45 +31,26 @@ const ENGINE_ORDER: VoiceEngineId[] = ["local", "cloud"];
 function isEngine(value: unknown): value is VoiceEngine {
   if (!value || typeof value !== "object") return false;
   const e = value as Record<string, unknown>;
-  if (!ENGINE_ORDER.includes(e.id as VoiceEngineId)) return false;
-  if (typeof e.label !== "string" || typeof e.detail !== "string") return false;
-  if (e.providerId !== null && typeof e.providerId !== "string") return false;
-  return typeof e.configured === "boolean"
-    && typeof e.proven === "boolean"
-    && typeof e.usable === "boolean";
-}
-
-function isOptionList(value: unknown): boolean {
-  return Array.isArray(value) && value.every((o) =>
-    !!o && typeof o === "object"
-    && typeof (o as { id?: unknown }).id === "string"
-    && typeof (o as { label?: unknown }).label === "string");
+  return ENGINE_ORDER.includes(e.id as VoiceEngineId) && typeof e.configured === "boolean";
 }
 
 /**
- * Validate every field the render reads, not just the first one. A payload
- * that passes the envelope check and throws one render later would take the
- * whole Settings window down (TASK-398); a panel that cannot read the box
- * keeps its last good reading instead.
+ * Validate every field the render reads — and only those. A payload that
+ * passes the envelope check and throws one render later would take the whole
+ * Settings window down (TASK-398); a panel that cannot read the box keeps its
+ * last good reading instead.
  */
 export function isVoiceStatus(value: unknown): value is VoiceOutputStatus {
   if (!value || typeof value !== "object") return false;
   const s = value as Record<string, unknown>;
   if (!["auto", "local", "cloud"].includes(s.choice as string)) return false;
   if (!Array.isArray(s.engines) || !s.engines.every(isEngine)) return false;
-  if (s.activeProviderId !== null && typeof s.activeProviderId !== "string") return false;
-  if (s.activeEngine !== null && !ENGINE_ORDER.includes(s.activeEngine as VoiceEngineId)) return false;
-  if (s.preferredEngine !== null && !ENGINE_ORDER.includes(s.preferredEngine as VoiceEngineId)) return false;
   if (typeof s.drifted !== "boolean") return false;
   if (s.warning !== null && typeof s.warning !== "string") return false;
   if (typeof s.language !== "string") return false;
   const voice = s.voice as Record<string, unknown> | undefined;
-  const voices = s.voices as Record<string, unknown> | undefined;
-  if (!voice || typeof voice !== "object" || !voices || typeof voices !== "object") return false;
-  for (const id of ENGINE_ORDER) {
-    if (typeof voice[id] !== "string" || !isOptionList(voices[id])) return false;
-  }
-  return true;
+  if (!voice || typeof voice !== "object") return false;
+  return ENGINE_ORDER.every((id) => typeof voice[id] === "string");
 }
 
 /**
@@ -91,7 +72,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [status, setStatus] = useState<VoiceOutputStatus | null>(null);
   const [unsupported, setUnsupported] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"select" | "voice" | "language" | "play" | null>(null);
+  const [busy, setBusy] = useState<"post" | "play" | null>(null);
   const [sample, setSample] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioUrl = useRef<string | null>(null);
@@ -122,8 +103,8 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     if (audioUrl.current) URL.revokeObjectURL(audioUrl.current);
   }, []);
 
-  const post = useCallback(async (body: Record<string, unknown>, kind: "select" | "voice" | "language") => {
-    setBusy(kind);
+  const post = useCallback(async (body: Record<string, unknown>) => {
+    setBusy("post");
     setError(null);
     try {
       const res = await fetch("/setup-api/tts", {
@@ -154,7 +135,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     if (status.choice !== "auto" || !status.drifted) return;
     if (reconciled.current) return;
     reconciled.current = true;
-    void post({ action: "select", choice: "auto" }, "select");
+    void post({ action: "select", choice: "auto" });
   }, [active, status, busy, post]);
 
   const play = useCallback(async (engine: VoiceEngineId, voice: string, text: string) => {
@@ -223,13 +204,13 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const cloud = engineById("cloud");
   const local = engineById("local");
   const voice = status.voice[source];
-  const voices = status.voices[source];
+  const voices = source === "local" ? LOCAL_VOICES : CLOUD_VOICES;
   const text = sample ?? sampleSentence(status.language);
   const disabled = busy !== null;
 
   const chooseSource = (next: VoiceEngineId) => {
     const choice: VoiceChoice = next === "local" ? "local" : "auto";
-    void post({ action: "select", choice }, "select");
+    void post({ action: "select", choice });
   };
 
   return (
@@ -273,7 +254,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             disabled={disabled}
             onChange={(e) => {
               setSample(null);
-              void post({ action: "language", language: e.target.value }, "language");
+              void post({ action: "language", language: e.target.value });
             }}
           >
             {VOICE_LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
@@ -288,7 +269,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             className={SELECT}
             value={voice}
             disabled={disabled}
-            onChange={(e) => void post({ action: "voice", engine: source, voice: e.target.value }, "voice")}
+            onChange={(e) => void post({ action: "voice", engine: source, voice: e.target.value })}
           >
             {voices.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
           </select>

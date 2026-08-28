@@ -347,12 +347,6 @@ export const de: Record<string, string> = {
   "skills.relative.months.other": "vor {n} Monaten",
   "skills.relative.years": "vor {n} J.",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "Sprache",
-  "localModels.kind.tts": "Sprachausgabe",
-  "localModels.kind.stt": "Spracheingabe",
-  "localModels.kind.embedding": "Gedächtnis",
-
   // === Run state ===
   "localModels.run.running": "An",
   "localModels.run.idle": "Aus",
@@ -365,9 +359,6 @@ export const de: Record<string, string> = {
   "localModels.unavailable": "Der Zustand von {list} konnte nicht gelesen werden.",
   "localModels.disk": "Speicherplatz {size}",
   "localModels.memoryInUse": "Belegter Arbeitsspeicher {size}",
-  "localModels.managedInClawKeep": "Wird in ClawKeep verwaltet.",
-  "localModels.managedInLocalAi": "Wird unter Einstellungen → Lokale KI verwaltet.",
-  "localModels.toggleLabel": "{name} aktiviert",
   "localModels.footer": "Was Sie ausschalten, bleibt auch nach einem Neustart aus.",
   "localModels.group.llm": "KI-Agent-Modell",
   "localModels.group.tts": "Stimme (Text zu Sprache)",

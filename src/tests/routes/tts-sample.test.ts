@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const readConfigMock = vi.fn();
-const spawnMock = vi.fn();
+const runChildMock = vi.fn();
 const readFileMock = vi.fn();
 const unlinkMock = vi.fn();
 const readLocalVoiceMock = vi.fn();
@@ -26,10 +26,9 @@ vi.mock("@/lib/voice-output-store", () => ({
   readLocalVoice: (...a: unknown[]) => readLocalVoiceMock(...a),
 }));
 
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
-  return { ...actual, spawn: (...a: unknown[]) => spawnMock(...a) };
-});
+vi.mock("@/lib/child-run", () => ({
+  runChild: (...a: unknown[]) => runChildMock(...a),
+}));
 
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
@@ -61,17 +60,9 @@ function config(over: Record<string, unknown> = {}) {
   };
 }
 
-/** A fake script that exits `code`; the route reads the file it "wrote". */
+/** The gateway's script, exiting `code`; the route reads the file it "wrote". */
 function scriptExits(code: number) {
-  return () => {
-    const handlers: Record<string, ((arg: unknown) => void)[]> = {};
-    setTimeout(() => (handlers.close ?? []).forEach(cb => cb(code)), 5);
-    return {
-      stderr: { on: () => {} },
-      kill: () => {},
-      on: (event: string, cb: (arg: unknown) => void) => { (handlers[event] ??= []).push(cb); },
-    };
-  };
+  return async () => ({ code, stdout: "", stderr: "", signal: null, timedOut: false, notStarted: false });
 }
 
 async function route() {
@@ -89,7 +80,7 @@ function post(body: unknown) {
 beforeEach(() => {
   vi.resetModules();
   readConfigMock.mockReset().mockResolvedValue(config());
-  spawnMock.mockReset().mockImplementation(scriptExits(0));
+  runChildMock.mockReset().mockImplementation(scriptExits(0));
   readFileMock.mockReset().mockResolvedValue(Buffer.alloc(4096, 1));
   unlinkMock.mockReset().mockResolvedValue(undefined);
   readLocalVoiceMock.mockReset().mockResolvedValue("af_heart");
@@ -106,9 +97,10 @@ describe("POST /setup-api/tts/sample — this box", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("audio/wav");
     expect((await res.arrayBuffer()).byteLength).toBe(4096);
-    const [command, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const [command, args, opts] = runChildMock.mock.calls[0] as [string, string[], { timeoutMs: number }];
     expect(command).toBe("/opt/clawbox-tts.sh");
     expect(args.slice(0, 4)).toEqual(["--voice", "bm_george", "--", "Hello there."]);
+    expect(opts.timeoutMs).toBeGreaterThan(0);
     // The clip is not kept.
     expect(unlinkMock).toHaveBeenCalledTimes(1);
   });
@@ -116,7 +108,7 @@ describe("POST /setup-api/tts/sample — this box", () => {
   it("falls back to the saved local voice when none is asked for, and never to an unknown one", async () => {
     const { POST } = await route();
     await POST(post({ text: "Hi", engine: "local", voice: "not-a-voice" }));
-    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const [, args] = runChildMock.mock.calls[0] as [string, string[]];
     expect(args.slice(0, 2)).toEqual(["--voice", "af_heart"]);
   });
 
@@ -133,7 +125,7 @@ describe("POST /setup-api/tts/sample — this box", () => {
     const { POST } = await route();
     const res = await POST(post({ text: "Hi", engine: "local" }));
     expect(res.status).toBe(409);
-    expect(spawnMock).not.toHaveBeenCalled();
+    expect(runChildMock).not.toHaveBeenCalled();
   });
 });
 
@@ -150,7 +142,7 @@ describe("POST /setup-api/tts/sample — the cloud", () => {
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer claw_84d065b");
     // The configured cloud voice is the default when none is asked for.
     expect(JSON.parse(String(init.body))).toMatchObject({ model: "gpt-4o-mini-tts", input: "Hello from the cloud.", voice: "nova" });
-    expect(spawnMock).not.toHaveBeenCalled();
+    expect(runChildMock).not.toHaveBeenCalled();
   });
 
   it("refuses a cloud voice this box cannot call, before sending anything", async () => {
@@ -183,7 +175,7 @@ describe("POST /setup-api/tts/sample — input", () => {
     expect((await POST(post({ text: "x".repeat(401), engine: "local" }))).status).toBe(400);
     expect((await POST(post({ text: "Hi", engine: "phone" }))).status).toBe(400);
     await POST(post({ text: "Hi\u0007there!", engine: "local" }));
-    const [, args] = spawnMock.mock.calls[0] as [string, string[]];
+    const [, args] = runChildMock.mock.calls[0] as [string, string[]];
     expect(args[3]).toBe("Hi there!");
   });
 });

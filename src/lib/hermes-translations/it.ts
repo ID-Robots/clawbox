@@ -359,12 +359,6 @@ export const it: Record<string, string> = {
   "skills.relative.months.other": "{n} mesi fa",
   "skills.relative.years": "{n} anni fa",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "Linguaggio",
-  "localModels.kind.tts": "Voce in uscita",
-  "localModels.kind.stt": "Voce in entrata",
-  "localModels.kind.embedding": "Memoria",
-
   // === Run state ===
   "localModels.run.running": "Acceso",
   "localModels.run.idle": "Spento",
@@ -377,9 +371,6 @@ export const it: Record<string, string> = {
   "localModels.unavailable": "Non è stato possibile leggere lo stato di: {list}.",
   "localModels.disk": "Disco {size}",
   "localModels.memoryInUse": "Memoria in uso {size}",
-  "localModels.managedInClawKeep": "Si gestisce in ClawKeep.",
-  "localModels.managedInLocalAi": "Si gestisce in Impostazioni → IA locale.",
-  "localModels.toggleLabel": "{name} abilitato",
   "localModels.footer": "Ciò che spegni resta spento dopo un riavvio.",
   "localModels.group.llm": "Modello dell'agente IA",
   "localModels.group.tts": "Voce (sintesi vocale)",

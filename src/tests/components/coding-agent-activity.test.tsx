@@ -214,6 +214,7 @@ describe("the badge", () => {
     const run = {
       id: "run-x", projectId: null, task: "x", startedAt: NOW,
       completedAt: null, status: "running" as const, source: "agent" as const,
+      subagentsTotal: 0, subagentsActive: 0, subagentsByType: {}, tokensUsed: 0, filesTouched: 0, lastProgress: null,
     };
     const { rerender } = render(
       <CodingAgentActivityPill run={run} labels={LABELS} openLabel={OPEN} onOpen={onOpen} />,

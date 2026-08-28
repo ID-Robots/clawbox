@@ -48,6 +48,9 @@ const PROBE_TIMEOUT_MS = 15_000;
 // The probe spawns python to import faster-whisper, which is a real cost on
 // this board, and the settings panel and every chat-mic press both ask.
 const PROBE_TTL_MS = 60_000;
+// An installed faster-whisper does not uninstall itself: hold a positive answer
+// for hours, and re-ask a negative one every minute so an install shows up.
+const INSTALLED_TTL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * The whole environment the script gets. `systemctl --user` needs
@@ -100,9 +103,10 @@ async function probe(): Promise<LocalSttProbe> {
   return { installed: true, detail: "faster-whisper, kept warm by whisper-server." };
 }
 
-/** Whether this box can transcribe on its own. Cached for a minute. */
+/** Whether this box can transcribe on its own. Cached — see the TTLs above. */
 export async function localSttInstalled(): Promise<LocalSttProbe> {
-  if (probeCache && Date.now() - probeCache.at < PROBE_TTL_MS) return probeCache.value;
+  const ttl = probeCache?.value.installed ? INSTALLED_TTL_MS : PROBE_TTL_MS;
+  if (probeCache && Date.now() - probeCache.at < ttl) return probeCache.value;
   const value = await probe();
   probeCache = { at: Date.now(), value };
   return value;

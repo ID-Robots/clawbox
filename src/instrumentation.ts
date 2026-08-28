@@ -77,11 +77,18 @@ export async function register() {
   }
   try {
     // The memory-status probe boots a whole OpenClaw process (~8 s on a
-    // Jetson). Pay it now, in the background, so the first Settings → Local AI
-    // open after a restart answers from the cache instead of waiting on it.
+    // Jetson). Pay it once, after the boot rush (gateway restart, schedulers,
+    // Next's own warm-up) has passed, so the first Settings → Local AI open
+    // answers from the cache. Not on Hermes: there is no openclaw to probe.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
-    void warmMemoryStatusCache().catch(() => { /* the first reader retries */ })
+    const { openclawIsAbsent } = require('./lib/openclaw-config')
+    if (!openclawIsAbsent()) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
+      setTimeout(() => {
+        void warmMemoryStatusCache().catch(() => { /* the first reader retries */ })
+      }, 45_000).unref()
+    }
   } catch (err) {
     console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)
   }

@@ -21,7 +21,7 @@ function model(over: Record<string, unknown>) {
 }
 
 const MODELS = [
-  model({ id: "llamacpp", name: "Gemma 4", kind: "llm", running: "idle", detail: "Installed and in standby." }),
+  model({ id: "llamacpp", name: "Gemma 4", kind: "llm", running: "idle", managedBy: "localAi", detail: "Ready. Sleeps until needed." }),
   model({ id: "ollama", name: "Ollama", kind: "llm", runtime: "System service", enabled: false, control: "system-unit", detail: "Installed and stopped." }),
   model({ id: "kokoro", name: "Kokoro", kind: "tts", runtime: "systemd user service", enabled: true, running: "running", control: "user-unit", detail: "Running as the GPU voice." }),
   model({ id: "whisper", name: "Whisper", kind: "stt", runtime: "systemd user service", enabled: false, control: "user-unit", detail: "Installed and stopped." }),

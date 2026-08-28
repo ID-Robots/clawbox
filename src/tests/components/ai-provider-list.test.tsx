@@ -51,14 +51,16 @@ afterEach(() => {
 });
 
 describe("AiProviderList", () => {
-  it("lists the connected providers — cloud and on-device — with the default marked, and not the unconnected ones", async () => {
+  it("lists the connected cloud providers with the default marked — not the unconnected ones, not the on-device engines", async () => {
     stubFetch();
     render(<AiProviderList />);
-    for (const row of ROWS.filter((r) => r.state === "connected")) {
+    for (const row of ROWS.filter((r) => r.state === "connected" && r.section !== "localAi")) {
       expect(await screen.findByTestId(`ai-provider-${row.id}`)).toBeInTheDocument();
     }
     // Connecting a provider is the panel below the list, not a row in it.
     expect(screen.queryByTestId("ai-provider-google")).not.toBeInTheDocument();
+    // The on-device model has its own tab.
+    expect(screen.queryByTestId("ai-provider-llamacpp")).not.toBeInTheDocument();
     expect(screen.getByTestId("ai-provider-default-clawai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-default-openai")).not.toBeInTheDocument();
     // A switched-off provider says so instead of pretending to be disconnected.
@@ -112,24 +114,5 @@ describe("AiProviderList", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Make another provider the default first.");
   });
 
-  it("opens the tab that configures a row", async () => {
-    stubFetch();
-    const onOpen = vi.fn();
-    render(<AiProviderList onOpen={onOpen} />);
-    fireEvent.click((await screen.findByTestId("ai-provider-llamacpp")).querySelector("button")!);
-    expect(onOpen).toHaveBeenCalledWith("local");
-    fireEvent.click(screen.getByTestId("ai-provider-openai").querySelector("button")!);
-    expect(onOpen).toHaveBeenCalledWith("cloud");
-  });
 
-  it("shows only the tab's own providers when filtered", async () => {
-    stubFetch();
-    const { unmount } = render(<AiProviderList filter="cloud" />);
-    await screen.findByTestId("ai-provider-openai");
-    expect(screen.queryByTestId("ai-provider-llamacpp")).not.toBeInTheDocument();
-    unmount();
-    render(<AiProviderList filter="local" />);
-    await screen.findByTestId("ai-provider-llamacpp");
-    expect(screen.queryByTestId("ai-provider-openai")).not.toBeInTheDocument();
-  });
 });

@@ -96,36 +96,6 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
-async function dirBytes(dir: string): Promise<number | null> {
-  let total = 0;
-  let sawAnything = false;
-  const walk = async (d: string, depth: number): Promise<void> => {
-    if (depth > 4) return;
-    let entries;
-    try {
-      entries = await fs.readdir(d, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const full = path.join(d, e.name);
-      if (e.isDirectory()) {
-        await walk(full, depth + 1);
-      } else if (e.isFile()) {
-        try {
-          const st = await fs.stat(full);
-          total += st.size;
-          sawAnything = true;
-        } catch {
-          /* a file that vanished mid-scan is not a failure */
-        }
-      }
-    }
-  };
-  await walk(dir, 0);
-  return sawAnything ? total : null;
-}
-
 async function run(cmd: string, args: string[], timeout = 5000): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(cmd, args, { timeout });
@@ -489,15 +459,12 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
  * more systemctl round trips that cannot change the answer.
  */
 export async function buildTtsInventory(): Promise<LocalModelEntry[]> {
-  const settled = await Promise.all([kokoroEntry].map(async build => {
-    try {
-      return await build();
-    } catch {
-      // An unreadable engine reads as absent, never as a broken tab.
-      return null;
-    }
-  }));
-  return settled.filter((e): e is LocalModelEntry => e !== null);
+  try {
+    return [await kokoroEntry()];
+  } catch {
+    // An unreadable engine reads as absent, never as a broken tab.
+    return [];
+  }
 }
 
 export interface InventoryProbes {

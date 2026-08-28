@@ -76,14 +76,8 @@ function isSnapshot(value: unknown): value is LocalModelsSnapshot {
   return models.every(isEntry);
 }
 
-/** The on-device roles, each read from the surface that decides it. */
-interface Roles {
-  llm: Role;
-  tts: Role;
-  stt: Role;
-}
-
-const LOCAL_LLM_IDS = new Set(["llamacpp", "ollama", "clawlocal"]);
+/** The on-device roles by kind, each read from the surface that decides it. */
+type Roles = Partial<Record<Kind, Role>>;
 
 interface Action {
   id: string;
@@ -99,7 +93,7 @@ const post = (url: string, body: unknown) =>
 export default function LocalAiPanel({ active, edition }: { active: boolean; edition: string | null }) {
   const { t } = useT();
   const [snapshot, setSnapshot] = useState<LocalModelsSnapshot | null>(null);
-  const [roles, setRoles] = useState<Roles>({ llm: null, tts: null, stt: null });
+  const [roles, setRoles] = useState<Roles>({});
   const [localOnly, setLocalOnly] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -122,8 +116,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       read("/setup-api/tts"),
       read("/setup-api/stt"),
     ]);
-    const rows = Array.isArray(providers?.providers) ? providers.providers as { id: string; state: string; isDefault: boolean }[] : [];
-    const local = rows.find((r) => LOCAL_LLM_IDS.has(r.id));
+    const rows = Array.isArray(providers?.providers) ? providers.providers as { section: string; state: string; isDefault: boolean }[] : [];
+    // The provider list already says which row is the on-device one.
+    const local = rows.find((r) => r.section === "localAi");
     const llm: Role = !local ? null : local.isDefault ? "primary" : local.state === "connected" ? "fallback" : null;
     const localVoice = Array.isArray(tts?.engines) && (tts.engines as { id: string; configured: boolean }[]).some((e) => e.id === "local" && e.configured);
     const ttsRole: Role = !localVoice ? null : tts?.choice === "local" ? "primary" : "fallback";
@@ -141,21 +136,27 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     } catch {
       /* keep the last good reading rather than blanking the page */
     }
-    void refreshRoles();
-  }, [refreshRoles]);
+  }, []);
 
+  // The inventory (is it running, how much memory) changes on its own, so it
+  // is polled — but not while the tab is hidden, where nobody sees it and the
+  // box pays eight process spawns a tick. Roles change only through this
+  // panel's own actions, so they are read once here and again after each one.
   useEffect(() => {
     if (!active) return;
     void refresh();
+    void refreshRoles();
     if (edition !== "hermes") {
       fetch("/setup-api/local-ai/exclusive", { cache: "no-store" })
         .then((r) => r.json())
         .then((d) => setLocalOnly(!!d.enabled))
         .catch(() => setLocalOnly(false));
     }
-    const timer = setInterval(() => { void refresh(); }, 5000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 5000);
     return () => clearInterval(timer);
-  }, [active, edition, refresh]);
+  }, [active, edition, refresh, refreshRoles]);
 
   // The menu closes on a click anywhere else or on Escape, like any menu.
   useEffect(() => {
@@ -191,8 +192,9 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
       pendingRef.current = null;
       setPendingId(null);
       void refresh();
+      void refreshRoles();
     }
-  }, [refresh, t]);
+  }, [refresh, refreshRoles, t]);
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
@@ -229,11 +231,11 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
         actions.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/providers/default", { provider: "clawai" }) });
       } else {
         actions.push({ id: "primary", labelKey: "localModels.menu.makePrimary", run: () => post("/setup-api/llamacpp/install", { scope: "local", activate: true }) });
-        if (roles.llm === null) {
+        if (roles.llm == null) {
           actions.push({ id: "fallback", labelKey: "localModels.menu.useAsFallback", run: () => post("/setup-api/llamacpp/install", { scope: "local" }) });
         }
       }
-      if (roles.llm !== null) {
+      if (roles.llm != null) {
         actions.push({ id: "turn-off", labelKey: "localModels.menu.turnOffLocalAi", destructive: true, run: () => post("/setup-api/local-ai", { action: "disable" }) });
       }
     }
@@ -254,12 +256,12 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     return actions;
   };
 
+  // The agent-model role belongs to the engine Local AI manages (llama.cpp);
+  // Ollama serves extra models and is not the on-device provider row.
   const roleFor = (entry: LocalModelEntry): Role => {
     if (!entry.installed) return null;
-    if (entry.kind === "llm") return entry.id === "llamacpp" || entry.id === "ollama" ? roles.llm : null;
-    if (entry.kind === "tts") return roles.tts;
-    if (entry.kind === "stt") return roles.stt;
-    return null;
+    if (entry.kind === "llm" && entry.managedBy !== "localAi") return null;
+    return roles[entry.kind] ?? null;
   };
 
   if (!snapshot) {
@@ -292,7 +294,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
 
       {/* Local-only mode is OpenClaw's fallback-chain machinery; Hermes has no
           equivalent, so the switch is not offered there. */}
-      {edition !== "hermes" && roles.llm !== null && (
+      {edition !== "hermes" && roles.llm != null && (
         <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] px-4 py-3 flex items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="text-sm font-semibold text-[var(--text-primary)]">{t("localModels.localOnly.title")}</div>

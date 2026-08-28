@@ -359,12 +359,6 @@ export const zh: Record<string, string> = {
   "skills.relative.months.other": "{n} 个月前",
   "skills.relative.years": "{n} 年前",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "语言",
-  "localModels.kind.tts": "语音输出",
-  "localModels.kind.stt": "语音输入",
-  "localModels.kind.embedding": "记忆",
-
   // === Run state ===
   "localModels.run.running": "开启",
   "localModels.run.idle": "关闭",
@@ -377,9 +371,6 @@ export const zh: Record<string, string> = {
   "localModels.unavailable": "无法读取以下模型的状态：{list}。",
   "localModels.disk": "磁盘 {size}",
   "localModels.memoryInUse": "已用内存 {size}",
-  "localModels.managedInClawKeep": "在 ClawKeep 中管理。",
-  "localModels.managedInLocalAi": "在设置 → 本地 AI 中管理。",
-  "localModels.toggleLabel": "启用 {name}",
   "localModels.footer": "关闭的项目在重启后仍保持关闭。",
   "localModels.group.llm": "AI 助手模型",
   "localModels.group.tts": "语音（文字转语音）",

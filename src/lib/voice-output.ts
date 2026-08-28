@@ -42,14 +42,11 @@
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { buildCloudTtsWarning } from "@/lib/tts-cloud-warning";
 import {
-  CLOUD_VOICES,
   DEFAULT_CLOUD_VOICE,
   DEFAULT_LOCAL_VOICE,
   DEFAULT_VOICE_LANGUAGE,
   isCloudVoice,
   isLocalVoice,
-  LOCAL_VOICES,
-  type VoiceOption,
 } from "@/lib/voice-catalog";
 
 /**
@@ -154,10 +151,8 @@ export interface VoiceOutputStatus {
   warning: string | null;
   /** The language the sample sentence comes in; the owner's pick. */
   language: string;
-  /** The voice each engine speaks with right now, always one from `voices`. */
+  /** The voice each engine speaks with right now; the lists are in voice-catalog.ts. */
   voice: Record<VoiceEngineId, string>;
-  /** What each engine can be asked to speak with. */
-  voices: Record<VoiceEngineId, readonly VoiceOption[]>;
 }
 
 /** Persisted in the setup app's own data dir; see voice-output-store.ts. */
@@ -205,6 +200,8 @@ interface TtsProviderEntry {
   apiKey?: unknown;
   baseUrl?: unknown;
   voice?: unknown;
+  model?: unknown;
+  enabled?: unknown;
 }
 
 /**
@@ -234,13 +231,45 @@ export function configuredTtsProviderId(config: VoiceConfigView): string | null 
  * fall back to the OpenAI-compatible provider the ClawBox image ships.
  */
 export function cloudProviderIdFor(config: VoiceConfigView): string | null {
-  for (const id of Object.keys(ttsProviders(config))) {
+  for (const [id, entry] of Object.entries(ttsProviders(config))) {
     const normalized = normalizeProviderId(id);
-    if (normalized && !isLocalProviderId(normalized)) return normalized;
+    // A provider switched off in the chain (Microsoft's bundled voice, see
+    // ensureMicrosoftTtsExcluded) is not the cloud voice, however early it
+    // sits in the file.
+    if (normalized && !isLocalProviderId(normalized) && entry?.enabled !== false) return normalized;
   }
   const models = config.models?.providers ?? {};
   if (models[DEFAULT_CLOUD_TTS_PROVIDER_ID]) return DEFAULT_CLOUD_TTS_PROVIDER_ID;
   return null;
+}
+
+/** What a speech request to the cloud needs, or null when this box cannot make one. */
+export interface CloudSpeechTarget {
+  providerId: string;
+  apiKey: string;
+  baseUrl: string;
+  /** The configured model, or null for the provider's default. */
+  model: string | null;
+}
+
+/** OpenClaw's own default for the OpenAI speech provider. */
+const DEFAULT_OPENAI_SPEECH_URL = "https://api.openai.com/v1";
+
+/**
+ * The one answer to "can this box call the cloud voice, and with what": the
+ * same rule `cloudEngine` uses for `configured`, so a voice the dropdown
+ * offers is one the Play button can reach.
+ */
+export function cloudSpeechTarget(config: VoiceConfigView): CloudSpeechTarget | null {
+  const providerId = cloudProviderIdFor(config);
+  if (!providerId) return null;
+  const apiKey = credentialFor(config, providerId);
+  if (!apiKey || cloudCredentialIsUnusable(config, providerId)) return null;
+  const entry = ttsProviders(config)[providerId];
+  const baseUrl = [entry?.baseUrl, config.models?.providers?.[providerId]?.baseUrl]
+    .find((u): u is string => typeof u === "string" && Boolean(u.trim()))?.trim() ?? DEFAULT_OPENAI_SPEECH_URL;
+  const model = typeof entry?.model === "string" && entry.model.trim() ? entry.model.trim() : null;
+  return { providerId, apiKey, baseUrl: baseUrl.replace(/\/+$/, ""), model };
 }
 
 function credentialFor(config: VoiceConfigView, providerId: string): string | null {
@@ -464,7 +493,6 @@ export function buildVoiceOutputStatus(
       local: isLocalVoice(localVoice) ? localVoice : DEFAULT_LOCAL_VOICE,
       cloud: cloudVoiceFrom(config),
     },
-    voices: { local: LOCAL_VOICES, cloud: CLOUD_VOICES },
   };
 }
 

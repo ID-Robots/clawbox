@@ -348,12 +348,6 @@ export const nl: Record<string, string> = {
   "skills.relative.months.other": "{n} maanden geleden",
   "skills.relative.years": "{n} jr geleden",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "Taal",
-  "localModels.kind.tts": "Spraakuitvoer",
-  "localModels.kind.stt": "Spraakinvoer",
-  "localModels.kind.embedding": "Geheugen",
-
   // === Run state ===
   "localModels.run.running": "Aan",
   "localModels.run.idle": "Uit",
@@ -366,9 +360,6 @@ export const nl: Record<string, string> = {
   "localModels.unavailable": "De status van het volgende kon niet worden gelezen: {list}.",
   "localModels.disk": "Schijf {size}",
   "localModels.memoryInUse": "Geheugen in gebruik {size}",
-  "localModels.managedInClawKeep": "Wordt beheerd in ClawKeep.",
-  "localModels.managedInLocalAi": "Wordt beheerd in Instellingen → Lokale AI.",
-  "localModels.toggleLabel": "{name} ingeschakeld",
   "localModels.footer": "Wat je uitschakelt, blijft uit na een herstart.",
   "localModels.group.llm": "AI-agentmodel",
   "localModels.group.tts": "Stem (tekst naar spraak)",

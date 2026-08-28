@@ -344,12 +344,6 @@ export const sv: Record<string, string> = {
   "skills.relative.months.other": "{n} månader sedan",
   "skills.relative.years": "{n} år sedan",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "Språk",
-  "localModels.kind.tts": "Tal ut",
-  "localModels.kind.stt": "Tal in",
-  "localModels.kind.embedding": "Minne",
-
   // === Run state ===
   "localModels.run.running": "På",
   "localModels.run.idle": "Av",
@@ -362,9 +356,6 @@ export const sv: Record<string, string> = {
   "localModels.unavailable": "Det gick inte att läsa läget för: {list}.",
   "localModels.disk": "På disk {size}",
   "localModels.memoryInUse": "Använt minne {size}",
-  "localModels.managedInClawKeep": "Hanteras i ClawKeep.",
-  "localModels.managedInLocalAi": "Hanteras i Inställningar → Lokal AI.",
-  "localModels.toggleLabel": "{name} aktiverad",
   "localModels.footer": "Det du stänger av förblir avstängt efter en omstart.",
   "localModels.group.llm": "AI-agentens modell",
   "localModels.group.tts": "Röst (text till tal)",

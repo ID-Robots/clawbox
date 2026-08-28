@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { isDeepStrictEqual } from "util";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
 import {
   openclawIsAbsent,
@@ -77,19 +78,6 @@ export async function GET() {
   }
 }
 
-/** JSON with every object's keys sorted, so two configs compare by content. */
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, canonical(record[key])]));
-  }
-  return value;
-}
-
-function sameJson(a: unknown, b: unknown): boolean {
-  return JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
-}
 
 /**
  * Make openclaw.json's audio chain say what the preference says. Answers
@@ -104,7 +92,7 @@ function sameJson(a: unknown, b: unknown): boolean {
 async function syncChannelAudio(order: SttEngine[], localInstalled: boolean): Promise<boolean> {
   const models = buildAudioModels(order, localInstalled);
   const audio = (await readConfig()).tools?.media?.audio;
-  if (audio?.baseUrl === CLAWBOX_AI_PROXY_URL && sameJson(audio.models, models)) return false;
+  if (audio?.baseUrl === CLAWBOX_AI_PROXY_URL && isDeepStrictEqual(audio.models, models)) return false;
   await runOpenclawConfigSetBatch([
     ["tools.media.audio.baseUrl", JSON.stringify(CLAWBOX_AI_PROXY_URL), "--json"],
     ["tools.media.audio.models", JSON.stringify(models), "--json"],

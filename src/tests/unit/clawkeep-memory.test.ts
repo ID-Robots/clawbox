@@ -276,7 +276,7 @@ describe("the status cache", () => {
 
     // Aged out: the stale reading comes back at once, not after the probe.
     const realNow = Date.now();
-    vi.spyOn(Date, "now").mockReturnValue(realNow + 60_000);
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 300_000);
     const started = performance.now();
     const stale = await getMemoryStatus();
     expect(performance.now() - started).toBeLessThan(500);

@@ -93,7 +93,12 @@ const LOCK_BUSY_EXIT = 75;
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-schedule.json");
 const RUN_STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-state.json");
 const RUN_LOCK_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index.lock");
-const STATUS_CACHE_MS = 30_000;
+// Two minutes: the probe boots a whole OpenClaw process, and what it reports
+// (provider, model, index health) changes through indexing runs — which call
+// invalidateMemoryStatusCache — not on its own. Settings → Local AI polls the
+// inventory every five seconds, so a short TTL here is a background OpenClaw
+// boot every few polls.
+const STATUS_CACHE_MS = 120_000;
 const STATUS_TIMEOUT_MS = 90_000;
 const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const LOCK_START_GRACE_MS = 30_000;

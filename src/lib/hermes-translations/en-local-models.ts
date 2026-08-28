@@ -1,14 +1,8 @@
 export const localModelsEn: Record<string, string> = {
-  // === Kind of model ===
-  "localModels.kind.llm": "Language",
-  "localModels.kind.tts": "Speech out",
-  "localModels.kind.stt": "Speech in",
-  "localModels.kind.embedding": "Memory",
-
   // === Run state ===
-  // One state, one sentence — see the comment on RUN_LABEL_KEY in
-  // LocalModelsPanel for why "not installed" must not read as "off", and why
-  // "not on this edition" is kept apart from it.
+  // One state, one word — see RUN_LABEL_KEY in LocalAiPanel for why "not
+  // installed" must not read as "off", and why "not on this edition" is kept
+  // apart from it.
   "localModels.run.running": "On",
   "localModels.run.idle": "Off",
   "localModels.run.onDemand": "Starts when needed",
@@ -20,11 +14,8 @@ export const localModelsEn: Record<string, string> = {
   "localModels.unavailable": "Could not read the state of: {list}.",
   "localModels.disk": "Disk {size}",
   "localModels.memoryInUse": "Memory in use {size}",
-  "localModels.managedInClawKeep": "Managed in ClawKeep.",
   // "Settings → Local AI" names a section of this app's own settings, so the
   // section name is translated with it; the arrow is the path separator.
-  "localModels.managedInLocalAi": "Managed in Settings → Local AI.",
-  "localModels.toggleLabel": "{name} enabled",
   "localModels.footer": "Anything you turn off stays off after a restart.",
   // The grouped list (LocalAiPanel): one row per engine, the actions behind a
   // "more" menu, and each row's role read from the surface that decides it.

@@ -395,12 +395,10 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect((await POST(post({ action: "language", language: "tlh" }))).status).toBe(400);
   });
 
-  it("reports the voices each engine can speak with", async () => {
+  it("reports the voice each engine speaks with", async () => {
     const { GET } = await route();
     const data = await (await GET()).json();
     expect(data.voice).toEqual({ local: "af_heart", cloud: "alloy" });
-    expect(data.voices.local.map((v: { id: string }) => v.id)).toContain("bm_george");
-    expect(data.voices.cloud.map((v: { id: string }) => v.id)).toContain("nova");
     expect(data.language).toBe("en");
   });
 });

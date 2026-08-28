@@ -350,12 +350,6 @@ export const ja: Record<string, string> = {
   "skills.relative.months.other": "{n}か月前",
   "skills.relative.years": "{n}年前",
 
-  // === Kind of model ===
-  "localModels.kind.llm": "言語",
-  "localModels.kind.tts": "音声出力",
-  "localModels.kind.stt": "音声入力",
-  "localModels.kind.embedding": "メモリ",
-
   // === Run state ===
   "localModels.run.running": "オン",
   "localModels.run.idle": "オフ",
@@ -368,9 +362,6 @@ export const ja: Record<string, string> = {
   "localModels.unavailable": "{list} の状態を読み取れませんでした。",
   "localModels.disk": "ディスク {size}",
   "localModels.memoryInUse": "使用中のメモリ {size}",
-  "localModels.managedInClawKeep": "ClawKeep で管理されています。",
-  "localModels.managedInLocalAi": "設定 → ローカル AI で管理されています。",
-  "localModels.toggleLabel": "{name} を有効にする",
   "localModels.footer": "オフにしたものは再起動後もオフのままです。",
   "localModels.group.llm": "AIエージェントのモデル",
   "localModels.group.tts": "音声（読み上げ）",

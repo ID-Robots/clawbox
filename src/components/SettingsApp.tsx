@@ -1225,10 +1225,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
   useEffect(() => {
-    // The Local AI panel needs this too: it is the only source that knows which
-    // provider the ACTIVE harness is really set to, which is what separates
-    // "the on-device model is installed" from "it is what answers".
-    if (section !== "ai" && section !== "localAi" && !isMobile) return;
+    if (section !== "ai" && !isMobile) return;
     const load = () => {
       fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
     };
@@ -1260,42 +1257,27 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => { alive = false; };
   }, [edition]);
 
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
-  const refreshLocalAiStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/setup-api/setup/status", { cache: "no-store" });
-      const data = await res.json();
-      const configured = !!data.local_ai_configured;
-      const provider = typeof data.local_ai_provider === "string" ? data.local_ai_provider : null;
-      const model = typeof data.local_ai_model === "string" ? data.local_ai_model : null;
-
-      let running: boolean | null = null;
-      let standbyEnabled = false;
-      if (configured && provider === "llamacpp") {
-        const llamaRes = await fetch("/setup-api/llamacpp/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
-        running = !!llamaRes?.running;
-        standbyEnabled = !!llamaRes?.standbyEnabled;
-      } else if (configured && provider === "ollama") {
-        const ollamaRes = await fetch("/setup-api/ollama/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
-        running = !!ollamaRes?.running;
-        standbyEnabled = !!ollamaRes?.standbyEnabled;
-      }
-
-      setLocalAiStatus({ configured, provider, model, running, standbyEnabled });
-    } catch {
-      setLocalAiStatus({ configured: false, provider: null, model: null, running: null, standbyEnabled: false });
-    }
-  }, []);
+  // Only the sidebar subtitle reads this; the pane itself (LocalAiPanel) polls
+  // its own inventory. Read once when the section opens and again when the
+  // providers change — the subtitle names the configured model, which changes
+  // through actions, not on its own.
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null } | null>(null);
   const localTabOpen = section === "localAi";
   useEffect(() => {
     if (!localTabOpen && !isMobile) return;
-    refreshLocalAiStatus();
-    if (!localTabOpen) return;
-    const interval = setInterval(() => {
-      refreshLocalAiStatus().catch(() => {});
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [refreshLocalAiStatus, localTabOpen, isMobile]);
+    const load = () => {
+      fetch("/setup-api/setup/status", { cache: "no-store" })
+        .then(r => r.json())
+        .then(data => setLocalAiStatus({
+          configured: !!data.local_ai_configured,
+          provider: typeof data.local_ai_provider === "string" ? data.local_ai_provider : null,
+          model: typeof data.local_ai_model === "string" ? data.local_ai_model : null,
+        }))
+        .catch(() => setLocalAiStatus({ configured: false, provider: null, model: null }));
+    };
+    load();
+    return onProvidersChanged(load);
+  }, [localTabOpen, isMobile]);
 
 
   /* ── Telegram ── */
@@ -3277,7 +3259,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── Providers: the cloud sign-ins, the owner's connected ones listed first ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
-            <AiProviderList filter="cloud" onOpen={(tab) => setSectionGated(tab === "local" ? "localAi" : "ai")} />
+            <AiProviderList />
 
             {/* Provider status card — suppressed on the Hermes edition, where the
                 AI Providers hero below already names the active provider, its

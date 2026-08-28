@@ -36,10 +36,6 @@ function status(over: Record<string, unknown> = {}) {
     warning: "Voice uses ClawBox AI cloud TTS. Text sent for speech leaves this ClawBox.",
     language: "en",
     voice: { local: "af_heart", cloud: "alloy" },
-    voices: {
-      local: [{ id: "af_heart", label: "Heart" }, { id: "bm_george", label: "George" }],
-      cloud: [{ id: "alloy", label: "Alloy" }, { id: "nova", label: "Nova" }],
-    },
     ...over,
   };
 }
@@ -179,10 +175,9 @@ describe("Voice panel", () => {
 });
 
 describe("status validation", () => {
-  it("rejects a payload without the voice lists the dropdowns render", () => {
+  it("rejects a payload without the voice each engine speaks with", () => {
     const s = status() as Record<string, unknown>;
     expect(isVoiceStatus(s)).toBe(true);
-    expect(isVoiceStatus({ ...s, voices: { local: [{ id: "x" }], cloud: [] } })).toBe(false);
     expect(isVoiceStatus({ ...s, voice: { local: "af_heart" } })).toBe(false);
     expect(isVoiceStatus({ ...s, language: null })).toBe(false);
   });
