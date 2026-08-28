@@ -54,6 +54,12 @@ const DRAFT = {
 /** What the server currently says is waiting. Flipped mid-test. */
 let queued: unknown[];
 
+/** How many times the queue has actually been read off the server. */
+function pendingFetches(): number {
+  const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+  return calls.filter((c) => String(c[0]).startsWith("/setup-api/email/pending")).length;
+}
+
 function jsonResponse(body: unknown) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
 }
@@ -108,6 +114,36 @@ describe("the approvals strip", () => {
     });
 
     await waitFor(() => expect(screen.queryByTestId("settings-email-approvals")).toBeNull());
+  });
+
+  it("does not tick on a phone that is showing the nav list, not the panel", async () => {
+    // The guard used to read `section !== "email" && !isMobile`, which on a
+    // phone can never return early: !isMobile is false, so the section is never
+    // consulted and the interval ran behind whatever the owner was actually
+    // looking at. The WhatsApp heartbeat in this file learned the same lesson.
+    const width = window.innerWidth;
+    try {
+      Object.defineProperty(window, "innerWidth", { value: 375, configurable: true });
+      // No pending section: on a phone that means the nav list is showing and
+      // no panel is open at all. (Asking for "email" would open the panel on
+      // mobile too, and then polling would be the correct behaviour.)
+      delete (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection;
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      render(<SettingsApp ui={ui} />);
+      await waitFor(() => expect(pendingFetches()).toBeGreaterThan(0));
+      const afterMount = pendingFetches();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      // The one-shot mount fetch is fine and stays. A minute of ticks behind a
+      // panel nobody opened must add nothing.
+      expect(pendingFetches()).toBe(afterMount);
+    } finally {
+      vi.useRealTimers();
+      Object.defineProperty(window, "innerWidth", { value: width, configurable: true });
+    }
   });
 
   it("clears it on its own while the panel is being looked at", async () => {

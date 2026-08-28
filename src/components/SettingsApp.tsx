@@ -1777,13 +1777,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
    * Only while the section is actually on screen, and stopped the moment it is
    * not: this is a Jetson serving its own UI, and a poll that runs behind a
    * hidden tab is a poll nobody is reading.
+   *
+   * Which is why the guard is `emailPanelVisible` and not the `&& !isMobile`
+   * shape the one-shot fetches above use. That shape inverts on a phone —
+   * `!isMobile` is false, so the early return never fires and the section is
+   * never consulted — and the WhatsApp heartbeat above learned the same lesson
+   * the expensive way: an interval that could not be stopped by browsing away.
+   * An extra GET on mount costs nothing; a timer that never stops does.
    */
+  const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
+
   useEffect(() => {
-    if (section !== "email" && !isMobile) return;
+    if (!emailPanelVisible) return;
     const refresh = () => {
       if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
       refreshEmailStatus();
       refreshEmailPending();
+      // The panel's own state can go stale the same way: an owner who pairs
+      // with the approvals bot in Telegram while this is open should stop
+      // being told nobody can be asked.
+      refreshChatApproval();
     };
     const onVisibility = () => {
       if (typeof document !== "undefined" && document.visibilityState === "visible") refresh();
@@ -1796,7 +1809,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [section, isMobile, refreshEmailStatus, refreshEmailPending]);
+  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
 
   /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
   const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
