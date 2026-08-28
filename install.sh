@@ -4931,9 +4931,14 @@ step_validate_services() {
       # the branches below and fell out of the chain as a silent PASS, while the
       # strictly LESS informative absent verdict correctly failed. Unparseable
       # is at least as suspicious as absent.
+      #
+      # `?*`, not `*`: a bare `skipped:` or `failed:` carries no reason, and a
+      # truncated write is exactly how one appears. "This board declines the
+      # engine" is a claim, and a claim with its reason cut off is not evidence
+      # for it either.
       local verdict_unreadable=false
-      case "$tts_state" in ""|ready|skipped:*|failed:*) ;; *) verdict_unreadable=true ;; esac
-      case "$piper_state" in ""|ready|skipped:*|failed:*) ;; *) verdict_unreadable=true ;; esac
+      case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) verdict_unreadable=true ;; esac
+      case "$piper_state" in ""|ready|skipped:?*|failed:?*) ;; *) verdict_unreadable=true ;; esac
       # ONE verdict about this box's speech, most severe first, so the check
       # that probe_count counts as one contributes at most one line. Reporting
       # "Kokoro failed" and "Piper failed" and "no engine" as three separate
@@ -4942,6 +4947,17 @@ step_validate_services() {
       local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
       if [ -z "$tts_state" ] && [ -z "$piper_state" ]; then
         failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
+      elif [ "$verdict_unreadable" = true ]; then
+        # SECOND, ahead of every arm that names an engine state. A verdict
+        # nobody can parse does not establish one: `KOKORO=redy` next to
+        # `PIPER=failed:download` would otherwise be reported as "this box has
+        # NO working TTS engine", which is a claim about a GPU engine that may
+        # be running perfectly — the same failure-report-over-a-success this PR
+        # exists to remove. It is an `elif` and not the trailing `else` that
+        # would close the chain, because the fall-through is also where the
+        # HEALTHY box lands (both engines `ready` match no arm), so an `else`
+        # there would fail every good box on the shelf.
+        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
       elif [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]         && { [ "$kokoro_failed" = true ] || [ "$piper_failed" = true ]; }; then
         # The defect this probe was rewritten for. Note what does NOT land here:
         # both engines `skipped:*` is a board that runs neither by design (no
@@ -4959,15 +4975,6 @@ step_validate_services() {
         failed_probe+=("TTS: the Piper CPU fallback was requested and did NOT install ($piper_state) — this box has no fallback behind its GPU engine. $tts_fix")
       elif [ -z "$piper_state" ]; then
         failed_probe+=("TTS: no Piper verdict at $TTS_STATUS_FILE — the CPU half left no record, so whether this box has a fallback cannot be asserted either way. $tts_fix")
-      elif [ "$verdict_unreadable" = true ]; then
-        # LAST, not first: every arm above is a more specific statement about
-        # the same box, and a garbled Piper verdict next to a failed Kokoro is
-        # still best reported as "no working engine". It is deliberately an
-        # `elif` rather than the trailing `else` that would close the chain,
-        # because the chain's fall-through is also where the HEALTHY box lands
-        # (both engines `ready` match no arm) — an `else` there would fail every
-        # good box on the shelf.
-        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}) — a verdict outside the ready/skipped:*/failed:* vocabulary is not evidence of an engine. $tts_fix")
       fi
     fi
 

@@ -768,9 +768,13 @@ if [ "${1:-}" = "--piper-only" ]; then
   # "=== Piper fallback ready ===" and exited 0 over a board that installed
   # nothing, in the very mode clawbox-tts.sh's "Piper not installed" hint tells
   # an operator to run.
+  # `skipped:?*`, not `skipped:*`: a bare `skipped:` carries no reason, and a
+  # truncated write is exactly how one appears. "No artifact applies to this
+  # board" is a claim, and a claim with its reason cut off is not evidence for
+  # it — it belongs with the unparseable values below.
   case "$TTS_PIPER_VERDICT" in
     ready) ;;
-    skipped:*)
+    skipped:?*)
       # The BOARD declines the engine — no pinned artifact for this
       # architecture. Nothing was asked for and nothing is missing, which is
       # the rule `skipped:*` already carries in --tts-only and in install.sh's
@@ -949,9 +953,9 @@ echo "  STT: Whisper (base) via on-demand server (~1.8s)"
 # fallback on every run, including the x86 runs where install_piper_engine
 # declines for want of a pinned artifact and the runs where its download failed.
 case "$TTS_PIPER_VERDICT" in
-  ready)     echo "  TTS: Kokoro-82M via on-demand server (~2s), Piper CPU fallback" ;;
-  skipped:*) echo "  TTS: Kokoro-82M via on-demand server (~2s); no Piper fallback applies to this board ($TTS_PIPER_VERDICT)" ;;
-  *)         echo "  TTS: Kokoro-82M via on-demand server (~2s); the Piper CPU fallback did NOT install (${TTS_PIPER_VERDICT:-unreported})" >&2 ;;
+  ready)      echo "  TTS: Kokoro-82M via on-demand server (~2s), Piper CPU fallback" ;;
+  skipped:?*) echo "  TTS: Kokoro-82M via on-demand server (~2s); no Piper fallback applies to this board ($TTS_PIPER_VERDICT)" ;;
+  *)          echo "  TTS: Kokoro-82M via on-demand server (~2s); the Piper CPU fallback did NOT install (${TTS_PIPER_VERDICT:-unreported})" >&2 ;;
 esac
 echo "  TTS entrypoint: $WORKSPACE/scripts/openclaw/clawbox-tts.sh"
 echo "  Services: kokoro-server, whisper-server (on-demand, auto-stop after idle)"

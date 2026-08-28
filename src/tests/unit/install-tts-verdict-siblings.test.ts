@@ -356,6 +356,28 @@ describe.skipIf(!hasBash)("service validation treats an unreadable verdict as no
     expect(res.out).toMatch(/unrecognised/i);
   });
 
+  it("does not read an engine state out of a verdict it could not parse", () => {
+    // A malformed verdict next to a failed sibling. "This box has NO working
+    // TTS engine" is a claim about a GPU engine that may be running perfectly,
+    // so the unreadable arm has to come first — reporting a failure over
+    // something that succeeded is the same defect one register down.
+    const res = runValidator("KOKORO=redy\nPIPER=failed:download\n");
+    expect(res.status, res.out).not.toBe(0);
+    expect(res.out).toMatch(/unrecognised/i);
+    expect(res.out, `a garbled Kokoro verdict was read as a mute box:\n${res.out}`).not.toMatch(
+      /NO working TTS engine/,
+    );
+  });
+
+  it("does not accept a skip with its reason truncated away", () => {
+    // `skipped:` matches `skipped:*` in bash, so a torn write could still be
+    // read as a legitimate board decline. A claim whose reason is cut off is
+    // not evidence for the claim.
+    const res = runValidator("KOKORO=skipped:no-cuda\nPIPER=skipped:\n");
+    expect(res.status, `a reasonless skip passed as a board decline:\n${res.out}`).not.toBe(0);
+    expect(res.out).toMatch(/unrecognised/i);
+  });
+
   it("reads a CRLF verdict rather than mistaking a ready engine for a mute box", () => {
     // A file edited on Windows or restored from a tarball ends the verdict as
     // `ready\r`, which is not `ready`. With Kokoro ready and Piper failed that
