@@ -118,13 +118,19 @@ interface VoiceRun {
  * answers: on anything but aarch64 install_piper_engine declines for want of a
  * pinned artifact and returns 0.
  */
-function runPiperOnly(opts: { piper?: "ready" | "broken"; arch?: string } = {}): VoiceRun {
+function runPiperOnly(
+  opts: { piper?: "ready" | "broken"; arch?: string; seedStatus?: string } = {},
+): VoiceRun {
   const { piper = "ready", arch = "aarch64" } = opts;
   const home = path.join(root, "home", "clawbox");
   const bin = path.join(root, "bin");
   const ttsStatus = path.join(root, "tts-status");
   mkdirSync(bin, { recursive: true });
   mkdirSync(home, { recursive: true });
+  // A verdict file a PREVIOUS run left behind, which is what tts_status_load
+  // seeds the OTHER engine's verdict from — the difference between "this box
+  // lost its CPU fallback" and "this box has nothing to speak with".
+  if (opts.seedStatus !== undefined) writeFileSync(ttsStatus, opts.seedStatus);
 
   writeExec(
     path.join(bin, "uname"),
@@ -186,16 +192,34 @@ describe.skipIf(!hasBash)("--piper-only reports the engine it published, not its
     expect(res.out, `a board with no artifact was told it has a fallback:\n${res.out}`).not.toContain(
       "Piper fallback ready",
     );
-    expect(res.out).toMatch(/no Piper artifact applies/i);
+    // With no other engine on record this board is mute, so the mode says so
+    // rather than "no artifact applies" — the "applies" wording is now reserved
+    // for the board where a ready Kokoro is carrying the speech, which the next
+    // test pins. Either way it is not an announced fallback.
+    expect(res.out).toMatch(/NO WORKING TTS ENGINE/);
   });
 
-  it("still exits 0 there — a board that declines an engine is not a failure", () => {
-    // The mirror-image over-correction. `skipped:*` means nothing was asked for
-    // and nothing is missing, the same rule --tts-only and the health check
-    // already follow; failing every x86 run would only teach everyone to
-    // ignore this mode.
+  it("says 'no artifact applies' when a ready Kokoro is carrying the box", () => {
+    const res = runPiperOnly({ piper: "broken", arch: "x86_64", seedStatus: "KOKORO=ready\n" });
+    expect(res.out).toMatch(/no Piper artifact applies/i);
+    expect(res.out).not.toContain("Piper fallback ready");
+  });
+
+  it("exits 13 there when nothing else on the box can speak either", () => {
+    // REVERSED. `skipped:*` means nothing is missing only while the OTHER half
+    // is carrying the box; with no Kokoro verdict on disk this is a mute box,
+    // and the mode an operator runs BECAUSE the box cannot speak was answering
+    // them with a clean exit 0. See install-tts-mute-box-fails.test.ts.
     const res = runPiperOnly({ piper: "broken", arch: "x86_64" });
-    expect(res.status, `a board with no applicable engine was called broken:\n${res.out}`).toBe(0);
+    expect(res.status, `a mute box was told nothing is missing:\n${res.out}`).toBe(13);
+  });
+
+  it("still exits 0 there when a ready Kokoro is on record", () => {
+    // The over-correction guard that replaces it: the question is "can this box
+    // speak", not "did Piper install", and tts_status_load has already read the
+    // GPU half's verdict off disk.
+    const res = runPiperOnly({ piper: "broken", arch: "x86_64", seedStatus: "KOKORO=ready\n" });
+    expect(res.status, `a box with a working GPU engine was called mute:\n${res.out}`).toBe(0);
   });
 
   it("announces the fallback when the engine is genuinely installed", () => {
@@ -298,12 +322,16 @@ describe.skipIf(!hasBash)("step_openclaw_tts names only the engines the exit cod
     }
   });
 
-  it("still records nothing for a board neither engine ships for (11)", () => {
-    // Nothing was asked for and nothing is missing: 11 stays a clean provision,
-    // exactly as #519 decided for two `skipped:*` verdicts.
+  it("RECORDS a board neither engine ships for (11)", () => {
+    // REVERSED. 11 was a clean provision on the grounds that nothing was asked
+    // for and nothing is missing — while the very same arm printed "this box
+    // answers speech with SILENCE". A run that describes a mute box and grades
+    // it healthy is not a check anyone can act on. It stays non-fatal (the box
+    // must come up reachable so it can be fixed) and it is recorded now.
+    // See install-tts-mute-box-fails.test.ts.
     const res = runStep(11);
-    expect(res.provisionFailures).toEqual([]);
-    expect(res.stepRc).toBe("0");
+    expect(res.provisionFailures, `a box with no engine was not recorded:\n${res.out}`).toContain("openclaw_tts");
+    expect(res.stepRc).toBe("13");
   });
 });
 
@@ -398,9 +426,11 @@ describe.skipIf(!hasBash)("service validation treats an unreadable verdict as no
     expect(res.status, `a healthy box was failed by the new guard:\n${res.out}`).toBe(0);
   });
 
-  it("still passes a board that runs neither engine by design", () => {
+  it("FAILS a board that runs neither engine by design", () => {
+    // REVERSED. "By design" describes why each engine is absent, not whether
+    // the box can speak — and it cannot. See install-tts-mute-box-fails.test.ts.
     const res = runValidator("KOKORO=skipped:no-cuda\nPIPER=skipped:arch-x86_64\n");
-    expect(res.status, res.out).toBe(0);
+    expect(res.status, `validation passed a box with no TTS engine:\n${res.out}`).toBe(1);
   });
 });
 

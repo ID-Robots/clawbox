@@ -279,14 +279,21 @@ describe.skipIf(!hasBash)("--tts-only reports which engines survived, not just t
     expect(res.status, res.out).toBe(1);
   });
 
-  it("does not cry 'no engine' on a board no engine was ever going to run on", () => {
-    // x86_64: no pinned Piper artifact AND no Jetson CUDA build. Nothing was
-    // asked for and nothing is missing — failing every install-x64.sh run would
-    // just teach everyone to ignore this check.
+  it("cries 'no engine' on a board no engine was ever going to run on", () => {
+    // REVERSED, deliberately. x86_64: no pinned Piper artifact AND no Jetson
+    // CUDA build, so both halves decline and the box has nothing to speak with.
+    // This used to exit 11 and grade clean, on the grounds that failing every
+    // install-x64.sh run would teach everyone to ignore the check — but
+    // install-x64.sh never calls this script (it contains no reference to
+    // voice, TTS, Piper or Kokoro at all), so the run being protected does not
+    // exist and what the leniency passed was a box with no voice. Both halves
+    // still publish `skipped:*`: WHY each engine is absent is a sentence for
+    // the operator, not an input to whether the run passed.
+    // See install-tts-mute-box-fails.test.ts.
     const res = runTtsOnly({ piper: "ready", arch: "x86_64" });
     expect(res.verdict("KOKORO"), res.ttsStatus).toMatch(/^skipped:/);
     expect(res.verdict("PIPER"), res.ttsStatus).toMatch(/^skipped:/);
-    expect(res.status, `a board with no applicable engine was called broken:\n${res.out}`).toBe(11);
+    expect(res.status, `a box with no engine at all exited clean:\n${res.out}`).toBe(13);
   });
 });
 
@@ -484,10 +491,13 @@ describe.skipIf(!hasBash)("service validation refuses to call a mute box healthy
     expect(res.status, `an unreported engine scored as healthy:\n${res.out}`).toBe(1);
   });
 
-  it("passes a board that was never going to run either engine", () => {
-    // install-x64.sh: no Jetson CUDA build and no pinned Piper artifact.
+  it("FAILS a board that was never going to run either engine", () => {
+    // REVERSED. No Jetson CUDA build and no pinned Piper artifact is still a
+    // box that answers every spoken request with silence, and this probe used
+    // to score it healthy because the mute-box arm asked for a `failed:*`
+    // first. See install-tts-mute-box-fails.test.ts.
     const res = runValidator("KOKORO=skipped:arch-x86_64\nPIPER=skipped:arch-x86_64\n");
-    expect(res.status, res.out).toBe(0);
+    expect(res.status, `validation passed a box with no TTS engine:\n${res.out}`).toBe(1);
   });
 
   it("passes a no-CUDA Orin that speaks on the CPU fallback", () => {

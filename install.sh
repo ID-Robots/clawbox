@@ -2631,7 +2631,32 @@ step_openclaw_tts() {
   case "$VOICE_RC" in
     0)  KOKORO_READY=true ;;
     10) KOKORO_REASON="no CUDA toolkit on this board" ;;
-    11) KOKORO_REASON="no Jetson CUDA build for this CPU architecture" ;;
+    11) KOKORO_REASON="no Jetson CUDA build for this CPU architecture, and no pinned Piper artifact either"
+        # ── "Nothing applies to this board" is still a box that cannot speak ──
+        # 11 was deliberately left clean: no TTS_RC, no recorded failure, on the
+        # grounds that a board neither engine ships for was never asked for one
+        # and that failing every such run "would only teach everyone to ignore
+        # the check". The summary this arm then printed said, in its own words,
+        # "this box answers speech with SILENCE" — and the run finished as a
+        # healthy provision. A run that describes a mute box and grades it
+        # healthy is not a check anyone can act on.
+        #
+        # install-voice.sh now answers that board with 13, so 11 should never
+        # arrive here again. The branch stays, and it fails, because a code
+        # whose meaning is "no engine applies to this board" must never be the
+        # one that grades clean if any future path revives it — leaving the
+        # lenient branch behind is exactly how the sibling call sites in #519,
+        # #533 and #544 stayed unguarded after each fix.
+        TTS_RC=13
+        echo "  ############################################################" >&2
+        echo "  # This box has NO working TTS engine — no Kokoro GPU build and" >&2
+        echo "  # no pinned Piper artifact apply to this CPU architecture." >&2
+        echo "  # It will answer every spoken request with SILENCE." >&2
+        echo "  # Engines and reasons: $TTS_STATUS_FILE" >&2
+        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
+        echo "  ############################################################" >&2
+        record_provision_failure openclaw_tts
+        ;;
     12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
         # ── A hard failure must stop arriving as a soft fallback ─────────────
         # This is the branch that made a shipped defect invisible. Kokoro's
@@ -2674,6 +2699,14 @@ step_openclaw_tts() {
         echo "  ############################################################" >&2
         echo "  # This box has NO working TTS engine — neither Kokoro nor Piper." >&2
         echo "  # It will answer every spoken request with SILENCE." >&2
+        # Both engines named with the reason each one is absent. 13 now covers
+        # the board that DECLINED both halves as well as the one whose install
+        # failed, and "neither engine is here" is not an actionable report on
+        # its own — which half declined for want of CUDA and which one failed
+        # its download lead to different fixes. The verdicts are what the run
+        # published, so they are what gets printed.
+        echo "  # Kokoro (GPU): ${KOKORO_VERDICT:-no verdict published}" >&2
+        echo "  # Piper (CPU):  ${PIPER_VERDICT:-no verdict published}" >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
         record_provision_failure openclaw_tts
@@ -2840,20 +2873,16 @@ step_openclaw_tts() {
         # install_kokoro_tts's "no Jetson CUDA build for this architecture",
         # i.e. `uname -m` is not aarch64 — which is exactly when
         # install_piper_engine has no pinned artifact either and publishes
-        # `skipped:arch-*` of its own. install-voice.sh has just printed "=== No
-        # on-device TTS engine applies to this board ===" for that pair, so
-        # naming a Piper CPU fallback one line later put the name of an engine
-        # this box does not have on the summary line an operator reads.
+        # `skipped:arch-*` of its own. So 11 is a box with NO engine.
         #
-        # Deliberately NOT a recorded provisioning failure: nothing was asked
-        # for and nothing is missing on a board neither engine ships for, which
-        # is the same rule `skipped:*` carries in step_validate_services.
-        #
-        # On stdout, not stderr, for the same reason: install-voice.sh prints
-        # its "no engine applies to this board" line on stdout too, and painting
-        # every install-x64.sh run red would only teach everyone to ignore it.
-        echo "  On-device TTS configured, but no speech engine applies to this CPU architecture"
-        echo "  (no Jetson CUDA build and no pinned Piper artifact) — this box answers speech with SILENCE"
+        # It used to print these two lines on stdout and record nothing, which
+        # meant the run said "this box answers speech with SILENCE" and then
+        # graded itself healthy. It is a recorded provisioning failure now (see
+        # the 11 arm above), so this line reports the same fact the rest of the
+        # step reports, on stderr with the other failures rather than in the
+        # middle of the success summary.
+        echo "  On-device TTS configured, but no speech engine applies to this CPU architecture" >&2
+        echo "  (no Jetson CUDA build and no pinned Piper artifact) — this box answers speech with SILENCE" >&2
         ;;
       1)
         # An engine SURVIVES here — install-voice.sh returns 13, not 1, when
@@ -4932,11 +4961,17 @@ step_validate_services() {
     # Probe: on-device TTS delivered the engine it was asked for.
     #
     # scripts/install-voice.sh publishes its verdict to $TTS_STATUS_FILE for
-    # exactly this check. The distinction the file carries is the whole point:
-    # `skipped:*` means this board was never going to run Kokoro (no CUDA, no
-    # Jetson build for its architecture) and is a PASS, while `failed:*` means
-    # the GPU engine was requested and did not arrive — the box is on the Piper
-    # CPU fallback and someone has to fix it.
+    # exactly this check. The distinction the file carries tells an operator
+    # WHAT to fix: `skipped:*` means this board was never going to run that
+    # engine (no CUDA, no Jetson build for its architecture), `failed:*` means
+    # it was requested and did not arrive.
+    #
+    # What the distinction does NOT decide is whether the check passes. That is
+    # decided by one question asked of both engines together — is either one
+    # `ready`? A `skipped:*` engine is a PASS only while the other half is
+    # carrying the box; two skipped engines is a box with no voice, and it used
+    # to score healthy here because the arm below asked for a `failed:*` before
+    # it would report one.
     #
     # An ABSENT verdict fails too. The TTS step runs before this check on both
     # the install and the update path, so nothing here can assert "Kokoro is
@@ -5008,12 +5043,38 @@ step_validate_services() {
         # HEALTHY box lands (both engines `ready` match no arm), so an `else`
         # there would fail every good box on the shelf.
         failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
-      elif [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]         && { [ "$kokoro_failed" = true ] || [ "$piper_failed" = true ]; }; then
-        # The defect this probe was rewritten for. Note what does NOT land here:
-        # both engines `skipped:*` is a board that runs neither by design (no
-        # Jetson CUDA build AND no pinned aarch64 artifact), and failing every
-        # install-x64.sh run would only teach everyone to ignore this check.
-        failed_probe+=("TTS: this box has NO working TTS engine — Kokoro was requested and did NOT install (${tts_state:-unreported}) or is unavailable, and there is no usable Piper fallback (${piper_state:-unreported}). It will answer every spoken request with SILENCE. $tts_fix")
+      elif [ -n "$tts_state" ] && [ -n "$piper_state" ] \
+        && [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]; then
+        # ── No `ready` engine is a FAILED check, whatever the reasons are ────
+        # This arm used to carry `&& { kokoro_failed || piper_failed }`, so a
+        # box whose two verdicts were both `skipped:*` matched no arm at all and
+        # fell out of the chain as a silent PASS. The comment defending it said
+        # both engines skipped is "a board that runs neither by design" and that
+        # failing every install-x64.sh run "would only teach everyone to ignore
+        # this check".
+        #
+        # install-x64.sh does not run this check. It contains no reference to
+        # voice, TTS, Piper or Kokoro, and `grep -n 'install-voice.sh' *.sh`
+        # names install.sh:2602 as the only caller of the script that publishes
+        # these verdicts. So the run the leniency was protecting does not exist,
+        # and what the leniency actually passed was a box that answers every
+        # spoken request with silence.
+        #
+        # `ready` is the only verdict that means an engine can speak, and this
+        # arm asks nothing else. Both reasons are printed because "no engine" is
+        # not actionable on its own — a skip and a failed download are different
+        # repairs.
+        failed_probe+=("TTS: this box has NO working TTS engine — Kokoro: $tts_state, Piper: $piper_state. Neither engine is installed, so it will answer every spoken request with SILENCE. $tts_fix")
+      elif [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]; then
+        # Same rule, weaker evidence: one half published a verdict that is not
+        # `ready` and the other published nothing. That is still no engine this
+        # box can prove it has, so it still fails — but it is NOT stated as
+        # "answers with SILENCE", because an unreported half is unknown rather
+        # than absent, and asserting a mute box from a missing line would be the
+        # failure-report-over-a-success this file keeps having to remove. The
+        # arms below stay reachable and stay accurate: past this point exactly
+        # one engine is `ready`, so each of them names the half that is not.
+        failed_probe+=("TTS: no on-device TTS engine on this box is confirmed ready — Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}. $tts_fix")
       elif [ "$kokoro_failed" = true ]; then
         failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box answers speech on the Piper CPU fallback. $tts_fix")
       elif [ -z "$tts_state" ]; then
