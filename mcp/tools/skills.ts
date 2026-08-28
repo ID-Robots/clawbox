@@ -14,6 +14,7 @@ import {
   SORT_OPTIONS,
   checkInstallIdentifier,
   isBrowsableSource,
+  isRemovableOrigin,
   isValidQuery,
   isValidSkillName,
 } from "../../src/lib/hermes-skills";
@@ -120,10 +121,16 @@ const INSTALL_RULES: ErrorRule[] = [
   },
 ];
 
-// The two reasons a skill cannot be removed, worded once. skill_uninstall can
-// reach either conclusion twice over — from the installed list in its own
-// pre-condition, or from the route's 404/409 when that list could not be read —
-// and one device state must not produce two different sentences.
+// The reasons a skill cannot be removed, worded once per DEVICE STATE.
+// skill_uninstall can reach a conclusion two ways — from the installed list in
+// its own pre-condition, or from the route's 404/409 when that list could not be
+// read — and one device state must not produce two different sentences.
+//
+// The pre-condition's three refusals below are for states it can actually tell
+// apart, because it has the list. The route's `not_installed` is worded
+// separately, in uninstallRules(), for the opposite reason: from there the list
+// is unreadable, so "not on the device" and "here but not from the store" are
+// one indistinguishable state and only the weaker of the two claims is true.
 const notInstalledMessage = (name: string) =>
   `There is no installed skill called "${name}" on this device.`;
 const NOT_INSTALLED_NEXT =
@@ -132,6 +139,15 @@ const builtinMessage = (name: string) => `"${name}" came with the device, so it 
 const BUILTIN_NEXT =
   "Only skills that skill_list marks \"from the store\" can be removed. "
   + "Tell the user this one is built in. Do not retry.";
+// The THIRD origin. `hermes skills uninstall` works off the hub lock, so a
+// directory that is in neither the lock nor .bundled_manifest cannot be removed
+// from here — by the store either, which is why the Skills page has always
+// badged it rather than offering Remove.
+const localMessage = (name: string) =>
+  `"${name}" is on this device but was not installed from the skill store, `
+  + "so it cannot be removed from here.";
+const LOCAL_NEXT =
+  "Do not retry. Tell the user its folder has to be deleted on the device.";
 
 /**
  * Built per call so the refusals can name the skill, exactly as the
@@ -154,11 +170,20 @@ const uninstallRules = (name: string): ErrorRule[] => [
     next: "Call skill_list and pass the name field of the skill you want removed.",
   },
   {
+    // The route reaches `not_installed` for a name that is in neither the hub
+    // lock nor .bundled_manifest — which is a name the device does not have AND
+    // a name it has as a `local` directory, and its own sentence says "No STORE
+    // skill called x is installed". This rule only ever runs when the installed
+    // list could not be read, so the two cannot be told apart here; claiming the
+    // stronger of them is how a skill that skill_list shows came to be reported
+    // as not installed at all.
     status: 404,
     match: /"code"\s*:\s*"not_installed"/,
     code: "NOT_FOUND",
-    message: notInstalledMessage(name),
-    next: NOT_INSTALLED_NEXT,
+    message: `There is no installed skill called "${name}" that came from the skill store.`,
+    next:
+      "Do not retry this name. Call skill_list: if it is not listed, it is not installed; "
+      + "if it is listed, it was made on this device and its folder has to be deleted there.",
   },
   {
     status: 409,
@@ -213,9 +238,16 @@ async function installedSkills(): Promise<InstalledSkill[] | null> {
 }
 
 /**
- * Is this row a skill the store put there, as opposed to one that shipped with
- * the device? `origin` is "builtin" | "hub" | "local"; a row with no origin at
- * all is treated as built in, exactly as the uninstall pre-condition does.
+ * Is this row anything OTHER than a skill that shipped with the device? A row
+ * with no origin at all is treated as built in, exactly as the uninstall
+ * pre-condition does.
+ *
+ * Deliberately wider than isRemovableOrigin(), which is what decides whether a
+ * skill can be uninstalled: this is the POST-condition's test, and the
+ * half-removed state #517 and TASK-547 both name — the CLI drops the lock entry
+ * and cannot delete the directory — brings the row back as `local`, which is a
+ * FAILED uninstall. Narrowing this to `hub` would report it as a success. Only
+ * un-shadowing a builtin counts as the name legitimately staying.
  */
 function isStoreSkill(s: InstalledSkill): boolean {
   return !!s.origin && s.origin !== "builtin";
@@ -490,7 +522,13 @@ export function registerSkillTools(reg: Registrar): void {
       // is 2 KB of noise that says nothing.
       const lines = (body.skills ?? []).map((s) => {
         const marks: string[] = [];
-        if (s.origin && s.origin !== "builtin") marks.push("from the store");
+        // "from the store" is the mark this tool's own description, the header
+        // below and skill_uninstall's builtin refusal all use to mean REMOVABLE,
+        // so it has to be the removable rule and nothing wider. A `local` row is
+        // not built in either, and saying nothing about it would leave the only
+        // unexplained row on the list, so it gets its own mark.
+        if (isRemovableOrigin(s.origin)) marks.push("from the store");
+        else if (s.origin === "local") marks.push("made on this device, cannot be removed from here");
         if (s.incompatible) marks.push("cannot run here");
         if (s.enabled === false) marks.push("disabled");
         return `${s.name} (${s.category ?? "other"})${marks.length ? ` — ${marks.join(", ")}` : ""}`;
@@ -498,7 +536,7 @@ export function registerSkillTools(reg: Registrar): void {
       const c = body.counts ?? {};
       const header = `${c.total ?? lines.length} skills installed. `
         + "Only the ones marked \"from the store\" can be removed with skill_uninstall; "
-        + "the rest came with the device.";
+        + "the rest came with the device or were made on it.";
       return text([header, ...lines].join("\n"));
     },
   );
@@ -682,15 +720,21 @@ export function registerSkillTools(reg: Registrar): void {
       const before = await installedSkills();
       let removing: InstalledSkill | undefined;
       if (before) {
-        // The store copy, not the builtin it may be shadowing: when both are
-        // listed under one name, the store one is the only removable row and
-        // its identifier is what the post-condition needs.
-        const entry = before.find((sk) => sk.name === name && isStoreSkill(sk)) ?? before.find((sk) => sk.name === name);
+        // The hub copy, not the builtin it may be shadowing: when both are
+        // listed under one name, the hub one is the only removable row and its
+        // identifier is what the post-condition needs.
+        const entry = before.find((sk) => sk.name === name && isRemovableOrigin(sk.origin)) ?? before.find((sk) => sk.name === name);
         if (!entry) {
           throw new ToolError("NOT_FOUND", notInstalledMessage(name), NOT_INSTALLED_NEXT);
         }
-        if (!isStoreSkill(entry)) {
-          throw new ToolError("CONFLICT", builtinMessage(name), BUILTIN_NEXT);
+        if (!isRemovableOrigin(entry.origin)) {
+          // Three origins, three answers. Calling a `local` skill built in would
+          // be wrong (it did not ship with the device) and letting it through to
+          // the route would earn a 404 that reads as "there is no such skill" —
+          // about a skill skill_list is listing.
+          throw entry.origin === "local"
+            ? new ToolError("CONFLICT", localMessage(name), LOCAL_NEXT)
+            : new ToolError("CONFLICT", builtinMessage(name), BUILTIN_NEXT);
         }
         removing = entry;
       }

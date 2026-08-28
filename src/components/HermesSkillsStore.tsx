@@ -15,6 +15,7 @@ import {
   type SortOption,
   MAX_FACET_VALUES,
   SORT_OPTIONS,
+  isRemovableOrigin,
   sourceLabel,
   trustMeta,
 } from '@/lib/hermes-skills';
@@ -154,8 +155,10 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
         (s) => s.identifier === skill.id || (s.origin === 'hub' && s.id === skill.id),
       );
       // Only hub-installed skills are removable: `hermes skills uninstall`
-      // works off the lock, so a Remove for anything else can only fail.
-      if (!match || match.origin !== 'hub') return null;
+      // works off the lock, so a Remove for anything else can only fail. The
+      // rule is shared with the agent's skill_list/skill_uninstall so the page
+      // and the assistant cannot answer one device state two ways.
+      if (!match || !isRemovableOrigin(match.origin)) return null;
       return { name: match.id, key: skill.id, identifier: match.identifier || skill.id };
     },
     [installed.skills],
@@ -360,7 +363,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
       // Only skills the STORE installed are removable: `hermes skills uninstall`
       // works off the hub lock, so offering Remove for a bundled skill or one
       // the agent wrote itself would be a button that can only fail.
-      if (skill.origin !== 'hub') {
+      if (!isRemovableOrigin(skill.origin)) {
         return (
           <span className="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
@@ -716,7 +719,8 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   // ── Detail view ───────────────────────────────────────────────────────────
   if (selected) {
     // Same rule as the installed cards: only hub-installed skills get an action.
-    const fixedOrigin = 'origin' in selected && selected.origin !== 'hub' ? selected.origin : null;
+    const fixedOrigin =
+      'origin' in selected && !isRemovableOrigin(selected.origin) ? selected.origin : null;
     const action = fixedOrigin ? (
       <span className="inline-flex items-center gap-1 text-sm text-[var(--text-secondary)]">
         <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
