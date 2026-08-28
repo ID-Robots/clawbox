@@ -4,6 +4,7 @@ import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
+import { readUsableProviderIds, refreshProviderToolsIfSetChanged } from "@/lib/provider-mcp-refresh";
 import { setHermesEnvValues } from "@/lib/hermes-env";
 import {
   HERMES_IMAGE_PLUGIN_NAME,
@@ -129,6 +130,12 @@ export async function applyClawaiToHermes(
   // and it is the order the readiness text itself asks for ("ClawBox AI is not
   // connected. Open Settings → AI Models and sign in to ClawBox AI first.").
   const codingReadyBefore = options.codingAgentReadyBefore ?? (await codingAgentReady());
+  // And the THIRD, which is the same fact from the picker's side: connecting
+  // credentials the `clawai` provider, and the ClawBox MCP server turned the
+  // provider list into `ai_set_provider`'s enum from one read taken while it
+  // booted. Sampled here, ahead of every write below, for the same reason as
+  // its two neighbours.
+  const providersBefore = await readUsableProviderIds();
 
   const vision = await resolveVisionModelId({ token: trimmed });
   let visionModelId: string | null = vision.id;
@@ -281,18 +288,28 @@ export async function applyClawaiToHermes(
   // above just moved, so this sees the new value rather than a memo of the old.
   const respawnedMcpChildren = await refreshHermesImageTools(couldDrawBefore, await hermesAgentDrawsImages());
 
+  // And the providers the agent may switch to, which the credential just written
+  // added to the catalogue. ONE respawn across all three families: `reload.mcp`
+  // kills and respawns every MCP child and invalidates the model's prompt cache,
+  // and a link that moves three families is still one fact about one box — so if
+  // the image reconcile above already reloaded (or bounced, which respawns the
+  // children with the dashboard), this one reports rather than pays for a
+  // second. Whichever family asks first pays; the rest report.
+  const respawnedForProviders = await refreshProviderToolsIfSetChanged(
+    providersBefore,
+    await readUsableProviderIds(),
+    { alreadyReloaded: respawnedMcpChildren },
+  );
+
   // And the coding-agent family, which the token just written may have made
-  // runnable. ONE respawn between the two: `reload.mcp` kills and respawns every
-  // MCP child and invalidates the model's prompt cache, and a link that moves
-  // both families is still one fact about one box — so if the image reconcile
-  // above already reloaded (or bounced, which respawns the children with the
-  // dashboard), this one reports rather than pays for a second.
+  // runnable — last in the chain, so it sees whether either neighbour already
+  // paid for the respawn it needs.
   const codingReadyAfter = await codingAgentReady();
   if (codingReadyBefore !== null && codingReadyAfter !== null) {
     await refreshCodingAgentToolsIfReadinessChanged(
       codingReadyBefore,
       codingReadyAfter,
-      { alreadyReloaded: respawnedMcpChildren },
+      { alreadyReloaded: respawnedMcpChildren || respawnedForProviders },
     );
   }
 

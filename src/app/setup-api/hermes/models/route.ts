@@ -282,6 +282,14 @@ export async function POST(request: Request) {
   } finally {
     // The device's selection changed (or attempted to) — never serve the old
     // `current` from cache.
+    //
+    // THE ONE `invalidateModelOptions()` SITE WITH NO MCP REFRESH BESIDE IT, and
+    // deliberately. Its five siblings move CREDENTIALS, which is what changes the
+    // set `mcp/lib/context.ts` builds `ai_set_provider`'s enum from; this one
+    // moves only the SELECTION, and every provider it will accept had to be in
+    // that set already (`isAllowedProvider` above). More to the point, this route
+    // is what `ai_set_provider` itself POSTs to — asking for a global
+    // `reload.mcp` here would shut down the very MCP child that is mid-call.
     invalidateModelOptions();
   }
 

@@ -6,6 +6,7 @@ import {
   isAllowedProvider,
   scopeFromPayload,
 } from "@/lib/hermes-model-options";
+import { withProviderMcpRefresh } from "@/lib/provider-mcp-refresh";
 
 // Applying an API-key cloud provider to a HERMES device.
 //
@@ -59,6 +60,18 @@ export interface HermesCloudApplyResult {
  *   stderr can carry the binary path, and the key must never be echoed back.
  */
 export async function applyCloudProviderKeyToHermes(opts: {
+  openclawProvider: string;
+  apiKey: string;
+}): Promise<HermesCloudApplyResult> {
+  // Storing a key here credentials a provider the ClawBox MCP server has never
+  // heard of: it read the provider list ONCE, while it booted, and turned it
+  // into `ai_set_provider`'s enum. The wrapper samples that set either side of
+  // the work below and asks the agent to re-advertise only when it actually
+  // moved — see `provider-mcp-refresh.ts`.
+  return withProviderMcpRefresh(() => applyCloudProviderKey(opts));
+}
+
+async function applyCloudProviderKey(opts: {
   openclawProvider: string;
   apiKey: string;
 }): Promise<HermesCloudApplyResult> {
