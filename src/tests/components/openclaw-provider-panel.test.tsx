@@ -201,6 +201,42 @@ describe("OpenClaw AI provider panel — Hermes treatment", () => {
     expect(screen.queryByTestId("provider-default-hero")).not.toBeInTheDocument();
   });
 
+  it("scrolls to the model picker once per Change-model press, not on every later row click", async () => {
+    // The counter behind "Change model" never returns to zero, and the effect
+    // that acts on it has to watch the row/catalog/picker state because the
+    // picker is not in the DOM until all three settle. Without a
+    // handled-marker that combination re-fires on every subsequent row click:
+    // the page scrolls and focus jumps into a model field the customer never
+    // asked for, long after the one press that did ask.
+    const scrollSpy = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollSpy;
+    try {
+      vi.unstubAllGlobals();
+      stubFetch({
+        ...summary,
+        defaultProvider: "anthropic",
+        providers: summary.providers.map((row) => ({ ...row, isDefault: row.id === "anthropic" })),
+      });
+      renderPanel({ currentProviderId: "anthropic", currentModel: "anthropic/claude-opus-4-8" });
+
+      const hero = await screen.findByTestId("provider-default-hero");
+      fireEvent.click(within(hero).getByRole("button", { name: "Change model" }));
+      await waitFor(() => expect(scrollSpy).toHaveBeenCalledTimes(1));
+
+      // Now browse to another provider. That is not a request to move.
+      scrollSpy.mockClear();
+      await expandCatalogue();
+      const group = screen.getByRole("radiogroup", { name: "AI Provider" });
+      const google = within(group).getAllByRole("radio").find((r) => (r as HTMLInputElement).value === "google");
+      fireEvent.click(google!);
+      await waitFor(() => expect(google).toBeChecked());
+      expect(scrollSpy).not.toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it("shows no hero on the Local AI surface, whose default is a different section", async () => {
     renderPanel({
       providerIds: ["llamacpp"],

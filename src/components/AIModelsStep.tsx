@@ -633,12 +633,22 @@ export default function AIModelsStep({
   // rather than growing a second one in the hero. Bumped as a counter, not a
   // boolean, so pressing it again re-scrolls after they have clicked away.
   const [focusModelRequest, setFocusModelRequest] = useState(0);
+  // The last request this effect actually landed. The counter never returns to
+  // zero, and the effect has to watch the row/catalog/picker state because the
+  // picker is not in the DOM until all three have settled — so without this,
+  // every later click on ANY provider row would re-run the effect, scroll the
+  // page and steal focus into that provider's model field, long after the one
+  // "Change model" press that asked for it.
+  const handledFocusRequestRef = useRef(0);
   useEffect(() => {
     if (!focusModelRequest) return;
+    if (handledFocusRequestRef.current === focusModelRequest) return;
     // Re-runs as the row switches and its catalog lands, because the picker
-    // does not exist in the DOM until both have happened.
+    // does not exist in the DOM until both have happened. The request is only
+    // marked handled once the element is really there, so the retry survives.
     const el = document.getElementById("ai-provider-model");
     if (!el) return;
+    handledFocusRequestRef.current = focusModelRequest;
     el.scrollIntoView({ block: "center", behavior: "smooth" });
     el.focus();
   }, [focusModelRequest, selectedProvider, activeCatalog, modelPickerOpen]);
