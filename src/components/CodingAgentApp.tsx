@@ -3,68 +3,46 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
+import CodingAgentReportPreview from "./CodingAgentReportPreview";
+import { formatBytes } from "@/lib/format-bytes";
+import { renderText } from "@/lib/chat-markdown";
+import { artifactUrl } from "@/lib/use-coding-agent-activity";
+import {
+  buildNewAppPrompt,
+  dispatchChatMessage,
+  dispatchOpenApp,
+  dispatchOpenSettingsSection,
+  onCodingAgentChanged,
+  onStandaloneAppPage,
+  standaloneSettingsHref,
+  type NewAppTemplate,
+} from "@/lib/ui-events";
+import { copyToClipboard } from "@/lib/clipboard";
+import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.
  *
- * The owner's switch for letting the assistant delegate coding work to a
- * headless Claude Code run (src/lib/coding-agent.ts), what such a run needs
- * and whether it is there, and the recent runs with their summaries.
+ * What a headless Claude Code run (src/lib/coding-agent.ts) needs and whether
+ * it is there, a one-tap smoke test of that harness, and the recent runs with
+ * their summaries and evidence.
  *
- * The switch is the CONSENT for a feature that edits files unattended, which
- * is why the route behind it refuses the agent's own credential — see
- * src/app/setup-api/coding-agent/enable/route.ts. Like SystemProfilePanel the
- * switch is not optimistic: it renders the state the route answers with.
+ * Above the runs, the owner's projects: every folder with a git history of
+ * its own in their project folder, with what it is called, its last commit,
+ * whether it is on the desktop and whether a run is working in it. The New
+ * app wizard beside them does not start a run: it composes ONE message and
+ * hands it to the mascot chat, because the assistant is the party that
+ * scaffolds, delegates and verifies, and the owner continues there.
+ *
+ * The owner's switch, the project folder, the effort and the GitHub account
+ * live in Settings → Coding Agent (CodingAgentSettingsPanel) now; the header
+ * links there. The app still reads the same status route, because "is it on
+ * and can it run" is the first thing this window has to answer, and the same
+ * git route, because a run's Backup button only exists for a connected account.
  *
  * This icon used to open a terminal already running `claude-ds`. It opens this
- * instead, so the app and the thing it configures are finally the same thing —
- * and the header says where the interactive session went, because an owner who
- * relied on it should not have to go looking.
+ * instead, so the app and the thing it configures are finally the same thing.
  */
-
-interface Readiness {
-  ready: boolean;
-  wrapperInstalled: boolean;
-  claudeInstalled: boolean;
-  clawaiConnected: boolean;
-  /** setpriv, which strips the web server's network capabilities off a run.
-   *  Not given a row of its own: it is present on every ClawBox, and when it
-   *  is not, `problems` says so in the owner's words. */
-  capabilityDropAvailable: boolean;
-  problems: string[];
-}
-
-type Effort = "low" | "medium" | "high" | "xhigh" | "max";
-
-interface GitHubState {
-  installed: boolean;
-  connected: boolean;
-  login: string | null;
-  loginCommand: string;
-  /** "unreachable" means gh is here but could not reach github.com — a
-   *  network fault. "not_runnable" means it is here and would not execute, so
-   *  the remedy is permissions, not `gh auth login`. Neither reads like a
-   *  missing install, and neither reads like "not connected": every reason the
-   *  library can answer has an arm below, or the card says something false. */
-  reason?: "not_installed" | "unreachable" | "not_runnable";
-}
-
-interface AgentStatus {
-  enabled: boolean;
-  ready: boolean;
-  readiness: Readiness;
-  running: number;
-  /** The folder a run uses when the assistant names neither project nor path. */
-  defaultDirectory: string | null;
-  effort: Effort;
-  effortLevels: Effort[];
-  subagents: boolean;
-  maxTurns: number;
-  minMaxTurns: number;
-  maxMaxTurns: number;
-  tokenLimit: number | null;
-  minTokenLimit: number;
-}
 
 interface Run {
   id: string;
@@ -98,6 +76,52 @@ interface Run {
   sessionId?: string | null;
   /** Where Claude Code keeps this run's transcript, for the live preview. */
   transcriptPath?: string | null;
+  /** The run's evidence folder — screenshots, test output and its report.md.
+   *  `markdown` is the kind that opens rendered in the app; every other
+   *  non-image opens as the plain text the route serves it as. */
+  artifacts?: { name: string; bytes: number; kind: "image" | "markdown" | "text" | "other" }[];
+}
+
+/**
+ * The status payload as this app reads it: the shared wire type plus the
+ * task ceiling, which only the New wizard needs — it is the bound the run
+ * route will hold the assistant's task to, so the description is held to it
+ * here, before the handoff.
+ */
+type AppStatus = AgentStatus & { maxTaskChars?: number };
+
+/** One project, as GET /setup-api/coding-agent/projects describes it. */
+interface Project {
+  folder: string;
+  directory: string;
+  /** The owner's project folder, or a code project under data/code-projects. */
+  kind: "folder" | "codeProject";
+  name: string;
+  lastCommit: { subject: string; date: number } | null;
+  onDesktop: boolean;
+  latestRun: Pick<Run, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+}
+
+/**
+ * The longest name the wizard accepts — the same bound as
+ * assertProjectName in src/lib/code-projects.ts (MAX_PROJECT_NAME_LENGTH),
+ * which is what refuses the name once the assistant scaffolds the project.
+ * Checked here so the owner hears it before the handoff, not from a tool
+ * error in the chat. Exported so a test can pin the two together; a client
+ * component cannot import the library constant, which pulls in fs.
+ */
+export const NEW_APP_NAME_MAX = 60;
+/** Order and default of the "start from" select — initProject's templates. */
+const NEW_APP_TEMPLATES: readonly NewAppTemplate[] = ["app", "blank"];
+
+/**
+ * The desktop's id for a deployed web app. page.tsx builds every installed
+ * app's id as `installed-<appId>`, and a web app's appId is its folder under
+ * data/webapps — the project folder. Exported so the test can pin the
+ * spelling against the one the desktop matches on.
+ */
+export function installedAppId(folder: string): string {
+  return `installed-${folder}`;
 }
 
 /** One page of runs. The list is open by default now, so it has to be paged
@@ -107,43 +131,6 @@ const RUNS_PAGE = 10;
 /** Where the preview script lives on the device. */
 const CLAWBOX_ROOT = "/home/clawbox/clawbox";
 const POLL_MS = 5_000;
-/** How often to ask again while the GitHub answer is one we do not trust. */
-const GITHUB_REPROBE_MS = 15_000;
-
-function Switch({
-  checked, busy, disabled, label, onChange,
-}: {
-  checked: boolean;
-  busy: boolean;
-  disabled: boolean;
-  label: string;
-  onChange: (next: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center gap-2 shrink-0">
-      {busy && (
-        <span className="material-symbols-rounded animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-          progress_activity
-        </span>
-      )}
-      <button
-        type="button"
-        role="switch"
-        aria-label={label}
-        aria-checked={checked}
-        aria-busy={busy}
-        disabled={disabled || busy}
-        onClick={() => onChange(!checked)}
-        data-testid="coding-agent-switch"
-        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
-          checked ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-        }`}
-      >
-        <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${checked ? "translate-x-6" : "translate-x-1"}`} />
-      </button>
-    </div>
-  );
-}
 
 /** Elapsed time, readable at every scale a run can reach — seconds to days. */
 function duration(run: Run): string {
@@ -179,6 +166,30 @@ function firstLine(text: string, max = 100): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/** Single-quote a value for the terminal command line. */
+function quoted(v: string): string {
+  return `'${v.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * The canned smoke task the Test harness button dispatches: one tiny page,
+ * verified through the browser stack, in a dedicated scratch project. It
+ * exercises the whole delegation pipeline — spawn, brief, browser MCP,
+ * vision description, evidence folder, summary — and says so plainly, so the
+ * "a short task is not a small task" bar in the brief does not inflate it.
+ */
+const HARNESS_TEST_PROJECT = "harness-test";
+const HARNESS_TEST_TASK =
+  "Harness self-test — a smoke test of the tooling, not a real feature. "
+  + "Make index.html in this folder show the text HARNESS OK, centered, white on #1a1a2e, nothing else. "
+  + "Then open it with browser_view_local and confirm the description shows that text. "
+  + "Keep it minimal and fast: no polish, no extra features, no sub-agents. "
+  + "Report what you built and what the description confirmed.";
+
+/** The Settings link, whichever element it renders as. */
+const OPEN_SETTINGS_CLASS =
+  "flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0 no-underline";
+
 const STATUS_CLASS: Record<Run["status"], string> = {
   running: "text-amber-400 border-amber-400/40",
   completed: "text-emerald-400 border-emerald-400/40",
@@ -188,12 +199,14 @@ const STATUS_CLASS: Record<Run["status"], string> = {
 
 export default function CodingAgentApp() {
   const { t } = useT();
-  const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [status, setStatus] = useState<AppStatus | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  /** The markdown artifact open in the preview dialog, if any. */
+  const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
@@ -202,18 +215,34 @@ export default function CodingAgentApp() {
   const [showRuns, setShowRuns] = useState(true);
   const [runsShown, setRunsShown] = useState(RUNS_PAGE);
   const [github, setGithub] = useState<GitHubState | null>(null);
-  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  // Decided once: the route does not change under a mounted window. The
+  // Settings link renders differently on the standalone page (below), and
+  // the New app wizard is not offered there at all: it ends in the mascot
+  // chat, which that page does not mount, so a message dispatched from it
+  // would reach nothing while the card said "handed to the assistant".
+  const [standalone] = useState(onStandaloneAppPage);
+  const [projects, setProjects] = useState<Project[]>([]);
+  /** The project folder the list was read from; null until one is set. */
+  const [projectsDir, setProjectsDir] = useState<string | null>(null);
+  /** Which folder name was just copied, for the two-second "Copied". */
+  const [copiedFolder, setCopiedFolder] = useState<string | null>(null);
+  // The New app wizard: an inline card, closed by Cancel, by Create, and
+  // never by a poll. `handed` is the line left behind once the message is
+  // in the chat — the card is gone by then, and the chat is where to look.
+  const [showNew, setShowNew] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newWhat, setNewWhat] = useState("");
+  const [newTemplate, setNewTemplate] = useState<NewAppTemplate>(NEW_APP_TEMPLATES[0]);
+  const [newError, setNewError] = useState<string | null>(null);
+  const [handed, setHanded] = useState(false);
   // Clearing is two clicks, not a browser confirm(): the second click is the
   // confirmation, and collapsing the list takes the offer back.
   const [confirmClear, setConfirmClear] = useState(false);
-  // The folder field is a DRAFT until saved, so typing does not fight the
-  // status the route keeps returning.
-  const [dirDraft, setDirDraft] = useState<string | null>(null);
 
   // `load` must not re-run because a translation function was re-created: a
-  // refetch on every render would overwrite a freshly toggled switch with the
-  // stale status it read a moment earlier. Read `t` through a ref instead,
-  // synchronised after commit so a discarded render never leaks into it.
+  // refetch on every render would restart the live poll and overwrite the
+  // run list mid-read. Read `t` through a ref instead, synchronised after
+  // commit so a discarded render never leaks into it.
   const tRef = useRef(t);
   useEffect(() => {
     tRef.current = t;
@@ -221,20 +250,26 @@ export default function CodingAgentApp() {
 
   const load = useCallback(async () => {
     try {
-      const [s, r, g] = await Promise.all([
+      const [s, r, g, p] = await Promise.all([
         fetch("/setup-api/coding-agent/status", { cache: "no-store" }),
-        fetch(`/setup-api/coding-agent/runs?limit=30`, { cache: "no-store" }),
+        fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }),
         fetch("/setup-api/coding-agent/git", { cache: "no-store" }),
+        // Read on the same cadence as the runs, and no faster: each project
+        // costs the device a `git log` per poll.
+        fetch("/setup-api/coding-agent/projects", { cache: "no-store" }),
       ]);
       if (!s.ok) throw new Error("status");
-      const next = await s.json() as AgentStatus;
-      setStatus(next);
-      setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
+      setStatus(await s.json() as AppStatus);
       if (r.ok) {
         const data = await r.json() as { runs?: Run[] };
         setRuns(Array.isArray(data.runs) ? data.runs : []);
       }
       if (g.ok) setGithub(await g.json() as GitHubState);
+      if (p.ok) {
+        const data = await p.json() as { directory?: string | null; projects?: Project[] };
+        setProjects(Array.isArray(data.projects) ? data.projects : []);
+        setProjectsDir(typeof data.directory === "string" ? data.directory : null);
+      }
     } catch {
       setError(tRef.current("codingAgent.loadFailed"));
     } finally {
@@ -244,16 +279,29 @@ export default function CodingAgentApp() {
 
   useEffect(() => { void load(); }, [load]);
 
-  /** Just the GitHub half of `load()`. The re-probe below wants this one answer
-   *  refreshed and nothing else: re-running the whole load on a timer would also
-   *  overwrite the run list and fight the folder draft for no reason. */
+  // The settings live in another window now. Re-read the box when Settings
+  // says it saved something — the chip, the checklist and a run's Backup
+  // button all follow the switch and the GitHub account — and when this tab
+  // comes back into view, which is how a phone returns from /app/settings.
+  useEffect(() => {
+    const onVisible = () => { if (document.visibilityState === "visible") void load(); };
+    const off = onCodingAgentChanged(() => { void load(); });
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [load]);
+
+  /** Just the GitHub half of `load()`, for the moment a backup is refused:
+   *  a 503 usually means the probe would answer differently now, and
+   *  re-running the whole load would overwrite the run list for no reason. */
   const loadGithub = useCallback(async () => {
     try {
       const g = await fetch("/setup-api/coding-agent/git", { cache: "no-store" });
       if (g.ok) setGithub(await g.json() as GitHubState);
     } catch {
-      // A failed re-probe is not new information — the card already says the
-      // uplink is down. Leave the badge alone and ask again next tick.
+      // A failed re-probe is not new information. Leave the buttons alone.
     }
   }, []);
 
@@ -265,89 +313,12 @@ export default function CodingAgentApp() {
     return () => clearInterval(id);
   }, [anyRunning, load]);
 
-  // `githubStatus()` refuses to cache an `unreachable` answer, and says why:
-  // "caching one would outlive the outage that produced it and go on refusing
-  // backups after the uplink came back". Holding it in React state and never
-  // asking again is that same cache one layer out — the card went on saying
-  // "GitHub unreachable" for as long as the panel stayed mounted, with no
-  // refresh affordance, long after the uplink was back.
-  //
-  // Only the inconclusive reason re-probes. "not_installed" and "not_runnable"
-  // are properties of the box, not of this moment, and polling them would be a
-  // timer with nothing to learn.
-  const githubInconclusive = github?.reason === "unreachable";
-  useEffect(() => {
-    if (!githubInconclusive) return;
-    const id = setInterval(() => { void loadGithub(); }, GITHUB_REPROBE_MS);
-    return () => clearInterval(id);
-  }, [githubInconclusive, loadGithub]);
-
   const readError = async (res: Response, fallback: string) => {
     try {
       const data = await res.json() as { error?: string };
       return typeof data.error === "string" && data.error ? data.error : fallback;
     } catch {
       return fallback;
-    }
-  };
-
-  const toggle = async (next: boolean) => {
-    setBusy("switch");
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/enable", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
-      });
-      if (!res.ok) throw new Error(await readError(res, t("codingAgent.toggleFailed")));
-      setStatus(await res.json() as AgentStatus);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.toggleFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const saveDirectory = async () => {
-    setBusy("dir");
-    setError(null);
-    try {
-      const value = (dirDraft ?? "").trim();
-      const res = await fetch("/setup-api/coding-agent/enable", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        // "" clears it. The route answers the re-read status, so a symlink
-        // comes back as the folder it actually leads to.
-        body: JSON.stringify({ defaultDirectory: value === "" ? null : value }),
-      });
-      if (!res.ok) throw new Error(await readError(res, t("codingAgent.folderFailed")));
-      const next = await res.json() as AgentStatus;
-      setStatus(next);
-      setDirDraft(next.defaultDirectory ?? "");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.folderFailed"));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /** One writer for both settings — the route takes either field. */
-  const saveSetting = async (patch: Record<string, unknown>, key: string, failMsg: string) => {
-    setBusy(key);
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/enable", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error(await readError(res, failMsg));
-      setStatus(await res.json());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : failMsg);
-    } finally {
-      setBusy(null);
     }
   };
 
@@ -359,7 +330,6 @@ export default function CodingAgentApp() {
    * which drops the owner into that exact session to carry on by hand.
    */
   const openInTerminal = (run: Run) => {
-    const quoted = (v: string) => `'${v.replace(/'/g, "'\\''")}'`;
     let command: string;
     if (run.status === "running" && run.transcriptPath) {
       command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
@@ -371,12 +341,56 @@ export default function CodingAgentApp() {
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
   };
 
-  /** Open a terminal on `gh auth login`. gh prints the device code; the owner
-   *  enters it on github.com from any device. No token is typed on the box. */
-  const connectGithub = () => {
-    const cmd = github?.loginCommand ?? "gh auth login --hostname github.com --git-protocol https";
-    window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command: cmd } }));
+  /**
+   * One tap of "is the harness healthy?": dispatch the canned smoke task into
+   * its scratch project through the same routes a real delegation uses, then
+   * open the live terminal view on it the moment its transcript exists. The
+   * result lands in Recent runs — evidence folder, summary and all.
+   */
+  const testHarness = async () => {
+    setBusy("harness-test");
+    setError(null);
+    try {
+      // Scaffold the scratch project; an "already exists" answer is fine and
+      // the run below is where a real failure would surface.
+      await fetch("/setup-api/code", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "init", projectId: HARNESS_TEST_PROJECT, name: "Harness Test" }),
+      }).catch(() => { /* the run request reports anything that matters */ });
+      const res = await fetch("/setup-api/coding-agent/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK }),
+      });
+      if (!res.ok) throw new Error(await readError(res, t("codingAgent.harnessTestFailed")));
+      const data = await res.json() as { run?: { id?: string } };
+      setShowRuns(true);
+      pendingLiveOpen.current = data.run?.id ?? null;
+      void load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
+    } finally {
+      setBusy(null);
+    }
   };
+
+  /** Open the live view once the run's transcript exists — the session id
+   *  lands a few seconds after spawn, and the poll above (`load` every
+   *  POLL_MS while a run is live) is already watching for it. A run that
+   *  settles before its transcript appears just skips the popup; it is in
+   *  the list either way. */
+  const pendingLiveOpen = useRef<string | null>(null);
+  useEffect(() => {
+    const id = pendingLiveOpen.current;
+    if (!id) return;
+    const run = runs.find((r) => r.id === id);
+    if (!run) return;
+    if (run.transcriptPath || run.status !== "running") {
+      pendingLiveOpen.current = null;
+      if (run.transcriptPath && run.status === "running") openInTerminal(run);
+    }
+  }, [runs]);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
   const backup = async (run: Run) => {
@@ -399,27 +413,6 @@ export default function CodingAgentApp() {
       setError(err instanceof Error ? err.message : t("codingAgent.backupFailed"));
       // A refused backup is the other moment the card's GitHub row can be
       // stale — a 503 usually means the probe would answer differently now.
-      void loadGithub();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /** Disconnect GitHub. Two clicks, like clearing history: it is not
-   *  destructive — pushed repositories stay — but it is not what anyone means
-   *  to do by brushing a button. */
-  const disconnectGithub = async () => {
-    setBusy("gh-out");
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/git", { method: "DELETE" });
-      if (!res.ok) throw new Error(await readError(res, t("codingAgent.githubOutFailed")));
-      setGithub(await res.json() as GitHubState);
-      setConfirmSignOut(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.githubOutFailed"));
-      // Same reason: a logout that failed leaves the row showing whatever it
-      // showed before, which may no longer be true.
       void loadGithub();
     } finally {
       setBusy(null);
@@ -460,6 +453,46 @@ export default function CodingAgentApp() {
     }
   };
 
+  const copyFolder = async (folder: string) => {
+    if (!(await copyToClipboard(folder))) return;
+    setCopiedFolder(folder);
+    setTimeout(() => setCopiedFolder((f) => (f === folder ? null : f)), 2_000);
+  };
+
+  const openNew = () => {
+    setShowNew(true);
+    setHanded(false);
+    setNewError(null);
+  };
+
+  const closeNew = () => {
+    setShowNew(false);
+    setNewError(null);
+  };
+
+  /**
+   * Create: check what the assistant would refuse, compose the one message,
+   * hand it to the chat, and get out of the way. No fetch here on purpose —
+   * the run route is the assistant's to call, with the project it has just
+   * scaffolded, and the owner is in the chat to see it happen.
+   */
+  const createNew = () => {
+    const name = newName.trim();
+    const what = newWhat.trim();
+    const maxWhat = status?.maxTaskChars ?? 4_000;
+    if (!name) return setNewError(t("codingAgent.newNameRequired"));
+    if (name.length > NEW_APP_NAME_MAX) return setNewError(t("codingAgent.newNameTooLong", { max: NEW_APP_NAME_MAX }));
+    if (!what) return setNewError(t("codingAgent.newWhatRequired"));
+    if (what.length > maxWhat) return setNewError(t("codingAgent.newWhatTooLong", { max: maxWhat }));
+    dispatchChatMessage(buildNewAppPrompt({ name, description: what, template: newTemplate }));
+    setShowNew(false);
+    setNewError(null);
+    setNewName("");
+    setNewWhat("");
+    setNewTemplate(NEW_APP_TEMPLATES[0]);
+    setHanded(true);
+  };
+
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
   if (loading) return <div className="h-full bg-[#0f1219]" data-testid="coding-agent-panel" />;
@@ -481,22 +514,49 @@ export default function CodingAgentApp() {
     <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
 
-        {/* One row: what this is, and whether it is on. The switch is the
-            reason the window gets opened, so it is the first thing in it. */}
-        <div className="flex items-start justify-between gap-4">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-              <h1 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.switchLabel")}</h1>
-            </div>
+        {/* One row: what this is, whether it is on, and where to change that.
+            The switch itself lives in Settings now; the chip is read-only and
+            says what the route said. */}
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">smart_toy</span>
+            <h1 className="text-sm font-semibold text-[var(--text-primary)]">{t("codingAgent.title")}</h1>
+            {status && (
+              <span
+                data-testid="coding-agent-state"
+                className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${
+                  status.enabled ? "text-emerald-400 border-emerald-400/40" : "text-[var(--text-muted)] border-white/20"
+                }`}
+              >
+                {status.enabled ? t("codingAgent.stateOn") : t("codingAgent.stateOff")}
+              </span>
+            )}
           </div>
-          <Switch
-            checked={status?.enabled ?? false}
-            busy={busy === "switch"}
-            disabled={!status}
-            label={t("codingAgent.switchLabel")}
-            onChange={toggle}
-          />
+          {/* On the desktop this opens the Settings window on our section.
+              On /app/coding — the page a phone lands on from "Open in new
+              tab" — there is no desktop listening, so it is a real link to
+              the standalone Settings page instead; a button that dispatched
+              into silence would leave the owner with no way to the switch. */}
+          {standalone ? (
+            <a
+              href={standaloneSettingsHref("codingAgent")}
+              data-testid="coding-agent-open-settings"
+              className={OPEN_SETTINGS_CLASS}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
+              {t("codingAgent.openSettings")}
+            </a>
+          ) : (
+            <button
+              type="button"
+              onClick={() => dispatchOpenSettingsSection("codingAgent")}
+              data-testid="coding-agent-open-settings"
+              className={OPEN_SETTINGS_CLASS}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
+              {t("codingAgent.openSettings")}
+            </button>
+          )}
         </div>
 
         {/* Nothing at all when the harness is fine. A row that always says
@@ -525,135 +585,192 @@ export default function CodingAgentApp() {
           </div>
         )}
 
-        {/* Where work goes when the assistant does not name a project. */}
-        <div className="mt-3">
-          <label htmlFor="coding-agent-dir" className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
-            {t("codingAgent.folderLabel")}
-          </label>
-          <div className="flex items-center gap-2 mt-1.5">
-            <input
-              id="coding-agent-dir"
-              type="text"
-              value={dirDraft ?? ""}
-              onChange={(e) => setDirDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveDirectory(); }}
-              placeholder={t("codingAgent.folderPlaceholder")}
-              spellCheck={false}
-              data-testid="coding-agent-folder"
-              // text-base on a phone: an input under 16px makes iOS Safari
-              // zoom the page on focus, which on this panel scrolls the rest
-              // of the settings out of view.
-              className="flex-1 min-w-0 rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 text-base @sm:text-xs font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
-            />
-            <button
-              type="button"
-              onClick={() => void saveDirectory()}
-              disabled={busy === "dir" || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
-              className="px-3 py-1.5 rounded-lg border border-white/10 text-xs text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+        {/* The projects, and the way to start one. */}
+        <div className="mt-4" data-testid="coding-agent-projects-section">
+          <div className="flex items-center justify-between gap-2 px-1">
+            <h2 className="flex items-center gap-2 text-xs text-[var(--text-primary)]">
+              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">folder</span>
+              {t("codingAgent.projectsTitle")}
+              {projects.length > 0 && <span className="text-[var(--text-muted)]">({projects.length})</span>}
+            </h2>
+            {!standalone && (
+              <button
+                type="button"
+                onClick={openNew}
+                disabled={showNew}
+                data-testid="coding-agent-new"
+                className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-[var(--coral-bright)]/40 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/10 disabled:opacity-50"
+              >
+                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">add</span>
+                {t("codingAgent.newApp")}
+              </button>
+            )}
+          </div>
+
+          {standalone && (
+            <p className="mt-2 px-1 text-[11px] text-[var(--text-muted)]" data-testid="coding-agent-new-needs-desktop">
+              {t("codingAgent.newNeedsDesktop")}
+            </p>
+          )}
+
+          {showNew && (
+            <form
+              onSubmit={(e) => { e.preventDefault(); createNew(); }}
+              data-testid="coding-agent-new-card"
+              className="mt-2 rounded-xl bg-white/[0.03] border border-[var(--coral-bright)]/30 px-3 py-3 space-y-2.5"
             >
-              {t("codingAgent.folderSave")}
-            </button>
-          </div>
+              <p className="text-xs font-medium text-[var(--text-primary)]">{t("codingAgent.newTitle")}</p>
+              <label className="block text-[11px] text-[var(--text-muted)]">
+                {t("codingAgent.newNameLabel")}
+                <input
+                  type="text"
+                  value={newName}
+                  onChange={(e) => { setNewName(e.target.value); setNewError(null); }}
+                  maxLength={NEW_APP_NAME_MAX}
+                  placeholder={t("codingAgent.newNamePlaceholder")}
+                  autoFocus
+                  data-testid="coding-agent-new-name"
+                  className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60"
+                />
+              </label>
+              <label className="block text-[11px] text-[var(--text-muted)]">
+                {t("codingAgent.newWhatLabel")}
+                <textarea
+                  value={newWhat}
+                  onChange={(e) => { setNewWhat(e.target.value); setNewError(null); }}
+                  maxLength={status?.maxTaskChars ?? 4_000}
+                  rows={3}
+                  placeholder={t("codingAgent.newWhatPlaceholder")}
+                  data-testid="coding-agent-new-what"
+                  className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60 resize-y"
+                />
+              </label>
+              <label className="block text-[11px] text-[var(--text-muted)]">
+                {t("codingAgent.newTemplateLabel")}
+                <select
+                  value={newTemplate}
+                  onChange={(e) => setNewTemplate(e.target.value as NewAppTemplate)}
+                  data-testid="coding-agent-new-template"
+                  className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/60"
+                >
+                  {NEW_APP_TEMPLATES.map((tpl) => (
+                    <option key={tpl} value={tpl}>
+                      {tpl === "app" ? t("codingAgent.newTemplateApp") : t("codingAgent.newTemplateBlank")}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {newError && (
+                <p className="text-[11px] text-amber-400" role="alert" data-testid="coding-agent-new-error">{newError}</p>
+              )}
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeNew}
+                  data-testid="coding-agent-new-cancel"
+                  className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+                >
+                  {t("cancel")}
+                </button>
+                <button
+                  type="submit"
+                  data-testid="coding-agent-new-create"
+                  className="text-[11px] px-3 py-1 rounded-lg bg-[var(--coral-bright)] text-black font-medium hover:opacity-90"
+                >
+                  {t("codingAgent.newCreate")}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {handed && !showNew && (
+            <p className="mt-2 px-1 text-xs text-emerald-400" role="status" data-testid="coding-agent-new-handed">
+              {t("codingAgent.newHanded")}
+            </p>
+          )}
+
+          {projects.length === 0 ? (
+            <p className="text-xs text-[var(--text-muted)] mt-2 px-1" data-testid="coding-agent-projects-empty">
+              {projectsDir ? t("codingAgent.noProjects", { folder: projectsDir }) : t("codingAgent.projectFolderUnset")}
+            </p>
+          ) : (
+            <ul className="space-y-1.5 mt-2" data-testid="coding-agent-projects">
+              {projects.map((project) => {
+                const running = project.latestRun?.status === "running";
+                return (
+                  <li
+                    // The absolute folder: a code project and a folder of the
+                    // owner's can share a name.
+                    key={project.directory}
+                    data-testid={`coding-agent-project-${project.folder}`}
+                    className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-medium text-[var(--text-primary)] break-words">{project.name}</span>
+                        {/* Says where the folder lives: a code project's is
+                            under the checkout, not in the owner's folder. */}
+                        {project.kind === "codeProject" && (
+                          <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
+                            {t("codingAgent.codeProject")}
+                          </span>
+                        )}
+                        {project.onDesktop && (
+                          <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
+                            {t("codingAgent.onDesktop")}
+                          </span>
+                        )}
+                        {running && (
+                          <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
+                            {t("codingAgent.runInProgress")}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-[var(--text-muted)] mt-0.5 break-words">
+                        {project.lastCommit
+                          ? <>{firstLine(project.lastCommit.subject, 80)} · {since(project.lastCommit.date)}</>
+                          : t("codingAgent.noCommits")}
+                      </p>
+                      {/* The folder name is what a run is given and what the
+                          owner types into a chat, so it is one tap to copy. */}
+                      <button
+                        type="button"
+                        onClick={() => void copyFolder(project.folder)}
+                        title={t("codingAgent.copyFolder")}
+                        aria-label={t("codingAgent.copyFolder")}
+                        data-testid={`coding-agent-copy-${project.folder}`}
+                        className="mt-0.5 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
+                      >
+                        {project.folder}
+                        <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
+                          {copiedFolder === project.folder ? "check" : "content_copy"}
+                        </span>
+                        {copiedFolder === project.folder && <span className="font-sans">{t("codingAgent.copied")}</span>}
+                      </button>
+                    </div>
+                    {project.onDesktop && (
+                      <button
+                        type="button"
+                        // The desktop registers a deployed web app under
+                        // `installed-<folder>` (page.tsx, getAllApps); the
+                        // bare folder name matches no app there, and the
+                        // click did nothing at all.
+                        onClick={() => dispatchOpenApp(installedAppId(project.folder))}
+                        data-testid={`coding-agent-open-${project.folder}`}
+                        className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
+                      >
+                        {t("codingAgent.open")}
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
 
-        {/* How a run thinks. Both are real Claude Code settings: --effort, and
-            whether the Task (sub-agent) tool is in --tools at all. */}
-        <div className="mt-4">
-          <label className="text-xs font-medium text-[var(--text-secondary)]">
-            {t("codingAgent.effortLabel")}
-          </label>
-          <div className="flex gap-1 mt-1.5" data-testid="coding-agent-effort">
-            {(status?.effortLevels ?? []).map((level) => {
-              const active = status?.effort === level;
-              return (
-                <button
-                  key={level}
-                  type="button"
-                  onClick={() => void saveSetting({ effort: level }, "effort", t("codingAgent.effortFailed"))}
-                  disabled={busy === "effort"}
-                  aria-pressed={active}
-                  data-testid={`coding-agent-effort-${level}`}
-                  className={`flex-1 px-2 py-1.5 rounded-lg border text-[11px] capitalize transition-colors disabled:opacity-50 ${
-                    active
-                      ? "border-[var(--coral-bright)]/60 bg-[var(--coral-bright)]/10 text-[var(--text-primary)]"
-                      : "border-white/[0.08] text-[var(--text-muted)] hover:bg-white/5"
-                  }`}
-                >
-                  {t(`codingAgent.effort.${level}`)}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* The ceilings a run stops at — both the owner's to set. There is no
-            time limit and no price limit: a run ends when it finishes, runs
-            out of steps, hits a token ceiling if one is set, or goes quiet. */}
-
-        {/* GitHub. Read-only here: connecting happens in a terminal running
-            gh, which prints a device code for github.com. ClawBox never
-            handles the token — gh keeps it and lends it to git. */}
-        {github?.installed && (
-          <div className="flex items-center justify-between gap-3 mt-4 rounded-xl border border-white/[0.08] px-3 py-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">cloud_upload</span>
-              <span className="text-xs text-[var(--text-secondary)]">GitHub</span>
-              {github.connected ? (
-                <span className="text-[11px] text-emerald-400 truncate" data-testid="coding-agent-github-login">
-                  {github.login}
-                </span>
-              ) : github.reason === "unreachable" ? (
-                // Not "not connected": we do not know whether an account is
-                // connected, only that github.com could not be asked.
-                <span className="text-[11px] text-amber-400" data-testid="coding-agent-github-unreachable">
-                  {t("codingAgent.githubUnreachable")}
-                </span>
-              ) : github.reason === "not_runnable" ? (
-                // gh is on the box and would not start. "Not connected" is not
-                // what was found, and Connect — which opens a terminal on
-                // `gh auth login` — is the one remedy that cannot work here.
-                <span className="text-[11px] text-amber-400" data-testid="coding-agent-github-not-runnable">
-                  {t("codingAgent.githubNotRunnable")}
-                </span>
-              ) : (
-                <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.githubOff")}</span>
-              )}
-            </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              {/* Not offered to a gh that would not start: the button opens a
-                  terminal on `gh auth login`, which needs the very binary that
-                  will not execute. The badge beside it says what to fix. */}
-              {github.reason !== "not_runnable" && (
-                <button
-                  type="button"
-                  onClick={connectGithub}
-                  data-testid="coding-agent-github-connect"
-                  className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
-                >
-                  {github.connected ? t("codingAgent.githubReconnect") : t("codingAgent.githubConnect")}
-                </button>
-              )}
-              {github.connected && (
-                <button
-                  type="button"
-                  onClick={() => (confirmSignOut ? void disconnectGithub() : setConfirmSignOut(true))}
-                  disabled={busy === "gh-out"}
-                  data-testid="coding-agent-github-signout"
-                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
-                    confirmSignOut
-                      ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
-                      : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-                  }`}
-                >
-                  {confirmSignOut ? t("codingAgent.githubOutConfirm") : t("codingAgent.githubOut")}
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Runs behind a button. Opening the window is usually about the
-            switch; the history is one click away when it is wanted. */}
+        {/* The runs: open by default, since the history is why the window
+            gets opened once the switch is on, and collapsible. */}
         <div className="mt-4">
           <button
             type="button"
@@ -677,21 +794,35 @@ export default function CodingAgentApp() {
             </span>
           </button>
 
-          {showRuns && runs.length > 0 && (
-            <div className="flex justify-end mt-2">
+          {showRuns && (
+            <div className="flex items-center justify-between mt-2">
+              {/* One tap dispatches the canned smoke run and opens its live
+                  view. Off while anything is running — one run at a time is
+                  the runner's rule, not just this button's. */}
               <button
                 type="button"
-                onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
-                disabled={busy === "clear"}
-                data-testid="coding-agent-clear"
-                className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
-                  confirmClear
-                    ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
-                    : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-                }`}
+                onClick={() => void testHarness()}
+                disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
+                data-testid="coding-agent-harness-test"
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
               >
-                {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
+                {t("codingAgent.harnessTest")}
               </button>
+              {runs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
+                  disabled={busy === "clear"}
+                  data-testid="coding-agent-clear"
+                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
+                    confirmClear
+                      ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
+                      : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+                  }`}
+                >
+                  {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
+                </button>
+              )}
             </div>
           )}
 
@@ -702,6 +833,7 @@ export default function CodingAgentApp() {
               <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
                 {runs.slice(0, runsShown).map((run) => {
                   const details = [run.error, run.summary].filter(Boolean).join("\n\n");
+                  const artifacts = run.artifacts ?? [];
                   const open = expanded === run.id;
                   return (
                     <li key={run.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
@@ -806,7 +938,7 @@ export default function CodingAgentApp() {
                           >
                             {run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
                           </button>
-                          {details && (
+                          {(details || artifacts.length > 0) && (
                             <button
                               type="button"
                               onClick={() => setExpanded(open ? null : run.id)}
@@ -855,10 +987,96 @@ export default function CodingAgentApp() {
                         </div>
                       )}
 
-                      {open && details && (
-                        <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-sans leading-relaxed">
-                          {details}
+                      {/* The run's evidence: screenshots it took while
+                          verifying its work, its report.md, and whatever test
+                          output it saved. Images render as thumbnails; a
+                          markdown file opens rendered in the app's own
+                          dialog; every other file opens in a new tab as the
+                          plain text the route serves it as. */}
+                      {open && artifacts.length > 0 && (() => {
+                        const images = artifacts.filter((a) => a.kind === "image");
+                        const files = artifacts.filter((a) => a.kind !== "image");
+                        return (
+                          <div className="mt-2" data-testid="coding-agent-artifacts">
+                            <p className="text-[11px] font-medium text-sky-300">
+                              {t("codingAgent.artifactsTitle")}
+                            </p>
+                            {images.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-2">
+                                {images.map((a) => (
+                                  <a
+                                    key={a.name}
+                                    href={artifactUrl(run.id, a.name)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
+                                    className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25"
+                                  >
+                                    {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
+                                    <img
+                                      src={artifactUrl(run.id, a.name)}
+                                      alt={a.name}
+                                      loading="lazy"
+                                      className="h-20 w-auto max-w-[10rem] object-cover"
+                                    />
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+                            {files.length > 0 && (
+                              <ul className="mt-1.5 space-y-0.5">
+                                {files.map((a) => (
+                                  <li key={a.name} className="text-[11px]">
+                                    {a.kind === "markdown" ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => setReport({ runId: run.id, name: a.name })}
+                                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all text-left"
+                                      >
+                                        {a.name}
+                                      </button>
+                                    ) : (
+                                      <a
+                                        href={artifactUrl(run.id, a.name)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                                      >
+                                        {a.name}
+                                      </a>
+                                    )}
+                                    {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {open && run.error && (
+                        <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">
+                          {run.error}
                         </pre>
+                      )}
+                      {/* The summary is the run's closing message, and that is
+                          markdown — "## What I built", a table of files. Drawn
+                          through the chat's renderer, the same one the
+                          assistant's replies use, so it reads like the chat
+                          instead of like a wall of hashes and pipes. The
+                          renderer builds elements from the text and never
+                          injects HTML, which is what lets agent-written words
+                          on to the owner's screen at all. The renderer's own
+                          tables and code blocks scroll sideways inside
+                          themselves; min-w-0 keeps a long token from widening
+                          the row past the window. */}
+                      {open && run.summary && (
+                        <div
+                          data-testid="coding-agent-summary"
+                          className="mt-2 text-xs text-[var(--text-secondary)] leading-relaxed max-h-64 overflow-y-auto min-w-0 break-words [&_img]:max-w-full"
+                        >
+                          {renderText(run.summary, t("chat.table"))}
+                        </div>
                       )}
                     </li>
                   );
@@ -880,6 +1098,15 @@ export default function CodingAgentApp() {
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>
+
+      {report && (
+        <CodingAgentReportPreview
+          key={`${report.runId}/${report.name}`}
+          runId={report.runId}
+          name={report.name}
+          onClose={() => setReport(null)}
+        />
+      )}
     </div>
   );
 }

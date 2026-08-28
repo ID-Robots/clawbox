@@ -167,6 +167,13 @@ with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
 
+An app `webapp_create` or `code_project_build` puts on the desktop without an
+icon gets one drawn by ClawBox AI's image model when the box is linked — after
+the tool has answered, never overwriting an icon that exists, one picture per
+app and one at a time (a rebuild while it is being drawn does not pay twice),
+dropped if the app is uninstalled meanwhile, and silently skipped on an
+unlinked box (`src/lib/webapp-icon.ts`).
+
 `code_project_init` and `code_project_list` report the project directory as an
 ABSOLUTE path. The agent edits those files with its harness's own file tools,
 and that process has a different working directory than the web tier — a
@@ -257,10 +264,22 @@ to stop.
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
 (both editions) · `browser_click` · `browser_type` · `browser_keypress` ·
-`browser_scroll` (OpenClaw only)
+`browser_scroll` (OpenClaw only) · `browser_view_local` (only inside a
+coding-agent run — see below)
 
 `browser_type` reports a character count, never the text — it is the tool that
 types passwords.
+
+**Inside a coding-agent run** (the runner spawns this server with
+`CLAWBOX_MCP_PROFILE=browser`, which registers ONLY the browser family): the
+run's model cannot see images, so every screenshot is archived into the run's
+evidence folder (`data/coding-agent-artifacts/<runId>/`,
+`CLAWBOX_RUN_ARTIFACTS_DIR`) and replaced in the reply by the backend's written
+description of it (the browser route's `describe` action, produced by the
+box's vision model — `src/lib/vision-describe.ts`). `browser_view_local` opens
+an HTML file from the run's working folder (`CLAWBOX_RUN_DIR`): the ONLY
+`file://` the browser route accepts, and only while that run is the active
+one, realpath-checked on both sides.
 
 ### Coding family (OpenClaw only)
 `bash` · `job_status` · `job_stop` · `read_file` · `write_file` · `edit_file` ·
@@ -407,7 +426,7 @@ and it drags server-only Next.js code into this stdio process.
 |---|---|
 | `CLAWBOX_API_BASE` | Device API origin. Default `http://127.0.0.1:80`. |
 | `CLAWBOX_MCP_TOKEN` | Bearer for `/setup-api/*`. Falls back to `<root>/data/.mcp-token`, so a provisioning entry need carry no secret. |
-| `CLAWBOX_MCP_PROFILE` | `full` (default) or `core` pins the tool set; `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
+| `CLAWBOX_MCP_PROFILE` | `full` (default), `core` or `browser` pins the tool set (`browser` = the browser family only — what a delegated coding-agent run gets); `auto` makes it FOLLOW THE MODEL — a device whose active provider is the on-device one and whose model is small (≤8B, or a ≤16k context) registers `core`, everything else `full`. `auto` is opt-in because this process sees only the persisted provider, not the chat header's per-turn override. See `mcp/lib/profile.ts` and `docs/hermes-reasoning-levels.md`. |
 | `CLAWBOX_SMALL_MODEL_PROFILE` | `off` disables the `auto` selection above (the explicit pins still work). |
 | `CLAWBOX_MCP_CODING_TOOLS` | `1` forces the coding family onto Hermes. Debugging only. |
 

@@ -40,6 +40,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
  */
 
 export type CodingRunStatus = "running" | "completed" | "failed" | "stopped";
+export type CodingTodoStatus = "pending" | "in_progress" | "completed";
+
+/** One item of the run's own plan — see CodingRun.todos in coding-agent.ts. */
+export interface CodingTodo {
+  content: string;
+  status: CodingTodoStatus;
+  activeForm?: string;
+}
 
 export interface CodingAgentActivity {
   id: string;
@@ -59,7 +67,31 @@ export interface CodingAgentActivity {
   subagentsActive: number;
   subagentsByType: Record<string, number>;
   tokensUsed: number;
+  /** Reasoning tokens so far; 0 on a record from before the runner counted them. */
+  thinkingTokens: number;
   filesTouched: number;
+  /** Agent turns — arrives with the final result, so 0 while the run is live. */
+  numTurns: number;
+  /**
+   * The run's newest progress lines, oldest first, at most PROGRESS_SHOWN:
+   * the last one is "what it is doing right now", the rest are the card's
+   * live-work panel. The runner keeps more on the record; the card has no
+   * room for them, so they are cut here rather than held in every badge.
+   */
+  progress: string[];
+  /**
+   * The newest screenshots the run saved, oldest first, by file name — the
+   * card turns a name into its served URL with artifactUrl(). Images only:
+   * the card thumbnails nothing else, so nothing else is kept.
+   */
+  screenshots: string[];
+  /**
+   * The run's plan, as it last wrote it with TodoWrite: what it means to do,
+   * what it is on now, what is done. Empty for a run that never planned. The
+   * runner already caps and trims it; this only refuses a shape it cannot
+   * draw.
+   */
+  todos: CodingTodo[];
 }
 
 interface RunPayload {
@@ -74,13 +106,46 @@ interface RunPayload {
   subagentsActive?: number;
   subagentsByType?: Record<string, number>;
   tokensUsed?: number;
+  thinkingTokens?: number;
   filesTouched?: string[];
+  numTurns?: number;
+  progress?: string[];
+  todos?: unknown;
+  artifacts?: { name?: unknown; kind?: unknown }[];
+}
+
+const TODO_STATUSES: readonly CodingTodoStatus[] = ["pending", "in_progress", "completed"];
+/** The runner's own cap, repeated so a hand-edited record cannot flood a card. */
+const TODOS_KEPT = 20;
+
+function toTodos(raw: unknown): CodingTodo[] {
+  if (!Array.isArray(raw)) return [];
+  const todos: CodingTodo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const t = item as { content?: unknown; status?: unknown; activeForm?: unknown };
+    if (typeof t.content !== "string" || !t.content) continue;
+    const status = (TODO_STATUSES as readonly unknown[]).includes(t.status) ? t.status as CodingTodoStatus : "pending";
+    const activeForm = typeof t.activeForm === "string" && t.activeForm ? t.activeForm : undefined;
+    todos.push(activeForm ? { content: t.content, status, activeForm } : { content: t.content, status });
+    if (todos.length >= TODOS_KEPT) break;
+  }
+  return todos;
 }
 
 /** How often to re-ask while a run is actually in flight. */
 const POLL_MS = 5_000;
 /** Enough to catch a run even if a couple of others finished meanwhile. */
 const LOOK_BACK = 5;
+/** Progress lines a card lists when expanded. */
+const PROGRESS_SHOWN = 8;
+/** Screenshots a card thumbnails; the Coding Agent app shows the whole folder. */
+const SCREENSHOTS_SHOWN = 3;
+
+/** The served URL of one run artifact — cookie auth rides along like any app asset. */
+export function artifactUrl(runId: string, name: string): string {
+  return `/setup-api/coding-agent/artifacts?runId=${encodeURIComponent(runId)}&file=${encodeURIComponent(name)}`;
+}
 /** Badges kept in one conversation, oldest dropped first. */
 const MAX_BADGES = 6;
 /**
@@ -108,7 +173,21 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     subagentsActive: typeof r.subagentsActive === "number" ? r.subagentsActive : 0,
     subagentsByType: r.subagentsByType && typeof r.subagentsByType === "object" ? r.subagentsByType : {},
     tokensUsed: typeof r.tokensUsed === "number" ? r.tokensUsed : 0,
+    thinkingTokens: typeof r.thinkingTokens === "number" ? r.thinkingTokens : 0,
     filesTouched: Array.isArray(r.filesTouched) ? r.filesTouched.length : 0,
+    numTurns: typeof r.numTurns === "number" ? r.numTurns : 0,
+    progress: Array.isArray(r.progress)
+      ? r.progress.filter((p): p is string => typeof p === "string").slice(-PROGRESS_SHOWN)
+      : [],
+    // The route lists a run's folder oldest first; the newest few are the
+    // ones worth a thumbnail (the last screenshot is the state of the page).
+    screenshots: Array.isArray(r.artifacts)
+      ? r.artifacts
+        .filter((a) => a && a.kind === "image" && typeof a.name === "string" && a.name)
+        .map((a) => a.name as string)
+        .slice(-SCREENSHOTS_SHOWN)
+      : [],
+    todos: toTodos(r.todos),
   };
 }
 
@@ -143,7 +222,16 @@ export function useCodingAgentActivity(active: boolean): {
 
     const read = async () => {
       try {
-        const res = await fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}`, { cache: "no-store" });
+        // `artifacts=1` on EVERY poll, not only for the runs a card has
+        // expanded. The route's listing is one readdir plus one stat per file
+        // for each of the LOOK_BACK runs — and most runs never save anything,
+        // so for them it is a single failed open. Measured against the
+        // alternative (a second fetch shape, and the card's expanded state
+        // plumbed up into this hook so it knows which runs to ask for), the
+        // per-poll cost is a handful of syscalls every five seconds while a
+        // run is in flight, and nothing at all once it is not; the plumbing
+        // would be the larger cost, paid in code.
+        const res = await fetch(`/setup-api/coding-agent/runs?limit=${LOOK_BACK}&artifacts=1`, { cache: "no-store" });
         if (!res.ok) throw new Error("runs");
         const data = await res.json() as { runs?: RunPayload[] };
         if (!alive) return;

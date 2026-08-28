@@ -44,6 +44,14 @@ vi.mock("@/lib/webapp-registry", () => ({
   registerWebappInPreferences: vi.fn(),
 }));
 
+// deployWebapp also fires off icon generation for an app created without one
+// (fire-and-forget, never awaited). Stub it so these tests never reach the
+// ClawBox AI proxy; the real module is covered in webapp-icon.test.ts.
+vi.mock("@/lib/webapp-icon", () => ({
+  ensureWebappIcon: vi.fn(async () => "skipped"),
+  htmlHint: vi.fn(() => ""),
+}));
+
 import {
   validateProjectId,
   initProject,

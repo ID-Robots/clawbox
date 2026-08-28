@@ -93,7 +93,12 @@ const LOCK_BUSY_EXIT = 75;
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-schedule.json");
 const RUN_STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-state.json");
 const RUN_LOCK_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index.lock");
-const STATUS_CACHE_MS = 30_000;
+// Two minutes: the probe boots a whole OpenClaw process, and what it reports
+// (provider, model, index health) changes through indexing runs — which call
+// invalidateMemoryStatusCache — not on its own. Settings → Local AI polls the
+// inventory every five seconds, so a short TTL here is a background OpenClaw
+// boot every few polls.
+const STATUS_CACHE_MS = 120_000;
 const STATUS_TIMEOUT_MS = 90_000;
 const INDEX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const LOCK_START_GRACE_MS = 30_000;
@@ -487,18 +492,7 @@ export function invalidateMemoryStatusCache(): void {
   cachedStatusAtMs = 0;
 }
 
-export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
-  const now = Date.now();
-  if (cachedStatus && now - cachedStatusAtMs < STATUS_CACHE_MS) {
-    // Run/schedule state changes independently from the expensive CLI probe.
-    const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
-    return {
-      ...cachedStatus,
-      run,
-      schedule,
-      nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()),
-    };
-  }
+function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   if (!statusInFlight) {
     statusInFlight = loadMemoryStatus().then((status) => {
       cachedStatus = status;
@@ -509,6 +503,58 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     });
   }
   return statusInFlight;
+}
+
+/**
+ * The CLI probe behind this takes ~8 s on a Jetson (a whole OpenClaw process
+ * boots to answer it). Only a caller with NO reading yet waits for it: once a
+ * status has been read, a stale one is answered at once and refreshed in the
+ * background — otherwise Settings → Local AI, which polls the inventory every
+ * five seconds, froze on a skeleton for eight seconds every half minute.
+ */
+export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
+  if (!cachedStatus) return reloadMemoryStatus();
+  if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
+    reloadMemoryStatus().catch(() => { /* the next read tries again */ });
+  }
+  // Run/schedule state changes independently from the expensive CLI probe.
+  const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
+  return {
+    ...cachedStatus,
+    run,
+    schedule,
+    nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()),
+  };
+}
+
+/**
+ * The reading this box already has, or null when it has never been probed —
+ * and in that case, start the probe in the background.
+ *
+ * For the caller that must not wait: the probe boots a whole OpenClaw process
+ * (~8 s on a Jetson), and Settings → Local AI polls its inventory every five
+ * seconds. Blocking that page on the one row that costs a process boot is what
+ * made the first open after a restart sit on a skeleton. A caller that gets
+ * null shows everything else and picks this row up on its next poll.
+ *
+ * Deliberately without the run/schedule refresh `getMemoryStatus` does: this
+ * answers "which model embeds, and is it answering", not "is an index run in
+ * flight", and it must stay synchronous to be useful here.
+ */
+export function peekMemoryStatus(): ClawKeepMemoryStatus | null {
+  if (!cachedStatus) {
+    reloadMemoryStatus().catch(() => { /* the next peek asks again */ });
+    return null;
+  }
+  if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
+    reloadMemoryStatus().catch(() => { /* keep serving the reading we have */ });
+  }
+  return cachedStatus;
+}
+
+/** Pay the cold probe at boot so the first Settings open after a restart does not. */
+export function warmMemoryStatusCache(): Promise<void> {
+  return reloadMemoryStatus().then(() => undefined);
 }
 
 /**

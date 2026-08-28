@@ -1,4 +1,4 @@
-import { expect, type Page, type Route } from "@playwright/test";
+import { expect, type Locator, type Page, type Route } from "@playwright/test";
 
 type SetupState = {
   setup_complete: boolean;
@@ -59,6 +59,14 @@ const DEFAULT_SETUP: SetupState = {
   local_ai_model: null,
   ai_model_configured: false,
   telegram_configured: false,
+};
+
+// The ids and labels /setup-api/providers/status gives the on-device engine
+// (LOCAL_PROVIDER_LABELS in src/lib/provider-status.ts). A provider outside
+// this map gets no row there, and so gets none here.
+const LOCAL_PROVIDER_LABELS: Record<string, string> = {
+  llamacpp: "Gemma 4 (on-device)",
+  ollama: "Ollama Local",
 };
 
 const DEFAULT_PREFERENCES: Record<string, unknown> = {
@@ -128,6 +136,40 @@ function fileEntry(name: string, size: number): FileEntry {
     size,
     modified: "2026-04-08T12:00:00.000Z",
   };
+}
+
+/**
+ * What the Voice tab's Play button gets back: a real, decodable WAV (8 kHz,
+ * 16-bit mono, 50 ms of silence), so the panel hands its player a clip a
+ * browser can play rather than a body it has to reject — which lets a spec
+ * assert that the clip DOES decode. Headless Chromium plays blob: audio like
+ * any other browser; what refuses it is a Content-Security-Policy with no
+ * `media-src`, where media falls back to `default-src 'self'` and a blob: src
+ * fails with "Media load rejected by URL safety check". That is a fault of the
+ * page's headers (next.config.ts), not of the browser or the box, and it fires
+ * for real users exactly as it does here.
+ */
+const SILENT_WAV = buildSilentWav();
+
+function buildSilentWav(): Buffer {
+  const sampleRate = 8000;
+  const samples = 400;
+  const dataBytes = samples * 2;
+  const wav = Buffer.alloc(44 + dataBytes);
+  wav.write("RIFF", 0);
+  wav.writeUInt32LE(36 + dataBytes, 4);
+  wav.write("WAVE", 8);
+  wav.write("fmt ", 12);
+  wav.writeUInt32LE(16, 16);
+  wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(1, 22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * 2, 28);
+  wav.writeUInt16LE(2, 32);
+  wav.writeUInt16LE(16, 34);
+  wav.write("data", 36);
+  wav.writeUInt32LE(dataBytes, 40);
+  return wav;
 }
 
 function directoryEntry(name: string): FileEntry {
@@ -247,6 +289,38 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     : setupState.local_ai_configured
       ? "local"
       : null;
+  // ── The box's on-device AI, as ONE set of facts ──────────────────────────
+  //
+  // Settings -> Local AI (the inventory and each row's role), Settings -> Voice
+  // (which engine speaks first, with which voice) and the chat's transcription
+  // all describe the same hardware, so every route below is DERIVED from these
+  // variables rather than written on its own. A Local AI tab that called Kokoro
+  // absent beside a Voice tab that had it speaking is exactly the drift the
+  // specs exist to catch, and a mock that contradicts itself cannot catch it.
+  //
+  // The box: Gemma 4 (llama.cpp) installed iff setup says local AI is
+  // configured; Ollama installed, serving one extra model; Kokoro installed
+  // and running; Whisper NOT installed. Everything cloud-side — the cloud
+  // voice, cloud transcription — exists iff setup says ClawBox AI is linked
+  // (`ai_model_configured`), because on the real box both are that one
+  // credential: a linked box speaks from the cloud first until the owner picks
+  // the box, an unlinked one has only Kokoro and reads the cloud as
+  // unavailable. Whisper is the "absent engine" every negative assertion leans
+  // on: it must read as absent and offer no control.
+  let ollamaEnabled = true;
+  let localOnly = false;
+  let voiceChoice: "auto" | "local" | "cloud" = "auto";
+  let voiceLanguage = "en";
+  const voiceVoices: Record<"local" | "cloud", string> = { local: "af_heart", cloud: "alloy" };
+  const codingAgent = {
+    enabled: false,
+    defaultDirectory: "/home/clawbox/projects" as string | null,
+    effort: "max",
+    subagents: false,
+    maxTurns: 200,
+    tokenLimit: null as number | null,
+  };
+
   const browserStatus = {
     chromium: {
       installed: false,
@@ -413,6 +487,134 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
         label: localModel ? getLocalChatLabel() : null,
         model: localModel,
       },
+    };
+  };
+
+  const buildLocalModels = () => {
+    const gemmaInstalled = setupState.local_ai_configured && setupState.local_ai_provider === "llamacpp";
+    return {
+      models: [
+        {
+          id: "llamacpp", name: "Gemma 4", kind: "llm", runtime: "Answers on this box",
+          installed: gemmaInstalled, enabled: null,
+          running: gemmaInstalled ? "running" : "not-installed",
+          diskBytes: null, memoryBytes: gemmaInstalled ? 2_147_483_648 : null,
+          control: "none", managedBy: "localAi",
+          detail: gemmaInstalled ? "Answering right now." : "Not installed.",
+        },
+        {
+          id: "ollama", name: "Ollama", kind: "llm", runtime: "Runs extra models on this box",
+          installed: true, enabled: ollamaEnabled, running: ollamaEnabled ? "running" : "idle",
+          diskBytes: 639_000_000, memoryBytes: ollamaEnabled ? 1_073_741_824 : null,
+          control: "system-unit",
+          detail: ollamaEnabled ? "Serving Qwen3 Embedding." : "Off. Turn it on from the menu.",
+        },
+        {
+          id: "kokoro", name: "Kokoro", kind: "tts", runtime: "Voice on this box",
+          installed: true, enabled: true, running: "running",
+          diskBytes: null, memoryBytes: 412_000_000, control: "user-unit",
+          detail: "Speaking from this box.",
+        },
+        {
+          id: "whisper", name: "Whisper", kind: "stt", runtime: "Transcribes on this box",
+          installed: false, enabled: null, running: "not-installed",
+          diskBytes: null, memoryBytes: null, control: "none",
+          detail: "Not installed. Speech is transcribed in the cloud.",
+        },
+      ],
+      unavailable: [],
+    };
+  };
+
+  // Mirrors selectionError in src/lib/voice-output.ts, so the mock refuses
+  // exactly the selections the real route refuses, with the same words.
+  const voiceSelectionError = (
+    choice: "auto" | "local" | "cloud",
+    engines: { id: string; configured: boolean }[],
+  ): string | null => {
+    if (choice === "auto") {
+      return engines.some((e) => e.configured) ? null : "This box has no voice it can use.";
+    }
+    const engine = engines.find((e) => e.id === choice);
+    if (!engine || !engine.configured) return "That voice is not available on this box.";
+    return null;
+  };
+
+  // The shape /setup-api/tts answers with (src/lib/voice-output.ts). `auto` is
+  // cloud-first — the standing product default — and `local` puts the box
+  // first; the Voice tab reads the order off `choice`, the Local AI tab reads
+  // Kokoro's role off the same field.
+  //
+  // The cloud engine follows the same setup fact every other surface reads: on
+  // the real box its credential is ClawBox AI's token, so a box that is not
+  // linked has no cloud voice (`configured: false`, the option greyed out, no
+  // privacy notice), and `auto` resolves to the box's own voice — exactly what
+  // resolvePreferredEngine and buildVoiceDisclosure produce for that box.
+  const buildVoiceStatus = () => {
+    const cloudVoice = setupState.ai_model_configured;
+    const engine = voiceChoice === "local" || !cloudVoice ? "local" : "cloud";
+    const providerId = engine === "local" ? "tts-local-cli" : "openai";
+    return {
+      choice: voiceChoice,
+      activeProviderId: providerId,
+      activeEngine: engine,
+      preferredEngine: engine,
+      drifted: false,
+      engines: [
+        {
+          id: "cloud", providerId: "openai", label: "ClawBox cloud",
+          configured: cloudVoice, proven: cloudVoice, usable: cloudVoice,
+          detail: cloudVoice
+            ? "Speaks in the cloud. The words to be spoken leave this box."
+            : "No cloud voice is set up on this box.",
+        },
+        {
+          id: "local", providerId: "tts-local-cli", label: "On this box",
+          configured: true, proven: true, usable: true,
+          detail: "Speaks on the box itself. Nothing leaves it. Installed: Kokoro.",
+        },
+      ],
+      lastCheck: {
+        at: 1787000000000, ok: true,
+        servedByProviderId: providerId, servedEngine: engine,
+        attempts: [{ providerId, engine, ok: true, message: null, latencyMs: engine === "local" ? 14893 : 812 }],
+        message: null,
+      },
+      warning: !cloudVoice
+        ? null
+        : engine === "cloud"
+          ? "Privacy notice: Voice uses ClawBox AI cloud TTS. Text sent for speech leaves this ClawBox."
+          : "Privacy notice: If On this box is unavailable, voice may use ClawBox AI cloud TTS. Text sent for speech may leave this ClawBox.",
+      language: voiceLanguage,
+      voice: { ...voiceVoices },
+    };
+  };
+
+  // The harness runs on the box's ClawBox AI plan, so its readiness is the
+  // same linkage fact as the cloud voice: an unlinked box is not ready, and
+  // says so with the real route's sentence.
+  const buildCodingAgentStatus = () => {
+    const clawaiConnected = setupState.ai_model_configured;
+    const problems = clawaiConnected
+      ? []
+      : ["ClawBox AI is not connected. Open Settings → AI Models and sign in to ClawBox AI first."];
+    return {
+      enabled: codingAgent.enabled,
+      ready: clawaiConnected,
+      readiness: {
+        ready: clawaiConnected, wrapperInstalled: true, claudeInstalled: true,
+        clawaiConnected, capabilityDropAvailable: true, problems,
+    },
+      running: 0,
+      defaultDirectory: codingAgent.defaultDirectory,
+      effort: codingAgent.effort,
+      effortLevels: ["low", "medium", "high", "xhigh", "max"],
+      subagents: codingAgent.subagents,
+      maxTurns: codingAgent.maxTurns,
+      minMaxTurns: 10,
+      maxMaxTurns: 1000,
+      tokenLimit: codingAgent.tokenLimit,
+      minTokenLimit: 100_000,
     };
   };
 
@@ -1117,63 +1319,139 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
-    // Settings -> Local Models. A realistic inventory rather than an empty
-    // one: the tab's whole point is telling "installed and stopped" apart from
-    // "not installed", so the mock has to contain both or the spec proves
-    // nothing. Without this handler the fallthrough below answers `{}` and the
-    // panel correctly refuses to adopt it, leaving the tab on its skeleton.
-    if (path === "/setup-api/local-models") {
+    // Settings -> Providers. The connection overview every provider surface
+    // reads: which providers hold a sign-in, and which one answers first. The
+    // rows follow the same setup facts ai-models/status answers from, and the
+    // local row is the engine `local_ai_provider` names — the setup mocks can
+    // put Ollama there, and a strip that called it Gemma 4 regardless would
+    // let a spec pass against a box the real route never describes.
+    if (path === "/setup-api/providers/status") {
+      const localProvider = setupState.local_ai_configured ? setupState.local_ai_provider ?? null : null;
+      const localLabel = localProvider ? LOCAL_PROVIDER_LABELS[localProvider] : undefined;
+      const providers = [
+        ...(setupState.ai_model_configured
+          ? [{ id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, enabled: true, section: "ai" }]
+          : []),
+        ...(localProvider && localLabel
+          ? [{
+              id: localProvider, label: localLabel, state: "connected",
+              isDefault: !setupState.ai_model_configured, enabled: true, section: "localAi",
+            }]
+          : []),
+      ];
       await fulfillJson(route, {
-        models: [
-          {
-            id: "ollama", name: "Ollama", kind: "llm", runtime: "System service",
-            installed: true, enabled: true, running: "running",
-            diskBytes: 639_000_000, memoryBytes: 1_073_741_824,
-            control: "system-unit", detail: "Serving 1 model: qwen3-embedding:0.6b.",
-          },
-          {
-            id: "kokoro", name: "Kokoro", kind: "tts", runtime: "systemd user service",
-            installed: false, enabled: null, running: "not-installed",
-            diskBytes: null, memoryBytes: null, control: "none",
-            detail: "Not installed on this box. Speech falls back to Piper.",
-          },
-        ],
-        unavailable: [],
+        harness: "openclaw",
+        providers,
+        defaultProvider: providers.find((row) => row.isDefault)?.id ?? null,
+        degraded: false,
       });
       return;
     }
 
-    // Settings -> Voice. Deliberately the real-box shape: the on-device voice
-    // works and the cloud one is present but unusable, because the assertion
-    // that matters is the negative one — a voice the box cannot use must read
-    // as unavailable rather than as a choice that quietly does something else.
+    // Settings -> Local AI: the inventory. Both "installed" and "not installed"
+    // rows, because the tab's whole point is telling the two apart — a mock
+    // with only working engines proves nothing about the absent one.
+    if (path === "/setup-api/local-models") {
+      if (method === "POST") {
+        const payload = await readRequestJson<{ id?: string; enabled?: boolean }>(route);
+        if (payload.id !== "ollama" || typeof payload.enabled !== "boolean") {
+          await fulfillJson(route, { error: "That model cannot be turned on or off here." }, 400);
+          return;
+        }
+        ollamaEnabled = payload.enabled;
+      }
+      await fulfillJson(route, buildLocalModels());
+      return;
+    }
+
+    if (path === "/setup-api/local-ai/exclusive") {
+      if (method === "POST") {
+        const payload = await readRequestJson<{ enabled?: boolean }>(route);
+        localOnly = payload.enabled === true;
+      }
+      await fulfillJson(route, { enabled: localOnly });
+      return;
+    }
+
+    // Settings -> Voice, and Kokoro's role on the Local AI tab.
     if (path === "/setup-api/tts") {
+      if (method === "POST") {
+        const payload = await readRequestJson<{
+          action?: string;
+          choice?: string;
+          language?: string;
+          engine?: string;
+          voice?: string;
+        }>(route);
+        if (payload.action === "select" && (payload.choice === "auto" || payload.choice === "local" || payload.choice === "cloud")) {
+          // The real route refuses to write a primary the box cannot honour
+          // (selectionError in src/lib/voice-output.ts): on an unlinked box
+          // the cloud voice is not configured, and picking it must answer 409,
+          // not a 200 that the Voice tab would read as a working choice.
+          const refusal = voiceSelectionError(payload.choice, buildVoiceStatus().engines);
+          if (refusal) {
+            await fulfillJson(route, { error: refusal }, 409);
+            return;
+          }
+          voiceChoice = payload.choice;
+        } else if (payload.action === "language" && typeof payload.language === "string") {
+          voiceLanguage = payload.language;
+        } else if (payload.action === "voice" && (payload.engine === "local" || payload.engine === "cloud") && typeof payload.voice === "string") {
+          voiceVoices[payload.engine] = payload.voice;
+        } else {
+          await fulfillJson(route, { error: "Unknown voice action" }, 400);
+          return;
+        }
+      }
+      await fulfillJson(route, buildVoiceStatus());
+      return;
+    }
+
+    if (path === "/setup-api/tts/sample" && method === "POST") {
+      await route.fulfill({ status: 200, contentType: "audio/wav", body: SILENT_WAV });
+      return;
+    }
+
+    // Speech in. Whisper is not on this box, so the cloud is the only engine
+    // that can be in the chain — and, as on the real route (where `configured`
+    // is "the box holds a ClawBox AI token"), only when the box is linked. An
+    // unlinked box with no Whisper transcribes nowhere, and the chain says so.
+    if (path === "/setup-api/stt") {
+      const cloudConfigured = setupState.ai_model_configured;
       await fulfillJson(route, {
-        choice: "auto",
-        activeProviderId: "tts-local-cli",
-        activeEngine: "local",
-        preferredEngine: "local",
-        drifted: false,
-        engines: [
-          {
-            id: "local", providerId: "tts-local-cli", label: "On this box",
-            configured: true, proven: true, usable: true,
-            detail: "Speaks on the box itself. Nothing leaves it. Installed: Piper.",
-          },
-          {
-            id: "cloud", providerId: "openai", label: "ClawBox cloud",
-            configured: false, proven: false, usable: false,
-            detail: "ClawBox AI does not serve the voice yet, so this box has no cloud voice to call.",
-          },
-        ],
-        lastCheck: {
-          at: 1787000000000, ok: true,
-          servedByProviderId: "tts-local-cli", servedEngine: "local",
-          attempts: [{ providerId: "tts-local-cli", engine: "local", ok: true, message: null, latencyMs: 14893 }],
-          message: null,
+        primary: "cloud",
+        engines: {
+          cloud: { configured: cloudConfigured, label: "ClawBox cloud" },
+          local: { installed: false, label: "On this box", detail: "The on-box transcriber is not installed." },
         },
-        warning: null,
+        chain: cloudConfigured ? ["cloud"] : [],
+        channels: { supportedOnEdition: true },
       });
+      return;
+    }
+
+    // Settings -> Coding Agent. The switch is not optimistic — the panel
+    // renders whatever the route answers — so `enable` has to answer the
+    // whole re-read status, exactly as the real route does.
+    if (path === "/setup-api/coding-agent/status") {
+      await fulfillJson(route, buildCodingAgentStatus());
+      return;
+    }
+
+    if (path === "/setup-api/coding-agent/enable" && method === "POST") {
+      const payload = await readRequestJson<Partial<typeof codingAgent>>(route);
+      if (typeof payload.enabled === "boolean") codingAgent.enabled = payload.enabled;
+      if (payload.defaultDirectory !== undefined) codingAgent.defaultDirectory = payload.defaultDirectory;
+      if (typeof payload.effort === "string") codingAgent.effort = payload.effort;
+      if (typeof payload.subagents === "boolean") codingAgent.subagents = payload.subagents;
+      if (typeof payload.maxTurns === "number") codingAgent.maxTurns = payload.maxTurns;
+      if (payload.tokenLimit !== undefined) codingAgent.tokenLimit = payload.tokenLimit;
+      await fulfillJson(route, buildCodingAgentStatus());
+      return;
+    }
+
+    if (path === "/setup-api/coding-agent/git") {
+      await fulfillJson(route, { installed: true, connected: false, login: null, loginCommand: "gh auth login" });
       return;
     }
 
@@ -1326,7 +1604,27 @@ export async function completeSetupWizard(page: Page) {
  * — the same shape openLauncher uses for its own button.
  */
 export async function openChatPopup(page: Page) {
-  await page.locator('[data-testid="shelf-chat-button"]:visible').first().click();
+  const button = page.locator('[data-testid="shelf-chat-button"]:visible').first();
+  await waitForHydration(button);
+  await button.click();
+}
+
+/**
+ * The shelf is server-rendered, so its buttons are visible — and clickable, as
+ * far as Playwright's actionability checks go — before React has attached a
+ * single handler to them. A click that lands in that window is simply lost,
+ * and on a loaded box (a build running beside the suite) the window is long
+ * enough to lose one every few runs. React marks a node it has hydrated with
+ * its own expando (`__reactProps$…`), so that is the signal: not "the button
+ * exists", but "the button has its onClick".
+ */
+async function waitForHydration(target: Locator) {
+  await expect
+    .poll(
+      () => target.evaluate((element) => Object.keys(element).some((key) => key.startsWith("__reactProps"))),
+      { message: "the shelf should be hydrated before it is clicked" },
+    )
+    .toBe(true);
 }
 
 export async function openLauncher(page: Page) {
@@ -1335,6 +1633,7 @@ export async function openLauncher(page: Page) {
   if (alreadyOpen) return;
 
   const button = page.locator('[data-testid="shelf-launcher-button"]:visible').first();
+  await waitForHydration(button);
   await button.click({ force: true });
   await expect(launcher).toBeVisible();
 }

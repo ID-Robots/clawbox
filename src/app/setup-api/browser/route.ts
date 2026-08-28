@@ -4,7 +4,11 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import net from "net";
+import fs from "fs";
+import { fileURLToPath, pathToFileURL } from "url";
 import { lookup as dnsLookup } from "dns/promises";
+import { activeRunDirectory, isInside } from "@/lib/coding-agent";
+import { describeImage } from "@/lib/vision-describe";
 
 const exec = promisify(execFile);
 const CDP_PORT = 18800;
@@ -14,6 +18,8 @@ const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
 // exfil — the JSON response hands back a screenshot of whatever it renders) or
 // to the device's own internal services (SSRF). Restrict to http(s) and reject
 // hosts that are, or resolve to, loopback/private/link-local addresses.
+// One scoped exception: file:// inside the ACTIVE coding run's own folder —
+// see validateFileNavUrl.
 function isPrivateIp(ip: string): boolean {
   if (net.isIPv4(ip)) {
     const p = ip.split(".").map(Number);
@@ -64,29 +70,80 @@ async function lookupWithTimeout(host: string): Promise<{ address: string }[]> {
   }
 }
 
-/** Returns an error message if the URL is not safe to navigate to, else null. */
-async function validateNavUrl(url: string): Promise<string | null> {
+/**
+ * The one file:// exception to SEC-4: the coding agent viewing the page IT is
+ * building. Only the ACTIVE run's working folder is reachable — anything else
+ * (config stores, token files, another run's folder) would end up rendered
+ * into a screenshot the vision model happily transcribes, which is exactly
+ * the exfil SEC-4 blocks. Realpath on both sides so a symlink a run planted
+ * inside its folder cannot point the browser outside it.
+ *
+ * The grant is deliberately TEMPORAL, not per-caller: while a run is live,
+ * any holder of the cookie-or-bearer gate may open file:// into that run's
+ * folder. On a single-owner appliance with one-run-at-a-time that is the
+ * run's own working set either way; a per-run capability token would be real
+ * machinery for marginal gain here.
+ *
+ * What is CHECKED is what is OPENED: the browser is sent to the resolved
+ * path, not the address the caller wrote. A symlink in the run's folder that
+ * pointed inside it when it was checked and is swapped to point outside a
+ * moment later would otherwise be followed by Chromium, not by this check.
+ */
+type NavDecision = { ok: true; url: string } | { ok: false; error: string };
+
+function resolveFileNavUrl(parsed: URL): NavDecision {
+  const activeDir = activeRunDirectory();
+  if (!activeDir) return { ok: false, error: "Blocked URL scheme: file: (no coding run is active)" };
+  let real: string;
+  let realDir: string;
+  try {
+    real = fs.realpathSync(fileURLToPath(parsed));
+    realDir = fs.realpathSync(activeDir);
+  } catch {
+    return { ok: false, error: "Blocked file address (file not found)" };
+  }
+  if (!isInside(real, realDir)) {
+    return { ok: false, error: "Blocked file address (outside the active coding run's folder)" };
+  }
+  // The page may read its own query and fragment; both ride along unchanged.
+  const resolved = pathToFileURL(real);
+  resolved.search = parsed.search;
+  resolved.hash = parsed.hash;
+  return { ok: true, url: resolved.href };
+}
+
+/** The address the browser may be sent to for `url`, or why it may not. */
+async function resolveNavUrl(url: string): Promise<NavDecision> {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return "Invalid URL";
+    return { ok: false, error: "Invalid URL" };
+  }
+  if (parsed.protocol === "file:") {
+    return resolveFileNavUrl(parsed);
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)`;
+    return { ok: false, error: `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)` };
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost")) return "Blocked internal host";
+  if (host === "localhost" || host.endsWith(".localhost")) return { ok: false, error: "Blocked internal host" };
   if (net.isIP(host)) {
-    return isPrivateIp(host) ? "Blocked internal address" : null;
+    return isPrivateIp(host) ? { ok: false, error: "Blocked internal address" } : { ok: true, url };
   }
   try {
     const results = await lookupWithTimeout(host);
-    if (results.some((r) => isPrivateIp(r.address))) return "Blocked internal address";
+    if (results.some((r) => isPrivateIp(r.address))) return { ok: false, error: "Blocked internal address" };
   } catch {
-    return "Host did not resolve";
+    return { ok: false, error: "Host did not resolve" };
   }
-  return null;
+  return { ok: true, url };
+}
+
+/** Returns an error message if the URL is not safe to navigate to, else null. */
+async function validateNavUrl(url: string): Promise<string | null> {
+  const nav = await resolveNavUrl(url);
+  return nav.ok ? null : nav.error;
 }
 
 // validateNavUrl only vets the URL the caller passes; page.goto then follows
@@ -280,9 +337,9 @@ export async function POST(req: Request) {
 
       const { url } = body;
       if (url) {
-        const navErr = await validateNavUrl(url);
-        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+        const nav = await resolveNavUrl(url);
+        if (!nav.ok) return NextResponse.json({ error: nav.error }, { status: 400 });
+        await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
       const id = `browser-${++sessionCounter}`;
@@ -317,6 +374,22 @@ export async function POST(req: Request) {
       };
     };
 
+    // The screenshot's written description, produced from the frame respond()
+    // just captured — for callers whose model cannot see images (coding-agent
+    // runs pass describe:true). One capture serves both; a failed description
+    // is an answer, not an error, and the caller degrades to the title.
+    const describeReply = async (reply: Awaited<ReturnType<typeof respond>>) => {
+      if (!reply.screenshot) {
+        return { ...reply, description: null, descriptionError: "could not capture the page" };
+      }
+      const described = await describeImage(reply.screenshot);
+      return { ...reply, description: described.text, descriptionError: described.error };
+    };
+    const finish = async () => {
+      const reply = await respond();
+      return body.describe === true ? describeReply(reply) : reply;
+    };
+
     const validCoord = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
 
     switch (action) {
@@ -324,10 +397,10 @@ export async function POST(req: Request) {
         const { url } = body;
         if (!url) return NextResponse.json({ error: "URL required" }, { status: 400 });
         await installNavGuard(page as unknown as GuardablePage);
-        const navErr = await validateNavUrl(url);
-        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
-        return NextResponse.json(await respond());
+        const nav = await resolveNavUrl(url);
+        if (!nav.ok) return NextResponse.json({ error: nav.error }, { status: 400 });
+        await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+        return NextResponse.json(await finish());
       }
 
       case "click": {
@@ -405,7 +478,12 @@ export async function POST(req: Request) {
         return NextResponse.json(await respond());
 
       case "screenshot":
-        return NextResponse.json(await respond());
+        return NextResponse.json(await finish());
+
+      case "describe":
+        // screenshot with the description forced — kept as its own action so
+        // a caller can ask for a described look without knowing the flag.
+        return NextResponse.json(await describeReply(await respond()));
 
       case "close":
         // Close the session's page, not the shared Browser — leaving CDP

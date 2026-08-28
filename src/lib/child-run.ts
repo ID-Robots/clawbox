@@ -54,6 +54,11 @@ export interface RunChildOptions {
   env: Record<string, string>;
   /** What stderr reads when the binary never started. */
   notStarted?: string;
+  /** Written to the child's stdin, which is then closed. Absent = stdin closed
+   *  from the start, exactly as before this option existed. The one consumer
+   *  is `gh auth login --with-token`, which reads the credential from stdin so
+   *  it never appears in argv. */
+  input?: string;
 }
 
 /**
@@ -67,15 +72,21 @@ export function runChild(bin: string, args: string[], opts: RunChildOptions): Pr
       // Cast only because this repo's ProcessEnv augmentation insists on
       // NODE_ENV, which neither git nor gh has any use for.
       env: opts.env as unknown as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
+    if (opts.input !== undefined && child.stdin) {
+      child.stdin.on("error", () => { /* a child that never read it is its exit code's problem */ });
+      child.stdin.end(opts.input);
+    }
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, opts.timeoutMs);
     timer.unref();
-    child.stdout.on("data", (c) => { stdout += String(c); });
-    child.stderr.on("data", (c) => { stderr += String(c); });
+    // `?.` only because the computed stdio tuple widens the type — slots 1
+    // and 2 are always "pipe", so the streams are always there.
+    child.stdout?.on("data", (c) => { stdout += String(c); });
+    child.stderr?.on("data", (c) => { stderr += String(c); });
     // `error` is not proof the binary is missing. It also fires on a child that
     // spawned perfectly well and whose kill() could not deliver its signal — so
     // treating every error as "not installed" would reintroduce the exact

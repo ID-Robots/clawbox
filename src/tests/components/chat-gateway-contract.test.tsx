@@ -167,17 +167,10 @@ describe("gateway wire contract", () => {
     expect(String(params.idempotencyKey).length).toBeGreaterThan(0);
   });
 
-  it("resets as sessions.reset{key,reason:'new'}", async () => {
-    await mountReady();
-    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
-    await waitFor(() => expect(framesFor("sessions.reset")).toHaveLength(1));
-    // `reason: 'new'` is what makes the agent start a fresh thread rather than
-    // merely rewinding.
-    expect(framesFor("sessions.reset")[0].params).toEqual({
-      key: "agent:main:main",
-      reason: "new",
-    });
-  });
+  // `sessions.reset{key,reason:'new'}` is pinned at the adapter level now
+  // (openclaw-gateway-adapter-reset.test.ts): the strip's + opens the gateway
+  // UI in a new tab instead of resetting this thread, and the only remaining
+  // caller is the provider-switch flow.
 
   it("pushes the sticky reasoning default as sessions.patch{key,thinkingLevel}", async () => {
     await mountReady();

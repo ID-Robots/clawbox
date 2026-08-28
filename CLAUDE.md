@@ -40,7 +40,8 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 
 - **WiFi**: `wifi/scan`, `wifi/connect`, `wifi/status`, `wifi/ethernet` — WiFi and Ethernet management
 - **System**: `system/info`, `system/stats`, `system/power`, `system/credentials`, `system/hotspot`, `system/desktop`, `system/power-profile` — system info, power control, password, hotspot config, desktop/headless toggle, Jetson power profile + memory guards
-- **AI Models**: `ai-models/configure`, `ai-models/status`, `ai-models/oauth/*` — API key config with OAuth flows (device auth + authorization code)
+- **AI Models**: `ai-models/configure`, `ai-models/status`, `ai-models/oauth/*` — API key config with OAuth flows (device auth + authorization code). `providers/status` lists every provider (cloud and on-device) with its connection state, whether it is the default, and `enabled`; `providers/enabled` (owner-only) is the per-provider switch — a switched-off provider keeps its credential but is never offered to the chat or written as a fallback, and the current default can never be switched off. Connecting a provider through `configure` switches it back on.
+- **Voice**: `tts` — speech output: which engine speaks first (ClawBox cloud or Kokoro on the box; the gateway falls through to the other), the voice each engine speaks with (`{action:"voice"}` — the local one is the file `clawbox-tts.sh` reads, the cloud one is OpenClaw's own `providers.<cloud>.voice`) and the sample language. `tts/sample` speaks typed text with ONE engine and voice and answers the WAV, for the Voice tab's player — deliberately not the fall-through chain, because an audition of the cloud voice that quietly played Kokoro would be the wrong answer. `stt` — speech input: `stt_primary` orders ClawBox cloud transcription and Whisper on the box for BOTH the chat microphone (`chat/transcribe`, which now falls through and reports `engine`) and channel voice notes (`tools.media.audio.models[]`, an ordered list OpenClaw tries in turn). Microsoft's bundled Edge TTS is switched off at boot on any box with its own voice (`ensureMicrosoftTtsExcluded`), so the speech chain is exactly cloud → Kokoro.
 - **Ollama**: `ollama/status`, `ollama/pull`, `ollama/search`, `ollama/delete` — local model management
 - **Apps**: `apps/store`, `apps/install`, `apps/uninstall`, `apps/icon/[appId]`, `apps/settings` — app store integration
 - **Files**: `files/` — file list, read, write, upload, mkdir, delete
@@ -54,7 +55,7 @@ Next.js rewrites in `next.config.ts` proxy gateway paths (`/api/*`, `/assets/*`,
 - **Preferences**: `preferences/` — persistent user preferences (language, installed apps, etc.)
 - **KV Store**: `kv/` — key-value store for UI state
 - **Code**: `code/` — code project management (init, file ops, search, build/deploy)
-- **Coding agent**: `coding-agent/status`, `coding-agent/enable`, `coding-agent/run`, `coding-agent/runs`, `coding-agent/stop` — a headless Claude Code run (`claude-ds -p`) the assistant delegates a whole task to; runs live in the web server and persist in `data/coding-agent-runs.json`. `enable` is owner-only (refuses the MCP bearer) because it is the consent for a delegated shell; `run` answers 409 while the switch is off.
+- **Coding agent**: `coding-agent/status`, `coding-agent/enable`, `coding-agent/run`, `coding-agent/runs`, `coding-agent/stop`, `coding-agent/artifacts`, `coding-agent/projects` — a headless Claude Code run (`claude-ds -p`) the assistant delegates a whole task to; runs live in the web server and persist in `data/coding-agent-runs.json`. `enable` is owner-only (refuses the MCP bearer) because it is the consent for a delegated shell; `run` answers 409 while the switch is off. Each run gets an evidence folder (`data/coding-agent-artifacts/<runId>/`) for the screenshots and test output it saves; when a run settles, its closing message is filed there as `report.md` too (unless the run wrote its own), and the app renders that — and any `.md` a run wrote — as Markdown through the chat's own renderer; `artifacts` serves one such file (images inline, everything else as plain text — agent-written HTML must never execute in the app's origin), and the runs listing decorates each run with the folder's contents at read time. `projects` (read-only) lists what the owner can point a run at: every folder directly under the project folder that has a `.git` directory of its own, plus every code project under `data/code-projects/` (`kind: "folder" | "codeProject"`), each with its last commit, whether it is on the desktop and its newest run.
 - **Other**: `vnc/`, `code-server/`, `webapps/`, `mascot-lines/`
 
 All dynamic API routes use `export const dynamic = "force-dynamic"` to prevent caching.
@@ -84,7 +85,11 @@ Handles two concerns:
 - **`email-approval-telegram.ts`** — the approvals bot's Bot API calls, and the reason it has to be a bot ClawBox owns exclusively: the harness is the single consumer of the MAIN bot's `getUpdates`, so a button on that bot delivers its callback into the process that runs the agent.
 - **`email-approval-prompts.ts`** — the outstanding questions (`data/email-approval-prompts.json`, 0600, capped, 24h): handle → draft id + fingerprint, claimed read-and-remove so one handle answers once.
 - **`coding-harness.ts`** — the one name for the `claude-ds` wrapper (Claude Code on the box's ClawBox AI plan) and where install.sh puts it.
-- **`coding-agent.ts`** — the coding agent runner: spawns `claude-ds -p` with an explicit environment, `acceptEdits`, a Bash allow/deny-list and file deny rules, parses the `stream-json` output into a persisted run record, enforces the owner's switch, readiness, one-run-at-a-time and the working-folder rules, settles runs lost to a restart.
+- **`coding-agent.ts`** — the coding agent runner: spawns `claude-ds -p` with an explicit environment, `acceptEdits`, a Bash allow/deny-list and file deny rules, parses the `stream-json` output into a persisted run record, enforces the owner's switch, readiness, one-run-at-a-time and the working-folder rules, settles runs lost to a restart. Wires the clawbox MCP server into each run (`--strict-mcp-config`, browser-only profile, no secret in argv) so a run can drive the device's Chromium to verify its work.
+- **`coding-agent-artifacts.ts`** — the run evidence store: per-run folder under `data/coding-agent-artifacts/`, listing/serving-path validation (traversal- and symlink-proof), removal when a run record is dropped.
+- **`vision-describe.ts`** — text eyes for image-blind run models: describes a screenshot through the box's resolved vision model, answering `{ text, error }` instead of throwing.
+- **`provider-enablement.ts`** — the per-provider switch (`ai_disabled_providers` in the config store): read by `provider-status.ts`, the chat model options, `providers/default` and the fallback writer; refuses to switch off the current default.
+- **`stt-preference.ts`** / **`stt-local.ts`** — speech-input ordering (`stt_primary`, the `tools.media.audio.models[]` shapes the boot script recognises as ours) and the on-box Whisper client (temp file, `stt-client.py`, never throws).
 - **`coding-agent-notify.ts`** — the finish notice: desktop toast plus a template-only Telegram message to approved senders. Never the task or the summary.
 - **`hermes-env.ts`** — writes `~/.hermes/.env` with Hermes' own `save_env_value` semantics. Needed because `hermes config set` routes no `EMAIL_*` key to `.env` and would put a mailbox password in `config.yaml` instead.
 - **`hermes-email.ts`** — Hermes' native inbound email adapter (opt-in, allowlist-only).
@@ -111,8 +116,7 @@ Handles two concerns:
 #### Desktop Environment
 - **`ChromeShelf.tsx`** — app launcher taskbar with pinned icons
 - **`ChromeLauncher.tsx`** — app discovery context menu
-- **`ChromeWindow.tsx`** / **`Window.tsx`** — draggable, resizable windows with title bar controls
-- **`Taskbar.tsx`** — bottom bar with system tray, clock, actions
+- **`ChromeWindow.tsx`** — the draggable, resizable desktop window with title bar controls
 - **`SystemTray.tsx`** — WiFi, battery, Telegram status indicators
 - **`Mascot.tsx`** — animated crab mascot with personality states
 - **`AndroidStatusBar.tsx`** / **`AndroidNavBar.tsx`** / **`AppDrawer.tsx`** — mobile UI
@@ -125,14 +129,15 @@ Handles two concerns:
 - **`VNCApp.tsx`** — NoVNC remote desktop viewer
 - **`VSCodeApp.tsx`** — VS Code server integration
 - **`AppStore.tsx`** — discover and install apps from clawbox.com
-- **`SettingsApp.tsx`** — appearance, WiFi, AI provider, Telegram, Email, system settings
+- **`SettingsApp.tsx`** — Providers, Local AI, Coding Agent (`CodingAgentSettingsPanel.tsx`), Channels (Telegram, Discord, Email), Voice, Network, Remote Control, Appearance, System, About
 - **`OllamaModelPanel.tsx`** — local model pull, search, delete
-- **`CodingAgentApp.tsx`** — the Coding Agent desktop app: the owner's switch for delegated Claude Code runs, harness readiness, recent runs (this icon used to open an interactive `claude-ds` terminal) with summaries
+- **`CodingAgentApp.tsx`** — the Coding Agent desktop app: harness readiness, the Test-harness button, the owner's projects (git-initialised folders and code projects), recent runs (this icon used to open an interactive `claude-ds` terminal) with summaries, and a "New app" wizard that composes one message and hands it to the mascot chat (`CHAT_MESSAGE_EVENT`) — the assistant carries on from there. Its settings live in Settings → Coding Agent; the app only links there.
+- **`CodingAgentSettingsPanel.tsx`** — Settings → Coding Agent: the owner's switch for delegated Claude Code runs, the default project folder, effort, the per-run ceilings and the GitHub card (device-flow login, sign-out, terminal fallback). Emits `CODING_AGENT_CHANGED_EVENT` after every saved change so an open Coding Agent window refreshes.
+- **`MemoryShardApp.tsx`** — the Memory Shard desktop app (`memory-shard`, OpenClaw only): the memory index card that used to sit inside ClawKeep — index now, schedule, status. ClawKeep keeps a one-line pointer card to it; the shared card/stat/dialog helpers live in `clawkeep-ui.tsx`.
 - **`ToastHost.tsx`** — the desktop's toast surface; the only listener for the `clawbox:toast` event every server-side owner notice ends in
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper
 
 #### Hooks
-- **`useWindows.ts`** — window state management (reducer pattern)
 - **`useOllamaModels.ts`** — Ollama model management
 
 ### MCP Server (`mcp/`)
@@ -185,7 +190,7 @@ Enables the AI agent to build multi-file desktop webapps through an iterative co
 3. Search code with `code_search`, inspect with `code_file_read`
 4. `code_project_build` — inlines local CSS/JS into a single HTML file, deploys to `data/webapps/`, registers on the desktop
 
-Projects live in `data/code-projects/<projectId>/`. Built webapps are deployed to `data/webapps/<projectId>/` and served at `/setup-api/webapps?app=<projectId>`.
+Projects live in `data/code-projects/<projectId>/`. Built webapps are deployed to `data/webapps/<projectId>/` and served at `/setup-api/webapps?app=<projectId>`. An app created or built without an icon gets one generated by ClawBox AI's image model when the box is linked (`src/lib/webapp-icon.ts`): fire-and-forget after `deployWebapp`/`buildProject` register the app, written atomically to `data/icons/<appId>.png` where the icon route already looks, never overwriting an existing icon, one picture per app and one generation at a time (a rebuild while the picture is being drawn joins it; a failure is not retried for a few minutes), dropped if the app was uninstalled meanwhile, and the open desktop is nudged with a `register_webapp` re-push so the icon appears without a reload.
 
 ### System Integration (`scripts/`, `config/`)
 

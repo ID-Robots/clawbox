@@ -1,4 +1,9 @@
 node_modules/
+# The name in every form, not only as a directory: a worktree with node_modules
+# as a SYMLINK once got that symlink committed by `git add -A`, and checking the
+# commit out replaced the real tree with a link to itself.
+/node_modules
+node_modules
 .next/
 .next-old/
 out/

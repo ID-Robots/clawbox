@@ -92,12 +92,21 @@ const PROTECTED_FILE_RES: RegExp[] = [
 // file — may only import modules whose whole graph is relative paths and node
 // builtins. Read the import rule at the top of mcp/lib/guard.ts before changing
 // this: an import here breaks the MCP server at startup, not at build time.
+
+/**
+ * The per-run evidence folders coding-agent runs write into. Owned HERE (the
+ * alias-free end of the import graph) and imported by coding-agent-artifacts,
+ * the module that builds paths from it — one owner, no mirrored literal.
+ */
+export const CODING_AGENT_ARTIFACTS_SUBTREE = "coding-agent-artifacts";
+
 export const DATA_DIR_PUBLIC_SUBTREES = new Set([
   "webapps",       // built desktop webapps, also served by the webapps route
   "icons",         // installed-app icons, also served by the icon route
   "catalog-cache", // cached copies of the providers' public model catalogues
   "code-projects", // the code assistant's project sources
   "llamacpp",      // local-model runtime: downloaded weights, pid file, log
+  CODING_AGENT_ARTIFACTS_SUBTREE,
 ]);
 
 // DATA_DIR is already absolute and normalised (config-store builds it with

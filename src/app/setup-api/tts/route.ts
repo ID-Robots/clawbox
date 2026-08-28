@@ -9,7 +9,6 @@ import crypto from "crypto";
 import {
   buildTtsInventory,
   KOKORO_STAMP,
-  PIPER_BINARY,
   type LocalModelEntry,
 } from "@/lib/local-models";
 import {
@@ -22,6 +21,7 @@ import {
 import {
   applyCheck,
   buildVoiceOutputStatus,
+  cloudSpeechTarget,
   forgetEngineCheck,
   failedVoiceCheck,
   isVoiceChoice,
@@ -33,12 +33,16 @@ import {
   type VoiceChoice,
   type VoiceOutputStatus,
 } from "@/lib/voice-output";
-import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
+import { readLocalVoice, readVoiceState, writeLocalVoice, writeVoiceState } from "@/lib/voice-output-store";
+import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
+import { createSerialLock } from "@/lib/serial-lock";
 
 /**
  * GET  /setup-api/tts            → who speaks for this box, and who actually did
  * POST /setup-api/tts {select}   → pick Auto / On this box / ClawBox cloud
  * POST /setup-api/tts {check}    → synthesise a real phrase and record the result
+ * POST /setup-api/tts {voice}    → which voice an engine speaks with
+ * POST /setup-api/tts {language} → the sample sentence's language on the Voice tab
  *
  * GET touches only the filesystem. The openclaw CLI costs 8-12 s of cold start
  * on an Orin Nano (see runOpenclawConfigSet's note), which is fine for an
@@ -78,13 +82,13 @@ async function probeBox() {
   // own artefacts when no command is configured at all.
   const commandPresent = command
     ? await exists(command)
-    : (await exists(PIPER_BINARY)) || (await exists(KOKORO_STAMP));
+    : await exists(KOKORO_STAMP);
   return { config, probe: localProbeFrom(config, models, commandPresent) };
 }
 
 async function status(): Promise<VoiceOutputStatus> {
-  const [{ config, probe }, state] = await Promise.all([probeBox(), readVoiceState()]);
-  return buildVoiceOutputStatus(config, probe, state);
+  const [{ config, probe }, state, localVoice] = await Promise.all([probeBox(), readVoiceState(), readLocalVoice()]);
+  return buildVoiceOutputStatus(config, probe, state, localVoice);
 }
 
 /**
@@ -200,6 +204,18 @@ function currentCheck() {
   return checkInFlight;
 }
 
+/**
+ * One writer of the voice state at a time.
+ *
+ * Every mutation below is "read the state, change a field, write it back",
+ * and two of them can land together: a check finishing at the moment the
+ * owner picks a language, or two tabs. Each would read the same base and the
+ * second write would drop the first — the check's record, or the language,
+ * silently gone. Only the read-modify-write is held; the 90-second synthesis
+ * and the 8-12 s openclaw CLI call stay outside it.
+ */
+const withVoiceState = createSerialLock();
+
 async function handleCheck() {
   const check = await currentCheck();
   // Read the state AFTER the run, not before it. A check holds no snapshot
@@ -207,12 +223,63 @@ async function handleCheck() {
   // running would otherwise have that choice overwritten by the stale copy this
   // handler started with. The box is probed once and reused, rather than read a
   // third time for a status this function can already assemble.
-  const [state, { config, probe }] = await Promise.all([readVoiceState(), probeBox()]);
-  const next = applyCheck(state, check);
-  await writeVoiceState(next);
-  return NextResponse.json(buildVoiceOutputStatus(config, probe, next), {
+  const { config, probe } = await probeBox();
+  const [next, localVoice] = await withVoiceState(async () => {
+    const [state, localVoice] = await Promise.all([readVoiceState(), readLocalVoice()]);
+    const next = applyCheck(state, check);
+    await writeVoiceState(next);
+    return [next, localVoice] as const;
+  });
+  return NextResponse.json(buildVoiceOutputStatus(config, probe, next, localVoice), {
     headers: { "Cache-Control": "no-store" },
   });
+}
+
+/**
+ * Which voice an engine speaks with. The on-device voice is the file the local
+ * script reads, so the gateway's next utterance uses it with no restart; the
+ * cloud voice is OpenClaw's own `providers.<cloud>.voice`, written the way the
+ * provider itself is. Both are validated against the catalogue the engine
+ * accepts, so an unknown id is refused here instead of failing at speech time.
+ */
+async function handleVoice(engine: unknown, voice: unknown) {
+  if (engine === "local") {
+    if (!isLocalVoice(voice)) {
+      return NextResponse.json({ error: "That voice is not on this box." }, { status: 400 });
+    }
+    await writeLocalVoice(voice);
+  } else if (engine === "cloud") {
+    if (!isCloudVoice(voice)) {
+      return NextResponse.json({ error: "The cloud voice does not have that voice." }, { status: 400 });
+    }
+    const target = cloudSpeechTarget(await readConfig());
+    if (!target) {
+      return NextResponse.json({ error: "That voice is not available on this box." }, { status: 409 });
+    }
+    // A voice some model has is not a voice THIS model has: tts-1 refuses
+    // ballad and verse at speech time, which would be a saved setting that
+    // never speaks.
+    if (!isCloudVoiceFor(target.model, voice)) {
+      return NextResponse.json(
+        { error: `The cloud voice's model (${target.model}) does not have that voice.` },
+        { status: 400 },
+      );
+    }
+    await runOpenclawConfigSet([`messages.tts.providers.${target.providerId}.voice`, voice]);
+  } else {
+    return NextResponse.json({ error: "Pick the voice on this box or the cloud voice." }, { status: 400 });
+  }
+  return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
+}
+
+async function handleLanguage(language: unknown) {
+  if (!isVoiceLanguage(language)) {
+    return NextResponse.json({ error: "That language is not offered." }, { status: 400 });
+  }
+  await withVoiceState(async () => {
+    await writeVoiceState({ ...(await readVoiceState()), language });
+  });
+  return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
 }
 
 async function handleSelect(choice: VoiceChoice) {
@@ -244,10 +311,16 @@ async function handleSelect(choice: VoiceChoice) {
 
   // Picking an engine again is a request to retry it, so this box stops
   // reporting what it observed last time until the next check says otherwise.
-  const next = choice === "auto"
-    ? { ...state, choice }
-    : { ...forgetEngineCheck(state, choice), choice };
-  await writeVoiceState(next);
+  // Re-read under the lock: the copy above decided the refusal, but the CLI
+  // call between then and now can take 12 s, and a check that finished in the
+  // meantime has a record this write must not erase.
+  await withVoiceState(async () => {
+    const current = await readVoiceState();
+    const next = choice === "auto"
+      ? { ...current, choice }
+      : { ...forgetEngineCheck(current, choice), choice };
+    await writeVoiceState(next);
+  });
   return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
 }
 
@@ -264,22 +337,24 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
-  const action = (body as { action?: unknown })?.action;
-  const choice = (body as { choice?: unknown })?.choice;
+  const { action, choice, engine, voice, language } = (body ?? {}) as Record<string, unknown>;
 
-  if (action !== "check" && action !== "select") {
+  if (action !== "check" && action !== "select" && action !== "voice" && action !== "language") {
     return NextResponse.json({ error: "Unknown action." }, { status: 400 });
   }
   if (action === "select" && !isVoiceChoice(choice)) {
     return NextResponse.json({ error: "Pick Auto, this box, or ClawBox cloud." }, { status: 400 });
   }
 
-  // One boundary for both branches. Every step here is filesystem work or a
+  // One boundary for every branch. Every step here is filesystem work or a
   // spawn: a full disk, a read-only data dir or a missing CLI must come back as
   // a message the panel can show, not as a framework error page that leaves the
   // box with nothing in its log.
   try {
-    return action === "check" ? await handleCheck() : await handleSelect(choice as VoiceChoice);
+    if (action === "check") return await handleCheck();
+    if (action === "voice") return await handleVoice(engine, voice);
+    if (action === "language") return await handleLanguage(language);
+    return await handleSelect(choice as VoiceChoice);
   } catch (err) {
     console.warn(`[setup-api/tts] ${action} failed:`, err);
     return NextResponse.json({ error: "Could not change the voice on this box." }, { status: 500 });

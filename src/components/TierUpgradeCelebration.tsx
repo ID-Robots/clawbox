@@ -45,7 +45,7 @@ type DialogAction =
   | { type: "CLOSE" };
 
 // Local reducer for the dialog's open/close lifecycle. CodeRabbit's
-// review on PR #132 suggested wiring this through `useWindows.ts`,
+// review on PR #132 suggested wiring this through a window-state hook,
 // but that hook is purpose-built for desktop windows with z-order /
 // minimize / maximize semantics — none of which apply to a transient
 // centred modal. A local reducer captures the spirit of the

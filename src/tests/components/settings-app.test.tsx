@@ -297,6 +297,8 @@ describe("SettingsApp mascot phrase refresh", () => {
   });
 
   const clickRefresh = async () => {
+    // Settings opens on AI Models; the phrase refresh lives in Appearance.
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
     const button = await screen.findByRole("button", { name: /settings\.mascotRefresh$/ });
     fireEvent.click(button);
     return button;
@@ -567,5 +569,194 @@ describe("SettingsApp — the AI section never doubles the provider hero", () =>
     await waitFor(() => {
       expect(screen.queryByText("settings.status")).not.toBeInTheDocument();
     });
+  });
+});
+
+/**
+ * The Messaging Channels hub — one sidebar entry for every outside service the assistant
+ * can be reached through, in the shape of GNOME's Online Accounts. The four
+ * connectors keep their own panes (and their deep links); what changed is that
+ * the sidebar stopped carrying four near-identical rows.
+ */
+describe("SettingsApp messaging channels hub", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      return jsonResponse({});
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function navButtons(container: HTMLElement): HTMLElement[] {
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    return [...nav.querySelectorAll(":scope > button")] as HTMLElement[];
+  }
+
+  it("carries one Messaging Channels entry instead of a row per channel", () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const labels = navButtons(container).map((b) => b.textContent ?? "");
+
+    // Each row's text carries its label plus an sr-only status line, so these
+    // are substring checks rather than exact matches.
+    expect(labels.some((l) => l.includes("settings.channels"))).toBe(true);
+    for (const gone of ["settings.telegram", "settings.email", "settings.whatsapp", "settings.discord"]) {
+      expect(labels.some((l) => l.includes(gone))).toBe(false);
+    }
+  });
+
+  it("lists every channel on the hub page, each opening its own settings", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const accounts = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.channels"));
+    if (!accounts) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(accounts);
+
+    const list = await screen.findByTestId("settings-channels-list");
+    for (const id of ["telegram", "email", "whatsapp", "discord"]) {
+      expect(within(list).getByTestId(`settings-channel-${id}`)).toBeInTheDocument();
+    }
+
+    // A row opens that connector's pane, and the pane offers the way back —
+    // the sidebar no longer has a row of its own to return to.
+    fireEvent.click(screen.getByTestId("settings-channel-telegram"));
+    expect(await screen.findByTestId("settings-channels-back")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-channels-list")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("settings-channels-back"));
+    expect(await screen.findByTestId("settings-channels-list")).toBeInTheDocument();
+  });
+
+  it("keeps the entry lit while a channel pane is open", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const accountsButton = () =>
+      navButtons(container).find((b) => (b.textContent ?? "").includes("settings.channels"))!;
+    fireEvent.click(accountsButton());
+    fireEvent.click(await screen.findByTestId("settings-channel-discord"));
+
+    await waitFor(() => expect(screen.getByTestId("settings-channels-back")).toBeInTheDocument());
+    expect(accountsButton().className).toContain("coral-bright");
+  });
+});
+
+/**
+ * Providers and Local AI are neighbouring sidebar entries, each with its own
+ * provider list on top: cloud sign-ins on Providers, the on-device model and
+ * the inventory of everything on the box on Local AI. The old "localModels"
+ * section id survives as a deep link that lands on Local AI.
+ */
+describe("SettingsApp providers and Local AI pages", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/providers/status")) {
+        return jsonResponse({ harness: "openclaw", providers: [], defaultProvider: null, degraded: false });
+      }
+      return jsonResponse({});
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function navButtons(container: HTMLElement): HTMLElement[] {
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    return [...nav.querySelectorAll(":scope > button")] as HTMLElement[];
+  }
+
+  it("carries Providers and Local AI, and no Local Models or AI Provider rows", () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const labels = navButtons(container).map((b) => b.textContent ?? "");
+    expect(labels.some((l) => l.includes("settings.providers"))).toBe(true);
+    expect(labels.some((l) => l.includes("settings.localAi"))).toBe(true);
+    expect(labels.some((l) => l.includes("settings.localModels"))).toBe(false);
+    expect(labels.some((l) => l.includes("settings.aiProvider"))).toBe(false);
+    // Providers leads the sidebar, with Local AI directly beneath it.
+    expect(labels.findIndex((l) => l.includes("settings.localAi"))).toBe(labels.findIndex((l) => l.includes("settings.providers")) + 1);
+  });
+
+  it("carries Coding Agent directly beneath Local AI, and opens its settings panel there", async () => {
+    // The coding agent's switch, folder, effort and GitHub account moved out
+    // of the desktop app into Settings; the app links here by section id.
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const labels = navButtons(container).map((b) => b.textContent ?? "");
+    expect(labels.findIndex((l) => l.includes("settings.codingAgent"))).toBe(labels.findIndex((l) => l.includes("settings.localAi")) + 1);
+
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "codingAgent" } }));
+    expect(await screen.findByTestId("coding-agent-settings-panel")).toBeInTheDocument();
+    expect(await screen.findByTestId("coding-agent-switch")).toBeInTheDocument();
+    const entry = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.codingAgent"))!;
+    expect(entry.className).toContain("coral-bright");
+  });
+
+  it("keeps the coding agent's last known state in the sidebar when the status read fails", async () => {
+    // A 500 has no `enabled` field, and reading one off its error body
+    // turned every failure into "Off" — the sidebar said the switch was off
+    // while the panel beside it said it could not read the box.
+    let statusAnswer: () => Promise<unknown> = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: "boom" }) });
+    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/providers/status")) {
+        return jsonResponse({ harness: "openclaw", providers: [], defaultProvider: null, degraded: false });
+      }
+      if (url.startsWith("/setup-api/coding-agent/status")) return statusAnswer();
+      if (url.startsWith("/setup-api/coding-agent/git")) {
+        return jsonResponse({ installed: false, connected: false, login: null, loginCommand: "gh auth login", reason: "not_installed" });
+      }
+      return jsonResponse({});
+    }));
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const entry = () => navButtons(container).find((b) => (b.textContent ?? "").includes("settings.codingAgent"))!;
+    const openCodingAgent = async () => {
+      window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "codingAgent" } }));
+      await screen.findByTestId("coding-agent-settings-panel");
+    };
+
+    // A failed first read: no state, not "Off".
+    await openCodingAgent();
+    expect(await screen.findByText("codingAgent.loadFailed")).toBeInTheDocument();
+    expect(entry().textContent).not.toContain("codingAgent.stateOff");
+    expect(entry().textContent).not.toContain("codingAgent.stateOn");
+
+    // The box answers: the sidebar says On.
+    statusAnswer = () => jsonResponse({ enabled: true, effort: "max", readiness: { ready: true, problems: [] }, effortLevels: ["max"] });
+    fireEvent.click(navButtons(container).find((b) => (b.textContent ?? "").includes("settings.providers"))!);
+    await openCodingAgent();
+    await waitFor(() => expect(entry().textContent).toContain("codingAgent.stateOn"));
+
+    // The next read fails: the sidebar keeps On rather than flipping to Off.
+    statusAnswer = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: "boom" }) });
+    fireEvent.click(navButtons(container).find((b) => (b.textContent ?? "").includes("settings.providers"))!);
+    await openCodingAgent();
+    expect(await screen.findByText("codingAgent.loadFailed")).toBeInTheDocument();
+    expect(entry().textContent).toContain("codingAgent.stateOn");
+    expect(entry().textContent).not.toContain("codingAgent.stateOff");
+  });
+
+  it("opens on Providers with the provider list, and Local AI shows the grouped on-device page", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    expect(await screen.findByTestId("ai-provider-list")).toBeInTheDocument();
+
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"));
+    if (!local) throw new Error("Local AI nav entry did not render");
+    fireEvent.click(local);
+    // One grouped page for everything on the box (it loads its inventory first).
+    expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-local-ai-step")).not.toBeInTheDocument();
+  });
+
+  it("lands the old Local Models deep link on Local AI and keeps that entry lit", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localModels" } }));
+    expect(await screen.findByTestId("local-ai-loading")).toBeInTheDocument();
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
+    expect(local.className).toContain("coral-bright");
   });
 });

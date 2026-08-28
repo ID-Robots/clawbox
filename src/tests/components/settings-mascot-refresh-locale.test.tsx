@@ -8,7 +8,7 @@
 
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
 vi.mock("@/lib/i18n", () => ({
@@ -54,6 +54,8 @@ describe("SettingsApp mascot phrase refresh (non-English locale)", () => {
   it("disables the button and explains that generation is English-only", async () => {
     render(<SettingsApp ui={defaultUi} />);
 
+    // Settings opens on AI Models; the phrase refresh lives in Appearance.
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
     const button = await screen.findByRole("button", { name: /settings\.mascotRefresh$/ });
     expect(button).toBeDisabled();
     expect(screen.getByText("settings.mascotRefreshEnglishOnly")).toBeInTheDocument();
@@ -61,6 +63,8 @@ describe("SettingsApp mascot phrase refresh (non-English locale)", () => {
 
   it("never POSTs to the regenerate endpoint from a disabled locale", async () => {
     render(<SettingsApp ui={defaultUi} />);
+    // Settings opens on AI Models; the phrase refresh lives in Appearance.
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
     await screen.findByRole("button", { name: /settings\.mascotRefresh$/ });
 
     const calls = (fetch as unknown as { mock: { calls: [string][] } }).mock.calls;

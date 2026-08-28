@@ -17,6 +17,7 @@ import {
 } from "@/lib/clawbox-ai-models";
 import { OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { isValidModelId, parseModelSlug } from "@/lib/provider-models";
+import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import {
   CODEX_SUPPORTED_MODEL_RE,
   isClaudeSubscriptionOnly,
@@ -40,6 +41,12 @@ interface ChatModelOption {
   available: boolean;
   settingsSection: "ai" | "localAi";
   isLocal: boolean;
+  /**
+   * Present (and true) only when `available` is false BECAUSE the owner
+   * switched the provider off in Settings — the credential is intact, and the
+   * picker shows the row greyed with that reason rather than "not set up".
+   */
+  disabledByOwner?: true;
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -337,10 +344,24 @@ async function loadChatModelState() {
   // pick GPT/Claude/DeepSeek in the chat dropdown while Local-only is
   // lit up, and the chat then quietly talks to the cloud provider.
   const localOnlyMode = !!configStore.local_only_mode;
+
+  // The owner's per-provider switch. A switched-off provider STAYS in the
+  // list, greyed and carrying the reason, rather than vanishing: a row that
+  // disappears reads as "not connected" and sends the owner to re-enter a key
+  // that is fine. Matched on the canonical id the status strip uses, so the
+  // `codex` and `openai` rows both follow the one "OpenAI" switch.
+  const disabledProviders = parseDisabledProviders(configStore[DISABLED_PROVIDERS_KEY]);
+  const applyOwnerSwitch = (option: ChatModelOption): ChatModelOption => {
+    const canonical = normalizeProviderId(option.provider);
+    return canonical && disabledProviders.has(canonical)
+      ? { ...option, available: false, disabledByOwner: true }
+      : option;
+  };
+
   const primaryOptions = localOnlyMode
     ? []
-    : sortPrimaryOptions([...configuredPrimaryOptions.values()]);
-  const localOption: ChatModelOption = localModel
+    : sortPrimaryOptions([...configuredPrimaryOptions.values()]).map(applyOwnerSwitch);
+  const localOption: ChatModelOption = applyOwnerSwitch(localModel
     ? {
         id: localModel,
         label: localLabel ?? "Local AI",
@@ -358,7 +379,7 @@ async function loadChatModelState() {
         available: false,
         settingsSection: "localAi",
         isLocal: true,
-      };
+      });
 
   const options = primaryOptions.length > 0
     ? [...primaryOptions, localOption]
@@ -372,7 +393,14 @@ async function loadChatModelState() {
         isLocal: false,
       }, localOption];
 
-  const summaryPrimaryOption = primaryOptions.find((option) => option.model === primaryModel) ?? primaryOptions[0] ?? null;
+  // The "back to primary" target. The remembered primary wins while it is
+  // still usable; a remembered provider the owner has since switched off gives
+  // way to the first one that is not, so the gesture keeps working instead of
+  // resolving to a model the switch below would refuse.
+  const summaryPrimaryOption = primaryOptions.find((option) => option.model === primaryModel && option.available)
+    ?? primaryOptions.find((option) => option.available)
+    ?? primaryOptions[0]
+    ?? null;
   const primaryLabel = summaryPrimaryOption?.label ?? null;
 
   const activeSource: ChatModelSource | null = activeModel
@@ -393,12 +421,36 @@ async function loadChatModelState() {
       model: summaryPrimaryOption?.model ?? null,
     },
     local: {
-      available: !!localModel,
+      available: localOption.available,
       label: localLabel,
       model: localModel,
     },
     subscriptionProviders: subscriptionProvidersForUi(openclawConfig),
   };
+}
+
+/**
+ * The 409 for a model on a provider the owner switched off, or null when the
+ * model may be routed to. Decided from the option rows — the same rows the
+ * picker greys out — so the refusal and the greying cannot disagree.
+ */
+function refuseDisabledProvider(
+  state: Awaited<ReturnType<typeof loadChatModelState>>,
+  model: string | null,
+): NextResponse | null {
+  const provider = normalizeProviderId(normalizeProviderFromModel(model));
+  const switchedOff = !!provider && state.options.some(
+    (option) => option.disabledByOwner && normalizeProviderId(option.provider) === provider,
+  );
+  if (!switchedOff) return null;
+  return NextResponse.json(
+    {
+      error: `${labelForProvider(provider, provider)} is switched off. Switch it on in Settings first.`,
+      kind: "provider_disabled",
+      provider,
+    },
+    { status: 409 },
+  );
 }
 
 export async function GET() {
@@ -425,6 +477,20 @@ export async function POST(request: Request) {
     }
 
     const state = await loadChatModelState();
+
+    // Refuse a switched-off provider BEFORE anything below runs: the
+    // openai-compat branch writes `models.providers.<p>.models` on its way to
+    // an answer, and a refusal that has already had a side effect is not a
+    // refusal. Both entry points are covered — an explicit model, and the
+    // "back to primary / local" gesture that resolves to one.
+    const requestedModel = typeof body.model === "string" && body.model.trim()
+      ? body.model.trim()
+      : body.source === "primary" ? state.primary.model
+        : body.source === "local" ? state.local.model
+          : null;
+    const disabledRefusal = refuseDisabledProvider(state, requestedModel);
+    if (disabledRefusal) return disabledRefusal;
+
     let targetModel: string | null = null;
     let authConfig: OpenClawConfig | null | undefined;
     const getAuthConfig = async () => {

@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import VoiceOutputPanel, { isVoiceStatus } from "@/components/VoiceOutputPanel";
+import { sampleSentence } from "@/lib/voice-catalog";
 
 /**
- * TASK-434 — what the customer is actually told.
+ * Settings → Voice, the compact version: where speech comes from, the
+ * language, the voice, and a sentence to hear.
  *
- * The acceptance line this panel exists for is "the chosen and the actually-used
- * engine must both be visible", so the assertions are about both being on
- * screen at once, and about a voice the box cannot use reading as unavailable
- * rather than as a choice that silently does something else.
+ * Pinned here: every dropdown posts to the route that owns the change and
+ * adopts the box's answer (never an optimistic flip); an engine the box does
+ * not have cannot be picked; the Play button speaks the text in the box with
+ * the engine and voice on screen; and a refusal is shown in the box's words.
  */
 
 function engine(over: Record<string, unknown> = {}) {
@@ -22,242 +24,213 @@ function engine(over: Record<string, unknown> = {}) {
 function status(over: Record<string, unknown> = {}) {
   return {
     choice: "auto",
-    activeProviderId: "tts-local-cli",
-    activeEngine: "local",
-    preferredEngine: "local",
+    activeProviderId: "openai",
+    activeEngine: "cloud",
+    preferredEngine: "cloud",
     drifted: false,
     engines: [
       engine(),
-      engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", usable: false, configured: false, detail: "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one." }),
+      engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: true, usable: true, detail: "Speaks in the cloud." }),
     ],
     lastCheck: null,
-    warning: null,
+    warning: "Voice uses ClawBox AI cloud TTS. Text sent for speech leaves this ClawBox.",
+    language: "en",
+    voice: { local: "af_heart", cloud: "alloy" },
     ...over,
   };
 }
 
-function mockFetch(payloads: unknown[]) {
-  const fn = vi.fn();
-  for (const p of payloads) fn.mockResolvedValueOnce({ ok: true, json: async () => p });
-  fn.mockResolvedValue({ ok: true, json: async () => payloads.at(-1) });
+let posts: { url: string; body: unknown }[] = [];
+
+function mockFetch(first: unknown, opts: { answer?: unknown; refuse?: { status: number; error: string }; sample?: { status: number; error?: string } } = {}) {
+  posts = [];
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const fn = vi.fn(async (input: string | URL, init?: RequestInit) => {
+    const url = input.toString();
+    if (init?.method === "POST") {
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      if (url === "/setup-api/tts/sample") {
+        if (opts.sample && opts.sample.status !== 200) return json({ error: opts.sample.error }, opts.sample.status);
+        return new Response(new Uint8Array(2048), { status: 200, headers: { "content-type": "audio/wav" } });
+      }
+      if (opts.refuse) return json({ error: opts.refuse.error }, opts.refuse.status);
+      return json(opts.answer ?? first);
+    }
+    return json(first);
+  });
   vi.stubGlobal("fetch", fn);
   return fn;
 }
 
-afterEach(() => { vi.unstubAllGlobals(); });
+const MEDIA = window.HTMLMediaElement.prototype;
+/**
+ * What jsdom ships before any test patches it — put back after EVERY test,
+ * pass or fail. `vi.stubGlobal("URL", Object.assign(URL, …))` looked like a
+ * stub but mutated the real URL, so unstubAllGlobals restored the patched
+ * object; and the `play` patch was undone only by the last line of the test
+ * that made it, so one failing assertion there left every later test with a
+ * player that refused everything.
+ */
+const original = {
+  createObjectURL: URL.createObjectURL,
+  revokeObjectURL: URL.revokeObjectURL,
+  play: Object.getOwnPropertyDescriptor(MEDIA, "play"),
+};
+
+/**
+ * jsdom has no object URLs, and its media elements never really play. `play`
+ * is patched only when the test says how the browser answers.
+ */
+function stubAudio(play?: () => Promise<void>) {
+  URL.createObjectURL = vi.fn(() => "blob:sample");
+  URL.revokeObjectURL = vi.fn();
+  if (play) Object.defineProperty(MEDIA, "play", { configurable: true, value: play });
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  URL.createObjectURL = original.createObjectURL;
+  URL.revokeObjectURL = original.revokeObjectURL;
+  if (original.play) Object.defineProperty(MEDIA, "play", original.play);
+  else Reflect.deleteProperty(MEDIA, "play");
+});
 
 describe("Voice panel", () => {
-  it("shows which voice is speaking and which one is chosen, together", async () => {
-    mockFetch([status()]);
+  it("shows the source, language and voice the box reports, and the sample sentence in that language", async () => {
+    mockFetch(status({ language: "de" }));
     render(<VoiceOutputPanel active />);
-    const speaking = await screen.findByTestId("voice-speaking-now");
-    expect(within(speaking).getByText("On this box")).toBeTruthy();
-    expect(screen.getByTestId("voice-choice-auto").getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByTestId("voice-choice-local").getAttribute("aria-checked")).toBe("false");
+    expect(await screen.findByTestId("voice-source")).toHaveValue("cloud");
+    expect(screen.getByTestId("voice-language")).toHaveValue("de");
+    expect(screen.getByTestId("voice-voice")).toHaveValue("alloy");
+    expect(screen.getByTestId("voice-sample-text")).toHaveValue(sampleSentence("de"));
+    // The privacy notice rides with the cloud source.
+    expect(screen.getByTestId("voice-cloud-warning")).toHaveTextContent(/leaves this ClawBox/);
   });
 
-  it("reads a voice the box cannot use as unavailable, with the reason", async () => {
-    mockFetch([status()]);
+  it("switches the source through the route and adopts the box's answer", async () => {
+    mockFetch(status(), { answer: status({ choice: "local", warning: null }) });
     render(<VoiceOutputPanel active />);
-    const cloud = await screen.findByTestId("voice-choice-cloud");
-    expect(within(cloud).getByText("Not available")).toBeTruthy();
-    expect(within(cloud).getByText(/comes with ClawBox AI Max/)).toBeTruthy();
-    expect(cloud.getAttribute("aria-disabled")).toBe("true");
-  });
-
-  it("surfaces the box's refusal rather than pretending the pick worked", async () => {
-    const fn = mockFetch([status()]);
-    fn.mockResolvedValueOnce({ ok: false, json: async () => ({ error: "That voice is not available on this box." }) });
-    render(<VoiceOutputPanel active />);
-    fireEvent.click(await screen.findByTestId("voice-choice-cloud"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("That voice is not available on this box.");
-    // The panel must not paint the refused choice as chosen.
-    expect(screen.getByTestId("voice-choice-cloud").getAttribute("aria-checked")).toBe("false");
-  });
-
-  it("sends the choice and adopts the box's answer", async () => {
-    const fn = mockFetch([status()]);
-    fn.mockResolvedValueOnce({
-      ok: true,
-      json: async () => status({ choice: "local", activeEngine: "local" }),
-    });
-    render(<VoiceOutputPanel active />);
-    fireEvent.click(await screen.findByTestId("voice-choice-local"));
-    await waitFor(() => {
-      expect(screen.getByTestId("voice-choice-local").getAttribute("aria-checked")).toBe("true");
-    });
-    const body = JSON.parse((fn.mock.calls[1][1] as { body: string }).body);
-    expect(body).toEqual({ action: "select", choice: "local" });
-  });
-
-  it("says which voice actually spoke, and names the one that failed before it", async () => {
-    mockFetch([status({
-      lastCheck: {
-        at: 1_787_000_000_000,
-        ok: true,
-        servedByProviderId: "tts-local-cli",
-        servedEngine: "local",
-        attempts: [
-          { providerId: "openai", engine: "cloud", ok: false, message: "rejected by the voice service", latencyMs: null },
-          { providerId: "tts-local-cli", engine: "local", ok: true, message: null, latencyMs: 14893 },
-        ],
-        message: null,
-      },
-    })]);
-    render(<VoiceOutputPanel active />);
-    const last = await screen.findByTestId("voice-last-check");
-    expect(within(last).getByText(/On this box spoke\./)).toBeTruthy();
-    expect(within(last).getByText(/ClawBox cloud could not speak: rejected by the voice service/)).toBeTruthy();
-    expect(within(last).getByText(/On this box spoke in 14\.9s\./)).toBeTruthy();
-  });
-
-  it("runs a real check when asked", async () => {
-    const fn = mockFetch([status()]);
-    fn.mockResolvedValueOnce({ ok: true, json: async () => status() });
-    render(<VoiceOutputPanel active />);
-    fireEvent.click(await screen.findByTestId("voice-check"));
-    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
-    expect(JSON.parse((fn.mock.calls[1][1] as { body: string }).body)).toEqual({ action: "check" });
-  });
-
-  it("shows the privacy notice the box sent, and nothing when it sent none", async () => {
-    mockFetch([status({
-      activeProviderId: "openai",
-      activeEngine: "cloud",
-      warning: "Privacy notice: Voice uses ClawBox AI cloud TTS. Text sent for speech leaves this ClawBox.",
-    })]);
-    render(<VoiceOutputPanel active />);
-    expect(await screen.findByTestId("voice-cloud-warning")).toHaveTextContent(/leaves this ClawBox/);
-  });
-
-  it("says nothing about the cloud when the box speaks locally", async () => {
-    mockFetch([status()]);
-    render(<VoiceOutputPanel active />);
-    await screen.findByTestId("voice-speaking-now");
+    fireEvent.change(await screen.findByTestId("voice-source"), { target: { value: "local" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "local" } }));
+    await waitFor(() => expect(screen.getByTestId("voice-source")).toHaveValue("local"));
+    // The voice list follows the source, and so does the cloud notice.
+    expect(screen.getByTestId("voice-voice")).toHaveValue("af_heart");
     expect(screen.queryByTestId("voice-cloud-warning")).toBeNull();
   });
 
-  it("names the engine that will actually speak, not the one in the config", async () => {
-    // The chosen cloud voice broke, so the gateway will fall back at request
-    // time. Naming the configured primary here would tell the customer the one
-    // thing this panel exists to stop them believing.
-    mockFetch([status({
-      choice: "cloud",
-      activeProviderId: "openai",
-      activeEngine: "cloud",
-      preferredEngine: "local",
-      drifted: true,
-    })]);
+  it("cannot pick an engine the box does not have", async () => {
+    const s = status();
+    s.engines[0] = engine({ configured: false, usable: false });
+    mockFetch(s);
     render(<VoiceOutputPanel active />);
-    const speaking = await screen.findByTestId("voice-speaking-now");
-    expect(within(speaking).getByText("On this box")).toBeTruthy();
-    expect(await screen.findByTestId("voice-drift"))
-      .toHaveTextContent(/You chose ClawBox cloud, but it cannot speak right now, so On this box answers instead/);
+    await screen.findByTestId("voice-source");
+    const option = screen.getByRole("option", { name: /This box/ }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toMatch(/no voice installed/);
   });
 
-  it("says nothing about a fallback when the chosen voice is the one speaking", async () => {
-    mockFetch([status({ choice: "local", preferredEngine: "local" })]);
+  it("posts a voice change for the engine on screen, and a language change with a fresh sample", async () => {
+    mockFetch(status(), { answer: status({ voice: { local: "af_heart", cloud: "nova" }, language: "fr" }) });
     render(<VoiceOutputPanel active />);
-    await screen.findByTestId("voice-speaking-now");
-    expect(screen.queryByTestId("voice-drift")).toBeNull();
+    fireEvent.change(await screen.findByTestId("voice-voice"), { target: { value: "nova" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "voice", engine: "cloud", voice: "nova" } }));
+    fireEvent.change(screen.getByTestId("voice-sample-text"), { target: { value: "my own words" } });
+    fireEvent.change(screen.getByTestId("voice-language"), { target: { value: "fr" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "language", language: "fr" } }));
+    await waitFor(() => expect(screen.getByTestId("voice-sample-text")).toHaveValue(sampleSentence("fr")));
   });
 
-  it("moves the box itself when Auto resolves somewhere else, instead of asking the customer to re-pick", async () => {
-    const both = [engine(), engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud" })];
-    const fn = mockFetch([status({ preferredEngine: "cloud", drifted: true, engines: both })]);
-    fn.mockResolvedValueOnce({
-      ok: true,
-      json: async () => status({ activeProviderId: "openai", activeEngine: "cloud", preferredEngine: "cloud", drifted: false, engines: both }),
-    });
+  it("hands the clip to a real player, with the engine and voice on screen", async () => {
+    stubAudio();
+    mockFetch(status({ choice: "local", voice: { local: "bm_george", cloud: "alloy" } }));
     render(<VoiceOutputPanel active />);
-    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
-    expect(JSON.parse((fn.mock.calls[1][1] as { body: string }).body)).toEqual({ action: "select", choice: "auto" });
-    const speaking = await screen.findByTestId("voice-speaking-now");
-    expect(within(speaking).getByText("ClawBox cloud")).toBeTruthy();
+    fireEvent.change(await screen.findByTestId("voice-sample-text"), { target: { value: "Testing, one two three." } });
+    fireEvent.click(screen.getByTestId("voice-play"));
+    await waitFor(() => expect(posts).toContainEqual({
+      url: "/setup-api/tts/sample",
+      body: { text: "Testing, one two three.", engine: "local", voice: "bm_george" },
+    }));
+    // A controls element the owner can press, not a detached Audio object the
+    // browser may refuse with nothing left to click.
+    const player = await screen.findByTestId("voice-sample-audio");
+    expect(player).toHaveAttribute("src", "blob:sample");
+    expect(player).toHaveAttribute("controls");
   });
 
-  it("does not keep rewriting the box when the drift will not clear", async () => {
-    // A write that does not resolve the drift must not become a loop.
-    const both = [engine(), engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud" })];
-    const drifting = status({ preferredEngine: "cloud", drifted: true, engines: both });
-    const fn = mockFetch([drifting]);
-    fn.mockResolvedValue({ ok: true, json: async () => drifting });
+  it("says the sound was blocked rather than losing the sample, when the browser refuses to start it", async () => {
+    // A browser that declines programmatic playback — Safari's rule once the
+    // audio arrived after an await.
+    stubAudio(() => Promise.reject(new Error("NotAllowedError")));
+    mockFetch(status());
     render(<VoiceOutputPanel active />);
-    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
-    await new Promise(r => setTimeout(r, 300));
-    expect(fn).toHaveBeenCalledTimes(2);
+    fireEvent.click(await screen.findByTestId("voice-play"));
+    expect(await screen.findByTestId("voice-autoplay-blocked")).toBeInTheDocument();
+    // ...and the player is still there to press.
+    expect(screen.getByTestId("voice-sample-audio")).toBeInTheDocument();
+  });
+
+  it("cannot play a sample with an engine the box does not have", async () => {
+    // `choice: "cloud"` is a legacy value the panel honours, so the source can
+    // be an engine whose own option is greyed out. Play used to ask the box
+    // to speak with it anyway, and all it produced was a refusal to read.
+    stubAudio();
+    const s = status({ choice: "cloud" });
+    s.engines[1] = engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: false, usable: false });
+    mockFetch(s);
+    render(<VoiceOutputPanel active />);
+    const play = await screen.findByTestId("voice-play");
+    expect(screen.getByTestId("voice-source")).toHaveValue("cloud");
+    expect(play).toBeDisabled();
+    fireEvent.click(play);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(posts.filter((p) => p.url === "/setup-api/tts/sample")).toEqual([]);
+    expect(screen.queryByTestId("voice-sample-audio")).toBeNull();
+  });
+
+  it("shows the box's refusal in its own words", async () => {
+    stubAudio();
+    mockFetch(status(), { sample: { status: 409, error: "The cloud voice is not set up on this box." } });
+    render(<VoiceOutputPanel active />);
+    fireEvent.click(await screen.findByTestId("voice-play"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The cloud voice is not set up on this box.");
+    expect(screen.queryByTestId("voice-sample-audio")).toBeNull();
+  });
+
+  it("notes that the box's own voice is English only when another language is picked", async () => {
+    mockFetch(status({ choice: "local", language: "es" }));
+    render(<VoiceOutputPanel active />);
+    expect(await screen.findByTestId("voice-local-english-only")).toBeInTheDocument();
+  });
+
+  it("moves the box itself when Auto resolves somewhere else, once", async () => {
+    mockFetch(status({ drifted: true, activeProviderId: "tts-local-cli", activeEngine: "local" }), { answer: status({ drifted: true, activeProviderId: "tts-local-cli", activeEngine: "local" }) });
+    render(<VoiceOutputPanel active />);
+    await screen.findByTestId("voice-source");
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "select", choice: "auto" } }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(posts.filter((p) => p.url === "/setup-api/tts")).toHaveLength(1);
   });
 
   it("keeps its last good reading when the box answers something that is not a status", async () => {
-    const fn = mockFetch([status()]);
+    mockFetch(status(), { answer: { engines: [] } });
     render(<VoiceOutputPanel active />);
-    await screen.findByTestId("voice-speaking-now");
-    fn.mockResolvedValueOnce({ ok: true, json: async () => ({ engines: [] }) });
-    fireEvent.click(screen.getByTestId("voice-check"));
-    await waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
-    // Still rendered, still the old reading — not a blank panel and not a crash.
-    expect(screen.getByTestId("voice-speaking-now")).toBeTruthy();
+    fireEvent.change(await screen.findByTestId("voice-voice"), { target: { value: "nova" } });
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(screen.getByTestId("voice-voice")).toHaveValue("alloy");
   });
 });
 
 describe("status validation", () => {
+  it("rejects a payload without the voice each engine speaks with", () => {
+    const s = status() as Record<string, unknown>;
+    expect(isVoiceStatus(s)).toBe(true);
+    expect(isVoiceStatus({ ...s, voice: { local: "af_heart" } })).toBe(false);
+    expect(isVoiceStatus({ ...s, language: null })).toBe(false);
+  });
+
   it("rejects a payload whose engines are half a shape", () => {
-    expect(isVoiceStatus(status())).toBe(true);
-    expect(isVoiceStatus({ ...status(), engines: [{ id: "local" }] })).toBe(false);
-    expect(isVoiceStatus({ ...status(), choice: "fastest" })).toBe(false);
-    expect(isVoiceStatus({ ...status(), drifted: "yes" })).toBe(false);
-    expect(isVoiceStatus({ engines: [] })).toBe(false);
-    expect(isVoiceStatus(null)).toBe(false);
-  });
-
-  it("rejects a last check that is missing the fields the render reads", () => {
-    expect(isVoiceStatus({ ...status(), lastCheck: { ok: true } })).toBe(false);
-    expect(isVoiceStatus({ ...status(), lastCheck: { at: 1, ok: true, attempts: [], servedByProviderId: null, servedEngine: null, message: null } })).toBe(true);
-  });
-});
-
-describe("a damaged check record cannot take the window down", () => {
-  const withCheck = (attempts: unknown[], over: Record<string, unknown> = {}) => ({
-    ...status(),
-    lastCheck: { at: 1, ok: true, servedByProviderId: "tts-local-cli", servedEngine: "local", attempts, message: null, ...over },
-  });
-
-  it("rejects a check whose attempts are not attempts", () => {
-    expect(isVoiceStatus(withCheck([null]))).toBe(false);
-    expect(isVoiceStatus(withCheck([{ providerId: "openai" }]))).toBe(false);
-    expect(isVoiceStatus(withCheck([{ providerId: "openai", engine: "cloud", ok: false, message: null, latencyMs: null }]))).toBe(true);
-  });
-
-  it("rejects a served provider the panel would print as `undefined`", () => {
-    expect(isVoiceStatus(withCheck([], { servedByProviderId: 7 }))).toBe(false);
-    expect(isVoiceStatus(withCheck([], { servedEngine: "quantum" }))).toBe(false);
-    expect(isVoiceStatus(withCheck([], { message: 7 }))).toBe(false);
-  });
-});
-
-describe("absent and broken are different answers", () => {
-  it("offers a voice whose last check failed, and says so", async () => {
-    mockFetch([status({
-      engines: [
-        engine(),
-        engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: true, usable: false, detail: "The last voice check failed: provider_error" }),
-      ],
-    })]);
-    render(<VoiceOutputPanel active />);
-    const cloud = await screen.findByTestId("voice-choice-cloud");
-    expect(within(cloud).getByText("Last check failed")).toBeTruthy();
-    expect(within(cloud).queryByText("Not available")).toBeNull();
-    // Still pickable: refusing it would make the failure permanent, since
-    // nothing else would ever route a check through it again.
-    expect(cloud.getAttribute("aria-disabled")).toBe("false");
-  });
-
-  it("does not offer a voice the box does not have", async () => {
-    mockFetch([status()]);
-    render(<VoiceOutputPanel active />);
-    const cloud = await screen.findByTestId("voice-choice-cloud");
-    expect(within(cloud).getByText("Not available")).toBeTruthy();
-    expect(within(cloud).queryByText("Last check failed")).toBeNull();
-    expect(cloud.getAttribute("aria-disabled")).toBe("true");
+    const s = status() as Record<string, unknown>;
+    expect(isVoiceStatus({ ...s, engines: [{ id: "local" }] })).toBe(false);
   });
 });

@@ -11,7 +11,7 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
-import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
@@ -28,7 +28,7 @@ import {
 } from '@/lib/chat-email-batch'
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeImageFailure } from '@/lib/chat-error-text'
-import { FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type FixErrorContext } from '@/lib/ui-events'
+import { CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext } from '@/lib/ui-events'
 import { buildSkillChangeMessage } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -554,6 +554,59 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // driven by the device's run record rather than the tool pills. Only probed
   // while the chat is open, and only polled while a run is actually in flight.
   const { runs: codingRuns, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
+  // Every run — live or settled — renders as a card IN the transcript, where
+  // the conversation that started it lives. A pinned bar above the messages
+  // was tried and rejected by the owner: it covered the chat rather than
+  // being part of it.
+  const codingAgentCard = (run: CodingAgentActivity) => (
+    <CodingAgentActivityPill
+      key={run.id}
+      run={run}
+      labels={{
+        running: t("codingAgent.chatWorking"),
+        runningOwner: t("codingAgent.chatWorkingOwner"),
+        completed: t("codingAgent.chatFinished"),
+        failed: t("codingAgent.chatFailed"),
+        stopped: t("codingAgent.chatStopped"),
+        // A template, not a sentence: the card fills in the count.
+        agents: t("codingAgent.chatAgents"),
+        tokensWord: t("codingAgent.tokensWord"),
+        // The expanded "live work" panel and the tooltip on its header.
+        liveWork: t("codingAgent.chatLiveWork"),
+        showDetails: t("codingAgent.showDetails"),
+        hideDetails: t("codingAgent.hideDetails"),
+        thinking: t("codingAgent.thinking"),
+        filesTouched: t("codingAgent.chatFilesTouched"),
+        turns: t("codingAgent.chatTurns"),
+        // The run's own plan on the card, and the word beside the three dots
+        // that say a live run is still working.
+        plan: t("codingAgent.chatPlan"),
+        done: t("codingAgent.chatDone"),
+        now: t("codingAgent.chatNow"),
+        more: t("codingAgent.chatMore"),
+        busy: t("codingAgent.chatBusy"),
+        // One word per kind of step the card can draw as a chip — the
+        // owner's language for what the harness names by tool.
+        steps: {
+          screenshot: t("codingAgent.chatScreenshot"),
+          lookingAtPage: t("codingAgent.chatLookingAtPage"),
+          openingPage: t("codingAgent.chatOpeningPage"),
+          drivingPage: t("codingAgent.chatDrivingPage"),
+          closingPage: t("codingAgent.chatClosingPage"),
+          write: t("codingAgent.chatWrite"),
+          edit: t("codingAgent.chatEdit"),
+          read: t("codingAgent.chatRead"),
+          plan: t("codingAgent.chatPlan"),
+        },
+      }}
+      openLabel={t("codingAgent.chatOpenApp")}
+      onOpen={() => dispatchOpenApp("coding")}
+      // A run's screenshot opens in the SAME full-size preview the generated
+      // and attached images use (the portal at the end of this component),
+      // not a second lightbox of the card's own.
+      onPreview={(src, alt) => setPreview({ src, alt })}
+    />
+  )
   // The questions the agent is currently parked on, newest last.
   //
   // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
@@ -1224,6 +1277,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Connect to gateway
   const gatewayTokenRef = useRef('')
+  // The gateway's own chat UI is opened from the strip with these two (see
+  // openInOpenclaw); OpenClawApp builds the same URL for its iframe.
+  const gatewayWsUrlRef = useRef('')
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -1274,6 +1330,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       token = config.token
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
+      gatewayWsUrlRef.current = wsUrl
     } catch {
       // Auto-retry if gateway config not ready yet. Extend the budget
       // during skill-install windows so the chat silently recovers once
@@ -1786,7 +1843,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
-  const [startingSession, setStartingSession] = useState(false)
   const loadHistory = useCallback(async () => {
     // A harness with no durable transcript has nothing to replay. Returning
     // before the bootstrap bookkeeping rather than calling and catching keeps
@@ -1911,6 +1967,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const resetSessionRef = useRef(resetSession)
   useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
 
+  // "New chat" — the Hermes edition's form of the strip's + button. There is
+  // no OpenClaw chat UI to open on that edition, so the button keeps its old
+  // meaning there: reset this popup's own thread (the Hermes adapter clears
+  // the transcript on disk without reaching for a gateway that is not there).
+  const [startingSession, setStartingSession] = useState(false)
   const startNewSession = useCallback(async () => {
     setStartingSession(true)
     try {
@@ -1928,6 +1989,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       setStartingSession(false)
     }
   }, [resetSession])
+
+  /**
+   * The "+" in the strip opens the gateway's OWN chat UI in a new browser tab —
+   * the same page OpenClawApp iframes, with the gateway URL and token in the
+   * URL so the SPA needs no sessionStorage of its own. It used to reset this
+   * popup's session in place; the owner asked for a fresh OpenClaw session in
+   * a new tab instead, which this is. The URL is built synchronously from what
+   * the connect step cached, because a window.open that follows an await is
+   * what popup blockers refuse.
+   */
+  const openInOpenclaw = useCallback(() => {
+    const wsUrl = gatewayWsUrlRef.current
+    const token = gatewayTokenRef.current
+    const url = wsUrl && token
+      ? `/chat?gatewayUrl=${encodeURIComponent(wsUrl)}#token=${encodeURIComponent(token)}`
+      : '/chat'
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }, [])
 
   // While a picture is being generated, go and look for it. The background run
   // that produces it does not deliver renderable media over this socket, so a
@@ -2968,6 +3047,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     return () => window.removeEventListener(FIX_ERROR_EVENT, handler)
   }, [])
 
+  // A message handed over by another app — the Coding Agent's New wizard —
+  // goes through the SAME queue as a fix-error prompt, and for the same
+  // reasons: the drain effect is the one send path, so the text is sent as
+  // the owner's turn in order with anything they typed, and the greet is
+  // marked done so loadHistory cannot race it with a stray "hi".
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const text = (e as CustomEvent<ChatMessageDetail>).detail?.text
+      if (typeof text !== 'string' || !text.trim()) return
+      greetedRef.current = true
+      setQueuedSends(prev => [...prev, { id: uuid(), text: text.trim(), attachments: [] }])
+    }
+    window.addEventListener(CHAT_MESSAGE_EVENT, handler)
+    return () => window.removeEventListener(CHAT_MESSAGE_EVENT, handler)
+  }, [])
+
   // Drain queued sends on connect; flush them as system errors on error
   // so messages don't sit forever in a ref the user has no way to see.
   // Sequential dispatch preserves user-typed order on the gateway.
@@ -3544,271 +3639,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       <div
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
+          // The controls FLOAT over the transcript instead of taking a row
+          // of it: once the model pills moved under the composer this bar
+          // carries only the status dot and three small buttons, and a
+          // whole row for those was the tallest thing between the owner and
+          // their messages. The strip is still the drag handle; the fade
+          // behind it keeps the buttons legible over a light bubble. The
+          // transcript pads its top by the strip's height so nothing hides
+          // under it at rest, and scrolls beneath it after that. No
+          // backdrop blur — a per-frame filter on the Jetson iGPU is the
+          // frame drop the burst animation's note warns about.
+          position: 'absolute',
+          top: 0, left: 0, right: 0,
+          zIndex: 5,
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '8px 12px',
-          background: 'linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(17,24,39,0.95) 100%)',
-          borderBottom: '1px solid rgba(249,115,22,0.2)',
-          flexShrink: 0,
+          justifyContent: 'flex-end',
+          gap: 8,
+          // The strip is taller than its buttons and darker at the top, so
+          // a light bubble scrolling under it never swallows the controls;
+          // the fade runs out over ~44px, which is a gradient, not a blur —
+          // blur here would be recomposited on every scrolled frame.
+          padding: '4px 8px 16px',
+          background: 'linear-gradient(180deg, rgba(8,12,22,0.95) 0%, rgba(8,12,22,0.8) 40%, rgba(8,12,22,0.45) 70%, rgba(8,12,22,0) 100%)',
           userSelect: 'none',
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        <div className="chat-header-pills">
-          {harnessId === 'hermes' ? (
-            // Same three pills, same order and widths as the OpenClaw branch
-            // below — provider → model (scoped to it) → thinking effort. The
-            // row is 262px at the 400px docked default, of which ~142px is
-            // label text, so every pill label is de-duplicated against its
-            // neighbour (see src/lib/chat-header-pills.ts) to fit un-truncated.
-            // Below ~386px they still truncate with "…" rather than wrap (see
-            // .chat-header-pills in globals.css); the popovers keep full text.
-            // Falls back to a plain label until the catalogue loads.
-            hermesProviders.length > 0 ? (
-              <>
-                <HeaderDropdown
-                  ariaLabel="Chat provider"
-                  value={hermesProvider}
-                  triggerLabel={hermesProviderPill}
-                  options={hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) }))}
-                  onChange={changeHermesProvider}
-                  onPointerDown={stopHeaderDrag}
-                  triggerMaxWidth={130}
-                  popoverWidth={220}
-                />
-                {/* Hidden at a single option, matching the OpenClaw rule — a
-                    one-entry picker is noise. That is today's ClawBox AI case:
-                    its proxy serves exactly the one model of the active tier. */}
-                {showModelPill && (
-                  <HeaderDropdown
-                    ariaLabel="Hermes model"
-                    /* While the new provider's list loads there is no model to
-                       name yet — an ellipsis holds the pill's place rather than
-                       showing the previous provider's id, which would be wrong
-                       for a beat and is the mistake worth avoiding. */
-                    disabled={hermesModelsLoading}
-                    value={hermesModelsLoading ? '' : hermesModel}
-                    /* Trigger shows the model WITHOUT whatever the provider pill
-                       immediately to its left already says — "claude-fable-5"
-                       next to "Claude" is "fable-5". At the docked width the
-                       repeated vendor was eating the part that distinguishes one
-                       model from another ("claude-fable-5" → "claude-fab…").
-                       The popover keeps the full id. */
-                    triggerLabel={hermesModelsLoading ? '…' : shortModelPillLabel(hermesModel, hermesProviderPill)}
-                    options={(hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id }))}
-                    onChange={changeHermesModel}
-                    onPointerDown={stopHeaderDrag}
-                    triggerMaxWidth={140}
-                    /* Wider than OpenClaw's 240: Hermes ids are long
-                       `vendor/model` slugs. */
-                    popoverWidth={280}
-                  />
-                )}
-                {/* `hermes --reasoning` takes the same eight levels for every
-                    provider, but the CLI accepting a level is not the same as
-                    the backend doing anything with it — so the level list is
-                    per-provider and a provider with nothing to offer gets no
-                    pill at all.
-
-                    The on-device model is the two-state case: its backend
-                    ignores `reasoning_effort` (which is why this pill used to
-                    be hidden for it) but does honour a thinking switch per
-                    request, with no graded middle to expose. So it shows two
-                    options, not eight, and the labels say what they do rather
-                    than borrowing the effort scale's vocabulary. */}
-                {hermesReasoningOptions.length > 0 && (
-                  <HeaderDropdown
-                    ariaLabel={hermesBinaryReasoning ? 'Thinking' : 'Reasoning effort'}
-                    value={hermesEffectiveReasoning}
-                    /* Brain glyph instead of a "Thinking: " word prefix — see
-                       REASONING_PILL_ICON. The word cost 55px of a 142px row
-                       and truncated the level away; the glyph costs ~11px. */
-                    triggerLabel={hermesReasoningTriggerLabel(hermesEffectiveReasoning)}
-                    triggerIcon={REASONING_PILL_ICON}
-                    options={hermesReasoningOptions.map(level => ({
-                      id: level,
-                      label: hermesReasoningLabel(level),
-                      /* Thinking on this model is ~25x slower on a short
-                         question (measured: 0.2s vs 8.4s). A dial that hides
-                         that is a dial that surprises people.
-                         `isThinkingOnLevel` is the SAME predicate the proxy
-                         uses to set enable_thinking — deriving "is on" here
-                         instead (e.g. "the last option") would let this hint
-                         and the wire behaviour drift apart silently. */
-                      hint: hermesBinaryReasoning
-                        ? (isThinkingOnLevel(hermesProvider, level)
-                          ? 'Better at reasoning. Much slower.'
-                          : 'Fastest. Answers immediately.')
-                        : undefined,
-                    }))}
-                    onChange={changeHermesReasoning}
-                    onPointerDown={stopHeaderDrag}
-                    triggerMaxWidth={120}
-                    popoverWidth={hermesBinaryReasoning ? 230 : 180}
-                  />
-                )}
-              </>
-            ) : (
-              <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
-            )
-          ) : (<>
-          {chatModelState && (() => {
-            const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
-            const activeOption = chatModelState.options.find(o => o.id === activeId)
-            const triggerLabel = activeOption ? getProviderPillText(activeOption) : activeId
-            return (
-              <HeaderDropdown
-                ariaLabel="Chat provider"
-                value={activeId}
-                triggerLabel={triggerLabel}
-                options={chatModelState.options.map((option) => ({
-                  id: option.id,
-                  label: getChatModelOptionText(option),
-                }))}
-                onChange={handleChatSourceChange}
-                onPointerDown={stopHeaderDrag}
-                disabled={switchingModel}
-                triggerMaxWidth={130}
-                popoverWidth={220}
-              />
-            )
-          })()}
-          {(() => {
-            // Inline model switcher: renders next to the provider dropdown
-            // whenever the active provider has multiple available models.
-            // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
-            // variants, Gemini variants, or OpenRouter's 340+ models
-            // mid-chat without opening Settings. If the current model
-            // isn't in the live catalog (custom ID typed in Settings),
-            // we prepend it as a "Custom" entry so the select reflects
-            // reality.
-            //
-            // The catalog is the live one from /setup-api/ai-models/catalog
-            // (kept in sync via the useEffect above), with the static
-            // fallback as cold-start render. Used to be a hand-curated
-            // array that rotted on every upstream rename — see the comment
-            // at the top of provider-models.ts for the migration history.
-            if (!chatModelState) return null
-            const activeOption = chatModelState.options.find(
-              (option) => option.id === chatModelState.activeOptionId,
-            )
-            if (!activeOption?.provider) return null
-            const catalog = chatProviderCatalog
-            if (!catalog) return null
-            // Show the dropdown when there are multiple models to pick OR
-            // the catalog permits a custom model id (then the picker
-            // surfaces a "type your own" affordance, which is the only way
-            // to switch to a different Claude variant when Anthropic's
-            // OAuth scope returned a single canonical model).
-            if (catalog.models.length < 2 && !catalog.allowCustom) return null
-            // ClawBox AI's wire-format provider is `deepseek` (Mike's
-            // gateway forwards to DeepSeek's API), while the UI normalizes
-            // to `clawai`. Try the canonical provider first, then fall
-            // back to the deepseek alias so the picker can resolve the
-            // active model id either way.
-            let activeModelId = extractProviderModelId(
-              chatModelState.activeModel,
-              activeOption.provider,
-            )
-            if (!activeModelId && activeOption.provider === 'clawai') {
-              activeModelId = extractProviderModelId(chatModelState.activeModel, 'deepseek')
-            }
-            if (!activeModelId) return null
-            const curatedHasActive = catalog.models.some(
-              (option) => option.id === activeModelId,
-            )
-            const modelOptions = curatedHasActive
-              ? catalog.models
-              : [
-                  { id: activeModelId, label: activeModelId, hint: 'Custom model' },
-                  ...catalog.models,
-                ]
-            // Same de-duplication as the Hermes branch: the provider pill to
-            // the left already says "Claude", so this pill shows "Sonnet 4.6",
-            // not "Claude Sonnet 4.6". The popover keeps the full label.
-            const activeModelLabel = modelOptions.find(o => o.id === activeModelId)?.label
-              ?? activeModelId
-            return (
-              <HeaderDropdown
-                ariaLabel={`${activeOption.label} model`}
-                value={activeModelId}
-                triggerLabel={shortModelPillLabel(
-                  activeModelLabel,
-                  getProviderPillText(activeOption),
-                )}
-                // A model the box's SUBSCRIPTION surface does not carry is
-                // SHOWN, not hidden, and it says why — the same treatment the
-                // setup wizard gives it, because the wizard's help line sends
-                // the customer here to switch models. Dropping the row would
-                // be the same lie in the other direction.
-                options={modelOptions.map(option => {
-                  const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
-                  return {
-                    id: option.id,
-                    label: option.label,
-                    hint: option.hint,
-                    disabled: blocked,
-                    unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
-                  }
-                })}
-                onChange={(nextId) => {
-                  if (nextId === activeModelId) return
-                  // The list already refuses a disabled row, but the switch is
-                  // not allowed to depend on that: the server guard exists for
-                  // ids that arrive some other way, and this one exists so the
-                  // customer is never shown a "Switched to ..." for a model
-                  // the same screen just told them the box cannot run.
-                  const next = modelOptions.find(option => option.id === nextId)
-                  if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
-                  // Wire-format provider for ClawBox AI is `deepseek`
-                  // (Mike's gateway routes via DeepSeek). Sending
-                  // `clawai/...` would be rejected by the gateway as
-                  // an unknown provider.
-                  const wireProvider = activeOption.provider === 'clawai'
-                    ? 'deepseek'
-                    : activeOption.provider
-                  void switchChatModel({
-                    model: `${wireProvider}/${nextId}`,
-                    label: nextId,
-                  })
-                }}
-                onPointerDown={stopHeaderDrag}
-                disabled={switchingModel}
-                triggerMaxWidth={140}
-                popoverWidth={240}
-              />
-            )
-          })()}
-          {/* Per-provider effort levels — see REASONING_BY_PROVIDER for
-              the upstream-API-accurate set per provider. The wire vocabulary
-              is the OpenClaw gateway's full union; the gateway translates
-              per-provider (DeepSeek `xhigh`→`max`, Google `adaptive`→
-              `thinking_budget=-1`, etc.). Hidden entirely for providers with
-              no real reasoning choice (off-only, e.g. local Gemma) — a
-              single-option dropdown is pointless and picking a level errors at
-              the gateway ("thinkingLevel … not supported for llamacpp/gemma…"). */}
-          {visibleThinkingLevels.length > 1 && (
-            <HeaderDropdown
-              ariaLabel="Reasoning effort"
-              value={effectiveThinkingLevel}
-              options={visibleThinkingLevels.map(level => ({
-                id: level,
-                label: THINKING_LEVEL_LABELS[level] ?? level,
-              }))}
-              onChange={handleThinkingLevelChange}
-              onPointerDown={stopHeaderDrag}
-              /* Brain glyph instead of a "Thinking: " word prefix — see
-                 REASONING_PILL_ICON. */
-              triggerLabel={THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}
-              triggerIcon={REASONING_PILL_ICON}
-              triggerMaxWidth={120}
-              popoverWidth={180}
-            />
-          )}
-          </>)}
-        </div>
-        <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (
           <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <div style={{
@@ -3820,11 +3677,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }} />
           </div>
         )}
-        {status === 'connected' && !switchingModel && (
-          <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
-          </div>
-        )}
+        {/* No "connected" dot: connected is the normal state and the composer
+            already says when it is not (the placeholder reads "Connecting…"
+            and the input is gated). Only the in-flight spinner above earns a
+            place in the strip. */}
         {onOpenFull && (
           <button
             onPointerDown={stopHeaderDrag}
@@ -3845,10 +3701,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
         <button
           onPointerDown={stopHeaderDrag}
-          onClick={() => { void startNewSession() }}
-          disabled={startingSession}
-          title="New chat"
-          aria-label="New chat"
+          onClick={harnessId === 'hermes' ? () => { void startNewSession() } : openInOpenclaw}
+          disabled={harnessId === 'hermes' && startingSession}
+          title={harnessId === 'hermes' ? 'New chat' : 'Open in OpenClaw'}
+          aria-label={harnessId === 'hermes' ? 'New chat' : 'Open in OpenClaw'}
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', padding: 4, borderRadius: 6,
@@ -3858,7 +3714,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 5v14M5 12h14" />
+            {harnessId === 'hermes'
+              ? <path d="M12 5v14M5 12h14" />
+              : <path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1h5" />}
           </svg>
         </button>
         {!mobile && (
@@ -3885,6 +3743,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <button
           onPointerDown={stopHeaderDrag}
           onClick={onClose}
+          aria-label={t("window.close")}
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', padding: 4, borderRadius: 6,
@@ -3899,9 +3758,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </button>
       </div>
 
-      {/* Messages area */}
+      {/* Messages area — its top padding is the floating control strip's
+          height, so the first line is readable at rest and everything
+          scrolls under the strip after that. */}
       <div style={{
-        flex: 1, overflowY: 'auto', padding: '12px 14px',
+        flex: 1, overflowY: 'auto', padding: '36px 14px 12px',
         display: 'flex', flexDirection: 'column', gap: 10,
         userSelect: 'text',
         scrollbarWidth: 'thin',
@@ -4170,24 +4031,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
             take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
-        {codingRuns.map(run => (
-          <CodingAgentActivityPill
-            key={run.id}
-            run={run}
-            labels={{
-              running: t("codingAgent.chatWorking"),
-              runningOwner: t("codingAgent.chatWorkingOwner"),
-              completed: t("codingAgent.chatFinished"),
-              failed: t("codingAgent.chatFailed"),
-              stopped: t("codingAgent.chatStopped"),
-              // A template, not a sentence: the card fills in the count.
-              agents: t("codingAgent.chatAgents"),
-              tokensWord: t("codingAgent.tokensWord"),
-            }}
-            openLabel={t("codingAgent.chatOpenApp")}
-            onOpen={() => dispatchOpenApp("coding")}
-          />
-        ))}
+        {codingRuns.map(codingAgentCard)}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one
@@ -4478,13 +4322,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
       )}
 
-      {/* Input area */}
+      {/* Composer — the shape people know from Claude's own UI: the text
+          box on top, full width, and one row under it with the attach,
+          microphone and picture buttons on the left and, on the right, the
+          provider / model / effort pills beside the send button. */}
       <div style={{
-        padding: '10px 14px 12px',
+        padding: '10px 14px 10px',
         borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
-        display: 'flex', gap: 8, alignItems: 'flex-end',
+        display: 'flex', flexDirection: 'column', gap: 8,
       }}>
+        <textarea
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={
+            status !== 'connected'
+              ? t("chat.connectingPlaceholder")
+              : greetingPending
+                ? t("chat.greetingPlaceholder")
+                : t("chat.messagePlaceholder")
+          }
+          // Block input while the WS handshake is still in flight. Allowing
+          // sends during 'connecting' caused them to queue behind a busy
+          // gateway loop and feel broken to users — better to clearly gate
+          // the input until the connection is ready.
+          disabled={status !== 'connected' || greetingPending}
+          rows={1}
+          style={{
+            width: '100%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
+            resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
+            fontFamily: 'inherit',
+          }}
+          onInput={(e) => {
+            const el = e.currentTarget
+            el.style.height = 'auto'
+            el.style.height = Math.min(el.scrollHeight, 100) + 'px'
+          }}
+        />
+        <div data-testid="chat-composer-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         {/* Shown only where a file staged here can actually reach the model.
             The alternative is worse than a missing button: the picture is drawn
             into the user's own bubble and then dropped, so the customer sees
@@ -4590,37 +4469,259 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </span>
           </button>
         )}
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder={
-            status !== 'connected'
-              ? t("chat.connectingPlaceholder")
-              : greetingPending
-                ? t("chat.greetingPlaceholder")
-                : t("chat.messagePlaceholder")
-          }
-          // Block input while the WS handshake is still in flight. Allowing
-          // sends during 'connecting' caused them to queue behind a busy
-          // gateway loop and feel broken to users — better to clearly gate
-          // the input until the connection is ready.
-          disabled={status !== 'connected' || greetingPending}
-          rows={1}
-          style={{
-            flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
-            borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
-            resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
-            fontFamily: 'inherit',
-          }}
-          onInput={(e) => {
-            const el = e.currentTarget
-            el.style.height = 'auto'
-            el.style.height = Math.min(el.scrollHeight, 100) + 'px'
-          }}
-        />
+          <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
+          {harnessId === 'hermes' ? (
+            // Same three pills, same order and widths as the OpenClaw branch
+            // below — provider → model (scoped to it) → thinking effort. The
+            // row is 262px at the 400px docked default, of which ~142px is
+            // label text, so every pill label is de-duplicated against its
+            // neighbour (see src/lib/chat-header-pills.ts) to fit un-truncated.
+            // Below ~386px they still truncate with "…" rather than wrap (see
+            // .chat-header-pills in globals.css); the popovers keep full text.
+            // Falls back to a plain label until the catalogue loads.
+            hermesProviders.length > 0 ? (
+              <>
+                <HeaderDropdown
+                  ariaLabel="Chat provider"
+                  value={hermesProvider}
+                  triggerLabel={hermesProviderPill}
+                  options={hermesProviders.map(p => ({ id: p.id, label: hermesProviderName(p.id) }))}
+                  onChange={changeHermesProvider}
+                  onPointerDown={stopHeaderDrag}
+                  triggerMaxWidth={130}
+                  popoverWidth={220}
+                />
+                {/* Hidden at a single option, matching the OpenClaw rule — a
+                    one-entry picker is noise. That is today's ClawBox AI case:
+                    its proxy serves exactly the one model of the active tier. */}
+                {showModelPill && (
+                  <HeaderDropdown
+                    ariaLabel="Hermes model"
+                    /* While the new provider's list loads there is no model to
+                       name yet — an ellipsis holds the pill's place rather than
+                       showing the previous provider's id, which would be wrong
+                       for a beat and is the mistake worth avoiding. */
+                    disabled={hermesModelsLoading}
+                    value={hermesModelsLoading ? '' : hermesModel}
+                    /* Trigger shows the model WITHOUT whatever the provider pill
+                       immediately to its left already says — "claude-fable-5"
+                       next to "Claude" is "fable-5". At the docked width the
+                       repeated vendor was eating the part that distinguishes one
+                       model from another ("claude-fable-5" → "claude-fab…").
+                       The popover keeps the full id. */
+                    triggerLabel={hermesModelsLoading ? '…' : shortModelPillLabel(hermesModel, hermesProviderPill)}
+                    options={(hermesScope?.models ?? []).map(m => ({ id: m.id, label: m.id }))}
+                    onChange={changeHermesModel}
+                    onPointerDown={stopHeaderDrag}
+                    triggerMaxWidth={140}
+                    /* Wider than OpenClaw's 240: Hermes ids are long
+                       `vendor/model` slugs. */
+                    popoverWidth={280}
+                  />
+                )}
+                {/* `hermes --reasoning` takes the same eight levels for every
+                    provider, but the CLI accepting a level is not the same as
+                    the backend doing anything with it — so the level list is
+                    per-provider and a provider with nothing to offer gets no
+                    pill at all.
+
+                    The on-device model is the two-state case: its backend
+                    ignores `reasoning_effort` (which is why this pill used to
+                    be hidden for it) but does honour a thinking switch per
+                    request, with no graded middle to expose. So it shows two
+                    options, not eight, and the labels say what they do rather
+                    than borrowing the effort scale's vocabulary. */}
+                {hermesReasoningOptions.length > 0 && (
+                  <HeaderDropdown
+                    ariaLabel={hermesBinaryReasoning ? 'Thinking' : 'Reasoning effort'}
+                    value={hermesEffectiveReasoning}
+                    /* Brain glyph instead of a "Thinking: " word prefix — see
+                       REASONING_PILL_ICON. The word cost 55px of a 142px row
+                       and truncated the level away; the glyph costs ~11px. */
+                    triggerLabel={hermesReasoningTriggerLabel(hermesEffectiveReasoning)}
+                    triggerIcon={REASONING_PILL_ICON}
+                    options={hermesReasoningOptions.map(level => ({
+                      id: level,
+                      label: hermesReasoningLabel(level),
+                      /* Thinking on this model is ~25x slower on a short
+                         question (measured: 0.2s vs 8.4s). A dial that hides
+                         that is a dial that surprises people.
+                         `isThinkingOnLevel` is the SAME predicate the proxy
+                         uses to set enable_thinking — deriving "is on" here
+                         instead (e.g. "the last option") would let this hint
+                         and the wire behaviour drift apart silently. */
+                      hint: hermesBinaryReasoning
+                        ? (isThinkingOnLevel(hermesProvider, level)
+                          ? 'Better at reasoning. Much slower.'
+                          : 'Fastest. Answers immediately.')
+                        : undefined,
+                    }))}
+                    onChange={changeHermesReasoning}
+                    onPointerDown={stopHeaderDrag}
+                    triggerMaxWidth={120}
+                    popoverWidth={hermesBinaryReasoning ? 230 : 180}
+                  />
+                )}
+              </>
+            ) : (
+              <span className="header-dropdown-trigger" style={{ cursor: 'default', maxWidth: 130 }}>Hermes</span>
+            )
+          ) : (<>
+          {chatModelState && (() => {
+            const activeId = chatModelState.activeOptionId ?? chatModelState.options[0]?.id ?? ''
+            const activeOption = chatModelState.options.find(o => o.id === activeId)
+            const triggerLabel = activeOption ? getProviderPillText(activeOption) : activeId
+            return (
+              <HeaderDropdown
+                ariaLabel="Chat provider"
+                value={activeId}
+                triggerLabel={triggerLabel}
+                options={chatModelState.options.map((option) => ({
+                  id: option.id,
+                  label: getChatModelOptionText(option),
+                }))}
+                onChange={handleChatSourceChange}
+                onPointerDown={stopHeaderDrag}
+                disabled={switchingModel}
+                triggerMaxWidth={130}
+                popoverWidth={220}
+              />
+            )
+          })()}
+          {(() => {
+            // Inline model switcher: renders next to the provider dropdown
+            // whenever the active provider has multiple available models.
+            // Lets users hot-swap between Claude Haiku/Sonnet/Opus, GPT
+            // variants, Gemini variants, or OpenRouter's 340+ models
+            // mid-chat without opening Settings. If the current model
+            // isn't in the live catalog (custom ID typed in Settings),
+            // we prepend it as a "Custom" entry so the select reflects
+            // reality.
+            //
+            // The catalog is the live one from /setup-api/ai-models/catalog
+            // (kept in sync via the useEffect above), with the static
+            // fallback as cold-start render. Used to be a hand-curated
+            // array that rotted on every upstream rename — see the comment
+            // at the top of provider-models.ts for the migration history.
+            if (!chatModelState) return null
+            const activeOption = chatModelState.options.find(
+              (option) => option.id === chatModelState.activeOptionId,
+            )
+            if (!activeOption?.provider) return null
+            const catalog = chatProviderCatalog
+            if (!catalog) return null
+            // Show the dropdown when there are multiple models to pick OR
+            // the catalog permits a custom model id (then the picker
+            // surfaces a "type your own" affordance, which is the only way
+            // to switch to a different Claude variant when Anthropic's
+            // OAuth scope returned a single canonical model).
+            if (catalog.models.length < 2 && !catalog.allowCustom) return null
+            // ClawBox AI's wire-format provider is `deepseek` (Mike's
+            // gateway forwards to DeepSeek's API), while the UI normalizes
+            // to `clawai`. Try the canonical provider first, then fall
+            // back to the deepseek alias so the picker can resolve the
+            // active model id either way.
+            let activeModelId = extractProviderModelId(
+              chatModelState.activeModel,
+              activeOption.provider,
+            )
+            if (!activeModelId && activeOption.provider === 'clawai') {
+              activeModelId = extractProviderModelId(chatModelState.activeModel, 'deepseek')
+            }
+            if (!activeModelId) return null
+            const curatedHasActive = catalog.models.some(
+              (option) => option.id === activeModelId,
+            )
+            const modelOptions = curatedHasActive
+              ? catalog.models
+              : [
+                  { id: activeModelId, label: activeModelId, hint: 'Custom model' },
+                  ...catalog.models,
+                ]
+            // Same de-duplication as the Hermes branch: the provider pill to
+            // the left already says "Claude", so this pill shows "Sonnet 4.6",
+            // not "Claude Sonnet 4.6". The popover keeps the full label.
+            const activeModelLabel = modelOptions.find(o => o.id === activeModelId)?.label
+              ?? activeModelId
+            return (
+              <HeaderDropdown
+                ariaLabel={`${activeOption.label} model`}
+                value={activeModelId}
+                triggerLabel={shortModelPillLabel(
+                  activeModelLabel,
+                  getProviderPillText(activeOption),
+                )}
+                // A model the box's SUBSCRIPTION surface does not carry is
+                // SHOWN, not hidden, and it says why — the same treatment the
+                // setup wizard gives it, because the wizard's help line sends
+                // the customer here to switch models. Dropping the row would
+                // be the same lie in the other direction.
+                options={modelOptions.map(option => {
+                  const blocked = !isModelUsableOnSubscription(option, headerOnSubscription)
+                  return {
+                    id: option.id,
+                    label: option.label,
+                    hint: option.hint,
+                    disabled: blocked,
+                    unavailableReason: blocked ? t('ai.modelNeedsApiKey') : undefined,
+                  }
+                })}
+                onChange={(nextId) => {
+                  if (nextId === activeModelId) return
+                  // The list already refuses a disabled row, but the switch is
+                  // not allowed to depend on that: the server guard exists for
+                  // ids that arrive some other way, and this one exists so the
+                  // customer is never shown a "Switched to ..." for a model
+                  // the same screen just told them the box cannot run.
+                  const next = modelOptions.find(option => option.id === nextId)
+                  if (next && !isModelUsableOnSubscription(next, headerOnSubscription)) return
+                  // Wire-format provider for ClawBox AI is `deepseek`
+                  // (Mike's gateway routes via DeepSeek). Sending
+                  // `clawai/...` would be rejected by the gateway as
+                  // an unknown provider.
+                  const wireProvider = activeOption.provider === 'clawai'
+                    ? 'deepseek'
+                    : activeOption.provider
+                  void switchChatModel({
+                    model: `${wireProvider}/${nextId}`,
+                    label: nextId,
+                  })
+                }}
+                onPointerDown={stopHeaderDrag}
+                disabled={switchingModel}
+                triggerMaxWidth={140}
+                popoverWidth={240}
+              />
+            )
+          })()}
+          {/* Per-provider effort levels — see REASONING_BY_PROVIDER for
+              the upstream-API-accurate set per provider. The wire vocabulary
+              is the OpenClaw gateway's full union; the gateway translates
+              per-provider (DeepSeek `xhigh`→`max`, Google `adaptive`→
+              `thinking_budget=-1`, etc.). Hidden entirely for providers with
+              no real reasoning choice (off-only, e.g. local Gemma) — a
+              single-option dropdown is pointless and picking a level errors at
+              the gateway ("thinkingLevel … not supported for llamacpp/gemma…"). */}
+          {visibleThinkingLevels.length > 1 && (
+            <HeaderDropdown
+              ariaLabel="Reasoning effort"
+              value={effectiveThinkingLevel}
+              options={visibleThinkingLevels.map(level => ({
+                id: level,
+                label: THINKING_LEVEL_LABELS[level] ?? level,
+              }))}
+              onChange={handleThinkingLevelChange}
+              onPointerDown={stopHeaderDrag}
+              /* Brain glyph instead of a "Thinking: " word prefix — see
+                 REASONING_PILL_ICON. */
+              triggerLabel={THINKING_LEVEL_LABELS[effectiveThinkingLevel] ?? effectiveThinkingLevel}
+              triggerIcon={REASONING_PILL_ICON}
+              triggerMaxWidth={120}
+              popoverWidth={180}
+            />
+          )}
+          </>)}
+        </div>
         {sending ? (
           <button
             onClick={abort}
@@ -4657,6 +4758,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </svg>
           </button>
         )}
+        </div>
       </div>
 
       {/* Left-edge resize for panel mode */}

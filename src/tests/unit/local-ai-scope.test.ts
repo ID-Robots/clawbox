@@ -22,11 +22,12 @@ function read(file: string): string {
 }
 
 describe("Settings → Local AI stays local", () => {
-  it("scopes the Local AI section to on-device providers", () => {
+  it("gives the Local AI section its own on-device panel, not the cloud list", () => {
     const settings = read("SettingsApp.tsx");
-    const step = settings.slice(settings.indexOf('testId="settings-local-ai-step"') - 1200);
-    expect(step).toContain('configureScope="local"');
-    expect(step).toContain('providerIds={["llamacpp"]}');
+    const section = /activeSection === "localAi" && \(\s*<LocalAiPanel /.exec(settings);
+    expect(section, "Local AI section not found — was it renamed?").not.toBeNull();
+    // The cloud provider list belongs to Providers; Local AI never lists it.
+    expect(settings).not.toMatch(/activeSection === "localAi"[\s\S]{0,400}<AiProviderList/);
   });
 
   it("does not hand the local scope to the Hermes provider panel", () => {

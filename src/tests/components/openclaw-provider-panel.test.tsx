@@ -78,11 +78,11 @@ const summary: ProviderStatusSummary = {
   defaultProvider: "clawai",
   degraded: false,
   providers: [
-    { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai" },
-    { id: "openai", label: "OpenAI GPT", state: "disconnected", isDefault: false, section: "ai" },
-    { id: "anthropic", label: "Anthropic Claude", state: "connected", isDefault: false, section: "ai" },
-    { id: "google", label: "Google Gemini", state: "disconnected", isDefault: false, section: "ai" },
-    { id: "openrouter", label: "OpenRouter", state: "disconnected", isDefault: false, section: "ai" },
+    { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
+    { id: "openai", label: "OpenAI GPT", state: "disconnected", isDefault: false, section: "ai", enabled: true },
+    { id: "anthropic", label: "Anthropic Claude", state: "connected", isDefault: false, section: "ai", enabled: true },
+    { id: "google", label: "Google Gemini", state: "disconnected", isDefault: false, section: "ai", enabled: true },
+    { id: "openrouter", label: "OpenRouter", state: "disconnected", isDefault: false, section: "ai", enabled: true },
   ],
 };
 

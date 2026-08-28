@@ -7,6 +7,48 @@ export async function onRequestError() {
   // required export — no-op
 }
 
+/**
+ * The boot-time repairs of openclaw.json, one after the other.
+ *
+ * WHY IN SEQUENCE. Each repair is its own read-modify-write of the same file
+ * through the same `.tmp` path. Run together they each read the original,
+ * each write their own change, and whichever renames last wins — the other
+ * repair is silently undone until the next boot, and two writers on one temp
+ * path can rename a half-written file into place. Awaiting the first before
+ * starting the second is the whole fix; nothing here is on the request path,
+ * so the extra few milliseconds cost nobody anything.
+ *
+ * Each repair keeps its own error handling: one that fails must not stop the
+ * other, and neither may stop the box booting. The gateway restarts once if
+ * either of them wrote anything. A separate function, with the repairs handed
+ * in, so the sequencing can be pinned by a test without `require()`-ing the
+ * real config module into it.
+ */
+export async function repairOpenclawConfig(repairs: {
+  ensureLocalAiProxyUrls: () => Promise<boolean>
+  ensureMicrosoftTtsExcluded: () => Promise<boolean>
+  restartGateway: () => Promise<void>
+}): Promise<void> {
+  const steps: Array<[label: string, run: () => Promise<boolean>]> = [
+    ['migrate Local AI proxy URLs', repairs.ensureLocalAiProxyUrls],
+    ['exclude Microsoft TTS', repairs.ensureMicrosoftTtsExcluded],
+  ]
+  let changed = false
+  for (const [label, run] of steps) {
+    try {
+      if (await run()) changed = true
+    } catch (err) {
+      console.error(`[instrumentation] Failed to ${label}:`, err instanceof Error ? err.message : err)
+    }
+  }
+  if (!changed) return
+  try {
+    await repairs.restartGateway()
+  } catch (err) {
+    console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
+  }
+}
+
 export async function register() {
   if (typeof process === 'undefined' || process.env.NEXT_RUNTIME === 'edge') return
 
@@ -14,16 +56,11 @@ export async function register() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { startTerminalServer } = require('./instrumentation-node')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { ensureLocalAiProxyUrls, restartGateway } = require('./lib/openclaw-config')
+  const { ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway } = require('./lib/openclaw-config')
   startTerminalServer()
-  void ensureLocalAiProxyUrls()
-    .then((changed: boolean) => {
-      if (!changed) return
-      return restartGateway()
-    })
-    .catch((err: unknown) => {
-      console.error('[instrumentation] Failed to migrate Local AI proxy URLs:', err instanceof Error ? err.message : err)
-    })
+  // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
+  // for why they must not run together. Never awaited: boot goes on.
+  void repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway })
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const clawkeepScheduler = require('./lib/clawkeep-scheduler')
@@ -76,6 +113,23 @@ export async function register() {
     emailApproval.startApprovalPoller()
   } catch (err) {
     console.error('[instrumentation] Could not resume email chat approvals:', err instanceof Error ? err.message : err)
+  }
+  try {
+    // The memory-status probe boots a whole OpenClaw process (~8 s on a
+    // Jetson). Pay it once, after the boot rush (gateway restart, schedulers,
+    // Next's own warm-up) has passed, so the first Settings → Local AI open
+    // answers from the cache. Not on Hermes: there is no openclaw to probe.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { openclawIsAbsent } = require('./lib/openclaw-config')
+    if (!openclawIsAbsent()) {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
+      setTimeout(() => {
+        void warmMemoryStatusCache().catch(() => { /* the first reader retries */ })
+      }, 45_000).unref()
+    }
+  } catch (err) {
+    console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)
   }
   try {
     // Memory indexing is armed the same way, from its own persisted schedule.

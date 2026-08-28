@@ -12,9 +12,11 @@
  * than an "unproven" badge until the next check.
  */
 import { promises as fs } from "fs";
+import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
+import { isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
 import {
   DEFAULT_VOICE_STATE,
   isVoiceChoice,
@@ -103,7 +105,41 @@ export async function readVoiceState(): Promise<VoiceOutputState> {
     choice: isVoiceChoice(raw.choice) ? raw.choice : DEFAULT_VOICE_STATE.choice,
     engineChecks,
     lastCheck: readCheck(raw.lastCheck),
+    language: isVoiceLanguage(raw.language) ? raw.language : DEFAULT_VOICE_STATE.language,
   };
+}
+
+/**
+ * The on-device voice lives where the local script reads it
+ * (`clawbox-tts.sh --set-voice` writes the same file), so the gateway and this
+ * tab can never disagree about which Kokoro voice speaks.
+ */
+export function localVoicePath(): string {
+  return process.env.CLAWBOX_TTS_VOICE_FILE
+    || path.join(process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox", ".openclaw", "clawbox-tts-voice");
+}
+
+/** The saved local voice, or null when none is saved or the file names an unknown one. */
+export async function readLocalVoice(): Promise<string | null> {
+  try {
+    const raw = (await fs.readFile(localVoicePath(), "utf8")).trim();
+    return isLocalVoice(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The voice is written the way the state is, below: `clawbox-tts.sh` reads
+ * this file on EVERY utterance, and a plain `writeFile` truncates before it
+ * writes — a read in that window finds an empty file and speaks the default,
+ * and an unplugged box could leave it that way.
+ */
+export async function writeLocalVoice(voice: string): Promise<void> {
+  if (!isLocalVoice(voice)) throw new Error("Unknown local voice.");
+  const target = localVoicePath();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await writeFileAtomically(target, `${voice}\n`);
 }
 
 export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
@@ -111,23 +147,73 @@ export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
   // Atomic, like every other state file in data/: a half-written selection read
   // by the next request would look like a corrupt file and silently reset the
   // customer's choice to Auto.
-  const tmp = `${VOICE_STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`;
+  await writeFileAtomically(VOICE_STATE_PATH, JSON.stringify(state, null, 2));
+}
+
+/**
+ * Write `contents` so a reader sees the old file or the new one, never a
+ * truncated one, and so the swap cannot outlive its own bytes.
+ *
+ * rename() makes the swap atomic against a reader; it does not make the new
+ * bytes durable. This runs on a Jetson that gets unplugged, and a rename that
+ * outlives its own contents leaves a truncated file — which reads as corrupt
+ * and silently resets the customer's choice, exactly the loss the atomic
+ * write is here to prevent. So sync before swapping. 0600 because the state
+ * is the box's own; the temp name is unique so two writers cannot share one.
+ *
+ * The rename itself is a write to the DIRECTORY, and it is durable only once
+ * the directory is synced too: without that, a power cut can leave the old
+ * name pointing at the old file — the write "succeeded" and was not there
+ * after the reboot. Both writers here go through this one function.
+ */
+async function writeFileAtomically(target: string, contents: string): Promise<void> {
+  const tmp = `${target}.tmp.${crypto.randomBytes(4).toString("hex")}`;
   try {
-    // rename() makes the swap atomic against a reader; it does not make the new
-    // bytes durable. This runs on a Jetson that gets unplugged, and a rename
-    // that outlives its own contents leaves a truncated file — which reads as
-    // corrupt and silently resets the customer's choice to Auto, exactly the
-    // loss the atomic write is here to prevent. So sync before swapping.
     const handle = await fs.open(tmp, "w", 0o600);
     try {
-      await handle.writeFile(JSON.stringify(state, null, 2));
+      await handle.writeFile(contents);
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await fs.rename(tmp, VOICE_STATE_PATH);
+    await fs.rename(tmp, target);
   } catch (err) {
     await fs.unlink(tmp).catch(() => {});
     throw err;
+  }
+  await syncDirectory(path.dirname(target));
+}
+
+/**
+ * fsync a directory, so a rename inside it survives a power cut.
+ *
+ * Best effort by design: the file's bytes were already synced and swapped in,
+ * so the one thing left to lose is the swap itself, and a filesystem that
+ * refuses to fsync a directory (some FUSE and network mounts answer EINVAL,
+ * EPERM or EISDIR; one without the concept answers ENOTSUP) is not a reason
+ * to fail a write that has otherwise landed.
+ */
+const DIRECTORY_SYNC_REFUSALS = new Set(["EISDIR", "EPERM", "EINVAL", "ENOTSUP", "EBADF", "EACCES"]);
+
+async function syncDirectory(dir: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(dir, "r");
+  } catch (err) {
+    // The same refusals a filesystem can give the sync itself are forgiven at
+    // the open; anything else (ENOENT for a directory that just held a rename,
+    // EIO, EMFILE) is an I/O failure the caller must hear about, or the
+    // "durable" in this writer's contract would be a word.
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    if (DIRECTORY_SYNC_REFUSALS.has(code)) return;
+    throw err;
+  }
+  try {
+    await handle.sync();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    if (!DIRECTORY_SYNC_REFUSALS.has(code)) throw err;
+  } finally {
+    await handle.close();
   }
 }

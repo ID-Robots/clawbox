@@ -7,7 +7,7 @@ import path from "node:path";
  * TASK-435 — Settings → Local Models.
  *
  * The tab exists because `install.sh` announced "On-device TTS configured
- * (Kokoro GPU, Piper fallback)" on boxes where Kokoro had never been installed,
+ * (Kokoro GPU)" on boxes where Kokoro had never been installed,
  * and nothing in the UI could contradict it. So the cases that matter here are
  * the ones where the box LOOKS equipped and is not: weights on disk with no
  * runtime, a stamp with no service, a binary with no voice.
@@ -79,7 +79,7 @@ function bareBox() {
 const PROBES = {
   ollamaBaseUrl: "http://127.0.0.1:11434",
   llamacpp: { installed: false, running: false, model: null },
-  embeddings: { supported: true, available: false, provider: null, model: null, local: false },
+  embeddings: { supported: true, ready: true, available: false, provider: null, model: null, local: false },
 };
 
 function entry(models: { id: string }[], id: string) {
@@ -102,7 +102,7 @@ describe("local model inventory", () => {
     expect(kokoro.running).toBe("not-installed");
     expect(kokoro.control).toBe("none");
     expect(kokoro.enabled).toBeNull();
-    expect(kokoro.detail).toMatch(/falls back to Piper/i);
+    expect(kokoro.detail).toMatch(/cloud voice/i);
   });
 
   it("calls Kokoro not installed when it is stamped but its service is gone", async () => {
@@ -146,36 +146,6 @@ describe("local model inventory", () => {
     expect(whisper.control).toBe("user-unit");
   });
 
-  it("does not call Piper installed when the binary has no voice", async () => {
-    const piper = path.join(tmpHome, ".local/share/piper");
-    await fs.mkdir(piper, { recursive: true });
-    await fs.writeFile(path.join(piper, "piper"), "#!/bin/sh\n");
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const entryPiper = entry(models, "piper") as unknown as { installed: boolean; detail: string };
-    expect(entryPiper.installed).toBe(false);
-    expect(entryPiper.detail).toMatch(/no voice/i);
-  });
-
-  it("names the installed Piper voices and reports it as on demand, not idle", async () => {
-    const piper = path.join(tmpHome, ".local/share/piper");
-    await fs.mkdir(path.join(piper, "voices"), { recursive: true });
-    await fs.writeFile(path.join(piper, "piper"), "#!/bin/sh\n");
-    await fs.writeFile(path.join(piper, "voices/en_US-lessac-medium.onnx"), "x".repeat(1024));
-    await fs.writeFile(path.join(piper, "voices/en_US-lessac-medium.onnx.json"), "{}");
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const entryPiper = entry(models, "piper") as unknown as { installed: boolean; running: string; detail: string; diskBytes: number };
-    expect(entryPiper.installed).toBe(true);
-    // A per-utterance binary is never "stopped"; calling it idle would invite
-    // the customer to look for a switch that does not exist.
-    expect(entryPiper.running).toBe("on-demand");
-    expect(entryPiper.detail).toContain("en_US-lessac-medium");
-    expect(entryPiper.diskBytes).toBeGreaterThan(1000);
-  });
-
   it("keeps the rest of the inventory when one engine cannot be read", async () => {
     // A subordinate row must not cost the customer the tab — the failure mode
     // a bad payload caused in the whole ClawKeep window on TASK-398.
@@ -185,13 +155,14 @@ describe("local model inventory", () => {
       ...PROBES,
       embeddings: {
         supported: true,
+        ready: true,
         get available(): boolean { throw new Error("probe exploded"); },
         provider: null, model: null, local: false,
       },
     } as unknown as Parameters<typeof mod.buildLocalModelInventory>[0];
     const { models, unavailable } = await mod.buildLocalModelInventory(broken);
     expect(unavailable).toContain("embeddings");
-    expect(models.map(m => m.id)).toEqual(expect.arrayContaining(["piper", "kokoro", "whisper", "ollama"]));
+    expect(models.map(m => m.id)).toEqual(expect.arrayContaining(["kokoro", "whisper", "ollama"]));
   });
 
   it("sums the pulled Ollama models into a disk figure", async () => {
@@ -209,7 +180,7 @@ describe("local model inventory", () => {
     const ollama = entry(models, "ollama") as unknown as { running: string; diskBytes: number; detail: string; control: string };
     expect(ollama.running).toBe("running");
     expect(ollama.diskBytes).toBe(639_000_000);
-    expect(ollama.detail).toContain("qwen3-embedding:0.6b");
+    expect(ollama.detail).toContain("Qwen 3");
     expect(ollama.control).toBe("system-unit");
   });
 });
@@ -262,7 +233,7 @@ describe("unit lookup", () => {
     expect(unitForEngine("ollama")).toEqual({ unit: "ollama.service", scope: "system" });
     expect(unitForEngine("kokoro")).toEqual({ unit: "kokoro-server.service", scope: "user" });
     expect(unitForEngine("whisper")).toEqual({ unit: "whisper-server.service", scope: "user" });
-    // Piper is a binary and llama.cpp is owned by Settings → Local AI.
+    // Piper is gone from the box (Kokoro-only voice) and llama.cpp is owned by Settings → Local AI.
     expect(unitForEngine("piper")).toBeNull();
     expect(unitForEngine("llamacpp")).toBeNull();
   });
@@ -282,11 +253,11 @@ describe("embeddings are checked against the engine that serves them", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("idle");
-    expect(emb.detail).toMatch(/Ollama is stopped/i);
+    expect(emb.detail).toMatch(/Ollama is off/i);
   });
 
   it("still reports embedding as running when its engine is up", async () => {
@@ -297,11 +268,11 @@ describe("embeddings are checked against the engine that serves them", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("running");
-    expect(emb.detail).toMatch(/on the box/i);
+    expect(emb.detail).toMatch(/on this box/i);
   });
 });
 
@@ -311,7 +282,7 @@ describe("the embeddings row on an edition that has no memory index", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: false, available: false, provider: null, model: null, local: false },
+      embeddings: { supported: false, ready: true, available: false, provider: null, model: null, local: false },
     });
     const emb = entry(models, "embeddings") as unknown as {
       running: string;
@@ -326,5 +297,53 @@ describe("the embeddings row on an edition that has no memory index", () => {
     // ClawKeep is absent on the same edition, so pointing at it would be a
     // second dead end inside the first.
     expect(emb.managedBy).toBeUndefined();
+  });
+});
+
+describe("the memory row waits for nobody", () => {
+  /**
+   * Reading it costs an OpenClaw process boot (~8 s on a Jetson) and Settings
+   * → Local AI polls this inventory every five seconds. The first open after a
+   * restart used to sit on a skeleton for the length of that boot, because the
+   * whole page was built behind the one row that needed it.
+   */
+  it("leaves the row out until the box has actually been asked", async () => {
+    bareBox();
+    const { buildLocalModelInventory } = await import("@/lib/local-models");
+    const { models, unavailable } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { ...PROBES.embeddings, ready: false },
+    });
+    expect(models.find(m => m.id === "embeddings")).toBeUndefined();
+    // Not a failure either — nothing broke, the answer is simply not in yet.
+    expect(unavailable).not.toContain("embeddings");
+    // Every other engine is there, which is the whole point.
+    expect(models.map(m => m.id)).toEqual(["llamacpp", "ollama", "kokoro", "whisper"]);
+  });
+
+  it("still says so on an edition that has no memory index at all", async () => {
+    bareBox();
+    const { buildLocalModelInventory } = await import("@/lib/local-models");
+    const { models } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { ...PROBES.embeddings, supported: false, ready: false },
+    });
+    expect(entry(models, "embeddings").running).toBe("not-on-this-edition");
+  });
+});
+
+describe("the name a model is shown under", () => {
+  it("is the family and version, never the file-name recipe", async () => {
+    const { friendlyModelName } = await import("@/lib/local-models");
+    // The owner asked for "Gemma 4", not "gemma4-e2b-it-q4_0": size, tuning
+    // and quantisation are the installer's choices, not the owner's.
+    expect(friendlyModelName("gemma4-e2b-it-q4_0")).toBe("Gemma 4");
+    expect(friendlyModelName("qwen3-embedding:0.6b")).toBe("Qwen 3");
+    expect(friendlyModelName("Llama-3.1-8B-Instruct")).toBe("Llama 3.1");
+    expect(friendlyModelName("nomic-embed-text")).toBe("Nomic");
+    // An unknown family is still named, not blanked.
+    expect(friendlyModelName("smollm2-360m")).toBe("Smollm 2");
+    expect(friendlyModelName("")).toBeNull();
+    expect(friendlyModelName(null)).toBeNull();
   });
 });

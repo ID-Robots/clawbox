@@ -7,118 +7,77 @@ import type {
   VoiceEngineId,
   VoiceOutputStatus,
 } from "@/lib/voice-output";
+import { cloudVoicesFor, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
 
-const CHOICES: { id: VoiceChoice; title: string; blurb: string }[] = [
-  {
-    id: "auto",
-    title: "Auto",
-    blurb: "Let ClawBox choose. It prefers the cloud voice and speaks on the box when the cloud cannot.",
-  },
-  {
-    id: "local",
-    title: "On this box",
-    blurb: "Speak with the on-device voice. Nothing to be spoken leaves the box unless it cannot speak at all.",
-  },
-  {
-    id: "cloud",
-    title: "ClawBox cloud",
-    blurb: "Speak with the cloud voice. The words to be spoken leave this box.",
-  },
-];
+/**
+ * Settings → Voice: three dropdowns and a sentence to hear.
+ *
+ *  - Speak from: the cloud voice or the voice on this box. The gateway always
+ *    falls through to the other one when the first cannot speak, so this is
+ *    "which one goes first" — cloud-first is the `auto` choice the tts route
+ *    has always written, box-first is `local`.
+ *  - Language: which language the sample sentence comes in.
+ *  - Voice: the engine's own list, read from the box.
+ *  - Hear it: a text box with a sample sentence and a Play button that speaks
+ *    THAT text with THAT engine and voice, through /setup-api/tts/sample.
+ *
+ * Everything the old panel said about primaries, fallbacks and check history is
+ * gone from here on the owner's request; the Local AI tab still carries the
+ * engines' state.
+ */
 
 const ENGINE_ORDER: VoiceEngineId[] = ["local", "cloud"];
 
 function isEngine(value: unknown): value is VoiceEngine {
   if (!value || typeof value !== "object") return false;
   const e = value as Record<string, unknown>;
-  if (!ENGINE_ORDER.includes(e.id as VoiceEngineId)) return false;
-  if (typeof e.label !== "string" || typeof e.detail !== "string") return false;
-  if (e.providerId !== null && typeof e.providerId !== "string") return false;
-  return typeof e.configured === "boolean"
-    && typeof e.proven === "boolean"
-    && typeof e.usable === "boolean";
+  return ENGINE_ORDER.includes(e.id as VoiceEngineId) && typeof e.configured === "boolean";
 }
 
 /**
- * An attempt is only adopted when every field the list below reads is really
- * there. `attempts: [null]` used to pass the array check and then throw on
- * `attempt.engine` one render later — the same guard-the-envelope-then-read-a-
- * sibling mistake this validator exists to prevent.
- */
-function isAttempt(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  const a = value as Record<string, unknown>;
-  if (typeof a.providerId !== "string") return false;
-  if (a.engine !== null && !ENGINE_ORDER.includes(a.engine as VoiceEngineId)) return false;
-  if (typeof a.ok !== "boolean") return false;
-  if (a.message !== null && typeof a.message !== "string") return false;
-  return a.latencyMs === null || typeof a.latencyMs === "number";
-}
-
-/**
- * Validate every field the render reads, not just the first one.
- *
- * `{ engines: [] }` passing here and throwing one render later on
- * `status.choice` is the same mistake that took the whole ClawKeep window down
- * on TASK-398 and that CodeRabbit caught again on the Local Models tab: a panel
- * that cannot read the box must keep its last good reading, never take the
- * window with it.
+ * Validate every field the render reads — and only those. A payload that
+ * passes the envelope check and throws one render later would take the whole
+ * Settings window down (TASK-398); a panel that cannot read the box keeps its
+ * last good reading instead.
  */
 export function isVoiceStatus(value: unknown): value is VoiceOutputStatus {
   if (!value || typeof value !== "object") return false;
   const s = value as Record<string, unknown>;
   if (!["auto", "local", "cloud"].includes(s.choice as string)) return false;
   if (!Array.isArray(s.engines) || !s.engines.every(isEngine)) return false;
-  if (s.activeProviderId !== null && typeof s.activeProviderId !== "string") return false;
-  if (s.activeEngine !== null && !ENGINE_ORDER.includes(s.activeEngine as VoiceEngineId)) return false;
-  if (s.preferredEngine !== null && !ENGINE_ORDER.includes(s.preferredEngine as VoiceEngineId)) return false;
   if (typeof s.drifted !== "boolean") return false;
   if (s.warning !== null && typeof s.warning !== "string") return false;
-  const last = s.lastCheck;
-  if (last !== null) {
-    if (!last || typeof last !== "object") return false;
-    const c = last as Record<string, unknown>;
-    if (typeof c.at !== "number" || typeof c.ok !== "boolean") return false;
-    if (!Array.isArray(c.attempts) || !c.attempts.every(isAttempt)) return false;
-    // Rendered directly when no engine matched, so an unvalidated value shows
-    // the customer the literal word "undefined".
-    if (c.servedByProviderId !== null && typeof c.servedByProviderId !== "string") return false;
-    if (c.servedEngine !== null && !ENGINE_ORDER.includes(c.servedEngine as VoiceEngineId)) return false;
-    if (c.message !== null && typeof c.message !== "string") return false;
-  }
-  return true;
-}
-
-function checkedAt(at: number): string {
-  try {
-    return new Date(at).toLocaleString();
-  } catch {
-    return "";
-  }
-}
-
-function seconds(ms: number | null): string {
-  if (ms === null || !Number.isFinite(ms) || ms <= 0) return "";
-  return `${(ms / 1000).toFixed(1)}s`;
+  if (typeof s.language !== "string") return false;
+  const voice = s.voice as Record<string, unknown> | undefined;
+  if (!voice || typeof voice !== "object") return false;
+  return ENGINE_ORDER.every((id) => typeof voice[id] === "string");
 }
 
 /**
  * The box says the whole feature is absent on this SKU. Read as its own field
  * rather than inferred from a missing engine list: "no voice is installed" and
- * "this edition has no voice at all" are different answers and the second one
- * must not be shown as the first, which reads as something the customer could
- * fix by installing a voice.
+ * "this edition has no voice at all" are different answers.
  */
 function isEditionUnsupported(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
   return (value as { supportedOnEdition?: unknown }).supportedOnEdition === false;
 }
 
+const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
+const ROW = "flex items-center justify-between gap-4";
+const SELECT = "min-w-[12rem] max-w-[60%] rounded-lg border border-white/10 bg-[var(--bg-elevated)] px-3 py-2 text-sm text-[var(--text-primary)] disabled:opacity-50";
+const LABEL = "text-sm font-medium text-[var(--text-primary)]";
+
 export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [status, setStatus] = useState<VoiceOutputStatus | null>(null);
   const [unsupported, setUnsupported] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"select" | "check" | null>(null);
+  const [busy, setBusy] = useState<"post" | "play" | null>(null);
+  const [sample, setSample] = useState<string | null>(null);
+  const [clipUrl, setClipUrl] = useState<string | null>(null);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const playerRef = useRef<HTMLAudioElement | null>(null);
+  const clipUrlRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -140,9 +99,32 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     load();
   }, [active, load]);
 
+  // Release the last clip's object URL when the panel goes away.
+  useEffect(() => () => {
+    if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
+  }, []);
 
-  const post = useCallback(async (body: Record<string, unknown>, kind: "select" | "check") => {
-    setBusy(kind);
+  /**
+   * Start the clip the moment it arrives, and say so when the browser refuses.
+   *
+   * A browser may decline programmatic playback — Safari and every browser in
+   * a stricter mode want the gesture and the sound in the same tick, and an
+   * await for the audio breaks that. That refusal used to be the end of it:
+   * the panel said "Could not play that here" and the owner had nothing to
+   * press. The player below is rendered either way, so a refusal costs one
+   * click on a real control rather than the feature.
+   */
+  useEffect(() => {
+    if (!clipUrl) return;
+    // Pre-2016 browsers and jsdom return nothing from play().
+    const started = playerRef.current?.play();
+    if (started && typeof started.catch === "function") {
+      started.catch(() => setAutoplayBlocked(true));
+    }
+  }, [clipUrl]);
+
+  const post = useCallback(async (body: Record<string, unknown>) => {
+    setBusy("post");
     setError(null);
     try {
       const res = await fetch("/setup-api/tts", {
@@ -164,8 +146,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   }, []);
 
   // Auto is a standing instruction, not a one-off write: if the engine it
-  // resolves to is not the one the box is configured for — because a cloud
-  // voice appeared, or the one in use stopped working — move the box rather
+  // resolves to is not the one the box is configured for, move the box rather
   // than telling the customer to click their own choice again. Once per mount,
   // so a write that does not clear the drift cannot become a loop.
   const reconciled = useRef(false);
@@ -174,28 +155,51 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     if (status.choice !== "auto" || !status.drifted) return;
     if (reconciled.current) return;
     reconciled.current = true;
-    void post({ action: "select", choice: "auto" }, "select");
+    void post({ action: "select", choice: "auto" });
   }, [active, status, busy, post]);
 
-  // Before the skeleton: a box that will never answer with a status must stop
-  // here rather than pulse three grey cards forever.
+  const play = useCallback(async (engine: VoiceEngineId, voice: string, text: string) => {
+    setBusy("play");
+    setError(null);
+    setAutoplayBlocked(false);
+    try {
+      const res = await fetch("/setup-api/tts/sample", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, engine, voice }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(typeof data?.error === "string" ? data.error : `The box could not speak that (HTTP ${res.status}).`);
+        return;
+      }
+      const blob = await res.blob();
+      if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
+      clipUrlRef.current = URL.createObjectURL(blob);
+      setClipUrl(clipUrlRef.current);
+    } catch (err) {
+      // The reason, not a shrug: a request the network dropped and a browser
+      // that would not hand over the bytes are different faults with
+      // different fixes, and "could not play that here" named neither.
+      setError(`Could not fetch the sample: ${err instanceof Error ? err.message : "unknown error"}`);
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
   if (unsupported) {
     return (
       <div className="max-w-2xl" data-testid="voice-output-unsupported">
-        <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 space-y-2">
+        <div className={`${CARD} space-y-2`}>
           <div className="flex items-center gap-2">
-            <span
-              className="material-symbols-rounded text-[var(--text-muted)]"
-              style={{ fontSize: 22 }}
-              aria-hidden="true"
-            >
+            <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }} aria-hidden="true">
               voice_over_off
             </span>
             <h2 className="font-semibold text-[var(--text-primary)]">Not available on this edition</h2>
           </div>
           <p className="text-sm text-[var(--text-secondary)] leading-relaxed">
             Speaking out loud is an OpenClaw feature, and this ClawBox does not run OpenClaw.
-            There is nothing to choose here and nothing to check — the box will answer in text.
+            The box will answer in text.
           </p>
         </div>
       </div>
@@ -205,8 +209,8 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   if (!status) {
     return (
       <div className="max-w-2xl space-y-3" data-testid="voice-output-loading">
-        {[0, 1, 2].map(i => (
-          <div key={i} className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 animate-pulse">
+        {[0, 1].map(i => (
+          <div key={i} className={`${CARD} animate-pulse`}>
             <div className="h-3 w-40 rounded bg-white/[0.08]" />
             <div className="h-2 w-64 rounded bg-white/[0.06] mt-3" />
           </div>
@@ -215,165 +219,150 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
     );
   }
 
-  const engineById = (id: VoiceEngineId | null) =>
-    id ? status.engines.find(e => e.id === id) ?? null : null;
-  // What will ACTUALLY speak, not what is written in the config. When a chosen
-  // engine stops working the gateway falls back at request time, so naming the
-  // configured primary here would tell the customer the one thing this panel
-  // exists to stop them believing.
-  const speaking = engineById(status.preferredEngine) ?? engineById(status.activeEngine);
-  const chosen = status.choice === "auto" ? null : engineById(status.choice as VoiceEngineId);
-  const fellBack = chosen !== null && speaking !== null && chosen.id !== speaking.id;
-  const last = status.lastCheck;
-  const servedEngine = engineById(last?.servedEngine ?? null);
-  const warning = status.warning;
+  const engineById = (id: VoiceEngineId) => status.engines.find(e => e.id === id) ?? null;
+  /**
+   * The engine that goes first. `cloud` (explicit, legacy) reads as
+   * cloud-first; `auto` reads as whatever the box resolved it to, because on a
+   * box with no cloud voice `auto` means "the local one" — and a select that
+   * showed the disabled "not available" option as chosen, over a list of cloud
+   * voices the box cannot speak with, would be describing a different box.
+   */
+  const source: VoiceEngineId =
+    status.choice === "local" || (status.choice === "auto" && status.preferredEngine === "local") ? "local" : "cloud";
+  const cloud = engineById("cloud");
+  const local = engineById("local");
+  const voice = status.voice[source];
+  // Only the voices the configured cloud model accepts: tts-1 refuses two of
+  // the eleven, and a dropdown entry that plays an error is not a voice.
+  const voices = source === "local" ? LOCAL_VOICES : cloudVoicesFor(status.cloudModel);
+  const text = sample ?? sampleSentence(status.language);
+  const disabled = busy !== null;
+  // An engine the box does not have cannot audition. `choice: "cloud"` is a
+  // legacy value the panel still honours, so the source CAN be an engine
+  // whose option is greyed out — and a Play that then asked the box to speak
+  // with it only produced a refusal to read.
+  const canSpeak = engineById(source)?.configured === true;
+
+  const chooseSource = (next: VoiceEngineId) => {
+    const choice: VoiceChoice = next === "local" ? "local" : "auto";
+    void post({ action: "select", choice });
+  };
 
   return (
-    <div className="max-w-2xl space-y-4">
-      <p className="text-sm text-[var(--text-secondary)]">
-        Who speaks when your ClawBox talks back. Whatever you pick here, the box tells you which
-        voice actually answered — a choice that quietly does something else is the thing this
-        setting exists to prevent.
-      </p>
-
+    <div className="max-w-2xl space-y-4" data-testid="voice-panel">
       {error && (
         <div role="alert" className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
           {error}
         </div>
       )}
 
-      <div
-        data-testid="voice-speaking-now"
-        className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5"
-      >
-        <div className="text-xs uppercase tracking-wide text-[var(--text-muted)]">Speaking now</div>
-        <div className="text-sm font-semibold text-[var(--text-primary)] mt-1">
-          {speaking ? speaking.label : "No voice is selected on this box."}
+      <div className={`${CARD} space-y-4`}>
+        <div className={ROW}>
+          <label htmlFor="voice-source" className={LABEL}>Speak from</label>
+          <select
+            id="voice-source"
+            data-testid="voice-source"
+            className={SELECT}
+            value={source}
+            disabled={disabled}
+            onChange={(e) => chooseSource(e.target.value as VoiceEngineId)}
+          >
+            <option value="cloud" disabled={!cloud?.configured}>
+              ClawBox cloud{cloud?.configured ? "" : " — not available"}
+            </option>
+            <option value="local" disabled={!local?.configured}>
+              This box{local?.configured ? "" : " — no voice installed"}
+            </option>
+          </select>
         </div>
-        {fellBack && (
-          <p className="text-sm text-amber-200 mt-2" data-testid="voice-drift">
-            You chose {chosen.label}, but it cannot speak right now, so {speaking.label} answers
-            instead.
-          </p>
+        {source === "cloud" && status.warning && (
+          <p className="text-xs text-amber-200" data-testid="voice-cloud-warning">{status.warning}</p>
         )}
-        {warning && (
-          <p role="alert" className="text-sm text-amber-200 mt-2" data-testid="voice-cloud-warning">
-            ⚠️ {warning}
+
+        <div className={ROW}>
+          <label htmlFor="voice-language" className={LABEL}>Language</label>
+          <select
+            id="voice-language"
+            data-testid="voice-language"
+            className={SELECT}
+            value={status.language}
+            disabled={disabled}
+            onChange={(e) => {
+              setSample(null);
+              void post({ action: "language", language: e.target.value });
+            }}
+          >
+            {VOICE_LANGUAGES.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+          </select>
+        </div>
+
+        <div className={ROW}>
+          <label htmlFor="voice-voice" className={LABEL}>Voice</label>
+          <select
+            id="voice-voice"
+            data-testid="voice-voice"
+            className={SELECT}
+            value={voice}
+            disabled={disabled}
+            onChange={(e) => void post({ action: "voice", engine: source, voice: e.target.value })}
+          >
+            {voices.map((v) => <option key={v.id} value={v.id}>{v.label}</option>)}
+          </select>
+        </div>
+        {source === "local" && status.language !== "en" && (
+          <p className="text-xs text-[var(--text-muted)]" data-testid="voice-local-english-only">
+            The voice on this box speaks English only. Pick ClawBox cloud for other languages.
           </p>
         )}
       </div>
 
-      <div role="radiogroup" aria-label="Voice output" className="space-y-3">
-        {CHOICES.map(choice => {
-          const selected = status.choice === choice.id;
-          const engine = choice.id === "auto" ? null : engineById(choice.id as VoiceEngineId);
-          // Absent and broken are different answers, and only one of them
-          // means "you cannot pick this". A voice whose last check failed is
-          // still offered — refusing it would make the failure permanent,
-          // because nothing else would ever route a check through it again.
-          const unavailable = engine !== null && !engine.configured;
-          const failing = engine !== null && engine.configured && !engine.usable;
-          return (
-            <button
-              key={choice.id}
-              type="button"
-              role="radio"
-              aria-checked={selected}
-              aria-disabled={unavailable || busy !== null}
-              disabled={busy !== null}
-              data-testid={`voice-choice-${choice.id}`}
-              onClick={() => post({ action: "select", choice: choice.id }, "select")}
-              className={`w-full text-left rounded-2xl border p-5 transition-colors cursor-pointer disabled:opacity-60 ${
-                selected
-                  ? "border-[var(--coral-bright)] bg-[var(--coral-bright)]/[0.08]"
-                  : "border-[var(--border-subtle)] bg-[var(--surface-card)]"
-              }`}
-            >
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm font-semibold text-[var(--text-primary)]">{choice.title}</span>
-                {selected && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full border bg-cyan-500/10 text-cyan-300 border-cyan-400/20">
-                    Chosen
-                  </span>
-                )}
-                {unavailable && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full border bg-amber-500/10 text-amber-300 border-amber-400/20">
-                    Not available
-                  </span>
-                )}
-                {failing && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full border bg-amber-500/10 text-amber-300 border-amber-400/20">
-                    Last check failed
-                  </span>
-                )}
-                {engine?.proven && (
-                  <span className="text-[11px] px-2 py-0.5 rounded-full border bg-white/[0.06] text-[var(--text-secondary)] border-white/10">
-                    Proven on this box
-                  </span>
-                )}
-              </div>
-              <p className="text-sm text-[var(--text-secondary)] mt-2">{choice.blurb}</p>
-              {engine && (
-                <p className="text-xs text-[var(--text-muted)] mt-2">{engine.detail}</p>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-        <div className="flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <div className="text-sm font-semibold text-[var(--text-primary)]">Voice check</div>
-            <p className="text-sm text-[var(--text-secondary)] mt-1">
-              Speaks one short phrase for real and reports which voice produced it.
-            </p>
-          </div>
+      <div className={`${CARD} space-y-3`}>
+        <label htmlFor="voice-sample-text" className={LABEL}>Hear it</label>
+        <textarea
+          id="voice-sample-text"
+          data-testid="voice-sample-text"
+          className="w-full rounded-lg border border-white/10 bg-[var(--bg-elevated)] px-3 py-2 text-sm text-[var(--text-primary)] resize-y min-h-[4.5rem]"
+          maxLength={SAMPLE_MAX_CHARS}
+          value={text}
+          onChange={(e) => setSample(e.target.value)}
+        />
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs text-[var(--text-muted)]">{text.length}/{SAMPLE_MAX_CHARS}</span>
           <button
             type="button"
-            data-testid="voice-check"
-            disabled={busy !== null}
-            aria-busy={busy === "check"}
-            onClick={() => post({ action: "check" }, "check")}
-            className="rounded-xl border border-[var(--border-subtle)] px-4 py-2 text-sm text-[var(--text-primary)] cursor-pointer disabled:opacity-50 shrink-0"
+            data-testid="voice-play"
+            disabled={disabled || !canSpeak || !text.trim()}
+            aria-busy={busy === "play"}
+            onClick={() => { if (canSpeak) void play(source, voice, text); }}
+            className="rounded-xl bg-[var(--coral-bright)] px-4 py-2 text-sm font-semibold text-white cursor-pointer disabled:opacity-50 shrink-0"
           >
-            {busy === "check" ? "Checking…" : "Check voice"}
+            {busy === "play" ? "Speaking…" : "Play"}
           </button>
         </div>
 
-        {last && (
-          <div className="mt-4 space-y-2" data-testid="voice-last-check">
-            <div className="text-xs text-[var(--text-muted)]">Last checked {checkedAt(last.at)}</div>
-            <div className={`text-sm ${last.ok ? "text-[var(--text-primary)]" : "text-red-300"}`}>
-              {last.ok
-                ? `${servedEngine?.label ?? last.servedByProviderId ?? "A voice"} spoke.`
-                : last.message
-                  ? `No voice could speak: ${last.message}`
-                  : "No voice could speak."}
-            </div>
-            {last.attempts.length > 0 && (
-              <ul className="text-xs text-[var(--text-muted)] space-y-1">
-                {last.attempts.map((attempt, i) => {
-                  const label = engineById(attempt.engine)?.label ?? attempt.providerId;
-                  const took = seconds(attempt.latencyMs);
-                  return (
-                    <li key={`${attempt.providerId}-${i}`}>
-                      {attempt.ok
-                        ? `${label} spoke${took ? ` in ${took}` : ""}.`
-                        : `${label} could not speak${attempt.message ? `: ${attempt.message}` : "."}`}
-                    </li>
-                  );
-                })}
-              </ul>
+        {/* Keyed by the URL so each clip gets its own element — a reused one
+            keeps the previous decode and will not start the new sound. */}
+        {clipUrl && (
+          <div className="space-y-1">
+            <audio
+              key={clipUrl}
+              ref={playerRef}
+              data-testid="voice-sample-audio"
+              aria-label="The spoken sample"
+              controls
+              autoPlay
+              src={clipUrl}
+              onError={() => setError("This browser could not play the audio the box sent.")}
+              style={{ width: "100%", height: 34 }}
+            />
+            {autoplayBlocked && (
+              <p className="text-xs text-[var(--text-muted)]" data-testid="voice-autoplay-blocked">
+                Your browser would not start it by itself — press play above.
+              </p>
             )}
           </div>
         )}
       </div>
-
-      <p className="text-xs text-[var(--text-muted)]">
-        A voice shown as not available is genuinely missing from this box — it is not a switch that
-        can be turned on here.
-      </p>
     </div>
   );
 }

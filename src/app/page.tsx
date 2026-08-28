@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -15,6 +15,7 @@ import AppStore from "@/components/AppStore";
 import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import MemoryShardApp from "@/components/MemoryShardApp";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import type { StoreApp } from "@/components/AppStore";
@@ -25,6 +26,7 @@ import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup from "@/components/ChatPopup";
 import ToastHost from "@/components/ToastHost";
+import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -48,7 +50,7 @@ interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "system_update" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat";
   url?: string;
   pinned: boolean;
   defaultWidth?: number;
@@ -77,6 +79,11 @@ const apps: AppDef[] = [
   { id: "coding", name: "app.codingAgent", color: "#14304d", type: "coding" as const, pinned: true, defaultWidth: 960, defaultHeight: 640 },
   { id: "files", name: "app.files", color: "#f97316", type: "files", pinned: true },
   { id: "clawkeep", name: "ClawKeep", color: "#14532d", type: "clawkeep", pinned: true, defaultWidth: 980, defaultHeight: 720 },
+  // The memory index — health, "Index now", the schedule — as its own window.
+  // It used to be a card inside ClawKeep; it sits next to ClawKeep here and
+  // borrows its green because the two are one family (what the box remembers,
+  // what the box keeps). Sized for the single card it shows.
+  { id: "memory-shard", name: "app.memoryShard", color: "#166534", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
@@ -109,11 +116,13 @@ function canonicalIconOrder(installedAppIds: readonly string[]): string[] {
 //   - "store" is the OpenClaw App Store — it installs OpenClaw desktop apps via
 //     the openclaw binary and reloads the OpenClaw gateway. On Hermes the Skills
 //     app ("hermes-skills") is the equivalent surface.
+//   - "memory-shard" is OpenClaw's memory index (`openclaw memory status`);
+//     Hermes has no equivalent, and ClawKeep hid the same panel on that box.
 //   - "hermes" / "hermes-skills" are the Hermes dashboard and skills store.
 // BOTH the icon-layout filter (harnessHiddenAppIds) and getAllApps read THESE
 // lists — keep them the single source of the policy so a hidden app can never be
 // visible in one surface and hidden in another.
-const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store"] as const;
+const OPENCLAW_ONLY_APP_IDS = ["openclaw", "store", "memory-shard"] as const;
 const HERMES_ONLY_APP_IDS = ["hermes", "hermes-skills"] as const;
 
 /**
@@ -213,6 +222,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     coding: "code",
     files: "folder",
     clawkeep: "shield_lock",
+    "memory-shard": "memory",
     system_update: "system_update",
     vnc: "desktop_windows",
     camera: "photo_camera",
@@ -235,34 +245,6 @@ interface OpenWindow {
   width?: number;
   height?: number;
   meta?: Record<string, string>;
-}
-
-// Icon component for installed store apps — tries local cached icon first, then store URL
-function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?: string; appId?: string; name?: string; size?: string }) {
-  const px = size.includes("w-12") ? 48 : size.includes("w-7") ? 28 : size.includes("w-6") ? 24 : size.includes("w-3") ? 12 : 24;
-  const localSrc = appId ? `/setup-api/apps/icon/${appId}` : undefined;
-  const sources = [localSrc, iconUrl].filter(Boolean) as string[];
-  const [srcIdx, setSrcIdx] = useState(0);
-  const [failed, setFailed] = useState(false);
-
-  const src = sources[srcIdx];
-  if (src && !failed) {
-    return (
-      <img
-        src={src}
-        alt={name || ""}
-        className="w-full h-full object-cover rounded-[inherit]"
-        onError={() => {
-          if (srcIdx + 1 < sources.length) {
-            setSrcIdx(srcIdx + 1);
-          } else {
-            setFailed(true);
-          }
-        }}
-      />
-    );
-  }
-  return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>extension</span>;
 }
 
 function ChromeDesktopInner() {
@@ -605,15 +587,17 @@ function ChromeDesktopInner() {
   const [mascotX, setMascotX] = useState(85);
   const handleChatPanelModeChange = useCallback((panelWidth: number) => setChatPanelWidth(panelWidth), []);
 
-  // Open chat on skill-install or fix-error events so the user can watch
-  // the agent's response.
+  // Open chat on skill-install, fix-error or handed-over-message events so
+  // the user can watch the agent's response.
   useEffect(() => {
     const handler = () => setChatOpen(true);
     window.addEventListener('clawbox-skill-installed', handler);
     window.addEventListener(FIX_ERROR_EVENT, handler);
+    window.addEventListener(CHAT_MESSAGE_EVENT, handler);
     return () => {
       window.removeEventListener('clawbox-skill-installed', handler);
       window.removeEventListener(FIX_ERROR_EVENT, handler);
+      window.removeEventListener(CHAT_MESSAGE_EVENT, handler);
     };
   }, []);
 
@@ -1617,6 +1601,8 @@ function ChromeDesktopInner() {
         return <FilesApp />;
       case "clawkeep":
         return <ClawKeepApp />;
+      case "memory_shard":
+        return <MemoryShardApp />;
       case "system_update":
         return <SystemUpdateApp />;
       case "browser":

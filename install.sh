@@ -425,6 +425,15 @@ if [ -f /etc/clawbox/test-mode.env ]; then
 fi
 CLAWBOX_TEST_MODE="${CLAWBOX_TEST_MODE:-0}"
 is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }
+# CLAWBOX_TEST_NO_GPU=1 is the e2e-install container saying "this host has no
+# GPU by construction". It is deliberately a second knob and not a reading of
+# CLAWBOX_TEST_MODE: the unit tests run the installer's functions under test
+# mode too and pin the real-hardware rule that a Kokoro which declines is a
+# mute box, so test mode alone must not soften that rule. Only the harness
+# entrypoint sets this (e2e-install/entrypoint.sh); a real device never does.
+harness_has_no_gpu() {
+  [ "${CLAWBOX_TEST_NO_GPU:-0}" = "1" ]
+}
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
@@ -1618,19 +1627,20 @@ step_openclaw_setup() {
   step_openclaw_install
   step_openclaw_patch
   step_openclaw_config
-  # Only 12 ("Kokoro was requested and did not install"), 13 ("this box has no
-  # working TTS engine at all") and 14 ("the TTS install did not complete, but
-  # an engine survives") are tolerated here, and only because the step has
-  # already recorded each of them with record_provision_failure, so the summary,
-  # the exit status, the provisioning marker and step_validate_services' TTS
-  # probe all carry them. A box that could not install its speech engines must
-  # still finish provisioning and come up reachable — that is how it gets fixed.
+  # Only 12 ("Kokoro was requested and did not install"), 13 ("this box has NO
+  # working on-device TTS engine") and 14 ("the voice scripts did not deploy;
+  # Kokoro's own verdict stands") are tolerated here, and only because the step
+  # has already recorded each of them with record_provision_failure, so the
+  # summary, the exit status, the provisioning marker and step_validate_services'
+  # TTS probe all carry them. A box that could not install its speech engine
+  # must still finish provisioning and come up reachable — that is how it gets
+  # fixed.
   #
   # They are three DIFFERENT facts and they are kept apart on purpose. Folding
-  # 14 into 13 would print "this box has no working TTS engine" over a box whose
-  # GPU engine is running perfectly and has merely lost its fallback — a failure
-  # report over something that actually succeeded, which is the same class of
-  # untrue status line this whole block exists to stop.
+  # 14 into 13 would print "this box has NO working on-device TTS engine" over a
+  # box whose Kokoro is running perfectly and has merely lost its script deploy
+  # — a failure report over something that actually succeeded, which is the same
+  # class of untrue status line this whole block exists to stop.
   #
   # Every OTHER non-zero return stays FATAL, exactly as it was before this
   # tolerance existed. Those are the provider-configuration failures — no
@@ -1644,7 +1654,7 @@ step_openclaw_setup() {
   case "$TTS_STEP_RC" in
     0) ;;
     12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; provisioning continues)" ;;
-    13) echo "  Warning: this box has NO working TTS engine — it answers speech with silence (recorded above; provisioning continues)" ;;
+    13) echo "  Warning: this box has NO working on-device TTS engine (recorded above; provisioning continues)" ;;
     14) echo "  Warning: the TTS install did not complete (recorded above; provisioning continues)" ;;
     *) return "$TTS_STEP_RC" ;;
   esac
@@ -2530,12 +2540,15 @@ NODE
   echo "  OpenClaw config updated"
 }
 
-# Point OpenClaw's speech output at the box's own engines (TASK-383).
+# Point OpenClaw's speech output at the box's own engine (TASK-383).
 #
 # Two halves, and both have to run on updates as well as fresh installs:
-#   1. Install Piper, the CPU fallback. Without it on disk the fallback chain
-#      in scripts/openclaw/clawbox-tts.sh has nowhere to fall, and every
-#      Kokoro failure is silence again.
+#   1. Install Kokoro, the box's only on-device voice, and deploy the scripts
+#      it runs from. There is no CPU fallback behind it any more — the owner
+#      removed Piper (2026-08). A Kokoro that is missing is reported by
+#      scripts/openclaw/clawbox-tts.sh as an exit-1 failure with reasons,
+#      which the gateway hands to its cloud voice, rather than hidden behind
+#      a second engine.
 #   2. Point the built-in `tts-local-cli` provider at clawbox-tts.sh.
 #
 # The command is the REPO copy, not a copy deployed into the workspace: the
@@ -2550,8 +2563,8 @@ NODE
 # The literal `--` guards against a reply that itself begins with `--` being
 # parsed as an option by the script.
 #
-# outputFormat wav is deliberate: both engines emit WAV natively, so the happy
-# path needs no ffmpeg at all, and OpenClaw transcodes to Opus itself when a
+# outputFormat wav is deliberate: Kokoro emits WAV natively, so the happy path
+# needs no ffmpeg at all, and OpenClaw transcodes to Opus itself when a
 # channel wants a voice note.
 # Configuring the provider is not the same as OpenClaw HAVING it, and the gap
 # between those two is silent. `tts-local-cli` ships inside OpenClaw as a
@@ -2585,14 +2598,15 @@ step_openclaw_tts() {
   is_hermes_edition && { echo "  [hermes edition] skipping on-device TTS"; return 0; }
   local TTS_SCRIPT="$PROJECT_DIR/scripts/openclaw/clawbox-tts.sh"
 
-  # --tts-only, NOT --piper-only. --piper-only installs the CPU fallback and
-  # nothing else, so every box we shipped ran on Piper while this step printed
-  # "Kokoro GPU" — on freshly flashed hardware neither `import kokoro` nor
-  # `import torch` resolved and no kokoro-server unit existed (TASK-420).
-  # --tts-only installs the CUDA Kokoro stack too, and deliberately not the STT
-  # half of that script (faster-whisper + the CTranslate2 source build, about
-  # an hour on an Orin) because this step also runs from step_post_update on
-  # every in-app update.
+  # --tts-only installs the CUDA Kokoro stack and deploys the voice scripts,
+  # and deliberately not the STT half of that script (faster-whisper + the
+  # CTranslate2 source build, about an hour on an Orin) because this step also
+  # runs from step_post_update on every in-app update. The flag it replaced
+  # installed only the CPU fallback of the time and nothing else, so every box
+  # we shipped ran on that fallback while this step printed "Kokoro GPU" — on
+  # freshly flashed hardware neither `import kokoro` nor `import torch`
+  # resolved and no kokoro-server unit existed (TASK-420). That fallback is
+  # gone now; Kokoro is the only on-device engine.
   #
   # Its exit code is the contract: it never fails the install over the GPU
   # path, it reports whether Kokoro is actually there so the summary below can
@@ -2601,135 +2615,137 @@ step_openclaw_tts() {
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
     bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
 
-  # WHICH engines this box has is a fact the run just PUBLISHED; $VOICE_RC only
-  # says how far it got. Reading the first off the second is the defect this
-  # step was built around and then reproduced one line lower: exit 1 means "an
-  # engine survives, the other half did not complete", and the engine line below
-  # printed "Kokoro GPU TTS NOT installed" over a box whose GPU engine had
-  # installed, warmed up and written KOKORO=ready — while
-  # step_validate_services, reading the same file, correctly reported the PIPER
-  # half as the missing one. One run, two mutually exclusive facts.
+  # WHETHER this box has its engine is a fact the run just PUBLISHED; $VOICE_RC
+  # only says how far it got. Reading the first off the second is the defect
+  # this step was built around and then reproduced one line lower: exit 1 means
+  # "the voice scripts did not deploy; Kokoro's own verdict stands", and the
+  # engine line below printed "Kokoro GPU TTS NOT installed" over a box whose
+  # GPU engine had installed, warmed up and written KOKORO=ready — while
+  # step_validate_services, reading the same file, scored that engine as
+  # present. One run, two mutually exclusive facts.
   #
-  # `tr -d '\r'` for the same reason the other two readers of this file do it
-  # (install.sh's probe, install-voice.sh's tts_status_load): the file is also
-  # restored from tarballs and edited by hand, and a CRLF `ready\r` is not
-  # `ready`. Absent or unreadable leaves both empty, and every claim below then
-  # falls back to what the exit code carries — nothing to read is not licence
-  # to invent.
-  local KOKORO_VERDICT="" PIPER_VERDICT=""
+  # `tr -d '\r'` for the same reason install.sh's own probe does it: the file
+  # is also restored from tarballs and edited by hand, and a CRLF `ready\r` is
+  # not `ready`. Absent or unreadable leaves it empty, and every claim below
+  # then falls back to what the exit code carries — nothing to read is not
+  # licence to invent.
+  #
+  # KOKORO= is the only key read. An older release's second key is ignored:
+  # install-voice.sh no longer writes it, and a stale line left in the file by
+  # an earlier run is never read as an engine.
+  local KOKORO_VERDICT=""
   if [ -r "$TTS_STATUS_FILE" ]; then
     KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
-    PIPER_VERDICT=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
   fi
 
   local KOKORO_READY=false KOKORO_REASON=""
   # The status this STEP returns, separate from whether TTS could be configured.
   # A Kokoro that was asked for and did not arrive is a failure of this step
-  # even though the box keeps a working (CPU) voice — see the block under
-  # VOICE_RC=12 below.
+  # (12), and so is a board that declines the only engine there is (13): either
+  # way the box has no on-device voice until it is fixed. This installer cannot
+  # know whether the cloud voice exists — that needs the ClawBox AI link, which
+  # happens after install — so neither is graded clean; both are recorded.
   local TTS_RC=0
   case "$VOICE_RC" in
     0)  KOKORO_READY=true ;;
-    10) KOKORO_REASON="no CUDA toolkit on this board" ;;
-    11) KOKORO_REASON="no Jetson CUDA build for this CPU architecture, and no pinned Piper artifact either"
-        # ── "Nothing applies to this board" is still a box that cannot speak ──
-        # 11 was deliberately left clean: no TTS_RC, no recorded failure, on the
-        # grounds that a board neither engine ships for was never asked for one
-        # and that failing every such run "would only teach everyone to ignore
-        # the check". The summary this arm then printed said, in its own words,
-        # "this box answers speech with SILENCE" — and the run finished as a
-        # healthy provision. A run that describes a mute box and grades it
-        # healthy is not a check anyone can act on.
+    13)
+        # An older install-voice.sh used 10 and 11 for the same fact; the
+        # current one emits only 13.
         #
-        # install-voice.sh now answers that board with 13, so 11 should never
-        # arrive here again. The branch stays, and it fails, because a code
-        # whose meaning is "no engine applies to this board" must never be the
-        # one that grades clean if any future path revives it — leaving the
-        # lenient branch behind is exactly how the sibling call sites in #519,
-        # #533 and #544 stayed unguarded after each fix.
+        # ——— This board declines the only on-device engine ————————————
+        # Kokoro published `skipped:<reason>` — no CUDA toolkit, no Jetson
+        # build for this CPU architecture — and there is no second engine to
+        # carry the box, so NO on-device engine can speak. Every shipped
+        # ClawBox is a Jetson a Kokoro build exists for, so a skipped Kokoro
+        # on real hardware means something is wrong: it is recorded as a
+        # provisioning failure, never graded clean. "The cloud voice speaks
+        # for it" is not a fact this installer can check — that voice needs
+        # the ClawBox AI link, which happens after install.
+        #
+        # It used to arrive as a bare `exit 1` from the removed second
+        # engine's guard, which overwrote whatever Kokoro had reported and
+        # landed in the 1 arm below — a warning, TTS_RC left at 0,
+        # PROVISION_FAILURES left empty, and "=== ClawBox Setup Complete ==="
+        # printed over a mute box.
+        #
+        # Non-fatal, for the same reason 12 is: a box that cannot speak must
+        # still finish provisioning and come up reachable so it can be fixed.
+        #
+        # The engine is named with the reason it is absent. "No engine" is not
+        # an actionable report on its own — a board that declined for want of
+        # CUDA and one whose download failed lead to different fixes. The
+        # verdict is what the run published, so it is what gets printed.
+        case "$KOKORO_VERDICT" in
+          skipped:?*) KOKORO_REASON="this board declines Kokoro: ${KOKORO_VERDICT#skipped:}" ;;
+          *)          KOKORO_REASON="the voice install reported no working engine (Kokoro: ${KOKORO_VERDICT:-no verdict published}), see the log above" ;;
+        esac
         TTS_RC=13
         echo "  ############################################################" >&2
-        echo "  # This box has NO working TTS engine — no Kokoro GPU build and" >&2
-        echo "  # no pinned Piper artifact apply to this CPU architecture." >&2
-        echo "  # It will answer every spoken request with SILENCE." >&2
-        echo "  # Engines and reasons: $TTS_STATUS_FILE" >&2
+        echo "  # This box has NO working on-device TTS engine." >&2
+        echo "  # Kokoro (GPU), the only on-device engine, is absent: ${KOKORO_VERDICT:-no verdict published}" >&2
+        echo "  # The cloud voice speaks for this box once it is linked to" >&2
+        echo "  # ClawBox AI; until then spoken requests go unanswered." >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
-        record_provision_failure openclaw_tts
+        # The e2e-install container has no GPU by construction (it says so
+        # with CLAWBOX_TEST_NO_GPU=1 — see e2e-install/README.md, which lists
+        # every CUDA step it skips for that reason), so a board that declines
+        # Kokoro there is the harness's documented state, not a provisioning
+        # failure to file. The verdict still stands in $TTS_STATUS_FILE and
+        # the step still returns 13; only the failure record is withheld, and
+        # only for that host, so a real device that declines the engine fails
+        # exactly as before.
+        if harness_has_no_gpu; then
+          echo "  CLAWBOX_TEST_NO_GPU=1, not recording the missing engine as a provisioning failure (no GPU in the harness)"
+        else
+          record_provision_failure openclaw_tts
+        fi
         ;;
     12) KOKORO_REASON="the Kokoro GPU install failed, see the log above"
         # ── A hard failure must stop arriving as a soft fallback ─────────────
         # This is the branch that made a shipped defect invisible. Kokoro's
         # model pre-download died on a shell syntax error, this step printed one
         # ERROR line, returned 0, and the flash reported "Setup: 1/1 succeeded"
-        # — so every box installed in that window ran CPU Piper while the
-        # install claimed GPU TTS, and nobody noticed because speech still
-        # worked. 10 and 11 deliberately do NOT come through here: "this board
-        # has no CUDA" is a box that was never going to have Kokoro, which is a
-        # different fact from "the GPU engine you asked for did not install".
+        # — so every box installed in that window ran the removed second
+        # engine while the install claimed GPU TTS, and nobody noticed because
+        # speech still worked. 13 deliberately does NOT come through here:
+        # "this board declines Kokoro" is recorded too, but it is a different
+        # fact from "the GPU engine you asked for did not install" and leads
+        # to a different fix.
         #
         # Non-fatal stays non-fatal — the caller decides, the provider is still
-        # configured below, and the box keeps its voice — but the failure now
-        # reaches the run's exit status, the provisioning summary, the marker
-        # the flash host reads, and step_validate_services' checks.
+        # configured below, and the box's spoken replies fall back to the
+        # gateway's cloud voice — but the failure now reaches the run's exit
+        # status, the provisioning summary, the marker the flash host reads,
+        # and step_validate_services' checks.
         TTS_RC=12
         echo "  ############################################################" >&2
         echo "  # Kokoro GPU TTS was REQUESTED and did NOT install." >&2
-        echo "  # This box answers speech on the Piper CPU fallback." >&2
+        echo "  # This box has no on-device voice; spoken replies fall back" >&2
+        echo "  # to the gateway's cloud voice until it is fixed." >&2
         echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         echo "  ############################################################" >&2
         record_provision_failure openclaw_tts
         ;;
-    13) KOKORO_REASON="neither TTS engine installed, see the log above"
-        # ——— The box has NO working TTS engine ————————————————————
-        # install-voice.sh reaches this code when neither Kokoro nor Piper is
-        # ready and at least one of them was asked for and failed — typically a
-        # board with no CUDA (a legitimate `skipped:no-cuda`) whose Piper
-        # download flaked. It is strictly worse than 12: there is no fallback
-        # left, so the box answers every spoken request with silence.
-        #
-        # It used to arrive as a bare `exit 1` from the Piper guard, which
-        # overwrote whatever the GPU half had reported and landed in the branch
-        # below — a warning, TTS_RC left at 0, PROVISION_FAILURES left empty,
-        # and "=== ClawBox Setup Complete ===" printed over a mute box.
-        #
-        # Non-fatal, for the same reason 12 is: a box that cannot speak must
-        # still finish provisioning and come up reachable so it can be fixed.
-        TTS_RC=13
-        echo "  ############################################################" >&2
-        echo "  # This box has NO working TTS engine — neither Kokoro nor Piper." >&2
-        echo "  # It will answer every spoken request with SILENCE." >&2
-        # Both engines named with the reason each one is absent. 13 now covers
-        # the board that DECLINED both halves as well as the one whose install
-        # failed, and "neither engine is here" is not an actionable report on
-        # its own — which half declined for want of CUDA and which one failed
-        # its download lead to different fixes. The verdicts are what the run
-        # published, so they are what gets printed.
-        echo "  # Kokoro (GPU): ${KOKORO_VERDICT:-no verdict published}" >&2
-        echo "  # Piper (CPU):  ${PIPER_VERDICT:-no verdict published}" >&2
-        echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
-        echo "  ############################################################" >&2
-        record_provision_failure openclaw_tts
-        ;;
-    1)  KOKORO_REASON="the voice install did not complete"
-        # An engine survives (install-voice.sh returns 13, not 1, when none
-        # does), so the box still speaks — with nothing behind the engine it
-        # speaks on. That is a provisioning failure, not a log line: this branch
-        # recorded NOTHING, which is how a lost fallback reached a customer
-        # under an "All checks healthy" banner.
+    1)  KOKORO_REASON="the voice scripts did not deploy"
+        # Kokoro's own verdict stands (install-voice.sh returns 12, not 1, when
+        # the engine itself failed): this is the workspace copy of the voice
+        # scripts — kokoro-server.py and the entrypoint — not landing. That is
+        # a provisioning failure, not a log line: this branch once recorded
+        # NOTHING, which is how a broken voice install reached a customer under
+        # an "All checks healthy" banner.
         #
         # 14 rather than 1, because step_openclaw_setup treats 1 as fatal and a
-        # missing fallback must not abort an otherwise good install; and rather
-        # than 13, because 13 means the box cannot speak AT ALL and saying that
-        # about a box with a working Kokoro would be its own false report.
+        # failed script deploy must not abort an otherwise good install; and
+        # rather than 13, because 13 means the box has no engine and saying
+        # that about a box with a working Kokoro would be its own false report.
         TTS_RC=14
-        # Named in terms of the half that failed, without asserting WHICH half
-        # or what survived: exit 1 covers both "the Piper CPU fallback did not
-        # install" and "the voice scripts did not deploy", and install.sh cannot
-        # tell them apart from a status code. $TTS_STATUS_FILE can, and it is
-        # what step_validate_services reads a moment later.
-        echo "  Warning: the voice install did not complete — the Piper CPU fallback did not install, or the voice scripts did not deploy" >&2
-        echo "  Which engines this box actually has is recorded in $TTS_STATUS_FILE" >&2
+        # Named in terms of what failed, without asserting what the engine's
+        # state is: install.sh cannot read that from a status code.
+        # $TTS_STATUS_FILE can, and it is what step_validate_services reads a
+        # moment later.
+        echo "  Warning: the voice install did not complete — the voice scripts did not deploy to the workspace" >&2
+        echo "  Whether this box has its engine is recorded in $TTS_STATUS_FILE" >&2
         echo "  Re-run:  sudo bash $PROJECT_DIR/install.sh --step openclaw_tts" >&2
         record_provision_failure openclaw_tts
         ;;
@@ -2751,26 +2767,25 @@ step_openclaw_tts() {
   case "$KOKORO_VERDICT" in
     ready) KOKORO_HAVE=true ;;
     ?*)    KOKORO_HAVE=false
-           # Only reachable if the verdict contradicts a clean exit, which the
-           # contract does not allow — but "the file says the engine is not
-           # there" beats "the status code implied it was", and the reason has
-           # to come from somewhere when the exit code named none.
+           # Reached by every non-zero exit that published a verdict, and by a
+           # clean exit only if the verdict contradicts it, which the contract
+           # does not allow — but "the file says the engine is not there"
+           # beats "the status code implied it was", and the reason has to
+           # come from somewhere when the exit code named none.
            [ -n "$KOKORO_REASON" ] || KOKORO_REASON="the voice install published KOKORO=$KOKORO_VERDICT"
            ;;
   esac
   if [ "$KOKORO_HAVE" != true ]; then
-    # No engine claim here: on VOICE_RC=1 the Piper half is the thing that
-    # failed, so "Piper is the active engine" would be its own small lie. The
-    # summary at the end of the step names the engine.
+    # No engine claim here: on VOICE_RC=1 with no verdict on file Kokoro's
+    # state is unknown, so naming an engine would be a guess. The summary at
+    # the end of the step says what is actually known.
     echo "  Kokoro GPU TTS NOT installed: $KOKORO_REASON"
   elif [ "$VOICE_RC" -eq 0 ]; then
-    echo "  Kokoro GPU TTS installed (Piper CPU fallback behind it)"
-  elif [ "$PIPER_VERDICT" = "ready" ]; then
-    # Both engines are there and the run still did not finish clean, so what is
-    # missing is the deploy behind them — say that rather than pick a half.
-    echo "  Kokoro GPU TTS installed, and so is the Piper CPU fallback — but the voice install did not complete"
+    echo "  Kokoro GPU TTS installed"
   else
-    echo "  Kokoro GPU TTS installed, but the CPU fallback did not — no CPU fallback behind this box's GPU engine (Piper: ${PIPER_VERDICT:-unreported})"
+    # The engine is there and the run still did not finish clean, so what is
+    # missing is the deploy behind it — say that rather than deny the engine.
+    echo "  Kokoro GPU TTS installed, but the voice install did not complete ($KOKORO_REASON)"
   fi
 
   # Seed-if-unset, same contract as the primary model above: an owner who has
@@ -2811,10 +2826,11 @@ step_openclaw_tts() {
   # timeoutMs bounds the WHOLE clawbox-tts.sh process, engine chain included.
   # It used to be a hardcoded 120000 while the script's own Kokoro timeout was
   # also 120s, so OpenClaw killed the process at the instant Kokoro gave up and
-  # Piper was never invoked — a hung GPU stayed silent, which is the failure
-  # this whole feature exists to remove. Ask the script for the number instead
-  # of keeping a second copy of it here: it derives the value from its own
-  # engine slices, so re-tuning one of them moves this with it.
+  # not even the reasons reached the gateway — a hung GPU was silence with no
+  # diagnostic, which is the failure this whole feature exists to remove. Ask
+  # the script for the number instead of keeping a second copy of it here: it
+  # derives the value from its own engine slices, so re-tuning one of them
+  # moves this with it.
   local TTS_TIMEOUT_MS
   TTS_TIMEOUT_MS=$(bash "$TTS_SCRIPT" --provider-timeout-ms 2>/dev/null || echo "")
   case "$TTS_TIMEOUT_MS" in
@@ -2854,56 +2870,40 @@ step_openclaw_tts() {
   fi
   # Only claim Kokoro when Kokoro is genuinely there. This line asserting
   # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three
-  # freshly flashed boxes printed it while running entirely on Piper.
+  # freshly flashed boxes printed it while running entirely on the CPU
+  # fallback of the time. Claimed from the VERDICT, not the exit code, and only
+  # on a clean exit: a ready Kokoro behind a failed script deploy is named in
+  # the 1 arm below, in those words.
   if [ "$KOKORO_HAVE" = true ] && [ "$VOICE_RC" -eq 0 ]; then
-    echo "  On-device TTS configured (Kokoro GPU, Piper fallback)"
+    echo "  On-device TTS configured (Kokoro GPU)"
   else
-    # "Piper CPU only" is a claim about an engine, so it is made ONLY for the
-    # exit codes that carry one. 10, 11 and 12 all mean the Kokoro half stood
-    # down or failed while the Piper half completed, so Piper is genuinely the
-    # engine. 13 means neither half produced one, and printing "Piper CPU only"
-    # there — which is where an unhandled 13 would have landed — would put the
-    # name of a working fallback on the box this whole fix exists to catch.
+    # Each arm names only what its exit code actually carries. 12 and 13 both
+    # mean Kokoro is not on this box — by defect, or because the board declines
+    # it — and with no second engine that means no on-device voice at all; the
+    # line says so instead of naming an engine the box does not have.
     case "$VOICE_RC" in
-      10|12)
-        echo "  On-device TTS configured (Piper CPU only — $KOKORO_REASON)"
-        ;;
-      11)
-        # 11 was bucketed with 10 and 12 and is not like them. It is
-        # install_kokoro_tts's "no Jetson CUDA build for this architecture",
-        # i.e. `uname -m` is not aarch64 — which is exactly when
-        # install_piper_engine has no pinned artifact either and publishes
-        # `skipped:arch-*` of its own. So 11 is a box with NO engine.
-        #
-        # It used to print these two lines on stdout and record nothing, which
-        # meant the run said "this box answers speech with SILENCE" and then
-        # graded itself healthy. It is a recorded provisioning failure now (see
-        # the 11 arm above), so this line reports the same fact the rest of the
-        # step reports, on stderr with the other failures rather than in the
-        # middle of the success summary.
-        echo "  On-device TTS configured, but no speech engine applies to this CPU architecture" >&2
-        echo "  (no Jetson CUDA build and no pinned Piper artifact) — this box answers speech with SILENCE" >&2
+      12)
+        echo "  On-device TTS configured, but Kokoro is not available on this box ($KOKORO_REASON) — spoken replies fall back to the gateway's cloud voice"
         ;;
       1)
-        # An engine SURVIVES here — install-voice.sh returns 13, not 1, when
-        # none does — so "NO engine is confirmed installed", which is where this
-        # case used to land, is a failure report over something that succeeded.
-        # It said nothing about WHICH engine, because exit 1 is also reachable
-        # with Kokoro skipped and the script deploy failing behind a ready
-        # Piper, and naming the wrong survivor would just be a smaller lie. The
-        # VERDICT knows, though, and an operator reading this line is about to
-        # be told by step_validate_services which half is missing — so when the
-        # file names a ready Kokoro and a Piper that is not ready, say it here
-        # too. NOT by setting KOKORO_READY: that would route into the "Kokoro
-        # GPU, Piper fallback" line above and claim the very thing that is gone.
-        if [ "$KOKORO_VERDICT" = "ready" ] && [ "$PIPER_VERDICT" != "ready" ]; then
-          echo "  On-device TTS configured (Kokoro GPU, NO CPU fallback behind it — Piper: ${PIPER_VERDICT:-unreported})"
+        # Kokoro's verdict stands here — install-voice.sh returns 12, not 1,
+        # when the engine itself failed — so "NO engine is confirmed
+        # installed", which is where this case used to land, would be a
+        # failure report over something that may well have succeeded. The
+        # exit code says nothing about the engine's state, but the VERDICT
+        # does, and an operator reading this line is about to be told by
+        # step_validate_services what it says — so when the file names a
+        # ready Kokoro, say it here too. NOT by setting KOKORO_READY: that
+        # would route into the "(Kokoro GPU)" line above and claim a clean
+        # install over a deploy that did not land.
+        if [ "$KOKORO_VERDICT" = "ready" ]; then
+          echo "  On-device TTS configured — Kokoro GPU is ready, but the voice install did not complete ($KOKORO_REASON)"
         else
-          echo "  On-device TTS configured on the engine that installed, but the voice install did not complete ($KOKORO_REASON)"
+          echo "  On-device TTS configured, but the voice install did not complete ($KOKORO_REASON)"
         fi
         ;;
       13)
-        echo "  On-device TTS configured, but this box has NO working engine — it answers speech with SILENCE ($KOKORO_REASON)"
+        echo "  On-device TTS configured, but this box has NO working on-device TTS engine ($KOKORO_REASON) — the cloud voice speaks for it once the box is linked to ClawBox AI"
         ;;
       *)
         echo "  On-device TTS configured, but NO engine is confirmed installed ($KOKORO_REASON)"
@@ -3604,22 +3604,22 @@ step_post_update() {
   # already-shipped box has `claude` on it today. Idempotent — a present
   # `claude` short-circuits after one `command -v`, and the wrapper is a copy.
   step_coding_harness || echo "  Warning: coding_harness step failed (non-fatal)"
-  # On-device TTS: installs/refreshes the Piper fallback and seeds the
-  # tts-local-cli provider. Without this call the whole of TASK-383 would be
-  # fresh-install-only, and every already-shipped box would keep answering a
-  # spoken request with silence.
+  # On-device TTS: installs/refreshes Kokoro and the voice scripts, and seeds
+  # the tts-local-cli provider. Without this call the whole of TASK-383 would
+  # be fresh-install-only, and every already-shipped box would keep answering
+  # a spoken request with silence.
   # The SAME tolerance table step_openclaw_setup applies to this step, and for
   # the same reason: 12, 13 and 14 are three different facts about a box's
   # speech and the update path has to keep them apart too. A single
   # `|| echo "(non-fatal)"` — indistinguishable from the fourteen lines around
-  # it — reported "this box answers speech with SILENCE" in the same words as a
+  # it — reported "this box has no working TTS engine" in the same words as a
   # skipped VNC refresh, on the very path that reaches ALREADY-SHIPPED boxes.
   local TTS_UPDATE_RC=0
   step_openclaw_tts || TTS_UPDATE_RC=$?
   case "$TTS_UPDATE_RC" in
     0) ;;
     12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; the update continues)" ;;
-    13) echo "  Warning: this box has NO working TTS engine — it answers speech with SILENCE (recorded above; the update continues)" ;;
+    13) echo "  Warning: this box has NO working on-device TTS engine (recorded above; the update continues)" ;;
     14) echo "  Warning: the TTS install did not complete (recorded above; the update continues)" ;;
     *)  echo "  Warning: openclaw_tts returned $TTS_UPDATE_RC, which is not in its contract (non-fatal)" ;;
   esac
@@ -5066,16 +5066,21 @@ step_validate_services() {
     #
     # scripts/install-voice.sh publishes its verdict to $TTS_STATUS_FILE for
     # exactly this check. The distinction the file carries tells an operator
-    # WHAT to fix: `skipped:*` means this board was never going to run that
-    # engine (no CUDA, no Jetson build for its architecture), `failed:*` means
-    # it was requested and did not arrive.
+    # WHAT to fix, and here it decides the wording, not the outcome: `ready` is
+    # the only verdict that passes. `skipped:*` means this board declines
+    # Kokoro (no CUDA, no Jetson build for its architecture), and with one
+    # engine that is a box with NO on-device voice — a mute box, recorded and
+    # named the way step_openclaw_tts records its 13. It does not pass:
+    # whether the cloud voice exists is not a fact this installer can check
+    # (that needs the ClawBox AI link, which happens after install), and every
+    # shipped ClawBox is a Jetson a Kokoro build exists for, so a skipped
+    # Kokoro on real hardware means something is wrong. `failed:*` means the
+    # GPU engine was requested and did not arrive, and someone has to fix it.
     #
-    # What the distinction does NOT decide is whether the check passes. That is
-    # decided by one question asked of both engines together — is either one
-    # `ready`? A `skipped:*` engine is a PASS only while the other half is
-    # carrying the box; two skipped engines is a box with no voice, and it used
-    # to score healthy here because the arm below asked for a `failed:*` before
-    # it would report one.
+    # Kokoro is the ONLY engine this probe reads. An older release's second
+    # key is ignored: install-voice.sh no longer writes it, and a stale line
+    # left in the file by an earlier run is never read as an engine that
+    # exists.
     #
     # An ABSENT verdict fails too. The TTS step runs before this check on both
     # the install and the update path, so nothing here can assert "Kokoro is
@@ -5086,110 +5091,77 @@ step_validate_services() {
     #
     # Hermes has no on-device TTS step at all, so it has nothing to verify.
     if ! is_hermes_edition; then
-      # BOTH engines, read fresh from the file on every pass. The probe used to
-      # grep `^KOKORO=` and nothing else, and the Piper half published no
-      # verdict at all — so a board with no CUDA (a legitimate
-      # `KOKORO=skipped:no-cuda`) whose Piper download flaked scored this check
-      # as a PASS and printed "All checks healthy" over a box that answers every
-      # spoken request with silence.
-      local tts_state="" piper_state=""
+      # Read fresh from the file on every pass, never from an earlier answer.
+      local tts_state=""
       if [ -r "$TTS_STATUS_FILE" ]; then
         # `tr -d '\r'`: the file is written by a shell on the device, but it is
         # also restored from tarballs and edited by hand, and a CRLF line ends
         # the verdict as `ready\r` — a value that is neither `ready` nor any
         # other word in the vocabulary. Parse the line rather than merely
         # refusing it; what a garbled value must NOT do is score a pass, and
-        # that is what the guard below is for.
+        # that is what the `*)` arm below is for.
         tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
-        piper_state=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
       fi
       # `ready` is the only verdict that means "this engine can speak".
-      # `skipped:*` is a board that was never going to run it, `failed:*` is one
-      # that was asked and could not, and an EMPTY string is an engine that
-      # reported nothing at all — which fails, exactly as the Kokoro half
-      # already did. The TTS step runs before this check on both the install and
-      # the update path and publishes both keys, so nothing here has to assert
-      # an engine is fine from a line that is not there.
-      local kokoro_failed=false piper_failed=false
-      case "$tts_state" in failed:*) kokoro_failed=true ;; esac
-      case "$piper_state" in failed:*) piper_failed=true ;; esac
-      # The vocabulary is closed: `ready`, `skipped:*`, `failed:*`, or nothing
-      # at all. Anything else — a truncated write (tts_status_publish truncates
-      # the file with `>` rather than writing-then-renaming, so a box that lost
-      # power mid-publish can leave one), a typo, a stray line — matched none of
-      # the branches below and fell out of the chain as a silent PASS, while the
+      # `skipped:*` is a board that declines it — with one engine, a box with
+      # no voice — `failed:*` is one that was asked and could not, and an
+      # EMPTY string is a step that reported nothing at all; all three fail.
+      # ONE line about this box's speech, so the check probe_count counts as
+      # one contributes at most one.
+      #
+      # The vocabulary is closed: `ready`, `skipped:<reason>`, `failed:<reason>`,
+      # or nothing at all. Anything else — a truncated write (tts_status_publish
+      # truncates the file with `>` rather than writing-then-renaming, so a box
+      # that lost power mid-publish can leave one), a typo, a stray line — used
+      # to match no arm and fall out of the chain as a silent PASS, while the
       # strictly LESS informative absent verdict correctly failed. Unparseable
-      # is at least as suspicious as absent.
+      # is at least as suspicious as absent, so it lands in the `*)` arm and
+      # fails — without asserting an engine state it could not read.
       #
       # `?*`, not `*`: a bare `skipped:` or `failed:` carries no reason, and a
       # truncated write is exactly how one appears. "This board declines the
       # engine" is a claim, and a claim with its reason cut off is not evidence
       # for it either.
-      local verdict_unreadable=false
-      case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) verdict_unreadable=true ;; esac
-      case "$piper_state" in ""|ready|skipped:?*|failed:?*) ;; *) verdict_unreadable=true ;; esac
-      # ONE verdict about this box's speech, most severe first, so the check
-      # that probe_count counts as one contributes at most one line. Reporting
-      # "Kokoro failed" and "Piper failed" and "no engine" as three separate
-      # failures for one question would make the failure list longer than the
-      # number of checks that ran.
+      #
+      # Unreadable is decided FIRST, before any arm names an engine state:
+      # "this box has NO working on-device TTS engine" is a claim about an
+      # engine that may be running perfectly, and a verdict this probe could
+      # not parse is no evidence for it.
       local tts_fix="Fix: sudo bash $PROJECT_DIR/install.sh --step openclaw_tts"
-      if [ -z "$tts_state" ] && [ -z "$piper_state" ]; then
-        failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
-      elif [ "$verdict_unreadable" = true ]; then
-        # SECOND, ahead of every arm that names an engine state. A verdict
-        # nobody can parse does not establish one: `KOKORO=redy` next to
-        # `PIPER=failed:download` would otherwise be reported as "this box has
-        # NO working TTS engine", which is a claim about a GPU engine that may
-        # be running perfectly — the same failure-report-over-a-success this PR
-        # exists to remove. It is an `elif` and not the trailing `else` that
-        # would close the chain, because the fall-through is also where the
-        # HEALTHY box lands (both engines `ready` match no arm), so an `else`
-        # there would fail every good box on the shelf.
-        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
-      elif [ -n "$tts_state" ] && [ -n "$piper_state" ] \
-        && [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]; then
-        # ── No `ready` engine is a FAILED check, whatever the reasons are ────
-        # This arm used to carry `&& { kokoro_failed || piper_failed }`, so a
-        # box whose two verdicts were both `skipped:*` matched no arm at all and
-        # fell out of the chain as a silent PASS. The comment defending it said
-        # both engines skipped is "a board that runs neither by design" and that
-        # failing every install-x64.sh run "would only teach everyone to ignore
-        # this check".
-        #
-        # install-x64.sh does not run this check. It contains no reference to
-        # voice, TTS, Piper or Kokoro, and `grep -n 'install-voice.sh' *.sh`
-        # names install.sh:2602 as the only caller of the script that publishes
-        # these verdicts. So the run the leniency was protecting does not exist,
-        # and what the leniency actually passed was a box that answers every
-        # spoken request with silence.
-        #
-        # `ready` is the only verdict that means an engine can speak, and this
-        # arm asks nothing else. Both reasons are printed because "no engine" is
-        # not actionable on its own — a skip and a failed download are different
-        # repairs.
-        failed_probe+=("TTS: this box has NO working TTS engine — Kokoro: $tts_state, Piper: $piper_state. Neither engine is installed, so it will answer every spoken request with SILENCE. $tts_fix")
-      elif [ "$tts_state" != "ready" ] && [ "$piper_state" != "ready" ]; then
-        # Same rule, weaker evidence: one half published a verdict that is not
-        # `ready` and the other published nothing. That is still no engine this
-        # box can prove it has, so it still fails — but it is NOT stated as
-        # "answers with SILENCE", because an unreported half is unknown rather
-        # than absent, and asserting a mute box from a missing line would be the
-        # failure-report-over-a-success this file keeps having to remove. The
-        # arms below stay reachable and stay accurate: past this point exactly
-        # one engine is `ready`, so each of them names the half that is not.
-        failed_probe+=("TTS: no on-device TTS engine on this box is confirmed ready — Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}. $tts_fix")
-      elif [ "$kokoro_failed" = true ]; then
-        failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box answers speech on the Piper CPU fallback. $tts_fix")
-      elif [ -z "$tts_state" ]; then
-        failed_probe+=("TTS: no on-device TTS verdict for Kokoro at $TTS_STATUS_FILE — the GPU half left no record, so whether this box has the engine it asked for cannot be asserted either way. $tts_fix")
-      elif [ "$piper_failed" = true ]; then
-        # Reached only with Kokoro ready: every case where the GPU engine is
-        # missing too was answered above. So the box speaks, with nothing behind
-        # the engine it speaks on.
-        failed_probe+=("TTS: the Piper CPU fallback was requested and did NOT install ($piper_state) — this box has no fallback behind its GPU engine. $tts_fix")
-      elif [ -z "$piper_state" ]; then
-        failed_probe+=("TTS: no Piper verdict at $TTS_STATUS_FILE — the CPU half left no record, so whether this box has a fallback cannot be asserted either way. $tts_fix")
+      local tts_verdict_unreadable=false
+      case "$tts_state" in ""|ready|skipped:?*|failed:?*) ;; *) tts_verdict_unreadable=true ;; esac
+      if [ "$tts_verdict_unreadable" = true ]; then
+        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: $tts_state) — a verdict outside the ready/skipped:<reason>/failed:<reason> vocabulary is not evidence of an engine. $tts_fix")
+      else
+        case "$tts_state" in
+          "")
+            failed_probe+=("TTS: no on-device TTS verdict at $TTS_STATUS_FILE — the TTS step left no record, so whether this box has an engine cannot be asserted either way. $tts_fix")
+            ;;
+          ready)
+            ;;
+          skipped:?*)
+            # The mute box: the same recorded, named, non-fatal fact as
+            # step_openclaw_tts's 13, checked again here from the file.
+            #
+            # Except in the e2e-install container, which says it has no GPU by
+            # construction with CLAWBOX_TEST_NO_GPU=1 (e2e-install/README.md
+            # lists every CUDA step it skips for the same reason): a Kokoro
+            # that declines there is the documented state of that host, not a
+            # defect in it — and failing every harness run would teach
+            # everyone to ignore this check on the hardware where it matters.
+            # Not keyed on test mode itself: the unit tests run this probe in
+            # test mode and pin the real-hardware rule. Real devices never set
+            # either; on them a skipped Kokoro fails exactly as before.
+            if harness_has_no_gpu; then
+              echo "  CLAWBOX_TEST_NO_GPU=1, on-device TTS declined ($tts_state) — expected without a GPU, not a failed probe"
+            else
+              failed_probe+=("TTS: this box has NO working on-device TTS engine — Kokoro, the only on-device engine, does not apply to this board ($tts_state). The cloud voice speaks for it once the box is linked to ClawBox AI. $tts_fix")
+            fi
+            ;;
+          failed:?*)
+            failed_probe+=("TTS: Kokoro GPU TTS was requested and did NOT install ($tts_state) — this box has no on-device voice; spoken replies fall back to the gateway's cloud voice until it is fixed. $tts_fix")
+            ;;
+        esac
       fi
     fi
 

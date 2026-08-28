@@ -39,15 +39,18 @@ describe("local-models agrees with the voice installer", () => {
     expect(KOKORO_STAMP.endsWith("/.cache/clawbox/kokoro-installed")).toBe(true);
   });
 
-  it("looks for Piper where the installer puts it", async () => {
+  it("expects the installer to put Piper nowhere", async () => {
+    // The owner removed the Piper CPU fallback (2026-08): install-voice.sh
+    // downloads neither the binary nor a voice, and clawbox-tts.sh never runs
+    // it. This used to pin the directory both sides agreed on; the contract
+    // now is that the installer has no such directory to agree on. (The
+    // library's own Piper inventory entry, which reads ~/.local/share/piper,
+    // is a separate question for src/lib — it will report "not installed" on
+    // any box provisioned from here on.)
     const script = await installer();
-    const { PIPER_DIR, PIPER_BINARY, PIPER_VOICE_DIR } = await import("@/lib/local-models");
-    expect(script).toContain('PIPER_DIR="${PIPER_DIR:-$CLAWBOX_HOME/.local/share/piper}"');
-    expect(script).toContain('PIPER_VOICE_DIR="${PIPER_VOICE_DIR:-$PIPER_DIR/voices}"');
-    expect(script).toContain('"$PIPER_DIR/piper"');
-    expect(PIPER_DIR.endsWith("/.local/share/piper")).toBe(true);
-    expect(PIPER_BINARY.endsWith("/.local/share/piper/piper")).toBe(true);
-    expect(PIPER_VOICE_DIR.endsWith("/.local/share/piper/voices")).toBe(true);
+    expect(script).not.toContain("PIPER_DIR");
+    expect(script).not.toContain(".local/share/piper");
+    expect(script).not.toMatch(/install_piper|piper_fetch|--piper-only/);
   });
 });
 

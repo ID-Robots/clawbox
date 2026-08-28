@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { clearFinishedRuns, getRun, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
+import { listArtifacts } from "@/lib/coding-agent-artifacts";
 import { hasOwnerSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
@@ -45,15 +46,23 @@ export async function DELETE(request: Request) {
   }
 }
 
-/** The app needs the transcript path to offer a live preview; the device is
- *  the only side that knows where Claude Code put it. */
-function withTranscript<T extends { sessionId: string | null; directory: string }>(run: T) {
-  return { ...run, transcriptPath: transcriptPath(run) };
+/** Device-derived fields the record does not persist: the transcript path
+ *  (the app's live preview needs it) and — only when asked (?artifacts=1) —
+ *  the evidence-folder listing. Opt-in because listing is a readdir + a stat
+ *  per file on every run returned, and this route is polled every 5s by two
+ *  UIs, only one of which renders artifacts. */
+function withDerived<T extends { id: string; sessionId: string | null; directory: string }>(run: T, withArtifacts: boolean) {
+  return {
+    ...run,
+    transcriptPath: transcriptPath(run),
+    ...(withArtifacts ? { artifacts: listArtifacts(run.id) } : {}),
+  };
 }
 
 export async function GET(request: Request) {
   const url = new URL(request.url);
   const id = url.searchParams.get("id");
+  const withArtifacts = url.searchParams.get("artifacts") === "1";
 
   try {
     if (id) {
@@ -63,11 +72,11 @@ export async function GET(request: Request) {
       if (!run) {
         return NextResponse.json({ error: "There is no coding run with that id.", kind: "not_found" }, { status: 404 });
       }
-      return NextResponse.json({ run: withTranscript(run) });
+      return NextResponse.json({ run: withDerived(run, withArtifacts) });
     }
     const limitRaw = Number(url.searchParams.get("limit") ?? String(DEFAULT_LIMIT));
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(Math.floor(limitRaw), MAX_LIMIT)) : DEFAULT_LIMIT;
-    return NextResponse.json({ runs: listRuns(limit).map(withTranscript) });
+    return NextResponse.json({ runs: listRuns(limit).map((run) => withDerived(run, withArtifacts)) });
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not read the coding runs" },

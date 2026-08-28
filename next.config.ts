@@ -150,6 +150,12 @@ const nextConfig: NextConfig = {
               // auto-redirect never fires and users must follow the manual URL.
               `img-src 'self' data: blob: ${LOCAL_LAN_SOURCES}`,
               "font-src 'self'",
+              // media-src is not inherited from img-src: without it media
+              // falls back to default-src 'self', and a blob: <audio> — the
+              // Voice tab's sample clip, fetched as WAV and played from an
+              // object URL — is refused by every browser ("Media load rejected
+              // by URL safety check") while the request itself succeeded.
+              "media-src 'self' blob: data:",
               `connect-src 'self' ws: wss: ${LOCAL_LAN_SOURCES}`,
               // Allow code-server iframe and webapp iframes (same origin)
               `frame-src 'self' blob:`,

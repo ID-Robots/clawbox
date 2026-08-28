@@ -41,6 +41,13 @@
  */
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { buildCloudTtsWarning } from "@/lib/tts-cloud-warning";
+import {
+  DEFAULT_CLOUD_VOICE,
+  DEFAULT_LOCAL_VOICE,
+  DEFAULT_VOICE_LANGUAGE,
+  isCloudVoiceFor,
+  isLocalVoice,
+} from "@/lib/voice-catalog";
 
 /**
  * The slice of openclaw.json this module reads.
@@ -142,6 +149,17 @@ export interface VoiceOutputStatus {
    * uses, so the two surfaces cannot word the same fact differently.
    */
   warning: string | null;
+  /** The language the sample sentence comes in; the owner's pick. */
+  language: string;
+  /** The voice each engine speaks with right now; the lists are in voice-catalog.ts. */
+  voice: Record<VoiceEngineId, string>;
+  /**
+   * The cloud speech model openclaw.json names, or null for the provider's
+   * default. The Voice tab reads it to offer only the voices that model has
+   * (`cloudVoicesFor`). Optional on the type because the panel's own validator
+   * does not require it — a status written before it existed still renders.
+   */
+  cloudModel?: string | null;
 }
 
 /** Persisted in the setup app's own data dir; see voice-output-store.ts. */
@@ -150,12 +168,15 @@ export interface VoiceOutputState {
   /** The most recent real attempt through each engine, by engine id. */
   engineChecks: Partial<Record<VoiceEngineId, VoiceAttempt & { at: number }>>;
   lastCheck: VoiceCheck | null;
+  /** Sample-sentence language on the Voice tab; absent in files written before it existed. */
+  language?: string;
 }
 
 export const DEFAULT_VOICE_STATE: VoiceOutputState = {
   choice: "auto",
   engineChecks: {},
   lastCheck: null,
+  language: DEFAULT_VOICE_LANGUAGE,
 };
 
 export function normalizeProviderId(value: unknown): string | null {
@@ -185,6 +206,35 @@ interface TtsProviderEntry {
   command?: unknown;
   apiKey?: unknown;
   baseUrl?: unknown;
+  voice?: unknown;
+  model?: unknown;
+  enabled?: unknown;
+}
+
+/**
+ * The cloud voice openclaw.json names (`messages.tts.providers.<cloud>.voice`),
+ * or the engine's own default when nothing is written — which is what the
+ * gateway speaks with in that case, so the dropdown shows the same thing.
+ */
+export function cloudVoiceFrom(config: VoiceConfigView): string {
+  const providerId = cloudProviderIdFor(config);
+  const voice = providerId ? ttsProviders(config)[providerId]?.voice : undefined;
+  // Judged against the model that will speak it: a `verse` left in the file
+  // beside `tts-1` is a voice that model refuses, so the engine's default is
+  // the honest answer to "what does this box speak with".
+  return isCloudVoiceFor(cloudModelFrom(config), voice) ? voice : DEFAULT_CLOUD_VOICE;
+}
+
+/**
+ * The cloud speech model openclaw.json names (`messages.tts.providers.<cloud>.model`),
+ * or null for the provider's default. Read without the credential check
+ * `cloudSpeechTarget` makes, because which voices to OFFER is a question about
+ * the model, not about whether the box can call it right now.
+ */
+export function cloudModelFrom(config: VoiceConfigView): string | null {
+  const providerId = cloudProviderIdFor(config);
+  const model = providerId ? ttsProviders(config)[providerId]?.model : undefined;
+  return typeof model === "string" && model.trim() ? model.trim() : null;
 }
 
 function ttsProviders(config: VoiceConfigView): Record<string, TtsProviderEntry> {
@@ -203,13 +253,45 @@ export function configuredTtsProviderId(config: VoiceConfigView): string | null 
  * fall back to the OpenAI-compatible provider the ClawBox image ships.
  */
 export function cloudProviderIdFor(config: VoiceConfigView): string | null {
-  for (const id of Object.keys(ttsProviders(config))) {
+  for (const [id, entry] of Object.entries(ttsProviders(config))) {
     const normalized = normalizeProviderId(id);
-    if (normalized && !isLocalProviderId(normalized)) return normalized;
+    // A provider switched off in the chain (Microsoft's bundled voice, see
+    // ensureMicrosoftTtsExcluded) is not the cloud voice, however early it
+    // sits in the file.
+    if (normalized && !isLocalProviderId(normalized) && entry?.enabled !== false) return normalized;
   }
   const models = config.models?.providers ?? {};
   if (models[DEFAULT_CLOUD_TTS_PROVIDER_ID]) return DEFAULT_CLOUD_TTS_PROVIDER_ID;
   return null;
+}
+
+/** What a speech request to the cloud needs, or null when this box cannot make one. */
+export interface CloudSpeechTarget {
+  providerId: string;
+  apiKey: string;
+  baseUrl: string;
+  /** The configured model, or null for the provider's default. */
+  model: string | null;
+}
+
+/** OpenClaw's own default for the OpenAI speech provider. */
+const DEFAULT_OPENAI_SPEECH_URL = "https://api.openai.com/v1";
+
+/**
+ * The one answer to "can this box call the cloud voice, and with what": the
+ * same rule `cloudEngine` uses for `configured`, so a voice the dropdown
+ * offers is one the Play button can reach.
+ */
+export function cloudSpeechTarget(config: VoiceConfigView): CloudSpeechTarget | null {
+  const providerId = cloudProviderIdFor(config);
+  if (!providerId) return null;
+  const apiKey = credentialFor(config, providerId);
+  if (!apiKey || cloudCredentialIsUnusable(config, providerId)) return null;
+  const entry = ttsProviders(config)[providerId];
+  const baseUrl = [entry?.baseUrl, config.models?.providers?.[providerId]?.baseUrl]
+    .find((u): u is string => typeof u === "string" && Boolean(u.trim()))?.trim() ?? DEFAULT_OPENAI_SPEECH_URL;
+  const model = typeof entry?.model === "string" && entry.model.trim() ? entry.model.trim() : null;
+  return { providerId, apiKey, baseUrl: baseUrl.replace(/\/+$/, ""), model };
 }
 
 function credentialFor(config: VoiceConfigView, providerId: string): string | null {
@@ -410,6 +492,8 @@ export function buildVoiceOutputStatus(
   config: VoiceConfigView,
   probe: LocalVoiceProbe,
   state: VoiceOutputState,
+  /** The voice the local script is saved to speak with; its default when unset. */
+  localVoice: string | null = null,
 ): VoiceOutputStatus {
   const engines = [localEngine(probe, state), cloudEngine(config, state)];
   const activeProviderId = configuredTtsProviderId(config);
@@ -426,6 +510,12 @@ export function buildVoiceOutputStatus(
     engines,
     lastCheck: state.lastCheck,
     warning: buildVoiceDisclosure(activeProviderId, engines),
+    language: state.language ?? DEFAULT_VOICE_LANGUAGE,
+    voice: {
+      local: isLocalVoice(localVoice) ? localVoice : DEFAULT_LOCAL_VOICE,
+      cloud: cloudVoiceFrom(config),
+    },
+    cloudModel: cloudModelFrom(config),
   };
 }
 

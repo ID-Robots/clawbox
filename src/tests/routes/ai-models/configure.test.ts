@@ -31,6 +31,13 @@ vi.mock("@/lib/clawkeep", () => ({
   unpairLocal: vi.fn(),
 }));
 
+// Connecting a provider re-enables it. The switch itself is exercised by the
+// providers/enabled route tests; here only the call matters.
+vi.mock("@/lib/provider-enablement", () => ({
+  getDisabledProviders: async () => new Set<string>(),
+  setProviderEnabled: vi.fn(async () => ({ ok: true })),
+}));
+
 // The configure route fires a catalog refresh out-of-band and deliberately does
 // NOT await it (step 8c). The real refreshInBackground starts a fetch/openclaw
 // fork and logs its outcome — `[catalog] refreshed …` or `[catalog] refresh
@@ -848,6 +855,59 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+  });
+
+  it("skips a local engine the owner switched off when picking the fallback", async () => {
+    // The switch reaches the fallback slot too: a backup the gateway would
+    // quietly route to when the primary fails is exactly what "switched off"
+    // promises cannot happen. With nothing else to back the primary up, the
+    // slot is cleared rather than left pointing at the disabled engine.
+    mockGetAll.mockResolvedValue({
+      local_ai_configured: true,
+      local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+      ai_disabled_providers: ["llamacpp"],
+    });
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-openai-key",
+    }));
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["llamacpp/gemma4-e2b-it-q4_0"] --json');
+    expect(commands).toContain("config set agents.defaults.model.fallbacks [] --json");
+  });
+
+  it("does not fall back to ClawBox AI when the owner switched it off", async () => {
+    // Same rule for the last resort: a stored token alone used to be enough
+    // to make ClawBox AI the silent backup for every other provider.
+    mockGetAll.mockResolvedValue({
+      clawai_token: "stored-fallback-token",
+      ai_disabled_providers: ["clawai"],
+    });
+
+    await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-test",
+    }));
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands).not.toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-v4-flash"] --json');
+    expect(commands).toContain("config set agents.defaults.model.fallbacks [] --json");
+  });
+
+  it("turns a switched-off provider back on when the owner connects it", async () => {
+    // Re-entering a key is the owner saying "use this one". Without this the
+    // save would route the chat to a provider the list still shows as off.
+    const { setProviderEnabled } = await import("@/lib/provider-enablement");
+    mockGetAll.mockResolvedValue({ ai_disabled_providers: ["openai"] });
+
+    await configurePost(jsonRequest({
+      provider: "openai",
+      apiKey: "sk-openai-key",
+    }));
+
+    expect(vi.mocked(setProviderEnabled)).toHaveBeenCalledWith("openai", true);
   });
 
   it("uses a stored ClawBox AI token when no new token is supplied", async () => {

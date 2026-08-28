@@ -4,19 +4,24 @@
  * WHY gh RATHER THAN OUR OWN OAUTH
  *
  * GitHub's device flow needs a registered OAuth App's client id. ClawBox has
- * none, and one cannot be conjured at runtime — it is a thing a human
- * registers on github.com. `gh` already ships one, already implements the
- * flow correctly, and is already installed on the device. So "connect" opens
- * a terminal on `gh auth login`, which prints the device code for the owner
- * to enter on github.com from any device. No token is typed on the box, and
- * ClawBox never handles the credential: gh stores it in its own config and
- * lends it to git as a credential helper.
+ * none — but `gh` does, published in its open source and honoured by
+ * github.com for exactly this flow. So "connect" runs the SAME device flow gh
+ * itself would run, just without the terminal: startDeviceLogin() asks
+ * github.com for a one-time code the UI shows with a tappable link (a
+ * terminal `gh auth login` on a phone tries xdg-open on the box, fails
+ * noisily, and buries the URL — measured from a phone through the tunnel),
+ * pollDeviceLogin() waits for the owner to approve on github.com from any
+ * device, and the resulting token is handed straight to
+ * `gh auth login --with-token` on stdin. gh stores it in its own config and
+ * lends it to git as a credential helper; ClawBox holds the token for the
+ * milliseconds between GitHub's answer and gh's stdin, never in argv, a
+ * file, or a log.
  *
  * WHAT THIS DOES NOT DO
  *
- * It does not log in on the owner's behalf, because driving an interactive
- * TUI from a web request is a fragile way to handle someone's credentials.
- * It reads the state and it pushes; the owner does the authorising.
+ * It does not log in on the owner's behalf: the owner approves the code on
+ * github.com, and the routes behind these functions refuse the agent's
+ * bearer. It reads the state and it pushes; the owner does the authorising.
  *
  * Every repository this creates is PRIVATE. A backup of a half-finished
  * project is not a publication, and a run that guessed wrong about a secret
@@ -42,6 +47,143 @@ const PUSH_TIMEOUT_MS = 180_000;
 /** The command the owner runs to connect. Shown in the UI and typed into the
  *  Terminal app, so both say the same thing. */
 export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https";
+
+// ── Device-flow login ────────────────────────────────────────────────────────
+
+/** The GitHub CLI's own OAuth client id — public in gh's source, and the id
+ *  the token must be minted under for `gh auth login --with-token` to be
+ *  indistinguishable from a terminal login. Env-overridable for a fork that
+ *  registered its own app. */
+const GH_OAUTH_CLIENT_ID = process.env.CLAWBOX_GITHUB_CLIENT_ID?.trim() || "178c6fc778ccc68e1d6a";
+/** The scopes a terminal `gh auth login` requests. */
+const DEVICE_SCOPES = "repo read:org gist workflow";
+const DEVICE_HTTP_TIMEOUT_MS = 15_000;
+
+/** The one login in flight. Module state like the runs store: one owner, one
+ *  web-server process, one pending code at a time — a second start replaces
+ *  the first, exactly as re-running `gh auth login` would.
+ *
+ *  `interval` is the cadence github.com allows, in seconds, and `nextPollAt`
+ *  the earliest moment the next request may go out. Both live HERE and not
+ *  only in the browser: the card's timer is what asks, but github.com's
+ *  `slow_down` is answered to this process, and a browser that kept its
+ *  original cadence would be rate-limited until the code expired. */
+let pendingLogin: { deviceCode: string; interval: number; expiresAt: number; nextPollAt: number } | null = null;
+
+export interface DeviceLoginStart {
+  userCode: string;
+  verificationUri: string;
+  expiresIn: number;
+  interval: number;
+}
+
+export type DeviceLoginPoll =
+  /** Not yet. `interval` is the cadence to ask again at, in seconds — it grows
+   *  when github.com says slow_down, and the card reschedules from it. */
+  | { status: "pending"; interval: number }
+  | { status: "connected"; login: string | null }
+  /** Over — declined, expired, or gh refused the token. A new start is the retry. */
+  | { status: "failed"; detail: string };
+
+async function githubJson(url: string, body: Record<string, string>): Promise<Record<string, unknown> | null> {
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(DEVICE_HTTP_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    return await res.json() as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Ask github.com for a one-time code the owner will approve from any device. */
+export async function startDeviceLogin(): Promise<DeviceLoginStart | { error: string }> {
+  const data = await githubJson("https://github.com/login/device/code", {
+    client_id: GH_OAUTH_CLIENT_ID,
+    scope: DEVICE_SCOPES,
+  });
+  const deviceCode = data?.device_code;
+  const userCode = data?.user_code;
+  const verificationUri = data?.verification_uri;
+  if (typeof deviceCode !== "string" || typeof userCode !== "string" || typeof verificationUri !== "string") {
+    return { error: "Could not reach github.com to start the login. Check the network connection and try again." };
+  }
+  const interval = typeof data?.interval === "number" ? Math.max(5, data.interval) : 5;
+  const expiresIn = typeof data?.expires_in === "number" ? data.expires_in : 900;
+  // The first poll may go out at once; the cadence applies between polls.
+  pendingLogin = { deviceCode, interval, expiresAt: Date.now() + expiresIn * 1000, nextPollAt: 0 };
+  return { userCode, verificationUri, expiresIn, interval };
+}
+
+/**
+ * One poll of the login in flight. "pending" until the owner approves the
+ * code on github.com; on approval the token goes straight to gh's stdin and
+ * is forgotten.
+ *
+ * The cadence is enforced here, not trusted to the caller. A poll that
+ * arrives before `nextPollAt` — a second tab, a browser that has not yet
+ * heard about a slow_down — is answered "pending" from memory without a
+ * request to github.com, so nothing this process does can exceed the rate
+ * the device flow allows. Every pending answer carries the current interval
+ * so the card can fall into step.
+ */
+export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
+  if (!pendingLogin) return { status: "failed", detail: "No login is in progress. Start again." };
+  if (Date.now() > pendingLogin.expiresAt) {
+    pendingLogin = null;
+    return { status: "failed", detail: "The code expired before it was entered. Start again for a fresh one." };
+  }
+  const login = pendingLogin;
+  const now = Date.now();
+  if (now < login.nextPollAt) return { status: "pending", interval: login.interval };
+  // Claimed before the request leaves, so a poll that lands while this one
+  // is still in flight is the early case above rather than a second request.
+  login.nextPollAt = now + login.interval * 1000;
+  const data = await githubJson("https://github.com/login/oauth/access_token", {
+    client_id: GH_OAUTH_CLIENT_ID,
+    device_code: login.deviceCode,
+    grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+  });
+  // The login may have been cancelled or replaced while github.com was
+  // answering; the answer then belongs to a flow that no longer exists.
+  if (pendingLogin !== login) return { status: "failed", detail: "No login is in progress. Start again." };
+  if (!data) return { status: "pending", interval: login.interval };
+  if (data.error === "authorization_pending") return { status: "pending", interval: login.interval };
+  if (data.error === "slow_down") {
+    // RFC 8628 §3.5: add five seconds to the interval and keep waiting. The
+    // next eligible moment moves with it, or the very next poll would go out
+    // at the old cadence and earn another slow_down.
+    login.interval += 5;
+    login.nextPollAt = Date.now() + login.interval * 1000;
+    return { status: "pending", interval: login.interval };
+  }
+  if (typeof data.access_token !== "string") {
+    pendingLogin = null;
+    return {
+      status: "failed",
+      detail: data.error === "access_denied"
+        ? "The login was declined on github.com."
+        : "GitHub ended the login. Start again for a fresh code.",
+    };
+  }
+  pendingLogin = null;
+  const stored = await run("gh", ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"], {
+    input: data.access_token,
+  });
+  if (stored.code !== 0) {
+    return { status: "failed", detail: `gh would not store the credential: ${(stored.stderr || stored.stdout).slice(0, 200)}` };
+  }
+  return { status: "connected", login: (await githubStatus()).login };
+}
+
+/** Forget the login in flight; the code on github.com simply goes unused. */
+export function cancelDeviceLogin(): void {
+  pendingLogin = null;
+}
 
 /**
  * Why the probe could not answer. Absent when it did — including when the
@@ -145,9 +287,10 @@ export type DisconnectOutcome =
  * `@/lib/child-run` — shared with coding-git.ts, which used to carry its own
  * pre-#518 copy of both.
  */
-function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number } = {}): Promise<ChildResult> {
+function run(bin: string, args: string[], opts: { cwd?: string; timeoutMs?: number; input?: string } = {}): Promise<ChildResult> {
   return runChild(bin, args, {
     cwd: opts.cwd,
+    input: opts.input,
     timeoutMs: opts.timeoutMs ?? GH_TIMEOUT_MS,
     env: {
       PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",

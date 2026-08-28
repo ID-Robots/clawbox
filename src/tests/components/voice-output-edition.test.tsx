@@ -15,13 +15,15 @@ import VoiceOutputPanel from "@/components/VoiceOutputPanel";
  */
 
 const OPENCLAW_STATUS = {
-  choice: "auto",
+  // The source dropdown reads `choice` and nothing else: "local" is the box
+  // itself, anything else shows as the cloud. A box with only its own engine.
+  choice: "local",
   engines: [
     {
       id: "local",
       label: "On this box",
-      detail: "Piper",
-      providerId: "piper",
+      detail: "Kokoro",
+      providerId: "tts-local-cli",
       configured: true,
       proven: true,
       usable: true,
@@ -33,6 +35,10 @@ const OPENCLAW_STATUS = {
   drifted: false,
   warning: null,
   lastCheck: null,
+  language: "en",
+  // The voice each engine speaks with. The LISTS to pick from are not part of
+  // the payload — the panel carries its own catalogue (@/lib/voice-catalog).
+  voice: { local: "af_heart", cloud: "alloy" },
 };
 
 function installFetch(payload: unknown) {
@@ -83,6 +89,13 @@ describe("Settings → Voice on the OpenClaw edition", () => {
 
     await waitFor(() => expect(screen.queryByTestId("voice-output-loading")).toBeNull());
     expect(screen.queryByTestId("voice-output-unsupported")).toBeNull();
-    expect(screen.getByText("ClawBox cloud")).toBeInTheDocument();
+    // The dropdowns show what the payload said: the source from `choice`, the
+    // voice from `voice[source]`. The cloud row is offered but greyed — no
+    // cloud engine was reported — rather than hidden.
+    expect(screen.getByTestId("voice-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("voice-source")).toHaveValue("local");
+    expect(screen.getByTestId("voice-voice")).toHaveValue("af_heart");
+    const cloud = screen.getByRole("option", { name: /ClawBox cloud/ }) as HTMLOptionElement;
+    expect(cloud.disabled).toBe(true);
   });
 });

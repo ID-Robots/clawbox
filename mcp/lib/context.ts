@@ -22,6 +22,9 @@ export interface DesktopApp {
 const OPENCLAW_ONLY_APPS: DesktopApp[] = [
   { id: "openclaw", name: "OpenClaw", description: "AI chat" },
   { id: "store", name: "Store", description: "App store" },
+  // OpenClaw's memory index. Listed here and not in COMMON_APPS for the same
+  // reason the desktop hides it on Hermes: there is no index to show there.
+  { id: "memory-shard", name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
 ];
 const HERMES_ONLY_APPS: DesktopApp[] = [
   { id: "hermes-skills", name: "Hermes Skills", description: "Install skills for the agent" },

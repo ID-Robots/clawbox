@@ -47,7 +47,13 @@ interface Row {
   label: string;
   state: string;
   isDefault: boolean;
+  enabled: boolean;
   section: string;
+}
+
+/** The config store answering ONLY the owner's disabled list. */
+function storeDisabled(ids: unknown) {
+  getConfigValue.mockImplementation(async (key: string) => (key === "ai_disabled_providers" ? ids : null));
 }
 
 const rowFor = (body: { providers: Row[] }, id: string): Row | undefined =>
@@ -166,6 +172,23 @@ describe("GET /setup-api/providers/status — Hermes", () => {
     expect((await (await GET()).json()).degraded).toBe(true);
   });
 
+  it("keys the owner's switch by Hermes' own id, not a folded one", async () => {
+    // `openai-codex` is what the Hermes row is called; folding it onto
+    // `openai` the way OpenClaw's normaliser does would leave a switch flipped
+    // on an id no row carries.
+    getModelOptions.mockResolvedValue(hermesPayload({
+      providers: [
+        ...hermesPayload().providers,
+        { id: "openai-codex", name: "OpenAI", authenticated: true, isUserDefined: false, source: "d", total: 1, models: [] },
+      ],
+    }));
+    storeDisabled(["openai-codex"]);
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "openai-codex")!.enabled).toBe(false);
+    expect(rowFor(body, "openai-codex")!.state).toBe("connected");
+  });
+
   it("degrades rather than throwing when the box cannot be asked", async () => {
     getModelOptions.mockRejectedValue(new Error("dashboard down"));
     const res = await GET();
@@ -194,6 +217,25 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     expect(body.defaultProvider).toBe("anthropic");
   });
 
+  it("does not call OpenAI connected when its slot only carries ClawBox AI's own token", async () => {
+    // ClawBox AI's image generation and cloud voice are registered under the
+    // `openai` provider (its OpenAI-compatible routes on our proxy) with the
+    // claw_ token. A box with nothing but ClawBox AI linked read
+    // "OpenAI: Connected" — seen on a live box.
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "deepseek:default": { provider: "deepseek", mode: "api_key" } } },
+      models: { providers: {
+        deepseek: { apiKey: "claw_box_token" },
+        openai: { apiKey: "claw_box_token", models: [{ id: "gpt-image-1-mini", baseUrl: "https://clawbox.com/api/ai" }] },
+      } },
+      agents: { defaults: { model: { primary: "deepseek/deepseek-v4-pro" } } },
+    });
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "clawai")!.state).toBe("connected");
+    expect(rowFor(body, "openai")!.state).toBe("disconnected");
+  });
+
   it("collapses the wire spellings of one vendor onto one row", async () => {
     // `deepseek` is ClawBox AI's provider id in openclaw.json, and `codex` is
     // the ChatGPT-subscription spelling of OpenAI. Two rows for one vendor in a
@@ -220,6 +262,46 @@ describe("GET /setup-api/providers/status — OpenClaw", () => {
     // them on a panel that cannot change it.
     expect(rowFor(body, "llamacpp")!.section).toBe("localAi");
     expect(rowFor(body, "anthropic")!.section).toBe("ai");
+  });
+});
+
+describe("the owner's switch", () => {
+  beforeEach(() => {
+    getActiveHarness.mockResolvedValue("openclaw");
+    readConfig.mockResolvedValue({
+      auth: { profiles: { "anthropic:default": { provider: "anthropic" } } },
+      models: { providers: { openrouter: { apiKey: "sk-or-secret" } } },
+      agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
+    });
+  });
+
+  it("is on for every row until the owner says otherwise", async () => {
+    const body = await (await GET()).json();
+
+    expect(body.providers.length).toBeGreaterThan(0);
+    for (const row of body.providers) expect(row.enabled).toBe(true);
+  });
+
+  it("reports a switched-off provider as enabled:false with its state untouched", async () => {
+    // Two orthogonal facts. Switching a provider off does not disconnect it —
+    // the credential is kept so switching it back on is one click — and the
+    // strip must say both: still connected, currently off.
+    storeDisabled(["openrouter"]);
+    const body = await (await GET()).json();
+
+    expect(rowFor(body, "openrouter")!.enabled).toBe(false);
+    expect(rowFor(body, "openrouter")!.state).toBe("connected");
+    expect(rowFor(body, "anthropic")!.enabled).toBe(true);
+    expect(rowFor(body, "google")!.enabled).toBe(true);
+  });
+
+  it("reads a malformed stored list as nothing disabled", async () => {
+    // config.json is hand-editable; a bad value must not take the strip down
+    // or, worse, switch anything off.
+    storeDisabled("anthropic");
+    const body = await (await GET()).json();
+
+    for (const row of body.providers) expect(row.enabled).toBe(true);
   });
 });
 
@@ -255,7 +337,7 @@ describe("the response carries statuses, never credentials", () => {
     expect(raw).not.toMatch(/"apiKey"|"api_key"|"token"|"baseUrl"/);
   });
 
-  it("emits only the four fields the strip renders", async () => {
+  it("emits only the fields the strip renders", async () => {
     getActiveHarness.mockResolvedValue("hermes");
     getModelOptions.mockResolvedValue(hermesPayload());
     const body = await (await GET()).json();
@@ -264,8 +346,10 @@ describe("the response carries statuses, never credentials", () => {
       ["defaultProvider", "degraded", "harness", "providers"],
     );
     for (const row of body.providers) {
-      expect(Object.keys(row).sort()).toEqual(["id", "isDefault", "label", "section", "state"]);
+      expect(Object.keys(row).sort()).toEqual(["enabled", "id", "isDefault", "label", "section", "state"]);
       expect(typeof row.isDefault).toBe("boolean");
+      expect(typeof row.enabled).toBe("boolean");
+      // The owner's switch is a fifth, orthogonal field — never a fifth state.
       expect(["connected", "disconnected", "needs-reauth", "unknown"]).toContain(row.state);
     }
   });

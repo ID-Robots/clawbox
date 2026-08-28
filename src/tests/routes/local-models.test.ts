@@ -32,7 +32,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   getOllamaBaseUrl: () => "http://127.0.0.1:11434",
 }));
 vi.mock("@/lib/clawkeep-memory", () => ({
-  getMemoryStatus: async () => ({ available: true, provider: "ollama", model: "qwen3-embedding:0.6b", location: "local" }),
+  peekMemoryStatus: () => ({ available: true, provider: "ollama", model: "qwen3-embedding:0.6b", location: "local" }),
 }));
 
 function snapshot(over: Partial<{ id: string; installed: boolean }> = {}) {

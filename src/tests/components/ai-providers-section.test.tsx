@@ -65,12 +65,12 @@ const summary = (overrides: Partial<ProviderStatusSummary> = {}): ProviderStatus
   defaultProvider: "clawai",
   degraded: false,
   providers: [
-    { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai" },
-    { id: "openrouter", label: "OpenRouter", state: "disconnected", isDefault: false, section: "ai" },
-    { id: "anthropic", label: "Anthropic", state: "connected", isDefault: false, section: "ai" },
-    { id: "openai-codex", label: "OpenAI Codex", state: "connected", isDefault: false, section: "ai" },
-    { id: "gemini", label: "Google Gemini", state: "needs-reauth", isDefault: false, section: "ai" },
-    { id: "nous", label: "Nous Portal", state: "unknown", isDefault: false, section: "ai" },
+    { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
+    { id: "openrouter", label: "OpenRouter", state: "disconnected", isDefault: false, section: "ai", enabled: true },
+    { id: "anthropic", label: "Anthropic", state: "connected", isDefault: false, section: "ai", enabled: true },
+    { id: "openai-codex", label: "OpenAI Codex", state: "connected", isDefault: false, section: "ai", enabled: true },
+    { id: "gemini", label: "Google Gemini", state: "needs-reauth", isDefault: false, section: "ai", enabled: true },
+    { id: "nous", label: "Nous Portal", state: "unknown", isDefault: false, section: "ai", enabled: true },
   ],
   ...overrides,
 });

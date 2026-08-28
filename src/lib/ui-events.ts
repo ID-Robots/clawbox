@@ -4,6 +4,16 @@
 
 export const OPEN_APP_EVENT = "clawbox:open-app";
 export const FIX_ERROR_EVENT = "clawbox:fix-error";
+/**
+ * "Send this as the owner's next chat turn."
+ *
+ * The Coding Agent app's New wizard ends here rather than at the run route:
+ * the assistant is the party that scaffolds, delegates and verifies, and the
+ * owner continues the conversation in the chat they were handed to. Same
+ * shape as FIX_ERROR_EVENT — ChatPopup queues the text through the one send
+ * path it has, and page.tsx opens the popup so the owner can watch.
+ */
+export const CHAT_MESSAGE_EVENT = "clawbox:chat-message";
 export const OPEN_SETTINGS_SECTION_EVENT = "clawbox:open-settings-section";
 
 /**
@@ -34,9 +44,41 @@ export function dispatchOpenApp(appId: string): void {
  */
 export function dispatchOpenSettingsSection(section: string): void {
   if (typeof window === "undefined") return;
+  handoffSettingsSection(section);
+  dispatchOpenApp("settings");
+}
+
+/**
+ * The two handoffs above WITHOUT opening the app — for a page that is already
+ * rendering Settings and only has to tell it which section: the standalone
+ * `/app/settings?section=…` route, where there is no desktop to open a window
+ * into and nothing listens for OPEN_APP_EVENT.
+ */
+export function handoffSettingsSection(section: string): void {
+  if (typeof window === "undefined") return;
   (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
   window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section } }));
-  dispatchOpenApp("settings");
+}
+
+/** The query parameter `/app/settings` reads its opening section from. */
+export const STANDALONE_SETTINGS_SECTION_PARAM = "section";
+
+/**
+ * True on `/app/<id>` — the page behind "Open in new tab", which a phone lands
+ * on. It hosts ONE app and no desktop: nothing there listens for
+ * OPEN_APP_EVENT or OPEN_SETTINGS_SECTION_EVENT, so a control that only
+ * dispatches them is inert. A link that wants to reach Settings from that
+ * page has to navigate to `standaloneSettingsHref()` instead.
+ */
+export function onStandaloneAppPage(): boolean {
+  return typeof window !== "undefined" && window.location.pathname.startsWith("/app/");
+}
+
+/** Where the standalone Settings page opens on `section` — the one spelling
+ *  of the address, shared by the link that navigates there and the page that
+ *  reads it. */
+export function standaloneSettingsHref(section: string): string {
+  return `/app/settings?${STANDALONE_SETTINGS_SECTION_PARAM}=${encodeURIComponent(section)}`;
 }
 
 export interface FixErrorContext {
@@ -48,6 +90,44 @@ export interface FixErrorContext {
 export function dispatchFixError(ctx: FixErrorContext): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(FIX_ERROR_EVENT, { detail: ctx }));
+}
+
+export interface ChatMessageDetail {
+  text: string;
+}
+
+export function dispatchChatMessage(text: string): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<ChatMessageDetail>(CHAT_MESSAGE_EVENT, { detail: { text } }));
+}
+
+/** The starter a new app is scaffolded from — initProject's two templates. */
+export type NewAppTemplate = "app" | "blank";
+
+export interface NewAppRequest {
+  name: string;
+  description: string;
+  template: NewAppTemplate;
+}
+
+/**
+ * The one message the New wizard hands to the chat.
+ *
+ * English on purpose, like buildFixErrorPrompt: it is addressed to the
+ * assistant, not shown as UI copy, and it names the steps the assistant has
+ * tools for — code_project_init, coding_agent_run, the browser, the desktop
+ * — so the request lands as a plan rather than a wish. The template is named
+ * the way code_project_init's argument is spelled.
+ */
+export function buildNewAppPrompt(req: NewAppRequest): string {
+  const name = req.name.trim();
+  // One sentence, whatever punctuation the owner typed: strip a trailing full
+  // stop so the description does not end "...timer.." after ours.
+  const what = req.description.trim().replace(/[.\s]+$/u, "");
+  return [
+    `Create a new ClawBox app called "${name}": ${what}.`,
+    `Scaffold it as a code project from the "${req.template}" template, build it with the coding agent, verify it in the browser, and put it on my desktop.`,
+  ].join("\n");
 }
 
 export function buildFixErrorPrompt(ctx: FixErrorContext): string {
@@ -176,4 +256,35 @@ export function onProvidersChanged(
     if (timer) clearTimeout(timer);
     for (const name of PROVIDER_SIGNAL_EVENTS) window.removeEventListener(name, onSignal);
   };
+}
+
+/**
+ * "The coding agent's settings changed" — the switch, the folder, the effort,
+ * a ceiling, or the GitHub account.
+ *
+ * Needed because the settings and the runs are two components now. While the
+ * switch lived in the Coding Agent app, the app's On/Off chip, its readiness
+ * checklist and a run's Backup button could not disagree with it; in Settings
+ * the switch is a different window, and the app only re-reads the box on
+ * mount and while a run is live. Without this, the owner flipped the switch
+ * and came back to a window still saying Off.
+ *
+ * A signal, not data, for the reason `notifyProvidersChanged` gives: the
+ * listener re-asks the routes, so there is one source of truth.
+ */
+export const CODING_AGENT_CHANGED_EVENT = "clawbox:coding-agent-changed";
+
+/** Emit the signal above. Call it wherever a coding agent setting was SAVED
+ *  — after the route answered, never on the click. */
+export function notifyCodingAgentChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CODING_AGENT_CHANGED_EVENT));
+}
+
+/** Subscribe to "coding agent changed" and return the unsubscribe. Undebounced:
+ *  one save is one event, and a listener already coalesces its own fetches. */
+export function onCodingAgentChanged(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(CODING_AGENT_CHANGED_EVENT, listener);
+  return () => window.removeEventListener(CODING_AGENT_CHANGED_EVENT, listener);
 }

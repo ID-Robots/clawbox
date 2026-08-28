@@ -10,7 +10,7 @@ import {
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
 import { getLlamaCppProvisioningStatus } from "@/lib/llamacpp-server";
 import { getOllamaBaseUrl } from "@/lib/local-ai-runtime";
-import { getMemoryStatus } from "@/lib/clawkeep-memory";
+import { peekMemoryStatus } from "@/lib/clawkeep-memory";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 
 /** Is llama.cpp answering right now? Same probe the llamacpp status route uses. */
@@ -37,10 +37,13 @@ async function probes(): Promise<InventoryProbes> {
   const embeddingsSupported = !openclawIsAbsent();
   // Each probe is independently guarded: an engine that cannot be reached must
   // cost only its own row, never the whole inventory.
-  const [provisioning, servedModel, memory] = await Promise.all([
+  // The memory reading is PEEKED, never awaited: it costs an OpenClaw process
+  // boot, and this route is polled every five seconds by a panel that must
+  // open at once. A cold peek starts that probe and answers null.
+  const memory = embeddingsSupported ? peekMemoryStatus() : null;
+  const [provisioning, servedModel] = await Promise.all([
     getLlamaCppProvisioningStatus(alias).catch(() => null),
     llamaCppRunning(llamaBase),
-    embeddingsSupported ? getMemoryStatus().catch(() => null) : Promise.resolve(null),
   ]);
   return {
     ollamaBaseUrl: getOllamaBaseUrl(),
@@ -51,6 +54,7 @@ async function probes(): Promise<InventoryProbes> {
     },
     embeddings: {
       supported: embeddingsSupported,
+      ready: memory !== null,
       available: !!memory?.available,
       provider: memory?.provider || null,
       model: memory?.model || null,

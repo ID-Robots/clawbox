@@ -156,8 +156,10 @@ test("restore modal opens, fetches snapshots, and Esc dismisses it", async ({ pa
   // render branch.
   const modal = page.getByRole("dialog");
   await expect(modal).toBeVisible();
-  // Three buttons inside the modal (one per snapshot, plus close).
-  expect(await modal.getByRole("button").count()).toBeGreaterThan(2);
+  // Three buttons inside the modal (one per snapshot, plus close). Polled,
+  // not read once: the snapshot list arrives from a fetch the modal starts
+  // on mount, and a count taken before it lands is the close button alone.
+  await expect.poll(() => modal.getByRole("button").count()).toBeGreaterThan(2);
 
   // Esc closes the modal — covers the keydown useEffect cleanup path.
   await page.keyboard.press("Escape");
@@ -305,10 +307,19 @@ test("restore modal: clicking a snapshot opens the confirm dialog", async ({ pag
 
   // Confirm dialog stacks on top of the restore modal — covers the
   // ConfirmDialog render branch with the "restore" copy variant
-  // (different from the unpair variant exercised earlier).
-  const confirmDialogs = page.getByRole("dialog");
-  expect(await confirmDialogs.count()).toBeGreaterThanOrEqual(2);
+  // (different from the unpair variant exercised earlier). The confirm
+  // dialog makes everything behind it inert and aria-hidden while it is
+  // open (useModalDialog), so the restore modal underneath is still on
+  // screen but no longer in the accessibility tree: count dialogs with
+  // hidden ones included, and check the one on top is the live one.
+  const confirmDialogs = page.getByRole("dialog", { includeHidden: true });
+  await expect(confirmDialogs).toHaveCount(2);
+  const confirm = page.getByRole("dialog");
+  await expect(confirm).toHaveCount(1);
+  await expect(confirm.getByText(/restore/i).first()).toBeVisible();
   await page.keyboard.press("Escape");
+  // Escape closes only the confirm dialog; the restore modal is live again.
+  await expect(page.getByRole("dialog")).toHaveCount(1);
 });
 
 test("paired-without-encryption opens the passphrase setup modal on backup", async ({ page }) => {

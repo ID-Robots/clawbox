@@ -1,34 +1,34 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { spawnSync, spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-// These run the shipped scripts/openclaw/clawbox-tts.sh itself against stub
-// `kokoro` and `piper` executables on PATH — not a reimplementation of its
-// fallback chain in TypeScript. The engines are the part that breaks, so the
-// stubs are scripted to break the way the real ones do: a kokoro that is not
-// installed, one that exits non-zero when CUDA will not allocate, one that
-// returns a WAV header with no samples in it, and a board with no memory left.
+// These run the shipped scripts/openclaw/clawbox-tts.sh itself against a stub
+// `kokoro` executable on PATH — not a reimplementation of its logic in
+// TypeScript. The engine is the part that breaks, so the stub is scripted to
+// break the way the real one does: a kokoro that is not installed, one that
+// exits non-zero when CUDA will not allocate, one that returns a WAV header
+// with no samples in it, one that hangs, and a board with no memory left.
 //
-// The bug being fixed is silence. Until TASK-383 the box called kokoro-tts.sh,
-// which printed "Kokoro TTS failed" and exited 1 for every one of those cases,
-// so each test below asserts BOTH that the right engine ran and that audio
-// came out — an exit code alone would have passed against the old script too.
+// Kokoro is the ONLY on-device engine. Until 2026-08 the script fell through
+// to a Piper CPU fallback on every one of those failures; the owner removed it
+// (the chain is cloud → Kokoro, no second CPU engine), because a fallback that
+// silently took over hid a broken GPU install for a whole release (TASK-420).
+// So the contract these tests pin is now two-sided:
+//
+//   * when Kokoro works, audio comes out and the exit is 0;
+//   * when Kokoro does not, the exit is non-zero with every reason on stderr,
+//     NO output file exists, and nothing else is tried — the gateway's own
+//     fallback (the cloud voice) is what answers next, and it can only do that
+//     if this script reports the failure instead of absorbing it.
+//
+// An exit code alone would not do: the old kokoro-tts.sh also exited 1, with
+// one message for every cause. Each failing case asserts on the reason too.
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/openclaw/clawbox-tts.sh");
 const INSTALL_SH = readFileSync(path.resolve(process.cwd(), "install.sh"), "utf-8");
 const INSTALL_VOICE_SH = readFileSync(path.resolve(process.cwd(), "scripts/install-voice.sh"), "utf-8");
-
-/** Pull a shell function body out of a script, for asserting on its shape. */
-function extractShellFn(source: string, name: string): string {
-  const start = source.indexOf(`${name}() {`);
-  if (start < 0) throw new Error(`${name} not found`);
-  const end = source.indexOf("\n}", start);
-  if (end < 0) throw new Error(`${name} has no closing brace`);
-  return source.slice(start, end + 2);
-}
 
 /** Every curl command in a script, line continuations folded in. */
 function curlInvocations(source: string): string[] {
@@ -53,7 +53,6 @@ const canRun = hasBash && hasPython3;
 
 let dir: string;
 let binDir: string;
-let voiceDir: string;
 let callsLog: string;
 let meminfo: string;
 let voiceFile: string;
@@ -107,30 +106,50 @@ function stubKokoro(atDir = binDir, name = "kokoro") {
   );
 }
 
-/** A piper CLI that reads text on stdin and honours -m/-f, like the real one. */
-function stubPiper() {
-  return writeStub(
-    "piper",
+/**
+ * A persistent kokoro-server on a unix socket, speaking the script's own
+ * JSON-in / "OK"-out protocol. `mode` picks whether it answers with audio or
+ * refuses the request, which is how the "collects every reason" case gets a
+ * server-side reason and a cold-start reason in the same run.
+ */
+function startServer(mode: "ok" | "refuse"): string {
+  const sock = path.join(dir, `kokoro-${mode}.sock`);
+  const server = path.join(dir, `server-${mode}.py`);
+  writeFileSync(
+    server,
     [
-      'echo "piper $*" >> "$CALLS_LOG"',
-      "cat > /dev/null",
-      'out=""; model=""',
-      "while [ $# -gt 0 ]; do",
-      '  case "$1" in',
-      '    -f) out="$2"; shift 2;;',
-      '    -m) model="$2"; shift 2;;',
-      "    *) shift;;",
-      "  esac",
-      "done",
-      'if [ "${PIPER_FAIL:-0}" != "0" ]; then exit 1; fi',
-      'python3 "$WAV_WRITER" "$out" 1',
+      "import json, os, socket, sys, wave",
+      "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
+      "s.bind(sys.argv[1]); s.listen(1)",
+      "open(sys.argv[1] + '.ready', 'w').close()",
+      "conn, _ = s.accept()",
+      "data = b''",
+      "while True:",
+      "    chunk = conn.recv(4096)",
+      "    if not chunk: break",
+      "    data += chunk",
+      "req = json.loads(data.decode())",
+      "open(os.environ['CALLS_LOG'], 'a').write('server voice=' + req.get('voice', '') + '\\n')",
+      `if ${JSON.stringify(mode)} == 'refuse':`,
+      "    conn.sendall(b'ERR model not loaded')",
+      "    conn.close()",
+      "    sys.exit(0)",
+      "w = wave.open(req['output'], 'wb')",
+      "w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)",
+      "w.writeframes(b'\\x00\\x00' * 24000)",
+      "w.close()",
+      "conn.sendall(b'OK')",
+      "conn.close()",
     ].join("\n"),
   );
-}
-
-function installPiperVoice(voice: string) {
-  writeFileSync(path.join(voiceDir, `${voice}.onnx`), "stub-model");
-  writeFileSync(path.join(voiceDir, `${voice}.onnx.json`), "{}");
+  const proc = spawn("python3", [server, sock], { env: { ...process.env, CALLS_LOG: callsLog }, stdio: "ignore" });
+  servers.push(proc);
+  const deadline = Date.now() + 15_000;
+  while (!existsSync(`${sock}.ready`) && Date.now() < deadline) {
+    spawnSync("sleep", ["0.05"]);
+  }
+  expect(existsSync(`${sock}.ready`)).toBe(true);
+  return sock;
 }
 
 function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
@@ -141,8 +160,6 @@ function baseEnv(extra: Record<string, string> = {}): Record<string, string> {
     WAV_WRITER: wavWriter,
     CLAWBOX_TTS_MEMINFO: meminfo,
     CLAWBOX_TTS_VOICE_FILE: voiceFile,
-    PIPER_BIN: path.join(binDir, "piper"),
-    PIPER_VOICE_DIR: voiceDir,
     // A path that cannot be a socket, so the cold-start branch is what runs
     // unless a test deliberately stands a server up.
     KOKORO_SOCKET: path.join(dir, "no-such.sock"),
@@ -170,12 +187,27 @@ function outputBytes(): number {
   return existsSync(outPath) ? readFileSync(outPath).length : 0;
 }
 
+/**
+ * The failure contract, asserted the same way for every failing case: a
+ * non-zero exit, the reasons on stderr, and — the half an exit code cannot
+ * prove — no output file at all. A header-only or partial file at $OUTPUT
+ * would be handed to the gateway as audio, which is the silence this script
+ * exists to replace.
+ */
+function expectReportedFailure(r: ReturnType<typeof synth>) {
+  expect(r.status, `expected a reported failure, got exit ${r.status}:\n${r.stderr}`).not.toBe(0);
+  expect(r.status).not.toBeNull(); // null == killed by the harness timeout, i.e. it hung
+  expect(r.stderr).toContain("Kokoro could not speak");
+  expect(r.stderr).toMatch(/kokoro:/);
+  expect(existsSync(outPath), "a failed run left an output file behind").toBe(false);
+  // No second engine: nothing was "fallen back" to, and nothing pretends to be.
+  expect(r.stderr).not.toMatch(/fell back|piper/i);
+}
+
 beforeEach(() => {
   dir = mkdtempSync(path.join(tmpdir(), "clawbox-tts-"));
   binDir = path.join(dir, "bin");
-  voiceDir = path.join(dir, "voices");
   mkdirSync(binDir, { recursive: true });
-  mkdirSync(voiceDir, { recursive: true });
   callsLog = path.join(dir, "calls.log");
   meminfo = path.join(dir, "meminfo");
   voiceFile = path.join(dir, "tts-voice");
@@ -192,7 +224,6 @@ beforeEach(() => {
     ].join("\n"),
   );
   writeMeminfo(6000);
-  installPiperVoice("en_US-lessac-medium");
 });
 
 afterEach(() => {
@@ -210,31 +241,119 @@ afterEach(() => {
 describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
   it("speaks through Kokoro when the GPU path is available", () => {
     stubKokoro();
-    stubPiper();
     const r = synth([]);
     expect(r.status).toBe(0);
     expect(calls()).toContain("kokoro ");
-    // Kokoro succeeded, so the CPU engine must not have been touched at all.
-    expect(calls()).not.toContain("piper ");
+    expect(outputBytes()).toBeGreaterThan(1024);
+    expect(r.stdout.trim()).toBe(outPath);
+  });
+
+  // ── Kokoro failing is REPORTED, never absorbed ─────────────────────────────
+  // Every case below used to end in the CPU fallback speaking instead, with
+  // the box quietly living on the wrong engine. Now each one has to leave the
+  // script with a non-zero status, the reason on stderr, and no audio file —
+  // so the gateway sees a failure it can hand to the cloud voice.
+
+  it("exits non-zero with its reasons when kokoro is not installed — never silent audio", () => {
+    const r = synth([]);
+    expectReportedFailure(r);
+    expect(r.stderr).toContain("is not installed");
+    expect(calls()).toBe("");
+  });
+
+  it("reports a kokoro that fails instead of hiding it behind a second engine", () => {
+    // This is what the old fallback chain hid: kokoro exits 1 (CUDA would not
+    // allocate), and the user heard the CPU engine with nothing in the log.
+    stubKokoro();
+    const r = synth([], { KOKORO_FAIL: "1" });
+    expectReportedFailure(r);
+    expect(calls()).toContain("kokoro ");
+    expect(r.stderr).toMatch(/kokoro: '.*' failed/);
+    // Only Kokoro ran: one engine line in the calls log, and nothing else.
+    expect(calls().split("\n").filter((l) => /^[a-z]+ /.test(l) && !l.startsWith("kokoro "))).toEqual([]);
+  });
+
+  it("treats a WAV with no samples in it as a failure, not as audio", () => {
+    // A header-only WAV is the shape "success" takes when the model loaded but
+    // synthesised nothing — exit code 0, file exists, no audio. Passing that
+    // upstream as speech is the silent success the script must never produce.
+    stubKokoro();
+    const r = synth([], { KOKORO_SECONDS: "0" });
+    expectReportedFailure(r);
+    expect(r.stderr).toContain("produced no audio");
+  });
+
+  it("skips the GPU entirely when the board has no memory headroom, and says so", () => {
+    // kokoro-torch peaks at 2259-2636 MB (TASK-382) on a board whose 7607 MB
+    // is shared with the GPU. Attempting it at 900 MB free does not fail
+    // politely, it OOM-kills something else — so kokoro must never be
+    // invoked. With no CPU engine to fall back on, the refusal itself is the
+    // report the gateway acts on.
+    stubKokoro();
+    writeMeminfo(900);
+    const r = synth([]);
+    expectReportedFailure(r);
+    expect(calls()).not.toContain("kokoro ");
+    expect(r.stderr).toMatch(/kokoro: skipped, 900MB available/);
+  });
+
+  it("uses the GPU again once the headroom is back", () => {
+    // Guards against a threshold that is simply always tripped.
+    stubKokoro();
+    writeMeminfo(3200);
+    const r = synth([]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("kokoro ");
     expect(outputBytes()).toBeGreaterThan(1024);
   });
 
-  it("falls back to Piper when kokoro is not installed at all", () => {
-    stubPiper();
+  it("honours an overridden memory threshold", () => {
+    stubKokoro();
+    writeMeminfo(3200);
+    const r = synth([], { CLAWBOX_TTS_MIN_FREE_MB: "5000" });
+    expectReportedFailure(r);
+    expect(calls()).not.toContain("kokoro ");
+  });
+
+  it("gives up on a hung Kokoro inside its own slice and reports it, rather than waiting to be killed", () => {
+    // The scenario the budget exists for, end to end: kokoro never returns.
+    // With timeoutMs equal to KOKORO_TIMEOUT, OpenClaw killed this process at
+    // the moment kokoro was given up on, so not even the reasons reached the
+    // gateway. Timeouts are shrunk here so the test is quick; the property
+    // under test is that the script ends on ITS deadline with a report.
+    writeStub("kokoro", ['echo "kokoro $*" >> "$CALLS_LOG"', "sleep 30"].join("\n"));
+    const started = Date.now();
+    const r = synth([], { KOKORO_TIMEOUT: "2", KOKORO_SERVER_TIMEOUT: "1" });
+    expectReportedFailure(r);
+    expect(calls()).toContain("kokoro ");
+    // It gave up on kokoro and reported, rather than waiting out the sleep.
+    expect(Date.now() - started).toBeLessThan(20_000);
+  }, 30_000);
+
+  it("names every reason it collected, not just the last one", () => {
+    // A server that refuses AND a cold start that fails: both reasons have to
+    // reach stderr, because the gateway log is the only place an operator can
+    // tell "the resident server is wedged" from "CUDA is gone".
+    const sock = startServer("refuse");
+    stubKokoro();
+    const r = synth([], { KOKORO_SOCKET: sock, KOKORO_FAIL: "1" });
+    expectReportedFailure(r);
+    expect(r.stderr).toContain("refused the request");
+    expect(r.stderr).toMatch(/kokoro: '.*' failed/);
+  });
+
+  it("exits non-zero with a diagnostic when no engine can run", () => {
+    // Silence is the bug. Whatever else happens, the reason must reach stderr,
+    // where OpenClaw surfaces it as `CLI TTS exit 1: <stderr>`.
     const r = synth([]);
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("piper ");
-    expect(outputBytes()).toBeGreaterThan(1024);
-    // The reason has to be visible; a silent fallback hides a broken GPU box
-    // that is quietly living on the CPU engine.
-    expect(r.stderr).toContain("fell back to Piper");
-    expect(r.stderr).toContain("is not installed");
+    expectReportedFailure(r);
+    expect(r.stderr).toMatch(/--step openclaw_tts/);
   });
 
   // ── Where the engine is, and what it can load ─────────────────────────────
   // Installing Kokoro was not enough. With the whole package set on disk and
   // `kokoro -t ... -o ...` producing 105 KB of audio from an interactive
-  // shell, a real Orin still spoke through Piper: the CLI lives at
+  // shell, a real Orin still spoke through the CPU fallback: the CLI lives at
   // ~/.local/bin, which is not on the PATH OpenClaw execs this script with,
   // and torch cannot import libcusparseLt.so.0 without a loader path that
   // only ~/.bashrc and the systemd unit carried (TASK-420).
@@ -243,27 +362,20 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     const userBin = path.join(dir, ".local", "bin");
     mkdirSync(userBin, { recursive: true });
     stubKokoro(userBin);
-    stubPiper();
     const r = synth([]);
     expect(r.status).toBe(0);
-    // Kokoro is the engine that spoke — not Piper, and not "Piper with a note".
     expect(calls()).toContain("kokoro ");
-    expect(calls()).not.toContain("piper ");
-    expect(r.stderr).not.toContain("fell back to Piper");
     expect(outputBytes()).toBeGreaterThan(1024);
   });
 
   it("says where it looked when the CLI is in neither place", () => {
-    stubPiper();
     const r = synth([]);
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("piper ");
+    expectReportedFailure(r);
     expect(r.stderr).toContain("is not installed");
     // "not installed" is what a box printed while Kokoro was installed and
     // working at exactly this path, so the note has to name the path it
     // checked rather than leave that as the reader's guess.
     expect(r.stderr).toContain(path.join(dir, ".local/bin/kokoro"));
-    expect(outputBytes()).toBeGreaterThan(1024);
   });
 
   it("lets an explicit KOKORO_BIN outrank both PATH and ~/.local/bin", () => {
@@ -274,12 +386,10 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     writeStub("kokoro", 'echo "wrong-kokoro-from-PATH $*" >> "$CALLS_LOG"; exit 1');
     writeStub("kokoro", 'echo "wrong-kokoro-from-user-site $*" >> "$CALLS_LOG"; exit 1', userBin);
     const explicit = stubKokoro(binDir, "kokoro-explicit");
-    stubPiper();
     const r = synth([], { KOKORO_BIN: explicit });
     expect(r.status).toBe(0);
     expect(calls()).toContain("kokoro ");
     expect(calls()).not.toContain("wrong-kokoro");
-    expect(calls()).not.toContain("piper ");
     expect(outputBytes()).toBeGreaterThan(1024);
   });
 
@@ -287,7 +397,6 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     const cusparse = path.join(dir, ".local/lib/python3.10/site-packages/nvidia/cusparselt/lib");
     mkdirSync(cusparse, { recursive: true });
     stubKokoro();
-    stubPiper();
     const r = synth([], { LD_LIBRARY_PATH: "/opt/already-here" });
     expect(r.status).toBe(0);
     const observed = calls().split("\n").find((l) => l.startsWith("ld=")) ?? "";
@@ -306,169 +415,10 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(entries.filter((e) => e === "")).toEqual([]);
   });
 
-  it("leaves Piper's own library path alone", () => {
-    // Piper ships its own onnxruntime next to the binary; putting user-site
-    // CUDA directories in front of that is not this change's business.
-    writeStub("piper", ['echo "piper-ld=${LD_LIBRARY_PATH:-}" >> "$CALLS_LOG"', "cat > /dev/null", "exit 1"].join("\n"));
-    mkdirSync(path.join(dir, ".local/lib/python3.10/site-packages/nvidia/cusparselt/lib"), { recursive: true });
-    synth([]);
-    const observed = calls().split("\n").find((l) => l.startsWith("piper-ld=")) ?? "";
-    expect(observed).toContain(binDir);
-    expect(observed).not.toContain("cusparselt");
-  });
-
-  it("falls back to Piper when kokoro fails, instead of exiting 1", () => {
-    // This is the old behaviour, exactly: kokoro-tts.sh printed
-    // "Kokoro TTS failed" and exited 1, and the user heard nothing.
-    stubKokoro();
-    stubPiper();
-    const r = synth([], { KOKORO_FAIL: "1" });
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("kokoro ");
-    expect(calls()).toContain("piper ");
-    expect(outputBytes()).toBeGreaterThan(1024);
-  });
-
-  it("treats a WAV with no samples in it as a failure and falls back", () => {
-    // A header-only WAV is the shape "success" takes when the model loaded but
-    // synthesised nothing — exit code 0, file exists, no audio.
-    stubKokoro();
-    stubPiper();
-    const r = synth([], { KOKORO_SECONDS: "0" });
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("piper ");
-    expect(outputBytes()).toBeGreaterThan(1024);
-  });
-
-  it("skips the GPU entirely when the board has no memory headroom", () => {
-    // kokoro-torch peaks at 2259-2636 MB (TASK-382) on a board whose 7607 MB
-    // is shared with the GPU. Attempting it at 900 MB free does not fail
-    // politely, it OOM-kills something else — so kokoro must never be invoked.
-    stubKokoro();
-    stubPiper();
-    writeMeminfo(900);
-    const r = synth([]);
-    expect(r.status).toBe(0);
-    expect(calls()).not.toContain("kokoro ");
-    expect(calls()).toContain("piper ");
-    expect(outputBytes()).toBeGreaterThan(1024);
-  });
-
-  it("uses the GPU again once the headroom is back", () => {
-    // Guards against a threshold that is simply always tripped.
-    stubKokoro();
-    stubPiper();
-    writeMeminfo(3200);
-    const r = synth([]);
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("kokoro ");
-  });
-
-  it("honours an overridden memory threshold", () => {
-    stubKokoro();
-    stubPiper();
-    writeMeminfo(3200);
-    const r = synth([], { CLAWBOX_TTS_MIN_FREE_MB: "5000" });
-    expect(r.status).toBe(0);
-    expect(calls()).not.toContain("kokoro ");
-    expect(calls()).toContain("piper ");
-  });
-
-  it("routes a voice Kokoro cannot speak to Piper's own voice for it", () => {
-    // Bulgarian is deferred because Kokoro has no Bulgarian voice. The failure
-    // to avoid is Kokoro speaking Bulgarian text in an English voice.
-    stubKokoro();
-    stubPiper();
-    installPiperVoice("bg_BG-dimitar-medium");
-    const r = synth(["--voice", "bg_dimitar"]);
-    expect(r.status).toBe(0);
-    expect(calls()).not.toContain("kokoro ");
-    expect(calls()).toContain("bg_BG-dimitar-medium.onnx");
-    expect(calls()).not.toContain("en_US-lessac-medium.onnx");
-    expect(outputBytes()).toBeGreaterThan(1024);
-  });
-
-  it("substitutes a same-language voice rather than going silent", () => {
-    // bm_george maps to en_GB-alba-medium, which the installer does not ship.
-    // On a box where Kokoro cannot run — the low-memory case the guard exists
-    // for — refusing here would be exactly the silence this task is about.
-    stubKokoro();
-    stubPiper();
-    writeMeminfo(900);
-    const r = synth(["--voice", "bm_george"]);
-    expect(r.status).toBe(0);
-    expect(calls()).not.toContain("kokoro ");
-    expect(calls()).toContain("en_US-lessac-medium.onnx");
-    expect(outputBytes()).toBeGreaterThan(1024);
-    // The user is told the accent is not the one they picked.
-    expect(r.stderr).toContain("en_GB-alba-medium");
-    expect(r.stderr).toContain("en_US-lessac-medium");
-    expect(r.stderr).toContain("bm_george");
-  });
-
-  it("prefers the voice's own model when it is installed", () => {
-    // Guards the substitution against becoming a permanent downgrade.
-    stubKokoro();
-    stubPiper();
-    installPiperVoice("en_GB-alba-medium");
-    writeMeminfo(900);
-    const r = synth(["--voice", "bm_george"]);
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("en_GB-alba-medium.onnx");
-    expect(calls()).not.toContain("en_US-lessac-medium.onnx");
-    expect(r.stderr).not.toContain("instead");
-  });
-
-  it("still refuses to cross languages when only English is installed", () => {
-    // Same-language substitution must not weaken this: an English model
-    // reading Bulgarian is broken audio, which is worse than no audio.
-    stubKokoro();
-    stubPiper();
-    writeMeminfo(900);
-    const r = synth(["--voice", "bg_dimitar"]);
-    expect(r.status).not.toBe(0);
-    // Assert on what the engine was actually asked to load, not just the code.
-    expect(calls()).not.toContain("en_US-lessac-medium.onnx");
-    expect(calls()).not.toContain("piper ");
-    expect(r.stderr).toContain("no voice model for language 'bg'");
-    expect(existsSync(outPath)).toBe(false);
-  });
-
-  it("refuses to speak a missing-voice language in the wrong voice", () => {
-    // With no Bulgarian model installed the honest answer is no audio and a
-    // reason — NOT Bulgarian text read out by the English voice.
-    stubKokoro();
-    stubPiper();
-    const r = synth(["--voice", "bg_dimitar"]);
-    expect(r.status).not.toBe(0);
-    expect(calls()).not.toContain("en_US-lessac-medium.onnx");
-    expect(r.stderr).toContain("bg_dimitar");
-    expect(r.stderr).toContain("bg_BG-dimitar-medium");
-    expect(existsSync(outPath)).toBe(false);
-  });
-
-  it("exits non-zero with a diagnostic when no engine can run", () => {
-    // Silence is the bug. Whatever else happens, the reason must reach stderr,
-    // where OpenClaw surfaces it as `CLI TTS exit 1: <stderr>`.
-    const r = synth([]);
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain("no engine could speak");
-    expect(r.stderr).toMatch(/kokoro/);
-    expect(r.stderr).toMatch(/piper/);
-    expect(existsSync(outPath)).toBe(false);
-  });
-
-  it("names both engines' reasons rather than just the last one", () => {
-    stubKokoro();
-    const r = synth([], { KOKORO_FAIL: "1" });
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain("kokoro:");
-    expect(r.stderr).toContain("piper: binary not found");
-  });
+  // ── Voices ────────────────────────────────────────────────────────────────
 
   it("passes the selected voice through to Kokoro", () => {
     stubKokoro();
-    stubPiper();
     const r = synth(["--voice", "am_michael"]);
     expect(r.status).toBe(0);
     expect(calls()).toContain("voice=am_michael");
@@ -476,7 +426,6 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
 
   it("maps an OpenAI-style voice alias onto its Kokoro voice", () => {
     stubKokoro();
-    stubPiper();
     const r = synth(["--voice", "onyx"]);
     expect(r.status).toBe(0);
     expect(calls()).toContain("voice=am_michael");
@@ -484,7 +433,6 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
 
   it("degrades an unknown voice to the default instead of erroring", () => {
     stubKokoro();
-    stubPiper();
     const r = synth(["--voice", "definitely-not-a-voice"]);
     expect(r.status).toBe(0);
     expect(calls()).toContain("voice=af_heart");
@@ -492,9 +440,27 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(outputBytes()).toBeGreaterThan(1024);
   });
 
+  it("offers no voice that no engine can speak", () => {
+    // bg_dimitar existed only as a Piper voice (Kokoro has no Bulgarian voice,
+    // TASK-382). With Piper gone, keeping it in the catalogue would make
+    // `--set-voice bg_dimitar` a way of muting the box: every reply would fail
+    // on "no Kokoro voice". So it is not a known voice at all — it degrades to
+    // the default like any other unknown name, and cannot be persisted.
+    stubKokoro();
+    const listed = run(["--list-voices"]);
+    expect(listed.status).toBe(0);
+    expect(listed.stdout).not.toContain("bg_dimitar");
+    const r = synth(["--voice", "bg_dimitar"]);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("unknown voice");
+    expect(calls()).toContain("voice=af_heart");
+    const set = run(["--set-voice", "bg_dimitar"]);
+    expect(set.status).not.toBe(0);
+    expect(existsSync(voiceFile)).toBe(false);
+  });
+
   it("persists a chosen voice and uses it on later runs", () => {
     stubKokoro();
-    stubPiper();
     const set = run(["--set-voice", "bf_emma"]);
     expect(set.status).toBe(0);
     expect(readFileSync(voiceFile, "utf8").trim()).toBe("bf_emma");
@@ -515,7 +481,6 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     // agent/channel/account overrides of the provider's `args` and `env`, so
     // both of those levers have to beat the device-wide saved voice.
     stubKokoro();
-    stubPiper();
     writeFileSync(voiceFile, "bf_emma\n");
 
     const viaEnv = synth([], { CLAWBOX_TTS_VOICE: "am_adam" });
@@ -535,72 +500,79 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(r.stdout.trim()).toBe("am_michael");
   });
 
+  it("tells Kokoro the American language code for an American voice", () => {
+    stubKokoro();
+    const r = synth(["--voice", "af_heart"]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("lang=a");
+  });
+
+  it("tells Kokoro the British language code for a British voice", () => {
+    // kokoro does not fail on a mismatch — it warns "Language mismatch,
+    // loading <voice> into <language> pipeline" and synthesises anyway, so
+    // hardcoding -l a degraded pronunciation instead of erroring.
+    stubKokoro();
+    const r = synth(["--voice", "bm_george"]);
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("voice=bm_george");
+    expect(calls()).toContain("lang=b");
+    expect(calls()).not.toContain("lang=a");
+  });
+
+  // ── Server first, cold start second ───────────────────────────────────────
+
   it("prefers the resident model server over a cold start", () => {
     // The persistent kokoro-server keeps the model on the GPU; cold-starting
     // the CLI instead is the difference between ~2s and a full model load.
-    const sock = path.join(dir, "kokoro.sock");
-    const server = path.join(dir, "server.py");
-    writeFileSync(
-      server,
-      [
-        "import json, os, socket, sys, wave",
-        "s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
-        "s.bind(sys.argv[1]); s.listen(1)",
-        "open(sys.argv[1] + '.ready', 'w').close()",
-        "conn, _ = s.accept()",
-        "data = b''",
-        "while True:",
-        "    chunk = conn.recv(4096)",
-        "    if not chunk: break",
-        "    data += chunk",
-        "req = json.loads(data.decode())",
-        "open(os.environ['CALLS_LOG'], 'a').write('server voice=' + req.get('voice', '') + '\\n')",
-        "w = wave.open(req['output'], 'wb')",
-        "w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)",
-        "w.writeframes(b'\\x00\\x00' * 24000)",
-        "w.close()",
-        "conn.sendall(b'OK')",
-        "conn.close()",
-      ].join("\n"),
-    );
-    const proc = spawn("python3", [server, sock], { env: { ...process.env, CALLS_LOG: callsLog }, stdio: "ignore" });
-    servers.push(proc);
-    const deadline = Date.now() + 15_000;
-    while (!existsSync(`${sock}.ready`) && Date.now() < deadline) {
-      spawnSync("sleep", ["0.05"]);
-    }
-    expect(existsSync(`${sock}.ready`)).toBe(true);
-
+    const sock = startServer("ok");
     stubKokoro();
-    stubPiper();
     const r = synth([], { KOKORO_SOCKET: sock });
     expect(r.status).toBe(0);
     expect(calls()).toContain("server voice=af_heart");
     // The whole point of the socket is not paying for a model load.
     expect(calls()).not.toContain("kokoro ");
-    expect(calls()).not.toContain("piper ");
     expect(outputBytes()).toBeGreaterThan(1024);
   });
 
   it("cold-starts when the server socket is gone", () => {
     stubKokoro();
-    stubPiper();
     const r = synth([], { KOKORO_SOCKET: path.join(dir, "absent.sock") });
     expect(r.status).toBe(0);
     expect(calls()).toContain("kokoro ");
   });
+
+  it("cold-starts when the server refuses, and still speaks", () => {
+    // The server-then-CLI chain is the one fallback that stays: same engine,
+    // same model, just not resident. A refused socket must not end the run
+    // while the CLI can still answer.
+    const sock = startServer("refuse");
+    stubKokoro();
+    const r = synth([], { KOKORO_SOCKET: sock });
+    expect(r.status).toBe(0);
+    expect(calls()).toContain("server voice=af_heart");
+    expect(calls()).toContain("kokoro ");
+    expect(outputBytes()).toBeGreaterThan(1024);
+  });
+
+  // ── Output ────────────────────────────────────────────────────────────────
 
   it("never writes WAV bytes into a file claiming to be something else", () => {
     // OpenClaw picks the extension from outputFormat. If a deployment asks for
     // mp3 on a box with no ffmpeg, handing back a mislabelled WAV is broken
     // audio; failing with a reason is not.
     stubKokoro();
-    stubPiper();
     const mp3 = path.join(dir, "out", "speech.mp3");
     const r = run(["--", "Your ClawBox is ready.", mp3], { FFMPEG_BIN: path.join(dir, "no-ffmpeg") });
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("ffmpeg");
     expect(existsSync(mp3)).toBe(false);
+  });
+
+  it("does not mistake reply text starting with -- for its own options", () => {
+    stubKokoro();
+    const r = run(["--", "--voice is a strange thing to say", outPath]);
+    expect(r.status).toBe(0);
+    expect(outputBytes()).toBeGreaterThan(1024);
   });
 
   it("rejects --voice with no value instead of spinning on it", () => {
@@ -629,49 +601,12 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     expect(r.stderr).toContain("--set-voice requires a value");
   });
 
-  it("tells Kokoro the American language code for an American voice", () => {
-    stubKokoro();
-    stubPiper();
-    const r = synth(["--voice", "af_heart"]);
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("lang=a");
-  });
-
-  it("tells Kokoro the British language code for a British voice", () => {
-    // kokoro does not fail on a mismatch — it warns "Language mismatch,
-    // loading <voice> into <language> pipeline" and synthesises anyway, so
-    // hardcoding -l a degraded pronunciation instead of erroring.
-    stubKokoro();
-    stubPiper();
-    const r = synth(["--voice", "bm_george"]);
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("voice=bm_george");
-    expect(calls()).toContain("lang=b");
-    expect(calls()).not.toContain("lang=a");
-  });
-
-  it("still reaches Piper when Kokoro hangs rather than fails", () => {
-    // The scenario the budget exists for, end to end: kokoro never returns.
-    // With timeoutMs equal to KOKORO_TIMEOUT, OpenClaw killed this process at
-    // the moment kokoro was given up on, so Piper never ran and a wedged GPU
-    // was still silence. Timeouts are shrunk here so the test is quick; the
-    // relationship under test is the ordering, not the numbers.
-    writeStub("kokoro", ['echo "kokoro $*" >> "$CALLS_LOG"', "sleep 30"].join("\n"));
-    stubPiper();
-    const started = Date.now();
-    const r = synth([], { KOKORO_TIMEOUT: "2", KOKORO_SERVER_TIMEOUT: "1", PIPER_TIMEOUT: "10" });
-    expect(r.status).toBe(0);
-    expect(calls()).toContain("kokoro ");
-    expect(calls()).toContain("piper ");
-    expect(outputBytes()).toBeGreaterThan(1024);
-    // It gave up on kokoro and moved on, rather than waiting out the sleep.
-    expect(Date.now() - started).toBeLessThan(20_000);
-  }, 30_000);
+  // ── The time budget ───────────────────────────────────────────────────────
 
   it("leaves room for the whole chain inside the caller's timeout", () => {
     // The regression this pins: timeoutMs and KOKORO_TIMEOUT were both 120s,
-    // so OpenClaw killed the process at the moment Kokoro gave up and Piper
-    // never ran. A hung GPU stayed silent — the exact bug this PR fixes.
+    // so OpenClaw killed the process at the moment Kokoro gave up and nothing
+    // — not even the reasons — reached the gateway.
     const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
     const providerMs = Number(spawnSync("bash", [SCRIPT, "--provider-timeout-ms"], { encoding: "utf8" }).stdout.trim());
     expect(Number.isFinite(budget)).toBe(true);
@@ -688,7 +623,7 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
       if (!m) throw new Error(`${name} default not found`);
       return Number(m[1]);
     };
-    const parts = ["KOKORO_SERVER_TIMEOUT", "KOKORO_TIMEOUT", "PIPER_TIMEOUT", "CONVERT_TIMEOUT"];
+    const parts = ["KOKORO_SERVER_TIMEOUT", "KOKORO_TIMEOUT", "CONVERT_TIMEOUT"];
     const sum = parts.reduce((acc, n) => acc + slice(n), 0);
     const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
     expect(budget).toBe(sum);
@@ -698,19 +633,33 @@ describe.skipIf(!canRun)("scripts/openclaw/clawbox-tts.sh", () => {
     }
   });
 
+  it("pays for no slice an engine no longer uses", () => {
+    // The Piper slice (15s) came out of the budget with the engine. Rope the
+    // caller reserves for a step that never runs is 15s of extra silence on
+    // every failure before the cloud voice gets its turn.
+    const src = readFileSync(SCRIPT, "utf8");
+    expect(src).not.toMatch(/PIPER_TIMEOUT/);
+    const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
+    expect(budget).toBe(60);
+  });
+
   it("keeps every engine slice short enough to fail over usefully", () => {
     // A spoken reply that takes even half a minute has already failed as an
-    // interaction; the point of the budget is fast failover, not long rope.
+    // interaction; the point of the budget is fast failover to the cloud
+    // voice, not long rope.
     const budget = Number(spawnSync("bash", [SCRIPT, "--budget-seconds"], { encoding: "utf8" }).stdout.trim());
     expect(budget).toBeLessThanOrEqual(120);
   });
 
-  it("does not mistake reply text starting with -- for its own options", () => {
-    stubKokoro();
-    stubPiper();
-    const r = run(["--", "--voice is a strange thing to say", outPath]);
-    expect(r.status).toBe(0);
-    expect(outputBytes()).toBeGreaterThan(1024);
+  // ── Kokoro-only, in the text as well as the behaviour ─────────────────────
+
+  it("carries no second engine: no Piper code, no Piper hint", () => {
+    const src = readFileSync(SCRIPT, "utf8");
+    for (const gone of ["try_piper", "PIPER_BIN", "PIPER_VOICE_DIR", "piper_voice_for", "--piper-only", "fell back to"]) {
+      expect(src, `${gone} is still in the script`).not.toContain(gone);
+    }
+    // The dispatch is Kokoro and nothing after it.
+    expect(src).toMatch(/^if try_kokoro "\$TEXT" "\$TMPWAV" "\$VOICE"; then$/m);
   });
 });
 
@@ -796,12 +745,16 @@ describe("install.sh wires TTS to the on-device chain", () => {
     expect(step).toContain('outputFormat:"wav"');
   });
 
-  it("installs both engines as part of the same step", () => {
+  it("installs Kokoro as part of the same step, and names no second engine", () => {
     expect(step).toContain("install-voice.sh");
-    // --piper-only until TASK-420, which installed the fallback and nothing
-    // else while this step claimed Kokoro GPU. --tts-only installs both.
-    // Behaviour is covered by install-kokoro-tts.test.ts, which executes it.
+    // A fallback-only flag until TASK-420, which installed the CPU fallback
+    // and nothing else while this step claimed Kokoro GPU. --tts-only installs
+    // Kokoro; behaviour is covered by install-kokoro-tts.test.ts, which
+    // executes it.
     expect(step).toMatch(/install-voice\.sh" --tts-only/);
+    // The step's own summary lines must not name an engine the box does not
+    // have. Piper is gone; the only engine the step may claim is Kokoro.
+    expect(step).not.toMatch(/piper/i);
   });
 
   it("runs on updated boxes and not just fresh installs", () => {
@@ -820,150 +773,33 @@ describe("install.sh wires TTS to the on-device chain", () => {
   });
 });
 
-describe("install-voice.sh installs the fallback engine", () => {
-  it("pins every downloaded artifact by sha256", () => {
-    // An executable and model weights fetched onto a customer device.
-    expect(INSTALL_VOICE_SH).toContain("PIPER_TARBALL_SHA256=");
-    expect(INSTALL_VOICE_SH).toContain("PIPER_EN_ONNX_SHA256=");
-    expect(INSTALL_VOICE_SH).toMatch(/piper_digest_ok "\$dest\.part" "\$want"/);
-  });
-
-  it("uses the same pinned bytes the benchmark measured", () => {
-    const bench = readFileSync(path.resolve(process.cwd(), "scripts/bench/tts-bench.py"), "utf-8");
-    for (const key of [
-      "fea0fd2d87c54dbc7078d0f878289f404bd4d6eea6e7444a77835d1537ab88eb",
-      "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
-    ]) {
-      expect(bench).toContain(key);
-      expect(INSTALL_VOICE_SH).toContain(key);
+describe("install-voice.sh installs no second engine", () => {
+  it("has no Piper install step, mode flag, or pinned artifact left", () => {
+    // The owner removed the CPU fallback outright. A half-removal — the
+    // install step gone but the flag or the digests still there — is how a
+    // "removed" engine comes back on the next update.
+    for (const gone of ["install_piper", "piper_fetch", "--piper-only", "PIPER_DIR", "PIPER_TARBALL_SHA256", "INSTALL_BG_VOICE", "piper_report", "TTS_PIPER_VERDICT"]) {
+      expect(INSTALL_VOICE_SH, `${gone} is still in install-voice.sh`).not.toContain(gone);
     }
   });
 
-  it("is idempotent: a matching digest on disk is not re-downloaded", () => {
-    expect(INSTALL_VOICE_SH).toMatch(/piper_digest_ok "\$dest" "\$want"[\s\S]{0,60}return 0/);
-    expect(INSTALL_VOICE_SH).toContain("Piper binary already installed");
+  it("downloads nothing by hand: the only fetches left are pip's", () => {
+    // Every curl in this file belonged to the Piper artifacts. With them gone
+    // there must be none: a new raw download here would be an unpinned,
+    // unbounded fetch onto a customer device on every in-app update.
+    expect(curlInvocations(INSTALL_VOICE_SH)).toEqual([]);
   });
 
-  it("bounds EVERY download, not just one of them", () => {
-    // Asserting the flags appear somewhere in the file would be satisfied by a
-    // single bounded curl while an unbounded one was added elsewhere. This
-    // runs from step_post_update on every in-app update of a shipped device,
-    // so any unbounded transfer hangs the whole update.
-    const invocations = curlInvocations(INSTALL_VOICE_SH);
-    expect(invocations.length).toBeGreaterThan(0);
-    for (const cmd of invocations) {
-      expect(cmd).toContain("--connect-timeout");
-      expect(cmd).toContain("--speed-limit");
-      expect(cmd).toContain("--speed-time");
-    }
-  });
-
-  describe.skipIf(!canRun)("piper_fetch against a recording curl", () => {
-    // Runs the real function out of the shipped script with a stub curl on
-    // PATH that records the argv it was handed, so the bound is checked on the
-    // call as it is actually made rather than on the file's text.
-    function runFetch(body: string, wantSha: string, times = 1) {
-      const fetchDir = mkdtempSync(path.join(tmpdir(), "piper-fetch-"));
-      const fetchBin = path.join(fetchDir, "bin");
-      mkdirSync(fetchBin, { recursive: true });
-      const curlArgs = path.join(fetchDir, "curl-args.log");
-      const curl = path.join(fetchBin, "curl");
-      writeFileSync(
-        curl,
-        [
-          "#!/usr/bin/env bash",
-          'printf "%s\n" "$*" >> "$CURL_ARGS"',
-          'out=""',
-          'while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; *) shift;; esac; done',
-          'printf "%s" "$CURL_BODY" > "$out"',
-        ].join("\n"),
-      );
-      chmodSync(curl, 0o755);
-      const dest = path.join(fetchDir, "artifact.bin");
-      const harness = path.join(fetchDir, "harness.sh");
-      writeFileSync(
-        harness,
-        [
-          "set -uo pipefail",
-          extractShellFn(INSTALL_VOICE_SH, "piper_digest_ok"),
-          extractShellFn(INSTALL_VOICE_SH, "piper_fetch"),
-          ...Array.from(
-            { length: times },
-            () => `piper_fetch "https://example.invalid/artifact.bin" "${dest}" "${wantSha}"`,
-          ),
-        ].join("\n"),
-      );
-      const r = spawnSync("bash", [harness], {
-        encoding: "utf8",
-        env: { PATH: `${fetchBin}:/usr/bin:/bin`, CURL_ARGS: curlArgs, CURL_BODY: body },
-        timeout: 30_000,
-      });
-      const recorded = existsSync(curlArgs) ? readFileSync(curlArgs, "utf8") : "";
-      return { r, recorded, dest, cleanup: () => rmSync(fetchDir, { recursive: true, force: true }) };
-    }
-
-    const BODY = "piper-artifact-bytes";
-    // sha256 of BODY, computed here so the fixture cannot drift from it.
-    //
-    // In Node, not by shelling out to sha256sum: describe.skipIf still runs
-    // this factory to COLLECT the tests even when canRun is false, and
-    // spawnSync on a missing binary returns stdout undefined, so .trim() threw
-    // a TypeError and took the whole FILE down instead of skipping it
-    // cleanly. Anything evaluated out here has to survive a box with no bash.
-    const SHA = createHash("sha256").update(BODY).digest("hex");
-
-    it("passes the timeout bounds on the actual call", () => {
-      const { r, recorded, cleanup } = runFetch(BODY, SHA);
-      try {
-        expect(r.status).toBe(0);
-        expect(recorded).toContain("--connect-timeout");
-        expect(recorded).toContain("--speed-limit");
-        expect(recorded).toContain("--speed-time");
-        expect(recorded).toContain("--retry");
-      } finally {
-        cleanup();
-      }
-    });
-
-    it("refuses bytes whose digest does not match the pin", () => {
-      const { r, dest, cleanup } = runFetch(BODY, "deadbeef");
-      try {
-        expect(r.status).not.toBe(0);
-        expect(r.stderr).toContain("does not match the pin");
-        // Nothing half-written is left for the next run to trust.
-        expect(existsSync(dest)).toBe(false);
-        expect(existsSync(`${dest}.part`)).toBe(false);
-      } finally {
-        cleanup();
-      }
-    });
-
-    it("does not re-download an artifact that is already correct", () => {
-      // Called twice; the second call must be satisfied by the digest already
-      // on disk. The updater re-runs this on every update of every device.
-      const { r, recorded, cleanup } = runFetch(BODY, SHA, 2);
-      try {
-        expect(r.status).toBe(0);
-        expect(recorded.trim().split("\n")).toHaveLength(1);
-      } finally {
-        cleanup();
-      }
-    });
-  });
-
-  it("proves the binary exists rather than discarding the chmod", () => {
-    expect(INSTALL_VOICE_SH).toContain("the Piper tarball did not contain piper");
-    expect(INSTALL_VOICE_SH).not.toMatch(/chmod \+x "\$PIPER_DIR\/piper" 2>\/dev\/null \|\| true/);
-  });
-
-  it("reports piper-only failure instead of exiting 0 regardless", () => {
-    const branch = INSTALL_VOICE_SH.slice(
-      INSTALL_VOICE_SH.indexOf('"${1:-}" = "--piper-only"'),
-      INSTALL_VOICE_SH.indexOf("Piper fallback ready"),
+  it("publishes exactly one engine key to the verdict file", () => {
+    // install.sh's health check reads KOKORO= and nothing else now. A second
+    // key would either be ignored (pointless) or scored (an engine that does
+    // not exist deciding whether a box is healthy).
+    const publish = INSTALL_VOICE_SH.slice(
+      INSTALL_VOICE_SH.indexOf("tts_status_publish() {"),
+      INSTALL_VOICE_SH.indexOf("\n}", INSTALL_VOICE_SH.indexOf("tts_status_publish() {")),
     );
-    expect(branch).toContain("install_piper || PIPER_ONLY_RC=1");
-    expect(branch).toContain("deploy_voice_scripts || PIPER_ONLY_RC=1");
-    expect(branch).toContain("exit 1");
+    expect(publish).toContain("printf 'KOKORO=%s\\n'");
+    expect(publish).not.toContain("PIPER=");
   });
 
   it("treats a missing TTS entrypoint as a deploy failure", () => {
@@ -975,14 +811,18 @@ describe("install-voice.sh installs the fallback engine", () => {
     expect(fn).toContain('return "$rc"');
   });
 
-  it("offers a cheap piper-only path for the updater", () => {
-    expect(INSTALL_VOICE_SH).toContain('"${1:-}" = "--piper-only"');
-  });
-
-  it("ships an English voice by default and keeps Bulgarian opt-in", () => {
-    // Bulgarian is deferred this release; the download stays behind a flag so
-    // enabling it later is config, not a code change.
-    expect(INSTALL_VOICE_SH).toContain("en_US-lessac-medium");
-    expect(INSTALL_VOICE_SH).toContain('INSTALL_BG_VOICE="${CLAWBOX_TTS_INSTALL_BG_VOICE:-false}"');
+  it.skipIf(!hasBash)("refuses an option it does not know instead of running the hour-long full install", () => {
+    // The removed flag used to be matched before the full-pipeline path. A
+    // caller that still passes it must be told, not handed an hour of
+    // CTranslate2 source builds and a Whisper download on a shipped device.
+    // The check runs before anything is executed, so this is safe to invoke.
+    const r = spawnSync("bash", [path.resolve(process.cwd(), "scripts/install-voice.sh"), "--piper-only"], {
+      encoding: "utf8",
+      env: { PATH: "/usr/bin:/bin", HOME: tmpdir(), CLAWBOX_HOME: path.join(tmpdir(), "no-such-home") },
+      timeout: 30_000,
+    });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("unknown option");
+    expect(r.stdout).not.toContain("Voice Pipeline Installer");
   });
 });

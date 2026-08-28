@@ -36,7 +36,7 @@ function extractShellFn(source: string, name: string): string {
   return source.slice(start, end + 2);
 }
 
-/** Read a pinned constant (e.g. PIPER_EN_ONNX_SHA256) out of the real script. */
+/** Read a pinned constant (e.g. KOKORO_STAMP_VERSION) out of the real script. */
 function shellConst(name: string): string {
   const m = new RegExp(`^${name}="([^"]+)"`, "m").exec(INSTALL_VOICE_SH);
   if (!m) throw new Error(`${name} not found in install-voice.sh`);
@@ -97,7 +97,11 @@ let root: string;
  * `true` for the current version, or a literal string for a stamp an older
  * release wrote.
  */
-function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string = false): VoiceRun {
+function runTtsOnly(
+  env: Record<string, string> = {},
+  stamped: boolean | string = false,
+  mode = "--tts-only",
+): VoiceRun {
   const home = path.join(root, "home", "clawbox");
   const bin = path.join(root, "bin");
   const suLog = path.join(root, "su.log");
@@ -183,20 +187,10 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
     writeExec(path.join(bin, "nvcc"), 'echo "Cuda compilation tools, release 12.6, V12.6.68"');
   }
 
-  // Piper: pre-installed, so nothing here needs the network. sha256sum is
-  // stubbed to report a file's own contents as its digest, which lets the
-  // fixtures carry the real pinned values without shipping the real weights.
-  const piperDir = path.join(root, "piper");
-  mkdirSync(path.join(piperDir, "voices"), { recursive: true });
-  writeExec(path.join(piperDir, "piper"), "exit 0");
-  writeFileSync(path.join(piperDir, "voices", "en_US-lessac-medium.onnx"), shellConst("PIPER_EN_ONNX_SHA256"));
-  writeFileSync(
-    path.join(piperDir, "voices", "en_US-lessac-medium.onnx.json"),
-    shellConst("PIPER_EN_JSON_SHA256"),
-  );
-  writeExec(path.join(bin, "sha256sum"), ['printf "%s  %s\\n" "$(head -c 64 "$1")" "$1"'].join("\n"));
+  // No second engine to pre-install: Kokoro is the only on-device voice, and
+  // the pip/python steps that install it all go through the su stub above.
 
-  const res = spawnSync("bash", [INSTALL_VOICE, "--tts-only"], {
+  const res = spawnSync("bash", [INSTALL_VOICE, mode], {
     encoding: "utf-8",
     timeout: 60_000,
     env: {
@@ -204,7 +198,6 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
       HOME: home,
       CLAWBOX_USER: "clawbox",
       CLAWBOX_HOME: home,
-      PIPER_DIR: piperDir,
       // Point the /usr/local/cuda probe at nothing so a dev box or CI runner
       // that happens to have CUDA cannot turn the no-CUDA test green. With
       // WITH_CUDA_LIBS this is a real directory the block above created.
@@ -236,15 +229,18 @@ function runTtsOnly(env: Record<string, string> = {}, stamped: boolean | string 
 /**
  * Run the real step_openclaw_tts against a stub `openclaw` and a stub
  * install-voice.sh whose exit code the test picks.
+ *
+ * @param voiceExit         the exit status the stub install-voice.sh reports.
+ * @param currentProvider   what `openclaw config get messages.tts.provider`
+ *                          answers. Non-empty puts the step on the
+ *                          already-configured branch — the shipped-box update
+ *                          path, which returns early.
+ * @param ttsStatusContents what the stub "published" to $TTS_STATUS_FILE, or
+ *                          null to leave the file absent. The step reads the
+ *                          engine's REASON off this file, never off the exit
+ *                          code, so a test about the wording has to write one.
  */
-/**
- * @param voiceExit       the exit status the stub install-voice.sh reports.
- * @param currentProvider what `openclaw config get messages.tts.provider`
- *                        answers. Non-empty puts the step on the
- *                        already-configured branch — the shipped-box update
- *                        path, which returns early.
- */
-function runStep(voiceExit: number, currentProvider = "") {
+function runStep(voiceExit: number, currentProvider = "", ttsStatusContents: string | null = null, extraEnv: Record<string, string> = {}) {
   const projectDir = path.join(root, "project");
   const callsLog = path.join(root, "openclaw.log");
   const voiceArgs = path.join(root, "voice-args.log");
@@ -272,6 +268,7 @@ function runStep(voiceExit: number, currentProvider = "") {
 
   const provisionLog = path.join(root, "provision-failures.log");
   const ttsStatus = path.join(root, "tts-status");
+  if (ttsStatusContents !== null) writeFileSync(ttsStatus, ttsStatusContents);
 
   const program = [
     "set -uo pipefail",
@@ -288,6 +285,8 @@ function runStep(voiceExit: number, currentProvider = "") {
     `record_provision_failure() { printf '%s\\n' "$1" >> "${provisionLog}"; }`,
     extractShellFn(INSTALL_SH, "oc_config_set"),
     extractShellFn(INSTALL_SH, "tts_ensure_provider_registered"),
+    // The real knob, not a stub: the test is about what the step does with it.
+    extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     extractShellFn(INSTALL_SH, "step_openclaw_tts"),
     "step_openclaw_tts",
   ].join("\n");
@@ -298,7 +297,7 @@ function runStep(voiceExit: number, currentProvider = "") {
   const res = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf-8").trim().split("\n").filter(Boolean) : []);
   return {
@@ -329,46 +328,118 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
 
   it("claims Kokoro only when install-voice.sh reports it ready", () => {
     const res = runStep(0);
-    expect(res.stdout).toContain("On-device TTS configured (Kokoro GPU, Piper fallback)");
+    expect(res.stdout).toContain("On-device TTS configured (Kokoro GPU)");
+    // And claims nothing behind it: there is no second engine to name.
+    expect(res.stdout).not.toMatch(/fallback/i);
   });
 
-  // 11 is deliberately NOT in this table any more — see the test below it.
-  // Every code here is one where the Piper half genuinely completed, so naming
-  // it as the surviving engine is true; --tts-only returns 13 or 1, never 10 or
-  // 12, when the fallback is missing.
-  it.each([
-    [10, /no CUDA toolkit/],
-    [12, /Kokoro GPU install failed/],
-  ])("stays non-fatal and tells the truth when the voice install exits %i", (code, reason) => {
-    const res = runStep(code as number);
-    // Non-fatal: a box must never lose its voice to the GPU path. TTS is still
-    // configured — through Piper.
+  // 13 sits beside 12 in this table, and 10 and 11 are gone from it. The
+  // two-engine release graded a no-CUDA board 10 ("the CPU fallback speaks")
+  // and a non-aarch64 board 11; when the second engine was removed, this
+  // branch briefly kept both codes and graded them CLEAN — "Kokoro does not
+  // apply to this board, the gateway's cloud voice speaks for it". That
+  // reading had a premise the installer cannot check: the cloud voice needs
+  // the ClawBox AI link, which happens AFTER install. Every shipped ClawBox is
+  // a Jetson a Kokoro build exists for, so a skipped Kokoro on real hardware
+  // means something is wrong, and with no engine behind it that is a box with
+  // no on-device voice at all. install-voice.sh exits 13 for it now and emits
+  // neither 10 nor 11; the step records it. Both rows here are failures the
+  // box survives — the difference is the fix, so the difference is the
+  // sentence.
+  it.each<[number, string | null, RegExp, RegExp]>([
+    [13, "KOKORO=skipped:no-cuda\n", /NO working on-device TTS engine/, /declines Kokoro: no-cuda/],
+    [12, null, /Kokoro is not available on this box/, /Kokoro GPU install failed/],
+  ])("stays non-fatal and tells the truth when the voice install exits %i", (code, verdict, summary, reason) => {
+    const res = runStep(code, "", verdict);
+    // Non-fatal: the provider is still configured, because clawbox-tts.sh
+    // reports a missing Kokoro as an exit-1 failure the gateway hands to its
+    // cloud voice — refusing to configure TTS would cost the box that path too.
     expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
-    // And the summary must not repeat the lie that hid this bug for a release.
-    expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
-    expect(res.stdout).toContain("Piper CPU only");
-    expect(res.stdout).toMatch(reason as RegExp);
+    // And the summary must not repeat the lie that hid this bug for a release,
+    // nor swap it for a smaller one by naming a fallback the box does not have.
+    expect(res.stdout).not.toContain("configured (Kokoro GPU)");
+    expect(res.stdout).not.toMatch(/piper/i);
+    expect(res.stdout).toMatch(summary);
+    expect(res.stdout).toContain("cloud voice");
+    expect(res.stdout).toMatch(reason);
   });
 
-  it("names no engine at all when the voice install exits 11, and RECORDS it", () => {
-    // 11 is "no Jetson CUDA build for this ARCHITECTURE" — `uname -m` is not
-    // aarch64, which is the same test that leaves install_piper_engine without
-    // a pinned artifact. Both halves publish `skipped:arch-*`, so 11 means the
-    // box has NO engine, and the "Piper CPU only" line this case used to assert
-    // named a fallback it does not have.
-    //
-    // It stayed non-fatal AND unrecorded, so the step said "this box answers
-    // speech with SILENCE" and graded the provision clean. Non-fatal is right —
-    // a mute box must still come up reachable so it can be fixed — but silent
-    // is not: it is recorded now, and the two lines moved to stderr with the
-    // other failures. See install-tts-mute-box-fails.test.ts.
-    const res = runStep(11);
+  it("exit 13 is a MUTE BOX: recorded, Kokoro and its reason named, and still non-fatal", () => {
+    // The contract's 13, end to end. The two-engine release graded a board
+    // that declined BOTH halves this way; the one-engine branch then argued a
+    // box Kokoro declines "talks through the cloud voice" and graded it 0
+    // with nothing recorded. That was the same class of untrue status line
+    // pointed the other way: "Setup: 1/1 succeeded" over a box whose only
+    // engine is absent, on the say-so of a cloud voice the installer has no
+    // way to see.
+    const res = runStep(13, "", "KOKORO=skipped:arch-x86_64\n");
+    // 1. The caller's status — 13, the code step_openclaw_setup and
+    //    step_post_update tolerate by name. The exact code, not merely
+    //    non-zero: spawnSync reports null on a timeout, and null satisfies
+    //    not.toBe(0).
+    expect(res.status, "a box with no engine was graded a clean install").toBe(13);
+    // 2. The provisioning record: summary + exit status + the marker file the
+    //    flash host reads instead of parsing stdout.
+    expect(res.provisionFailures, "a mute box was not recorded as a provisioning failure").toContain(
+      "openclaw_tts",
+    );
+    // 3. Something an operator cannot scroll past — and it says WHICH engine
+    //    is absent and WHY, off the verdict the run published. "No engine" on
+    //    its own is not actionable: a board that declined for want of a Jetson
+    //    build and one whose download failed lead to different fixes.
+    expect(res.stderr).toMatch(/NO working on-device TTS engine/);
+    expect(res.stderr).toMatch(/Kokoro/);
+    expect(res.stderr).toMatch(/skipped:arch-x86_64/);
+    expect(res.stderr).toMatch(/--step openclaw_tts/);
+    // Not the 12 sentence: the engine was never REQUESTED on this board.
+    expect(res.stderr).not.toMatch(/REQUESTED and did NOT install/);
+    // 4. The summary line tells the same truth — no engine, the reason, and
+    //    where the box's voice comes from once that CAN be checked — and names
+    //    no engine the box does not have.
+    expect(res.stdout).toMatch(/NO working on-device TTS engine/);
+    expect(res.stdout).toContain("declines Kokoro: arch-x86_64");
+    expect(res.stdout).toContain("cloud voice");
+    expect(res.stdout).not.toContain("configured (Kokoro GPU)");
+    expect(res.stdout).not.toMatch(/piper/i);
+    // Still non-fatal for the box's voice: the provider is configured anyway,
+    // so the box comes up reachable — and fixable.
     expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
-    expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
-    expect(res.stdout, "a board with no engine was told it speaks on Piper").not.toContain("Piper CPU only");
-    expect(res.stderr).toMatch(/CPU architecture/);
-    expect(res.stderr).toMatch(/SILENCE/);
-    expect(res.provisionFailures, "a box with no engine was not recorded as a failure").toContain("openclaw_tts");
+  });
+
+  it("on the GPU-less harness (CLAWBOX_TEST_NO_GPU=1) a declined Kokoro is still 13, still named, but not filed as a failure", () => {
+    // The e2e-install container has no GPU by construction, so Kokoro
+    // declines there on every run. The verdict, the return status and the
+    // banner all stay — the harness must not be told it has a voice it lacks
+    // — but the provisioning-failure record is withheld, because that record
+    // is what fails service validation, and a check that fails every CI run
+    // over a documented fact teaches everyone to ignore it where it matters.
+    const res = runStep(13, "", "KOKORO=skipped:no-cuda\n", { CLAWBOX_TEST_NO_GPU: "1" });
+    expect(res.status).toBe(13);
+    expect(res.stderr).toMatch(/NO working on-device TTS engine/);
+    expect(res.stdout).toContain("CLAWBOX_TEST_NO_GPU=1");
+    expect(res.provisionFailures, "the harness's documented no-GPU state was filed as a provisioning failure").toEqual([]);
+  });
+
+  it("test mode alone does not soften the mute-box rule — only the explicit no-GPU knob does", () => {
+    // Test mode is what the unit tests and the install harness both run the
+    // installer under; the real-hardware rule has to survive it, or every
+    // test that pins the rule would be pinning the exemption instead.
+    const res = runStep(13, "", "KOKORO=skipped:no-cuda\n", { CLAWBOX_TEST_MODE: "1" });
+    expect(res.status).toBe(13);
+    expect(res.provisionFailures).toEqual(["openclaw_tts"]);
+  });
+
+  it("exit 13 with no verdict on file is still recorded, and invents no reason", () => {
+    // The exit code says "no engine"; only the verdict file says why. When the
+    // run published nothing, the step says so in as many words rather than
+    // guessing at a board it cannot see — a made-up reason would send an
+    // operator off to fix the wrong thing.
+    const res = runStep(13);
+    expect(res.status).toBe(13);
+    expect(res.provisionFailures).toContain("openclaw_tts");
+    expect(res.stderr).toMatch(/NO working on-device TTS engine/);
+    expect(res.stderr).toMatch(/no verdict published/);
+    expect(res.stdout).not.toMatch(/no-cuda|arch-/);
   });
 
   // ── Requested-and-failed is not the same outcome as never-requested ────────
@@ -376,22 +447,9 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
   // treated "this board has no CUDA" and "the GPU engine you asked for did not
   // install" as the same result — zero — so a flash host printed
   // "Setup: 1/1 succeeded" over a box that had told itself it was broken.
-
-  // 11 used to be in this table beside 10 and is not any more. Both are skips
-  // of the GPU engine, but they leave DIFFERENT boxes: 10 is an aarch64 board
-  // with no nvcc, where install_piper still has its pinned artifact and the box
-  // speaks on the CPU fallback, while 11 is `uname -m` != aarch64, which is the
-  // same test that leaves install_piper with nothing to install — so 11 is a
-  // box with NO engine and is a recorded failure now. See
-  // install-tts-mute-box-fails.test.ts.
-  it.each([[10, "no CUDA toolkit on this board"]])(
-    "exit %i is a SKIP: the GPU engine was never requested and the box still speaks",
-    (code) => {
-      const res = runStep(code as number);
-      expect(res.status, "a board that was never going to run Kokoro is not a failed install").toBe(0);
-      expect(res.provisionFailures, "a skip was recorded as a provisioning failure").toEqual([]);
-    },
-  );
+  // Both are failures now, and they are still kept apart: 13 is a board that
+  // declines the only engine, 12 is an engine that was asked for and did not
+  // arrive. Same silence for the listener, a different fix for the operator.
 
   it("exit 12 is a FAILURE: it leaves the step, the summary and the operator's screen", () => {
     const res = runStep(12);
@@ -409,21 +467,23 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     //    retries it.
     expect(res.stderr).toMatch(/Kokoro GPU TTS was REQUESTED and did NOT install/);
     expect(res.stderr).toMatch(/--step openclaw_tts/);
-    // Still non-fatal for the box's voice: the provider is configured anyway,
-    // because Piper is a working engine and refusing to configure TTS at all
-    // would cost the box speech it can actually deliver.
+    // Still non-fatal for the box's voice: the provider is configured anyway.
+    // With Kokoro down, clawbox-tts.sh exits 1 with the reasons and the
+    // gateway's cloud voice answers; the operator's screen says so.
     expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
+    expect(res.stderr).toMatch(/cloud voice/);
   });
 
-  it("carries the failure through even when the owner's provider is preserved", () => {
+  it.each([12, 13])("carries a %i through even when the owner's provider is preserved", (code) => {
     // The update path on a shipped box: messages.tts.provider is already set,
     // so the step returns early. Returning 0 from there would drop the verdict
     // on exactly the population that has the defect — and without a provider in
     // the stub's answer this case never reaches that branch at all, it just
-    // retreads the one above.
-    const res = runStep(12, "tts-local-cli");
+    // retreads the one above. 13 rides the same branch: a shipped box whose
+    // only engine has gone missing on an update is still a recorded failure.
+    const res = runStep(code, "tts-local-cli");
     expect(res.stdout, "the preserve branch was never reached").toContain("preserved");
-    expect(res.status).toBe(12);
+    expect(res.status).toBe(code);
     expect(res.provisionFailures).toContain("openclaw_tts");
   });
 
@@ -434,27 +494,28 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(step).toContain("CLAWBOX_TTS_STATUS_FILE=");
   });
 
-  it("warns about the fallback in terms of the fallback, not of Kokoro", () => {
+  it("warns about a failed script deploy in terms of the deploy, not of Kokoro", () => {
     // The old wording said "Kokoro still works, but a GPU failure will be
     // silent" — written when Kokoro was assumed present, which it never was.
     const res = runStep(1);
     // 14, not 0. Returning 0 here is what left PROVISION_FAILURES empty for a
-    // box that had lost its CPU fallback, so the run printed Setup Complete
-    // over it (TTS-01); the step now records the failure and says so in its
-    // status. It stays out of the fatal range because a missing fallback must
-    // not abort an otherwise good install — see step_openclaw_setup, which
-    // tolerates 12, 13 and 14 and nothing else. It is deliberately NOT 13:
-    // that code means the box cannot speak at all, and this box still can.
+    // box whose voice install had not completed, so the run printed Setup
+    // Complete over it (TTS-01); the step now records the failure and says so
+    // in its status. It stays out of the fatal range because a failed script
+    // deploy must not abort an otherwise good install — see
+    // step_openclaw_setup, which tolerates 12, 13 and 14 and nothing else. It
+    // is deliberately NOT 13: that code means the box has no engine, and exit
+    // 1 says nothing of the kind.
     expect(res.status).toBe(14);
-    expect(res.stderr).toMatch(/Piper CPU fallback did not install/);
+    expect(res.stderr).toMatch(/voice scripts did not deploy/);
     expect(res.stderr).not.toMatch(/Kokoro still works/);
-    // Exit 1 is the Piper half failing, so claiming Piper is the active engine
-    // would just be a smaller version of the same lie.
-    expect(res.stdout).not.toContain("Piper CPU only");
-    expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
-    // Nor the opposite lie. install-voice.sh returns 13, not 1, when no engine
-    // survives, so an engine IS confirmed installed on this path and saying
-    // otherwise reports a failure over something that succeeded (TTS-01).
+    // Exit 1 carries no engine verdict, so the summary must name none: not a
+    // working Kokoro, and not the removed fallback either.
+    expect(res.stdout).not.toContain("configured (Kokoro GPU)");
+    expect(res.stdout).not.toMatch(/piper/i);
+    // Nor the opposite lie. install-voice.sh returns 12, not 1, when Kokoro
+    // itself failed, so "NO engine is confirmed installed" here would be a
+    // failure report over something that may well have succeeded (TTS-01).
     expect(res.stdout).not.toContain("NO engine is confirmed installed");
     expect(res.stdout).toContain("the voice install did not complete");
   });
@@ -590,12 +651,14 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only on a fresh CUDA box", () 
     expect(res.chown.some((c) => c.includes("clawbox:clawbox") && c.includes(bashrc)), "the .bashrc was never chowned back to the user").toBe(true);
   });
 
-  it("still deploys Piper and the TTS entrypoint alongside it", () => {
+  it("still deploys the TTS entrypoint and the server script alongside it", () => {
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
-    expect(res.stdout).toMatch(/Piper voice ready/);
     const entrypoint = path.join(res.home, ".openclaw/workspace/scripts/openclaw/clawbox-tts.sh");
     expect(existsSync(entrypoint)).toBe(true);
     expect(existsSync(path.join(res.home, ".openclaw/workspace/scripts/kokoro-server.py"))).toBe(true);
+    // And nothing else: no second engine is fetched, unpacked or reported.
+    expect(res.curl, "something was downloaded by hand").toEqual([]);
+    expect(res.stdout).not.toMatch(/piper/i);
   });
 
   it("never runs the STT half — it would add about an hour to every update", () => {
@@ -683,15 +746,16 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only is cheap on re-run", () =
 });
 
 describe.skipIf(!hasBash)("install-voice.sh --tts-only never costs the box its voice", () => {
-  it("survives a failed pip: exit 12, Piper intact, no claim of Kokoro", () => {
+  it("survives a failed pip: exit 12, entrypoint intact, no claim of Kokoro", () => {
     const res = runTtsOnly({ WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1", PIP_EXIT: "1" });
     expect(res.status, "a GPU failure must be reported, not fatal").toBe(12);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=failed:torch");
     expect(res.stdout).not.toContain("CLAWBOX_TTS_KOKORO=ready");
-    // Piper and the entrypoint are installed BEFORE Kokoro is attempted
-    // precisely so this is true.
-    expect(res.stdout).toMatch(/Piper voice ready/);
+    // The entrypoint is deployed BEFORE Kokoro is attempted precisely so this
+    // is true: it is what turns "Kokoro is down" into an exit-1 report the
+    // gateway can hand to its cloud voice, instead of a missing command.
     expect(existsSync(path.join(res.home, ".openclaw/workspace/scripts/openclaw/clawbox-tts.sh"))).toBe(true);
+    expect(res.stderr).toMatch(/no on-device voice/);
   });
 
   it("survives a failed model pre-download the same way", () => {
@@ -700,36 +764,66 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only never costs the box its v
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=failed:model");
   });
 
-  it("skips Kokoro with a stated reason when there is no CUDA", () => {
+  it("skips Kokoro with a stated reason when there is no CUDA — a mute box, exit 13", () => {
     const res = runTtsOnly({ KOKORO_IMPORT_EXIT: "1" });
-    expect(res.status).toBe(10);
+    // 13, not 10. 10 meant "GPU skipped, the CPU fallback speaks", and there
+    // is no fallback to speak: a board Kokoro declines has no on-device voice,
+    // and whether a cloud voice will ever be linked is not something this
+    // installer can see. A run that exited clean here was scored a healthy
+    // provision by install.sh, and the box answered spoken requests with
+    // silence.
+    expect(res.status).toBe(13);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=skipped:no-cuda");
     expect(res.stdout).toMatch(/no CUDA toolkit/);
     // Skipping means skipping: no wheel, no packages, no pretending.
     expect(res.su.filter((c) => c.includes("pip3 install"))).toEqual([]);
-    expect(res.stdout).toMatch(/Piper voice ready/);
+    // And the report names the engine and the concrete reason it is absent,
+    // rather than sending the operator to the verdict file to find out.
+    expect(res.stderr).toMatch(/NO WORKING TTS ENGINE/);
+    expect(res.stderr).toMatch(/SILENCE/);
+    expect(res.stderr).toMatch(/Kokoro \(GPU\): SKIPPED \(no-cuda\)/);
+    expect(res.stderr).toMatch(/Verdict recorded in/);
   });
 
   it("skips Kokoro on an architecture with no Jetson build, and fails the run", () => {
-    // install_piper already refuses to guess a digest off aarch64; the CUDA
-    // torch wheel is just as aarch64-only. So this board declines BOTH halves
-    // and has nothing to speak with — the run exits 13 rather than the 11 it
-    // used to hand back as a clean provision. The verdict is unchanged: which
-    // engine skipped and why is still published, it just no longer decides
-    // whether the run passed. See install-tts-mute-box-fails.test.ts.
+    // The CUDA torch wheel is aarch64-only; installing "something" and
+    // reporting Kokoro would be the exact lie TASK-420 removed. So this board
+    // declines the only engine and has nothing to speak with — 13, the code
+    // install.sh records, rather than the 11 the one-engine branch briefly
+    // handed back as a clean provision. The verdict is unchanged: which
+    // engine skipped and why is still published, and it is the verdict, not
+    // the exit code, that install.sh and the health check read.
     const res = runTtsOnly({ FAKE_ARCH: "x86_64", WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
     expect(res.status).toBe(13);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=skipped:arch-x86_64");
     expect(res.su.filter((c) => c.includes("pip3 install"))).toEqual([]);
+    expect(res.stderr).toMatch(/Kokoro \(GPU\): SKIPPED \(arch-x86_64\)/);
+    // A skip is not the 12 report: nothing was requested, so nothing "did NOT
+    // install". The two are kept apart because they lead to different fixes.
+    expect(res.stderr).not.toMatch(/did NOT install/);
   });
 });
 
-describe.skipIf(!hasBash)("the older --piper-only entry point still works", () => {
-  it("is kept: clawbox-tts.sh names it and older devices' scripts call it", () => {
-    // Removing it would break the hint a box prints when Piper is missing.
+describe("the --piper-only entry point is gone with the engine it installed", () => {
+  it("is named nowhere: not as a mode, not in the entrypoint's hint", () => {
+    // It survived one release as "older devices' scripts call it". Nothing
+    // does — install.sh and install-voice.sh update together — and keeping a
+    // mode that installs a removed engine is how the engine comes back.
     const tts = readFileSync(path.join(REPO, "scripts/openclaw/clawbox-tts.sh"), "utf-8");
-    expect(tts).toContain("--piper-only");
-    expect(INSTALL_VOICE_SH).toContain('if [ "${1:-}" = "--piper-only" ]; then');
+    expect(tts).not.toContain("--piper-only");
+    expect(INSTALL_VOICE_SH).not.toContain("--piper-only");
+    expect(INSTALL_VOICE_SH).not.toContain("install_piper");
+  });
+
+  it.skipIf(!hasBash)("is refused with exit 2 like any unknown option, not taken as the full pipeline", () => {
+    // The no-flag path builds CTranslate2 from source — about an hour — and
+    // the fallback-only flag used to land on it. A stale caller must hear "no
+    // such mode" and nothing must run: no deploy, no pip, no verdict.
+    const res = runTtsOnly({}, false, "--piper-only");
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/unknown option '--piper-only'/);
+    expect(res.su, "an unknown option ran an install step").toEqual([]);
+    expect(res.ttsStatus, "an unknown option published a verdict").toBe("");
   });
 });
 
@@ -821,11 +915,16 @@ describe.skipIf(!hasBash)("the Kokoro verdict outlives the run", () => {
     expect(res.ttsStatus).toContain("KOKORO=failed:model");
   });
 
-  it("publishes skipped:* as its own state — not a failure, not a success", () => {
+  it("publishes skipped:* as its own verdict — never failed:*, never ready", () => {
+    // The run itself is graded 13 (a mute box), but the VERDICT stays its own
+    // word: install.sh and the health check read the file, not the exit code,
+    // and "this board declines the engine" and "the engine did not install"
+    // lead to different fixes.
     const res = runTtsOnly({ KOKORO_IMPORT_EXIT: "1" });
-    expect(res.status).toBe(10);
+    expect(res.status).toBe(13);
     expect(res.ttsStatus).toContain("KOKORO=skipped:no-cuda");
     expect(res.ttsStatus).not.toContain("failed");
+    expect(res.ttsStatus).not.toContain("ready");
   });
 
   it("publishes ready when the engine genuinely landed", () => {
@@ -841,7 +940,7 @@ describe.skipIf(!hasBash)("the Kokoro verdict outlives the run", () => {
  * stubbed healthy. `ttsStatusContents` is written to the verdict file, or the
  * file is left absent when it is null.
  */
-function runValidator(ttsStatusContents: string | null): { status: number; out: string } {
+function runValidator(ttsStatusContents: string | null, extraEnv: Record<string, string> = {}): { status: number; out: string } {
   const ttsStatus = path.join(root, "validator-tts-status");
   if (ttsStatusContents !== null) writeFileSync(ttsStatus, ttsStatusContents);
   const clock = path.join(root, "clock");
@@ -861,6 +960,7 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
     'is_test_mode() { [ "$CLAWBOX_TEST_MODE" = "1" ]; }',
     'is_hermes_edition() { [ "$CLAWBOX_EDITION" = "hermes" ]; }',
     "has_hermes_harness() { return 1; }",
+    extractShellFn(INSTALL_SH, "harness_has_no_gpu"),
     "gateway_port_listening() { return 1; }",
     "systemctl() { return 0; }",
     "curl() { printf '200'; }",
@@ -877,50 +977,97 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
   const r = spawnSync("bash", ["-c", program], {
     encoding: "utf-8",
     timeout: 60_000,
-    env: { ...process.env, TTS_STATUS_FILE: ttsStatus },
+    env: { ...process.env, ...extraEnv, TTS_STATUS_FILE: ttsStatus },
   });
   return { status: r.status ?? -1, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
 describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box healthy", () => {
   it("fails the install when the GPU engine was requested and did not install", () => {
-    // The fixture carries no PIPER line, so neither engine is `ready` here and
-    // the probe reports it as such. It used to match the Kokoro-specific arm,
-    // whose sentence ends "— this box answers speech on the Piper CPU
-    // fallback": a fallback claim made from an UNREPORTED verdict. That arm is
-    // now reached only with a ready Piper, and this state gets a sentence that
-    // names both halves and asserts a fallback for neither.
+    // The probe's sentence used to end "— this box answers speech on the Piper
+    // CPU fallback": a fallback claim made from an UNREPORTED verdict. There is
+    // no fallback to claim now. The arm names the one engine, quotes the
+    // verdict it read (an operator should not have to open the file to learn
+    // what the run already knew), and says where the box's voice comes from
+    // until it is fixed — without asserting an engine it has not seen.
     const res = runValidator("KOKORO=failed:model\n");
     expect(res.status, `validation passed a box with no GPU TTS:\n${res.out}`).toBe(1);
-    expect(res.out).toMatch(/no on-device TTS engine on this box is confirmed ready/);
+    expect(res.out).toMatch(/requested and did NOT install/);
     expect(res.out).toMatch(/failed:model/);
-    expect(res.out, "a fallback was claimed from an unreported verdict").not.toMatch(
-      /answers speech on the Piper CPU fallback/,
-    );
+    expect(res.out).toMatch(/cloud voice/);
+    expect(res.out, "a fallback was claimed from an unreported verdict").not.toMatch(/piper/i);
     expect(res.out).toMatch(/--step openclaw_tts/);
   });
 
-  it("still names the Kokoro half specifically when the CPU fallback IS there", () => {
-    // The arm above did not disappear — it moved behind the evidence it needs.
-    const res = runValidator("KOKORO=failed:model\nPIPER=ready\n");
-    expect(res.status, `validation passed a box with no GPU TTS:\n${res.out}`).toBe(1);
-    expect(res.out).toMatch(/requested and did NOT install/);
-    expect(res.out).toMatch(/Piper CPU fallback/);
+  it("passes the GPU-less harness (CLAWBOX_TEST_NO_GPU=1) with the declined engine named, not hidden", () => {
+    // Same verdict as the mute-box case above, on the one host that declares
+    // it has no GPU by construction. The probe still says what it read — an
+    // operator reading the harness log learns the engine declined and why —
+    // it just does not count that as a failed probe there.
+    const res = runValidator("KOKORO=skipped:no-cuda\n", { CLAWBOX_TEST_NO_GPU: "1" });
+    expect(res.status, `the harness's documented no-GPU state failed validation:\n${res.out}`).toBe(0);
+    expect(res.out).toMatch(/CLAWBOX_TEST_NO_GPU=1/);
+    expect(res.out).toMatch(/skipped:no-cuda/);
+    expect(res.out).not.toMatch(/NO working on-device TTS engine/);
   });
 
-  it("passes a board that was never going to run Kokoro", () => {
-    // The distinction the whole verdict file exists for: no CUDA is not a
-    // defect, and failing every x86 or non-Jetson install would just teach
-    // everyone to ignore this check.
-    // The Piper verdict is part of the fixture because it is part of the
-    // published contract now: the probe reads both engines, and a board that
-    // declined Kokoro still has to say whether it got a CPU engine (TTS-01).
-    const res = runValidator("KOKORO=skipped:no-cuda\nPIPER=ready\n");
-    expect(res.status, res.out).toBe(0);
+  it("the no-GPU knob excuses a DECLINED engine only — a requested Kokoro that failed still fails the harness", () => {
+    // "No GPU here" explains a skip; it does not explain a GPU install that
+    // was attempted and died, which on the harness would mean the install
+    // path itself is broken.
+    const res = runValidator("KOKORO=failed:model\n", { CLAWBOX_TEST_NO_GPU: "1" });
+    expect(res.status).toBe(1);
+    expect(res.out).toMatch(/requested and did NOT install/);
+  });
+
+  it("is not rescued by a stale PIPER=ready line left by an earlier release", () => {
+    // The fixture the two-engine probe used to reach its Kokoro-specific arm
+    // — a failed Kokoro beside a ready Piper. The probe reads KOKORO= only
+    // now; a PIPER= line is a leftover of a release that still shipped the
+    // CPU fallback, and reading it as a working engine would put the removed
+    // engine back into the health check by way of an old file.
+    const res = runValidator("KOKORO=failed:model\nPIPER=ready\n");
+    expect(res.status, `a stale fallback line passed a box with no GPU TTS:\n${res.out}`).toBe(1);
+    expect(res.out).toMatch(/requested and did NOT install/);
+    expect(res.out, "an engine that no longer exists was named").not.toMatch(/piper/i);
+  });
+
+  it("FAILS a board that was never going to run Kokoro — with one engine, a skip is a mute box", () => {
+    // This probe briefly passed `skipped:*`: "no CUDA is not a defect, and
+    // failing every non-Jetson install would teach everyone to ignore this
+    // check". That reasoning had a second engine behind it. With Kokoro the
+    // only on-device voice, a board that declines it has none, and whether
+    // the cloud voice will speak for it is not something this installer can
+    // see — that needs the ClawBox AI link, which happens after install.
+    // Every shipped ClawBox is a Jetson a Kokoro build exists for, so a
+    // skipped Kokoro on real hardware means something is wrong: the same
+    // recorded, named 13 as step_openclaw_tts, checked again here from the
+    // file. KOKORO= is the only key the probe reads.
+    const res = runValidator("KOKORO=skipped:no-cuda\n");
+    expect(res.status, `validation passed a box with no engine at all:\n${res.out}`).toBe(1);
+    expect(res.out).toMatch(/NO working on-device TTS engine/);
+    expect(res.out).toMatch(/Kokoro/);
+    expect(res.out).toMatch(/skipped:no-cuda/);
+    expect(res.out).toMatch(/cloud voice/);
+    expect(res.out, "an engine that no longer exists was named").not.toMatch(/piper/i);
+    expect(res.out).toMatch(/--step openclaw_tts/);
+    // Not the failed:* sentence either: nothing was requested on this board.
+    expect(res.out).not.toMatch(/requested and did NOT install/);
   });
 
   it("passes a box that has the engine", () => {
-    expect(runValidator("KOKORO=ready\nPIPER=ready\n").status).toBe(0);
+    expect(runValidator("KOKORO=ready\n").status).toBe(0);
+  });
+
+  it("reads a CRLF verdict rather than mistaking a ready engine for an unreadable one", () => {
+    // The file is also restored from tarballs and edited by hand. `ready\r`
+    // is `ready`, and `skipped:no-cuda\r` is still the mute box — named
+    // without the stray carriage return, not refused as out of vocabulary.
+    expect(runValidator("KOKORO=ready\r\n").status).toBe(0);
+    const res = runValidator("KOKORO=skipped:no-cuda\r\n");
+    expect(res.status).toBe(1);
+    expect(res.out).toMatch(/\(skipped:no-cuda\)/);
+    expect(res.out).not.toMatch(/unrecognised/);
   });
 
   it("refuses to read a MISSING verdict as a healthy one", () => {
@@ -934,9 +1081,10 @@ describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box 
 
 // ── The call site must not launder a hard failure into a warning ─────────────
 //
-// step_openclaw_tts returns 12 for "Kokoro was requested and did not install",
-// which is survivable — the box still speaks, on Piper — and is already carried
-// by record_provision_failure, the marker and the validator's TTS probe. It
+// step_openclaw_tts returns 12 for "Kokoro was requested and did not install"
+// and 13 for "this board declines the only engine" — both survivable (the box
+// must come up reachable to be fixed) and both already carried by
+// record_provision_failure, the marker and the validator's TTS probe. It
 // also returns 1 from six OTHER paths that mean the box has no working speech
 // path at all: no clawbox-tts.sh, a tts-local-cli plugin that will not resolve,
 // a provider definition or selection that never landed.
@@ -980,6 +1128,16 @@ describe.skipIf(!hasBash)("the openclaw setup step weighs the TTS result", () =>
     expect(res.status, res.out).toBe(0);
     expect(res.out).toContain("SETUP_COMPLETED=0");
     expect(res.out).toMatch(/Kokoro GPU TTS did not install/);
+  });
+
+  it("continues past a mute box, saying so", () => {
+    // 13 is recorded by the step itself; the call site's job is to let the box
+    // finish provisioning so it comes up reachable, and to say why in the same
+    // words step_post_update uses for the code.
+    const res = runOpenclawSetup(13);
+    expect(res.status, res.out).toBe(0);
+    expect(res.out).toContain("SETUP_COMPLETED=0");
+    expect(res.out).toMatch(/NO working on-device TTS engine/);
   });
 
   it.each([1, 2])("stays FATAL on a provider-configuration failure (exit %i)", (code) => {

@@ -1,3 +1,5 @@
+import os from "os";
+import path from "path";
 import { defineConfig } from "vitest/config";
 import tsconfigPaths from "vite-tsconfig-paths";
 
@@ -17,6 +19,22 @@ export default defineConfig({
     // control; the individual edition tests override this with a real tmp file.
     env: {
       CLAWBOX_EDITION_FILE: "/nonexistent/clawbox-test-edition.env",
+      // The same hermetic principle for device STATE: config-store falls back
+      // to the real /home/clawbox/clawbox when CLAWBOX_ROOT is unset, so a
+      // test that imports the real modules without re-pointing the root reads
+      // — and can WRITE — the box's live data/. Measured on this box
+      // (2026-08-27): a suite run while coding run run-0nxtbhb1 was in flight
+      // loaded the real runs file in a worker and stamped the live run as
+      // failed. Tests that need their own root still set one in beforeEach;
+      // this is the floor that keeps a forgotten one harmless.
+      CLAWBOX_ROOT: path.join(os.tmpdir(), `clawbox-test-root-${process.pid}`),
+      // Same rule for OpenClaw's own store: `OPENCLAW_HOME` falls back to the
+      // hard-coded /home/clawbox/.openclaw, so on the device a test that
+      // "never linked" the box still found the box's REAL ClawBox AI token in
+      // the real openclaw.json and went on to call the proxy. CI has no such
+      // file; the suite must see the same nothing everywhere. Tests that need
+      // an openclaw.json point OPENCLAW_HOME at their own fixture dir.
+      OPENCLAW_HOME: path.join(os.tmpdir(), `clawbox-test-openclaw-${process.pid}`),
     },
     projects: [
       {

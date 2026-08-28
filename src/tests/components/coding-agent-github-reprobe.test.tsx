@@ -4,20 +4,21 @@
  * a property of the box: caching one would outlive the outage that produced it
  * and go on refusing backups after the uplink came back."
  *
- * The card then caches it anyway. `load()` runs once on mount; the only re-poll
- * is gated on `anyRunning`, i.e. a run being in progress. So an owner who opens
- * the panel during a thirty-second uplink blip sees "GitHub unreachable" with
- * no refresh affordance for as long as the panel stays mounted — the outage
- * outlives itself on the one surface the owner looks at. It is the probe-once
- * shape #518 exists to remove, moved one layer out.
+ * The card then cached it anyway: `load()` ran once on mount and never again
+ * without a run in progress. So an owner who opened the panel during a
+ * thirty-second uplink blip saw "GitHub unreachable" with no refresh
+ * affordance for as long as the panel stayed mounted — the outage outlived
+ * itself on the one surface the owner looks at. It is the probe-once shape
+ * #518 exists to remove, moved one layer out.
  *
- * The two facts pinned here: the card keeps asking while the answer is
- * inconclusive, and it stops asking once it is not.
+ * The card lives in Settings → Coding Agent (CodingAgentSettingsPanel) now,
+ * and the two facts pinned here moved with it: the card keeps asking while
+ * the answer is inconclusive, and it stops asking once it is not.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import CodingAgentApp from "@/components/CodingAgentApp";
+import CodingAgentSettingsPanel from "@/components/CodingAgentSettingsPanel";
 
 const t = (key: string, params?: Record<string, string | number>) => {
   let str = translations.en[key] ?? key;
@@ -57,7 +58,7 @@ function stubFetch(next: () => Record<string, unknown>) {
   return gitCalls;
 }
 
-/** Let the mount's three fetches settle before anything is counted. */
+/** Let the mount's two fetches settle before anything is counted. */
 async function settle() {
   await act(async () => { await vi.advanceTimersByTimeAsync(50); });
 }
@@ -75,7 +76,7 @@ afterEach(() => {
 describe("an inconclusive GitHub answer is asked again", () => {
   it("keeps re-probing while the card says GitHub is unreachable", async () => {
     const calls = stubFetch(() => UNREACHABLE);
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
     await settle();
 
     expect(screen.queryByTestId("coding-agent-github-unreachable")).not.toBeNull();
@@ -83,15 +84,15 @@ describe("an inconclusive GitHub answer is asked again", () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
 
-    // No run is in progress, so the existing poll is off. If the card only ever
-    // asks once, the outage is permanent until the panel is remounted.
+    // Nothing else on this panel polls. If the card only ever asks once, the
+    // outage is permanent until the panel is remounted.
     expect(calls.count).toBeGreaterThan(afterMount);
   });
 
   it("shows the account again once the uplink comes back, without a remount", async () => {
     let answer: Record<string, unknown> = UNREACHABLE;
     stubFetch(() => answer);
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
     await settle();
 
     expect(screen.queryByTestId("coding-agent-github-unreachable")).not.toBeNull();
@@ -108,7 +109,7 @@ describe("an inconclusive GitHub answer is asked again", () => {
     // background poll it never had. Re-probing is for the inconclusive state
     // only.
     const calls = stubFetch(() => CONNECTED);
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
     await settle();
 
     const afterMount = calls.count;
@@ -124,7 +125,7 @@ describe("an inconclusive GitHub answer is asked again", () => {
     const calls = stubFetch(() => ({
       installed: false, connected: false, login: null, loginCommand: LOGIN_COMMAND, reason: "not_installed",
     }));
-    render(<CodingAgentApp />);
+    render(<CodingAgentSettingsPanel />);
     await settle();
 
     const afterMount = calls.count;
@@ -132,5 +133,24 @@ describe("an inconclusive GitHub answer is asked again", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
 
     expect(calls.count).toBe(afterMount);
+  });
+});
+
+describe("a login made somewhere else", () => {
+  it("shows up without a reload: the card keeps asking while merely not connected", async () => {
+    // Not installed / not runnable are settled and stop the timer; plain
+    // "not connected" is not: the owner may be finishing `gh auth login` in a
+    // terminal right now, and a card that never asks again reads as "failed".
+    let answer: Record<string, unknown> = { installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND };
+    const calls = stubFetch(() => answer);
+    render(<CodingAgentSettingsPanel />);
+    await settle();
+    const afterMount = calls.count;
+
+    answer = CONNECTED;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+    expect(calls.count).toBeGreaterThan(afterMount);
+    expect(screen.queryByText(/yalexx/)).not.toBeNull();
   });
 });

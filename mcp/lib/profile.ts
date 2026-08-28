@@ -66,6 +66,7 @@ function envProfile(env: NodeJS.ProcessEnv): ProfileRequest | null {
   const raw = (env.CLAWBOX_MCP_PROFILE || "").trim().toLowerCase();
   if (raw === "core") return "core";
   if (raw === "full") return "full";
+  if (raw === "browser") return "browser";
   if (raw === "auto") return "auto";
   return null;
 }

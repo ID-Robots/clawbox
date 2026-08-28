@@ -6,6 +6,7 @@ import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
+import AiProviderList from "./AiProviderList";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import type { WifiNetwork } from "@/lib/wifi-utils";
@@ -14,7 +15,8 @@ import { dispatchOpenApp, CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProv
 import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
-import LocalModelsPanel from "./LocalModelsPanel";
+import LocalAiPanel from "./LocalAiPanel";
+import CodingAgentSettingsPanel, { type AgentStatus as CodingAgentStatus } from "./CodingAgentSettingsPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
@@ -24,9 +26,8 @@ import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
-import { cachedActiveHarness, cachedEdition, fetchHarness } from "@/lib/client-harness";
+import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 import { isPairingToken, normalizePairingToken, samePairingToken } from "@/lib/telegram-pairing-token";
-import { lastModelSegment } from "@/lib/chat-header-pills";
 import { QRCodeSVG } from "qrcode.react";
 import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
@@ -173,7 +174,30 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "codingAgent", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+
+/**
+ * The channels that live behind the single "Messaging Channels" entry — the same idea
+ * as GNOME's Online Accounts: one page listing every outside service the
+ * assistant can be reached through, each row opening its own settings.
+ *
+ * They are still ordinary Sections, so their panes, their deep links
+ * (`clawbox:open-settings`) and their status lines are unchanged; only the
+ * sidebar stops carrying four near-identical entries.
+ */
+const CHANNEL_SECTIONS = ["telegram", "email", "whatsapp", "discord"] as const;
+type ChannelSection = typeof CHANNEL_SECTIONS[number];
+
+const CHANNEL_ITEMS: { id: ChannelSection; icon: string; labelKey: string; hintKey: string }[] = [
+  { id: "telegram", icon: "send", labelKey: "settings.telegram", hintKey: "settings.channelsTelegramHint" },
+  { id: "email", icon: "mail", labelKey: "settings.email", hintKey: "settings.channelsEmailHint" },
+  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp", hintKey: "settings.channelsWhatsappHint" },
+  { id: "discord", icon: "forum", labelKey: "settings.discord", hintKey: "settings.channelsDiscordHint" },
+];
+
+function isChannelSection(id: string): id is ChannelSection {
+  return (CHANNEL_SECTIONS as readonly string[]).includes(id);
+}
 
 /** The three mailbox modes, in increasing order of what the assistant may do. */
 const EMAIL_MODE_OPTIONS: { id: EmailMode; labelKey: string; hintKey: string }[] = [
@@ -230,17 +254,28 @@ interface WhatsappPairSnapshot {
 
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
-  { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
-  { id: "wifi", icon: "wifi", labelKey: "settings.network" },
-  { id: "ai", icon: "smart_toy", labelKey: "settings.aiProvider" },
+  // Ordered by how often an owner comes here, not by history: the brain and
+  // the ways to reach it first, the box's own machinery next, the cosmetics
+  // and the once-a-year pages last. The first entry is also where Settings
+  // opens.
+  // Providers (cloud sign-ins) and Local AI (the on-device model and the
+  // inventory of everything running on the box) are neighbours, each with its
+  // own provider list on top. "localModels" stays a Section so its deep links
+  // land on Local AI.
+  { id: "ai", icon: "smart_toy", labelKey: "settings.providers" },
   { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
-  { id: "localModels", icon: "deployed_code", labelKey: "settings.localModels" },
+  // The coding agent's settings — its switch, folder, effort and GitHub
+  // account — moved here from the Coding Agent app, which keeps the runs.
+  // Next to the AI pages because it is the other thing the assistant does
+  // with a model.
+  { id: "codingAgent", icon: "code", labelKey: "settings.codingAgent" },
+  // One entry for every messaging channel; the four panes live behind it
+  // (CHANNEL_ITEMS) rather than each claiming a sidebar row of its own.
+  { id: "channels", icon: "forum", labelKey: "settings.channels" },
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
-  { id: "telegram", icon: "send", labelKey: "settings.telegram" },
-  { id: "email", icon: "mail", labelKey: "settings.email" },
-  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp" },
-  { id: "discord", icon: "forum", labelKey: "settings.discord" },
+  { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
+  { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
@@ -281,25 +316,6 @@ function toDiscordMembers(value: unknown): DiscordMemberOption[] {
   }
   return out;
 }
-
-/* ── Helpers ── */
-// Hermes registers the on-device model under this single provider id whichever
-// local runtime backs it (see HERMES_LOCAL_PROVIDER in lib/hermes-local-ai.ts).
-// OpenClaw instead names the runtime directly ("llamacpp" / "ollama"), so
-// "is the local model the active provider" has to accept either spelling.
-const HERMES_LOCAL_PROVIDER_ID = "clawlocal";
-
-// Copy for the four Local AI states, kept as data so the status line and the
-// card below cannot drift apart. "Selected" vs "available" is the distinction
-// that matters: installing the on-device model does not make it the one that
-// answers, and saying "sleeping until needed" when it was never selected read
-// as though it were.
-const LOCAL_AI_STATUS_SUFFIX = {
-  offline: "endpoint not responding",
-  available: "available, not currently selected",
-  standby: "selected · sleeping until needed",
-  running: "selected · running",
-} as const;
 
 function formatBytes(b: number): string {
   if (!b) return "0 B";
@@ -344,7 +360,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
-  const [section, setSection] = useState<Section>("appearance");
+  const [section, setSection] = useState<Section>(NAV_ITEMS[0].id);
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
@@ -409,7 +425,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
     if (next === "remote" && requireLoginFor("remote")) return;
+    // The old Local Models section is part of Local AI now.
+    if (next === "localModels") next = "localAi";
     setSection(next);
+    // Both, so one navigation call works on either layout: the mobile view
+    // reads `mobileSection`, and a hub row that only set `section` would
+    // leave a phone sitting on the page it was already showing.
+    setMobileSection(next);
   }, [requireLoginFor]);
 
   // Allow other parts of the desktop (e.g. the "new version available" toast)
@@ -420,10 +442,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const isSection = (s: unknown): s is Section =>
       typeof s === "string" && (SECTIONS as readonly string[]).includes(s);
     const apply = (s: unknown) => {
-      if (isSection(s)) {
-        setSection(s);
-        setMobileSection(s);
-      }
+      if (!isSection(s)) return;
+      let next: Section = s;
+      if (next === "localModels") next = "localAi";
+      setSection(next);
+      setMobileSection(next);
     };
     const requestClawAiOffer = () => {
       setSection("ai");
@@ -1282,10 +1305,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   /* ── AI Provider ── */
   const [aiProvider, setAiProvider] = useState<{ connected: boolean; provider: string | null; providerLabel: string | null; mode: string | null; model: string | null; clawaiTier: "flash" | "pro" | null } | null>(null);
   useEffect(() => {
-    // The Local AI panel needs this too: it is the only source that knows which
-    // provider the ACTIVE harness is really set to, which is what separates
-    // "the on-device model is installed" from "it is what answers".
-    if (section !== "ai" && section !== "localAi" && !isMobile) return;
+    if (section !== "ai" && !isMobile) return;
     const load = () => {
       fetch("/setup-api/ai-models/status", { cache: "no-store" }).then(r => r.json()).then(setAiProvider).catch(() => {});
     };
@@ -1297,18 +1317,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     // left and re-entered. Seen on a live box, in the same window.
     return onProvidersChanged(load);
   }, [section, isMobile]);
-  // Which agent consumes the local model. Named the harness outright, and said
-  // "OpenClaw" on a Hermes box where OpenClaw isn't installed.
-  const [harnessLabel, setHarnessLabel] = useState(
-    () => (cachedActiveHarness() === "hermes" ? "Hermes" : "OpenClaw"),
-  );
-  useEffect(() => {
-    let alive = true;
-    void fetchHarness().then((d) => {
-      if (alive && d) setHarnessLabel(d.active === "hermes" ? "Hermes" : "OpenClaw");
-    });
-    return () => { alive = false; };
-  }, []);
 
   // Device EDITION (openclaw | hermes | dual), tracked the same way AIModelsStep
   // tracks its own copy — seeded from the immutable cache, then confirmed once.
@@ -1329,124 +1337,54 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => { alive = false; };
   }, [edition]);
 
-  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null; running: boolean | null; standbyEnabled: boolean } | null>(null);
-  const [localAiDisabling, setLocalAiDisabling] = useState(false);
-  const [localAiError, setLocalAiError] = useState<string | null>(null);
-  const refreshLocalAiStatus = useCallback(async () => {
-    try {
-      const res = await fetch("/setup-api/setup/status", { cache: "no-store" });
-      const data = await res.json();
-      const configured = !!data.local_ai_configured;
-      const provider = typeof data.local_ai_provider === "string" ? data.local_ai_provider : null;
-      const model = typeof data.local_ai_model === "string" ? data.local_ai_model : null;
-
-      let running: boolean | null = null;
-      let standbyEnabled = false;
-      if (configured && provider === "llamacpp") {
-        const llamaRes = await fetch("/setup-api/llamacpp/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
-        running = !!llamaRes?.running;
-        standbyEnabled = !!llamaRes?.standbyEnabled;
-      } else if (configured && provider === "ollama") {
-        const ollamaRes = await fetch("/setup-api/ollama/status", { cache: "no-store" }).then(r => r.json()).catch(() => null);
-        running = !!ollamaRes?.running;
-        standbyEnabled = !!ollamaRes?.standbyEnabled;
-      }
-
-      setLocalAiStatus({ configured, provider, model, running, standbyEnabled });
-      setLocalAiError(null);
-    } catch {
-      setLocalAiStatus({ configured: false, provider: null, model: null, running: null, standbyEnabled: false });
-    }
-  }, []);
-  // Is the on-device model the provider the active harness will actually answer
-  // with? `localAiStatus` alone can never say — it is built from the
-  // config-store keys written when the model was installed, and installing one
-  // deliberately does not take over from the provider the customer chose. The
-  // harness's own selection (via /setup-api/ai-models/status) is the only proof.
-  const localAiIsActive = !!localAiStatus?.configured
-    && !!aiProvider?.provider
-    && (aiProvider.provider === HERMES_LOCAL_PROVIDER_ID || aiProvider.provider === localAiStatus.provider);
-
-  /**
-   * The four states the Local AI cards render, resolved once so the status line
-   * and the card copy cannot drift apart:
-   *   offline   — configured, but the endpoint isn't answering and there is no standby
-   *   available — installed and healthy, but something else is answering
-   *   standby   — selected, asleep to free RAM until it is needed
-   *   running   — selected and resident
-   */
-  const localAiState: "offline" | "available" | "standby" | "running" | null = !localAiStatus?.configured
-    ? null
-    : localAiStatus.running === false && !localAiStatus.standbyEnabled
-      ? "offline"
-      : !localAiIsActive
-        ? "available"
-        : localAiStatus.running === false
-          ? "standby"
-          : "running";
-  const localAiOffline = localAiState === "offline";
-
-  const disableLocalAi = useCallback(async () => {
-    setLocalAiDisabling(true);
-    setLocalAiError(null);
-    try {
-      const res = await fetch("/setup-api/local-ai", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "disable" }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.success) {
-        throw new Error(typeof data.error === "string" ? data.error : "Failed to disable Local AI");
-      }
-      await refreshLocalAiStatus();
-      notifyChatModelStateChanged();
-    } catch (err) {
-      setLocalAiError(err instanceof Error ? err.message : "Failed to disable Local AI");
-    } finally {
-      setLocalAiDisabling(false);
-    }
-  }, [notifyChatModelStateChanged, refreshLocalAiStatus]);
+  // Only the sidebar subtitle reads this; the pane itself (LocalAiPanel) polls
+  // its own inventory. Read once when the section opens and again when the
+  // providers change — the subtitle names the configured model, which changes
+  // through actions, not on its own.
+  const [localAiStatus, setLocalAiStatus] = useState<{ configured: boolean; provider: string | null; model: string | null } | null>(null);
+  const localTabOpen = section === "localAi";
   useEffect(() => {
-    if (section !== "localAi" && !isMobile) return;
-    refreshLocalAiStatus();
-    if (section !== "localAi") return;
-    const interval = setInterval(() => {
-      refreshLocalAiStatus().catch(() => {});
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [refreshLocalAiStatus, section, isMobile]);
+    if (!localTabOpen && !isMobile) return;
+    const load = () => {
+      fetch("/setup-api/setup/status", { cache: "no-store" })
+        .then(r => r.json())
+        .then(data => setLocalAiStatus({
+          configured: !!data.local_ai_configured,
+          provider: typeof data.local_ai_provider === "string" ? data.local_ai_provider : null,
+          model: typeof data.local_ai_model === "string" ? data.local_ai_model : null,
+        }))
+        .catch(() => setLocalAiStatus({ configured: false, provider: null, model: null }));
+    };
+    load();
+    return onProvidersChanged(load);
+  }, [localTabOpen, isMobile]);
 
-  const [localOnlyMode, setLocalOnlyMode] = useState<boolean | null>(null);
-  const [localOnlyPending, setLocalOnlyPending] = useState(false);
+  // Same shape for the coding agent: the sidebar's "On · Max effort" line is
+  // the only reader here. Read once when the section opens (or on mobile,
+  // where the subtitle is visible from the list), then let the panel hand
+  // over every status the route answers with — the switch changes through
+  // actions on that panel, not on its own.
+  const [codingAgentStatus, setCodingAgentStatus] = useState<Pick<CodingAgentStatus, "enabled" | "effort"> | null>(null);
+  const codingAgentTabOpen = section === "codingAgent";
   useEffect(() => {
-    if (section !== "localAi") return;
-    fetch("/setup-api/local-ai/exclusive", { cache: "no-store" })
-      .then((r) => r.json())
-      .then((d) => setLocalOnlyMode(!!d.enabled))
-      .catch(() => setLocalOnlyMode(false));
-  }, [section]);
-  const toggleLocalOnly = useCallback(async (next: boolean) => {
-    setLocalOnlyPending(true);
-    try {
-      const res = await fetch("/setup-api/local-ai/exclusive", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
+    if (!codingAgentTabOpen && !isMobile) return;
+    let alive = true;
+    fetch("/setup-api/coding-agent/status", { cache: "no-store" })
+      // A 500 has no `enabled` field, and reading one off its error body
+      // turned every failure into "Off" — the sidebar said the switch was
+      // off while the panel beside it said it could not read the box.
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(data => {
+        if (!alive) return;
+        setCodingAgentStatus({ enabled: !!data.enabled, effort: typeof data.effort === "string" ? data.effort : "max" });
+      })
+      .catch(() => {
+        // Keep whatever the sidebar last knew: a failed read is not a state
+        // of the switch, and the panel reports the failure in words.
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
-      setLocalOnlyMode(next);
-      notifyChatModelStateChanged();
-      fetch("/setup-api/ai-models/status", { cache: "no-store" })
-        .then((r) => r.json())
-        .then(setAiProvider)
-        .catch(() => {});
-    } catch (err) {
-      setLocalAiError(err instanceof Error ? err.message : "Failed to toggle local-only mode");
-    } finally {
-      setLocalOnlyPending(false);
-    }
-  }, [notifyChatModelStateChanged]);
+    return () => { alive = false; };
+  }, [codingAgentTabOpen, isMobile]);
+
 
   /* ── Telegram ── */
   const [tgToken, setTgToken] = useState("");
@@ -2706,6 +2644,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
+  // A channel pane keeps the Messaging Channels entry lit: the sidebar no longer has a
+  // row of its own to highlight, and an unlit sidebar reads as "nowhere".
+  const navSection: Section = isChannelSection(activeSection)
+    ? "channels"
+    : activeSection === "localModels" ? "localAi" : activeSection;
   const visibleNavItems = NAV_ITEMS;
   const resetProgressSteps = [
     {
@@ -3532,9 +3475,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── AI Provider ─── */}
+        {/* ─── Providers: the cloud sign-ins, the owner's connected ones listed first ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
+            <AiProviderList />
 
             {/* No status card here. The AI Providers panel below opens with the
                 hero, which names the active provider, its model and its
@@ -3566,197 +3510,87 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── Local AI ─── */}
+        {/* ─── Local AI: everything on the box, one grouped list ─── */}
         {activeSection === "localAi" && (
-          <div className="max-w-xl space-y-5">
-
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>memory</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
-              </div>
-              {localAiStatus === null ? (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
-                  </div>
-                </div>
-              ) : localAiStatus.configured ? (
-                <div className={`flex items-center gap-4 rounded-xl px-4 py-3.5 border ${
-                  localAiOffline
-                    ? "bg-amber-500/[0.06] border-amber-500/15"
-                    : "bg-cyan-500/[0.06] border-cyan-500/15"
-                }`}>
-                  <div className={`relative w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
-                    localAiOffline
-                      ? "bg-amber-500/10 border-amber-400/10"
-                      : "bg-cyan-500/10 border-cyan-400/10"
-                  }`}>
-                    <AIProviderIcon provider={localAiStatus.provider} size={24} />
-                    <span className={`absolute -right-1 -bottom-1 w-5 h-5 rounded-full border flex items-center justify-center ${
-                      localAiOffline
-                        ? "bg-[#2a1d10] border-amber-500/25"
-                        : "bg-[#10212a] border-cyan-500/25"
-                    }`}>
-                      <span className={`material-symbols-rounded ${
-                        localAiOffline ? "text-amber-300" : "text-cyan-300"
-                      }`} style={{ fontSize: 14 }}>
-                        {localAiOffline ? "warning" : "check"}
-                      </span>
-                    </span>
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--text-primary)] font-medium">
-                      {localAiStatus.provider === "llamacpp" ? "Gemma 4 Local" : localAiStatus.provider === "ollama" ? "Ollama Local" : "Local AI"}
-                    </div>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      <span className={`w-1.5 h-1.5 rounded-full animate-pulse ${
-                        localAiOffline ? "bg-amber-300" : "bg-cyan-300"
-                      }`} />
-                      <span className={`text-xs ${
-                        localAiOffline ? "text-amber-300/80" : "text-cyan-300/80"
-                      }`}>
-                        {`${localAiStatus.model ? lastModelSegment(localAiStatus.model) : "Configured"} · ${
-                          localAiState ? LOCAL_AI_STATUS_SUFFIX[localAiState] : ""
-                        }`}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>memory</span>
-                  </div>
-                  <div>
-                    <div className="text-sm text-[var(--text-muted)]">No local model configured</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">Turn on Gemma 4 or Ollama to add a private on-device backup.</div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {localAiError && (
-              <div className="rounded-xl border border-red-500/20 bg-red-500/[0.06] px-4 py-3 text-sm text-red-300">
-                {localAiError}
-              </div>
-            )}
-
-            {/* Local AI itself works on Hermes (see HERMES_LOCAL_PROVIDER_ID
-                above) — Local-ONLY mode does not. It is built from OpenClaw CLI
-                calls against a fallback chain Hermes has no equivalent of, so
-                this is the one control in the section that cannot work here.
-                Its route now refuses with `supported:false`; hiding the card
-                keeps the owner from discovering that through a red banner
-                quoting our internals at them. */}
-            {localAiStatus?.configured && edition !== "hermes" && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold text-[var(--text-primary)]">Local-only mode</div>
-                    <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-                      Route everything to the local model. Disables all cloud AI providers (including fallbacks).
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    {localOnlyPending && (
-                      <span
-                        className="material-symbols-rounded animate-spin text-[var(--text-muted)]"
-                        style={{ fontSize: 18 }}
-                        aria-hidden="true"
-                      >
-                        progress_activity
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-label="Local-only mode"
-                      aria-checked={!!localOnlyMode}
-                      aria-busy={localOnlyPending}
-                      disabled={localOnlyPending || localOnlyMode === null}
-                      onClick={() => toggleLocalOnly(!localOnlyMode)}
-                      className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 ${
-                        localOnlyMode ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-                      }`}
-                    >
-                      <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${localOnlyMode ? "translate-x-6" : "translate-x-1"}`} />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {localAiStatus?.configured && (
-              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-lg font-semibold text-[var(--text-primary)]">
-                      {localAiStatus.provider === "llamacpp" ? "Gemma 4" : "Ollama"}
-                    </div>
-                    <p className="text-sm text-[var(--text-secondary)] mt-1">
-                      {localAiState === "offline"
-                        ? "Configured, but currently offline."
-                        : localAiState === "available"
-                          // Installed and ready, but the harness is pointed
-                          // elsewhere — name what IS answering so the state is
-                          // unambiguous. The label comes from the same endpoint
-                          // that reports the active provider, so it can't drift.
-                          ? `Installed and ready, but ${harnessLabel} is currently set to ${aiProvider?.providerLabel || aiProvider?.provider || "another provider"}.`
-                          : localAiState === "standby"
-                            ? `Selected. Kept in on-demand standby to free RAM until ${harnessLabel} needs it.`
-                            : "Selected and running as your on-device model."}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={disableLocalAi}
-                    disabled={localAiDisabling}
-                    className="px-4 py-2.5 bg-red-500/10 text-red-300 border border-red-500/20 rounded-xl text-sm font-semibold cursor-pointer hover:bg-red-500/20 transition-colors disabled:opacity-50"
-                  >
-                    {localAiDisabling ? "Disabling..." : "Disable"}
-                  </button>
-                </div>
-                <p className="text-xs text-[var(--text-muted)] mt-3">
-                  Disabling Local AI stops the local model and frees the memory it is using.
-                </p>
-              </div>
-            )}
-
-            <I18nProvider><AIModelsStep
-              embedded
-              providerIds={["llamacpp"]}
-              defaultProviderId="llamacpp"
-              currentProviderId={localAiStatus?.provider ?? null}
-              currentModel={localAiStatus?.model ?? null}
-              // Installed is not selected. Without this the panel rendered the
-              // green "already configured" pill and hid its own switch button,
-              // so a device that had Gemma installed but unselected offered no
-              // way to actually start using it.
-              localAiIsActive={localAiIsActive}
-              title="Set Up Local AI"
-              description={localAiStatus?.configured
-                ? "Gemma 4 is installed as your private on-device model."
-                : "Turn on a local model so ClawBox always has a private on-device backup."}
-              configureScope="local"
-              testId="settings-local-ai-step"
-              onConfigured={() => {
-                refreshLocalAiStatus().catch(() => {});
-                notifyChatModelStateChanged();
-              }}
-            /></I18nProvider>
-          </div>
+          <LocalAiPanel active={localTabOpen} edition={edition} />
         )}
 
-        {/* ─── Local Models ─── */}
+        {/* ─── Coding Agent: the switch and everything a run is told ─── */}
+        {activeSection === "codingAgent" && (
+          <CodingAgentSettingsPanel onStatus={setCodingAgentStatus} />
+        )}
+
+        {/* ─── Voice ─── */}
         {activeSection === "voice" && (
           <VoiceOutputPanel active={activeSection === "voice"} />
         )}
 
-        {activeSection === "localModels" && (
-          <LocalModelsPanel active={activeSection === "localModels"} />
+        {/* ─── Accounts (the hub) ───
+            One page for every messaging channel the assistant can be reached
+            through, in the shape people already know from GNOME's Online
+            Accounts: a row per channel with its live status, opening that
+            channel's own settings. */}
+        {activeSection === "channels" && (
+          <div className="max-w-xl space-y-5">
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>forum</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  {t("settings.channelsConnect")}
+                </label>
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.channelsHelper")}</p>
+              <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
+                {CHANNEL_ITEMS.map((item) => {
+                  const connected = channelConnected(item.id);
+                  const { subtitle } = sectionStatus(item.id);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setSectionGated(item.id)}
+                      data-testid={`settings-channel-${item.id}`}
+                      className="w-full flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer hover:bg-white/[0.04] transition-colors"
+                    >
+                      <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
+                        <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
+                          {item.icon}
+                        </span>
+                      </span>
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
+                        <span className="block text-[11px] text-[var(--text-muted)] truncate">
+                          {subtitle ?? t(item.hintKey)}
+                        </span>
+                      </span>
+                      {connected && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                      )}
+                      <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
+                        chevron_right
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* The way back out of a channel pane, now that the sidebar has no
+            row of its own for it. */}
+        {isChannelSection(activeSection) && (
+          <div className="max-w-xl">
+            <button
+              type="button"
+              onClick={() => setSectionGated("channels")}
+              data-testid="settings-channels-back"
+              className="flex items-center gap-1 mb-3 px-2 py-1 -ml-2 rounded-lg bg-transparent border-none cursor-pointer text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.05] transition-colors"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_left</span>
+              {t("settings.channels")}
+            </button>
+          </div>
         )}
 
         {/* ─── Telegram ─── */}
@@ -5720,8 +5554,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // ─── Section status (subtitle) shared by mobile list + desktop sidebar ───
   // SectionStatus type is declared at module scope (above component)
+  /** Whether a channel actually holds a working account right now. */
+  const channelConnected = (id: ChannelSection): boolean => {
+    switch (id) {
+      case "telegram": return tgConfigured === true;
+      case "email": return emailStatus?.configured === true;
+      case "whatsapp": return waStatus?.state === "paired";
+      case "discord": return dcConfigured === true;
+    }
+  };
+
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
+      case "channels": {
+        const connected = CHANNEL_ITEMS.filter((a) => channelConnected(a.id)).length;
+        return {
+          subtitle: connected > 0
+            ? t("settings.channelsConnectedCount", { n: connected })
+            : (t("settings.notConfigured") || "Not configured"),
+        };
+      }
       case "appearance": {
         const sub = ui.wallpaperId.startsWith("custom-")
           ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
@@ -5741,6 +5593,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (localAiStatus === null) return { subtitle: null };
         if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
         return { subtitle: localAiStatus.model || localAiStatus.provider };
+      }
+      case "codingAgent": {
+        if (codingAgentStatus === null) return { subtitle: null };
+        if (!codingAgentStatus.enabled) return { subtitle: t("codingAgent.stateOff") };
+        // "On · Max" — the effort is the one setting worth a glance from the
+        // list, because it is the one that changes how much a run costs.
+        return { subtitle: `${t("codingAgent.stateOn")} · ${t(`codingAgent.effort.${codingAgentStatus.effort}`)}` };
       }
       case "telegram": {
         if (tgConfigured === null) return { subtitle: null };
@@ -5979,7 +5838,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           grow the row past the window body and paint outside the frame. */}
       <nav className="w-60 shrink-0 min-h-0 overflow-y-auto bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
         {visibleNavItems.map(item => {
-          const active = activeSection === item.id;
+          const active = navSection === item.id;
           const status = sectionStatus(item.id);
           return (
             <button

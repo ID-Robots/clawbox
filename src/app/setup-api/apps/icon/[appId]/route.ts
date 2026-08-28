@@ -9,7 +9,7 @@ const ICONS_DIR = path.join(DATA_DIR, "icons");
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ appId: string }> }
 ) {
   const { appId } = await params;
@@ -19,14 +19,23 @@ export async function GET(
   }
   const iconPath = path.join(ICONS_DIR, `${appId}.png`);
 
-  // Try local cached icon first
+  // Try local cached icon first. Served with `no-cache` plus an ETag rather
+  // than `immutable`: the file under an id can CHANGE now — a web app's
+  // generated icon (src/lib/webapp-icon.ts) is removed with the app, and a
+  // different app can take the same id and get a different picture. Under
+  // `immutable` a browser that had seen the first icon would show it for a
+  // year without asking. `no-cache` costs one conditional request per icon
+  // per desktop load, answered 304 from a stat when nothing changed.
   try {
+    const stat = await fs.stat(iconPath);
+    const etag = `"${stat.size.toString(16)}-${Math.floor(stat.mtimeMs).toString(16)}"`;
+    const cacheHeaders = { ETag: etag, "Cache-Control": "public, no-cache" };
+    if (req.headers.get("if-none-match") === etag) {
+      return new NextResponse(null, { status: 304, headers: cacheHeaders });
+    }
     const data = await fs.readFile(iconPath);
     return new NextResponse(data, {
-      headers: {
-        "Content-Type": "image/png",
-        "Cache-Control": "public, max-age=31536000, immutable",
-      },
+      headers: { "Content-Type": "image/png", ...cacheHeaders },
     });
   } catch {
     // Not cached locally

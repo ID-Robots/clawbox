@@ -69,11 +69,12 @@ import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
-import { projectPath, validateProjectId } from "@/lib/code-projects";
+import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
-import { commitRunWork } from "@/lib/coding-git";
+import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -195,6 +196,14 @@ const MAX_RUNS_KEPT = 30;
 /** Progress lines kept per run. */
 const PROGRESS_KEEP = 60;
 const MAX_PROGRESS_LINE_CHARS = 160;
+/**
+ * The plan Claude Code keeps through its TodoWrite tool, as much of it as a
+ * card can show. Twenty items is more than any run on this box has planned;
+ * a longer list is a run enumerating files, not planning, and the newest
+ * twenty still say where it is.
+ */
+const MAX_TODOS = 20;
+const MAX_TODO_CHARS = 160;
 const MAX_SUMMARY_CHARS = 6_000;
 const MAX_ERROR_CHARS = 1_000;
 const MAX_STDERR_CHARS = 8_000;
@@ -429,8 +438,32 @@ export interface CodingRun {
    */
   resumable: boolean;
   progress: string[];
+  /**
+   * The run's OWN plan — the latest list Claude Code wrote with its TodoWrite
+   * tool, whole, replacing the one before it.
+   *
+   * The progress feed says what tool the run just called; this says what it
+   * is trying to do and how far along it is, in its own words. It is the
+   * difference between "Read app.js" and "Wiring the game loop — 3 of 7
+   * done", and it is what the owner asked to see while a run works. A run
+   * that never plans has an empty list, and that is fine: the feed still
+   * carries its steps.
+   */
+  todos: CodingTodo[];
   exitCode: number | null;
 }
+
+/** One item of the run's plan, as Claude Code's TodoWrite tool reports it. */
+export interface CodingTodo {
+  content: string;
+  status: CodingTodoStatus;
+  /** The present-tense form of the item — "Wiring the game loop" — when the
+   *  tool sent one. The card shows it as "now" while the item is in progress. */
+  activeForm?: string;
+}
+
+export type CodingTodoStatus = "pending" | "in_progress" | "completed";
+const TODO_STATUSES: readonly CodingTodoStatus[] = ["pending", "in_progress", "completed"];
 
 /** One sub-agent currently out, as the owner should read it. */
 export interface ActiveSubagent {
@@ -613,7 +646,7 @@ export async function setTokenLimit(limit: number | null): Promise<number | null
 }
 
 
-  /**
+/**
  * Folder names directly inside the owner's default project folder.
  *
  * The assistant could only ever see code projects — the 15 under
@@ -622,8 +655,28 @@ export async function setTokenLimit(limit: number | null): Promise<number | null
  * Names only: this is a picker, not a file listing.
  */
 export async function listProjectFolders(): Promise<string[]> {
+  return (await readProjectFolders())?.names ?? [];
+}
+
+/**
+ * The owner's folder and the names in it. Null when no folder is set; a
+ * folder that is set but cannot be read answers with no names, so the caller
+ * can still say WHICH folder it looked in.
+ */
+async function readProjectFolders(): Promise<{ base: string; names: string[] } | null> {
   const base = await getDefaultDirectory();
-  if (!base) return [];
+  if (!base) return null;
+  return { base, names: await readFolderNames(base) };
+}
+
+/**
+ * The one readdir behind every listing: the folder names directly inside
+ * `base`, or none when it cannot be read.
+ *
+ * `isDirectory()` on the Dirent, deliberately: a symlink is never followed,
+ * so a link out of the folder is not offered as a project in it.
+ */
+async function readFolderNames(base: string): Promise<string[]> {
   try {
     const entries = await fs.promises.readdir(base, { withFileTypes: true });
     return entries
@@ -634,6 +687,208 @@ export async function listProjectFolders(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+/**
+ * Where code projects live: the folders code_project_init scaffolds and a run
+ * given a project id works in. The code project library keeps this path to
+ * itself (its one exported path helper, projectPath, answers per id), and
+ * resolveWorkingDirectory below spells it out again for the same reason — a
+ * listing needs the folder, not one project in it.
+ */
+const CODE_PROJECTS_DIR = path.join(DATA_DIR, "code-projects");
+
+/** Where a listed project comes from: the owner's folder, or data/code-projects. */
+export type CodingProjectKind = "folder" | "codeProject";
+
+/** One project of the owner's, as the Coding Agent app lists it. */
+export interface CodingProject {
+  /** The folder's name — the name a run is given. For a code project, its id. */
+  folder: string;
+  /** The absolute folder. */
+  directory: string;
+  kind: CodingProjectKind;
+  /** From project.json when the folder is a code project; the folder name otherwise. */
+  name: string;
+  lastCommit: LastCommit | null;
+  /** Registered on the desktop as a web app (data/webapps/<folder>/meta.json). */
+  onDesktop: boolean;
+  /** The newest run that worked in this folder, if any has. */
+  latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
+}
+
+/** A folder that may be a project, before describeProject has looked. */
+interface ProjectCandidate {
+  base: string;
+  folder: string;
+  kind: CodingProjectKind;
+}
+
+/**
+ * Every project the owner has, from both places one can be:
+ *
+ * - a folder directly inside their project folder with a `.git` DIRECTORY of
+ *   its own. That test, and not "any folder", because a folder with its own
+ *   history is what a run leaves behind (coding-git.ts commits every run's
+ *   work) and what the owner can get back to. A `.git` FILE — a worktree or
+ *   submodule pointer into somebody else's repository — is not counted, for
+ *   the same reason the committer refuses such a folder;
+ * - a code project under data/code-projects. That is where the New app
+ *   wizard's handoff lands ("scaffold it as a code project"), and it can
+ *   never be the owner's folder, because resolveWorkingDirectory refuses
+ *   anything inside the checkout — so a list of the owner's folder alone
+ *   could never show the app the wizard had just asked for. A code project
+ *   counts once it has a project.json, which code_project_init writes before
+ *   any run commits, so the app appears while it is being built and not only
+ *   after.
+ *
+ * `directory` stays the owner's folder alone: it is what the empty state
+ * names as the place to build in.
+ *
+ * One `git log -1` per project, a few at a time: the app asks on its poll,
+ * and a hundred concurrent spawns on a Jetson is a stall, not a listing.
+ */
+export async function listProjects(): Promise<{ directory: string | null; projects: CodingProject[] }> {
+  const [folders, codeProjects] = await Promise.all([readProjectFolders(), readFolderNames(CODE_PROJECTS_DIR)]);
+  const candidates: ProjectCandidate[] = folders
+    ? folders.names.map((folder) => ({ base: folders.base, folder, kind: "folder" as const }))
+    : [];
+  for (const folder of codeProjects) candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
+  const described = await mapLimit(candidates, 4, describeProject);
+
+  // Once per real folder. config.json is a file the owner can edit, so the
+  // project folder can be pointed at data/code-projects by hand, and every
+  // project would then be listed twice. The owner's folder was described
+  // first, so its row is the one kept.
+  const seen = new Set<string>();
+  const projects: CodingProject[] = [];
+  for (const d of described) {
+    if (!d || seen.has(d.real)) continue;
+    seen.add(d.real);
+    projects.push(d.project);
+  }
+  projects.sort((a, b) => (b.lastCommit?.date ?? 0) - (a.lastCommit?.date ?? 0) || a.name.localeCompare(b.name));
+  return { directory: folders?.base ?? null, projects };
+}
+
+async function describeProject({ base, folder, kind }: ProjectCandidate): Promise<{ project: CodingProject; real: string } | null> {
+  const directory = path.join(base, folder);
+  const [dotGit, metaName] = await Promise.all([
+    fs.promises.stat(path.join(directory, ".git")).catch(() => null),
+    projectNameOf(directory, folder),
+  ]);
+  const hasGit = dotGit?.isDirectory() === true;
+  // A plain folder is a project by its history alone; a code project by its
+  // project.json as well, since the scaffold comes before the first commit.
+  if (!hasGit && !(kind === "codeProject" && metaName !== null)) return null;
+  const [commit, onDesktop, real] = await Promise.all([
+    // Only a folder with its own history is asked. `git log` in one without
+    // walks UP to the nearest repository — for a code project, ClawBox's own
+    // checkout — and would present the OS's last commit as the app's.
+    hasGit ? lastCommit(directory) : Promise.resolve(null),
+    isOnDesktop(folder),
+    // A run records the folder it worked in symlink-resolved; match both
+    // spellings so a project reached through a link still shows its run.
+    fs.promises.realpath(directory).catch(() => directory),
+  ]);
+  // loadRuns() is newest first, so the first match is the latest run. A run
+  // given a project id recorded the id as well as the folder.
+  const run = loadRuns().find((r) =>
+    r.directory === real || r.directory === directory || (kind === "codeProject" && r.projectId === folder),
+  ) ?? null;
+  return {
+    real,
+    project: {
+      folder,
+      directory,
+      kind,
+      name: metaName ?? folder,
+      lastCommit: commit,
+      onDesktop,
+      latestRun: run
+        ? { id: run.id, status: run.status, task: run.task, startedAt: run.startedAt, completedAt: run.completedAt }
+        : null,
+    },
+  };
+}
+
+/**
+ * The project's name from its project.json, bounded like a name the code
+ * project library would accept — the file may have been written by hand —
+ * or the folder's own name when the file has no usable one. Null when there
+ * is no such file at all: that is what tells a code project from a folder
+ * that merely sits under data/code-projects.
+ */
+async function projectNameOf(directory: string, folder: string): Promise<string | null> {
+  let raw: string;
+  try {
+    raw = await readProjectJson(path.join(directory, "project.json"));
+  } catch {
+    return null;
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const name = typeof parsed === "object" && parsed !== null ? (parsed as { name?: unknown }).name : undefined;
+    if (typeof name === "string" && name.trim()) return name.trim().slice(0, MAX_PROJECT_NAME_LENGTH);
+  } catch {
+    // Not JSON, or not the shape expected: the folder's own name will do.
+  }
+  return folder;
+}
+
+/**
+ * The most of a project.json this listing will read. code_project_init writes
+ * a few hundred bytes; a delegated run can write anything into its folder,
+ * and the app polls this listing — so a file it grew to gigabytes must not be
+ * read into memory on every poll.
+ */
+const MAX_PROJECT_JSON_BYTES = 64 * 1024;
+
+/**
+ * project.json, read through one handle so the size checked is the size
+ * read. Rejects when there is no such file (that is what tells a code
+ * project from a plain folder under data/code-projects). A file over the
+ * bound answers "" — which parses as nothing, so the folder's own name is
+ * used, the same as for a file that is not JSON: it is still a project, it
+ * just has no name this listing will trust.
+ */
+async function readProjectJson(file: string): Promise<string> {
+  const handle = await fs.promises.open(file, "r");
+  try {
+    const { size } = await handle.stat();
+    if (size > MAX_PROJECT_JSON_BYTES) return "";
+    // Never more than the bound, whatever the file grew to since the stat.
+    const buf = Buffer.alloc(Math.min(size, MAX_PROJECT_JSON_BYTES));
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    return buf.subarray(0, bytesRead).toString("utf-8");
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Whether the desktop knows this folder as a web app. A folder name that is
+ * not a valid app id cannot be one, and is never spliced into a path under
+ * data/webapps to find out.
+ */
+async function isOnDesktop(folder: string): Promise<boolean> {
+  if (!validateProjectId(folder)) return false;
+  const meta = await fs.promises.stat(path.join(WEBAPPS_DIR, folder, "meta.json")).catch(() => null);
+  return meta?.isFile() === true;
+}
+
+/** `Promise.all` with at most `limit` items in flight. Order is preserved. */
+async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 // ─── Readiness ───────────────────────────────────────────────────────────────
@@ -662,6 +917,10 @@ export function runnerPath(): string {
     "/usr/local/bin",
     "/usr/bin",
     "/bin",
+    // Chromium ships as a snap on this device; without /snap/bin a run's
+    // `which chromium` answers "not installed" and the run burns minutes
+    // stubbing out a browser it actually has (seen on run-3750zcwc).
+    "/snap/bin",
   ].join(":");
 }
 
@@ -820,6 +1079,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
+    todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
   };
 }
@@ -899,45 +1159,48 @@ const waiters = new Map<string, Set<() => void>>();
 let flushTimer: NodeJS.Timeout | null = null;
 let dirty = false;
 let exitHookInstalled = false;
-/** Records loadRuns() settled as failed because the previous server died with them. */
-let repairedAtLoad = 0;
 
 /**
- * Load the store, and settle anything the previous web server left behind.
- * `live` is empty when this process starts, so every "running" record on disk
- * belongs to a process that no longer exists — systemd kills the whole cgroup
- * when clawbox-setup restarts at the end of an update.
+ * Load the store. READ-ONLY on purpose: settling stale records lives in
+ * reconcileAfterRestart(), called from the boot hook of the ONE process that
+ * owns runs. When the settle lived here, any other process that imported this
+ * module against the real root — a test worker, a script — would take a run
+ * the live web server was still driving for a dead server's leftover and
+ * stamp it failed on disk (measured on this box: run-0nxtbhb1, 2026-08-27).
  */
 function loadRuns(): CodingRun[] {
   if (runs) return runs;
   runs = readAll();
-  repairedAtLoad = 0;
-  for (const run of runs) {
-    if (run.status === "running" && !live.has(run.id)) {
-      run.status = "failed";
-      run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
-      run.completedAt = Date.now();
-      repairedAtLoad += 1;
-    }
-  }
-  if (repairedAtLoad > 0) {
-    try {
-      writeAll(runs);
-    } catch (err) {
-      console.error("[coding-agent] could not repair the runs file:", err instanceof Error ? err.message : err);
-    }
-  }
   return runs;
 }
 
 /**
- * Called from the boot hook so a stale "running" run is settled before anyone
- * asks. Returns how many were settled — the one signal an operator gets that
- * a restart killed work in progress.
+ * Settle anything the previous web server left behind, from the boot hook
+ * (src/instrumentation.ts) — before anyone asks. `live` is empty when this
+ * process starts, so every "running" record on disk belongs to a process that
+ * no longer exists: systemd kills the whole cgroup when clawbox-setup
+ * restarts at the end of an update. Returns how many were settled — the one
+ * signal an operator gets that a restart killed work in progress.
  */
 export function reconcileAfterRestart(): number {
-  loadRuns();
-  return repairedAtLoad;
+  const list = loadRuns();
+  let repaired = 0;
+  for (const run of list) {
+    if (run.status === "running" && !live.has(run.id)) {
+      run.status = "failed";
+      run.error = "The ClawBox web server restarted while this run was in progress. Start it again.";
+      run.completedAt = Date.now();
+      repaired += 1;
+    }
+  }
+  if (repaired > 0) {
+    try {
+      writeAll(list);
+    } catch (err) {
+      console.error("[coding-agent] could not repair the runs file:", err instanceof Error ? err.message : err);
+    }
+  }
+  return repaired;
 }
 
 function persist(immediate = false): void {
@@ -979,6 +1242,7 @@ function cloneRun(run: CodingRun): CodingRun {
     activeSubagents: run.activeSubagents.map((a) => ({ ...a })),
     subagentsByType: { ...run.subagentsByType },
     modelsUsed: [...run.modelsUsed],
+    todos: run.todos.map((t) => ({ ...t })),
   };
 }
 
@@ -1008,6 +1272,9 @@ export function clearFinishedRuns(): number {
   const keep = list.filter((r) => r.status === "running");
   const removed = list.length - keep.length;
   if (removed === 0) return 0;
+  for (const r of list) {
+    if (r.status !== "running") removeArtifacts(r.id);
+  }
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
@@ -1019,6 +1286,16 @@ export function clearFinishedRuns(): number {
 
 export function runningCount(): number {
   return loadRuns().filter((r) => r.status === "running").length;
+}
+
+/**
+ * The working folder of the run executing right now, or null. The browser
+ * route uses it to scope file:// navigation to the page a run is building —
+ * the ONLY file:// anything may open through the desktop browser.
+ */
+export function activeRunDirectory(): string | null {
+  const running = loadRuns().find((r) => r.status === "running");
+  return running ? running.directory : null;
 }
 
 /**
@@ -1069,7 +1346,9 @@ function newRunId(): string {
   return `run-${n.toString(36).padStart(8, "0").slice(-8)}`;
 }
 
-export const RUN_ID_RE = /^run-[a-z0-9]{8}$/;
+// Owned by the artifacts leaf module (both sides of the runner validate ids);
+// re-exported here under the name the routes have always imported.
+export const RUN_ID_RE = ARTIFACT_RUN_ID_RE;
 
 function normalizeTask(task: unknown): string {
   if (typeof task !== "string") throw new CodingAgentError("invalid", "A task is required.");
@@ -1081,7 +1360,8 @@ function normalizeTask(task: unknown): string {
   return cleaned;
 }
 
-function isInside(child: string, parent: string): boolean {
+/** Path containment (parent itself counts). Exported for the browser route's file:// scope check. */
+export function isInside(child: string, parent: string): boolean {
   const rel = path.relative(parent, child);
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
@@ -1241,6 +1521,11 @@ export const HEADLESS_BRIEF = [
   "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
   "When sub-agents are available to you, use them: hand searching and mapping to the explorer, running builds and tests to the tester, and a last read-through to the reviewer before you report done. Do the writing yourself.",
   "Verify your work where you can (run the build or the tests you have).",
+  "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open it with browser_view_local (it takes a file path in your folder) and read the description of what actually renders before you report done.",
+  "Verify deliberately, not exhaustively: take a described screenshot at each state that matters and move on — never one per keystroke, and never watch a timer or animation run its course when a short interval proves the logic. A handful of screenshots is a verified app; fifty is a stalled one.",
+  "You have a limited number of steps and every tool call spends one. Driving a page key by key through the browser is the fastest way to run out mid-task (measured: one run spent 103 steps on single keypresses and was cut off) — prove logic with a small script run by node instead, and spend the browser on ONE visual pass of the states that matter.",
+  "The folder named in CLAWBOX_RUN_ARTIFACTS_DIR is this run's evidence folder, shown to the owner with the run's details. Screenshots land there automatically; save test output there too, and move any verification script you wrote there instead of deleting it.",
+  "A short task is not a small task: deliver the complete, polished result the task implies — real styling, sensible edge handling, a finished feel — never a minimal stub.",
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, and anything you could not finish.",
 ].join(" ");
 
@@ -1301,8 +1586,51 @@ export function denyRulesCover(rules: readonly string[], directory: string): boo
   });
 }
 
+/**
+ * The browser family a run may call through the clawbox MCP server — and the
+ * ONLY MCP tools a run may call: --strict-mcp-config keeps other servers out,
+ * the browser profile keeps the rest of the clawbox tool set unregistered,
+ * and this allow-list is what approves the calls in headless mode.
+ * Exported for the contract test.
+ */
+export const MCP_BROWSER_TOOLS = [
+  "mcp__clawbox__browser_view_local",
+  "mcp__clawbox__browser_open",
+  "mcp__clawbox__browser_navigate",
+  "mcp__clawbox__browser_screenshot",
+  "mcp__clawbox__browser_close",
+  "mcp__clawbox__browser_click",
+  "mcp__clawbox__browser_type",
+  "mcp__clawbox__browser_keypress",
+  "mcp__clawbox__browser_scroll",
+] as const;
+
+/**
+ * The MCP config a run gets: the clawbox server in its browser-only profile.
+ * No token in here — argv is world-readable in /proc, so the server reads
+ * data/.mcp-token itself through its normal file fallback. Exported for the
+ * contract test.
+ */
+export function buildRunMcpConfig(run: { id: string; directory: string }): string {
+  return JSON.stringify({
+    mcpServers: {
+      clawbox: {
+        command: path.join(homeDir(), ".bun", "bin", "bun"),
+        args: ["run", path.join(CONFIG_ROOT, "mcp", "clawbox-mcp.ts")],
+        env: {
+          CLAWBOX_API_BASE: `http://127.0.0.1:${process.env.PORT || "80"}`,
+          CLAWBOX_ROOT: CONFIG_ROOT,
+          CLAWBOX_MCP_PROFILE: "browser",
+          CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
+          CLAWBOX_RUN_DIR: run.directory,
+        },
+      },
+    },
+  });
+}
+
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; run?: { id: string; directory: string } }): string[] {
   const args = [
     "-p",
     "--verbose",
@@ -1313,6 +1641,17 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--append-system-prompt", HEADLESS_BRIEF,
   ];
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
+  if (opts.run) {
+    // Exactly one MCP server — ours, in its browser-only profile. Strict, so
+    // servers an owner configured for their own interactive claude-ds
+    // sessions (~/.claude-ds) never leak into a delegated run.
+    args.push("--strict-mcp-config");
+    args.push("--mcp-config", buildRunMcpConfig(opts.run));
+    // acceptEdits only covers the working folder; without this, the run's own
+    // Write into its evidence folder is denied — the brief's promise broken
+    // (measured on run-yuyqta4t: pomodoro-verification.md refused).
+    args.push("--add-dir", artifactsDir(opts.run.id));
+  }
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
   args.push("--tools", toolsFor(true));
@@ -1326,14 +1665,14 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // still denied with the lists absent). The FILE rules still ship, and a
     // deny rule outranks any allow, so the credential stores stay closed.
     // Full access is about commands, not secrets.
-    args.push("--allowedTools", "Bash(*)");
+    args.push("--allowedTools", "Bash(*)", ...(opts.run ? MCP_BROWSER_TOOLS : []));
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
 }
 
 /** The environment a run gets — and nothing else. Exported for the contract test. */
-export function buildRunEnv(opts: { effort?: CodingEffort } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -1357,6 +1696,9 @@ export function buildRunEnv(opts: { effort?: CodingEffort } = {}): Record<string
   // The owner's setting wins over anything inherited: this is the knob the
   // Coding Agent app writes, and a stale shell variable must not override it.
   if (opts.effort) env.CLAUDE_DS_EFFORT = opts.effort;
+  // The run's evidence folder — the brief tells the run to save proof of its
+  // work here, and the browser MCP layer saves screenshots into it.
+  if (opts.artifactsDir) env.CLAWBOX_RUN_ARTIFACTS_DIR = opts.artifactsDir;
   return env;
 }
 
@@ -1450,6 +1792,38 @@ function describeDenial(entry: unknown): string {
 
 /** Exported for the test: this parses a payload the device does not control. */
 export const describeDenialForTests = describeDenial;
+
+/**
+ * The `todos` a TodoWrite tool_use carries, or null when the payload is not a
+ * list at all — the caller then leaves the plan it has alone rather than
+ * replacing a good plan with nothing. A list with a broken item in it keeps
+ * the items that read; the tool's shape is Claude Code's to change, and the
+ * card must never crash on a field the model spelled differently.
+ */
+function parseTodos(raw: unknown): CodingTodo[] | null {
+  if (!Array.isArray(raw)) return null;
+  const cut = (s: string) => {
+    const cleaned = s.replace(/\s+/g, " ").trim();
+    return cleaned.length > MAX_TODO_CHARS ? `${cleaned.slice(0, MAX_TODO_CHARS - 1)}…` : cleaned;
+  };
+  const todos: CodingTodo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const t = item as { content?: unknown; status?: unknown; activeForm?: unknown };
+    if (typeof t.content !== "string") continue;
+    const content = cut(t.content);
+    if (!content) continue;
+    // An unknown status is "not done": the safe reading of a word we do not know.
+    const status = (TODO_STATUSES as readonly unknown[]).includes(t.status) ? t.status as CodingTodoStatus : "pending";
+    const activeForm = typeof t.activeForm === "string" ? cut(t.activeForm) : "";
+    todos.push(activeForm ? { content, status, activeForm } : { content, status });
+    if (todos.length >= MAX_TODOS) break;
+  }
+  return todos;
+}
+
+/** Exported for the test, for the same reason. */
+export const parseTodosForTests = parseTodos;
 
 /** One line of `--output-format stream-json`. */
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
@@ -1553,6 +1927,21 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
           case "Grep":
             pushProgress(run, `${block.name} ${typeof input.pattern === "string" ? input.pattern : ""}`);
             break;
+          case "TodoWrite": {
+            // The run's plan, whole: TodoWrite always sends the full list, so
+            // the newest one replaces the record's. One summary line in the
+            // feed — the list itself lives on the record, where the card
+            // draws it as a checklist rather than as twenty progress lines.
+            const todos = parseTodos(input.todos);
+            if (!todos) {
+              pushProgress(run, block.name);
+              break;
+            }
+            run.todos = todos;
+            const done = todos.filter((t) => t.status === "completed").length;
+            pushProgress(run, `Plan: ${todos.length} tasks, ${done} done`);
+            break;
+          }
           default:
             pushProgress(run, `${block.name}`);
         }
@@ -1744,6 +2133,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.completedAt = null;
       run.exitCode = null;
       run.error = null;
+      // The first attempt's closing words too: a 503 arrives as a result event
+      // and lands in the summary, and the report is filed from the summary
+      // once the run settles. Left in place, a second attempt that dies
+      // without a result would file the first one's error as its report.
+      run.summary = null;
       run.sessionId = null;
       run.numTurns = 0;
       run.subagentsTotal = 0;
@@ -1762,6 +2156,13 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       }
     }
   }
+
+  // The closing message becomes report.md beside the run's screenshots — for
+  // a run that did not finish too, when it said anything, because a partial
+  // account is what the owner reads before deciding whether to resume. After
+  // the retry decision above, so a restarted run never files its first
+  // attempt's words; never throwing, so the record settles regardless.
+  if (run.summary) writeRunReport(run.id, run.summary);
 
   pushProgress(run, `Finished: ${run.status}`);
   persist(true);
@@ -1798,13 +2199,22 @@ function spawnRun(
   setprivPath: string,
   settings: { effort: CodingEffort; maxTurns: number },
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, run: { id: run.id, directory: run.directory } }));
+  // One evidence path everywhere — env, MCP config and --add-dir must never
+  // disagree about where it is. Creation is best-effort: the MCP layer also
+  // mkdirs lazily, so a failure here degrades evidence, never the run.
+  const evidenceDir = artifactsDir(run.id);
+  try {
+    ensureArtifactsDir(run.id);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: no artifacts folder:`, err instanceof Error ? err.message : err);
+  }
   const child = spawn(bin, argv, {
     cwd: run.directory,
     // Deliberately NOT process.env: see the header. The cast is only because
     // this repo's ProcessEnv augmentation insists on NODE_ENV, which a run has
     // no use for.
-    env: buildRunEnv({ effort: settings.effort }) as NodeJS.ProcessEnv,
+    env: buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir }) as NodeJS.ProcessEnv,
     detached: true,
     stdio: ["pipe", "pipe", "pipe"],
   });
@@ -1993,16 +2403,20 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     retries: 0,
     resumable: false,
     progress: [],
+    todos: [],
     exitCode: null,
   };
   if (resumeSessionId) pushProgress(run, "Resuming the previous session");
   else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
 
   list.unshift(run);
-  // Never drop a running run; trim the oldest finished ones.
+  // Never drop a running run; trim the oldest finished ones. A dropped
+  // record takes its evidence folder with it — unreachable artifacts would
+  // sit on the flash forever.
   while (list.length > MAX_RUNS_KEPT) {
     const idx = findLastFinished(list);
     if (idx < 0) break;
+    removeArtifacts(list[idx].id);
     list.splice(idx, 1);
   }
   persist(true);
@@ -2075,6 +2489,5 @@ export function _resetCodingAgentStateForTests(): void {
     flushTimer = null;
   }
   dirty = false;
-  repairedAtLoad = 0;
   runs = null;
 }
