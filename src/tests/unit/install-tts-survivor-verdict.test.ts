@@ -42,6 +42,12 @@ const INSTALL_VOICE_SH = readFileSync(path.join(REPO, "scripts", "install-voice.
 
 const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status === 0;
 
+/**
+ * Lift one shell function verbatim out of a script so the test runs the SHIPPED
+ * body rather than a copy of it. Matches from `name() {` to the first
+ * column-zero `}`, which is the style every function in install.sh is written
+ * in.
+ */
 function extractShellFn(source: string, name: string): string {
   const start = source.indexOf(`${name}() {`);
   if (start < 0) throw new Error(`${name} not found`);
@@ -50,6 +56,7 @@ function extractShellFn(source: string, name: string): string {
   return source.slice(start, end + 2);
 }
 
+/** Write an executable stub — the shebang and the +x bit, so PATH lookup finds it. */
 function writeExec(file: string, body: string) {
   writeFileSync(file, `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 }
