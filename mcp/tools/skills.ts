@@ -287,13 +287,23 @@ interface InstallRefusal {
   error?: string;
   conflictsWith?: string;
   missingFiles?: string[];
+  /**
+   * `incomplete_install`: the skill was already installed before this request,
+   * so the owner's copy was left in place. Without this the branch below is
+   * true only of the other state the code covers.
+   */
+  preexisting?: boolean;
   /** `unresolved`: the ids the device's "did you mean" list offered instead. */
   candidates?: string[];
   /** `rollback_incomplete`: what the failed undo left behind. */
   leftover?: {
     /** The store still lists it — so the store is where it can be removed. */
     lockEntry?: boolean;
-    directory?: "present" | "absent" | "unknown";
+    /**
+     * `unchecked` — nothing looked, the entry named no location. `unknown` —
+     * the check ran on the location the entry named and could not answer.
+     */
+    directory?: "present" | "absent" | "unchecked" | "unknown";
   };
   warning?: {
     verdict?: string;
@@ -436,6 +446,20 @@ function refusalToToolError(err: unknown): ToolError | null {
   }
   if (payload.code === "incomplete_install") {
     const missing = (payload.missingFiles ?? []).slice(0, 5).join(", ");
+    if (payload.preexisting) {
+      // The skill was already installed when this request arrived, so the
+      // rollback left the owner's copy alone. "Nothing was installed" would be
+      // false, and the retry it implies is the one thing that cannot work: the
+      // installer meets the surviving lock entry, exits 0 without fetching, and
+      // the completeness check lands on the same missing files. The repair pass
+      // has already had its go, so only a removal changes the outcome.
+      return new ToolError(
+        "CONFLICT",
+        `That skill was already installed and some of its files are missing from the device${missing ? ` (missing: ${missing})` : ""}, so it was left in place.`,
+        "Do NOT retry the install and do not check the network — neither changes this. "
+          + "Tell the user, and offer to call skill_uninstall for it and then skill_install again.",
+      );
+    }
     return new ToolError(
       "CONFLICT",
       `The skill's download was incomplete, so nothing was installed${missing ? ` (missing: ${missing})` : ""}.`,

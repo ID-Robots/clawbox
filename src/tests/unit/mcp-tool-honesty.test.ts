@@ -849,6 +849,38 @@ describe("skill_install — a refusal the agent can act on", () => {
     expect(e.next).toMatch(/wifi_status/);
   });
 
+  it("does not tell the agent nothing was installed when the skill is still there", async () => {
+    // The SECOND state behind `incomplete_install`: the skill was already
+    // installed before the request, so the rollback left the owner's copy in
+    // place. The route says so and flags it; the decoder read neither, so the
+    // agent was told "nothing was installed" about a skill that is on the
+    // device, and sent to check the WiFi and retry — which cannot work, because
+    // the installer meets the surviving lock entry and exits 0 without
+    // fetching, landing back on the same missing files.
+    refuse(502, {
+      error:
+        "Some of \"pdf-tools\"'s files are missing from the device. It was already installed "
+        + "before this request, so it was left in place — remove it from the Skills store and "
+        + "install it again.",
+      code: "incomplete_install",
+      preexisting: true,
+      missingFiles: ["reference/pdf.md"],
+    });
+
+    const e = await installErr();
+
+    expect(e.code).toBe("CONFLICT");
+    expect(e.message).not.toMatch(/nothing was installed/i);
+    expect(e.message).toMatch(/already installed|left in place/i);
+    // The missing files are still worth relaying — they are what is wrong.
+    expect(e.message).toMatch(/reference\/pdf\.md/);
+    // The next step that CAN work, and not the one that cannot.
+    expect(e.next).not.toMatch(/wifi_status/);
+    expect(e.next).not.toMatch(/retry once/i);
+    expect(e.next).toMatch(/do NOT retry/i);
+    expect(e.next).toMatch(/skill_uninstall/);
+  });
+
   it("refuses a short name the store cannot narrow down, without inventing an id", async () => {
     refuse(409, { error: "More than one skill goes by that name.", code: "ambiguous_id" });
 

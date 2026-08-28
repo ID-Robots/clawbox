@@ -736,15 +736,21 @@ async function rollbackIncomplete(
     warning?: SkillDangerWarning | null;
   },
 ): Promise<NextResponse> {
-  // Say only what was actually established. `unknown` is its own sentence
-  // because the alternative — calling it removed — is the false-success this
-  // change is here to stop telling.
+  // Say only what was actually established, and no more: each unanswered state
+  // gets its own sentence because the alternative — calling it removed — is the
+  // false-success this change is here to stop telling, and because naming a
+  // CAUSE the verdict did not establish is the same failure wearing a different
+  // sentence. `unchecked` is the only state in which "the entry names no
+  // location" is a fact; under `unknown` the entry named one, the check ran on
+  // it, and only the answer is missing.
   const leftover = left.lockEntry
     ? left.dir === "present"
       ? `"${ctx.name}" is still listed in the Skills store and its files are still on the device`
       : left.dir === "absent"
         ? `"${ctx.name}" is still listed in the Skills store although its files were removed`
-        : `"${ctx.name}" is still listed in the Skills store, and the entry names no location, so whether its files are still on the device could not be checked`
+        : left.dir === "unchecked"
+          ? `"${ctx.name}" is still listed in the Skills store, and the entry names no location, so whether its files are still on the device could not be checked`
+          : `"${ctx.name}" is still listed in the Skills store, and whether its files were removed could not be checked`
     : `"${ctx.name}" is no longer listed in the Skills store, but its files are still on the device`;
   // A leftover the store cannot see is a leftover the store cannot remove, so
   // the two states get the two different next steps they actually have.
