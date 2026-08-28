@@ -286,3 +286,195 @@ describe("the call sites the allow-list has to cover", () => {
     }
   });
 });
+
+// ── A declaration is checked against the code, not believed ─────────────────
+//
+// DECLARED_ARGV is how a sudo call whose argv is not a literal array gets past
+// the fail-closed resolver: someone writes down what the call can produce and
+// that list is used instead. Writing it down is a review. Nothing kept the
+// review honest afterwards.
+//
+// The shipped defect, exactly: the ClawKeep restore route's call read
+// `["/usr/bin/systemctl", "restart", svc]` before and after a Hermes branch was
+// added to the helper feeding `svc`. The call's source text — the only thing
+// the declaration was keyed on — never changed, so the declaration went on
+// claiming the site restarts clawbox-gateway.service while the code had grown a
+// second unit with no grant at all. This check said "0 gaps"; a real Hermes box
+// restored every file and then could not restart its own agent.
+//
+// So `resolve` now names the symbol the values come from, the checker
+// re-resolves it on every run, and a declaration that has stopped matching the
+// code is a build failure that names the drift.
+let patchSeq = 0;
+
+function runPatched(root: string, patch: (src: string) => string, args: string[] = []) {
+  // Written OUTSIDE the fixture: a checker copy inside scripts/ would be
+  // scanned as if it were product code.
+  const file = path.join(os.tmpdir(), `clawbox-sudoers-checker-${process.pid}-${patchSeq++}.sh`);
+  const patched = patch(fs.readFileSync(CHECKER, "utf-8"));
+  fs.writeFileSync(file, patched);
+  try {
+    return spawnSync("bash", [file, ...args], {
+      encoding: "utf-8",
+      env: { ...process.env, CLAWBOX_REPO_ROOT: root },
+    });
+  } finally {
+    fs.rmSync(file, { force: true });
+  }
+}
+
+const declaring = (perl: string) => (src: string) => {
+  const anchor = "my %DECLARED_ARGV = (";
+  if (!src.includes(anchor)) throw new Error("DECLARED_ARGV anchor not found");
+  return src.replace(anchor, `${anchor}\n${perl}`);
+};
+const exempting = (perl: string) => (src: string) => {
+  const anchor = "my %EXEMPT_CALLS = (";
+  if (!src.includes(anchor)) throw new Error("EXEMPT_CALLS anchor not found");
+  return src.replace(anchor, `${anchor}\n${perl}`);
+};
+
+/**
+ * A sudo call whose unit comes out of a helper — the shape that slipped
+ * through. The CALL text is fixed; only the helper decides which units exist.
+ */
+function writeUnitProbe(hermes: string, openclaw: string) {
+  fs.writeFileSync(
+    path.join(fixture, "scripts/zz-probe.ts"),
+    [
+      'import { execFile } from "node:child_process";',
+      "",
+      "function zzUnits(edition: string): string[] {",
+      `  return edition === "hermes" ? ["${hermes}"] : ["${openclaw}"];`,
+      "}",
+      "",
+      "export function zzRestart(edition: string) {",
+      "  for (const svc of zzUnits(edition)) {",
+      '    execFile("sudo", ["/usr/bin/systemctl", "restart", svc]);',
+      "  }",
+      "}",
+      "",
+    ].join("\n"),
+  );
+}
+
+const ZZ_KEY = `'scripts/zz-probe.ts :: "/usr/bin/systemctl", "restart", svc'`;
+const zzDeclaration = (units: string[], extra = "resolve => { svc => 'zzUnits' },") =>
+  `  ${ZZ_KEY} => {\n`
+  + `    argv => [${units.map((u) => `['/usr/bin/systemctl', 'restart', '${u}']`).join(", ")}],\n`
+  + `    ${extra}\n  },`;
+const grantRestart = (unit: string) =>
+  appendGrant(`clawbox ALL=(root) NOPASSWD: /usr/bin/systemctl restart ${unit}`);
+
+d("a declaration is verified against its producer", () => {
+  // THE REGRESSION. Reproduced in miniature: the helper grows a unit, the call
+  // does not change, and the declaration is now a lie.
+  it("fails when the helper grows a unit the declaration does not list", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    grantRestart("zz-openclaw.service");
+    const r = runPatched(fixture, declaring(zzDeclaration(["zz-openclaw.service"])));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no longer describes the code/);
+    expect(r.stderr).toMatch(/zz-hermes\.service/);
+  });
+
+  it("fails when the declaration lists a unit the code no longer produces", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    for (const u of ["zz-openclaw.service", "zz-hermes.service", "zz-ghost.service"]) grantRestart(u);
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service", "zz-ghost.service"])),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no longer produced by the code/);
+    expect(r.stderr).toMatch(/zz-ghost\.service/);
+  });
+
+  // The point of catching the drift: the NEW value is a new privileged command,
+  // and it is the allow-list that has to have kept up.
+  it("reports the newly resolved unit as uncovered when nothing grants it", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    grantRestart("zz-openclaw.service");
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/UNCOVERED sudo invocations/);
+    expect(r.stderr).toMatch(/systemctl restart zz-hermes\.service/);
+  });
+
+  it("passes once the declaration and the allow-list have both caught up", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    grantRestart("zz-openclaw.service");
+    grantRestart("zz-hermes.service");
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
+    );
+    expect(r.stderr + r.stdout).toMatch(/0 gaps/);
+    expect(r.status).toBe(0);
+  });
+
+  // Fail-closed for anything new: a dynamic argument nobody described is how a
+  // privileged command reaches a device without ever being reviewed.
+  it("refuses a declaration that says nothing about its dynamic argument", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    grantRestart("zz-openclaw.service");
+    const r = runPatched(fixture, declaring(zzDeclaration(["zz-openclaw.service"], "")));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/says nothing about the dynamic argument `svc`/);
+  });
+
+  it("accepts `unverified` only with a reason", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    grantRestart("zz-openclaw.service");
+    const empty = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service"], "unverified => { svc => '' },")),
+    );
+    expect(empty.status).toBe(1);
+    expect(empty.stderr).toMatch(/needs a reason/);
+  });
+
+  it("refuses a `resolve` pointed at a symbol that does not exist", () => {
+    writeUnitProbe("zz-hermes.service", "zz-openclaw.service");
+    grantRestart("zz-openclaw.service");
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service"], "resolve => { svc => 'zzNoSuchThing' },")),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/does not define as a const array, Set, object/);
+  });
+
+  // The other direction: a reviewed decision must not outlive its call site.
+  it("refuses a declaration whose call site no longer exists", () => {
+    const r = runPatched(
+      fixture,
+      declaring("  'src/gone.ts :: a, b' => { argv => [['sudo', '/usr/bin/systemctl', 'reboot']],"
+        + " unverified => { a => 'gone', b => 'gone' } },"),
+    );
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/matches no sudo call site in the tree/);
+  });
+
+  it("refuses an exemption nothing uses", () => {
+    const r = runPatched(fixture, exempting("  'src/gone.ts :: bin, argv' => 'no longer real',"));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/matches no unresolved sudo call site/);
+  });
+
+  // Proof that the declarations the repo really ships are being verified rather
+  // than skipped: break one of them and the real tree fails.
+  it("verifies the declarations the repo itself ships", () => {
+    const r = runPatched(REPO, (src) => {
+      const before = "      ['/usr/bin/systemctl', 'poweroff'],\n      ['/usr/bin/systemctl', 'reboot'],";
+      if (!src.includes(before)) throw new Error("power-route declaration not found");
+      return src.replace(before, "      ['/usr/bin/systemctl', 'poweroff'],");
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toMatch(/no longer describes the code/);
+    expect(r.stderr).toMatch(/reboot/);
+  });
+});

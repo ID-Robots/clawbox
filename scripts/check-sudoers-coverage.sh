@@ -20,6 +20,22 @@
 #     twin of a grant that IS invoked (see the header of config/clawbox-sudoers
 #     for why both spellings are shipped) or is acknowledged in
 #     ACKNOWLEDGED_UNUSED with a reason.
+#   * A DECLARED_ARGV entry is VERIFIED against the code, not trusted. Every
+#     dynamic argument in the declared call has to name the symbol its values
+#     come from; that symbol is re-resolved on every run and the declaration
+#     fails the build the moment the two disagree. An argument that genuinely
+#     cannot be resolved goes in `unverified` with a reason, and is reviewed
+#     like a grant.
+#   * A DECLARED_ARGV or EXEMPT_CALLS entry that matches nothing is an ERROR.
+#     A reviewed decision must not outlive the call site it was made about.
+#
+# The third rule is not theoretical. `for (const svc of
+# restartServicesFor(getEdition()))` in the ClawKeep restore route kept its
+# source text byte-for-byte while the helper behind it grew a Hermes branch
+# restarting clawbox-hermes-dashboard.service. The hand-written declaration
+# still said the site only ever restarts clawbox-gateway.service, so this check
+# reported "0 gaps" — and the owner's restore on a real Hermes box put every
+# file back and then could not restart the dashboard.
 #
 # It also enforces two SHAPE invariants on the allow-list itself, because
 # coverage alone does not make a grant safe (TASK-445 audit, GAP 2 and GAP 3):
@@ -138,49 +154,93 @@ my %SCAN_SKIP_FILE = ('scripts/check-sudoers-coverage.sh' => 1);
 
 # ── Call sites whose argv is not a literal array ────────────────────────────
 # Key   = "<repo-relative path> :: <argv source text, whitespace-collapsed>"
-# Value = the concrete argument lists that call site can produce.
+# Value = { argv => [...], resolve => {...}, unverified => {...} }
 #
-# Keying on the source text rather than a line number means unrelated edits
-# above the call do not invalidate the declaration, but editing the CALL does:
-# the key stops matching, the site becomes unresolved, and this check fails.
-# That is the point — a new dynamic argument gets re-reviewed as a privilege
-# boundary instead of inheriting someone else's review.
+#   argv       the concrete argument lists this call site can produce.
+#   resolve    { <dynamic item> => <symbol> | [<symbol>, ...] }. The symbol is
+#              RE-RESOLVED out of the file on every run and `argv` is checked
+#              against it, so the declaration is verified rather than trusted.
+#   unverified { <dynamic item> => 'why the resolver cannot see it' }. Reviewed
+#              like a grant, because nothing else is checking it.
+#
+# Keying on the source text means unrelated edits above the call do not
+# invalidate the declaration, but editing the CALL does: the key stops matching,
+# the site becomes unresolved, and this check fails.
+#
+# THAT WAS NOT ENOUGH, and the gap it left shipped. When a call takes its
+# argument from a helper — `for (const svc of restartServicesFor(getEdition()))`
+# — the helper can grow a whole new unit without the call text changing by a
+# byte. The hand-written `argv` below then quietly stops being the truth: the
+# declaration said the site only ever restarts `clawbox-gateway.service`, the
+# code had grown a Hermes branch restarting `clawbox-hermes-dashboard.service`,
+# and this check reported "0 gaps" while that restart failed on every Hermes
+# device it ran on.
+#
+# So the source text is no longer the only thing pinned. Every non-literal item
+# in the key must be listed in `resolve` (verified against the code) or in
+# `unverified` (with a reason). An item in neither is a hard failure, a
+# `resolve` whose value set no longer matches `argv` is a hard failure, and a
+# declaration whose call site has disappeared is a hard failure too — a stale
+# declaration is how a reviewed decision outlives the code it was about.
 my %DECLARED_ARGV = (
   # src/lib/system-profile.ts — runScript() builds cmd = useSudo ? "sudo" :
   # script and argv = [script, ...args]. The two scripts do NOT share modes, so
   # this is enumerated per script rather than as a cartesian product; --check is
   # absent because the status path runs it without sudo.
-  'src/lib/system-profile.ts :: cmd, argv' => [
-    ['sudo', '/usr/local/libexec/clawbox/clawbox-desktop-mode.sh', '--enable'],
-    ['sudo', '/usr/local/libexec/clawbox/clawbox-desktop-mode.sh', '--disable'],
-    ['sudo', '/usr/local/libexec/clawbox/clawbox-power-mode.sh', '--balanced'],
-    ['sudo', '/usr/local/libexec/clawbox/clawbox-power-mode.sh', '--performance'],
-  ],
+  'src/lib/system-profile.ts :: cmd, argv' => {
+    argv => [
+      ['sudo', '/usr/local/libexec/clawbox/clawbox-desktop-mode.sh', '--enable'],
+      ['sudo', '/usr/local/libexec/clawbox/clawbox-desktop-mode.sh', '--disable'],
+      ['sudo', '/usr/local/libexec/clawbox/clawbox-power-mode.sh', '--balanced'],
+      ['sudo', '/usr/local/libexec/clawbox/clawbox-power-mode.sh', '--performance'],
+    ],
+    unverified => {
+      cmd  => 'runScript() sets cmd = useSudo ? "sudo" : script — a branch on its own '
+            . 'parameter, not a value set anything can enumerate from the file.',
+      argv => 'argv = [script, ...args], assembled from runScript()\'s parameters at each '
+            . 'call site rather than from a table. The four lists above are every MUTATING '
+            . 'caller; the --check modes are absent because the status path runs them with '
+            . 'no sudo at all.',
+    },
+  },
   # src/lib/local-models.ts — verb is enable|disable; unit is constrained to
   # SYSTEM_UNITS by the `allowed.has(unit)` guard immediately above the call.
-  'src/lib/local-models.ts :: "/usr/bin/systemctl", verb, "--now", unit' => [
-    ['/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
-    ['/usr/bin/systemctl', 'disable', '--now', 'ollama.service'],
-  ],
+  'src/lib/local-models.ts :: "/usr/bin/systemctl", verb, "--now", unit' => {
+    argv => [
+      ['/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
+      ['/usr/bin/systemctl', 'disable', '--now', 'ollama.service'],
+    ],
+    resolve    => { unit => 'SYSTEM_UNITS' },
+    unverified => {
+      verb => 'enable|disable, chosen from a boolean by the caller. A parameter, not a '
+            . 'table — but it can only ever be one of those two spellings, and both are '
+            . 'enumerated above.',
+    },
+  },
   # src/lib/local-ai-runtime.ts — systemctlOllama() is private to the module and
   # every caller passes one of the three module-level const argv arrays declared
-  # right above it, each already a literal list. Enumerated here rather than
-  # resolved because the call spreads them (`["-n", ...argv]`).
-  'src/lib/local-ai-runtime.ts :: "-n", ...argv' => [
-    ['-n', '/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
-    ['-n', '/usr/bin/systemctl', 'start', 'ollama.service'],
-    ['-n', '/usr/bin/systemctl', 'stop', 'ollama.service'],
-  ],
+  # right above it. The CONTENTS of those three arrays are re-resolved on every
+  # run, so a `--now` or a unit rename inside one fails this check instead of
+  # failing on a device.
+  'src/lib/local-ai-runtime.ts :: "-n", ...argv' => {
+    argv => [
+      ['-n', '/usr/bin/systemctl', 'enable', '--now', 'ollama.service'],
+      ['-n', '/usr/bin/systemctl', 'start', 'ollama.service'],
+      ['-n', '/usr/bin/systemctl', 'stop', 'ollama.service'],
+    ],
+    resolve => {
+      '...argv' => ['OLLAMA_ENABLE_NOW_ARGV', 'OLLAMA_START_ARGV', 'OLLAMA_STOP_ARGV'],
+    },
+  },
   # src/app/setup-api/system/power/route.ts — POWER_ACTIONS maps the request
   # body to exactly these two; an unmapped action 400s before the call.
-  'src/app/setup-api/system/power/route.ts :: "/usr/bin/systemctl", systemctlAction' => [
-    ['/usr/bin/systemctl', 'poweroff'],
-    ['/usr/bin/systemctl', 'reboot'],
-  ],
-  # src/app/setup-api/clawkeep/restore/route.ts — svc iterates RESTART_SERVICES.
-  'src/app/setup-api/clawkeep/restore/route.ts :: "/usr/bin/systemctl", "restart", svc' => [
-    ['/usr/bin/systemctl', 'restart', 'clawbox-gateway.service'],
-  ],
+  'src/app/setup-api/system/power/route.ts :: "/usr/bin/systemctl", systemctlAction' => {
+    argv => [
+      ['/usr/bin/systemctl', 'poweroff'],
+      ['/usr/bin/systemctl', 'reboot'],
+    ],
+    resolve => { systemctlAction => 'POWER_ACTIONS' },
+  },
 );
 
 # ── Sudo calls that are deliberately NOT in the allow-list ──────────────────
@@ -301,12 +361,306 @@ sub local_consts {
   return \%c;
 }
 
+# ── Verifying a declaration against the code it describes ───────────────────
+#
+# A DECLARED_ARGV entry is a hand-written claim about what a call site can
+# produce, and an unchecked claim rots the moment its producer changes. That is
+# not hypothetical: the ClawKeep restore declaration kept saying
+# "clawbox-gateway.service" long after the route had grown a Hermes branch
+# restarting clawbox-hermes-dashboard.service, and this check reported "0 gaps"
+# while that restart failed on every Hermes device.
+#
+# Everything below re-derives the claim from the source on every run, so the
+# claim fails the build instead of the device.
+
+my (%DECL_USED, %DECL_VERIFIED, %EXEMPT_USED);
+
+# Comments come out before any symbol lookup: an apostrophe in prose would
+# otherwise open a "string" and swallow the brace matching below.
+sub strip_ts_comments {
+  my ($src) = @_;
+  my ($out, $i, $n) = ('', 0, length $src);
+  while ($i < $n) {
+    my $two = substr($src, $i, 2);
+    if ($two eq '//') { $i += 2; $i++ while $i < $n && substr($src, $i, 1) ne "\n"; next }
+    if ($two eq '/*') { $i += 2; $i++ while $i < $n && substr($src, $i, 2) ne '*/'; $i += 2; next }
+    my $ch = substr($src, $i, 1);
+    if ($ch eq '"' || $ch eq "'" || $ch eq '`') {
+      my $q = $ch;
+      $out .= $ch;
+      $i++;
+      while ($i < $n) {
+        my $c = substr($src, $i, 1);
+        $out .= $c;
+        $i++;
+        last if $c eq $q;
+        if ($c eq '\\' && $i < $n) { $out .= substr($src, $i, 1); $i++ }
+      }
+      next;
+    }
+    $out .= $ch;
+    $i++;
+  }
+  return $out;
+}
+
+# The inner text of the balanced group $text starts with, quotes respected.
+sub balanced_group {
+  my ($text, $open, $close) = @_;
+  return undef unless length($text) && substr($text, 0, 1) eq $open;
+  my ($depth, $i, $n) = (0, 0, length $text);
+  while ($i < $n) {
+    my $ch = substr($text, $i, 1);
+    if ($ch eq '"' || $ch eq "'" || $ch eq '`') {
+      my $q = $ch;
+      $i++;
+      while ($i < $n) {
+        my $c = substr($text, $i, 1);
+        $i++;
+        last if $c eq $q;
+        $i++ if $c eq '\\';
+      }
+      next;
+    }
+    if ($ch eq $open) { $depth++ }
+    elsif ($ch eq $close) {
+      $depth--;
+      return substr($text, 1, $i - 1) if $depth == 0;
+    }
+    $i++;
+  }
+  return undef;
+}
+
+# Where a symbol's values live: ('array'|'object'|'function', the inner text).
+sub symbol_definition {
+  my ($src, $name) = @_;
+  if ($src =~ /(?:^|[^A-Za-z0-9_\$])(?:export\s+)?(?:const|let|var)\s+\Q$name\E\s*(?::[^=\n]*)?=\s*/g) {
+    my $rest = substr($src, pos($src));
+    $rest =~ s/^new\s+(?:Set|Map)\s*\(\s*//;
+    return ('array',  balanced_group($rest, '[', ']')) if substr($rest, 0, 1) eq '[';
+    return ('object', balanced_group($rest, '{', '}')) if substr($rest, 0, 1) eq '{';
+    return ('opaque', undef);
+  }
+  if ($src =~ /(?:^|[^A-Za-z0-9_\$])(?:export\s+)?(?:async\s+)?function\s+\Q$name\E\s*(?=\()/g) {
+    my $rest = substr($src, pos($src));
+    my $params = balanced_group($rest, '(', ')');
+    return ('opaque', undef) unless defined $params;
+    my $after = substr($rest, length($params) + 2);
+    $after =~ s/^[^{]*//s;
+    return ('function', balanced_group($after, '{', '}'));
+  }
+  return (undef, undef);
+}
+
+sub unquote {
+  my ($s) = @_;
+  return $1 if $s =~ /^"([^"\\]*)"$/;
+  return $1 if $s =~ /^'([^'\\]*)'$/;
+  return $1 if $s =~ /^`([^`\\\$]*)`$/;
+  return undef;
+}
+
+# Every value a symbol can contribute.
+#   want 'scalar' -> one [value] per array element / Set member / map value
+#   want 'list'   -> one arrayref per array literal, kept whole (for a spread)
+sub resolve_symbol_values {
+  my ($key, $rel, $clean, $consts, $name, $want) = @_;
+  my ($kind, $body) = symbol_definition($clean, $name);
+  fatal("DECLARED_ARGV{$key}\n"
+      . "  `resolve` names `$name`, which $rel does not define as a const array, Set, object\n"
+      . "  literal or function. Point it at the symbol that really holds the values, or move\n"
+      . "  the argument to `unverified` with the reason it cannot be resolved.\n")
+    unless defined $kind && $kind ne 'opaque' && defined $body;
+
+  my @groups;
+  if ($kind eq 'array') {
+    push @groups, [split_argv_items($body)];
+  } elsif ($kind eq 'object') {
+    my @items;
+    while ($body =~ /(?:^|[,{])\s*(?:"[^"]*"|'[^']*'|\[[^\]]*\]|[A-Za-z_\$][A-Za-z0-9_\$]*)\s*:\s*("[^"\\]*"|'[^'\\]*'|[A-Za-z_\$][A-Za-z0-9_\$]*)/g) {
+      push @items, $1;
+    }
+    push @groups, \@items;
+  } else {
+    # A function: the union of every array literal in its body. Restricted to
+    # array literals on purpose — harvesting every string in the body would
+    # collect the operands of `edition === "hermes"` as if they were units.
+    my ($i, $n) = (0, length $body);
+    while ($i < $n) {
+      if (substr($body, $i, 1) eq '[') {
+        my $g = balanced_group(substr($body, $i), '[', ']');
+        if (defined $g) { push @groups, [split_argv_items($g)]; $i += length($g) + 2; next }
+      }
+      $i++;
+    }
+  }
+
+  my @out;
+  for my $g (@groups) {
+    next unless @$g;
+    my ($argv, $why) = resolve_items($rel, $consts, $g);
+    fatal("DECLARED_ARGV{$key}\n"
+        . "  cannot read the values of `$name` in $rel: $why.\n"
+        . "  Give it string literals or string constants, or move the argument to\n"
+        . "  `unverified` with a reason.\n")
+      unless $argv;
+    if ($want eq 'list') { push @out, $argv }
+    else { push @out, map { [$_] } @$argv }
+  }
+  fatal("DECLARED_ARGV{$key}\n"
+      . "  `$name` in $rel yielded no values at all, so nothing was verified. A declaration\n"
+      . "  that silently checks nothing is the failure mode this whole mechanism is for.\n")
+    unless @out;
+  return \@out;
+}
+
+sub report_drift {
+  my ($key, $what, $want, $got, $symbols) = @_;
+  my @missing = grep { !$got->{$_} } sort keys %$want;
+  my @extra   = grep { !$want->{$_} } sort keys %$got;
+  return unless @missing || @extra;
+  my $show = sub { join('', map { '    ' . join(' ', split /\0/, $_) . "\n" } @{ $_[0] }) };
+  my $msg = "DECLARED_ARGV{$key}\n"
+          . "  no longer describes the code. $what resolves out of "
+          . join(', ', @$symbols) . " to a different\n  set of values than the declaration lists.\n";
+  $msg .= "  produced by the code, missing from the declaration:\n" . $show->(\@missing) if @missing;
+  $msg .= "  listed in the declaration, no longer produced by the code:\n" . $show->(\@extra) if @extra;
+  $msg .= "  Update `argv` to match — then check the allow-list still covers every line of it,\n"
+        . "  because a new value here is a new privileged command, and that is what this catches.\n";
+  fatal($msg);
+}
+
+sub verify_declaration {
+  my ($key, $tmpl_src, $decl, $rel, $src, $consts) = @_;
+
+  fatal("DECLARED_ARGV{$key}\n  must be a hash with an `argv` list of argument lists.\n")
+    unless ref $decl eq 'HASH' && ref $decl->{argv} eq 'ARRAY' && @{ $decl->{argv} };
+  my $resolve    = $decl->{resolve}    || {};
+  my $unverified = $decl->{unverified} || {};
+
+  my @tmpl = split_argv_items($tmpl_src);
+  my @dyn;
+  for my $i (0 .. $#tmpl) {
+    next if defined unquote($tmpl[$i]);
+    push @dyn, { idx => $i, name => $tmpl[$i] };
+  }
+
+  # Fail-closed in both directions: nothing dynamic goes undeclared, and nothing
+  # declared outlives the argument it was about.
+  for my $d (@dyn) {
+    next if exists $resolve->{ $d->{name} } || exists $unverified->{ $d->{name} };
+    fatal("DECLARED_ARGV{$key}\n"
+        . "  says nothing about the dynamic argument `$d->{name}`.\n"
+        . "  Add it to `resolve`, naming the symbol that holds its values so this check can\n"
+        . "  verify the declaration against the code, or to `unverified` with the reason it\n"
+        . "  cannot be. A dynamic argument nobody described is how a new privileged command\n"
+        . "  reaches a device without a grant.\n");
+  }
+  my %is_dyn = map { $_->{name} => 1 } @dyn;
+  for my $name (sort(keys %$resolve), sort(keys %$unverified)) {
+    next if $is_dyn{$name};
+    fatal("DECLARED_ARGV{$key}\n"
+        . "  describes `$name`, which this call site no longer passes. Drop it, or re-point it\n"
+        . "  at the argument the call really builds.\n");
+  }
+  for my $name (sort keys %$unverified) {
+    fatal("DECLARED_ARGV{$key}\n  `unverified` entry `$name` needs a reason, not an empty string.\n")
+      unless defined $unverified->{$name} && $unverified->{$name} =~ /\S/;
+  }
+  return unless %$resolve;
+
+  my $clean = strip_ts_comments($src);
+  my @spread = grep { $_->{name} =~ /^\.\.\./ } @dyn;
+
+  if (@spread) {
+    fatal("DECLARED_ARGV{$key}\n"
+        . "  mixes a spread with another dynamic argument. A spread can only be verified when\n"
+        . "  every other item in the call is a literal; mark them `unverified` instead.\n")
+      if @spread > 1 || @dyn > 1;
+    my $sp = $spread[0];
+    my $syms = $resolve->{ $sp->{name} };
+    my @symbols = ref $syms eq 'ARRAY' ? @$syms : ($syms);
+    my %want;
+    for my $sym (@symbols) {
+      $want{ join("\0", @$_) } = 1
+        for @{ resolve_symbol_values($key, $rel, $clean, $consts, $sym, 'list') };
+    }
+    my @before = map { unquote($tmpl[$_]) } (0 .. $sp->{idx} - 1);
+    my @after  = map { unquote($tmpl[$_]) } ($sp->{idx} + 1 .. $#tmpl);
+    my %got;
+    for my $a (@{ $decl->{argv} }) {
+      my @c = @$a;
+      fatal("DECLARED_ARGV{$key}\n  a declared argv is shorter than the literals around the spread.\n")
+        if @c < @before + @after;
+      for my $j (0 .. $#before) {
+        fatal("DECLARED_ARGV{$key}\n"
+            . "  argument $j is the literal `$before[$j]` in the call but `$c[$j]` in a declared\n"
+            . "  argv. The declaration does not describe this call site.\n")
+          unless $c[$j] eq $before[$j];
+      }
+      for my $j (0 .. $#after) {
+        my $pos = scalar(@c) - scalar(@after) + $j;
+        fatal("DECLARED_ARGV{$key}\n"
+            . "  the trailing literal `$after[$j]` is `$c[$pos]` in a declared argv.\n")
+          unless $c[$pos] eq $after[$j];
+      }
+      splice(@c, scalar(@c) - scalar(@after), scalar @after) if @after;
+      splice(@c, 0, scalar @before) if @before;
+      $got{ join("\0", @c) } = 1;
+    }
+    report_drift($key, "the spread `$sp->{name}`", \%want, \%got, \@symbols);
+    return;
+  }
+
+  my $n = scalar @tmpl;
+  fatal("DECLARED_ARGV{$key}\n"
+      . "  has `resolve` entries, but the declared argument lists are not the same length as\n"
+      . "  the call's own argument list, so there is no position to verify them against.\n"
+      . "  Declare the argv the call really passes, or mark every dynamic item `unverified`.\n")
+    if grep { scalar @$_ != $n } @{ $decl->{argv} };
+
+  for my $i (0 .. $#tmpl) {
+    my $lit = unquote($tmpl[$i]);
+    next unless defined $lit;
+    for my $a (@{ $decl->{argv} }) {
+      fatal("DECLARED_ARGV{$key}\n"
+          . "  argument $i is the literal `$lit` in the call but `$a->[$i]` in a declared argv.\n"
+          . "  The declaration does not describe this call site.\n")
+        unless $a->[$i] eq $lit;
+    }
+  }
+  for my $d (@dyn) {
+    next unless exists $resolve->{ $d->{name} };
+    my $syms = $resolve->{ $d->{name} };
+    my @symbols = ref $syms eq 'ARRAY' ? @$syms : ($syms);
+    my %want;
+    for my $sym (@symbols) {
+      $want{ $_->[0] } = 1
+        for @{ resolve_symbol_values($key, $rel, $clean, $consts, $sym, 'scalar') };
+    }
+    my %got = map { $_->[ $d->{idx} ] => 1 } @{ $decl->{argv} };
+    report_drift($key, "`$d->{name}`", \%want, \%got, \@symbols);
+  }
+}
+
+# The one entry point the scanners use: look the declaration up, verify it
+# against the file it describes, and hand back the argument lists.
+sub declared_argv {
+  my ($rel, $norm, $src, $consts) = @_;
+  my $key = "$rel :: $norm";
+  my $decl = $DECLARED_ARGV{$key} or return undef;
+  $DECL_USED{$key} = 1;
+  verify_declaration($key, $norm, $decl, $rel, $src, $consts) unless $DECL_VERIFIED{$key}++;
+  return $decl->{argv};
+}
+
 my (@calls, @unresolved);
 
 sub add_unresolved {
   my ($rel, $raw, $why) = @_;
   my $key = "$rel :: $raw";
-  return if exists $EXEMPT_CALLS{$key};
+  if (exists $EXEMPT_CALLS{$key}) { $EXEMPT_USED{$key} = 1; return }
   push @unresolved, { file => $rel, raw => $raw, why => $why, key => $key };
 }
 
@@ -365,7 +719,7 @@ sub scan_ts {
   while ($raw =~ /$SPAWNERS\s*\(\s*"((?:\/usr\/bin\/)?sudo)"\s*,\s*\[([^\]]*)\]/gs) {
     my ($bin, $args_src) = ($1, $2);
     my $norm = collapse($args_src);
-    if (my $declared = $DECLARED_ARGV{"$rel :: $norm"}) {
+    if (my $declared = declared_argv($rel, $norm, $raw, $consts)) {
       push @calls, { file => $rel, argv => $_ } for @$declared;
       next;
     }
@@ -389,7 +743,7 @@ sub scan_ts {
     while ($raw =~ /$SPAWNERS\s*\(\s*\Q$var\E\s*,\s*([A-Za-z_][A-Za-z0-9_]*)\s*[,)]/gs) {
       my $second = $1;
       my $norm = "$var, $second";
-      if (my $declared = $DECLARED_ARGV{"$rel :: $norm"}) {
+      if (my $declared = declared_argv($rel, $norm, $raw, $consts)) {
         push @calls, { file => $rel, argv => $_ } for @$declared;
         next;
       }
@@ -398,7 +752,7 @@ sub scan_ts {
     while ($raw =~ /$SPAWNERS\s*\(\s*\Q$var\E\s*,\s*\[([^\]]*)\]/gs) {
       my $args_src = $1;
       my $norm = collapse($args_src);
-      if (my $declared = $DECLARED_ARGV{"$rel :: $norm"}) {
+      if (my $declared = declared_argv($rel, $norm, $raw, $consts)) {
         push @calls, { file => $rel, argv => $_ } for @$declared;
         next;
       }
@@ -467,6 +821,34 @@ for my $rel (@files) {
   close $fh;
   next unless defined $src && $src =~ /sudo/;
   if ($rel =~ /\.sh$/) { scan_sh($rel, $src) } else { scan_ts($rel, $src) }
+}
+
+# ── Nothing described here may outlive the code it described ────────────────
+# A declaration or an exemption is a reviewed decision about one call site. When
+# that call site changes shape or goes away, the decision has to be re-made, not
+# inherited: a leftover entry is a standing permission to skip a check, keyed on
+# text nothing in the tree produces any more.
+for my $key (sort keys %DECLARED_ARGV) {
+  next if $DECL_USED{$key};
+  fatal("DECLARED_ARGV{$key}
+"
+      . "  matches no sudo call site in the tree. The call it described was edited, moved or
+"
+      . "  removed; delete the entry, or re-key it on the call as it is written now so it is
+"
+      . "  reviewed against today's code instead of yesterday's.
+");
+}
+for my $key (sort keys %EXEMPT_CALLS) {
+  next if $EXEMPT_USED{$key};
+  fatal("EXEMPT_CALLS{$key}
+"
+      . "  matches no unresolved sudo call site. Either the call is gone, or it now resolves
+"
+      . "  and is being checked properly — both mean the exemption is a permission nobody is
+"
+      . "  using. Delete it.
+");
 }
 
 # ── Match ───────────────────────────────────────────────────────────────────

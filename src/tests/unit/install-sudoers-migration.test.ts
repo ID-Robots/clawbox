@@ -559,3 +559,134 @@ describe("the root-owned helper scripts the grants point at", () => {
     }
   });
 });
+
+// ── What a real device's allow-list actually grants ─────────────────────────
+//
+// The allow-list is only ever as good as the audit of what the product runs,
+// and that audit drifts. It drifted here: PR #471/#495 narrowed the drop-in,
+// then a Hermes branch was added to the ClawKeep restore route and nothing
+// noticed that the unit it restarts has no grant — the restore put every file
+// back on the owner's box and then reported it could not restart the agent.
+//
+// These tests install the SHIPPED file through the real helper and read the
+// exact (verb, unit) pairs back off disk, so no grant can appear or disappear
+// without a test being edited. Editing it is the point: config/clawbox-sudoers
+// is a privilege boundary, and a diff that changes this list is a diff a
+// reviewer has to look at.
+d("the allow-list a device ends up with", () => {
+  const install = () => {
+    const r = runShell(`install_sudoers_dropin "$REPO/config/clawbox-sudoers" clawbox`);
+    expect(r.status).toBe(0);
+    return fs.readFileSync(path.join(tmp, "sudoers.d/clawbox"), "utf-8");
+  };
+  const systemctlGrants = (text: string) =>
+    text
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith("clawbox ") && l.includes("/usr/bin/systemctl"))
+      .map((l) => l.replace(/^.*\/usr\/bin\/systemctl\s+/, "").replace(/\s+/g, " "));
+
+  // Every systemctl privilege the appliance has, in one place. Each line is a
+  // command some product code really issues — scripts/check-sudoers-coverage.sh
+  // fails the build for any line here that nothing invokes, and for any
+  // invocation with no line here.
+  const EXPECTED = [
+    "restart clawbox-gateway.service",
+    "restart clawbox-gateway",
+    "stop clawbox-gateway.service",
+    "stop clawbox-gateway",
+    "--runtime mask clawbox-gateway.service",
+    "--runtime mask clawbox-gateway",
+    "--runtime unmask clawbox-gateway.service",
+    "--runtime unmask clawbox-gateway",
+    "restart clawbox-setup.service",
+    "restart clawbox-setup",
+    "start clawbox-browser.service",
+    "start clawbox-browser",
+    "stop clawbox-browser.service",
+    "stop clawbox-browser",
+    "stop clawbox-tunnel.service",
+    "stop clawbox-tunnel",
+    "restart clawbox-tunnel.service",
+    "restart clawbox-tunnel",
+    "enable clawbox-tunnel.service",
+    "enable clawbox-tunnel",
+    "disable clawbox-tunnel.service",
+    "disable clawbox-tunnel",
+    "restart hermes-gateway.service",
+    "restart hermes-gateway",
+    "enable --now ollama.service",
+    "disable --now ollama.service",
+    "start ollama.service",
+    "stop ollama.service",
+    "reset-failed clawbox-root-update@chpasswd.service",
+    "start clawbox-root-update@chpasswd.service",
+    "reset-failed clawbox-root-update@set_hostname.service",
+    "start clawbox-root-update@set_hostname.service",
+    "reset-failed clawbox-root-update@restart_ap.service",
+    "start clawbox-root-update@restart_ap.service",
+    "reset-failed clawbox-root-update@llamacpp_install.service",
+    "start --no-block clawbox-root-update@llamacpp_install.service",
+    "reboot",
+    "poweroff",
+  ];
+
+  it("grants exactly the systemctl commands the product issues, and no others", () => {
+    expect(systemctlGrants(install())).toEqual(EXPECTED);
+  });
+
+  it("grants the unit a ClawKeep restore restarts on OpenClaw, in both spellings", () => {
+    // src/app/setup-api/clawkeep/restore/route.ts, restartStateHolder(): the
+    // non-hermes branch runs `sudo /usr/bin/systemctl restart
+    // clawbox-gateway.service`. sudoers Cmnd_Spec is exact-string, hence both.
+    const grants = systemctlGrants(install());
+    expect(grants).toContain("restart clawbox-gateway.service");
+    expect(grants).toContain("restart clawbox-gateway");
+  });
+
+  it("still grants nothing over a Hermes dashboard unit", () => {
+    // The Hermes half of the same restore does NOT go through sudo — it calls
+    // bounceHermesDashboard(), which stops the dashboard as the clawbox user
+    // that owns it and lets Restart=always bring it back. A `restart` grant
+    // here would also START a stopped unit, which is precisely how an OpenClaw
+    // box could resurrect the dashboard its foreign-edition teardown had just
+    // stopped and disabled. install-foreign-edition-teardown.test.ts owns that
+    // invariant; this asserts the same thing from the installed file.
+    expect(systemctlGrants(install()).some((g) => g.includes("hermes-dashboard"))).toBe(false);
+  });
+
+  it("grants nothing over the units only root-context code drives", () => {
+    // Each of these appeared on a first-pass grep of "units the product
+    // restarts", and every one of them is issued from somewhere that is ALREADY
+    // root, so a grant would be privilege handed out for nothing:
+    //
+    //   clawbox-vnc, clawbox-websockify, clawbox-firstboot-vnc
+    //     scripts/ensure-vnc-on-first-boot.sh, run by clawbox-firstboot-vnc
+    //     .service — a unit install.sh writes with no User=, i.e. as root.
+    //   clawbox-ap
+    //     scripts/ap-watchdog.sh (clawbox-ap-watchdog.service, root) and
+    //     install.sh itself. The UI path goes through
+    //     clawbox-root-update@restart_ap.service, which IS granted above.
+    //   clawbox-hermes-dashboard-proxy
+    //     scripts/setup-hermes-edition.sh, which install.sh runs as root.
+    const grants = systemctlGrants(install());
+    for (const unit of [
+      "clawbox-vnc",
+      "clawbox-websockify",
+      "clawbox-firstboot-vnc",
+      "clawbox-ap.service",
+      "clawbox-hermes-dashboard-proxy",
+    ]) {
+      expect(grants.some((g) => g.includes(unit)), `${unit} is granted`).toBe(false);
+    }
+  });
+
+  it("reintroduces no blanket rule", () => {
+    // Asserted through the installer's own detector, not a regex of our own:
+    // the thing that has to agree the file is narrow is the code that
+    // quarantines wide ones on real devices.
+    install();
+    const r = runShell(`sudoers_grants_blanket_nopasswd "${tmp}/sudoers.d/clawbox"`);
+    expect(r.status).toBe(1);
+  });
+});
