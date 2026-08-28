@@ -269,6 +269,72 @@ describe("what every run now gets, permanently", () => {
     expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
     expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
   });
+
+  it("opens the file tools for every path, exactly as wide as Bash already is", async () => {
+    // The Snake build stalled here. `Bash(*)` approved `ls` on the projects
+    // folder; the Grep that followed hit a SECOND gate — the working-folder
+    // check, which only `--add-dir` opens — and headless -p has nobody to
+    // open it. `cat` was never narrower than Read, so the file tools were
+    // buying stalls, not secrecy.
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    const i = args.indexOf("--add-dir");
+    expect(i).toBeGreaterThan(-1);
+    expect(args[i + 1]).toBe("/");
+    const allow = args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--disallowedTools"));
+    for (const tool of ["Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit"]) {
+      expect(allow, `${tool} must be allowed for every path`).toContain(tool);
+    }
+  });
+
+  it("keeps --add-dir ahead of the variadic tool flags, so it swallows none of them", async () => {
+    // `--add-dir <directories...>` is variadic like --tools and the two rule
+    // lists: put it last and it eats whatever follows.
+    const lib = await import("@/lib/coding-agent");
+    const args = lib.buildRunArgs({ resumeSessionId: "abc" });
+    for (const flag of ["--tools", "--agents", "--allowedTools", "--disallowedTools", "--resume"]) {
+      expect(args.indexOf("--add-dir"), `--add-dir must precede ${flag}`).toBeLessThan(args.indexOf(flag));
+    }
+    expect(args[args.indexOf("--resume") + 1]).toBe("abc");
+  });
+
+  it("still refuses the credential stores — the widening is about reach, not secrets", async () => {
+    // The whole safety model in one test: a deny rule is evaluated before any
+    // allow rule and before any added directory, so opening every path to the
+    // file tools must leave these closed. If this ever goes green-by-accident
+    // the gateway token, the mail password and the session secret are readable.
+    const lib = await import("@/lib/coding-agent");
+    const { CONFIG_ROOT } = await import("@/lib/config-store");
+    const args = lib.buildRunArgs({ resumeSessionId: null });
+    const deny = args.slice(args.indexOf("--disallowedTools") + 1);
+    const home = osMod.homedir();
+    for (const secret of [
+      pathMod.join(home, ".ssh", "id_ed25519"),
+      pathMod.join(home, ".openclaw", "openclaw.json"),
+      pathMod.join(home, ".hermes", ".env"),
+      pathMod.join(home, ".claude", "settings.json"),
+      pathMod.join(CONFIG_ROOT, "data", ".session-secret"),
+      pathMod.join(CONFIG_ROOT, "data", "config.json"),
+    ]) {
+      expect(lib.denyRulesCover(deny, secret), `${secret} must stay denied`).toBe(true);
+    }
+    // A path-scoped ALLOW rule would be a narrower exception someone could
+    // later point at a credential store. There are none: the widening is six
+    // bare tool names and one added directory.
+    const allow = args.slice(args.indexOf("--allowedTools") + 1, args.indexOf("--disallowedTools"));
+    for (const rule of allow) expect(rule, `${rule} must not name a path`).not.toMatch(/^(?:Read|Edit|Write|Glob|Grep|NotebookEdit)\(/);
+  });
+
+  it("never reaches for the flag that would void the deny rules", async () => {
+    // `--dangerously-skip-permissions` / `bypassPermissions` is the tempting
+    // way to spell "all permissions"; it skips EVERY check, deny rules
+    // included, and would hand a run the credential stores.
+    const lib = await import("@/lib/coding-agent");
+    const joined = lib.buildRunArgs({ resumeSessionId: null }).join(" ");
+    expect(joined).not.toContain("--dangerously-skip-permissions");
+    expect(joined).not.toContain("bypassPermissions");
+  });
+
 });
 
 describe("working in a folder the owner already has", () => {
@@ -310,42 +376,3 @@ describe("working in a folder the owner already has", () => {
       .rejects.toThrow(/absolute path, or a folder name/i);
   });
 });
-
-describe("what every run now gets, permanently", () => {
-  // The owner removed both switches: full command access and sub-agents are
-  // always on. These pin what that means so it cannot drift back silently.
-
-  it("allows every command — no allow-list, no command deny-list", async () => {
-    const lib = await import("@/lib/coding-agent");
-    const args = lib.buildRunArgs({ resumeSessionId: null });
-    expect(args[args.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
-    for (const rule of lib.BASH_DENYLIST) expect(args.join(" ")).not.toContain(rule);
-  });
-
-  it("still ships the credential file rules, because they cost nothing", async () => {
-    // They bind Claude Code's own Read/Edit/Write and NOT Bash — an
-    // interpreter reads the file either way, measured on the box. Worth
-    // keeping, not worth trusting.
-    const lib = await import("@/lib/coding-agent");
-    const joined = lib.buildRunArgs({ resumeSessionId: null }).join(" ");
-    for (const secret of ["config.json", ".mcp-token", ".session-secret"]) {
-      expect(joined).toContain(secret);
-    }
-  });
-
-  it("always offers the Agent tool and the three definitions", async () => {
-    const lib = await import("@/lib/coding-agent");
-    const args = lib.buildRunArgs({ resumeSessionId: null });
-    expect(args[args.indexOf("--tools") + 1].split(",")).toContain("Agent");
-    const defs = JSON.parse(args[args.indexOf("--agents") + 1]);
-    expect(Object.keys(defs).sort()).toEqual(["explorer", "reviewer", "tester"]);
-  });
-
-  it("keeps acceptEdits and the capability drop", async () => {
-    const lib = await import("@/lib/coding-agent");
-    const args = lib.buildRunArgs({ resumeSessionId: null });
-    expect(args[args.indexOf("--permission-mode") + 1]).toBe("acceptEdits");
-    expect(lib.CAPABILITY_DROP_ARGS).toContain("--ambient-caps=-all");
-  });
-});
-
