@@ -199,8 +199,14 @@ async function syncDirectory(dir: string): Promise<void> {
   let handle: Awaited<ReturnType<typeof fs.open>>;
   try {
     handle = await fs.open(dir, "r");
-  } catch {
-    return;
+  } catch (err) {
+    // The same refusals a filesystem can give the sync itself are forgiven at
+    // the open; anything else (ENOENT for a directory that just held a rename,
+    // EIO, EMFILE) is an I/O failure the caller must hear about, or the
+    // "durable" in this writer's contract would be a word.
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    if (DIRECTORY_SYNC_REFUSALS.has(code)) return;
+    throw err;
   }
   try {
     await handle.sync();
