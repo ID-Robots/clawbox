@@ -50,6 +50,13 @@ export interface ProviderStatusRow {
   /** True for the provider the harness config actually names as its default. */
   isDefault: boolean;
   /**
+   * The owner's switch, orthogonal to `state`: a provider can be connected and
+   * switched off at the same time, and the strip shows both facts. False only
+   * for an id in `ai_disabled_providers`; see `provider-enablement.ts` for the
+   * rule that keeps the default out of that list.
+   */
+  enabled: boolean;
+  /**
    * Which Settings section configures this row, so a click on the chip lands
    * where the fix is. Local engines are configured in their own section and
    * saying "AI Provider" for them would send the user to a panel that cannot
@@ -90,13 +97,18 @@ const LOCAL_PROVIDER_LABELS: Record<string, string> = {
 const LOCAL_PROVIDER_IDS = new Set(Object.keys(LOCAL_PROVIDER_LABELS));
 
 /**
- * Collapse the wire spellings of one vendor onto one id, so a provider cannot
- * appear twice in a strip whose whole job is to be scannable. Mirrors the
- * normaliser `/setup-api/ai-models/status` already uses; kept in step with it
- * deliberately, because a row the two disagreed about would show as connected
- * in one place and absent in the other.
+ * Collapse OpenClaw's wire spellings of one vendor onto one id, so a provider
+ * cannot appear twice in a strip whose whole job is to be scannable. Mirrors
+ * the normaliser `/setup-api/ai-models/status` already uses; kept in step with
+ * it deliberately, because a row the two disagreed about would show as
+ * connected in one place and absent in the other.
+ *
+ * OpenClaw only. Hermes' ids are already canonical (`gemini`, `openai-codex`,
+ * `clawlocal`) and are used verbatim — this would fold `openai-codex` onto
+ * `openai`, an id no Hermes row carries. `canonicalProviderId` is the
+ * harness-aware entry point.
  */
-function normalizeOpenclawProvider(provider: string | null | undefined): string | null {
+export function normalizeProviderId(provider: string | null | undefined): string | null {
   if (!provider) return null;
   const normalized = provider.trim().toLowerCase();
   if (!normalized) return null;
@@ -110,8 +122,42 @@ function normalizeOpenclawProvider(provider: string | null | undefined): string 
   return normalized;
 }
 
+/**
+ * The id a provider is keyed by in the status rows — and therefore in the
+ * owner's disabled list, which must match those rows exactly or a switch
+ * flipped on one id would never be seen on the other.
+ */
+export function canonicalProviderId(harness: Harness, provider: string | null | undefined): string | null {
+  if (harness === "openclaw") return normalizeProviderId(provider);
+  const trimmed = provider?.trim().toLowerCase();
+  return trimmed || null;
+}
+
+/**
+ * Config-store key for the providers the owner has switched off: an array of
+ * canonical ids. Read here, because the status is what stamps `enabled` on
+ * every row; written only by `provider-enablement.ts`, which owns the rule.
+ */
+export const DISABLED_PROVIDERS_KEY = "ai_disabled_providers";
+
+/**
+ * The stored list as a set, tolerant of anything that is not one: the store
+ * is hand-editable JSON, and a malformed value must read as "nothing disabled"
+ * rather than take the status endpoint down.
+ */
+export function parseDisabledProviders(raw: unknown): Set<string> {
+  if (!Array.isArray(raw)) return new Set();
+  return new Set(raw.filter((id): id is string => typeof id === "string" && id.length > 0));
+}
+
 function sectionFor(id: string): "ai" | "localAi" {
   return LOCAL_PROVIDER_IDS.has(id) ? "localAi" : "ai";
+}
+
+/** A row before the owner's switch is stamped on it; see `readProviderStatus`. */
+type UnstampedRow = Omit<ProviderStatusRow, "enabled">;
+interface UnstampedSummary extends Omit<ProviderStatusSummary, "providers"> {
+  providers: UnstampedRow[];
 }
 
 /**
@@ -134,7 +180,7 @@ function stateFor(credentialed: boolean | null, isDefault: boolean): ProviderCon
  * (`authenticated` per row) and `getModelOptions` is the memoised reader for
  * it, so the aggregate costs no more than the panel's own existing load.
  */
-async function readHermesStatus(): Promise<ProviderStatusSummary> {
+async function readHermesStatus(): Promise<UnstampedSummary> {
   const payload = await getModelOptions();
   const byId = new Map(payload.providers.map((row) => [row.id, row]));
   const defaultProvider = payload.current.provider || null;
@@ -200,20 +246,20 @@ async function readHermesStatus(): Promise<ProviderStatusSummary> {
  * definition — the same two places `/setup-api/chat/model` builds its dropdown
  * from, so the strip and the chat can never disagree about who is available.
  */
-async function readOpenclawStatus(): Promise<ProviderStatusSummary> {
+async function readOpenclawStatus(): Promise<UnstampedSummary> {
   const config = await readConfig();
   const profiles = config.auth?.profiles ?? {};
   const definitions = config.models?.providers ?? {};
 
   const credentialed = new Set<string>();
   for (const [profileKey, entry] of Object.entries(profiles)) {
-    const id = normalizeOpenclawProvider(entry?.provider ?? profileKey.split(":")[0]);
+    const id = normalizeProviderId(entry?.provider ?? profileKey.split(":")[0]);
     if (id) credentialed.add(id);
   }
   for (const [wireId, definition] of Object.entries(definitions)) {
     const key = (definition as { apiKey?: unknown })?.apiKey;
     if (typeof key !== "string" || !key.trim()) continue;
-    const id = normalizeOpenclawProvider(wireId);
+    const id = normalizeProviderId(wireId);
     if (id) credentialed.add(id);
   }
   // The ClawBox AI credential can live in the config store instead of the
@@ -222,7 +268,7 @@ async function readOpenclawStatus(): Promise<ProviderStatusSummary> {
   if (await hasClawaiToken()) credentialed.add("clawai");
 
   const primary = config.agents?.defaults?.model?.primary ?? null;
-  const defaultProvider = normalizeOpenclawProvider(primary ? primary.split("/")[0] : null);
+  const defaultProvider = normalizeProviderId(primary ? primary.split("/")[0] : null);
 
   const rows: { id: string; label: string }[] = [...OPENCLAW_PANEL_PROVIDERS];
 
@@ -230,7 +276,7 @@ async function readOpenclawStatus(): Promise<ProviderStatusSummary> {
   // titled "what is connected" even though it is configured elsewhere — the
   // `section` field is what keeps a click on it honest.
   const storedLocal = await getConfigValue("local_ai_provider").catch(() => null);
-  const localProvider = normalizeOpenclawProvider(
+  const localProvider = normalizeProviderId(
     typeof storedLocal === "string" ? storedLocal : null,
   );
   if (localProvider && LOCAL_PROVIDER_IDS.has(localProvider)) {
@@ -268,7 +314,17 @@ async function readOpenclawStatus(): Promise<ProviderStatusSummary> {
 export async function readProviderStatus(): Promise<ProviderStatusSummary> {
   const harness = await getActiveHarness().catch(() => "openclaw" as Harness);
   try {
-    return harness === "hermes" ? await readHermesStatus() : await readOpenclawStatus();
+    const summary = harness === "hermes" ? await readHermesStatus() : await readOpenclawStatus();
+    // Stamped once, here, rather than inside each reader: the switch is the
+    // same fact on both harnesses, and one site cannot disagree with itself
+    // about what "enabled" means.
+    const disabled = parseDisabledProviders(
+      await getConfigValue(DISABLED_PROVIDERS_KEY).catch(() => null),
+    );
+    return {
+      ...summary,
+      providers: summary.providers.map((row) => ({ ...row, enabled: !disabled.has(row.id) })),
+    };
   } catch {
     return { harness, providers: [], defaultProvider: null, degraded: true };
   }

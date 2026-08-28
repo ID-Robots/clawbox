@@ -583,4 +583,49 @@ describe("/setup-api/chat/model", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
   });
+
+  describe("the owner's per-provider switch", () => {
+    beforeEach(() => {
+      vi.mocked(getAll).mockResolvedValue({
+        ai_model_provider: "clawai",
+        local_ai_provider: "llamacpp",
+        local_ai_model: "llamacpp/gemma4-e2b-it-q4_0",
+        ai_disabled_providers: ["anthropic"],
+      });
+      vi.mocked(readConfig).mockResolvedValue({
+        auth: {
+          profiles: {
+            "deepseek:default": { provider: "deepseek", mode: "api_key" },
+            "anthropic:default": { provider: "anthropic", mode: "token" },
+          },
+        },
+        agents: { defaults: { model: { primary: "deepseek/deepseek-v4-flash" } } },
+      } as never);
+    });
+
+    it("keeps a switched-off provider in the list, greyed and carrying the reason", async () => {
+      // Not dropped: a row that vanishes reads as "not connected" and sends
+      // the owner to re-enter a key that is fine.
+      const body = await (await GET()).json();
+
+      const anthropic = body.options.find((option: { provider: string }) => option.provider === "anthropic");
+      expect(anthropic).toMatchObject({ available: false, disabledByOwner: true });
+      const clawai = body.options.find((option: { provider: string }) => option.provider === "clawai");
+      expect(clawai.available).toBe(true);
+      expect(clawai).not.toHaveProperty("disabledByOwner");
+    });
+
+    it("refuses to switch to a model on a switched-off provider, before any write", async () => {
+      const response = await POST(new Request("http://localhost/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "anthropic/claude-sonnet-4-6" }),
+      }));
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ kind: "provider_disabled", provider: "anthropic" });
+      expect(runOpenclawConfigSet).not.toHaveBeenCalled();
+      expect(restartGateway).not.toHaveBeenCalled();
+    });
+  });
 });

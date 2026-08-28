@@ -3,6 +3,7 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { isPlausibleHermesProviderId } from "@/lib/hermes-providers";
+import { isProviderEnabled } from "@/lib/provider-enablement";
 import { POST as setHermesPairing } from "@/app/setup-api/hermes/models/route";
 import {
   GET as readChatModelState,
@@ -50,6 +51,17 @@ export async function POST(request: Request) {
   // CLI flag out of the call entirely.
   if (!provider || !isPlausibleHermesProviderId(provider)) {
     return NextResponse.json({ error: "Invalid provider" }, { status: 400 });
+  }
+
+  // The owner's switch, checked before either harness is asked. A provider
+  // switched off may still hold a working credential, so neither delegate
+  // would refuse it on its own — and promoting it would put the box's default
+  // on a provider the owner just said not to use.
+  if (!(await isProviderEnabled(provider))) {
+    return NextResponse.json(
+      { error: "That provider is switched off. Switch it on first.", kind: "provider_disabled", provider },
+      { status: 409 },
+    );
   }
 
   const harness = await getActiveHarness();

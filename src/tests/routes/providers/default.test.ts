@@ -16,12 +16,14 @@ vi.mock("@/lib/harness", () => ({
 }));
 vi.mock("@/app/setup-api/hermes/models/route", () => ({ POST: vi.fn() }));
 vi.mock("@/app/setup-api/chat/model/route", () => ({ GET: vi.fn(), POST: vi.fn() }));
+vi.mock("@/lib/provider-enablement", () => ({ isProviderEnabled: vi.fn() }));
 
 let POST: (request: Request) => Promise<Response>;
 let getActiveHarness: Mock;
 let hermesModelsPOST: Mock;
 let chatModelGET: Mock;
 let chatModelPOST: Mock;
+let isProviderEnabled: Mock;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
@@ -44,7 +46,26 @@ beforeEach(async () => {
   ({ getActiveHarness } = (await import("@/lib/harness")) as unknown as { getActiveHarness: Mock });
   ({ POST: hermesModelsPOST } = (await import("@/app/setup-api/hermes/models/route")) as unknown as { POST: Mock });
   ({ GET: chatModelGET, POST: chatModelPOST } = (await import("@/app/setup-api/chat/model/route")) as unknown as { GET: Mock; POST: Mock });
+  ({ isProviderEnabled } = (await import("@/lib/provider-enablement")) as unknown as { isProviderEnabled: Mock });
+  isProviderEnabled.mockResolvedValue(true);
   ({ POST } = await import("@/app/setup-api/providers/default/route"));
+});
+
+describe("the owner's switch", () => {
+  it.each(["hermes", "openclaw"])("on %s, refuses to promote a provider the owner switched off", async (harness) => {
+    // The provider may well hold a working credential, so neither harness
+    // delegate would refuse it on its own; this is the one place that asks.
+    getActiveHarness.mockResolvedValue(harness);
+    isProviderEnabled.mockResolvedValue(false);
+
+    const res = await call({ provider: "openrouter" });
+
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({ kind: "provider_disabled", provider: "openrouter" });
+    expect(hermesModelsPOST).not.toHaveBeenCalled();
+    expect(chatModelGET).not.toHaveBeenCalled();
+    expect(chatModelPOST).not.toHaveBeenCalled();
+  });
 });
 
 describe("POST /setup-api/providers/default — Hermes", () => {

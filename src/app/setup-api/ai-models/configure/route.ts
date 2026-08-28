@@ -60,6 +60,8 @@ import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/op
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { fetchPortalTier } from "@/lib/clawbox-ai-portal-tier";
 import { isValidModelId, isCatalogProvider, GOOGLE_MODELS, ANTHROPIC_MODELS, extractProviderModelId } from "@/lib/provider-models";
+import { normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
+import { setProviderEnabled } from "@/lib/provider-enablement";
 import { refreshInBackground as refreshCatalogInBackground } from "@/app/setup-api/ai-models/catalog/route";
 import {
   isClaudeSubscriptionOnly,
@@ -944,6 +946,16 @@ async function getStoredLocalFallbackModel(): Promise<string | null> {
 }
 
 /**
+ * The providers the owner has switched off. The fallback slot honours the
+ * switch too: a provider the gateway would quietly route to when the primary
+ * fails is exactly what "switched off" promises cannot happen.
+ */
+async function readDisabledProviders(): Promise<Set<string>> {
+  const config = await getAll().catch(() => ({} as Record<string, unknown>));
+  return parseDisabledProviders(config.ai_disabled_providers);
+}
+
+/**
  * The local model that should back up `primaryModel`, or null when there is
  * none to use.
  *
@@ -955,8 +967,10 @@ async function pickLocalFallbackModel(
   primaryModel?: string | null,
   preferredLocalModel?: string,
 ): Promise<string | null> {
+  const disabled = await readDisabledProviders();
   const fallbackCandidates = [preferredLocalModel, await getStoredLocalFallbackModel()]
-    .filter((model): model is string => !!model && model !== primaryModel);
+    .filter((model): model is string => !!model && model !== primaryModel)
+    .filter((model) => !disabled.has(normalizeProviderId(model.split("/")[0]) ?? ""));
   return fallbackCandidates[0] ?? null;
 }
 
@@ -974,14 +988,17 @@ async function ensureFallbackModel(
   }
 
   try {
-    const fallbackConfigured = await configureClawboxAi(true, preferredClawboxAiToken);
+    // ClawBox AI is the last resort, and the owner's switch reaches it too.
+    const clawaiSwitchedOff = (await readDisabledProviders()).has("clawai");
+    const fallbackConfigured = !clawaiSwitchedOff
+      && await configureClawboxAi(true, preferredClawboxAiToken);
     if (fallbackConfigured) {
       console.log("[AI Config] Configured ClawBox AI as fallback model");
       return;
     }
 
     await setFallbackModels([]);
-    console.log("[AI Config] Cleared stale fallback (no local or ClawBox AI backup available)");
+    console.log("[AI Config] Cleared stale fallback (no enabled local or ClawBox AI backup available)");
   } catch (err) {
     console.warn("[AI Config] Failed to configure fallback model:", err instanceof Error ? logSafe(err.message) : err);
   }
@@ -1813,6 +1830,16 @@ export async function POST(request: Request) {
         ...(isClawAI ? { [CLAWBOX_AI_TOKEN_CONFIG_KEY]: clawboxAiToken } : {}),
         ...(clawboxAiTierForStore ? { [CLAWBOX_AI_TIER_CONFIG_KEY]: clawboxAiTierForStore } : {}),
       });
+    }
+
+    // Connecting a provider is the owner saying "use this one": a provider the
+    // switch had turned off comes back on, or the save below would route the
+    // chat to something the provider list still shows as switched off.
+    // Non-fatal — the switch is bookkeeping, the credential write is the save.
+    try {
+      await setProviderEnabled(ocProvider, true);
+    } catch (err) {
+      console.error("[ai-models/configure] could not re-enable the provider:", err instanceof Error ? err.message : err);
     }
 
     // 7. For ClawBox AI (DeepSeek) or Ollama, define a custom provider in openclaw.json

@@ -297,6 +297,8 @@ describe("SettingsApp mascot phrase refresh", () => {
   });
 
   const clickRefresh = async () => {
+    // Settings opens on AI Models; the phrase refresh lives in Appearance.
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
     const button = await screen.findByRole("button", { name: /settings\.mascotRefresh$/ });
     fireEvent.click(button);
     return button;
@@ -635,5 +637,61 @@ describe("SettingsApp messaging channels hub", () => {
 
     await waitFor(() => expect(screen.getByTestId("settings-channels-back")).toBeInTheDocument());
     expect(accountsButton().className).toContain("coral-bright");
+  });
+});
+
+/**
+ * The merged AI page — cloud providers and the on-device model behind one
+ * sidebar entry, with the unified provider list above two tabs. The old
+ * "localAi" section id survives as a deep link that lands on the Local tab.
+ */
+describe("SettingsApp merged AI page", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
+      const url = input.toString();
+      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
+      if (url.startsWith("/setup-api/providers/status")) {
+        return jsonResponse({ harness: "openclaw", providers: [], defaultProvider: null, degraded: false });
+      }
+      return jsonResponse({});
+    }));
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function navButtons(container: HTMLElement): HTMLElement[] {
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    return [...nav.querySelectorAll(":scope > button")] as HTMLElement[];
+  }
+
+  it("carries one AI Models entry and no separate Local AI row", () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const labels = navButtons(container).map((b) => b.textContent ?? "");
+    expect(labels.some((l) => l.includes("settings.aiModels"))).toBe(true);
+    expect(labels.some((l) => l.includes("settings.localAi"))).toBe(false);
+    expect(labels.some((l) => l.includes("settings.aiProvider"))).toBe(false);
+  });
+
+  it("shows the provider list and opens the Local tab from the old localAi deep link", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const ai = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.aiModels"));
+    if (!ai) throw new Error("AI Models nav entry did not render");
+    fireEvent.click(ai);
+    expect(await screen.findByTestId("ai-provider-list")).toBeInTheDocument();
+    expect(screen.getByTestId("settings-ai-tab-cloud")).toHaveAttribute("aria-selected", "true");
+
+    fireEvent.click(screen.getByTestId("settings-ai-tab-local"));
+    expect(screen.getByTestId("settings-ai-tab-local")).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByTestId("settings-local-ai-step")).toBeInTheDocument();
+
+    // Back to cloud, then the legacy deep link must land on Local again.
+    fireEvent.click(screen.getByTestId("settings-ai-tab-cloud"));
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localAi" } }));
+    await waitFor(() => expect(screen.getByTestId("settings-ai-tab-local")).toHaveAttribute("aria-selected", "true"));
+    // And the sidebar keeps the merged entry lit, since Local AI has no row.
+    expect(ai.className).toContain("coral-bright");
   });
 });
