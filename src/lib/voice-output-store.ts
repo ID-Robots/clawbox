@@ -129,11 +129,17 @@ export async function readLocalVoice(): Promise<string | null> {
   }
 }
 
+/**
+ * The voice is written the way the state is, below: `clawbox-tts.sh` reads
+ * this file on EVERY utterance, and a plain `writeFile` truncates before it
+ * writes — a read in that window finds an empty file and speaks the default,
+ * and an unplugged box could leave it that way.
+ */
 export async function writeLocalVoice(voice: string): Promise<void> {
   if (!isLocalVoice(voice)) throw new Error("Unknown local voice.");
   const target = localVoicePath();
   await fs.mkdir(path.dirname(target), { recursive: true });
-  await fs.writeFile(target, `${voice}\n`, { mode: 0o600 });
+  await writeFileAtomically(target, `${voice}\n`);
 }
 
 export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
@@ -141,21 +147,31 @@ export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
   // Atomic, like every other state file in data/: a half-written selection read
   // by the next request would look like a corrupt file and silently reset the
   // customer's choice to Auto.
-  const tmp = `${VOICE_STATE_PATH}.tmp.${crypto.randomBytes(4).toString("hex")}`;
+  await writeFileAtomically(VOICE_STATE_PATH, JSON.stringify(state, null, 2));
+}
+
+/**
+ * Write `contents` so a reader sees the old file or the new one, never a
+ * truncated one, and so the swap cannot outlive its own bytes.
+ *
+ * rename() makes the swap atomic against a reader; it does not make the new
+ * bytes durable. This runs on a Jetson that gets unplugged, and a rename that
+ * outlives its own contents leaves a truncated file — which reads as corrupt
+ * and silently resets the customer's choice, exactly the loss the atomic
+ * write is here to prevent. So sync before swapping. 0600 because the state
+ * is the box's own; the temp name is unique so two writers cannot share one.
+ */
+async function writeFileAtomically(target: string, contents: string): Promise<void> {
+  const tmp = `${target}.tmp.${crypto.randomBytes(4).toString("hex")}`;
   try {
-    // rename() makes the swap atomic against a reader; it does not make the new
-    // bytes durable. This runs on a Jetson that gets unplugged, and a rename
-    // that outlives its own contents leaves a truncated file — which reads as
-    // corrupt and silently resets the customer's choice to Auto, exactly the
-    // loss the atomic write is here to prevent. So sync before swapping.
     const handle = await fs.open(tmp, "w", 0o600);
     try {
-      await handle.writeFile(JSON.stringify(state, null, 2));
+      await handle.writeFile(contents);
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await fs.rename(tmp, VOICE_STATE_PATH);
+    await fs.rename(tmp, target);
   } catch (err) {
     await fs.unlink(tmp).catch(() => {});
     throw err;

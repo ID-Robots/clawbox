@@ -38,6 +38,17 @@ export const zh: Record<string, string> = {
   "settings.codingAgent": "编程助手",
   "settings.codingAgentHint": "让助手把整项编程任务交给这台设备上的 Claude Code 运行，并设定每次运行可以走多远。",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "云端提供商",
+  "settings.providers.hint": "默认提供商最先响应；已关闭的提供商保留其登录信息，但绝不会被使用。",
+  "settings.providers.readError": "无法从这台 ClawBox 读取提供商列表。正在显示最后已知的状态。",
+  "settings.providers.changeFailed": "无法更改提供商。",
+  "settings.providers.enable": "启用 {name}",
+  "settings.providers.switchedOff": "已关闭",
+  "settings.providers.makeDefault": "设为默认",
+  "settings.providers.lockedHint": "请先将另一个提供商设为默认。",
+  "settings.providers.empty": "尚未连接任何提供商 — 请在下方连接一个。",
+
   // === System password card ===
   "settings.security.passwordLabel": "密码",
   "settings.security.passwordHintPrefix": "用于网页登录、SSH 和",

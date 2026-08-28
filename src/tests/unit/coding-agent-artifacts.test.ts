@@ -58,6 +58,30 @@ describe("listing", () => {
     expect(lib.listArtifacts("../../etc")).toEqual([]);
     expect(() => lib.artifactsDir("run-UPPER!!!")).toThrow();
   });
+
+  it("keeps the NEWEST entries when a run archived more than the cap, report.md among them", () => {
+    // A run that took 99 screenshots (run-yuyqta4t) writes its report last.
+    // A cap that kept the oldest would drop the one file the owner opens
+    // first, and every screenshot of the finished work.
+    const dir = lib.ensureArtifactsDir(RUN_ID);
+    const epoch = Math.floor(Date.now() / 1000) - 10_000;
+    const total = lib.MAX_ARTIFACTS + 10;
+    for (let i = 1; i <= total; i++) {
+      const file = path.join(dir, `shot-${String(i).padStart(3, "0")}.png`);
+      fs.writeFileSync(file, "png");
+      fs.utimesSync(file, epoch + i, epoch + i);
+    }
+    expect(lib.writeRunReport(RUN_ID, "## Done")).toBe(true);
+
+    const names = lib.listArtifacts(RUN_ID).map((a) => a.name);
+    expect(names).toHaveLength(lib.MAX_ARTIFACTS);
+    expect(names.at(-1)).toBe(lib.REPORT_FILE);
+    expect(names[0]).toBe(`shot-${String(total - lib.MAX_ARTIFACTS + 2).padStart(3, "0")}.png`);
+    expect(names).not.toContain("shot-001.png");
+    expect(names).toContain(`shot-${String(total).padStart(3, "0")}.png`);
+    // Dropped from the list, never from disk.
+    expect(fs.existsSync(path.join(dir, "shot-001.png"))).toBe(true);
+  });
 });
 
 describe("serving gate", () => {

@@ -69,7 +69,7 @@ let posts: { url: string; body: unknown }[];
 function stubFetch(
   status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY },
   runsArg: unknown[] = [],
-  opts: { artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null } = {},
+  opts: { artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string } = {},
 ) {
   let runs = runsArg;
   posts = [];
@@ -115,7 +115,12 @@ function stubFetch(
     }
     if (url === "/setup-api/coding-agent/run" && init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
-      return json({ started: true, run: { ...RUN, id: "run-smoke001", status: "running" } }, 202);
+      // The started run is in the listing from the next poll on, as the
+      // runner's record is on the box — carrying its transcript path when the
+      // test says Claude Code has opened the file by then.
+      const started = { ...RUN, id: "run-smoke001", status: "running", completedAt: null, transcriptPath: opts.transcriptPath ?? null };
+      runs = [started, ...runs];
+      return json({ started: true, run: started }, 202);
     }
     return json({ error: "unexpected" }, 404);
   }));
@@ -355,8 +360,10 @@ describe("CodingAgentApp", () => {
 });
 
 describe("the harness self-test", () => {
+  const TRANSCRIPT = "/home/clawbox/.claude-ds/projects/-home-clawbox-clawbox-data-code-projects-harness-test/61400ab6-0da9-4feb-8ad5-b547239c1367.jsonl";
+
   it("dispatches the canned smoke run into its scratch project and opens the live view", async () => {
-    stubFetch({ enabled: true, readiness: READY }, []);
+    stubFetch({ enabled: true, readiness: READY }, [], { transcriptPath: TRANSCRIPT });
     const opened: string[] = [];
     const onTerminal = (e: Event) => opened.push((e as CustomEvent<{ command: string }>).detail.command);
     window.addEventListener("clawbox:open-terminal", onTerminal);
@@ -374,6 +381,9 @@ describe("the harness self-test", () => {
       // The task names itself a smoke test, so the brief's "complete, polished
       // app" bar does not inflate it into a real feature build.
       expect(String((runPost?.body as { task?: string }).task)).toContain("smoke test");
+      // The live view: the Terminal app is handed the preview script on the
+      // run's transcript, single-quoted, once the listing carries the path.
+      await waitFor(() => expect(opened).toEqual([`/home/clawbox/clawbox/scripts/coding-run-preview '${TRANSCRIPT}'`]));
     } finally {
       window.removeEventListener("clawbox:open-terminal", onTerminal);
     }

@@ -7,6 +7,10 @@
  * into a reply. The rest pins the flow's verdicts: pending stays pending,
  * slow_down slows down, declined and expired end the flow, and a fresh start
  * is always the retry.
+ *
+ * The cadence is pinned here too, because it is enforced HERE: github.com
+ * answers slow_down to this process, and a caller that polls early must be
+ * answered from memory, not with another request that earns the next one.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -27,16 +31,22 @@ function githubAnswers(body: Record<string, unknown>, ok = true): void {
 
 const CODES = { device_code: "dev-123", user_code: "8A5B-0396", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 5 };
 
+/** The clock the cadence is measured on; tests move it instead of waiting. */
+let now = 1_700_000_000_000;
+
 beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   vi.stubGlobal("fetch", fetchMock);
+  now = 1_700_000_000_000;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
   runChild.mockResolvedValue({ code: 0, stdout: "", stderr: "Logged in to github.com as yalexx", signal: null, timedOut: false, startFailed: false, startError: null });
   lib = await import("@/lib/coding-github");
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 describe("starting", () => {
@@ -61,14 +71,58 @@ describe("polling", () => {
 
   it("stays pending while the owner has not entered the code, and slows down when told to", async () => {
     githubAnswers({ error: "authorization_pending" });
-    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending" });
+    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending", interval: 5 });
+    now += 5_000;
     githubAnswers({ error: "slow_down" });
-    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending" });
+    // RFC 8628: slow_down adds five seconds. The answer carries the new
+    // cadence so the card can fall into step.
+    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending", interval: 10 });
+  });
+
+  it("answers an early poll from memory, without asking github.com", async () => {
+    githubAnswers({ error: "authorization_pending" });
+    await lib.pollDeviceLogin();
+    expect(fetchMock).toHaveBeenCalledTimes(2); // start + one poll
+    // Four seconds later: too soon at a five-second cadence.
+    now += 4_000;
+    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending", interval: 5 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Once the cadence has passed, the next poll goes out.
+    now += 1_000;
+    githubAnswers({ error: "authorization_pending" });
+    await lib.pollDeviceLogin();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("holds the slower cadence after a slow_down — the old one would earn another", async () => {
+    githubAnswers({ error: "slow_down" });
+    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending", interval: 10 });
+    // A caller still on the original five-second timer.
+    now += 5_000;
+    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending", interval: 10 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    now += 5_000;
+    githubAnswers({ error: "authorization_pending" });
+    await lib.pollDeviceLogin();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("treats a transient network fault as pending — the code is still valid", async () => {
     fetchMock.mockRejectedValueOnce(new Error("flaky"));
-    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending" });
+    expect(await lib.pollDeviceLogin()).toEqual({ status: "pending", interval: 5 });
+  });
+
+  it("does not let a poll that was in flight when the login was cancelled store a token", async () => {
+    // The answer belongs to a flow that no longer exists.
+    let answer: (body: Record<string, unknown>) => void = () => {};
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {
+      answer = (body) => resolve({ ok: true, json: async () => body } as Response);
+    }));
+    const poll = lib.pollDeviceLogin();
+    lib.cancelDeviceLogin();
+    answer({ access_token: "gho_secret_token_value" });
+    expect((await poll).status).toBe("failed");
+    expect(runChild.mock.calls.some(([bin, args]) => bin === "gh" && (args as string[]).includes("--with-token"))).toBe(false);
   });
 
   it("ends the flow when the owner declines, and a new start is the retry", async () => {
@@ -76,6 +130,7 @@ describe("polling", () => {
     const out = await lib.pollDeviceLogin();
     expect(out.status).toBe("failed");
     // Cleared: the next poll no longer has a login to ask about.
+    now += 5_000;
     expect((await lib.pollDeviceLogin()).status).toBe("failed");
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

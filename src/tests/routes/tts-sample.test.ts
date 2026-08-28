@@ -163,6 +163,22 @@ describe("POST /setup-api/tts/sample — the cloud", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("refuses a voice the configured model does not have, before sending anything", async () => {
+    // An audition is of ONE voice: a `ballad` that tts-1 cannot speak must
+    // not be quietly swapped for the configured voice and played as if it
+    // were the one asked for.
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    readConfigMock.mockResolvedValue(config({
+      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "tts-1", voice: "nova" } } } },
+    }));
+    const { POST } = await route();
+    const res = await POST(post({ text: "Hi", engine: "cloud", voice: "ballad" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/tts-1/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("turns a refusal from the cloud into a message, not a stack", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 402 })));
     const { POST } = await route();

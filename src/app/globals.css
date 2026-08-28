@@ -1572,7 +1572,7 @@ input[type="range"].appearance-none::-moz-range-track {
   width: 4px;
   height: 4px;
   border-radius: 50%;
-  background: currentColor;
+  background: currentcolor;
   animation: coding-agent-dot 1.2s ease-in-out infinite;
 }
 /* Reduced motion: every one of these holds its resting frame. The blanket

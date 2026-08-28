@@ -14,6 +14,17 @@ export const bg: Record<string, string> = {
   "settings.codingAgent": "Кодиращ агент",
   "settings.codingAgentHint": "Позволете на асистента да предава цели задачи по програмиране на изпълнение на Claude Code на тази кутия и задайте докъде може да стигне едно изпълнение.",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "Облачни доставчици",
+  "settings.providers.hint": "Първо отговаря доставчикът по подразбиране; изключен доставчик запазва вписването си, но никога не се използва.",
+  "settings.providers.readError": "Списъкът с доставчици не можа да бъде прочетен от кутията. Показва се последното известно състояние.",
+  "settings.providers.changeFailed": "Доставчикът не можа да бъде променен.",
+  "settings.providers.enable": "Включване на {name}",
+  "settings.providers.switchedOff": "Изключен",
+  "settings.providers.makeDefault": "Направи по подразбиране",
+  "settings.providers.lockedHint": "Първо направете друг доставчик по подразбиране.",
+  "settings.providers.empty": "Все още няма свързан доставчик — свържете един по-долу.",
+
   // === System password card ===
   "settings.security.passwordLabel": "Парола",
   "settings.security.passwordHintPrefix": "Използва се за влизане в уеб интерфейса, SSH и",

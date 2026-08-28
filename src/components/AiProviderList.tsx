@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { useT } from "@/lib/i18n";
 import AIProviderIcon from "./AIProviderIcon";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
@@ -24,6 +25,7 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
  */
 
 export default function AiProviderList() {
+  const { t } = useT();
   const { summary, loading, error, settingDefault, defaultError, setDefault, refresh } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
   const [toggleError, setToggleError] = useState<string | null>(null);
@@ -46,11 +48,11 @@ export default function AiProviderList() {
       // this one now, not on its own next load.
       notifyProvidersChanged();
     } catch (e) {
-      setToggleError(e instanceof Error ? e.message : "Could not change the provider");
+      setToggleError(e instanceof Error ? e.message : t("settings.providers.changeFailed"));
     } finally {
       setToggling(null);
     }
-  }, [refresh]);
+  }, [refresh, t]);
 
   // Only providers that actually hold a sign-in belong here: this list is
   // about which of the owner's providers answer, in what order, and which are
@@ -65,16 +67,16 @@ export default function AiProviderList() {
       <div className="flex items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
         <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
-          Cloud providers
+          {t("settings.providers.title")}
         </label>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">
-        The default answers first; a switched-off provider keeps its sign-in but is never used.
+        {t("settings.providers.hint")}
       </p>
 
       {error && (
         <div role="alert" className="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200">
-          The provider list could not be read from the box. Showing the last known state.
+          {t("settings.providers.readError")}
         </div>
       )}
       {(defaultError || toggleError) && (
@@ -86,7 +88,7 @@ export default function AiProviderList() {
       {loading ? (
         <div className="space-y-2" data-testid="ai-provider-list-loading">
           {[0, 1, 2].map((i) => (
-            <div key={i} className="h-12 rounded-xl bg-white/[0.04] animate-pulse" />
+            <div key={i} className="h-12 rounded-xl bg-white/[0.04] motion-safe:animate-pulse" />
           ))}
         </div>
       ) : (
@@ -106,13 +108,13 @@ export default function AiProviderList() {
                     </span>
                     {row.isDefault && (
                       <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--coral-bright)] border-[var(--coral-bright)]/40" data-testid={`ai-provider-default-${row.id}`}>
-                        Default
+                        {t("settings.providers.default")}
                       </span>
                     )}
                   </span>
                   {row.enabled
                     ? <ProviderConnectionLabel state={row.state} className="text-[11px]" />
-                    : <span className="block text-[11px] text-[var(--text-muted)]">Switched off</span>}
+                    : <span className="block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
                 </span>
 
                 {canMakeDefault && (
@@ -123,7 +125,7 @@ export default function AiProviderList() {
                     data-testid={`ai-provider-make-default-${row.id}`}
                     className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 shrink-0"
                   >
-                    Make default
+                    {t("settings.providers.makeDefault")}
                   </button>
                 )}
 
@@ -132,10 +134,10 @@ export default function AiProviderList() {
                   type="button"
                   role="switch"
                   aria-checked={row.enabled}
-                  aria-label={`Enable ${row.label}`}
+                  aria-label={t("settings.providers.enable", { name: row.label })}
                   aria-busy={busy}
                   disabled={busy || row.isDefault}
-                  title={row.isDefault ? "Make another provider the default first." : undefined}
+                  title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
                   onClick={() => void setEnabled(row, !row.enabled)}
                   data-testid={`ai-provider-switch-${row.id}`}
                   className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
@@ -149,7 +151,7 @@ export default function AiProviderList() {
           })}
           {rows.length === 0 && (
             <li className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
-              No provider is connected yet — connect one below.
+              {t("settings.providers.empty")}
             </li>
           )}
         </ul>

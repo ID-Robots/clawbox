@@ -356,6 +356,11 @@ export async function POST(req: NextRequest) {
 
   let firstFailure: Failure | null = null;
   for (const engine of sttEngineOrder(await getSttPrimary())) {
+    // The caller left. The cloud call above honours `req.signal` and comes
+    // back as a failure like any other — which, unchecked, would send the
+    // recording on to the box's own engine and hold a two-minute whisper run
+    // for nobody. Nothing is spawned for a request nobody is waiting on.
+    if (req.signal.aborted) return NextResponse.json({ error: "The recording was cancelled." }, { status: 499 });
     const result = engine === "cloud" ? await transcribeInCloud(req, audio) : await transcribeOnBox(audio);
     if (result === null) continue;
     if ("status" in result) {

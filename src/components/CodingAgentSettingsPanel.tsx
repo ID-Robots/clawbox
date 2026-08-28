@@ -74,6 +74,22 @@ export interface AgentStatus {
 /** How often to ask again while the GitHub answer is one we do not trust. */
 const GITHUB_REPROBE_MS = 15_000;
 
+/** The slowest cadence GitHub's device flow ever asks for, in seconds. */
+const DEVICE_POLL_FLOOR_S = 5;
+
+/**
+ * The poll cadence the route answered, as seconds this card may use.
+ *
+ * Clamped to GitHub's own floor, and NOT `interval ?? 5`: a route that
+ * answered `0` (or a string, or nothing) would otherwise turn into
+ * `setInterval(fn, 0)` — a hot loop against the box and, through it, against
+ * github.com. Exported for its test; the card is the only caller.
+ */
+export function devicePollSeconds(raw: unknown): number {
+  const n = Number(raw);
+  return Math.max(DEVICE_POLL_FLOOR_S, Number.isFinite(n) && n > 0 ? n : DEVICE_POLL_FLOOR_S);
+}
+
 const CARD = "rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5";
 const FIELD = "rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5 font-mono text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50";
 const SMALL_BUTTON = "text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50";
@@ -215,6 +231,13 @@ export default function CodingAgentSettingsPanel({
   // While a device login is showing its code, ask github.com (through the
   // box) whether it was entered. A transient fetch failure keeps polling —
   // the code is still valid; only a verdict ends the wait.
+  //
+  // The cadence is the ROUTE's: every pending answer carries the interval
+  // github.com currently allows, which grows when it says slow_down. The box
+  // refuses to ask github.com early whatever this timer does, but a timer that
+  // kept the old cadence would spend most of its ticks being told "not yet"
+  // from memory — so the interval is re-read from each answer, and a change
+  // reschedules the timer through the state it hangs off.
   useEffect(() => {
     if (!deviceLogin) return;
     let alive = true;
@@ -226,9 +249,12 @@ export default function CodingAgentSettingsPanel({
           body: JSON.stringify({ action: "poll" }),
         });
         if (!res.ok || !alive) return;
-        const out = await res.json() as { status?: string; detail?: string };
+        const out = await res.json() as { status?: string; detail?: string; interval?: unknown };
         if (!alive) return;
-        if (out.status === "connected") {
+        if (out.status === "pending" && out.interval !== undefined) {
+          const interval = devicePollSeconds(out.interval);
+          setDeviceLogin(prev => (prev && prev.interval !== interval ? { ...prev, interval } : prev));
+        } else if (out.status === "connected") {
           setDeviceLogin(null);
           void loadGithub();
           // A run's Backup button exists only for a connected account; the
@@ -328,8 +354,8 @@ export default function CodingAgentSettingsPanel({
         body: JSON.stringify({ action: "start" }),
       });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.githubStartFailed")));
-      const data = await res.json() as { userCode: string; verificationUri: string; interval?: number };
-      setDeviceLogin({ userCode: data.userCode, verificationUri: data.verificationUri, interval: data.interval ?? 5 });
+      const data = await res.json() as { userCode: string; verificationUri: string; interval?: unknown };
+      setDeviceLogin({ userCode: data.userCode, verificationUri: data.verificationUri, interval: devicePollSeconds(data.interval) });
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.githubStartFailed"));
     } finally {

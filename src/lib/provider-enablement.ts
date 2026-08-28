@@ -18,6 +18,7 @@
 
 import { get as getConfigValue, set as setConfigValue } from "@/lib/config-store";
 import { getActiveHarness, type Harness } from "@/lib/harness";
+import { createSerialLock } from "@/lib/serial-lock";
 import {
   canonicalProviderId,
   DISABLED_PROVIDERS_KEY,
@@ -28,6 +29,15 @@ import {
 export type SetProviderEnabledResult =
   | { ok: true }
   | { ok: false; kind: "is_default" | "unknown_provider"; error: string };
+
+/**
+ * One writer of the disabled list at a time. The list is read, changed and
+ * written back as a whole; two switches flipped together — two tabs, or a
+ * fast owner — would each read the same list and the second write would
+ * silently undo the first. The store's atomic rename protects the file, not
+ * the update.
+ */
+const withDisabledList = createSerialLock();
 
 /** The canonical ids the owner has switched off. Empty when nothing is. */
 export async function getDisabledProviders(): Promise<Set<string>> {
@@ -67,10 +77,12 @@ export async function setProviderEnabled(id: string, enabled: boolean): Promise<
     return { ok: false, kind: "is_default", error: "Make another provider the default first." };
   }
 
-  const disabled = await getDisabledProviders();
-  if (enabled) disabled.delete(canonical);
-  else disabled.add(canonical);
-  // Sorted so the stored list is stable across flips and diffs cleanly.
-  await setConfigValue(DISABLED_PROVIDERS_KEY, [...disabled].sort());
+  await withDisabledList(async () => {
+    const disabled = await getDisabledProviders();
+    if (enabled) disabled.delete(canonical);
+    else disabled.add(canonical);
+    // Sorted so the stored list is stable across flips and diffs cleanly.
+    await setConfigValue(DISABLED_PROVIDERS_KEY, [...disabled].sort());
+  });
   return { ok: true };
 }

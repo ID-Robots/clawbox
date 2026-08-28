@@ -10,6 +10,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { I18nProvider } from "@/lib/i18n";
+import { translations } from "@/lib/translations";
 import AiProviderList from "@/components/AiProviderList";
 
 vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid="icon" /> }));
@@ -24,12 +26,16 @@ const ROWS = [
 
 let posts: { url: string; body: unknown }[] = [];
 
-function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string } } = {}) {
+function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string } = {}) {
   posts = [];
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    // The I18nProvider's one read: which language the owner picked.
+    if (url.startsWith("/setup-api/preferences")) {
+      return json(opts.locale ? { ui_language: opts.locale } : {});
+    }
     if (url.startsWith("/setup-api/providers/status")) {
       return json({ harness: "openclaw", providers: rows, defaultProvider: "clawai", degraded: false });
     }
@@ -46,6 +52,11 @@ function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string
   }));
 }
 
+/** The list as Settings mounts it: inside the app's I18nProvider. */
+function renderList() {
+  return render(<I18nProvider><AiProviderList /></I18nProvider>);
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
@@ -53,7 +64,7 @@ afterEach(() => {
 describe("AiProviderList", () => {
   it("lists the connected cloud providers with the default marked — not the unconnected ones, not the on-device engines", async () => {
     stubFetch();
-    render(<AiProviderList />);
+    renderList();
     for (const row of ROWS.filter((r) => r.state === "connected" && r.section !== "localAi")) {
       expect(await screen.findByTestId(`ai-provider-${row.id}`)).toBeInTheDocument();
     }
@@ -69,7 +80,7 @@ describe("AiProviderList", () => {
 
   it("flips a provider through the route and re-reads the list", async () => {
     stubFetch();
-    render(<AiProviderList />);
+    renderList();
     const sw = await screen.findByTestId("ai-provider-switch-openai");
     expect(sw).toHaveAttribute("aria-checked", "true");
     fireEvent.click(sw);
@@ -87,7 +98,7 @@ describe("AiProviderList", () => {
 
   it("locks the default provider's switch, with the way out as its hint", async () => {
     stubFetch();
-    render(<AiProviderList />);
+    renderList();
     const sw = await screen.findByTestId("ai-provider-switch-clawai");
     expect(sw).toBeDisabled();
     expect(sw).toHaveAttribute("title", "Make another provider the default first.");
@@ -97,7 +108,7 @@ describe("AiProviderList", () => {
 
   it("offers Make default only for a connected, enabled, non-default row", async () => {
     stubFetch();
-    render(<AiProviderList />);
+    renderList();
     await screen.findByTestId("ai-provider-openai");
     expect(screen.getByTestId("ai-provider-make-default-openai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-make-default-clawai")).not.toBeInTheDocument();
@@ -109,10 +120,33 @@ describe("AiProviderList", () => {
 
   it("shows the box's refusal in its own words", async () => {
     stubFetch(ROWS.map((r) => ({ ...r, isDefault: false })), { refuse: { status: 409, error: "Make another provider the default first." } });
-    render(<AiProviderList />);
+    renderList();
     fireEvent.click(await screen.findByTestId("ai-provider-switch-clawai"));
     expect(await screen.findByRole("alert")).toHaveTextContent("Make another provider the default first.");
   });
 
+  // Every string on this card used to be hardcoded English, so a German box
+  // read a German Settings page with one English card in the middle of it.
+  // Resolve against the REAL German table rather than a hand-written map, so
+  // this breaks if the card stops reading the catalogue.
+  it("reads its copy from the catalogue — a German box sees German", async () => {
+    stubFetch(ROWS, { locale: "de" });
+    const de = translations.de;
+    renderList();
+    expect(await screen.findByText(de["settings.providers.title"])).toBeInTheDocument();
+    expect(screen.getByText(de["settings.providers.hint"])).toBeInTheDocument();
+    expect(screen.getByTestId("ai-provider-anthropic")).toHaveTextContent(de["settings.providers.switchedOff"]);
+    expect(screen.getByTestId("ai-provider-default-clawai")).toHaveTextContent(de["settings.providers.default"]);
+    expect(screen.getByTestId("ai-provider-make-default-openai")).toHaveTextContent(de["settings.providers.makeDefault"]);
+    expect(screen.getByTestId("ai-provider-switch-clawai")).toHaveAttribute("title", de["settings.providers.lockedHint"]);
+    expect(screen.getByTestId("ai-provider-switch-openai")).toHaveAccessibleName(
+      de["settings.providers.enable"].replace("{name}", "OpenAI"),
+    );
+  });
 
+  it("says so in the owner's language when nothing is connected yet", async () => {
+    stubFetch(ROWS.map((r) => ({ ...r, state: "disconnected", isDefault: false })), { locale: "fr" });
+    renderList();
+    expect(await screen.findByText(translations.fr["settings.providers.empty"])).toBeInTheDocument();
+  });
 });

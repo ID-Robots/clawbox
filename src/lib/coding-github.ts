@@ -61,8 +61,14 @@ const DEVICE_HTTP_TIMEOUT_MS = 15_000;
 
 /** The one login in flight. Module state like the runs store: one owner, one
  *  web-server process, one pending code at a time — a second start replaces
- *  the first, exactly as re-running `gh auth login` would. */
-let pendingLogin: { deviceCode: string; interval: number; expiresAt: number } | null = null;
+ *  the first, exactly as re-running `gh auth login` would.
+ *
+ *  `interval` is the cadence github.com allows, in seconds, and `nextPollAt`
+ *  the earliest moment the next request may go out. Both live HERE and not
+ *  only in the browser: the card's timer is what asks, but github.com's
+ *  `slow_down` is answered to this process, and a browser that kept its
+ *  original cadence would be rate-limited until the code expired. */
+let pendingLogin: { deviceCode: string; interval: number; expiresAt: number; nextPollAt: number } | null = null;
 
 export interface DeviceLoginStart {
   userCode: string;
@@ -72,7 +78,9 @@ export interface DeviceLoginStart {
 }
 
 export type DeviceLoginPoll =
-  | { status: "pending" }
+  /** Not yet. `interval` is the cadence to ask again at, in seconds — it grows
+   *  when github.com says slow_down, and the card reschedules from it. */
+  | { status: "pending"; interval: number }
   | { status: "connected"; login: string | null }
   /** Over — declined, expired, or gh refused the token. A new start is the retry. */
   | { status: "failed"; detail: string };
@@ -106,7 +114,8 @@ export async function startDeviceLogin(): Promise<DeviceLoginStart | { error: st
   }
   const interval = typeof data?.interval === "number" ? Math.max(5, data.interval) : 5;
   const expiresIn = typeof data?.expires_in === "number" ? data.expires_in : 900;
-  pendingLogin = { deviceCode, interval, expiresAt: Date.now() + expiresIn * 1000 };
+  // The first poll may go out at once; the cadence applies between polls.
+  pendingLogin = { deviceCode, interval, expiresAt: Date.now() + expiresIn * 1000, nextPollAt: 0 };
   return { userCode, verificationUri, expiresIn, interval };
 }
 
@@ -114,6 +123,13 @@ export async function startDeviceLogin(): Promise<DeviceLoginStart | { error: st
  * One poll of the login in flight. "pending" until the owner approves the
  * code on github.com; on approval the token goes straight to gh's stdin and
  * is forgotten.
+ *
+ * The cadence is enforced here, not trusted to the caller. A poll that
+ * arrives before `nextPollAt` — a second tab, a browser that has not yet
+ * heard about a slow_down — is answered "pending" from memory without a
+ * request to github.com, so nothing this process does can exceed the rate
+ * the device flow allows. Every pending answer carries the current interval
+ * so the card can fall into step.
  */
 export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
   if (!pendingLogin) return { status: "failed", detail: "No login is in progress. Start again." };
@@ -121,16 +137,29 @@ export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
     pendingLogin = null;
     return { status: "failed", detail: "The code expired before it was entered. Start again for a fresh one." };
   }
+  const login = pendingLogin;
+  const now = Date.now();
+  if (now < login.nextPollAt) return { status: "pending", interval: login.interval };
+  // Claimed before the request leaves, so a poll that lands while this one
+  // is still in flight is the early case above rather than a second request.
+  login.nextPollAt = now + login.interval * 1000;
   const data = await githubJson("https://github.com/login/oauth/access_token", {
     client_id: GH_OAUTH_CLIENT_ID,
-    device_code: pendingLogin.deviceCode,
+    device_code: login.deviceCode,
     grant_type: "urn:ietf:params:oauth:grant-type:device_code",
   });
-  if (!data) return { status: "pending" };
-  if (data.error === "authorization_pending") return { status: "pending" };
+  // The login may have been cancelled or replaced while github.com was
+  // answering; the answer then belongs to a flow that no longer exists.
+  if (pendingLogin !== login) return { status: "failed", detail: "No login is in progress. Start again." };
+  if (!data) return { status: "pending", interval: login.interval };
+  if (data.error === "authorization_pending") return { status: "pending", interval: login.interval };
   if (data.error === "slow_down") {
-    pendingLogin.interval += 5;
-    return { status: "pending" };
+    // RFC 8628 §3.5: add five seconds to the interval and keep waiting. The
+    // next eligible moment moves with it, or the very next poll would go out
+    // at the old cadence and earn another slow_down.
+    login.interval += 5;
+    login.nextPollAt = Date.now() + login.interval * 1000;
+    return { status: "pending", interval: login.interval };
   }
   if (typeof data.access_token !== "string") {
     pendingLogin = null;

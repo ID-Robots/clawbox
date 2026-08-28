@@ -63,16 +63,37 @@ function mockFetch(first: unknown, opts: { answer?: unknown; refuse?: { status: 
   return fn;
 }
 
-/** jsdom has no object URLs, and its media elements never really play. */
-function stubAudio() {
-  vi.stubGlobal("URL", Object.assign(URL, {
-    createObjectURL: vi.fn(() => "blob:sample"),
-    revokeObjectURL: vi.fn(),
-  }));
+const MEDIA = window.HTMLMediaElement.prototype;
+/**
+ * What jsdom ships before any test patches it — put back after EVERY test,
+ * pass or fail. `vi.stubGlobal("URL", Object.assign(URL, …))` looked like a
+ * stub but mutated the real URL, so unstubAllGlobals restored the patched
+ * object; and the `play` patch was undone only by the last line of the test
+ * that made it, so one failing assertion there left every later test with a
+ * player that refused everything.
+ */
+const original = {
+  createObjectURL: URL.createObjectURL,
+  revokeObjectURL: URL.revokeObjectURL,
+  play: Object.getOwnPropertyDescriptor(MEDIA, "play"),
+};
+
+/**
+ * jsdom has no object URLs, and its media elements never really play. `play`
+ * is patched only when the test says how the browser answers.
+ */
+function stubAudio(play?: () => Promise<void>) {
+  URL.createObjectURL = vi.fn(() => "blob:sample");
+  URL.revokeObjectURL = vi.fn();
+  if (play) Object.defineProperty(MEDIA, "play", { configurable: true, value: play });
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  URL.createObjectURL = original.createObjectURL;
+  URL.revokeObjectURL = original.revokeObjectURL;
+  if (original.play) Object.defineProperty(MEDIA, "play", original.play);
+  else Reflect.deleteProperty(MEDIA, "play");
 });
 
 describe("Voice panel", () => {
@@ -138,18 +159,15 @@ describe("Voice panel", () => {
   });
 
   it("says the sound was blocked rather than losing the sample, when the browser refuses to start it", async () => {
-    stubAudio();
     // A browser that declines programmatic playback — Safari's rule once the
     // audio arrived after an await.
-    const refuse = vi.fn(() => Promise.reject(new Error("NotAllowedError")));
-    Object.defineProperty(window.HTMLMediaElement.prototype, "play", { configurable: true, value: refuse });
+    stubAudio(() => Promise.reject(new Error("NotAllowedError")));
     mockFetch(status());
     render(<VoiceOutputPanel active />);
     fireEvent.click(await screen.findByTestId("voice-play"));
     expect(await screen.findByTestId("voice-autoplay-blocked")).toBeInTheDocument();
     // ...and the player is still there to press.
     expect(screen.getByTestId("voice-sample-audio")).toBeInTheDocument();
-    Reflect.deleteProperty(window.HTMLMediaElement.prototype, "play");
   });
 
   it("shows the box's refusal in its own words", async () => {

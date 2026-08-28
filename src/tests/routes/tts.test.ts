@@ -315,6 +315,31 @@ describe("POST /setup-api/tts — check", () => {
     expect(writeStateMock.mock.calls[0][0].choice).toBe("local");
   });
 
+  it("does not lose a language picked while the check was writing its record", async () => {
+    // Both are read-modify-writes of the same state file. Unserialised, the
+    // check reads the state before the language write lands and then writes
+    // its stale copy over it: the owner's language is gone, or the check's
+    // record is, depending on who finished last.
+    let stored: Record<string, unknown> = { choice: "auto", engineChecks: {}, lastCheck: null };
+    readStateMock.mockImplementation(async () => ({ ...stored }));
+    writeStateMock.mockImplementation(async (next: Record<string, unknown>) => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      stored = next;
+    });
+    spawnMock.mockImplementation(cliEmits(JSON.stringify({
+      ok: true, provider: LOCAL, attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 900 }],
+    })));
+    const { POST } = await route();
+    const [check, language] = await Promise.all([
+      POST(post({ action: "check" })),
+      POST(post({ action: "language", language: "de" })),
+    ]);
+    expect(check.status).toBe(200);
+    expect(language.status).toBe(200);
+    expect(stored.language).toBe("de");
+    expect((stored.lastCheck as { ok: boolean }).ok).toBe(true);
+  });
+
   it("asks the CLI for the real chain rather than pinning one provider", async () => {
     spawnMock.mockImplementation(cliEmits(JSON.stringify({ ok: true, attempts: [{ provider: LOCAL, outcome: "success" }] })));
     const { POST } = await route();
@@ -380,6 +405,21 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
   });
 
+  it("refuses a cloud voice the configured model cannot speak, and says which model", async () => {
+    // tts-1 has no ballad or verse; saving one would be a voice that never speaks.
+    readConfigMock.mockResolvedValue(config({
+      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai", model: "tts-1" } } } },
+    }));
+    const { POST } = await route();
+    const bad = await POST(post({ action: "voice", engine: "cloud", voice: "verse" }));
+    expect(bad.status).toBe(400);
+    expect((await bad.json()).error).toMatch(/tts-1/);
+    expect(configSetMock).not.toHaveBeenCalled();
+    const ok = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
+    expect(ok.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
+  });
+
   it("refuses a cloud voice for a box that has no cloud voice", async () => {
     const { POST } = await route();
     const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
@@ -400,5 +440,14 @@ describe("POST /setup-api/tts — voice and language", () => {
     const data = await (await GET()).json();
     expect(data.voice).toEqual({ local: "af_heart", cloud: "alloy" });
     expect(data.language).toBe("en");
+  });
+
+  it("reports the cloud model, so the panel offers only the voices that model has", async () => {
+    const { GET } = await route();
+    expect((await (await GET()).json()).cloudModel).toBeNull();
+    readConfigMock.mockResolvedValue(config({
+      messages: { tts: { provider: LOCAL, providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { model: "tts-1-hd" } } } },
+    }));
+    expect((await (await GET()).json()).cloudModel).toBe("tts-1-hd");
   });
 });

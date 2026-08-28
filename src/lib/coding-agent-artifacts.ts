@@ -26,8 +26,8 @@ import { CODING_AGENT_ARTIFACTS_SUBTREE } from "@/lib/file-guard";
  */
 export const ARTIFACT_RUN_ID_RE = /^run-[a-z0-9]{8}$/;
 
-/** One file per run is plenty of history; a run writing hundreds is misbehaving. */
-const MAX_ARTIFACTS = 50;
+/** Fifty files per run is plenty of history; a run writing hundreds is misbehaving. */
+export const MAX_ARTIFACTS = 50;
 const MAX_NAME_CHARS = 100;
 
 /** Filenames a run may create and the route may serve: no dotfiles, no separators. */
@@ -107,9 +107,9 @@ export function artifactKind(name: string): ArtifactKind {
  * report.md knows more about its work than the closing message does, so the
  * agent's file wins and this is a no-op. Written to a
  * dotfile first and renamed into place, so a listing that races the write
- * sees either nothing (dotfiles are never listed) or the whole file, and
- * world-readable like the screenshots beside it, because the folder is the
- * run's public evidence.
+ * sees either nothing (dotfiles are never listed) or the whole file. The
+ * file's 0644 matches the screenshots beside it; what keeps the evidence to
+ * the box's own user is the folder's 0700 (ensureArtifactsDir), not the file.
  *
  * Answers whether a file was written. Never throws: the report is a
  * convenience on top of a run that has already finished, and no failure to
@@ -134,7 +134,16 @@ export function writeRunReport(runId: string, markdown: string): boolean {
   }
 }
 
-/** Create the folder a run writes its evidence into. */
+/**
+ * Create the folder a run writes its evidence into.
+ *
+ * The folder's mode is decided HERE and nowhere else: 0700, the box's own
+ * user, because a run's screenshots can show whatever page it opened. The
+ * runner calls this before a run starts; the browser MCP layer
+ * (mcp/tools/browser.ts, which cannot import this module) mkdirs lazily with
+ * the same mode as its fallback. mkdir never changes the mode of a folder
+ * that exists, so whichever writer runs first decides — they must agree.
+ */
 export function ensureArtifactsDir(runId: string): string {
   const dir = artifactsDir(runId);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -142,8 +151,11 @@ export function ensureArtifactsDir(runId: string): string {
 }
 
 /**
- * The run's artifacts, oldest first (the order they were produced), capped at
- * MAX_ARTIFACTS. Missing folder — most runs never save anything — is [].
+ * The run's artifacts, oldest first (the order they were produced). Past
+ * MAX_ARTIFACTS the NEWEST survive: the last screenshots and the report.md
+ * written at settle are what the owner needs to see, and a run that archived
+ * hundreds loses its first ones from the list, never from disk. Missing
+ * folder — most runs never save anything — is [].
  */
 export function listArtifacts(runId: string): RunArtifact[] {
   let dir: string;
@@ -167,7 +179,7 @@ export function listArtifacts(runId: string): RunArtifact[] {
     out.push({ name, bytes: stat.size, modifiedAt: stat.mtimeMs, kind: artifactKind(name) });
   }
   out.sort((a, b) => a.modifiedAt - b.modifiedAt || a.name.localeCompare(b.name));
-  return out.slice(0, MAX_ARTIFACTS);
+  return out.slice(-MAX_ARTIFACTS);
 }
 
 /**

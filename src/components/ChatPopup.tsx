@@ -3743,6 +3743,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         <button
           onPointerDown={stopHeaderDrag}
           onClick={onClose}
+          aria-label={t("window.close")}
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', padding: 4, borderRadius: 6,

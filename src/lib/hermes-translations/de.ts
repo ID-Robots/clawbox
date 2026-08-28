@@ -26,6 +26,17 @@ export const de: Record<string, string> = {
   "settings.codingAgent": "Coding-Agent",
   "settings.codingAgentHint": "Lassen Sie den Assistenten ganze Programmieraufgaben an einen Claude-Code-Lauf auf dieser Box übergeben, und legen Sie fest, wie weit ein Lauf gehen darf.",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "Cloud-Anbieter",
+  "settings.providers.hint": "Der Standardanbieter antwortet zuerst; ein ausgeschalteter Anbieter behält seine Anmeldung, wird aber nie verwendet.",
+  "settings.providers.readError": "Die Anbieterliste konnte nicht von der Box gelesen werden. Es wird der letzte bekannte Stand angezeigt.",
+  "settings.providers.changeFailed": "Der Anbieter konnte nicht geändert werden.",
+  "settings.providers.enable": "{name} einschalten",
+  "settings.providers.switchedOff": "Ausgeschaltet",
+  "settings.providers.makeDefault": "Als Standard festlegen",
+  "settings.providers.lockedHint": "Machen Sie zuerst einen anderen Anbieter zum Standard.",
+  "settings.providers.empty": "Noch kein Anbieter verbunden — verbinden Sie unten einen.",
+
   // === System password card ===
   "settings.security.passwordLabel": "Passwort",
   "settings.security.passwordHintPrefix": "Wird für die Web-Anmeldung, SSH und",

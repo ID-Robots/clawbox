@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
+import { isSameOriginRequest } from "@/lib/same-origin";
 import { cancelDeviceLogin, pollDeviceLogin, startDeviceLogin } from "@/lib/coding-github";
 
 export const dynamic = "force-dynamic";
@@ -14,11 +15,23 @@ export const dynamic = "force-dynamic";
  * OWNER-ONLY, all three actions, like enable and the git DELETE: this route
  * changes whose GitHub credential the box holds, and the party that gains
  * push access must not be the party that can grant it.
+ *
+ * And OUR PAGE ONLY: the owner's browser attaches the session cookie to a
+ * POST any other site fires at the box, so "signed in" alone would let a
+ * cross-site page start a device flow in the owner's name. The origin guard
+ * (src/lib/same-origin.ts) runs second, after the owner gate, so the answer
+ * to the agent's bearer stays the one every owner-only route gives.
  */
 export async function POST(request: Request) {
   if (!(await hasOwnerSession(request))) {
     return NextResponse.json(
       { error: "Connecting GitHub needs a signed-in browser session.", kind: "owner_only" },
+      { status: 403 },
+    );
+  }
+  if (!isSameOriginRequest(request)) {
+    return NextResponse.json(
+      { error: "Connecting GitHub only works from this ClawBox's own pages.", kind: "cross_origin" },
       { status: 403 },
     );
   }

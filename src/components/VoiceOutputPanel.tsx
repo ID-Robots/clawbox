@@ -7,7 +7,7 @@ import type {
   VoiceEngineId,
   VoiceOutputStatus,
 } from "@/lib/voice-output";
-import { CLOUD_VOICES, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
+import { cloudVoicesFor, LOCAL_VOICES, SAMPLE_MAX_CHARS, sampleSentence, VOICE_LANGUAGES } from "@/lib/voice-catalog";
 
 /**
  * Settings → Voice: three dropdowns and a sentence to hear.
@@ -225,7 +225,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const cloud = engineById("cloud");
   const local = engineById("local");
   const voice = status.voice[source];
-  const voices = source === "local" ? LOCAL_VOICES : CLOUD_VOICES;
+  // Only the voices the configured cloud model accepts: tts-1 refuses two of
+  // the eleven, and a dropdown entry that plays an error is not a voice.
+  const voices = source === "local" ? LOCAL_VOICES : cloudVoicesFor(status.cloudModel);
   const text = sample ?? sampleSentence(status.language);
   const disabled = busy !== null;
 

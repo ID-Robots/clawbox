@@ -27,6 +27,17 @@ export const nl: Record<string, string> = {
   "settings.codingAgent": "Codeeragent",
   "settings.codingAgentHint": "Laat de assistent hele programmeertaken overdragen aan een Claude Code-run op deze box, en bepaal hoe ver een run mag gaan.",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "Cloudproviders",
+  "settings.providers.hint": "De standaardprovider antwoordt eerst; een uitgeschakelde provider houdt zijn aanmelding, maar wordt nooit gebruikt.",
+  "settings.providers.readError": "De providerlijst kon niet van de box worden gelezen. De laatst bekende toestand wordt getoond.",
+  "settings.providers.changeFailed": "Kan de provider niet wijzigen.",
+  "settings.providers.enable": "{name} inschakelen",
+  "settings.providers.switchedOff": "Uitgeschakeld",
+  "settings.providers.makeDefault": "Als standaard instellen",
+  "settings.providers.lockedHint": "Maak eerst een andere provider de standaard.",
+  "settings.providers.empty": "Er is nog geen provider verbonden — verbind er hieronder een.",
+
   // === System password card ===
   "settings.security.passwordLabel": "Wachtwoord",
   "settings.security.passwordHintPrefix": "Wordt gebruikt voor inloggen op het web, voor SSH en voor",

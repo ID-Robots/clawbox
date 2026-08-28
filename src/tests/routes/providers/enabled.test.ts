@@ -24,6 +24,13 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
   get: vi.fn(),
   set: vi.fn(),
 }));
+// The real rule, behind a spy: every test below runs the genuine
+// setProviderEnabled, and the log test alone answers "ok" for an id the rule
+// would refuse, to see what the route writes for it.
+vi.mock("@/lib/provider-enablement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/provider-enablement")>()),
+  setProviderEnabled: vi.fn(),
+}));
 
 const SESSION_SECRET = "a".repeat(64);
 
@@ -34,6 +41,7 @@ let getActiveHarness: Mock;
 let readConfig: Mock;
 let getModelOptions: Mock;
 let configSet: Mock;
+let setProviderEnabled: Mock;
 
 function ownerCookie(): string {
   return `clawbox_session=${createSessionCookie(3600, SESSION_SECRET)}`;
@@ -72,6 +80,9 @@ beforeEach(async () => {
   configStore.get.mockImplementation(async (key: string) => store.get(key));
   configStore.set.mockImplementation(async (key: string, value: unknown) => { store.set(key, value); });
   (await import("@/lib/harness/credentials") as unknown as { hasClawaiToken: Mock }).hasClawaiToken.mockResolvedValue(false);
+  ({ setProviderEnabled } = (await import("@/lib/provider-enablement")) as unknown as { setProviderEnabled: Mock });
+  const enablement = await vi.importActual<typeof import("@/lib/provider-enablement")>("@/lib/provider-enablement");
+  setProviderEnabled.mockImplementation(enablement.setProviderEnabled);
 
   // An OpenClaw box with Anthropic as its default and OpenRouter connected.
   getActiveHarness.mockResolvedValue("openclaw");
@@ -134,6 +145,21 @@ describe("what it refuses before writing", () => {
     expect(res.status).toBe(404);
     expect((await res.json()).kind).toBe("unknown_provider");
     expect(configSet).not.toHaveBeenCalled();
+  });
+});
+
+describe("the log line", () => {
+  it("records the body's spelling of the id as ONE line, control characters replaced", async () => {
+    // The rule matched the id to a row; the line still carries what the body
+    // sent. A newline in it would have written a second, forged record.
+    setProviderEnabled.mockResolvedValueOnce({ ok: true });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await asOwner({ provider: "openrouter\n[providers] forged line", enabled: false });
+    expect(res.status).toBe(200);
+    const lines = error.mock.calls.map((call) => call.join(" ")).filter((line) => line.includes("switched off"));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toContain("\n");
+    expect(lines[0]).toContain("[providers] openrouter�[providers] forged line switched off by the owner");
   });
 });
 

@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { logSafe } from "@/lib/log-safe";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { readProviderStatus } from "@/lib/provider-status";
@@ -56,7 +57,9 @@ export async function POST(request: Request) {
       { status: result.kind === "is_default" ? 409 : 404 },
     );
   }
-  console.error(`[providers] ${provider} switched ${fields.enabled ? "on" : "off"} by the owner`);
+  // The id is one the rule just matched to a row, but it is still the body's
+  // spelling of it: one line per flip, whatever the body carried.
+  console.error(`[providers] ${logSafe(provider)} switched ${fields.enabled ? "on" : "off"} by the owner`);
 
   const summary = await readProviderStatus();
   return NextResponse.json(summary, { headers: { "Cache-Control": "no-store" } });

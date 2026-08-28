@@ -43,12 +43,40 @@ export const CLOUD_VOICES: readonly VoiceOption[] = [
 
 export const DEFAULT_CLOUD_VOICE = "alloy";
 
+/**
+ * Voices only the newer speech model has. `tts-1` and `tts-1-hd` refuse
+ * `ballad` and `verse` with a 400, so a box whose cloud provider is pinned to
+ * one of those must not be offered them — that would be a dropdown entry that
+ * plays an error.
+ */
+const NEWER_MODEL_ONLY_VOICES: ReadonlySet<string> = new Set(["ballad", "verse"]);
+
+/** The models with the smaller voice list. Anything else — `gpt-4o-mini-tts`,
+ *  a model this catalogue has never heard of, or none configured — gets the
+ *  full list, because refusing a voice a model may well have is the worse
+ *  mistake. */
+export function isLegacyCloudModel(model: string | null | undefined): boolean {
+  const id = (model ?? "").trim().toLowerCase();
+  return id === "tts-1" || id === "tts-1-hd";
+}
+
+/** The cloud voices a given model accepts. */
+export function cloudVoicesFor(model: string | null | undefined): readonly VoiceOption[] {
+  return isLegacyCloudModel(model) ? CLOUD_VOICES.filter((v) => !NEWER_MODEL_ONLY_VOICES.has(v.id)) : CLOUD_VOICES;
+}
+
 export function isLocalVoice(value: unknown): value is string {
   return typeof value === "string" && LOCAL_VOICES.some((v) => v.id === value);
 }
 
+/** A cloud voice SOME model has. For "this model has it", see isCloudVoiceFor. */
 export function isCloudVoice(value: unknown): value is string {
   return typeof value === "string" && CLOUD_VOICES.some((v) => v.id === value);
+}
+
+/** A cloud voice the configured model will actually speak with. */
+export function isCloudVoiceFor(model: string | null | undefined, value: unknown): value is string {
+  return typeof value === "string" && cloudVoicesFor(model).some((v) => v.id === value);
 }
 
 export interface VoiceLanguage {

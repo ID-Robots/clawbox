@@ -29,6 +29,17 @@ export const ja: Record<string, string> = {
   "settings.codingAgent": "コーディングエージェント",
   "settings.codingAgentHint": "アシスタントがコーディング作業をまるごとこの機器上の Claude Code の実行に任せられるようにし、実行がどこまで進めるかを決めます。",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "クラウドプロバイダー",
+  "settings.providers.hint": "既定のプロバイダーが最初に応答します。オフにしたプロバイダーはサインインを保持しますが、使われることはありません。",
+  "settings.providers.readError": "本体からプロバイダーの一覧を読み取れませんでした。最後に確認した状態を表示しています。",
+  "settings.providers.changeFailed": "プロバイダーを変更できませんでした。",
+  "settings.providers.enable": "{name}を有効にする",
+  "settings.providers.switchedOff": "オフ",
+  "settings.providers.makeDefault": "既定にする",
+  "settings.providers.lockedHint": "先に別のプロバイダーを既定にしてください。",
+  "settings.providers.empty": "まだプロバイダーが接続されていません。下から接続してください。",
+
   // === System password card ===
   "settings.security.passwordLabel": "パスワード",
   "settings.security.passwordHintPrefix": "ウェブへのログイン、SSH、および",

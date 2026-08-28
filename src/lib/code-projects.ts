@@ -10,7 +10,7 @@ import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "./config-store";
 import { registerWebappInPreferences } from "./webapp-registry";
-import { ensureWebappIcon, htmlHint } from "./webapp-icon";
+import { ensureWebappIcon, htmlHint, safeAppId } from "./webapp-icon";
 
 // ── Paths ──
 
@@ -643,8 +643,12 @@ export async function deployWebapp(
 
 /** Is this deployed app's meta.json still without an icon of its own? */
 async function deployedWithoutIcon(appId: string): Promise<boolean> {
+  // The id passed the door already; the path is still joined from the rebuilt
+  // copy, so this read stands on its own the way ensureWebappIcon's do.
+  const id = safeAppId(appId);
+  if (!id) return false;
   try {
-    const raw = await fs.readFile(path.join(WEBAPPS_DIR, appId, "meta.json"), "utf-8");
+    const raw = await fs.readFile(path.join(WEBAPPS_DIR, id, "meta.json"), "utf-8");
     const parsed = JSON.parse(raw) as { icon?: unknown };
     return !parsed.icon;
   } catch {

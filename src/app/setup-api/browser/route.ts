@@ -5,7 +5,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import net from "net";
 import fs from "fs";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { lookup as dnsLookup } from "dns/promises";
 import { activeRunDirectory, isInside } from "@/lib/coding-agent";
 import { describeImage } from "@/lib/vision-describe";
@@ -83,50 +83,67 @@ async function lookupWithTimeout(host: string): Promise<{ address: string }[]> {
  * folder. On a single-owner appliance with one-run-at-a-time that is the
  * run's own working set either way; a per-run capability token would be real
  * machinery for marginal gain here.
+ *
+ * What is CHECKED is what is OPENED: the browser is sent to the resolved
+ * path, not the address the caller wrote. A symlink in the run's folder that
+ * pointed inside it when it was checked and is swapped to point outside a
+ * moment later would otherwise be followed by Chromium, not by this check.
  */
-function validateFileNavUrl(parsed: URL): string | null {
+type NavDecision = { ok: true; url: string } | { ok: false; error: string };
+
+function resolveFileNavUrl(parsed: URL): NavDecision {
   const activeDir = activeRunDirectory();
-  if (!activeDir) return "Blocked URL scheme: file: (no coding run is active)";
+  if (!activeDir) return { ok: false, error: "Blocked URL scheme: file: (no coding run is active)" };
   let real: string;
   let realDir: string;
   try {
     real = fs.realpathSync(fileURLToPath(parsed));
     realDir = fs.realpathSync(activeDir);
   } catch {
-    return "Blocked file address (file not found)";
+    return { ok: false, error: "Blocked file address (file not found)" };
   }
   if (!isInside(real, realDir)) {
-    return "Blocked file address (outside the active coding run's folder)";
+    return { ok: false, error: "Blocked file address (outside the active coding run's folder)" };
   }
-  return null;
+  // The page may read its own query and fragment; both ride along unchanged.
+  const resolved = pathToFileURL(real);
+  resolved.search = parsed.search;
+  resolved.hash = parsed.hash;
+  return { ok: true, url: resolved.href };
 }
 
-/** Returns an error message if the URL is not safe to navigate to, else null. */
-async function validateNavUrl(url: string): Promise<string | null> {
+/** The address the browser may be sent to for `url`, or why it may not. */
+async function resolveNavUrl(url: string): Promise<NavDecision> {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    return "Invalid URL";
+    return { ok: false, error: "Invalid URL" };
   }
   if (parsed.protocol === "file:") {
-    return validateFileNavUrl(parsed);
+    return resolveFileNavUrl(parsed);
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    return `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)`;
+    return { ok: false, error: `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)` };
   }
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (host === "localhost" || host.endsWith(".localhost")) return "Blocked internal host";
+  if (host === "localhost" || host.endsWith(".localhost")) return { ok: false, error: "Blocked internal host" };
   if (net.isIP(host)) {
-    return isPrivateIp(host) ? "Blocked internal address" : null;
+    return isPrivateIp(host) ? { ok: false, error: "Blocked internal address" } : { ok: true, url };
   }
   try {
     const results = await lookupWithTimeout(host);
-    if (results.some((r) => isPrivateIp(r.address))) return "Blocked internal address";
+    if (results.some((r) => isPrivateIp(r.address))) return { ok: false, error: "Blocked internal address" };
   } catch {
-    return "Host did not resolve";
+    return { ok: false, error: "Host did not resolve" };
   }
-  return null;
+  return { ok: true, url };
+}
+
+/** Returns an error message if the URL is not safe to navigate to, else null. */
+async function validateNavUrl(url: string): Promise<string | null> {
+  const nav = await resolveNavUrl(url);
+  return nav.ok ? null : nav.error;
 }
 
 // validateNavUrl only vets the URL the caller passes; page.goto then follows
@@ -320,9 +337,9 @@ export async function POST(req: Request) {
 
       const { url } = body;
       if (url) {
-        const navErr = await validateNavUrl(url);
-        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+        const nav = await resolveNavUrl(url);
+        if (!nav.ok) return NextResponse.json({ error: nav.error }, { status: 400 });
+        await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
       const id = `browser-${++sessionCounter}`;
@@ -380,9 +397,9 @@ export async function POST(req: Request) {
         const { url } = body;
         if (!url) return NextResponse.json({ error: "URL required" }, { status: 400 });
         await installNavGuard(page as unknown as GuardablePage);
-        const navErr = await validateNavUrl(url);
-        if (navErr) return NextResponse.json({ error: navErr }, { status: 400 });
-        await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+        const nav = await resolveNavUrl(url);
+        if (!nav.ok) return NextResponse.json({ error: nav.error }, { status: 400 });
+        await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
         return NextResponse.json(await finish());
       }
 

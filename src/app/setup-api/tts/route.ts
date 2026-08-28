@@ -34,7 +34,8 @@ import {
   type VoiceOutputStatus,
 } from "@/lib/voice-output";
 import { readLocalVoice, readVoiceState, writeLocalVoice, writeVoiceState } from "@/lib/voice-output-store";
-import { isCloudVoice, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
+import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
+import { createSerialLock } from "@/lib/serial-lock";
 
 /**
  * GET  /setup-api/tts            → who speaks for this box, and who actually did
@@ -203,6 +204,18 @@ function currentCheck() {
   return checkInFlight;
 }
 
+/**
+ * One writer of the voice state at a time.
+ *
+ * Every mutation below is "read the state, change a field, write it back",
+ * and two of them can land together: a check finishing at the moment the
+ * owner picks a language, or two tabs. Each would read the same base and the
+ * second write would drop the first — the check's record, or the language,
+ * silently gone. Only the read-modify-write is held; the 90-second synthesis
+ * and the 8-12 s openclaw CLI call stay outside it.
+ */
+const withVoiceState = createSerialLock();
+
 async function handleCheck() {
   const check = await currentCheck();
   // Read the state AFTER the run, not before it. A check holds no snapshot
@@ -210,9 +223,13 @@ async function handleCheck() {
   // running would otherwise have that choice overwritten by the stale copy this
   // handler started with. The box is probed once and reused, rather than read a
   // third time for a status this function can already assemble.
-  const [state, { config, probe }, localVoice] = await Promise.all([readVoiceState(), probeBox(), readLocalVoice()]);
-  const next = applyCheck(state, check);
-  await writeVoiceState(next);
+  const { config, probe } = await probeBox();
+  const [next, localVoice] = await withVoiceState(async () => {
+    const [state, localVoice] = await Promise.all([readVoiceState(), readLocalVoice()]);
+    const next = applyCheck(state, check);
+    await writeVoiceState(next);
+    return [next, localVoice] as const;
+  });
   return NextResponse.json(buildVoiceOutputStatus(config, probe, next, localVoice), {
     headers: { "Cache-Control": "no-store" },
   });
@@ -239,6 +256,15 @@ async function handleVoice(engine: unknown, voice: unknown) {
     if (!target) {
       return NextResponse.json({ error: "That voice is not available on this box." }, { status: 409 });
     }
+    // A voice some model has is not a voice THIS model has: tts-1 refuses
+    // ballad and verse at speech time, which would be a saved setting that
+    // never speaks.
+    if (!isCloudVoiceFor(target.model, voice)) {
+      return NextResponse.json(
+        { error: `The cloud voice's model (${target.model}) does not have that voice.` },
+        { status: 400 },
+      );
+    }
     await runOpenclawConfigSet([`messages.tts.providers.${target.providerId}.voice`, voice]);
   } else {
     return NextResponse.json({ error: "Pick the voice on this box or the cloud voice." }, { status: 400 });
@@ -250,7 +276,9 @@ async function handleLanguage(language: unknown) {
   if (!isVoiceLanguage(language)) {
     return NextResponse.json({ error: "That language is not offered." }, { status: 400 });
   }
-  await writeVoiceState({ ...(await readVoiceState()), language });
+  await withVoiceState(async () => {
+    await writeVoiceState({ ...(await readVoiceState()), language });
+  });
   return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
 }
 
@@ -283,10 +311,16 @@ async function handleSelect(choice: VoiceChoice) {
 
   // Picking an engine again is a request to retry it, so this box stops
   // reporting what it observed last time until the next check says otherwise.
-  const next = choice === "auto"
-    ? { ...state, choice }
-    : { ...forgetEngineCheck(state, choice), choice };
-  await writeVoiceState(next);
+  // Re-read under the lock: the copy above decided the refusal, but the CLI
+  // call between then and now can take 12 s, and a check that finished in the
+  // meantime has a record this write must not erase.
+  await withVoiceState(async () => {
+    const current = await readVoiceState();
+    const next = choice === "auto"
+      ? { ...current, choice }
+      : { ...forgetEngineCheck(current, choice), choice };
+    await writeVoiceState(next);
+  });
   return NextResponse.json(await status(), { headers: { "Cache-Control": "no-store" } });
 }
 

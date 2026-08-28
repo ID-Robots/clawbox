@@ -497,6 +497,26 @@ describe.skipIf(!hasBash)("the manual voice-pipeline install fails a box with no
  * that is the difference between a failure the operator sees and one that
  * ends at a log line nobody greps — and what it asked the gateway to
  * configure.
+ *
+ * The contract has two sides, and the numbers in the test names below are
+ * the INPUT side: what install-voice.sh --tts-only exits with. The step
+ * answers with its own status, which differs for one of them:
+ *
+ *   install-voice.sh exits         step_openclaw_tts returns   recorded?
+ *   0   Kokoro ready               0                           no
+ *   13  the board declines the     13                          yes (withheld
+ *       only engine — a mute box                               only in the
+ *                                                              no-GPU harness)
+ *   12  Kokoro was asked for and   12                          yes
+ *       did not install
+ *   1   the voice scripts did      14                          yes
+ *       not deploy
+ *   *   outside the contract       14                          yes
+ *
+ * 1 becomes 14 because step_openclaw_setup treats a 1 as fatal and a failed
+ * script deploy must not abort an otherwise good install; and not 13, which
+ * would call a box with a working Kokoro mute. An unknown status lands on 14
+ * for the same reason: "something did not complete", not "there is no engine".
  */
 function runStep(voiceExit: number, verdictFile?: string) {
   const projectDir = path.join(root, "project");

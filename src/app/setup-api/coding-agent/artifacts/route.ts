@@ -29,16 +29,31 @@ export async function GET(request: Request) {
   if (!filePath) {
     return NextResponse.json({ error: "There is no such artifact.", kind: "not_found" }, { status: 404 });
   }
+  let handle: fs.promises.FileHandle | undefined;
   try {
-    const stat = await fs.promises.stat(filePath);
+    // One open, and every later question — what kind of file, how big, the
+    // bytes — is asked of the HANDLE. A path stat'd and then re-opened is two
+    // looks at a folder the run itself can rewrite in between; O_NOFOLLOW
+    // makes the open refuse a symlink swapped in after artifactFilePath()
+    // resolved the name to a plain file.
+    handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      return NextResponse.json({ error: "There is no such artifact.", kind: "not_found" }, { status: 404 });
+    }
     if (stat.size > MAX_SERVED_BYTES) {
       return NextResponse.json({ error: "This artifact is too large to serve.", kind: "too_large" }, { status: 413 });
     }
-    const body = await fs.promises.readFile(filePath);
-    return new NextResponse(new Uint8Array(body), {
+    // Exactly the bytes the size check covered, read once into the buffer the
+    // response sends: a file that grew after the fstat is cut at the size that
+    // passed, and a Jetson serving a 20 MB screenshot holds one copy, not two.
+    const body = new Uint8Array(stat.size);
+    const { bytesRead } = await handle.read(body, 0, stat.size, 0);
+    const bytes = bytesRead === stat.size ? body : body.subarray(0, bytesRead);
+    return new NextResponse(bytes, {
       headers: {
         "Content-Type": artifactMimeType(name) ?? "text/plain; charset=utf-8",
-        "Content-Length": String(body.byteLength),
+        "Content-Length": String(bytes.byteLength),
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, max-age=60",
         // The name already passed ARTIFACT_NAME_RE — no characters to escape.
@@ -47,5 +62,7 @@ export async function GET(request: Request) {
     });
   } catch {
     return NextResponse.json({ error: "Could not read the artifact.", kind: "not_found" }, { status: 404 });
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }

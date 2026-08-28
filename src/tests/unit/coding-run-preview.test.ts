@@ -73,11 +73,15 @@ function watch(args: string[], env: Record<string, string>, ms: number): Promise
     let out = "";
     child.stdout.on("data", (d) => { out += String(d); });
     child.stderr.on("data", (d) => { out += String(d); });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => resolve({ out, code, signal }));
-    setTimeout(() => {
+    // Ctrl-C is for a view still running at the deadline. A script that ended
+    // on its own (no transcript, no arguments) must not leave a timer behind
+    // that later signals a process group the OS may have handed to someone
+    // else — and keeps the worker's event loop busy for nothing.
+    const ctrlC = setTimeout(() => {
       try { process.kill(-child.pid!, "SIGINT"); } catch { /* already gone */ }
     }, ms);
+    child.on("error", (err) => { clearTimeout(ctrlC); reject(err); });
+    child.on("exit", (code, signal) => { clearTimeout(ctrlC); resolve({ out, code, signal }); });
   });
 }
 

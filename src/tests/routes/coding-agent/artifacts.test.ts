@@ -54,6 +54,40 @@ describe("GET artifacts", () => {
     expect(Buffer.from(await res.arrayBuffer())).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   });
 
+  it("serves every byte of a larger artifact, once", async () => {
+    const dir = artifacts.ensureArtifactsDir(RUN_ID);
+    const bytes = Buffer.alloc(1_000_003);
+    for (let i = 0; i < bytes.length; i += 7) bytes[i] = i & 0xff;
+    fs.writeFileSync(path.join(dir, "tests.log"), bytes);
+    const res = await GET(url(RUN_ID, "tests.log"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Length")).toBe(String(bytes.length));
+    expect(Buffer.from(await res.arrayBuffer()).equals(bytes)).toBe(true);
+  });
+
+  it("answers 413 above the cap without reading the file", async () => {
+    // A sparse file: the size is the fstat's answer, the bytes were never written.
+    const dir = artifacts.ensureArtifactsDir(RUN_ID);
+    const file = path.join(dir, "huge.log");
+    fs.writeFileSync(file, "");
+    fs.truncateSync(file, 20 * 1024 * 1024 + 1);
+    const res = await GET(url(RUN_ID, "huge.log"));
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ kind: "too_large" });
+  });
+
+  it("refuses a symlink a run planted, however it points", async () => {
+    const dir = artifacts.ensureArtifactsDir(RUN_ID);
+    fs.writeFileSync(path.join(root, "data", "config.json"), "{\"secret\":1}");
+    fs.symlinkSync(path.join(root, "data", "config.json"), path.join(dir, "notes.txt"));
+    fs.writeFileSync(path.join(dir, "real.txt"), "fine");
+    fs.symlinkSync(path.join(dir, "real.txt"), path.join(dir, "alias.txt"));
+    for (const name of ["notes.txt", "alias.txt"]) {
+      const res = await GET(url(RUN_ID, name));
+      expect(res.status).toBe(404);
+    }
+  });
+
   it("serves agent-written HTML as plain text, never as a page in the app's origin", async () => {
     const dir = artifacts.ensureArtifactsDir(RUN_ID);
     fs.writeFileSync(path.join(dir, "page.html"), "<script>document.cookie</script>");

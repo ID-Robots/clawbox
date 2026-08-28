@@ -41,13 +41,19 @@ import { GET } from "@/app/setup-api/local-models/route";
 
 /** The probe object the route handed to the inventory builder. */
 function probes() {
-  return inventory.mock.calls[0][0] as { embeddings: { supported: boolean } };
+  return inventory.mock.calls[0][0] as {
+    embeddings: { supported: boolean; ready: boolean; available: boolean; provider: string | null; model: string | null; local: boolean };
+  };
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
   inventory.mockResolvedValue({ models: [], unavailable: [] });
-  memoryStatus.mockResolvedValue({ available: true, provider: "ollama", model: "q", location: "local" });
+  // peekMemoryStatus is SYNCHRONOUS: the cached reading or null, never a
+  // promise — the route must answer at once and the probe runs behind it. A
+  // resolved-value mock handed the route a Promise instead, whose fields all
+  // read undefined while `ready` claimed the reading was in.
+  memoryStatus.mockReturnValue({ available: true, provider: "ollama", model: "q", location: "local" });
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
 });
 
@@ -68,6 +74,9 @@ describe("GET /setup-api/local-models — embeddings on the hermes edition", () 
     mockOpenclawIsAbsent.mockReturnValue(false);
     await GET();
     expect(memoryStatus).toHaveBeenCalledTimes(1);
-    expect(probes().embeddings.supported).toBe(true);
+    // Every field of the row comes from the reading the peek handed back.
+    expect(probes().embeddings).toEqual({
+      supported: true, ready: true, available: true, provider: "ollama", model: "q", local: true,
+    });
   });
 });

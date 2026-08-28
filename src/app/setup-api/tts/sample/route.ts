@@ -9,7 +9,7 @@ import { runChild } from "@/lib/child-run";
 import { openclawIsAbsent, readConfig } from "@/lib/openclaw-config";
 import { cloudSpeechTarget, localCommandPath, cloudVoiceFrom, type VoiceConfigView } from "@/lib/voice-output";
 import { readLocalVoice } from "@/lib/voice-output-store";
-import { DEFAULT_LOCAL_VOICE, isCloudVoice, isLocalVoice, SAMPLE_MAX_CHARS } from "@/lib/voice-catalog";
+import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice, SAMPLE_MAX_CHARS } from "@/lib/voice-catalog";
 
 /**
  * POST /setup-api/tts/sample {text, engine, voice?} → the audio, for the browser.
@@ -73,7 +73,14 @@ async function speakLocally(config: VoiceConfigView, requestedVoice: unknown, te
 async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, text: string): Promise<Response> {
   const target = cloudSpeechTarget(config);
   if (!target) return refuse("The cloud voice is not set up on this box.", 409);
-  const voice = isCloudVoice(requestedVoice) ? requestedVoice : cloudVoiceFrom(config);
+  // An audition is of ONE voice. A voice this model does not have (tts-1 has
+  // no ballad or verse) is refused with the reason, never quietly swapped for
+  // the configured one — that would play the owner the wrong voice and call it
+  // the one they asked for.
+  if (requestedVoice != null && !isCloudVoiceFor(target.model, requestedVoice)) {
+    return refuse(`The cloud voice's model (${target.model ?? DEFAULT_CLOUD_MODEL}) does not have that voice.`, 400);
+  }
+  const voice = typeof requestedVoice === "string" ? requestedVoice : cloudVoiceFrom(config);
   let res: Response;
   try {
     res = await fetch(`${target.baseUrl}/audio/speech`, {

@@ -70,11 +70,38 @@ export const ICONS_DIR = path.join(DATA_DIR, "icons");
 const WEBAPPS_DIR = path.join(DATA_DIR, "webapps");
 
 /**
- * The icon route's own whitelist, repeated rather than imported so this module
- * cannot pull a Next.js route handler into a library. An id the route would
+ * The icon route's own whitelist (`/setup-api/apps/icon/[appId]`, the same
+ * rule as `APP_ID_RE` in code-projects.ts), repeated rather than imported so
+ * this module cannot pull a Next.js route handler into a library: one to
+ * sixty-four of these characters and nothing else. An id the route would
  * refuse is an icon nothing could ever fetch, so it is not worth generating.
  */
-const ICON_APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const APP_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+const MAX_APP_ID_CHARS = 64;
+
+/**
+ * The app id this module builds paths from, or null for anything else.
+ *
+ * Every path here — the icon, its temp file, the app's meta.json — is
+ * `<dir>/<appId>…`, and the id arrives from a tool argument or a request
+ * body. Rather than testing the id and then joining the ORIGINAL string, the
+ * value that reaches `path.join` is assembled here, one character at a time,
+ * out of the alphabet: whatever the caller sent, what is used downstream is
+ * made of these characters and no more than this many of them. The rule is
+ * exactly a regex test; it is written this way so the data flow itself shows
+ * the cut — a `.test()` guard leaves the caller's string in play, and a
+ * static analyser rightly keeps flagging every path built from it.
+ */
+export function safeAppId(appId: unknown): string | null {
+  if (typeof appId !== "string" || appId.length < 1 || appId.length > MAX_APP_ID_CHARS) return null;
+  let safe = "";
+  for (const ch of appId) {
+    const at = APP_ID_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += APP_ID_ALPHABET[at];
+  }
+  return safe;
+}
 
 /** The 8-byte PNG signature; the icon route serves `image/png` and nothing else. */
 const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
@@ -175,6 +202,30 @@ export function buildIconPrompt(hints: WebappIconHints): string {
 }
 
 /**
+ * How much of a page is searched for its title. A hint, not a parse: any real
+ * page names itself in its first few kilobytes, and the work here must not
+ * grow with the size of the create — `webapp_create` accepts megabytes.
+ */
+const MAX_HINT_SCAN_CHARS = 64 * 1024;
+
+/** The elements a page names itself in, in order of preference. */
+const HINT_ELEMENTS: { open: RegExp; close: RegExp }[] = [
+  { open: /<title(?=[\s/>])/i, close: /<\/title\s*>/gi },
+  { open: /<h1(?=[\s/>])/i, close: /<\/h1\s*>/gi },
+];
+
+/** The entities worth decoding for a prompt; the rest are left as written. */
+const ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  "#39": "'",
+  nbsp: " ",
+};
+
+/**
  * A one-line description pulled from a page, for a create that carried none.
  *
  * `webapp_create` sends HTML and a name and nothing else, so the closest thing
@@ -184,21 +235,61 @@ export function buildIconPrompt(hints: WebappIconHints): string {
  */
 export function htmlHint(html: string): string {
   if (typeof html !== "string" || !html) return "";
-  for (const re of [/<title[^>]*>([\s\S]*?)<\/title>/i, /<h1[^>]*>([\s\S]*?)<\/h1>/i]) {
-    const match = re.exec(html);
-    if (!match) continue;
-    const text = match[1]
-      .replace(/<[^>]*>/g, " ")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;|&apos;/g, "'")
-      .replace(/&nbsp;/g, " ");
-    const line = oneLine(text, MAX_DESCRIPTION_CHARS);
+  const page = html.slice(0, MAX_HINT_SCAN_CHARS);
+  for (const element of HINT_ELEMENTS) {
+    const inner = elementText(page, element);
+    if (inner === null) continue;
+    const line = oneLine(decodeEntities(stripTags(inner)), MAX_DESCRIPTION_CHARS);
     if (line) return line;
   }
   return "";
+}
+
+/**
+ * The text between the first `<tag …>` and the `</tag>` after it, or null.
+ *
+ * Three positions looked up in turn rather than `<tag[^>]*>([\s\S]*?)</tag>`:
+ * that pattern rescans to the end of the page from every `<tag` it fails to
+ * close, which is quadratic on exactly the input an agent can send.
+ */
+function elementText(page: string, element: { open: RegExp; close: RegExp }): string | null {
+  const start = element.open.exec(page);
+  if (!start) return null;
+  const from = page.indexOf(">", start.index + start[0].length);
+  if (from < 0) return null;
+  // A global pattern searches from `lastIndex`; it is set on every call, so
+  // the shared object carries nothing over from the previous page.
+  element.close.lastIndex = from + 1;
+  const end = element.close.exec(page);
+  if (!end) return null;
+  return page.slice(from + 1, end.index);
+}
+
+/**
+ * Drop the tags inside the text: everything from a `<` to the next `>`, and
+ * a `<` that nothing closes is left as written. The same reading as
+ * `/<[^>]*>/g`, in one forward pass — that pattern rescans to the end of the
+ * text from every `<` once one of them has no `>`, which is quadratic.
+ */
+function stripTags(text: string): string {
+  let out = "";
+  let at = 0;
+  for (;;) {
+    const open = text.indexOf("<", at);
+    if (open < 0) return out + text.slice(at);
+    const close = text.indexOf(">", open + 1);
+    if (close < 0) return out + text.slice(at);
+    out += `${text.slice(at, open)} `;
+    at = close + 1;
+  }
+}
+
+/**
+ * One pass with a table, so what a decode produces is never decoded again:
+ * `&amp;lt;` is the four characters `&lt;`, not `<`.
+ */
+function decodeEntities(text: string): string {
+  return text.replace(/&(amp|lt|gt|quot|apos|nbsp|#39);/g, (_, name: string) => ENTITIES[name]);
 }
 
 /**
@@ -212,18 +303,21 @@ export function htmlHint(html: string): string {
  * and both post a generation — the very thing the map exists to stop.
  */
 export function ensureWebappIcon(appId: string, hints: WebappIconHints): Promise<WebappIconOutcome> {
-  if (!ICON_APP_ID_RE.test(appId)) return Promise.resolve("skipped");
-  const pending = inFlight.get(appId);
+  // From here on only the rebuilt id exists: every path below is joined from
+  // `id`, never from the argument.
+  const id = safeAppId(appId);
+  if (!id) return Promise.resolve("skipped");
+  const pending = inFlight.get(id);
   if (pending) return pending;
-  const job = ensureOnce(appId, hints)
+  const job = ensureOnce(id, hints)
     .catch((err: unknown): WebappIconOutcome => {
       // `ensureOnce` catches its own; this is belt and braces so the map can
       // never hold a rejected promise that a later caller would be handed.
-      warn(appId, err instanceof Error ? err.message : String(err));
+      warn(id, err instanceof Error ? err.message : String(err));
       return "skipped";
     })
-    .finally(() => inFlight.delete(appId));
-  inFlight.set(appId, job);
+    .finally(() => inFlight.delete(id));
+  inFlight.set(id, job);
   return job;
 }
 

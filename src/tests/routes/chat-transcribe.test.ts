@@ -469,6 +469,30 @@ describe("/setup-api/chat/transcribe", () => {
     expect(upstreamSignal?.aborted).toBe(true);
   });
 
+  it("does not hand the recording to the box's engine once the caller has gone", async () => {
+    // The cloud call comes back as a failure when the browser disconnects,
+    // and a failure is what the fall-through runs the next engine on. That
+    // next engine is a two-minute whisper run on the box — for nobody.
+    boxHasWhisper();
+    const caller = new AbortController();
+    fetchMock.mockImplementation((_url: unknown, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        caller.abort();
+      }));
+    const form = new FormData();
+    form.set("file", new Blob([new Uint8Array(AUDIO)], { type: "audio/webm" }), "recording.webm");
+
+    const res = await POST(new NextRequest("http://localhost/setup-api/chat/transcribe", {
+      method: "POST",
+      body: form,
+      signal: caller.signal,
+    }));
+
+    expect(localStt.transcribe).not.toHaveBeenCalled();
+    expect(res.status).toBe(499);
+  });
+
   it("reports an unreadable upstream response as a server-side fault", async () => {
     fetchMock.mockResolvedValue(new Response("<html>gateway</html>", { status: 200 }));
     const res = await POST(audioRequest());

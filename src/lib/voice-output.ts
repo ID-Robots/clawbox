@@ -45,7 +45,7 @@ import {
   DEFAULT_CLOUD_VOICE,
   DEFAULT_LOCAL_VOICE,
   DEFAULT_VOICE_LANGUAGE,
-  isCloudVoice,
+  isCloudVoiceFor,
   isLocalVoice,
 } from "@/lib/voice-catalog";
 
@@ -153,6 +153,13 @@ export interface VoiceOutputStatus {
   language: string;
   /** The voice each engine speaks with right now; the lists are in voice-catalog.ts. */
   voice: Record<VoiceEngineId, string>;
+  /**
+   * The cloud speech model openclaw.json names, or null for the provider's
+   * default. The Voice tab reads it to offer only the voices that model has
+   * (`cloudVoicesFor`). Optional on the type because the panel's own validator
+   * does not require it — a status written before it existed still renders.
+   */
+  cloudModel?: string | null;
 }
 
 /** Persisted in the setup app's own data dir; see voice-output-store.ts. */
@@ -212,7 +219,22 @@ interface TtsProviderEntry {
 export function cloudVoiceFrom(config: VoiceConfigView): string {
   const providerId = cloudProviderIdFor(config);
   const voice = providerId ? ttsProviders(config)[providerId]?.voice : undefined;
-  return isCloudVoice(voice) ? voice : DEFAULT_CLOUD_VOICE;
+  // Judged against the model that will speak it: a `verse` left in the file
+  // beside `tts-1` is a voice that model refuses, so the engine's default is
+  // the honest answer to "what does this box speak with".
+  return isCloudVoiceFor(cloudModelFrom(config), voice) ? voice : DEFAULT_CLOUD_VOICE;
+}
+
+/**
+ * The cloud speech model openclaw.json names (`messages.tts.providers.<cloud>.model`),
+ * or null for the provider's default. Read without the credential check
+ * `cloudSpeechTarget` makes, because which voices to OFFER is a question about
+ * the model, not about whether the box can call it right now.
+ */
+export function cloudModelFrom(config: VoiceConfigView): string | null {
+  const providerId = cloudProviderIdFor(config);
+  const model = providerId ? ttsProviders(config)[providerId]?.model : undefined;
+  return typeof model === "string" && model.trim() ? model.trim() : null;
 }
 
 function ttsProviders(config: VoiceConfigView): Record<string, TtsProviderEntry> {
@@ -493,6 +515,7 @@ export function buildVoiceOutputStatus(
       local: isLocalVoice(localVoice) ? localVoice : DEFAULT_LOCAL_VOICE,
       cloud: cloudVoiceFrom(config),
     },
+    cloudModel: cloudModelFrom(config),
   };
 }
 

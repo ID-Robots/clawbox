@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { saveEnv } from "@/tests/helpers/env";
 
 /**
  * src/lib/stt-local.ts — the on-box speech-to-text engine.
@@ -21,7 +22,7 @@ vi.mock("@/lib/child-run", async (importOriginal) => {
 type Lib = typeof import("@/lib/stt-local");
 let lib: Lib;
 let home: string;
-let originalHome: string | undefined;
+let restoreEnv: () => void;
 
 function ran(over: Record<string, unknown> = {}) {
   return { code: 0, stdout: "", stderr: "", signal: null, timedOut: false, startFailed: false, startError: null, ...over };
@@ -37,16 +38,19 @@ function installEngine() {
 }
 
 beforeEach(async () => {
-  originalHome = process.env.HOME;
+  restoreEnv = saveEnv("HOME", "XDG_RUNTIME_DIR", "CLAWBOX_TEST_SECRET");
   home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-stt-local-"));
   process.env.HOME = home;
+  // A developer's desktop session has a runtime dir; the web server under
+  // systemd does not. The tests say which case they are in rather than
+  // inherit whichever host they run on.
+  delete process.env.XDG_RUNTIME_DIR;
   vi.resetModules();
   lib = await import("@/lib/stt-local");
 });
 
 afterEach(() => {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
+  restoreEnv();
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -88,13 +92,22 @@ describe("transcribeLocally", () => {
     await lib.transcribeLocally(Buffer.from("x"), "r.webm");
     const opts = runChild.mock.calls[0][2] as { env: Record<string, string>; timeoutMs: number };
     expect(opts.env.HOME).toBe(home);
-    expect(opts.env.XDG_RUNTIME_DIR).toMatch(/^\/run\/user\/\d+$/);
+    // With none inherited (a system service), the uid's own runtime dir —
+    // where `systemctl --user` finds the bus that starts whisper-server.
+    expect(opts.env.XDG_RUNTIME_DIR).toBe(`/run/user/${process.getuid?.() ?? 1000}`);
     expect(opts.env.PATH).toBeTruthy();
     expect(opts.env.CLAWBOX_TEST_SECRET).toBeUndefined();
     // A cold whisper loads its model before it decodes a word; a budget that
     // fits only a warm server fails every first call of the day.
     expect(opts.timeoutMs).toBe(120_000);
-    delete process.env.CLAWBOX_TEST_SECRET;
+  });
+
+  it("keeps a runtime dir the host already named — that is where its user bus is", async () => {
+    process.env.XDG_RUNTIME_DIR = "/run/user/4242";
+    runChild.mockResolvedValue(ran({ stdout: "hi" }));
+    await lib.transcribeLocally(Buffer.from("x"), "r.webm");
+    const opts = runChild.mock.calls[0][2] as { env: Record<string, string> };
+    expect(opts.env.XDG_RUNTIME_DIR).toBe("/run/user/4242");
   });
 
   it("reports a script that exited badly as a failure, not an exception, and still cleans up", async () => {

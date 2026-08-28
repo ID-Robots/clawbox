@@ -23,6 +23,17 @@ export const sv: Record<string, string> = {
   "settings.codingAgent": "Kodagent",
   "settings.codingAgentHint": "Låt assistenten lämna över hela kodningsuppgifter till en Claude Code-körning på den här boxen, och bestäm hur långt en körning får gå.",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "Molnleverantörer",
+  "settings.providers.hint": "Standardleverantören svarar först; en avstängd leverantör behåller sin inloggning men används aldrig.",
+  "settings.providers.readError": "Leverantörslistan kunde inte läsas från boxen. Senast kända läge visas.",
+  "settings.providers.changeFailed": "Det gick inte att ändra leverantören.",
+  "settings.providers.enable": "Slå på {name}",
+  "settings.providers.switchedOff": "Avstängd",
+  "settings.providers.makeDefault": "Gör till standard",
+  "settings.providers.lockedHint": "Gör först en annan leverantör till standard.",
+  "settings.providers.empty": "Ingen leverantör är ansluten ännu — anslut en nedan.",
+
   // === System password card ===
   "settings.security.passwordLabel": "Lösenord",
   "settings.security.passwordHintPrefix": "Används för webbinloggning, SSH och",

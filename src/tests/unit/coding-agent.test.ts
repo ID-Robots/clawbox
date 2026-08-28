@@ -521,6 +521,13 @@ describe("what a run can verify with", () => {
 
   it("wires the clawbox MCP server in its browser-only profile, with no secret in argv", async () => {
     makeProject("site");
+    // Two bearers the runner could reach: the web server's own environment
+    // (CLAWBOX_MCP_TOKEN, set in beforeEach) and the file the MCP server
+    // reads for itself. Both are seeded so the assertion below has something
+    // to catch.
+    const onDisk = "the-mcp-bearer-token-on-disk";
+    fs.writeFileSync(path.join(root, "data", ".mcp-token"), onDisk, { mode: 0o600 });
+    expect(process.env.CLAWBOX_MCP_TOKEN).toBe("the-mcp-bearer-token-value");
     const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
     await finished(run.id);
 
@@ -532,9 +539,14 @@ describe("what a run can verify with", () => {
     expect(server.env.CLAWBOX_MCP_PROFILE).toBe("browser");
     expect(server.env.CLAWBOX_RUN_DIR).toBe(run.directory);
     expect(server.env.CLAWBOX_RUN_ARTIFACTS_DIR).toBe(path.join(root, "data", "coding-agent-artifacts", run.id));
-    // argv is world-readable in /proc: the bearer must never ride in it. The
-    // server reads data/.mcp-token itself through its file fallback.
-    expect(argv.join(" ")).not.toContain("the-mcp-bearer-token-value");
+    // argv is world-readable in /proc: neither bearer may ride in it, nor in
+    // the server's env block inside --mcp-config. What the server is given is
+    // the root whose data/.mcp-token it reads through its file fallback — and
+    // that file is there to be read.
+    for (const bearer of ["the-mcp-bearer-token-value", onDisk]) expect(argv.join(" ")).not.toContain(bearer);
+    expect(server.env.CLAWBOX_MCP_TOKEN).toBeUndefined();
+    expect(server.env.CLAWBOX_ROOT).toBe(root);
+    expect(fs.readFileSync(path.join(server.env.CLAWBOX_ROOT, "data", ".mcp-token"), "utf-8")).toBe(onDisk);
 
     // The browser family is approved for headless mode; nothing else MCP is.
     for (const tool of lib.MCP_BROWSER_TOOLS) expect(argv).toContain(tool);

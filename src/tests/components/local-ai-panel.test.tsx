@@ -31,7 +31,9 @@ const MODELS = [
 
 let posts: { url: string; body: unknown }[] = [];
 
-function stubFetch(over: { llmDefault?: boolean; ttsChoice?: string; sttPrimary?: string } = {}) {
+type PostAnswer = (url: string) => Promise<Response> | Response | undefined;
+
+function stubFetch(over: { llmDefault?: boolean; ttsChoice?: string; sttPrimary?: string; post?: PostAnswer } = {}) {
   posts = [];
   const json = (body: unknown, status = 200) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -39,7 +41,9 @@ function stubFetch(over: { llmDefault?: boolean; ttsChoice?: string; sttPrimary?
     const url = input.toString();
     if (init?.method === "POST") {
       posts.push({ url, body: JSON.parse(String(init.body)) });
-      return json({ ok: true });
+      // A test may script the box's answer (a refusal, a slow reply); the
+      // default is a plain success.
+      return (await over.post?.(url)) ?? json({ ok: true });
     }
     if (url.startsWith("/setup-api/local-models")) return json({ models: MODELS, unavailable: [] });
     if (url.startsWith("/setup-api/providers/status")) {
@@ -134,5 +138,63 @@ describe("LocalAiPanel", () => {
       window.removeEventListener(OPEN_APP_EVENT, onOpen);
     }
     expect(opened).toEqual(["memory-shard"]);
+  });
+
+  it("clears a refused local-only flip's error once the next flip goes through", async () => {
+    const json = (body: unknown, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    let refuse = true;
+    stubFetch({
+      llmDefault: false,
+      post: (url) => {
+        if (url !== "/setup-api/local-ai/exclusive") return undefined;
+        if (!refuse) return undefined;
+        refuse = false;
+        return json({ error: "The local model is not ready yet." }, 409);
+      },
+    });
+    renderPanel();
+    const sw = await screen.findByTestId("local-ai-local-only");
+    await waitFor(() => expect(sw).toBeEnabled());
+    fireEvent.click(sw);
+    expect(await screen.findByRole("alert")).toHaveTextContent("The local model is not ready yet.");
+    await waitFor(() => expect(sw).toBeEnabled());
+    // The second flip succeeds — the stale refusal must not stay on screen
+    // above a switch that now says the opposite.
+    fireEvent.click(sw);
+    await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "true"));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("holds still for owners who asked for reduced motion: the skeleton and the busy icon animate motion-safe only", async () => {
+    // Assigned from inside the fetch stub, so TS cannot see it change: a no-op
+    // start rather than `null`, which it would narrow to and refuse to call.
+    let release: () => void = () => {};
+    stubFetch({
+      post: (url) => {
+        if (url !== "/setup-api/stt") return undefined;
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } }));
+        });
+      },
+    });
+    renderPanel();
+    // Before the inventory answers: the placeholder cards.
+    const skeleton = screen.getByTestId("local-ai-loading");
+    for (const card of Array.from(skeleton.children)) {
+      expect(card).toHaveClass("motion-safe:animate-pulse");
+      expect(card).not.toHaveClass("animate-pulse");
+    }
+    await screen.findByTestId("local-ai-group-stt");
+    // While an action is in flight: the row's spinner.
+    fireEvent.click(screen.getByTestId("local-model-menu-whisper"));
+    fireEvent.click(await screen.findByTestId("local-model-action-whisper-primary"));
+    const row = screen.getByTestId("local-model-whisper");
+    await waitFor(() => expect(within(row).getByText("progress_activity")).toBeInTheDocument());
+    const spinner = within(row).getByText("progress_activity");
+    expect(spinner).toHaveClass("motion-safe:animate-spin");
+    expect(spinner).not.toHaveClass("animate-spin");
+    release();
+    await waitFor(() => expect(within(row).queryByText("progress_activity")).not.toBeInTheDocument());
   });
 });

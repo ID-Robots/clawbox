@@ -198,6 +198,8 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
 
   const toggleLocalOnly = useCallback(async (next: boolean) => {
     setLocalOnly(null);
+    // A refusal from the last flip must not outlive a flip that went through.
+    setError(null);
     try {
       const res = await post("/setup-api/local-ai/exclusive", { enabled: next });
       const data = await res.json().catch(() => ({}));
@@ -268,7 +270,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
     return (
       <div className="max-w-2xl space-y-3" data-testid="local-ai-loading">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 animate-pulse">
+          <div key={i} className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5 motion-safe:animate-pulse">
             <div className="h-3 w-40 rounded bg-white/[0.08]" />
             <div className="h-2 w-64 rounded bg-white/[0.06] mt-3" />
           </div>
@@ -365,7 +367,7 @@ export default function LocalAiPanel({ active, edition }: { active: boolean; edi
                     </div>
 
                     {busy && (
-                      <span className="material-symbols-rounded animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+                      <span className="material-symbols-rounded motion-safe:animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
                         progress_activity
                       </span>
                     )}

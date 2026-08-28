@@ -243,13 +243,18 @@ describe("ensureWebappIcon", () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses an id the icon route would refuse, before touching the credential", async () => {
-    for (const bad of ["../etc", "a/b", "", "x".repeat(65), "todo list", "todo.png"]) {
+  it("refuses an id the icon route would refuse, before touching the credential or the disk", async () => {
+    for (const bad of ["../etc", "../x", "..", "a/b", "", "x".repeat(65), "todo list", "todo.png", "tödo", "a\u0000b"]) {
       await expect(mod.ensureWebappIcon(bad, { name: "Bad" })).resolves.toBe("skipped");
     }
     expect(mocks.hasToken).not.toHaveBeenCalled();
     expect(mocks.generate).not.toHaveBeenCalled();
+    expect(mocks.kvSet).not.toHaveBeenCalled();
     expect(fs.existsSync(path.join(tmpRoot, "data", "icons"))).toBe(false);
+    // Nothing was created anywhere: data/ still holds only the deployed app.
+    expect(fs.readdirSync(path.join(tmpRoot, "data"))).toEqual(["webapps"]);
+    expect(fs.readdirSync(path.join(tmpRoot, "data", "webapps"))).toEqual(["todo-list"]);
+    expect(fs.existsSync(path.join(tmpRoot, "x"))).toBe(false);
   });
 
   it("pays for one picture when the same app is asked for twice while it is being drawn", async () => {
@@ -407,6 +412,20 @@ describe("buildIconPrompt", () => {
   });
 });
 
+describe("safeAppId", () => {
+  it("accepts exactly what the icon route and code-projects accept, and hands back a fresh copy", async () => {
+    const { APP_ID_RE } = await import("@/lib/code-projects");
+    for (const id of ["a", "todo-list", "Todo_List-2", "x".repeat(64)]) {
+      expect(APP_ID_RE.test(id)).toBe(true);
+      expect(mod.safeAppId(id)).toBe(id);
+    }
+    for (const id of ["", "..", "../x", "a/b", "a\\b", "a b", "a.png", "x".repeat(65), "tödo", "a\nb", "a\u0000b", "a\tb", "😀", 42, null, undefined]) {
+      expect(typeof id === "string" && APP_ID_RE.test(id)).toBe(false);
+      expect(mod.safeAppId(id)).toBeNull();
+    }
+  });
+});
+
 describe("htmlHint", () => {
   it("prefers the title, then the first h1, then nothing", () => {
     expect(mod.htmlHint("<html><head><title> Pomodoro &amp; Breaks </title></head><body><h1>Other</h1></body></html>"))
@@ -414,7 +433,45 @@ describe("htmlHint", () => {
     expect(mod.htmlHint("<body><h1 class=\"x\">Hello <em>world</em></h1></body>")).toBe("Hello world");
     expect(mod.htmlHint("<body><p>no heading</p></body>")).toBe("");
     expect(mod.htmlHint("<title>   </title><h1>Fallback</h1>")).toBe("Fallback");
+    expect(mod.htmlHint("<TITLE lang=\"en\">Shouted</TITLE >")).toBe("Shouted");
+    // `<titlebar>` is not a title; `<h10>` is not an h1.
+    expect(mod.htmlHint("<titlebar>x</titlebar><h10>y</h10><h1>Real</h1>")).toBe("Real");
     expect(mod.htmlHint("")).toBe("");
+  });
+
+  it("decodes each entity once: &amp;lt; is the text &lt;, never a tag", () => {
+    expect(mod.htmlHint("<title>a &amp;lt;b&amp;gt; c</title>")).toBe("a &lt;b&gt; c");
+    expect(mod.htmlHint("<title>Tom &amp; Jerry&#39;s &quot;show&quot;&nbsp;&apos;live&apos;</title>"))
+      .toBe("Tom & Jerry's \"show\" 'live'");
+    // A tag runs to the next `>`, as it always did; a `<` nothing closes is text.
+    expect(mod.htmlHint("<h1>Broken <b tag <i>inside</i></h1>")).toBe("Broken inside");
+    expect(mod.htmlHint("<h1>1 < 2 and 3</h1>")).toBe("1 < 2 and 3");
+  });
+
+  it("answers a pathological page in bounded time", () => {
+    // 5 MB of openings with no close. The lazy `[\s\S]*?` this replaced
+    // rescanned to the end of the page from every one of them, which is
+    // 650 000 × 5 MB of work — minutes, on the request path of every create.
+    for (const page of [
+      "<title>a".repeat(650_000),
+      "<h1>a".repeat(1_000_000),
+      "<title".repeat(700_000),
+      `<title>${"<".repeat(5_000_000)}</title>`,
+      `<h1>${"&amp;".repeat(1_000_000)}`,
+    ]) {
+      const started = performance.now();
+      const hint = mod.htmlHint(page);
+      const elapsed = performance.now() - started;
+      expect(typeof hint).toBe("string");
+      expect(elapsed).toBeLessThan(250);
+    }
+  });
+
+  it("looks only at the head of the page: a title past the window is no title", () => {
+    const late = `<!-- ${"x".repeat(70_000)} --><title>Late</title>`;
+    expect(mod.htmlHint(late)).toBe("");
+    const early = `<title>Early</title><!-- ${"x".repeat(70_000)} -->`;
+    expect(mod.htmlHint(early)).toBe("Early");
   });
 });
 

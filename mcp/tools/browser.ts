@@ -56,21 +56,46 @@ function runContext(): RunContext | null {
 
 let shotCounter = 0;
 
-/** Archive one screenshot into the run's evidence folder; null when it cannot be saved. */
+/**
+ * Screenshots archived per run. The runner's listing shows the newest ones,
+ * so past this a capture is still described to the model — it just is not
+ * kept, and the reply says so. A run that wants more evidence than this is
+ * looping on screenshots, not verifying (run-yuyqta4t archived 99).
+ */
+const MAX_SHOTS_PER_RUN = 200;
+
+/**
+ * The evidence folder's mode is ONE decision, made by ensureArtifactsDir() in
+ * src/lib/coding-agent-artifacts.ts: the runner creates the folder before the
+ * run starts, and this is the lazy fallback for a folder that is not there.
+ * mkdir never changes the mode of a folder that exists, so whichever writer
+ * runs first decides it — which is why the two must agree.
+ */
+const ARTIFACTS_DIR_MODE = 0o700;
+/** Readable like report.md beside it; the folder's mode is the guard. */
+const SHOT_FILE_MODE = 0o644;
+
+/** Archive one screenshot into the run's evidence folder; null when it was not kept. */
 function saveShot(base64: string): string | null {
   const dir = runContext()?.artifactsDir;
   if (!dir) return null;
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    let name: string;
-    let file: string;
-    do {
+    fs.mkdirSync(dir, { recursive: true, mode: ARTIFACTS_DIR_MODE });
+    const bytes = Buffer.from(base64, "base64");
+    // 'wx' creates the file or fails with EEXIST: "is this name free" and the
+    // write are one syscall, so a file that appears between them — the run
+    // saving its own shot-003.png — is stepped over, never overwritten.
+    while (shotCounter < MAX_SHOTS_PER_RUN) {
       shotCounter += 1;
-      name = `shot-${String(shotCounter).padStart(3, "0")}.png`;
-      file = path.join(dir, name);
-    } while (fs.existsSync(file));
-    fs.writeFileSync(file, Buffer.from(base64, "base64"));
-    return name;
+      const name = `shot-${String(shotCounter).padStart(3, "0")}.png`;
+      try {
+        fs.writeFileSync(path.join(dir, name), bytes, { flag: "wx", mode: SHOT_FILE_MODE });
+        return name;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      }
+    }
+    return null;
   } catch {
     return null;
   }
@@ -186,7 +211,13 @@ function pageResult(message: string, reply: BrowserReply): ToolResult {
   if (!runContext()) return withScreenshot(message, reply);
   const lines = headerLines(message, reply);
   const saved = reply.screenshot ? saveShot(reply.screenshot) : null;
-  if (saved) lines.push(`Screenshot archived to this run's evidence folder as ${saved}.`);
+  if (saved) {
+    lines.push(`Screenshot archived to this run's evidence folder as ${saved}.`);
+  } else if (reply.screenshot) {
+    // Said plainly: a model told "archived" every time would cite evidence
+    // the owner will never find.
+    lines.push("Screenshot not archived: this run's evidence folder is full or cannot be written.");
+  }
   if (reply.description) {
     lines.push(`What the page shows: ${reply.description}`);
   } else {

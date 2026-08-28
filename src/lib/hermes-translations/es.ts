@@ -22,6 +22,17 @@ export const es: Record<string, string> = {
   "settings.codingAgent": "Agente de código",
   "settings.codingAgentHint": "Deja que el asistente entregue tareas de programación completas a una ejecución de Claude Code en esta caja, y decide hasta dónde puede llegar cada ejecución.",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "Proveedores en la nube",
+  "settings.providers.hint": "El predeterminado responde primero; un proveedor desactivado conserva su inicio de sesión pero nunca se usa.",
+  "settings.providers.readError": "No se pudo leer la lista de proveedores de la caja. Se muestra el último estado conocido.",
+  "settings.providers.changeFailed": "No se pudo cambiar el proveedor.",
+  "settings.providers.enable": "Activar {name}",
+  "settings.providers.switchedOff": "Desactivado",
+  "settings.providers.makeDefault": "Hacer predeterminado",
+  "settings.providers.lockedHint": "Primero haz que otro proveedor sea el predeterminado.",
+  "settings.providers.empty": "Aún no hay ningún proveedor conectado — conecta uno más abajo.",
+
   // === System password card ===
   "settings.security.passwordLabel": "Contraseña",
   "settings.security.passwordHintPrefix": "Se usa para iniciar sesión en la web, para SSH y para",

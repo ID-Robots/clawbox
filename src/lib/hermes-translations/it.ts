@@ -38,6 +38,17 @@ export const it: Record<string, string> = {
   "settings.codingAgent": "Agente di codice",
   "settings.codingAgentHint": "Lascia che l'assistente affidi intere attività di programmazione a un'esecuzione di Claude Code su questa box, e decidi fino a dove può spingersi un'esecuzione.",
 
+  // === Settings → AI: the cloud-provider list ===
+  "settings.providers.title": "Provider cloud",
+  "settings.providers.hint": "Il provider predefinito risponde per primo; un provider disattivato conserva l'accesso ma non viene mai usato.",
+  "settings.providers.readError": "Non è stato possibile leggere l'elenco dei provider dal box. Viene mostrato l'ultimo stato noto.",
+  "settings.providers.changeFailed": "Non è stato possibile cambiare il provider.",
+  "settings.providers.enable": "Attiva {name}",
+  "settings.providers.switchedOff": "Disattivato",
+  "settings.providers.makeDefault": "Imposta come predefinito",
+  "settings.providers.lockedHint": "Imposta prima un altro provider come predefinito.",
+  "settings.providers.empty": "Nessun provider è ancora collegato — collegane uno qui sotto.",
+
   // === System password card ===
   "settings.security.passwordLabel": "Password di sistema",
   "settings.security.passwordHintPrefix": "Usata per l'accesso web, per SSH e per",
