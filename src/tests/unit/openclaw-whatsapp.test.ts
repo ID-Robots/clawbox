@@ -58,6 +58,40 @@ describe("OpenclawWhatsappPairing", () => {
     expect(mockSpawn.mock.calls[0][0].slice(0, 3)).toEqual(["gateway", "call", "web.login.start"]);
   });
 
+  /** `--timeout <ms>` as it was handed to the CLI, and the method's own budget. */
+  function budgets(call: number): { rpc: number; method: number } {
+    const args = mockSpawn.mock.calls[call][0] as string[];
+    return {
+      rpc: Number(args[args.indexOf("--timeout") + 1]),
+      method: Number(JSON.parse(String(args[args.indexOf("--params") + 1])).timeoutMs),
+    };
+  }
+
+  it("gives the transport more time than the method it is carrying", async () => {
+    // `--timeout` bounds the RPC round trip; `params.timeoutMs` is how long the
+    // gateway itself may spend producing the answer. Equal budgets race: a QR
+    // that takes the whole window is abandoned by the caller at the moment the
+    // gateway is handing it over, and the panel says `start_failed` for a login
+    // that worked. A Jetson is exactly where that window is used up.
+    //
+    // The wait call already reserves headroom; the start call did not.
+    vi.useFakeTimers();
+    try {
+      mockSpawn.mockResolvedValue(rpcOk({ qrDataUrl: QR_A }));
+      const pairing = new lib.OpenclawWhatsappPairing();
+      await pairing.start();
+
+      const start = budgets(0);
+      expect(start.rpc).toBeGreaterThan(start.method);
+
+      await vi.advanceTimersByTimeAsync(lib.TICK_MS + 1);
+      const wait = budgets(1);
+      expect(wait.rpc).toBeGreaterThan(wait.method);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports a completed link as paired, with the restart still pending", async () => {
     mockSpawn.mockResolvedValueOnce(rpcOk({ connected: true }));
 
@@ -313,6 +347,62 @@ describe("readOpenclawWhatsappStatus", () => {
       row({ enabled: false, configured: false, linked: false, connected: false, running: false }),
     );
     expect((await lib.readOpenclawWhatsappStatus()).state).toBe("not_configured");
+  });
+
+  // `configured` is not a fact about this channel — the plugin HARDCODES it.
+  //
+  //   resolveAccountSnapshot: async ({ account, runtime }) => ({
+  //     accountId, name, enabled: account.enabled,
+  //     configured: true,                       // <- @openclaw/whatsapp 2026.7.1
+  //     extra: { statusState: authState, linked, connected, ... },
+  //   })
+  //
+  // and that snapshot is exactly what `channels status --json` publishes as the
+  // per-account row (createAsyncComputedAccountStatusAdapter maps it to the
+  // host's `status.buildAccountSnapshot`). So every real WhatsApp row carries
+  // `configured: true` — including one the owner has just switched off.
+  //
+  // The fixture above cannot happen on a device: it pairs `enabled: false` with
+  // `configured: false`, and the gateway never says that. These two cases use
+  // the shape it does say.
+  it("believes the channel is off when the gateway's own enabled flag says so", async () => {
+    // Straight after Settings -> WhatsApp -> off. `enabled` is the plugin's
+    // real answer (isEnabled: account.enabled && cfg.web?.enabled !== false);
+    // `configured: true` is the constant beside it.
+    mockChannel.mockResolvedValue(
+      row({ enabled: false, configured: true, linked: false, connected: false, running: false }),
+    );
+
+    const status = await lib.readOpenclawWhatsappStatus();
+
+    expect(status.enabled).toBe(false);
+    expect(status.state).toBe("not_configured");
+  });
+
+  it("does not report a switched-off channel as paired because a phone is still linked", async () => {
+    // The worst version of the same shape: the owner turned WhatsApp off but
+    // the linked device is still on disk. Reading `configured` as enablement
+    // put the card back at "paired"/active for a channel receiving nothing —
+    // the false-success class, one field over from the one #548 removed.
+    mockChannel.mockResolvedValue(
+      row({ enabled: false, configured: true, linked: true, connected: false, running: false }),
+    );
+
+    const status = await lib.readOpenclawWhatsappStatus();
+
+    expect(status.enabled).toBe(false);
+    expect(status.state).toBe("not_configured");
+  });
+
+  it("still trusts a running channel that forgot to say it was enabled", async () => {
+    // `running` stays in the disjunction on purpose: a channel the gateway is
+    // actually running is enabled, whatever the config row claims. Only
+    // `configured` is dropped, because only `configured` is a constant.
+    mockChannel.mockResolvedValue(
+      row({ enabled: false, configured: true, linked: true, connected: true, running: true }),
+    );
+
+    expect((await lib.readOpenclawWhatsappStatus()).state).toBe("paired");
   });
 
   it("never invents a link when the gateway could not be asked", async () => {

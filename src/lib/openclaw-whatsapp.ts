@@ -56,6 +56,18 @@ const RPC_SPAWN_TIMEOUT_MS = 90_000;
 const LOGIN_WAIT_MS = 25_000;
 /** Bound on `web.login.start`, which returns as soon as there is a QR. */
 const LOGIN_START_MS = 30_000;
+/**
+ * Headroom the RPC round trip gets over the method's own budget.
+ *
+ * `--timeout` bounds the transport; `params.timeoutMs` is how long the gateway
+ * may spend producing the answer. Setting them equal is a race the caller
+ * loses: `startWebLoginWithQr` is allowed the full window to produce the first
+ * QR, and a transport deadline that expires in the same instant abandons the
+ * call exactly as the answer is handed over — reported to the owner as
+ * `start_failed` for a login that worked. A Jetson is precisely where that
+ * window gets used up.
+ */
+const RPC_HEADROOM_MS = 5_000;
 
 /** Phases, identical to the Hermes pairing manager's — one panel renders both. */
 export type WhatsappPairPhase =
@@ -111,9 +123,14 @@ interface WebLoginResult {
 /**
  * Call one gateway RPC method through the CLI.
  *
- * `openclaw gateway call` prints the method's result object with `ok` merged
- * into it on success, and `{ok:false, error:{...}}` on failure — so `ok` is the
- * discriminator, not the presence of a `result` wrapper.
+ * With `--json`, `openclaw gateway call` prints the method's RESULT OBJECT and
+ * nothing else on success — there is no `ok` wrapper to unwrap and no `result`
+ * key to reach through. On failure it writes an error payload and exits 1, so
+ * the failure arrives here as a rejection from `spawnOpenclawCli` carrying that
+ * text, which is what `isProviderMissing` matches against.
+ *
+ * The `ok === false` check below is therefore belt-and-braces for a build that
+ * reports a refusal on exit 0, not the normal path.
  */
 async function gatewayCall(
   method: string,
@@ -236,7 +253,7 @@ export class OpenclawWhatsappPairing {
       const result = await gatewayCall(
         "web.login.start",
         { force: opts.force === true, timeoutMs: LOGIN_START_MS },
-        LOGIN_START_MS,
+        LOGIN_START_MS + RPC_HEADROOM_MS,
       );
       if (epoch !== this.epoch) return this.peek();
       this.apply(result);
@@ -332,7 +349,7 @@ export class OpenclawWhatsappPairing {
           timeoutMs: LOGIN_WAIT_MS,
           ...(this.snap.qrImage ? { currentQrDataUrl: this.snap.qrImage } : {}),
         },
-        LOGIN_WAIT_MS + 5_000,
+        LOGIN_WAIT_MS + RPC_HEADROOM_MS,
       );
       // Discard an answer that belongs to a session which has since been
       // replaced or stopped.
@@ -399,7 +416,27 @@ export async function readOpenclawWhatsappStatus(): Promise<OpenclawWhatsappStat
   // `lastError: "not linked"`.
   const paired = row.linked === true;
   const connected = row.connected === true;
-  const enabled = row.enabled === true || row.configured === true || row.running === true;
+  // `configured` is deliberately NOT in this disjunction, and leaving it in was
+  // the same mistake one field over. The plugin hardcodes it:
+  //
+  //   resolveAccountSnapshot: async ({ account, runtime }) => ({
+  //     accountId, name, enabled: account.enabled,
+  //     configured: true,                      // <- @openclaw/whatsapp 2026.7.1
+  //     extra: { statusState: authState, linked, connected, ... },
+  //   })
+  //
+  // and that snapshot IS the per-account row `channels status --json` publishes
+  // (createAsyncComputedAccountStatusAdapter maps it onto the host's
+  // `status.buildAccountSnapshot`). So `configured === true` on every WhatsApp
+  // row there has ever been, including one the owner has just switched off —
+  // which made this report the channel enabled, and the card "paired", for a
+  // channel receiving nothing.
+  //
+  // `enabled` is the plugin's real answer (`account.enabled && cfg.web?.enabled
+  // !== false`). `running` stays because a channel the gateway is actually
+  // running is enabled whatever the config says; it is an observation, not a
+  // constant.
+  const enabled = row.enabled === true || row.running === true;
 
   return {
     state: !enabled ? "not_configured" : paired ? "paired" : "enabled_not_paired",
