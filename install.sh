@@ -4569,27 +4569,131 @@ install_claude_ds_wrapper() {
 # step_post_update calls THIS and not the bigger step: an in-app update should
 # deliver the harness without also reinstalling the Codex and Gemini CLIs on
 # every box that updates.
+# Tell a RUNNING agent that the coding harness exists now.
+#
+# The agent offers coding_agent_run / _status / _stop only when the ClawBox MCP
+# server says the harness is ready, and it asks exactly ONCE — in
+# `buildContext` while it boots (mcp/lib/context.ts probes
+# /setup-api/coding-agent/status; mcp/tools/coding-agent.ts returns without
+# declaring anything when the answer is no). The server is then a long-lived
+# stdio child of the agent, so a harness installed underneath it is invisible
+# until something respawns the server.
+#
+# The web server already covers the two paths where readiness flips from ITS
+# side — see src/lib/coding-agent-mcp-refresh.ts, hung off the enable route and
+# the ClawBox AI connect path. This step is the third path, and it had nothing:
+# a full install and step_post_update both happen to restart the agent shortly
+# afterwards (step_start_services / step_gateway_setup), and the STANDALONE
+# `--step coding_harness` — the repair checkReadiness() itself tells the owner
+# to run — did not.
+#
+# ONLY units that are ALREADY ACTIVE are touched. An agent that is stopped, or
+# masked by the edition lock, re-probes when it next starts; starting one here
+# would resurrect a unit the owner or the SKU deliberately put down, which is
+# the whole reason the Hermes edition masks clawbox-gateway.
+refresh_agent_coding_tools() {
+  local unit failed=false found=false
+  for unit in clawbox-gateway.service clawbox-hermes-dashboard.service; do
+    systemctl is-active --quiet "$unit" 2>/dev/null || continue
+    found=true
+    # try-restart, not restart. The probe above and the action below are two
+    # commands, and a unit that stops in between would be STARTED by `restart` —
+    # exactly the thing this function must never do. `try-restart` acts only on a
+    # unit that is running at the moment it runs, and exits 0 when there is
+    # nothing to do, so the invariant does not depend on the gap being small.
+    if systemctl try-restart "$unit" >/dev/null 2>&1; then
+      # "Asked", not "Restarted". try-restart exits 0 both when it restarted the
+      # unit and when the unit had stopped in the meantime and it did nothing —
+      # so claiming a restart here would be this PR's own bug in miniature. What
+      # is true in both cases is that the request was made and the agent will
+      # re-probe, now or at its next start.
+      echo "  Asked $unit to restart so the agent re-probes and offers the coding tools"
+    else
+      echo "  WARN: could not restart $unit — the agent will keep answering that it has no coding tools" >&2
+      failed=true
+    fi
+  done
+  if [ "$found" = false ]; then
+    echo "  No agent running; it will probe the harness when it next starts"
+    return 0
+  fi
+  # EVERY running agent, not "at least one". On the dual edition both units are
+  # up, and one that could not be restarted is one harness still blind — a
+  # partial refresh reported as a whole one is the shape this whole change is
+  # about.
+  [ "$failed" = false ]
+}
+
 step_coding_harness() {
+  # Whether the harness was ALREADY usable decides two things below: nothing
+  # needs telling if nothing changed, and a step that changed nothing and fixed
+  # nothing must not report that it did.
+  local was_ready=false
+  if [ -x "$CLAWBOX_HOME/.local/bin/claude-ds" ] && as_clawbox_login "command -v claude" &>/dev/null; then
+    was_ready=true
+  fi
+
   # Test mode has no network for claude.ai and no reason to download a binary,
   # but the wrapper is a file copy — install it so e2e-install exercises the
   # real delivery path instead of skipping the whole step.
   if is_test_mode; then
     echo "  CLAWBOX_TEST_MODE=1, skipping the Claude Code download"
   else
+    # Still swallowed here: a download that failed is not the verdict, the
+    # probe below is. What changed is that the verdict is now the EXIT STATUS
+    # as well as a line of text.
     ensure_claude_code || true
   fi
   install_claude_ds_wrapper || true
   ensure_clawbox_bashrc_path
 
-  # Say plainly whether the harness can actually run. Without this the only
-  # symptom of a failed CLI install is the wrapper telling the owner to run
-  # this very step again — a loop with no diagnosis in it.
   if is_test_mode; then
-    :
-  elif as_clawbox_login "command -v claude" &>/dev/null; then
-    echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
-  else
-    echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is"
+    return 0
+  fi
+
+  # Say plainly whether the harness can actually run — and MEAN it in the exit
+  # status. This step is what src/lib/coding-agent.ts tells the owner to run
+  # when the Coding app refuses ("Run: sudo bash install.sh --step
+  # coding_harness"), and it used to exit 0 whatever happened: on a box where
+  # the CLI install failed (no network, or Anthropic geo-blocking the region)
+  # the owner ran the documented repair, was told nothing had gone wrong, and
+  # went back to an app refusing in exactly the same words. A repair that
+  # cannot repair has to SAY so.
+  # BOTH halves are reported, then one return. An early return after the first
+  # would hide the second, and this step exists to tell an owner what is wrong —
+  # sending them back for a second run to discover the other half is the same
+  # repair loop in slower motion.
+  local harness_missing=false
+  if ! as_clawbox_login "command -v claude" &>/dev/null; then
+    echo "  WARN: Claude Code is NOT installed — the Coding app will refuse until it is" >&2
+    echo "  Claude Code is downloaded from https://claude.ai/install.sh, so check this" >&2
+    echo "  box's internet access (and whether the installer is available in this" >&2
+    echo "  region), then run the step again." >&2
+    harness_missing=true
+  fi
+  if [ ! -x "$CLAWBOX_HOME/.local/bin/claude-ds" ]; then
+    echo "  WARN: the claude-ds wrapper is NOT at $CLAWBOX_HOME/.local/bin/claude-ds — the Coding app will refuse until it is" >&2
+    harness_missing=true
+  fi
+  if [ "$harness_missing" = true ]; then
+    echo "  This step did NOT repair the coding harness." >&2
+    return 1
+  fi
+
+  echo "  Coding harness ready: claude-ds -> Claude Code -> ClawBox AI"
+
+  # Only on the transition. A reload respawns every MCP child and invalidates
+  # the model's prompt cache, and this step runs on every install and every
+  # in-app update — the same rule, and the same reason for it, as the guard in
+  # refreshCodingAgentToolsIfReadinessChanged.
+  if [ "$was_ready" = false ]; then
+    # A refusal here is REPORTED (on stderr, inside the helper) and does not
+    # fail the step: the harness itself IS repaired and the Coding app works,
+    # so a non-zero exit would be the opposite lie. The agent re-probes at its
+    # next start either way.
+    if ! refresh_agent_coding_tools; then
+      echo "  The agent will offer the coding tools after its next restart" >&2
+    fi
   fi
 }
 
@@ -5398,7 +5502,15 @@ log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install
 
 log "Installing the ClawBox coding harness (claude-ds)..."
-step_coding_harness
+# Guarded, and it has to be. The step now FAILS when the harness did not end up
+# usable — that is the whole point of the change, because this step is the
+# repair src/lib/coding-agent.ts tells the owner to run and it must not report
+# success while the Coding app still refuses. But the harness is OPTIONAL: a box
+# with no Claude Code boots, serves its dashboard and runs its agent. Under the
+# `set -euo pipefail` at the top of this file an unguarded call would turn a
+# region-blocked download into an ABORTED INSTALL, which is the opposite defect.
+step_coding_harness \
+  || echo "  Warning: the coding harness did not install; the Coding app will refuse until it does"
 
 log "Installing VNC server..."
 step_vnc_install

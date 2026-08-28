@@ -173,8 +173,15 @@ describe("the step says whether the harness can actually run", () => {
     // each other forever with no diagnosis anywhere.
     const fn = extractShellFunction("step_coding_harness");
     expect(fn).toContain("command -v claude");
-    expect(fn).toMatch(/WARN: claude-ds is installed but Claude Code is NOT/);
     expect(fn).toMatch(/Coding harness ready/);
+    // Each half names only its own component. The message used to open
+    // "claude-ds is installed but Claude Code is NOT", which is a claim about
+    // the OTHER half — and a lie on the box where both are missing, which is
+    // also the box most likely to be reading it. See
+    // install-coding-harness-repair.test.ts for the behaviour.
+    expect(fn).toMatch(/WARN: Claude Code is NOT installed/);
+    expect(fn).toMatch(/WARN: the claude-ds wrapper is NOT/);
+    expect(fn).not.toMatch(/claude-ds is installed but Claude Code is NOT/);
   });
 });
 
