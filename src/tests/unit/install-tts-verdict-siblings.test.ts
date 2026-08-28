@@ -515,6 +515,16 @@ describe.skipIf(!hasBash)("--step dispatch carries the verdict its step recorded
     expect(res.marker).toBe("");
   });
 
+  it("keeps a recorded failure AND the step's own status together", () => {
+    // `sudo bash install.sh --step openclaw_tts` is the repair command every
+    // TTS failure message prints. The step both records and returns 13, and
+    // the operator needs each half: the marker for the dashboard, the exit
+    // code for whatever ran the command.
+    const res = runDispatch("record_provision_failure openclaw_tts; return 13");
+    expect(res.status, res.out).toBe(13);
+    expect(res.marker).toContain("STATUS=incomplete");
+  });
+
   it("still exits with a failing step's own status", () => {
     // The trap must report the step, not replace it: a dispatched step that
     // dies keeps its exit code, which is what the updater and the operator
