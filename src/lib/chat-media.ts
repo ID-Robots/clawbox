@@ -117,9 +117,12 @@ export function mediaUrl(source: string, mimeType?: string): string {
 }
 
 /**
- * The name to save a media URL under. Our own route carries the real path in a
- * query parameter, so the generated file keeps the name the harness gave it
- * rather than becoming "media" or "route.png" in the downloads folder.
+ * The name to save a media URL under. Our own routes carry the real name in a
+ * query parameter — `path` on the chat media route, `file` on the coding
+ * agent's artifact route — so the saved file keeps the name the harness gave
+ * it rather than becoming "media", "artifacts" or "route.png" in the downloads
+ * folder. The pathname is the last resort, for a URL that names its file the
+ * ordinary way.
  */
 export function mediaFileName(url: string): string {
   const FALLBACK = "image.png";
@@ -129,7 +132,9 @@ export function mediaFileName(url: string): string {
     // The base only matters for the relative URLs this app builds; it is never
     // used for anything but parsing.
     const parsed = new URL(url, "http://localhost");
-    const source = parsed.searchParams.get("path") ?? parsed.pathname;
+    const source = parsed.searchParams.get("path")
+      ?? parsed.searchParams.get("file")
+      ?? parsed.pathname;
     // Trailing separators would otherwise yield an empty final segment.
     const base = source.replace(/\/+$/, "").split("/").pop() ?? "";
     return base || FALLBACK;

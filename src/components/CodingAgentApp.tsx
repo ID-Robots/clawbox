@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import { formatBytes } from "@/lib/format-bytes";
+import { artifactUrl } from "@/lib/use-coding-agent-activity";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.
@@ -101,11 +102,6 @@ interface Run {
   transcriptPath?: string | null;
   /** The run's evidence folder — screenshots and test output it saved. */
   artifacts?: { name: string; bytes: number; kind: "image" | "text" | "other" }[];
-}
-
-/** The served URL of one run artifact — cookie auth rides along like any app asset. */
-function artifactUrl(runId: string, name: string): string {
-  return `/setup-api/coding-agent/artifacts?runId=${encodeURIComponent(runId)}&file=${encodeURIComponent(name)}`;
 }
 
 /** One page of runs. The list is open by default now, so it has to be paged

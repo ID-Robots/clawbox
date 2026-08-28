@@ -21,6 +21,21 @@ export const codingAgentEn: Record<string, string> = {
   // A template the chat's run card fills in — "{n} agents" — shown when a
   // delegated run fans out to sub-agents.
   "codingAgent.chatAgents": "{n} agents",
+  // The chat card's live-work panel: what one progress line means, in the
+  // owner's words rather than the harness's ("Screenshot", never
+  // "mcp__clawbox__browser_screenshot" — see src/lib/coding-agent-progress.ts),
+  // and the counted words after a number: "3 files touched", "12 turns".
+  "codingAgent.chatLiveWork": "Live work",
+  "codingAgent.chatScreenshot": "Screenshot",
+  "codingAgent.chatLookingAtPage": "Looking at the page",
+  "codingAgent.chatOpeningPage": "Opening a page",
+  "codingAgent.chatDrivingPage": "Driving the page",
+  "codingAgent.chatClosingPage": "Closing the page",
+  "codingAgent.chatWrite": "Writing",
+  "codingAgent.chatEdit": "Editing",
+  "codingAgent.chatRead": "Reading",
+  "codingAgent.chatFilesTouched": "files touched",
+  "codingAgent.chatTurns": "turns",
 
   // The desktop card a finished run raises, top-right with the others.
   "codingAgent.noticeOpen": "Open the coding agent",
