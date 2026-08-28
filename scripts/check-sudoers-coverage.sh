@@ -453,6 +453,52 @@ sub symbol_definition {
   return (undef, undef);
 }
 
+# The text of every `return …;` in a function body. Quotes and brackets are
+# respected so a `;` inside a string or a nested literal does not end the
+# expression early.
+sub return_expressions {
+  my ($body) = @_;
+  my @out;
+  my ($i, $n) = (0, length $body);
+  while ($i < $n) {
+    my $ch = substr($body, $i, 1);
+    if ($ch eq '"' || $ch eq "'" || $ch eq '`') {
+      my $q = $ch;
+      $i++;
+      # ord(), not a backslash literal: this file is a shell heredoc wrapping a
+      # perl script, and a lone `\` in it has three layers to survive.
+      while ($i < $n) { my $c = substr($body, $i, 1); $i++; last if $c eq $q; $i++ if ord($c) == 92 }
+      next;
+    }
+    if (substr($body, $i, 6) eq 'return'
+        && ($i == 0 || substr($body, $i - 1, 1) !~ /[A-Za-z0-9_\$]/)
+        && ($i + 6 >= $n || substr($body, $i + 6, 1) !~ /[A-Za-z0-9_\$]/)) {
+      my $j = $i + 6;
+      my $start = $j;
+      my $depth = 0;
+      while ($j < $n) {
+        my $c = substr($body, $j, 1);
+        if ($c eq '"' || $c eq "'" || $c eq '`') {
+          my $q = $c;
+          $j++;
+          while ($j < $n) { my $d = substr($body, $j, 1); $j++; last if $d eq $q; $j++ if ord($d) == 92 }
+          next;
+        }
+        $depth++ if $c =~ /[\(\[\{]/;
+        $depth-- if $c =~ /[\)\]\}]/;
+        last if $depth < 0;
+        last if $c eq ';' && $depth == 0;
+        $j++;
+      }
+      push @out, substr($body, $start, $j - $start);
+      $i = $j + 1;
+      next;
+    }
+    $i++;
+  }
+  return @out;
+}
+
 sub unquote {
   my ($s) = @_;
   return $1 if $s =~ /^"([^"\\]*)"$/;
@@ -483,16 +529,31 @@ sub resolve_symbol_values {
     }
     push @groups, \@items;
   } else {
-    # A function: the union of every array literal in its body. Restricted to
-    # array literals on purpose — harvesting every string in the body would
-    # collect the operands of `edition === "hermes"` as if they were units.
-    my ($i, $n) = (0, length $body);
-    while ($i < $n) {
-      if (substr($body, $i, 1) eq '[') {
-        my $g = balanced_group(substr($body, $i), '[', ']');
-        if (defined $g) { push @groups, [split_argv_items($g)]; $i += length($g) + 2; next }
+    # A function: the array literals in its RETURN expressions, and nothing
+    # else. Two narrowings, both deliberate:
+    #
+    #   * array literals only, not every string. Harvesting the whole body
+    #     would collect the operands of `edition === "hermes"` as if they were
+    #     unit names.
+    #   * return expressions only. An unrelated array elsewhere in the body —
+    #     a validation list, an error message built from a template literal —
+    #     would otherwise be demanded as a privileged argument, and the cheapest
+    #     way to silence that is to ADD a grant for it. A check that pushes the
+    #     next author towards widening the allow-list is worse than no check.
+    #
+    # A helper whose return is not a literal array contributes nothing and
+    # fails the "yielded no values" test below, which is the fail-closed
+    # answer: point `resolve` at the symbol that holds the values, or say in
+    # `unverified` why it cannot be resolved.
+    for my $expr (return_expressions($body)) {
+      my ($i, $n) = (0, length $expr);
+      while ($i < $n) {
+        if (substr($expr, $i, 1) eq '[') {
+          my $g = balanced_group(substr($expr, $i), '[', ']');
+          if (defined $g) { push @groups, [split_argv_items($g)]; $i += length($g) + 2; next }
+        }
+        $i++;
       }
-      $i++;
     }
   }
 

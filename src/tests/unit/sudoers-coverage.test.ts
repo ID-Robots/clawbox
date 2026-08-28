@@ -338,13 +338,14 @@ const exempting = (perl: string) => (src: string) => {
  * A sudo call whose unit comes out of a helper — the shape that slipped
  * through. The CALL text is fixed; only the helper decides which units exist.
  */
-function writeUnitProbe(hermes: string, openclaw: string) {
+function writeUnitProbe(hermes: string, openclaw: string, extraBody = "") {
   fs.writeFileSync(
     path.join(fixture, "scripts/zz-probe.ts"),
     [
       'import { execFile } from "node:child_process";',
       "",
       "function zzUnits(edition: string): string[] {",
+      ...(extraBody ? [extraBody] : []),
       `  return edition === "hermes" ? ["${hermes}"] : ["${openclaw}"];`,
       "}",
       "",
@@ -413,6 +414,26 @@ d("a declaration is verified against its producer", () => {
       declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
     );
     expect(r.stderr + r.stdout).toMatch(/0 gaps/);
+    expect(r.status).toBe(0);
+  });
+
+  // Only the RETURN expressions of a helper are harvested. An unrelated array in
+  // its body — a validation list, a message built from a template literal — is
+  // not a set of privileged arguments, and demanding grants for it would push
+  // the next author into widening the allow-list to silence this check.
+  it("ignores an array literal that is not part of a return expression", () => {
+    writeUnitProbe(
+      "zz-hermes.service",
+      "zz-openclaw.service",
+      '  const known = ["not-a-unit", "also-not-a-unit"];\n  void known;',
+    );
+    grantRestart("zz-openclaw.service");
+    grantRestart("zz-hermes.service");
+    const r = runPatched(
+      fixture,
+      declaring(zzDeclaration(["zz-openclaw.service", "zz-hermes.service"])),
+    );
+    expect(r.stderr).not.toMatch(/not-a-unit/);
     expect(r.status).toBe(0);
   });
 

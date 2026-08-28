@@ -632,7 +632,11 @@ d("the allow-list a device ends up with", () => {
   ];
 
   it("grants exactly the systemctl commands the product issues, and no others", () => {
-    expect(systemctlGrants(install())).toEqual(EXPECTED);
+    // Sorted on both sides: these are all NOPASSWD allows with no overlapping
+    // Cmnd, so reordering lines in the file changes no privilege. Comparing in
+    // file order would fail a pure reshuffle with a diff that reads like a
+    // privilege change, and that is the diff nobody looks at twice.
+    expect([...systemctlGrants(install())].sort()).toEqual([...EXPECTED].sort());
   });
 
   it("grants the unit a ClawKeep restore restarts on OpenClaw, in both spellings", () => {
