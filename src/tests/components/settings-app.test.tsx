@@ -641,11 +641,12 @@ describe("SettingsApp messaging channels hub", () => {
 });
 
 /**
- * The merged AI page — cloud providers and the on-device model behind one
- * sidebar entry, with the unified provider list above two tabs. The old
- * "localAi" section id survives as a deep link that lands on the Local tab.
+ * Providers and Local AI are neighbouring sidebar entries, each with its own
+ * provider list on top: cloud sign-ins on Providers, the on-device model and
+ * the inventory of everything on the box on Local AI. The old "localModels"
+ * section id survives as a deep link that lands on Local AI.
  */
-describe("SettingsApp merged AI page", () => {
+describe("SettingsApp providers and Local AI pages", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
       const url = input.toString();
@@ -667,35 +668,34 @@ describe("SettingsApp merged AI page", () => {
     return [...nav.querySelectorAll(":scope > button")] as HTMLElement[];
   }
 
-  it("carries one AI Models entry and no separate Local AI row", () => {
+  it("carries Providers and Local AI, and no Local Models or AI Provider rows", () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const labels = navButtons(container).map((b) => b.textContent ?? "");
-    expect(labels.some((l) => l.includes("settings.aiModels"))).toBe(true);
-    expect(labels.some((l) => l.includes("settings.localAi"))).toBe(false);
-    expect(labels.some((l) => l.includes("settings.aiProvider"))).toBe(false);
-    // The on-device inventory lives under the Local tab too.
+    expect(labels.some((l) => l.includes("settings.providers"))).toBe(true);
+    expect(labels.some((l) => l.includes("settings.localAi"))).toBe(true);
     expect(labels.some((l) => l.includes("settings.localModels"))).toBe(false);
+    expect(labels.some((l) => l.includes("settings.aiProvider"))).toBe(false);
+    // Providers leads the sidebar, with Local AI directly beneath it.
+    expect(labels.findIndex((l) => l.includes("settings.localAi"))).toBe(labels.findIndex((l) => l.includes("settings.providers")) + 1);
   });
 
-  it("shows the provider list and opens the Local tab from the old localAi deep link", async () => {
+  it("opens on Providers with the provider list, and Local AI shows the model setup plus the inventory", async () => {
     const { container } = render(<SettingsApp ui={defaultUi} />);
-    const ai = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.aiModels"));
-    if (!ai) throw new Error("AI Models nav entry did not render");
-    fireEvent.click(ai);
     expect(await screen.findByTestId("ai-provider-list")).toBeInTheDocument();
-    expect(screen.getByTestId("settings-ai-tab-cloud")).toHaveAttribute("aria-selected", "true");
 
-    fireEvent.click(screen.getByTestId("settings-ai-tab-local"));
-    expect(screen.getByTestId("settings-ai-tab-local")).toHaveAttribute("aria-selected", "true");
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"));
+    if (!local) throw new Error("Local AI nav entry did not render");
+    fireEvent.click(local);
     expect(await screen.findByTestId("settings-local-ai-step")).toBeInTheDocument();
-    // The inventory of everything on the box renders on the same tab.
     expect(await screen.findByTestId("local-models-loading")).toBeInTheDocument();
+    expect(screen.getByTestId("ai-provider-list")).toBeInTheDocument();
+  });
 
-    // Back to cloud, then the legacy deep link must land on Local again.
-    fireEvent.click(screen.getByTestId("settings-ai-tab-cloud"));
-    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localAi" } }));
-    await waitFor(() => expect(screen.getByTestId("settings-ai-tab-local")).toHaveAttribute("aria-selected", "true"));
-    // And the sidebar keeps the merged entry lit, since Local AI has no row.
-    expect(ai.className).toContain("coral-bright");
+  it("lands the old Local Models deep link on Local AI and keeps that entry lit", async () => {
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "localModels" } }));
+    expect(await screen.findByTestId("settings-local-ai-step")).toBeInTheDocument();
+    const local = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.localAi"))!;
+    expect(local.className).toContain("coral-bright");
   });
 });

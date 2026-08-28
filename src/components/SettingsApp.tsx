@@ -223,10 +223,12 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // the ways to reach it first, the box's own machinery next, the cosmetics
   // and the once-a-year pages last. The first entry is also where Settings
   // opens.
-  // Cloud providers and the on-device model share one entry; the page holds
-  // the unified provider list and the two configure panels as tabs. "localAi"
-  // stays a Section so existing deep links land on the Local tab.
-  { id: "ai", icon: "smart_toy", labelKey: "settings.aiModels" },
+  // Providers (cloud sign-ins) and Local AI (the on-device model and the
+  // inventory of everything running on the box) are neighbours, each with its
+  // own provider list on top. "localModels" stays a Section so its deep links
+  // land on Local AI.
+  { id: "ai", icon: "smart_toy", labelKey: "settings.providers" },
+  { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
   // One entry for every messaging channel; the four panes live behind it
   // (CHANNEL_ITEMS) rather than each claiming a sidebar row of its own.
   { id: "channels", icon: "forum", labelKey: "settings.channels" },
@@ -338,8 +340,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
   const [section, setSection] = useState<Section>(NAV_ITEMS[0].id);
-  /** Which half of the merged AI page is open: cloud sign-ins or the local model. */
-  const [aiTab, setAiTab] = useState<"cloud" | "local">("cloud");
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
@@ -404,13 +404,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
     if (next === "remote" && requireLoginFor("remote")) return;
-    // The old Local AI and Local Models sections are the Local tab of the
-    // merged AI page now: the on-device model's setup and the inventory of
-    // everything running on the box belong under one roof.
-    if (next === "localAi" || next === "localModels") {
-      setAiTab("local");
-      next = "ai";
-    }
+    // The old Local Models section is part of Local AI now.
+    if (next === "localModels") next = "localAi";
     setSection(next);
     // Both, so one navigation call works on either layout: the mobile view
     // reads `mobileSection`, and a hub row that only set `section` would
@@ -428,10 +423,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     const apply = (s: unknown) => {
       if (!isSection(s)) return;
       let next: Section = s;
-      if (next === "localAi" || next === "localModels") {
-        setAiTab("local");
-        next = "ai";
-      }
+      if (next === "localModels") next = "localAi";
       setSection(next);
       setMobileSection(next);
     };
@@ -1378,8 +1370,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       setLocalAiDisabling(false);
     }
   }, [notifyChatModelStateChanged, refreshLocalAiStatus]);
-  // The local model's pane is the Local tab of the merged AI page now.
-  const localTabOpen = section === "ai" && aiTab === "local";
+  const localTabOpen = section === "localAi";
   useEffect(() => {
     if (!localTabOpen && !isMobile) return;
     refreshLocalAiStatus();
@@ -2573,7 +2564,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // row of its own to highlight, and an unlit sidebar reads as "nowhere".
   const navSection: Section = isChannelSection(activeSection)
     ? "channels"
-    : activeSection === "localAi" || activeSection === "localModels" ? "ai" : activeSection;
+    : activeSection === "localModels" ? "localAi" : activeSection;
   const visibleNavItems = NAV_ITEMS;
   const resetProgressSteps = [
     {
@@ -3397,38 +3388,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── AI Models: one page for every provider ───
-            The unified list (status, default, on/off switch per provider) sits
-            above the two configure panels, which keep their own components and
-            routes and simply became tabs. */}
+        {/* ─── Providers: the cloud sign-ins, the owner's connected ones listed first ─── */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
-            <div role="tablist" aria-label="AI configuration" className="flex rounded-xl bg-white/[0.04] border border-white/[0.06] p-1 gap-1">
-              {(["cloud", "local"] as const).map((tab) => (
-                <button
-                  key={tab}
-                  type="button"
-                  role="tab"
-                  aria-selected={aiTab === tab}
-                  onClick={() => setAiTab(tab)}
-                  data-testid={`settings-ai-tab-${tab}`}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border-none cursor-pointer transition-colors ${
-                    aiTab === tab
-                      ? "bg-[var(--coral-bright)]/20 text-[var(--text-primary)]"
-                      : "bg-transparent text-[var(--text-muted)] hover:text-[var(--text-primary)]"
-                  }`}
-                >
-                  {tab === "cloud" ? t("settings.aiTabCloud") : t("settings.aiTabLocal")}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ─── AI Models · Cloud tab ─── */}
-        {activeSection === "ai" && aiTab === "cloud" && (
-          <div className="max-w-xl space-y-5">
-            <AiProviderList filter="cloud" onOpen={setAiTab} />
+            <AiProviderList filter="cloud" onOpen={(tab) => setSectionGated(tab === "local" ? "localAi" : "ai")} />
 
             {/* Provider status card — suppressed on the Hermes edition, where the
                 AI Providers hero below already names the active provider, its
@@ -3541,10 +3504,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         )}
 
-        {/* ─── AI Models · Local tab ─── */}
-        {activeSection === "ai" && aiTab === "local" && (
+        {/* ─── Local AI: the on-device model, and the inventory of everything on the box ─── */}
+        {activeSection === "localAi" && (
           <div className="max-w-xl space-y-5">
-            <AiProviderList filter="local" onOpen={setAiTab} />
+            <AiProviderList filter="local" onOpen={(tab) => setSectionGated(tab === "local" ? "localAi" : "ai")} />
 
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
@@ -3732,8 +3695,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         )}
 
         {/* The on-device inventory — every engine on the box and what it is
-            doing — lives under the Local tab with the model setup above it. */}
-        {activeSection === "ai" && aiTab === "local" && (
+            doing — lives on Local AI beneath the model setup. */}
+        {activeSection === "localAi" && (
           <LocalModelsPanel active={localTabOpen} />
         )}
 
