@@ -1115,14 +1115,17 @@ async function clearOpenAICompatProvider(provider: string): Promise<void> {
  * `setProviderPlugins` enables a few steps later.
  */
 /**
- * Which transport a save ended up on. Returned rather than logged here so the
- * line is written by the caller, whose provider name is a literal: `opts`
- * carries the request body's apiKey and authMode, so anything read back off it
- * is taint-tracked to `request.json()` and a log line built from it trips
- * CodeQL's js/log-injection whether or not it goes through `logSafe`.
+ * True when the save wrote the openai-compat override, false when it handed the
+ * provider to its native plugin.
+ *
+ * A boolean, and reported by the CALLER rather than logged here, because both
+ * halves are needed to keep the log line clean under CodeQL: `opts` carries the
+ * request body's apiKey and authMode, so anything read back off it — or
+ * returned from a function that took it — is taint-tracked to `request.json()`
+ * and trips js/log-injection, which does not recognise `logSafe` as a barrier.
+ * A boolean carries no text into the line; the caller picks between two string
+ * literals and names its own provider, which is a literal there too.
  */
-type CloudProviderTransport = "openai-compat" | "native plugin, subscription auth";
-
 async function applyCloudProviderTransport(opts: {
   provider: string;
   baseUrl: string;
@@ -1130,10 +1133,10 @@ async function applyCloudProviderTransport(opts: {
   authMode: string;
   defaultModel: string;
   curatedModels: readonly { id: string }[];
-}): Promise<CloudProviderTransport> {
+}): Promise<boolean> {
   if (!routesSubscriptionNatively(opts.provider, opts.authMode)) {
     await writeOpenAICompatProvider(opts);
-    return "openai-compat";
+    return true;
   }
 
   await clearOpenAICompatProvider(opts.provider);
@@ -1148,7 +1151,7 @@ async function applyCloudProviderTransport(opts: {
     },
   ]);
   await ensureFallbackModel(opts.defaultModel);
-  return "native plugin, subscription auth";
+  return false;
 }
 
 export async function POST(request: Request) {
@@ -2066,7 +2069,7 @@ export async function POST(request: Request) {
       // provider entry the chat turn silently returns usage 0/0/0 — and no
       // OAuth flow either (it is absent from OAUTH_PROVIDERS), so every save
       // that reaches here is key-based and keeps the override.
-      const openrouterTransport = await applyCloudProviderTransport({
+      const openrouterWroteOverride = await applyCloudProviderTransport({
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
         apiKey: normalizedApiKey,
@@ -2074,7 +2077,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: OPENROUTER_CURATED_MODELS,
       });
-      console.log(`[AI Config] Set openrouter provider (${openrouterTransport}): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set openrouter provider (${openrouterWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
@@ -2083,7 +2086,7 @@ export async function POST(request: Request) {
       // the anthropic bug fixed here, and it is deliberately left alone: see
       // NATIVE_SUBSCRIPTION_ROUTING for why taking its override away without
       // a device to prove the native route on would repeat the same mistake.
-      const googleTransport = await applyCloudProviderTransport({
+      const googleWroteOverride = await applyCloudProviderTransport({
         provider: "google",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
         apiKey: normalizedApiKey,
@@ -2091,7 +2094,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: GOOGLE_MODELS,
       });
-      console.log(`[AI Config] Set google provider (${googleTransport}): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set google provider (${googleWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else if (isAnthropic) {
       // With an API KEY: the native anthropic plugin reads a per-agent sqlite
       // auth store that ClawBox's file auth profile doesn't populate, so it
@@ -2101,7 +2104,7 @@ export async function POST(request: Request) {
       // With a Claude Pro/Max SUBSCRIPTION: that same override is what made
       // every turn 429. applyCloudProviderTransport keeps the two apart; see
       // its doc comment for the transport proof.
-      const anthropicTransport = await applyCloudProviderTransport({
+      const anthropicWroteOverride = await applyCloudProviderTransport({
         provider: "anthropic",
         baseUrl: "https://api.anthropic.com/v1",
         apiKey: normalizedApiKey,
@@ -2109,7 +2112,7 @@ export async function POST(request: Request) {
         defaultModel: config.defaultModel,
         curatedModels: ANTHROPIC_MODELS,
       });
-      console.log(`[AI Config] Set anthropic provider (${anthropicTransport}): ${logSafe(config.defaultModel)}`);
+      console.log(`[AI Config] Set anthropic provider (${anthropicWroteOverride ? "openai-compat" : "native plugin, subscription auth"}): ${logSafe(config.defaultModel)}`);
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.

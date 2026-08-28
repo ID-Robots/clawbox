@@ -62,6 +62,10 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
+  // The configure route imports this to remove a stale openai-compat override.
+  // A factory mock replaces the whole module, so an export the route imports but
+  // the factory omits fails module loading the moment a test reaches it.
+  runOpenclawConfigUnset: vi.fn(),
   // The configure route reads the config STRICTLY before it removes an
   // openai-compat override, so the mock has to carry both readers.
   readConfigStrict: vi.fn().mockResolvedValue({}),
