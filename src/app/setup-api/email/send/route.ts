@@ -41,6 +41,11 @@
 import { NextResponse } from "next/server";
 import { getEmailCredentials, toSmtpConfig } from "@/lib/email-config";
 import { notifyOwner } from "@/lib/email-notify";
+// Asking in chat is a NOTIFICATION, not a second gate: it posts the draft and a
+// button to a bot ClawBox owns exclusively. Nothing this route returns can
+// approve anything, and the agent reading the answer cannot press the button.
+// See src/lib/email-approval.ts.
+import { sendApprovalPrompt } from "@/lib/email-approval";
 // The message limits live with the queue that has the final say on them, so a
 // route that accepts a message the queue then refuses cannot drift into
 // existence — the caller would have spent the send budget on a 400.
@@ -134,14 +139,28 @@ export async function POST(request: Request) {
           { status: queued.reason === "full" ? 429 : 400 },
         );
       }
+      // Ask in chat when the owner has turned that on. Awaited rather than
+      // fired and forgotten because the answer below has to be TRUE: an agent
+      // told "I asked them on Telegram" when Telegram was unreachable will tell
+      // the person the same thing, and they will wait for a message that never
+      // arrives. Never throws; see sendApprovalPrompt.
+      const prompt = await sendApprovalPrompt(queued.draft);
       // Best effort: a notification that does not appear must not turn a
       // successfully-queued draft into a failed send.
       await notifyOwner(
         `The assistant wants to send an email. Open Settings → Email to approve or delete it.`,
       ).catch(() => undefined);
-      console.error("[email/send] queued for owner approval");
+      console.error(`[email/send] queued for owner approval (chat prompt: ${prompt.kind})`);
       return NextResponse.json(
-        { success: true, queued: true, pendingId: queued.draft.id, recipients: recipients.length },
+        {
+          success: true,
+          queued: true,
+          pendingId: queued.draft.id,
+          recipients: recipients.length,
+          // What the agent may say to the person. A kind, never a chat id and
+          // never the button — there is nothing here the agent can act on.
+          approvalPrompt: prompt.kind,
+        },
         { status: 202 },
       );
     }

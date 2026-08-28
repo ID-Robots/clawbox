@@ -126,6 +126,42 @@ interface LostDraft {
   body: string;
 }
 
+/**
+ * "Approve from Telegram", as the panel sees it.
+ *
+ * `ownerChats` is a COUNT and never the ids: the panel only needs to warn that
+ * nobody is paired yet, and publishing the household's Telegram user ids into
+ * the DOM to say so would be a worse trade than the warning is worth.
+ */
+interface ChatApprovalState {
+  enabled: boolean;
+  botConfigured: boolean;
+  botUsername: string | null;
+  ownerChats: number;
+}
+
+/** One shape, one parser. Two hand-rolled copies drift the moment a field moves. */
+function parseChatApprovalState(d: unknown): ChatApprovalState {
+  const r = (typeof d === "object" && d !== null ? d : {}) as Record<string, unknown>;
+  return {
+    enabled: r.enabled === true,
+    botConfigured: r.botConfigured === true,
+    botUsername: typeof r.botUsername === "string" ? r.botUsername : null,
+    ownerChats: typeof r.ownerChats === "number" ? r.ownerChats : 0,
+  };
+}
+
+/**
+ * How often the open approvals strip re-reads the queue.
+ *
+ * Fifteen seconds is chosen against what it is for: a draft approved from
+ * Telegram should stop being listed here while the owner is still looking at
+ * the page, and "within a few seconds" is what makes the list believable. It is
+ * two small local requests, only while this section is on screen and the tab is
+ * in front.
+ */
+const PENDING_REFRESH_MS = 15_000;
+
 interface SwapStats { used: number; total: number; percent: number }
 interface DiskMount { filesystem: string; size: string; used: string; avail: string; usePercent: number; mountpoint: string }
 interface NetworkIface { name: string; ip: string; rx: number; tx: number }
@@ -1644,6 +1680,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [emailReconfigure, setEmailReconfigure] = useState(false);
   const [emailMsg, setEmailMsg] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const emailSaveControllerRef = useRef<AbortController | null>(null);
+  const [chatApproval, setChatApproval] = useState<ChatApprovalState | null>(null);
+  const [chatApprovalToken, setChatApprovalToken] = useState("");
+  const [chatApprovalBusy, setChatApprovalBusy] = useState(false);
 
   const refreshEmailStatus = useCallback(async () => {
     try {
@@ -1702,11 +1741,99 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   }, []);
 
+  const refreshChatApproval = useCallback(async () => {
+    try {
+      const r = await fetch("/setup-api/email/chat-approval", { cache: "no-store" });
+      if (!r.ok) return;
+      setChatApproval(parseChatApprovalState(await r.json()));
+    } catch {
+      // keep the last known state
+    }
+  }, []);
+
   useEffect(() => {
     if (section !== "email" && !isMobile) return;
     refreshEmailStatus();
     refreshEmailPending();
-  }, [section, isMobile, refreshEmailStatus, refreshEmailPending]);
+    refreshChatApproval();
+  }, [section, isMobile, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+
+  /**
+   * KEEP THE QUEUE HONEST WHILE THE PANEL IS OPEN.
+   *
+   * The approval strip used to be fetched on mount and after this panel's own
+   * buttons, and nowhere else — so a draft approved ANYWHERE ELSE went on being
+   * listed here as if it were still waiting. That was true of the chat card and
+   * of a second browser tab already, and it is unavoidable now that a draft can
+   * be approved from Telegram, where this page is not even open.
+   *
+   * A stale entry in an approvals list is not a cosmetic bug: the owner reads
+   * it as "this message has not gone out", and the honest answers are either to
+   * re-approve something already sent or to delete a draft that no longer
+   * exists. So the strip re-reads the server whenever this tab could have
+   * missed something — when it comes back to the foreground, and on a slow tick
+   * while it is being looked at.
+   *
+   * Only while the section is actually on screen, and stopped the moment it is
+   * not: this is a Jetson serving its own UI, and a poll that runs behind a
+   * hidden tab is a poll nobody is reading.
+   *
+   * Which is why the guard is `emailPanelVisible` and not the `&& !isMobile`
+   * shape the one-shot fetches above use. That shape inverts on a phone —
+   * `!isMobile` is false, so the early return never fires and the section is
+   * never consulted — and the WhatsApp heartbeat above learned the same lesson
+   * the expensive way: an interval that could not be stopped by browsing away.
+   * An extra GET on mount costs nothing; a timer that never stops does.
+   */
+  const emailPanelVisible = isMobile ? mobileSection === "email" : section === "email";
+
+  useEffect(() => {
+    if (!emailPanelVisible) return;
+    const refresh = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      refreshEmailStatus();
+      refreshEmailPending();
+      // The panel's own state can go stale the same way: an owner who pairs
+      // with the approvals bot in Telegram while this is open should stop
+      // being told nobody can be asked.
+      refreshChatApproval();
+    };
+    const onVisibility = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") refresh();
+    };
+    const timer = setInterval(refresh, PENDING_REFRESH_MS);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
+
+  /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */
+  const submitChatApproval = async (body: { enabled?: boolean; botToken?: string } | null) => {
+    setChatApprovalBusy(true);
+    setEmailMsg(null);
+    try {
+      const r = await fetch("/setup-api/email/chat-approval", {
+        method: body === null ? "DELETE" : "POST",
+        headers: { "Content-Type": "application/json" },
+        ...(body === null ? {} : { body: JSON.stringify(body) }),
+      });
+      const d = await r.json().catch(() => null);
+      if (!r.ok) {
+        setEmailMsg({ type: "error", message: typeof d?.error === "string" ? d.error : t("settings.failedSave") });
+        return;
+      }
+      setChatApproval(parseChatApprovalState(d));
+      setChatApprovalToken("");
+    } catch {
+      setEmailMsg({ type: "error", message: t("settings.failedSave") });
+    } finally {
+      setChatApprovalBusy(false);
+    }
+  };
 
   /**
    * Open the setup form on what is actually saved, rather than on the defaults.
@@ -4145,6 +4272,77 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     </div>
                   ))}
                 </div>
+              </div>
+            )}
+
+            {/* Approve from chat. Shown only once an account exists AND the
+                owner has asked to be asked -- with askBeforeSend off there is
+                nothing to approve, and offering the switch would suggest
+                otherwise. */}
+            {emailStatus?.configured && emailStatus.askBeforeSend && (
+              <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-email-chat-approval">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }} aria-hidden="true">forum</span>
+                  <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.emailChatApproval")}</label>
+                </div>
+                <p className="text-xs text-[var(--text-secondary)] mb-4">{t("settings.emailChatApprovalHelp")}</p>
+
+                {chatApproval?.botConfigured ? (
+                  <div className="space-y-3">
+                    <div className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-4 py-3.5">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          data-testid="settings-email-chat-approval-toggle"
+                          checked={chatApproval.enabled}
+                          disabled={chatApprovalBusy}
+                          onChange={(e) => submitChatApproval({ enabled: e.target.checked })}
+                          className="mt-0.5 accent-[var(--coral-bright)]"
+                        />
+                        <span className="min-w-0">
+                          <span className="block text-sm text-[var(--text-primary)] font-medium">{t("settings.emailChatApprovalOn")}</span>
+                          <span className="block text-xs text-[var(--text-secondary)] mt-0.5 break-words">
+                            {t("settings.emailChatApprovalConnected", { bot: chatApproval.botUsername ?? "" })}
+                          </span>
+                        </span>
+                      </label>
+                    </div>
+                    {chatApproval.ownerChats === 0 && (
+                      <p className="text-xs text-amber-300/90" data-testid="settings-email-chat-approval-no-peers">
+                        {t("settings.emailChatApprovalNoPeers")}
+                      </p>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => submitChatApproval(null)}
+                      disabled={chatApprovalBusy}
+                      className="text-sm text-[var(--text-muted)] hover:text-[var(--text-secondary)] bg-transparent border-none cursor-pointer disabled:opacity-50 px-0"
+                    >
+                      {t("settings.emailChatApprovalDisconnect")}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <input
+                      type="password"
+                      data-testid="settings-email-chat-approval-token"
+                      value={chatApprovalToken}
+                      onChange={(e) => setChatApprovalToken(e.target.value)}
+                      placeholder={t("settings.emailChatApprovalToken")}
+                      autoComplete="off"
+                      className="w-full px-4 py-3 rounded-xl bg-white/[0.03] border border-white/[0.06] text-base text-[var(--text-primary)] outline-none focus:border-[var(--coral-bright)]/50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => submitChatApproval({ botToken: chatApprovalToken.trim(), enabled: true })}
+                      disabled={chatApprovalBusy || chatApprovalToken.trim().length === 0}
+                      className="px-4 py-2 rounded-lg bg-[var(--coral-bright)] hover:bg-orange-500 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold text-white transition-colors border-none cursor-pointer inline-flex items-center gap-2"
+                    >
+                      {chatApprovalBusy && <span className="material-symbols-rounded animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>}
+                      {t("settings.emailChatApprovalConnect")}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

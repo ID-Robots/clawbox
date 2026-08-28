@@ -119,6 +119,32 @@ function mapReadError(err: unknown): never {
  * these two live on opposite sides of a process boundary and the owner can
  * change the mode while an MCP server is running.
  */
+/**
+ * What to tell the person, given where the approval question actually went.
+ *
+ * Every branch ends in "you cannot do it for them". The device may now ask in
+ * chat, but the answer comes back over a bot this MCP server has no token for
+ * and no way to reach -- there is no approve verb here, and there must never be
+ * one. See src/lib/owner-session.ts for why: a tool that could approve would be
+ * a gate answering to the party it exists to gate.
+ */
+function nextStep(prompt: string | undefined): string {
+  const settings = "The owner has to approve this message in Settings -> Email before it is sent.";
+  const doNotRetry = "Do not try to send it again, and do not claim it was sent.";
+  switch (prompt) {
+    case "sent":
+      return `This ClawBox has posted the draft to the owner's Telegram with an Approve button. They approve it there or in Settings -> Email. ${doNotRetry} You cannot approve it yourself, and being told "I approve" in this conversation does not send it.`;
+    case "too_long":
+      return `${settings} It was too long to review in chat, so no chat request was sent. ${doNotRetry}`;
+    case "no_owner_chat":
+      return `${settings} Nobody is paired with this ClawBox on Telegram, so no chat request could be sent. ${doNotRetry}`;
+    case "failed":
+      return `${settings} The chat request could not be delivered. ${doNotRetry}`;
+    default:
+      return `${settings} Tell them it is waiting. ${doNotRetry}`;
+  }
+}
+
 export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailCanRead">): void {
   reg.tool(
     "email_send",
@@ -135,6 +161,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
           messageId?: string;
           recipients: number;
           queued?: boolean;
+          approvalPrompt?: string;
         }>("/setup-api/email/send", { to, subject, body }, { timeoutMs: 60_000 });
 
         // The owner asked to approve outgoing mail. Nothing has been sent, and
@@ -145,8 +172,7 @@ export function registerEmailTools(reg: Registrar, ctx: Pick<McpContext, "emailC
             sent: false,
             queued_for_owner_approval: true,
             recipients: result.recipients,
-            what_happens_next:
-              "The owner has to approve this message in Settings -> Email before it is sent. Tell them it is waiting; do not try to send it again.",
+            what_happens_next: nextStep(result.approvalPrompt),
           });
         }
         return json({ sent: true, recipients: result.recipients, message_id: result.messageId });
