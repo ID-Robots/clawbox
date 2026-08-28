@@ -2791,8 +2791,28 @@ step_openclaw_tts() {
     # there — which is where an unhandled 13 would have landed — would put the
     # name of a working fallback on the box this whole fix exists to catch.
     case "$VOICE_RC" in
-      10|11|12)
+      10|12)
         echo "  On-device TTS configured (Piper CPU only — $KOKORO_REASON)"
+        ;;
+      11)
+        # 11 was bucketed with 10 and 12 and is not like them. It is
+        # install_kokoro_tts's "no Jetson CUDA build for this architecture",
+        # i.e. `uname -m` is not aarch64 — which is exactly when
+        # install_piper_engine has no pinned artifact either and publishes
+        # `skipped:arch-*` of its own. install-voice.sh has just printed "=== No
+        # on-device TTS engine applies to this board ===" for that pair, so
+        # naming a Piper CPU fallback one line later put the name of an engine
+        # this box does not have on the summary line an operator reads.
+        #
+        # Deliberately NOT a recorded provisioning failure: nothing was asked
+        # for and nothing is missing on a board neither engine ships for, which
+        # is the same rule `skipped:*` carries in step_validate_services.
+        #
+        # On stdout, not stderr, for the same reason: install-voice.sh prints
+        # its "no engine applies to this board" line on stdout too, and painting
+        # every install-x64.sh run red would only teach everyone to ignore it.
+        echo "  On-device TTS configured, but no speech engine applies to this CPU architecture"
+        echo "  (no Jetson CUDA build and no pinned Piper artifact) — this box answers speech with SILENCE"
         ;;
       1)
         # An engine SURVIVES here — install-voice.sh returns 13, not 1, when
@@ -3509,7 +3529,21 @@ step_post_update() {
   # tts-local-cli provider. Without this call the whole of TASK-383 would be
   # fresh-install-only, and every already-shipped box would keep answering a
   # spoken request with silence.
-  step_openclaw_tts || echo "  Warning: openclaw_tts step failed (non-fatal)"
+  # The SAME tolerance table step_openclaw_setup applies to this step, and for
+  # the same reason: 12, 13 and 14 are three different facts about a box's
+  # speech and the update path has to keep them apart too. A single
+  # `|| echo "(non-fatal)"` — indistinguishable from the fourteen lines around
+  # it — reported "this box answers speech with SILENCE" in the same words as a
+  # skipped VNC refresh, on the very path that reaches ALREADY-SHIPPED boxes.
+  local TTS_UPDATE_RC=0
+  step_openclaw_tts || TTS_UPDATE_RC=$?
+  case "$TTS_UPDATE_RC" in
+    0) ;;
+    12) echo "  Warning: Kokoro GPU TTS did not install (recorded above; the update continues)" ;;
+    13) echo "  Warning: this box has NO working TTS engine — it answers speech with SILENCE (recorded above; the update continues)" ;;
+    14) echo "  Warning: the TTS install did not complete (recorded above; the update continues)" ;;
+    *)  echo "  Warning: openclaw_tts returned $TTS_UPDATE_RC, which is not in its contract (non-fatal)" ;;
+  esac
   # Re-assert the gateway service after an in-app update. The full update
   # syncs repo files and rebuilds before this continuation runs; older devices
   # can therefore reach the new UI while the gateway is still using stale
@@ -4871,8 +4905,14 @@ step_validate_services() {
       # spoken request with silence.
       local tts_state="" piper_state=""
       if [ -r "$TTS_STATUS_FILE" ]; then
-        tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
-        piper_state=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
+        # `tr -d '\r'`: the file is written by a shell on the device, but it is
+        # also restored from tarballs and edited by hand, and a CRLF line ends
+        # the verdict as `ready\r` — a value that is neither `ready` nor any
+        # other word in the vocabulary. Parse the line rather than merely
+        # refusing it; what a garbled value must NOT do is score a pass, and
+        # that is what the guard below is for.
+        tts_state=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+        piper_state=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
       fi
       # `ready` is the only verdict that means "this engine can speak".
       # `skipped:*` is a board that was never going to run it, `failed:*` is one
@@ -4884,6 +4924,16 @@ step_validate_services() {
       local kokoro_failed=false piper_failed=false
       case "$tts_state" in failed:*) kokoro_failed=true ;; esac
       case "$piper_state" in failed:*) piper_failed=true ;; esac
+      # The vocabulary is closed: `ready`, `skipped:*`, `failed:*`, or nothing
+      # at all. Anything else — a truncated write (tts_status_publish truncates
+      # the file with `>` rather than writing-then-renaming, so a box that lost
+      # power mid-publish can leave one), a typo, a stray line — matched none of
+      # the branches below and fell out of the chain as a silent PASS, while the
+      # strictly LESS informative absent verdict correctly failed. Unparseable
+      # is at least as suspicious as absent.
+      local verdict_unreadable=false
+      case "$tts_state" in ""|ready|skipped:*|failed:*) ;; *) verdict_unreadable=true ;; esac
+      case "$piper_state" in ""|ready|skipped:*|failed:*) ;; *) verdict_unreadable=true ;; esac
       # ONE verdict about this box's speech, most severe first, so the check
       # that probe_count counts as one contributes at most one line. Reporting
       # "Kokoro failed" and "Piper failed" and "no engine" as three separate
@@ -4909,6 +4959,15 @@ step_validate_services() {
         failed_probe+=("TTS: the Piper CPU fallback was requested and did NOT install ($piper_state) — this box has no fallback behind its GPU engine. $tts_fix")
       elif [ -z "$piper_state" ]; then
         failed_probe+=("TTS: no Piper verdict at $TTS_STATUS_FILE — the CPU half left no record, so whether this box has a fallback cannot be asserted either way. $tts_fix")
+      elif [ "$verdict_unreadable" = true ]; then
+        # LAST, not first: every arm above is a more specific statement about
+        # the same box, and a garbled Piper verdict next to a failed Kokoro is
+        # still best reported as "no working engine". It is deliberately an
+        # `elif` rather than the trailing `else` that would close the chain,
+        # because the chain's fall-through is also where the HEALTHY box lands
+        # (both engines `ready` match no arm) — an `else` there would fail every
+        # good box on the shelf.
+        failed_probe+=("TTS: unrecognised on-device TTS verdict at $TTS_STATUS_FILE (Kokoro: ${tts_state:-unreported}, Piper: ${piper_state:-unreported}) — a verdict outside the ready/skipped:*/failed:* vocabulary is not evidence of an engine. $tts_fix")
       fi
     fi
 
@@ -5090,6 +5149,43 @@ if [ "${1:-}" = "--step" ]; then
     echo "Available steps: ${DISPATCH_STEPS[*]}" >&2
     exit 1
   fi
+  # ── A dispatched step's recorded failures must not die with it ─────────────
+  # `"step_x"; exit 0` threw away everything record_provision_failure collected.
+  # step_post_update returns 0 whatever its fixups reported, so an in-app update
+  # whose TTS step left the box MUTE — exit 13, recorded inside
+  # step_openclaw_tts precisely so it would be carried — finished as a
+  # successful update with nothing in $PROVISION_STATUS_FILE, the marker the
+  # dashboard and the flash host read. The full-install path has printed this
+  # summary since the marker existed; the dispatch path never reached it.
+  #
+  # An EXIT trap, not `"step_x" || rc=$?`: the OR-list form would switch set -e
+  # OFF for the entire body of the dispatched step, so every guard inside it
+  # that relies on errexit to stop would run on instead. The trap also catches
+  # the step that dies mid-way under errexit, which is the case that reported
+  # nothing at all.
+  #
+  # Only `incomplete` is ever published here. One dispatched step finishing
+  # cleanly is not evidence that the whole box provisioned, so a clean run
+  # writes nothing and leaves the marker to the full install that owns it.
+  dispatch_provision_verdict() {
+    local rc=$?
+    trap - EXIT
+    if [ "${#PROVISION_FAILURES[@]}" -gt 0 ]; then
+      echo "  ############################################################"
+      echo "  # PROVISIONING INCOMPLETE — step $local_step reported errors."
+      echo "  # Steps that failed: ${PROVISION_FAILURES[*]}"
+      echo "  # Re-run:  sudo bash $PROJECT_DIR/install.sh --step ${PROVISION_FAILURES[0]}"
+      echo "  ############################################################"
+      write_provision_status incomplete "${PROVISION_FAILURES[*]}" || true
+      # Same stdout contract as the full install: the flash host greps these
+      # two lines, and the prefix and the verdict word are byte-identical.
+      echo "[provision-status] INCOMPLETE (${PROVISION_FAILURES[*]})"
+      echo "[provision-run] $PROVISION_RUN_ID"
+      if [ "$rc" -eq 0 ]; then rc=1; fi
+    fi
+    exit "$rc"
+  }
+  trap dispatch_provision_verdict EXIT
   "step_${local_step}"
   exit 0
 fi

@@ -547,8 +547,12 @@ TTS_PIPER_VERDICT=""
 # actually succeeded.
 tts_status_load() {
   [ -r "$TTS_STATUS_FILE" ] || return 0
-  TTS_KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
-  TTS_PIPER_VERDICT=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tail -1)
+  # `tr -d '\r'` for the same reason install.sh's reader carries it: this file
+  # is also restored from tarballs and edited by hand, and the two parsers must
+  # agree about what a line says or the installer and its own health check can
+  # disagree about the same box.
+  TTS_KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+  TTS_PIPER_VERDICT=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
 }
 
 # Rewrite $TTS_STATUS_FILE from every verdict known so far. A key with no
@@ -685,7 +689,13 @@ if [ "${1:-}" = "--tts-only" ]; then
   # The exit status is the contract with install.sh's step_openclaw_tts:
   #
   #   0        Kokoro is the engine and it is ready.
-  #   10 / 11  Kokoro does not apply to this board; the box speaks on Piper.
+  #   10       No CUDA toolkit on an aarch64 board; the box speaks on Piper.
+  #   11       No Jetson build for this ARCHITECTURE — which is the very
+  #            condition under which install_piper_engine has no pinned
+  #            artifact either, so 11 means NO engine applies to the board at
+  #            all, not "the box speaks on Piper". install.sh names the engine
+  #            off this code, and bucketing 11 with 10 put the name of a
+  #            fallback that does not exist on a box that has none.
   #   12       Kokoro was REQUESTED and did not install; the box speaks on Piper.
   #   1        the Piper half did not complete, but an engine survives.
   #   13       NO usable engine at all - this box answers speech with SILENCE.
@@ -750,6 +760,32 @@ if [ "${1:-}" = "--piper-only" ]; then
     echo "=== Piper fallback INCOMPLETE — the box may answer speech with silence ===" >&2
     exit 1
   fi
+  # Whether an engine ARRIVED is read from the published verdict, never from the
+  # return code above — the same rule --tts-only follows, and for the same
+  # reason: install_piper returns 0 for "there is no pinned artifact for this
+  # board" too, so its exit status cannot tell an installed engine from a
+  # declined one. Answering from the return code alone printed
+  # "=== Piper fallback ready ===" and exited 0 over a board that installed
+  # nothing, in the very mode clawbox-tts.sh's "Piper not installed" hint tells
+  # an operator to run.
+  case "$TTS_PIPER_VERDICT" in
+    ready) ;;
+    skipped:*)
+      # The BOARD declines the engine — no pinned artifact for this
+      # architecture. Nothing was asked for and nothing is missing, which is
+      # the rule `skipped:*` already carries in --tts-only and in install.sh's
+      # health check, so this exits clean without claiming a fallback.
+      echo "=== No Piper artifact applies to this board (Piper: $TTS_PIPER_VERDICT) ==="
+      exit 0
+      ;;
+    *)
+      # `failed:*`, nothing published, or a verdict outside the vocabulary.
+      # None of those is evidence of an engine, and an unparseable answer is at
+      # least as suspicious as an absent one.
+      echo "=== Piper fallback INCOMPLETE — no usable Piper verdict (Piper: ${TTS_PIPER_VERDICT:-unreported}) ===" >&2
+      exit 1
+      ;;
+  esac
   echo "=== Piper fallback ready ==="
   exit 0
 fi
@@ -907,6 +943,15 @@ else
   echo "  Mode: CPU"
 fi
 echo "  STT: Whisper (base) via on-demand server (~1.8s)"
-echo "  TTS: Kokoro-82M via on-demand server (~2s), Piper CPU fallback"
+# The fallback is named from the PUBLISHED verdict, not from the fact that
+# install_piper was called a few lines up. This is the third caller of
+# install_piper and it was the least honest of them: it asserted a Piper CPU
+# fallback on every run, including the x86 runs where install_piper_engine
+# declines for want of a pinned artifact and the runs where its download failed.
+case "$TTS_PIPER_VERDICT" in
+  ready)     echo "  TTS: Kokoro-82M via on-demand server (~2s), Piper CPU fallback" ;;
+  skipped:*) echo "  TTS: Kokoro-82M via on-demand server (~2s); no Piper fallback applies to this board ($TTS_PIPER_VERDICT)" ;;
+  *)         echo "  TTS: Kokoro-82M via on-demand server (~2s); the Piper CPU fallback did NOT install (${TTS_PIPER_VERDICT:-unreported})" >&2 ;;
+esac
 echo "  TTS entrypoint: $WORKSPACE/scripts/openclaw/clawbox-tts.sh"
 echo "  Services: kokoro-server, whisper-server (on-demand, auto-stop after idle)"
