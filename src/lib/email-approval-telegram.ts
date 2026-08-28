@@ -102,6 +102,7 @@ export class TelegramUnavailableError extends Error {
   }
 }
 
+/** A plain object, which is the only thing this file reads fields off. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -304,6 +305,7 @@ export async function fetchApprovalUpdates(
   return result.filter(isUpdate);
 }
 
+/** Keep only updates shaped the way the handler expects; drop the rest silently. */
 function isUpdate(value: unknown): value is TelegramUpdate {
   if (!isRecord(value) || typeof value.update_id !== "number") return false;
   if (value.callback_query === undefined) return true;

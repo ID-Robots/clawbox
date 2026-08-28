@@ -88,6 +88,7 @@ interface PromptStore {
 
 const EMPTY: PromptStore = { version: 1, offset: 0, prompts: [] };
 
+/** Shape check for one record read back off disk. Anything else is dropped. */
 function isPrompt(value: unknown): value is ApprovalPrompt {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -101,6 +102,7 @@ function isPrompt(value: unknown): value is ApprovalPrompt {
   );
 }
 
+/** Shape check for one "where it was posted" entry. */
 function isPromptMessage(value: unknown): value is PromptMessage {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -130,6 +132,7 @@ function readStore(now: number): PromptStore {
   }
 }
 
+/** Fresh temp at 0600, then atomic rename — the discipline config-store uses. */
 function writeStore(store: PromptStore): void {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   const tmp = `${PROMPTS_PATH}.tmp`;

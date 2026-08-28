@@ -40,6 +40,7 @@ export const dynamic = "force-dynamic";
 /** Remembered so the panel can show "@YourBot" without another Telegram call. */
 const BOT_USERNAME_KEY = "email_approval_bot_username";
 
+/** The refusal every non-owner caller gets, identical whatever they presented. */
 function forbidden() {
   return NextResponse.json(
     { error: "Changing how email is approved needs a signed-in browser session.", kind: "owner_only" },
@@ -47,6 +48,7 @@ function forbidden() {
   );
 }
 
+/** What the panel needs to draw the section: state, bot name, and a count. */
 async function snapshot() {
   const token = await approvalBotToken();
   const username = await configGet(BOT_USERNAME_KEY);

@@ -504,6 +504,7 @@ export function stopApprovalPoller(): void {
   pollAbort = null;
 }
 
+/** A sleep that never keeps the process alive on its own. */
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -512,6 +513,7 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+/** The long-poll cycle. Runs while a question is outstanding, and not otherwise. */
 async function pollLoop(): Promise<void> {
   let backoff = RETRY_MIN_MS;
   while (!stopRequested) {
@@ -561,6 +563,7 @@ async function pollLoop(): Promise<void> {
   running = false;
 }
 
+/** One update off the wire. A throw here must not take the loop down with it. */
 async function handleUpdate(update: TelegramUpdate): Promise<void> {
   if (!update.callback_query) return;
   try {
