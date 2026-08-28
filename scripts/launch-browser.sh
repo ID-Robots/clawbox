@@ -114,6 +114,15 @@ if [ "${CLAWBOX_TEST_MODE:-0}" = "1" ] \
   SANDBOX_FLAGS=(--no-sandbox --disable-setuid-sandbox)
 fi
 
+# WebGL without a GPU. Over VNC there is no usable GL, and `--disable-gpu`
+# used to switch the whole GPU process off — which also switched off WebGL,
+# because Chromium's software WebGL (SwiftShader, via ANGLE) runs INSIDE the
+# GPU process. A page with a <canvas> WebGL context (the coding agent's own
+# Three.js games, any WebGL site) then failed with "WebGL not supported".
+# So: keep compositing in software (--disable-gpu-compositing, the cheap part
+# of what --disable-gpu did) but let the GPU process run SwiftShader for
+# WebGL. --enable-unsafe-swiftshader is the switch recent Chromium requires
+# before it will hand a page a software WebGL context.
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
@@ -124,7 +133,10 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --no-first-run \
   --no-default-browser-check \
   --start-maximized \
-  --disable-gpu \
+  --disable-gpu-compositing \
+  --use-gl=angle \
+  --use-angle=swiftshader \
+  --enable-unsafe-swiftshader \
   --disable-dev-shm-usage \
   --disable-background-networking \
   --password-store=basic \
