@@ -10,6 +10,7 @@ import fs from "fs/promises";
 import path from "path";
 import { DATA_DIR } from "./config-store";
 import { registerWebappInPreferences } from "./webapp-registry";
+import { ensureWebappIcon, htmlHint } from "./webapp-icon";
 
 // ── Paths ──
 
@@ -562,8 +563,20 @@ export async function buildProject(
     .catch(() => false);
   if (alreadyDeployed) {
     await writeWebappIndex(projectId, html);
+    // A rebuild of an app that still has no icon — its first build may have
+    // happened before the box was linked to ClawBox AI — gets the same
+    // after-the-reply generation a create does. `ensureWebappIcon` answers
+    // 'kept' from one stat when the icon has since appeared, so this costs a
+    // meta.json read and nothing more on every other rebuild.
+    if (await deployedWithoutIcon(projectId)) {
+      void ensureWebappIcon(projectId, {
+        name,
+        color,
+        description: meta.description || htmlHint(html),
+      }).catch(() => {});
+    }
   } else {
-    await deployWebapp(projectId, html, { name, color });
+    await deployWebapp(projectId, html, { name, color, description: meta.description });
   }
 
   const url = `/setup-api/webapps?app=${projectId}`;
@@ -596,7 +609,7 @@ export async function writeWebappIndex(appId: string, html: string): Promise<voi
 export async function deployWebapp(
   appId: string,
   html: string,
-  meta: { name: string; color?: string; icon?: string },
+  meta: { name: string; color?: string; icon?: string; description?: string },
 ): Promise<void> {
   // Same rule and same reason as initProject: the name reaches meta.json and
   // the desktop label, so bound it before any of that is written.
@@ -612,6 +625,32 @@ export async function deployWebapp(
     iconUrl: meta.icon,
     webappUrl: `/setup-api/webapps?app=${appId}`,
   });
+  // An app that arrived without an icon gets one drawn by ClawBox AI, AFTER
+  // this returns: generation takes 5–15 s and the tool reply behind this call
+  // must not wait for a picture. Fire-and-forget by design — the app is
+  // created and registered either way, and `ensureWebappIcon` never rejects;
+  // the `.catch` is belt and braces against an unhandled rejection ever taking
+  // the server down over a missing icon. A create that supplied its own icon
+  // is left alone.
+  if (!meta.icon) {
+    void ensureWebappIcon(appId, {
+      name,
+      color: meta.color,
+      description: meta.description || htmlHint(html),
+    }).catch(() => {});
+  }
+}
+
+/** Is this deployed app's meta.json still without an icon of its own? */
+async function deployedWithoutIcon(appId: string): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(path.join(WEBAPPS_DIR, appId, "meta.json"), "utf-8");
+    const parsed = JSON.parse(raw) as { icon?: unknown };
+    return !parsed.icon;
+  } catch {
+    // Unreadable metadata is not a reason to spend a generation on it.
+    return false;
+  }
 }
 
 // ── Helpers ──
