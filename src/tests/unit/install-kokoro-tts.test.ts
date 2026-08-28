@@ -332,9 +332,12 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(res.stdout).toContain("On-device TTS configured (Kokoro GPU, Piper fallback)");
   });
 
+  // 11 is deliberately NOT in this table any more — see the test below it.
+  // Every code here is one where the Piper half genuinely completed, so naming
+  // it as the surviving engine is true; --tts-only returns 13 or 1, never 10 or
+  // 12, when the fallback is missing.
   it.each([
     [10, /no CUDA toolkit/],
-    [11, /CPU architecture/],
     [12, /Kokoro GPU install failed/],
   ])("stays non-fatal and tells the truth when the voice install exits %i", (code, reason) => {
     const res = runStep(code as number);
@@ -345,6 +348,22 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
     expect(res.stdout).toContain("Piper CPU only");
     expect(res.stdout).toMatch(reason as RegExp);
+  });
+
+  it("names no engine at all when the voice install exits 11", () => {
+    // 11 is "no Jetson CUDA build for this ARCHITECTURE" — `uname -m` is not
+    // aarch64, which is the same test that leaves install_piper_engine without
+    // a pinned artifact. Both halves publish `skipped:arch-*`, install-voice.sh
+    // prints "=== No on-device TTS engine applies to this board ===" and exits
+    // 11, so the "Piper CPU only" line this case used to assert named a
+    // fallback the box does not have. It stays non-fatal and unrecorded — a
+    // board neither engine ships for was never asked for one.
+    const res = runStep(11);
+    expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
+    expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
+    expect(res.stdout, "a board with no engine was told it speaks on Piper").not.toContain("Piper CPU only");
+    expect(res.stdout).toMatch(/CPU architecture/);
+    expect(res.stdout).toMatch(/SILENCE/);
   });
 
   // ── Requested-and-failed is not the same outcome as never-requested ────────
