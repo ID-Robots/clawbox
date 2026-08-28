@@ -132,3 +132,19 @@ describe("describeProgressLine", () => {
     });
   });
 });
+
+describe("the run's plan", () => {
+  it("'Plan: 7 tasks, 3 done' is a checklist chip carrying the two counts — never the English words", () => {
+    // The card says the counts in the owner's language; a `detail` is shown
+    // verbatim, and "Aufgaben 7 tasks, 3 done" was the one chip left in English.
+    expect(describeProgressLine("Plan: 7 tasks, 3 done")).toEqual({
+      kind: "tool", label: "Plan", labelKey: "plan", icon: "checklist", counts: { total: 7, done: 3 },
+    });
+    expect(describeProgressLine("Plan: 1 task, 0 done")).toMatchObject({ labelKey: "plan", counts: { total: 1, done: 0 } });
+    expect(describeProgressLine("Plan: 7 tasks, 3 done").detail).toBeUndefined();
+  });
+
+  it("a plan line in any other shape is the run's own sentence, not a plan chip", () => {
+    expect(describeProgressLine("Plan: rewrite the loop first")).toMatchObject({ kind: "text", icon: "notes" });
+  });
+});

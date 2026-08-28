@@ -187,7 +187,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
   const hasConfigFields = appSettings.length > 0;
 
   return (
-    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto">
+    <div className="h-full flex flex-col bg-[var(--win-ground)] text-white overflow-y-auto">
       {/* Header */}
       <div className="shrink-0 flex flex-col items-center pt-8 pb-4 px-6 border-b border-white/10">
         <div

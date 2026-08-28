@@ -36,6 +36,15 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.chatRead": "Reading",
   "codingAgent.chatFilesTouched": "files touched",
   "codingAgent.chatTurns": "turns",
+  // The run's own plan (its TodoWrite list) on the card: the checklist's
+  // heading, the counted word after "3 of 7", the line that names the item
+  // it is on now, the overflow of a long list, and the word beside the
+  // three moving dots that say a live run is still working.
+  "codingAgent.chatPlan": "Plan",
+  "codingAgent.chatDone": "done",
+  "codingAgent.chatNow": "Now",
+  "codingAgent.chatMore": "+{n} more",
+  "codingAgent.chatBusy": "working",
 
   // The desktop card a finished run raises, top-right with the others.
   "codingAgent.noticeOpen": "Open the coding agent",
@@ -92,6 +101,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.denials": "{n} actions were not allowed",
   "codingAgent.deniedTitle": "Not allowed",
   "codingAgent.artifactsTitle": "Evidence from this run",
+  // The report dialog: a run's report.md (or any .md it wrote) drawn as
+  // markdown over the app. {name} is the artifact's file name.
+  "codingAgent.reportLoading": "Loading {name}…",
+  "codingAgent.reportFailed": "Could not load {name}.",
+  "codingAgent.reportOpenText": "Open as text",
+  "codingAgent.reportClose": "Close",
   "codingAgent.githubDeviceIntro": "Enter this code on github.com to connect your account:",
   "codingAgent.githubDeviceOpen": "Open github.com/login/device",
   "codingAgent.githubDeviceWaiting": "Waiting for the code to be entered…",

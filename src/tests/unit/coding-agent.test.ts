@@ -1027,3 +1027,207 @@ describe("naming the sub-agents that are out", () => {
     expect(done.subagentsActive).toBe(0);
   });
 });
+
+describe("the report", () => {
+  beforeEach(() => readyDevice());
+
+  const reportOf = (id: string) => path.join(root, "data", "coding-agent-artifacts", id, "report.md");
+
+  it("files the closing message as report.md beside the run's evidence", async () => {
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.status).toBe("completed");
+    expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe(`${done.summary}\n`);
+    // Renamed into place: nothing half-written is left beside it.
+    expect(fs.readdirSync(path.dirname(reportOf(run.id)))).toEqual(["report.md"]);
+    // The listing the app reads carries it as markdown, which is what opens
+    // it rendered rather than as plain text.
+    const artifactsLib = await import("@/lib/coding-agent-artifacts");
+    expect(artifactsLib.listArtifacts(run.id)).toMatchObject([{ name: "report.md", kind: "markdown" }]);
+  });
+
+  it("files the closing message of a run that did not finish, too", async () => {
+    // A partial account is what the owner reads before deciding whether to
+    // resume, so a failure with words still gets its report.
+    const failed = JSON.stringify({
+      type: "result", subtype: "success", is_error: true, num_turns: 1,
+      result: "## Blocked\nThe build needs node 22.",
+    });
+    installFakeWrapper([`echo '${INIT}'`, `printf '%s\\n' '${failed}'`, "exit 1"].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.status).toBe("failed");
+    expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe("## Blocked\nThe build needs node 22.\n");
+  });
+
+  it("never files the first attempt's words when the retry dies without any", async () => {
+    // A 503 arrives as a RESULT event, so its text lands in the summary
+    // before the retry decision. The second attempt exits with no result at
+    // all; the report must be empty, not the first attempt's error text
+    // filed as though it were this run's account of itself.
+    const counter = path.join(home, "attempts.txt");
+    const first = JSON.stringify({
+      type: "result", subtype: "success", is_error: true, num_turns: 1,
+      result: "API Error: 503 Service Unavailable",
+    });
+    installFakeWrapper([
+      `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter}"`,
+      `echo '${INIT}'`,
+      'if [ "$n" = "1" ]; then',
+      `  printf '%s\\n' '${first}'`,
+      "  exit 0",
+      "fi",
+      "exit 1",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.retries).toBe(1);
+    expect(done.status).toBe("failed");
+    expect(done.summary).toBeNull();
+    expect(done.error).not.toContain("503");
+    expect(fs.existsSync(reportOf(run.id))).toBe(false);
+  });
+
+  it("leaves a report the run wrote itself alone", async () => {
+    // The brief invites a run to write its own report.md; that file knows
+    // more about the work than the closing message does, so it wins.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `printf '# Mine\\n' > "$CLAWBOX_RUN_ARTIFACTS_DIR/report.md"`,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.status).toBe("completed");
+    expect(done.summary).toContain("Changed index.html");
+    expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe("# Mine\n");
+  });
+
+  it("keeps the run's outcome when the report cannot be written", async () => {
+    // The run replaces its own evidence folder with a plain file, so the
+    // write fails in a way no permission bit could rescue — and the record
+    // must still say what the run did.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `rmdir "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      makeProject("site");
+      const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+      const done = await finished(run.id);
+      expect(done.status).toBe("completed");
+      expect(done.summary).toContain("Changed index.html");
+      expect(done.error).toBeNull();
+      expect(fs.statSync(path.dirname(reportOf(run.id))).isFile()).toBe(true);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes("report.md"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * The run's own plan. Claude Code's TodoWrite tool sends the WHOLE list each
+ * time; the record keeps the latest one so the chat card can show what the
+ * run is on in its own words — the owner's "show summaries of current tasks".
+ */
+describe("the run's plan", () => {
+  beforeEach(() => readyDevice());
+
+  const TODO = (todos: unknown) => JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id: "t_todo", name: "TodoWrite", input: { todos } }] },
+  });
+  const DONE = '{"type":"result","subtype":"success","num_turns":2,"result":"done"}';
+
+  it("keeps the latest list, and notes each rewrite as one line in the feed", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TODO([
+        { content: "Scaffold the page", status: "completed", activeForm: "Scaffolding the page" },
+        { content: "Wire the game loop", status: "in_progress", activeForm: "Wiring the game loop" },
+        { content: "Add tests", status: "pending" },
+      ])}'`,
+      `echo '${TODO([
+        { content: "Scaffold the page", status: "completed" },
+        { content: "Wire the game loop", status: "completed" },
+        { content: "Add tests", status: "in_progress", activeForm: "Adding tests" },
+      ])}'`,
+      `echo '${DONE}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.todos).toEqual([
+      { content: "Scaffold the page", status: "completed" },
+      { content: "Wire the game loop", status: "completed" },
+      { content: "Add tests", status: "in_progress", activeForm: "Adding tests" },
+    ]);
+    // One summary line per rewrite — never the list itself in the feed.
+    expect(run.progress.filter((p) => p.startsWith("Plan:"))).toEqual(["Plan: 3 tasks, 1 done", "Plan: 3 tasks, 2 done"]);
+    expect(run.progress.join("\n")).not.toContain("Wire the game loop");
+  });
+
+  it("caps the list, cuts each line, and reads an unknown status as pending", async () => {
+    const long = "x".repeat(400);
+    const todos = Array.from({ length: 25 }, (_, i) => ({ content: `task ${i} ${long}`, status: i === 0 ? "done" : "pending" }));
+    installFakeWrapper([`echo '${INIT}'`, `echo '${TODO(todos)}'`, `echo '${DONE}'`, "exit 0"].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.todos).toHaveLength(20);
+    expect(run.todos[0].content.length).toBe(160);
+    expect(run.todos[0].content.endsWith("…")).toBe(true);
+    expect(run.todos[0].status).toBe("pending"); // "done" is not a status the tool defines
+    expect(run.progress).toContain("Plan: 20 tasks, 0 done");
+  });
+
+  it("ignores a payload that is not a list, and skips items without words", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TODO([{ content: "Real", status: "in_progress" }])}'`,
+      `echo '${TODO("not a list")}'`,
+      `echo '${TODO([null, 7, { status: "completed" }, { content: "   " }, { content: "Also real" }])}'`,
+      `echo '${DONE}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    // The string payload left the good list alone; the mixed list kept its one readable item.
+    expect(run.todos).toEqual([{ content: "Also real", status: "pending" }]);
+    expect(run.progress.filter((p) => p.startsWith("Plan:"))).toEqual(["Plan: 1 tasks, 0 done", "Plan: 1 tasks, 0 done"]);
+    // The unparseable call still shows in the feed as the tool it was.
+    expect(run.progress).toContain("TodoWrite");
+  });
+
+  it("is on the record on disk and survives a fresh import", async () => {
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${TODO([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }])}'`,
+      `echo '${DONE}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const id = (await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id;
+    await finished(id);
+
+    const onDisk = JSON.parse(fs.readFileSync(runsFile(), "utf-8")) as { id: string; todos: unknown }[];
+    expect(onDisk.find((r) => r.id === id)?.todos).toEqual([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }]);
+
+    vi.resetModules();
+    const fresh: Lib = await import("@/lib/coding-agent");
+    expect(fresh.getRun(id)?.todos).toEqual([{ content: "Wire it", status: "in_progress", activeForm: "Wiring it" }]);
+    // A record from before the field existed reads as "never planned".
+    expect(fresh.parseTodosForTests(undefined)).toBeNull();
+  });
+});

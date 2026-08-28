@@ -2,48 +2,293 @@
 # Readable live view of a coding run's Claude Code transcript.
 #
 # The raw file is one JSON object per line and is unreadable as a tail. This
-# renders the parts an owner cares about — what it said, which tool it used,
-# what it was refused — and follows the file while the run works.
+# renders the parts an owner cares about — what it said, what it was thinking,
+# which tool it used, what it was refused — and follows the file while the run
+# works.
 #
-# Usage: coding-run-preview <transcript.jsonl>
+# WHY IT HAS A HEARTBEAT
+#
+# Watched on the box: a run at effort "max" sits inside ONE model turn for ten
+# minutes and more before it acts, and in that time the transcript gains not
+# a single line. The first version of this view showed the prompt and then a
+# bare cursor for those minutes, which reads as dead. The run record in
+# data/coding-agent-runs.json knows better — the runner stamps every
+# thinking_tokens event on it — so whenever nothing has arrived for
+# HEARTBEAT seconds this prints one status line built from that record.
+#
+# One python process does the following, the rendering and the heartbeat;
+# no tail, no spawn per beat. Ctrl-C ends it.
+#
+# Usage: coding-run-preview <transcript.jsonl> [<run-id>]
+#   CLAWBOX_PREVIEW_HEARTBEAT  seconds of silence before a status line (20)
+#   CLAWBOX_ROOT               where data/coding-agent-runs.json lives
 set -uo pipefail
 FILE="${1:-}"
-[ -n "$FILE" ] || { echo "usage: coding-run-preview <transcript.jsonl>" >&2; exit 2; }
+RUN_ID="${2:-}"
+[ -n "$FILE" ] || { echo "usage: coding-run-preview <transcript.jsonl> [<run-id>]" >&2; exit 2; }
 if [ ! -f "$FILE" ]; then
   echo "No transcript yet at $FILE" >&2
   echo "The run may not have written anything so far. Retry in a moment." >&2
   exit 1
 fi
-echo "── following $(basename "$FILE") — Ctrl-C to stop ──"
-tail -n 200 -f "$FILE" | python3 -u -c '
-import json, sys
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
+SCRIPT=$(cat <<'PY'
+import json, os, sys, time
+
+FILE = sys.argv[1]
+RUN_ID = sys.argv[2] if len(sys.argv) > 2 else ""
+ROOT = os.environ.get("CLAWBOX_ROOT") or "/home/clawbox/clawbox"
+RUNS = os.path.join(ROOT, "data", "coding-agent-runs.json")
+try:
+    HEARTBEAT = max(0.2, float(os.environ.get("CLAWBOX_PREVIEW_HEARTBEAT", "20")))
+except ValueError:
+    HEARTBEAT = 20.0
+# The transcript is named after the session, and the record carries the same id.
+SESSION = os.path.basename(FILE)
+if SESSION.endswith(".jsonl"):
+    SESSION = SESSION[: -len(".jsonl")]
+REPLAY = 200          # lines shown from before the view opened
+POLL = 0.5            # how often the file is checked for growth
+EXCERPT = 120         # characters of a thought worth showing
+
+
+def out(s):
+    sys.stdout.write(s + "\n")
+    sys.stdout.flush()
+
+
+def squash(s, n):
+    s = " ".join(str(s).split())
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def count(n):
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1000:
+        return f"{round(n / 1000)}k"
+    return str(n)
+
+
+def span(seconds):
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    m = s // 60
+    if m < 60:
+        return f"{m}m"
+    return f"{m // 60}h {m % 60:02d}m"
+
+
+def parse(line):
     try:
         d = json.loads(line)
     except Exception:
-        continue
-    msg = d.get("message") or {}
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def render(d):
+    """One transcript entry → the lines an owner reads."""
+    msg = d.get("message")
+    if not isinstance(msg, dict):
+        return  # a string or a list where a message should be: not ours to read
     content = msg.get("content")
     if isinstance(content, str):
-        print(content); continue
+        if d.get("type") == "user":
+            out(content)
+        return
     if not isinstance(content, list):
-        continue
+        return
     for b in content:
         if not isinstance(b, dict):
             continue
         t = b.get("type")
-        if t == "text" and b.get("text", "").strip():
-            print(b["text"].strip())
+        if t == "text" and str(b.get("text", "")).strip():
+            out(str(b["text"]).strip())
         elif t == "thinking":
-            print("  · thinking…")
+            # The thought itself, not just that there was one: a line of it is
+            # what says the run is on the right track while it is quiet.
+            thought = b.get("thinking") or b.get("text") or ""
+            if str(thought).strip():
+                out("  · thinking: " + squash(thought, EXCERPT))
+            else:
+                out("  · thinking…")
         elif t == "tool_use":
             i = b.get("input") or {}
-            arg = i.get("command") or i.get("file_path") or i.get("pattern") or ""
+            if not isinstance(i, dict):
+                i = {}
             name = b.get("name") or "tool"
-            print("  \u2192 " + name + " " + str(arg)[:120])
+            if name == "TodoWrite":
+                todos = i.get("todos") if isinstance(i.get("todos"), list) else []
+                done = sum(1 for x in todos if isinstance(x, dict) and x.get("status") == "completed")
+                out(f"  → plan: {len(todos)} tasks, {done} done")
+                for x in todos:
+                    if isinstance(x, dict) and x.get("status") == "in_progress":
+                        out("    ● " + squash(x.get("activeForm") or x.get("content") or "", EXCERPT))
+                continue
+            arg = i.get("command") or i.get("file_path") or i.get("pattern") or ""
+            out("  → " + str(name) + " " + str(arg)[:120])
         elif t == "tool_result" and b.get("is_error"):
-            print("  \u2717 " + str(b.get("content"))[:160])
-'
+            out("  ✗ " + str(b.get("content"))[:160])
+
+
+def show(d):
+    """render(), but one odd entry can never end the view: a traceback in
+    place of the live work is exactly the dead screen this exists to prevent."""
+    try:
+        render(d)
+    except Exception:
+        pass
+
+
+class Turns:
+    """How many model turns the transcript holds.
+
+    NOT the number of assistant lines. Claude Code writes ONE line per content
+    block — the thought, the text, each tool call — and every line of one
+    turn carries the same message.id (checked on a live run's transcript on
+    this box: 144 assistant lines, 56 ids). Counting lines put "turn 145" on
+    the sign-of-life line while the run was in its 57th, which made the
+    heartbeat the thing that looked wrong. A message with no id is counted
+    as its own turn, which is all that can be said of it; an entry with no
+    message at all is not a turn.
+    """
+
+    def __init__(self):
+        self.n = 0
+        self.last_id = None
+
+    def add(self, d):
+        if d.get("type") != "assistant":
+            return
+        msg = d.get("message")
+        if not isinstance(msg, dict):
+            return
+        mid = msg.get("id")
+        if not isinstance(mid, str) or not mid:
+            self.last_id = None
+            self.n += 1
+            return
+        if mid == self.last_id:
+            return
+        self.last_id = mid
+        self.n += 1
+
+
+def find_run():
+    """The record for this transcript, or None: by id when the app passed
+    one, by session otherwise. A missing or half-written file is None too —
+    the runner rewrites it every second while a run is busy."""
+    try:
+        with open(RUNS, encoding="utf-8") as fh:
+            runs = json.load(fh)
+    except Exception:
+        return None
+    if not isinstance(runs, list):
+        return None
+    for r in runs:
+        if not isinstance(r, dict):
+            continue
+        if RUN_ID:
+            if r.get("id") == RUN_ID:
+                return r
+        elif r.get("sessionId") == SESSION:
+            return r
+    return None
+
+
+def heartbeat(quiet, turn):
+    r = find_run()
+    if r is None:
+        return f"  … still working — waiting for the model ({span(quiet)} without output)"
+    status = r.get("status")
+    if isinstance(status, str) and status != "running":
+        return f"  ■ run {status}"
+    now = time.time() * 1000
+    parts = []
+    started = r.get("startedAt")
+    if isinstance(started, (int, float)):
+        parts.append(f"{span((now - started) / 1000)} in, turn {turn}")
+    else:
+        parts.append(f"turn {turn}")
+    thinking = r.get("thinkingTokens")
+    if isinstance(thinking, (int, float)) and thinking > 0:
+        parts.append(f"thinking {count(int(thinking))} tokens")
+    last = r.get("lastActivityAt")
+    if isinstance(last, (int, float)) and last > 0:
+        parts.append(f"last activity {span((now - last) / 1000)} ago")
+    return "  … still working — " + " · ".join(parts)
+
+
+def main():
+    out(f"── following {os.path.basename(FILE)} — Ctrl-C to stop ──")
+    # Everything so far in one pass: the task line for the header, the turn
+    # count for the heartbeat, and the last REPLAY lines to show.
+    task = None
+    turns = Turns()
+    recent = []
+    offset = 0
+    # Bytes, not text: tell() is the byte offset the follow loop resumes
+    # from, and a text file refuses to tell() while being iterated.
+    with open(FILE, "rb") as fh:
+        for raw in fh:
+            if not raw.endswith(b"\n"):
+                break  # a half-written line; the follow loop picks it up
+            offset = fh.tell()
+            d = parse(raw.decode("utf-8", "replace"))
+            if d is None:
+                continue
+            if task is None and d.get("type") == "user":
+                m = d.get("message")
+                c = m.get("content") if isinstance(m, dict) else None
+                if isinstance(c, str) and c.strip():
+                    task = squash(c.strip().splitlines()[0], 120)
+            turns.add(d)
+            recent.append(d)
+            if len(recent) > REPLAY:
+                recent.pop(0)
+    if task:
+        out(f"── task: {task}")
+    for d in recent:
+        show(d)
+
+    last_line = time.time()
+    beats = True
+    pending = b""
+    with open(FILE, "rb") as fh:
+        fh.seek(offset)
+        while True:
+            chunk = fh.read()
+            if chunk:
+                pending += chunk
+                lines = pending.split(b"\n")
+                pending = lines.pop()  # b"" after a complete line, else a partial one
+                for raw in lines:
+                    d = parse(raw.decode("utf-8", "replace"))
+                    if d is None:
+                        continue
+                    last_line = time.time()
+                    show(d)
+                    turns.add(d)
+                    beats = True
+                continue
+            if beats and time.time() - last_line >= HEARTBEAT:
+                quiet = time.time() - last_line
+                # The turn the run is IN: one more than the model has finished.
+                line = heartbeat(quiet, turns.n + 1)
+                out(line)
+                last_line = time.time()
+                if line.startswith("  ■"):
+                    beats = False  # nothing more is coming; say so once
+            time.sleep(POLL)
+
+
+try:
+    main()
+except KeyboardInterrupt:
+    sys.stdout.write("\n")
+except BrokenPipeError:
+    pass
+PY
+)
+exec python3 -u -c "$SCRIPT" "$FILE" "$RUN_ID"

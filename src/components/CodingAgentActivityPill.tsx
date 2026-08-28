@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { artifactUrl, type CodingAgentActivity } from "@/lib/use-coding-agent-activity";
+import { artifactUrl, type CodingAgentActivity, type CodingTodo } from "@/lib/use-coding-agent-activity";
 import { describeProgressLine, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 
 /**
@@ -38,6 +38,28 @@ import { describeProgressLine, type ProgressDescription, type ProgressLabelKey }
  * lives exactly as long as "this run, while the chat is open" — the lifetime
  * the expanded flag should have. A Set in ChatPopup would carry the same
  * information one level up and need clearing on close by hand.
+ *
+ * THE PLAN, AND THE SIGNS OF LIFE
+ *
+ * The owner's next ask: "add some animation to indicate Agent Working. In
+ * live work show summaries of current tasks if possible." Two things came of
+ * it. The run's own TodoWrite list is drawn as a checklist at the top of the
+ * live-work panel — done, in progress, pending — and while the card is
+ * collapsed the in-progress item's present-tense line is a "Now:" line above
+ * the newest step chip. Above rather than instead: the chip is the freshest
+ * TOOL call and the todo is the freshest INTENT, and choosing between them by
+ * age would need a timestamp on each for the sake of one line the card has
+ * room for anyway.
+ *
+ * And while the run is live, three things move: the 🤖 breathes, three dots
+ * step beside the status word, and the in-progress item's dot pulses. The
+ * keyframes live in globals.css (the "Coding agent card" block) rather than
+ * a <style> the card owns, because every card in a chat would otherwise
+ * carry its own copy of the same rules, and because the app's other motion —
+ * claw-pulse, toast-in — is there too, under the one reduced-motion guard.
+ * Opacity and transform only, so the Jetson's compositor animates them
+ * without a repaint. Nothing animates once the run settles: the card drops
+ * the classes, so a finished card is as still as its outcome.
  */
 
 const TONE = {
@@ -77,6 +99,38 @@ export interface CodingAgentCardLabels {
   turns?: string;
   /** One word per describable step; a missing entry falls back to English. */
   steps?: Partial<Record<ProgressLabelKey, string>>;
+  /** The plan's heading, the counted word after "3/7", the collapsed card's
+   *  "Now" line, and the "+{n} more" of a long list. */
+  plan?: string;
+  done?: string;
+  now?: string;
+  more?: string;
+  /** The three moving dots' accessible name — "working". */
+  busy?: string;
+}
+
+/** Plan items drawn before the list folds into "+N more". */
+const TODOS_SHOWN = 8;
+
+/** How each state of a plan item is marked. */
+const TODO_MARK: Record<CodingTodo["status"], { glyph: string; color: string }> = {
+  completed: { glyph: "✓", color: "rgba(134,239,172,0.55)" },
+  in_progress: { glyph: "●", color: "#fcd34d" },
+  pending: { glyph: "○", color: "rgba(255,255,255,0.35)" },
+};
+
+/**
+ * Which plan items fit on the card. The list is read in order, and the item
+ * the run is on is the one worth seeing — so a long list scrolls its window
+ * to keep that item in view (with a little of what comes next), and whatever
+ * falls outside is counted as "+N more". The heading's "3/7 done" already
+ * accounts for the finished ones that scrolled off the top.
+ */
+function visibleTodos(todos: CodingTodo[]): { shown: CodingTodo[]; hidden: number } {
+  if (todos.length <= TODOS_SHOWN) return { shown: todos, hidden: 0 };
+  const active = todos.findIndex((t) => t.status === "in_progress");
+  const start = active < 0 ? 0 : Math.max(0, Math.min(active - (TODOS_SHOWN - 3), todos.length - TODOS_SHOWN));
+  return { shown: todos.slice(start, start + TODOS_SHOWN), hidden: todos.length - TODOS_SHOWN };
 }
 
 function elapsed(from: number, to: number): string {
@@ -103,9 +157,11 @@ function firstLine(text: string, max = 64): string {
  * Screenshot chip opens the picture), a plain span otherwise. Either way a
  * click must not bubble to the card, which would toggle it.
  */
-function StepChip({ step, label, onClick, title }: {
+function StepChip({ step, label, detail, onClick, title }: {
   step: ProgressDescription;
   label: string;
+  /** What follows the label — the file, the command, or a plan's translated counts. */
+  detail?: string;
   onClick?: () => void;
   title?: string;
 }) {
@@ -126,8 +182,8 @@ function StepChip({ step, label, onClick, title }: {
     <>
       <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 13, flexShrink: 0 }}>{step.icon}</span>
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-      {step.detail ? (
-        <span style={{ opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{step.detail}</span>
+      {detail ? (
+        <span style={{ opacity: 0.75, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{detail}</span>
       ) : null}
     </>
   );
@@ -189,11 +245,22 @@ export default function CodingAgentActivityPill(
   const thinking = run.thinkingTokens ?? 0;
   const progress = run.progress ?? [];
   const screenshots = run.screenshots ?? [];
+  const todos = run.todos ?? [];
+  const todosDone = todos.filter((t) => t.status === "completed").length;
+  const activeTodo = todos.find((t) => t.status === "in_progress") ?? null;
+  // What the run says it is doing, in its own present tense.
+  const nowLine = activeTodo ? (activeTodo.activeForm || activeTodo.content) : null;
+  const { shown: todosShown, hidden: todosHidden } = visibleTodos(todos);
   const newestShot = screenshots.length > 0 ? screenshots[screenshots.length - 1] : null;
   const lastStep = progress.length > 0 ? describeProgressLine(progress[progress.length - 1]) : null;
 
   const stepLabel = (step: ProgressDescription) =>
     (step.labelKey && labels.steps?.[step.labelKey]) || step.label;
+  // A plan chip's counts in the owner's language — "1/3 erledigt" — the same
+  // shape as the checklist heading, so the two never disagree. Every other
+  // chip's detail is a name or a command and is shown as it is.
+  const stepDetail = (step: ProgressDescription) =>
+    step.counts ? `${step.counts.done}/${step.counts.total} ${labels.done ?? "done"}` : step.detail;
   const preview = (name: string) => onPreview?.(artifactUrl(run.id, name), name);
   // The collapsed "Screenshot" chip opens the newest picture — the owner's
   // second ask. Only when there IS one: the chip can precede the file.
@@ -201,7 +268,23 @@ export default function CodingAgentActivityPill(
     step.labelKey === "screenshot" && newestShot && onPreview ? () => preview(newestShot) : undefined;
 
   const meta: React.ReactNode[] = [
-    <span key="label" style={{ color: tone.color }}>{label}</span>,
+    <span key="label" style={{ display: "inline-flex", alignItems: "center", gap: 5, color: tone.color }}>
+      {label}
+      {live ? (
+        // Three dots stepping in turn: the sign of life that costs nothing.
+        // An image with a name, so a screen reader hears "working" once and
+        // is not read three empty spans.
+        <span
+          className="coding-agent-working"
+          data-testid="coding-agent-activity-working"
+          role="img"
+          aria-label={labels.busy ?? "working"}
+          title={labels.busy ?? "working"}
+        >
+          <span /><span /><span />
+        </span>
+      ) : null}
+    </span>,
   ];
   if (run.projectId) meta.push(<span key="project">{run.projectId}</span>);
   if (subTotal > 0 && labels.agents) {
@@ -274,7 +357,13 @@ export default function CodingAgentActivityPill(
           }}
           style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, outlineOffset: 2 }}
         >
-          <span aria-hidden="true" style={{ color: tone.color, flexShrink: 0 }}>{tone.glyph}</span>
+          <span
+            aria-hidden="true"
+            className={live ? "coding-agent-pulse" : undefined}
+            style={{ color: tone.color, flexShrink: 0 }}
+          >
+            {tone.glyph}
+          </span>
           <span style={{
             fontWeight: 600,
             fontSize: 12.5,
@@ -324,6 +413,23 @@ export default function CodingAgentActivityPill(
           </span>
         ))}
       </div>
+      {live && !expanded && nowLine ? (
+        // The run's own words for what it is on — the in-progress item of its
+        // plan. Only while live and collapsed: expanded, the checklist below
+        // shows the same item in its place.
+        <div
+          data-testid="coding-agent-activity-now"
+          aria-live="off"
+          title={nowLine}
+          style={{ display: "flex", alignItems: "baseline", gap: 6, minWidth: 0, fontSize: 11.5, color: "rgba(255,255,255,0.75)" }}
+        >
+          <span aria-hidden="true" className="coding-agent-pulse" style={{ color: TODO_MARK.in_progress.color, flexShrink: 0 }}>
+            {TODO_MARK.in_progress.glyph}
+          </span>
+          <span style={{ color: "rgba(255,255,255,0.45)", flexShrink: 0 }}>{labels.now ?? "Now"}:</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{nowLine}</span>
+        </div>
+      ) : null}
       {live && !expanded && lastStep ? (
         // What the run is doing RIGHT NOW, off the record's newest progress
         // line. Only while live: a finished card reports the outcome, not its
@@ -334,6 +440,7 @@ export default function CodingAgentActivityPill(
           <StepChip
             step={lastStep}
             label={stepLabel(lastStep)}
+            detail={stepDetail(lastStep)}
             onClick={chipOpens(lastStep)}
             title={lastStep.kind === "text" ? firstLine(lastStep.label, 200) : undefined}
           />
@@ -368,6 +475,66 @@ export default function CodingAgentActivityPill(
               {labels.liveWork}
             </div>
           ) : null}
+          {todos.length > 0 ? (
+            // The run's plan, ABOVE the steps: intent first, then the tool
+            // calls that carry it out. Done items are muted, the one in
+            // progress carries its present-tense line and pulses while the
+            // run is live; a long list keeps the live item in view and folds
+            // the rest into a count.
+            <div data-testid="coding-agent-activity-plan" style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>
+                {`${labels.plan ?? "Plan"} · ${todosDone}/${todos.length} ${labels.done ?? "done"}`}
+              </div>
+              <ul
+                data-testid="coding-agent-activity-todos"
+                style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 2 }}
+              >
+                {todosShown.map((t, i) => {
+                  const mark = TODO_MARK[t.status];
+                  const inProgress = t.status === "in_progress";
+                  const text = inProgress ? (t.activeForm || t.content) : t.content;
+                  return (
+                    <li
+                      key={`${i}:${t.content}`}
+                      data-status={t.status}
+                      // The glyph is aria-hidden, the colour and the
+                      // strike-through are not voiced: without these a screen
+                      // reader hears seven bare lines and no state at all.
+                      // "current step" for the one in progress; the word
+                      // "done" before each finished item; a pending item is
+                      // the plain line, which is what it is.
+                      aria-current={inProgress ? "step" : undefined}
+                      title={text}
+                      style={{
+                        display: "flex",
+                        alignItems: "baseline",
+                        gap: 6,
+                        minWidth: 0,
+                        fontSize: 11.5,
+                        color: t.status === "completed" ? "rgba(255,255,255,0.4)" : inProgress ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.65)",
+                        textDecoration: t.status === "completed" ? "line-through" : "none",
+                      }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={live && inProgress ? "coding-agent-pulse" : undefined}
+                        style={{ color: mark.color, flexShrink: 0, width: 10, textAlign: "center" }}
+                      >
+                        {mark.glyph}
+                      </span>
+                      {t.status === "completed" ? <span className="sr-only">{`${labels.done ?? "done"} `}</span> : null}
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
+                    </li>
+                  );
+                })}
+              </ul>
+              {todosHidden > 0 ? (
+                <div data-testid="coding-agent-activity-todos-more" style={{ fontSize: 10.5, color: "rgba(255,255,255,0.4)", paddingLeft: 16 }}>
+                  {(labels.more ?? "+{n} more").replaceAll("{n}", String(todosHidden))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           {progress.length > 0 ? (
             <ol
               data-testid="coding-agent-activity-steps"
@@ -380,6 +547,7 @@ export default function CodingAgentActivityPill(
                     <StepChip
                       step={step}
                       label={stepLabel(step)}
+                      detail={stepDetail(step)}
                       onClick={chipOpens(step)}
                       title={step.kind === "text" ? firstLine(step.label, 200) : undefined}
                     />

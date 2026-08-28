@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
+import CodingAgentReportPreview from "./CodingAgentReportPreview";
 import { formatBytes } from "@/lib/format-bytes";
+import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 
 /**
@@ -100,8 +102,10 @@ interface Run {
   sessionId?: string | null;
   /** Where Claude Code keeps this run's transcript, for the live preview. */
   transcriptPath?: string | null;
-  /** The run's evidence folder — screenshots and test output it saved. */
-  artifacts?: { name: string; bytes: number; kind: "image" | "text" | "other" }[];
+  /** The run's evidence folder — screenshots, test output and its report.md.
+   *  `markdown` is the kind that opens rendered in the app; every other
+   *  non-image opens as the plain text the route serves it as. */
+  artifacts?: { name: string; bytes: number; kind: "image" | "markdown" | "text" | "other" }[];
 }
 
 /** One page of runs. The list is open by default now, so it has to be paged
@@ -218,6 +222,8 @@ export default function CodingAgentApp() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  /** The markdown artifact open in the preview dialog, if any. */
+  const [report, setReport] = useState<{ runId: string; name: string } | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
@@ -418,7 +424,11 @@ export default function CodingAgentApp() {
   const openInTerminal = (run: Run) => {
     let command: string;
     if (run.status === "running" && run.transcriptPath) {
-      command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
+      // The run id is what the preview's heartbeat looks the record up by:
+      // a long model turn writes nothing to the transcript for minutes, and
+      // the record is the only place the reasoning count and the last sign
+      // of life live.
+      command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)} ${quoted(run.id)}`;
     } else if (run.sessionId) {
       command = `cd ${quoted(run.directory)} && claude-ds --resume ${run.sessionId}`;
     } else {
@@ -601,7 +611,7 @@ export default function CodingAgentApp() {
 
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
-  if (loading) return <div className="h-full bg-[#0f1219]" data-testid="coding-agent-panel" />;
+  if (loading) return <div className="h-full bg-[var(--win-ground)]" data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
   const checks: { label: string; ok: boolean; okText: string; badText: string }[] = readiness
@@ -617,7 +627,7 @@ export default function CodingAgentApp() {
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
+    <div className="h-full flex flex-col bg-[var(--win-ground)] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
 
         {/* One row: what this is, and whether it is on. The switch is the
@@ -1050,9 +1060,11 @@ export default function CodingAgentApp() {
                       )}
 
                       {/* The run's evidence: screenshots it took while
-                          verifying its work, plus whatever test output it
-                          saved. Images render as thumbnails; every file opens
-                          in a new tab (non-images are served as plain text). */}
+                          verifying its work, its report.md, and whatever test
+                          output it saved. Images render as thumbnails; a
+                          markdown file opens rendered in the app's own
+                          dialog; every other file opens in a new tab as the
+                          plain text the route serves it as. */}
                       {open && artifacts.length > 0 && (() => {
                         const images = artifacts.filter((a) => a.kind === "image");
                         const files = artifacts.filter((a) => a.kind !== "image");
@@ -1087,14 +1099,24 @@ export default function CodingAgentApp() {
                               <ul className="mt-1.5 space-y-0.5">
                                 {files.map((a) => (
                                   <li key={a.name} className="text-[11px]">
-                                    <a
-                                      href={artifactUrl(run.id, a.name)}
-                                      target="_blank"
-                                      rel="noreferrer"
-                                      className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
-                                    >
-                                      {a.name}
-                                    </a>
+                                    {a.kind === "markdown" ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => setReport({ runId: run.id, name: a.name })}
+                                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all text-left"
+                                      >
+                                        {a.name}
+                                      </button>
+                                    ) : (
+                                      <a
+                                        href={artifactUrl(run.id, a.name)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                                      >
+                                        {a.name}
+                                      </a>
+                                    )}
                                     {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
                                   </li>
                                 ))}
@@ -1104,10 +1126,29 @@ export default function CodingAgentApp() {
                         );
                       })()}
 
-                      {open && details && (
-                        <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-sans leading-relaxed">
-                          {details}
+                      {open && run.error && (
+                        <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words font-sans leading-relaxed">
+                          {run.error}
                         </pre>
+                      )}
+                      {/* The summary is the run's closing message, and that is
+                          markdown — "## What I built", a table of files. Drawn
+                          through the chat's renderer, the same one the
+                          assistant's replies use, so it reads like the chat
+                          instead of like a wall of hashes and pipes. The
+                          renderer builds elements from the text and never
+                          injects HTML, which is what lets agent-written words
+                          on to the owner's screen at all. The renderer's own
+                          tables and code blocks scroll sideways inside
+                          themselves; min-w-0 keeps a long token from widening
+                          the row past the window. */}
+                      {open && run.summary && (
+                        <div
+                          data-testid="coding-agent-summary"
+                          className="mt-2 text-xs text-[var(--text-secondary)] leading-relaxed max-h-64 overflow-y-auto min-w-0 break-words [&_img]:max-w-full"
+                        >
+                          {renderText(run.summary, t("chat.table"))}
+                        </div>
                       )}
                     </li>
                   );
@@ -1129,6 +1170,15 @@ export default function CodingAgentApp() {
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>
+
+      {report && (
+        <CodingAgentReportPreview
+          key={`${report.runId}/${report.name}`}
+          runId={report.runId}
+          name={report.name}
+          onClose={() => setReport(null)}
+        />
+      )}
     </div>
   );
 }

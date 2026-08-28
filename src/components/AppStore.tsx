@@ -511,7 +511,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || selectedApp.url;
 
     return (
-      <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
+      <div className="h-full flex flex-col bg-[var(--win-ground)] text-white" data-testid="app-store">
         {confirmModal}
         {/* Back header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/10 flex items-center gap-3">
@@ -630,7 +630,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   return (
     // @container on the root so the header can size itself to the WINDOW, not
     // the viewport — this is a desktop window the owner can resize freely.
-    <div className="h-full flex flex-col bg-[#0f1219] text-white @container" data-testid="app-store">
+    <div className="h-full flex flex-col bg-[var(--win-ground)] text-white @container" data-testid="app-store">
       {confirmModal}
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-white/10">

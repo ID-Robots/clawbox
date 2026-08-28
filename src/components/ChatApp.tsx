@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, memo } from 'react'
 import * as kv from '@/lib/client-kv'
+import { WIN_GROUND } from '@/lib/window-chrome'
 import { describeChatFailure } from '@/lib/chat-error-text'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
@@ -531,7 +532,7 @@ function ChatApp({ onThinkingChange, hideHeader = false }: ChatAppProps) {
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
-      background: '#0d1117',
+      background: WIN_GROUND,
       overflow: 'hidden',
     }}>
       {/* Connection status bar — hidden when parent provides its own header */}

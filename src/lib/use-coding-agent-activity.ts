@@ -40,6 +40,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
  */
 
 export type CodingRunStatus = "running" | "completed" | "failed" | "stopped";
+export type CodingTodoStatus = "pending" | "in_progress" | "completed";
+
+/** One item of the run's own plan — see CodingRun.todos in coding-agent.ts. */
+export interface CodingTodo {
+  content: string;
+  status: CodingTodoStatus;
+  activeForm?: string;
+}
 
 export interface CodingAgentActivity {
   id: string;
@@ -77,6 +85,13 @@ export interface CodingAgentActivity {
    * the card thumbnails nothing else, so nothing else is kept.
    */
   screenshots: string[];
+  /**
+   * The run's plan, as it last wrote it with TodoWrite: what it means to do,
+   * what it is on now, what is done. Empty for a run that never planned. The
+   * runner already caps and trims it; this only refuses a shape it cannot
+   * draw.
+   */
+  todos: CodingTodo[];
 }
 
 interface RunPayload {
@@ -95,7 +110,27 @@ interface RunPayload {
   filesTouched?: string[];
   numTurns?: number;
   progress?: string[];
+  todos?: unknown;
   artifacts?: { name?: unknown; kind?: unknown }[];
+}
+
+const TODO_STATUSES: readonly CodingTodoStatus[] = ["pending", "in_progress", "completed"];
+/** The runner's own cap, repeated so a hand-edited record cannot flood a card. */
+const TODOS_KEPT = 20;
+
+function toTodos(raw: unknown): CodingTodo[] {
+  if (!Array.isArray(raw)) return [];
+  const todos: CodingTodo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const t = item as { content?: unknown; status?: unknown; activeForm?: unknown };
+    if (typeof t.content !== "string" || !t.content) continue;
+    const status = (TODO_STATUSES as readonly unknown[]).includes(t.status) ? t.status as CodingTodoStatus : "pending";
+    const activeForm = typeof t.activeForm === "string" && t.activeForm ? t.activeForm : undefined;
+    todos.push(activeForm ? { content: t.content, status, activeForm } : { content: t.content, status });
+    if (todos.length >= TODOS_KEPT) break;
+  }
+  return todos;
 }
 
 /** How often to re-ask while a run is actually in flight. */
@@ -152,6 +187,7 @@ function toActivity(r: RunPayload): CodingAgentActivity {
         .map((a) => a.name as string)
         .slice(-SCREENSHOTS_SHOWN)
       : [],
+    todos: toTodos(r.todos),
   };
 }
 

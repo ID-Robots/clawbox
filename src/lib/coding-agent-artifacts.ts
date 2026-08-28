@@ -48,9 +48,27 @@ export const INLINE_IMAGE_MIME: Record<string, string> = {
 };
 
 const IMAGE_EXTENSIONS = new Set(Object.keys(INLINE_IMAGE_MIME));
-const TEXT_EXTENSIONS = new Set([".txt", ".log", ".md", ".json", ".html", ".css", ".js", ".ts", ".csv", ".xml", ".yaml", ".yml"]);
+const TEXT_EXTENSIONS = new Set([".txt", ".log", ".json", ".html", ".css", ".js", ".ts", ".csv", ".xml", ".yaml", ".yml"]);
+/**
+ * Markdown is its own kind so the app can open it RENDERED — through the
+ * chat's own markdown renderer, which draws model output as React elements
+ * and never injects HTML — instead of as the plain text every other file is.
+ * It is still SERVED as text/plain: the kind changes how the app draws the
+ * bytes, never what the route says they are.
+ */
+const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown"]);
 
-export type ArtifactKind = "image" | "text" | "other";
+export type ArtifactKind = "image" | "markdown" | "text" | "other";
+
+/**
+ * The run's own account of what it did, kept next to its screenshots.
+ *
+ * The final message of a run is markdown — "## What I built", a table of
+ * files — and lived only in the run record, where a history trim took it with
+ * the run. As a file in the evidence folder it is one more artifact: listed,
+ * served and opened like a screenshot, and copied out with the folder.
+ */
+export const REPORT_FILE = "report.md";
 
 export interface RunArtifact {
   name: string;
@@ -77,8 +95,43 @@ export function artifactsDir(runId: string): string {
 export function artifactKind(name: string): ArtifactKind {
   const ext = path.extname(name).toLowerCase();
   if (IMAGE_EXTENSIONS.has(ext)) return "image";
+  if (MARKDOWN_EXTENSIONS.has(ext)) return "markdown";
   if (TEXT_EXTENSIONS.has(ext)) return "text";
   return "other";
+}
+
+/**
+ * Save a settled run's summary as REPORT_FILE in its evidence folder.
+ *
+ * Only when no report is there yet: a run that chose to write its own
+ * report.md knows more about its work than the closing message does, so the
+ * agent's file wins and this is a no-op. Written to a
+ * dotfile first and renamed into place, so a listing that races the write
+ * sees either nothing (dotfiles are never listed) or the whole file, and
+ * world-readable like the screenshots beside it, because the folder is the
+ * run's public evidence.
+ *
+ * Answers whether a file was written. Never throws: the report is a
+ * convenience on top of a run that has already finished, and no failure to
+ * save it may change what the run record says about that run.
+ */
+export function writeRunReport(runId: string, markdown: string): boolean {
+  if (!ARTIFACT_RUN_ID_RE.test(runId)) return false;
+  const body = markdown.trim();
+  if (!body) return false;
+  try {
+    const dir = artifactsDir(runId);
+    const target = path.join(dir, REPORT_FILE);
+    if (fs.existsSync(target)) return false;
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const tmp = path.join(dir, `.${REPORT_FILE}.tmp`);
+    fs.writeFileSync(tmp, `${body}\n`, { mode: 0o644 });
+    fs.renameSync(tmp, target);
+    return true;
+  } catch (err) {
+    console.warn(`[coding-agent] could not save ${REPORT_FILE} for ${runId}:`, err instanceof Error ? err.message : err);
+    return false;
+  }
 }
 
 /** Create the folder a run writes its evidence into. */

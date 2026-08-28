@@ -95,3 +95,43 @@ describe("removal", () => {
     expect(() => lib.removeArtifacts("not-a-run-id")).not.toThrow();
   });
 });
+
+describe("the report file", () => {
+  it("classifies markdown as its own kind, still served as plain text", () => {
+    // The kind is what lets the app open it RENDERED; the route's answer for
+    // it must stay text/plain, or an agent-written file could run as HTML.
+    expect(lib.artifactKind("report.md")).toBe("markdown");
+    expect(lib.artifactKind("NOTES.MD")).toBe("markdown");
+    expect(lib.artifactKind("tests.txt")).toBe("text");
+    expect(lib.artifactMimeType("report.md")).toBeNull();
+  });
+
+  it("writes the report once, in one piece, and never over one that is there", () => {
+    expect(lib.writeRunReport(RUN_ID, "  \n")).toBe(false);
+    expect(lib.writeRunReport(RUN_ID, "## Done\n")).toBe(true);
+    const dir = lib.artifactsDir(RUN_ID);
+    const report = path.join(dir, lib.REPORT_FILE);
+    expect(fs.readdirSync(dir)).toEqual([lib.REPORT_FILE]);
+    expect(fs.readFileSync(report, "utf-8")).toBe("## Done\n");
+    // Owner-readable at least; the folder's own mode is what guards it.
+    expect(fs.statSync(report).mode & 0o600).toBe(0o600);
+    expect(lib.writeRunReport(RUN_ID, "something else")).toBe(false);
+    expect(fs.readFileSync(report, "utf-8")).toBe("## Done\n");
+    expect(lib.listArtifacts(RUN_ID)).toMatchObject([{ name: lib.REPORT_FILE, kind: "markdown" }]);
+  });
+
+  it("answers false with one warning instead of throwing", () => {
+    // The evidence root is a plain file, so nothing under it can be made.
+    fs.mkdirSync(path.dirname(lib.artifactsRoot()), { recursive: true });
+    fs.writeFileSync(lib.artifactsRoot(), "not a folder");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(lib.writeRunReport(RUN_ID, "## Done")).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(lib.writeRunReport("../etc", "## Done")).toBe(false);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

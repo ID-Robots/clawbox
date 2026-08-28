@@ -52,6 +52,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     commandsRun: 2,
     permissionDenials: 0,
     progress: [],
+    todos: [],
     exitCode: 0,
     ...over,
   };

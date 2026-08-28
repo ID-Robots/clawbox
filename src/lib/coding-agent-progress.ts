@@ -31,7 +31,8 @@ export type ProgressLabelKey =
   | "closingPage"
   | "write"
   | "edit"
-  | "read";
+  | "read"
+  | "plan";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -42,6 +43,12 @@ export interface ProgressDescription {
   /** The file, the command, the search pattern — shown after the label, never translated. */
   detail?: string;
   labelKey?: ProgressLabelKey;
+  /**
+   * The plan chip's numbers, for the card to say in the owner's language
+   * ("3/7 erledigt"). Numbers rather than a `detail`, because a detail is
+   * shown verbatim and the runner's "7 tasks, 3 done" is English.
+   */
+  counts?: { total: number; done: number };
 }
 
 /**
@@ -70,6 +77,16 @@ const FILE_TOOLS: Record<string, { labelKey: ProgressLabelKey; label: string; ic
   NotebookEdit: { labelKey: "edit", label: "Editing", icon: "edit" },
   Read: { labelKey: "read", label: "Reading", icon: "description" },
 };
+
+/**
+ * "Plan: 7 tasks, 3 done" — the runner's one-line note that the run rewrote
+ * its TodoWrite list. The list itself is on the record (the card draws it as a
+ * checklist); the chip only marks WHEN the plan changed. The two numbers are
+ * lifted out as `counts` and the English words dropped: with them as a
+ * `detail`, a German card read "Aufgaben 7 tasks, 3 done" — the one chip in
+ * the wrong language.
+ */
+const PLAN_RE = /^Plan: (\d+) tasks?, (\d+) done$/;
 
 /** A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. */
 const MCP_TOOL_RE = /^mcp__[A-Za-z0-9-]+__([A-Za-z0-9_]+)$/;
@@ -111,6 +128,17 @@ export function describeProgressLine(raw: string): ProgressDescription {
       labelKey: tool.labelKey,
       icon: tool.icon,
       ...(target ? { detail: basename(target) } : {}),
+    };
+  }
+
+  const plan = PLAN_RE.exec(line);
+  if (plan) {
+    return {
+      kind: "tool",
+      label: "Plan",
+      labelKey: "plan",
+      icon: "checklist",
+      counts: { total: Number(plan[1]), done: Number(plan[2]) },
     };
   }
 
