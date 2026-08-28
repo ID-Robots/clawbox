@@ -4596,7 +4596,12 @@ refresh_agent_coding_tools() {
   for unit in clawbox-gateway.service clawbox-hermes-dashboard.service; do
     systemctl is-active --quiet "$unit" 2>/dev/null || continue
     found=true
-    if systemctl restart "$unit" >/dev/null 2>&1; then
+    # try-restart, not restart. The probe above and the action below are two
+    # commands, and a unit that stops in between would be STARTED by `restart` —
+    # exactly the thing this function must never do. `try-restart` acts only on a
+    # unit that is running at the moment it runs, and exits 0 when there is
+    # nothing to do, so the invariant does not depend on the gap being small.
+    if systemctl try-restart "$unit" >/dev/null 2>&1; then
       echo "  Restarted $unit so the agent re-probes and offers the coding tools"
     else
       echo "  WARN: could not restart $unit — the agent will keep answering that it has no coding tools" >&2
@@ -4649,15 +4654,24 @@ step_coding_harness() {
   # the owner ran the documented repair, was told nothing had gone wrong, and
   # went back to an app refusing in exactly the same words. A repair that
   # cannot repair has to SAY so.
+  # BOTH halves are reported, then one return. An early return after the first
+  # would hide the second, and this step exists to tell an owner what is wrong —
+  # sending them back for a second run to discover the other half is the same
+  # repair loop in slower motion.
+  local harness_missing=false
   if ! as_clawbox_login "command -v claude" &>/dev/null; then
-    echo "  WARN: claude-ds is installed but Claude Code is NOT — the Coding app will refuse until it is" >&2
-    echo "  This step did NOT repair the coding harness. Claude Code is downloaded from" >&2
-    echo "  https://claude.ai/install.sh, so check this box's internet access (and whether" >&2
-    echo "  the installer is available in this region), then run the step again." >&2
-    return 1
+    echo "  WARN: Claude Code is NOT installed — the Coding app will refuse until it is" >&2
+    echo "  Claude Code is downloaded from https://claude.ai/install.sh, so check this" >&2
+    echo "  box's internet access (and whether the installer is available in this" >&2
+    echo "  region), then run the step again." >&2
+    harness_missing=true
   fi
   if [ ! -x "$CLAWBOX_HOME/.local/bin/claude-ds" ]; then
-    echo "  WARN: Claude Code is installed but the claude-ds wrapper is NOT — the Coding app will refuse until it is" >&2
+    echo "  WARN: the claude-ds wrapper is NOT at $CLAWBOX_HOME/.local/bin/claude-ds — the Coding app will refuse until it is" >&2
+    harness_missing=true
+  fi
+  if [ "$harness_missing" = true ]; then
+    echo "  This step did NOT repair the coding harness." >&2
     return 1
   fi
 

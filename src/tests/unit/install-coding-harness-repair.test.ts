@@ -71,8 +71,13 @@ let systemctlLog: string;
 interface Scenario {
   /** Units `systemctl is-active --quiet` answers yes for. */
   activeUnits?: string[];
-  /** Units whose `systemctl restart` fails. */
+  /** Units whose refresh fails. */
   failingRestarts?: string[];
+  /**
+   * Units that are active at the `is-active` probe and STOPPED by the time the
+   * refresh runs. `restart` would start them again; `try-restart` must not.
+   */
+  stopsBetween?: string[];
   /** Is Claude Code on the clawbox login PATH before the step runs? */
   claudeInstalled?: boolean;
   /** Does the CLI install performed by the step succeed? */
@@ -96,6 +101,7 @@ function runStep(scenario: Scenario = {}): StepRun {
   const {
     activeUnits = [],
     failingRestarts = [],
+    stopsBetween = [],
     claudeInstalled = false,
     claudeInstallSucceeds = true,
     wrapperInstalled = false,
@@ -141,6 +147,7 @@ function runStep(scenario: Scenario = {}): StepRun {
     "",
     'ACTIVE_UNITS="' + activeUnits.join(" ") + '"',
     'FAILING_RESTARTS="' + failingRestarts.join(" ") + '"',
+    'STOPS_BETWEEN="' + stopsBetween.join(" ") + '"',
     "",
     "systemctl() {",
     '  printf "%s\\n" "systemctl $*" >> "$SYSTEMCTL_LOG"',
@@ -150,6 +157,16 @@ function runStep(scenario: Scenario = {}): StepRun {
     "      return 3",
     "      ;;",
     "    restart)",
+    "      # A real `restart` STARTS an inactive unit. The fake says so, which is",
+    "      # what lets the invariant be tested rather than assumed.",
+    '      for u in $STOPS_BETWEEN; do [ "$u" = "$2" ] && { printf "%s\\n" "STARTED-A-STOPPED-UNIT $2" >> "$SYSTEMCTL_LOG"; return 0; }; done',
+    '      for u in $FAILING_RESTARTS; do [ "$u" = "$2" ] && return 1; done',
+    "      return 0",
+    "      ;;",
+    "    try-restart)",
+    "      # ...and a real `try-restart` does nothing, successfully, for a unit",
+    "      # that is no longer running.",
+    '      for u in $STOPS_BETWEEN; do [ "$u" = "$2" ] && return 0; done',
     '      for u in $FAILING_RESTARTS; do [ "$u" = "$2" ] && return 1; done',
     "      return 0",
     "      ;;",
@@ -179,7 +196,18 @@ function runStep(scenario: Scenario = {}): StepRun {
   };
 }
 
-const restarts = (run: StepRun) => run.systemctl.filter((l) => l.startsWith("systemctl restart"));
+/**
+ * Every refresh the step asked systemd for.
+ *
+ * `try-restart`, not `restart`: the probe and the action are two commands, and
+ * `restart` would START a unit that stopped in between — the one thing this
+ * function must never do.
+ */
+const refreshes = (run: StepRun) => run.systemctl.filter((l) => l.startsWith("systemctl try-restart"));
+
+/** A unit systemd was told to bring UP. Must always be empty. */
+const starts = (run: StepRun) =>
+  run.systemctl.filter((l) => l.startsWith("systemctl restart") || l.startsWith("STARTED-A-STOPPED-UNIT"));
 
 beforeEach(() => {
   sandbox = mkdtempSync(path.join(tmpdir(), "clawbox-harness-repair-"));
@@ -222,12 +250,12 @@ describe("the agent is told the harness exists now", () => {
     // — until something unrelated respawns its MCP server.
     const run = runStep({ activeUnits: ["clawbox-gateway.service"] });
     expect(run.status).toBe(0);
-    expect(run.systemctl).toContain("systemctl restart clawbox-gateway.service");
+    expect(run.systemctl).toContain("systemctl try-restart clawbox-gateway.service");
   }, SHELL_TIMEOUT_MS);
 
   it("restarts the Hermes dashboard when that is the agent that is running", () => {
     const run = runStep({ activeUnits: ["clawbox-hermes-dashboard.service"] });
-    expect(run.systemctl).toContain("systemctl restart clawbox-hermes-dashboard.service");
+    expect(run.systemctl).toContain("systemctl try-restart clawbox-hermes-dashboard.service");
   }, SHELL_TIMEOUT_MS);
 
   it("does NOT restart anything when the harness was already there", () => {
@@ -241,7 +269,7 @@ describe("the agent is told the harness exists now", () => {
       activeUnits: ["clawbox-gateway.service"],
     });
     expect(run.status).toBe(0);
-    expect(restarts(run)).toEqual([]);
+    expect(refreshes(run)).toEqual([]);
   }, SHELL_TIMEOUT_MS);
 
   it("does NOT start an agent that is stopped or masked", () => {
@@ -250,8 +278,23 @@ describe("the agent is told the harness exists now", () => {
     // re-probes when it next starts anyway.
     const run = runStep({ activeUnits: [] });
     expect(run.status).toBe(0);
-    expect(restarts(run)).toEqual([]);
+    expect(refreshes(run)).toEqual([]);
     expect(run.stdout).toMatch(/No agent running/);
+  }, SHELL_TIMEOUT_MS);
+
+  it("never STARTS a unit that stopped between the probe and the refresh", () => {
+    // The probe and the action are two commands. `systemctl restart` on a unit
+    // that went down in the gap would bring it back up — resurrecting exactly
+    // the agent the owner, or the Hermes edition lock, put down. `try-restart`
+    // acts only on a unit that is still running and exits 0 when there is
+    // nothing to do, so the invariant does not depend on the gap being small.
+    const run = runStep({
+      activeUnits: ["clawbox-gateway.service"],
+      stopsBetween: ["clawbox-gateway.service"],
+    });
+    expect(run.status).toBe(0);
+    expect(starts(run)).toEqual([]);
+    expect(refreshes(run)).toContain("systemctl try-restart clawbox-gateway.service");
   }, SHELL_TIMEOUT_MS);
 
   it("counts a PARTIAL refresh as a refusal on a dual box", () => {
@@ -263,7 +306,7 @@ describe("the agent is told the harness exists now", () => {
       failingRestarts: ["clawbox-hermes-dashboard.service"],
     });
     expect(run.status).toBe(0);
-    expect(restarts(run)).toHaveLength(2);
+    expect(refreshes(run)).toHaveLength(2);
     expect(run.stderr).toMatch(/could not restart clawbox-hermes-dashboard\.service/);
     expect(run.stderr).toMatch(/after its next restart/);
   }, SHELL_TIMEOUT_MS);
