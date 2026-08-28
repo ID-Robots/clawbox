@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { runHermesCli } from "@/lib/hermes-cli";
-import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
+import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 
 // Store an API key for a Hermes inference provider via `hermes auth add`. Hermes
@@ -26,16 +26,13 @@ const API_KEY_PROVIDERS = new Set([
 // as a flag.
 const API_KEY_RE = /^[!-~]{8,512}$/;
 
-/**
- * Take the pasted key out of any text on its way to a person or a log.
- *
- * The key is validated to printable non-space ASCII, so a plain substring swap
- * is exact — there is no encoding of it in the CLI's output that this would
- * miss and no regex escaping to get wrong.
- */
-function redactKey(text: string, apiKey: string): string {
-  return apiKey ? text.split(apiKey).join("<redacted>") : text;
-}
+// `redactKey` — take the pasted key out of any text on its way to a person or a
+// log — now lives beside the parser it runs in front of. It moved because
+// `applyCloudProviderKeyToHermes` runs the SAME `hermes auth add` for the
+// Settings/wizard panel and needed the same redaction; a second copy would have
+// been a second place to forget it. The key is validated to printable non-space
+// ASCII below, so a plain substring swap is exact — no encoding of it in the
+// CLI's output that this would miss, and no regex escaping to get wrong.
 
 export async function POST(request: Request) {
   let body: { provider?: string; apiKey?: string };

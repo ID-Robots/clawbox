@@ -2,6 +2,7 @@ import { setMany } from "@/lib/config-store";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
 import { hermesAgentDrawsImages } from "@/lib/harness/hermes-features";
 import { runHermesCli } from "@/lib/hermes-cli";
+import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { refreshHermesImageTools } from "@/lib/hermes-image-refresh";
 import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { setHermesEnvValues } from "@/lib/hermes-env";
@@ -223,7 +224,15 @@ export async function applyClawaiToHermes(
     const r = await runHermesCli(args, { timeoutMs: 15_000 });
     // `unset` of an absent key is a no-op; only a failing `set` is fatal.
     if (r.code !== 0 && args[1] === "set") {
-      throw new ClawaiApplyError(r.stderr || "Failed to configure ClawBox AI");
+      // This message is rendered verbatim in the Settings save banner (the
+      // configure route returns it as `{ error }`, and the clawai poll route
+      // re-throws it unchanged), so the raw stream stops here: `hermes config
+      // set` is a Python CLI and a crash prints /home/clawbox/.hermes at the
+      // customer. The journal keeps the whole thing.
+      console.error(`[hermes/clawai] ${args.join(" ")} exit`, r.code, r.stderr);
+      throw new ClawaiApplyError(
+        safeHermesFailureMessage(r.stdout, r.stderr) || "Failed to configure ClawBox AI",
+      );
     }
   }
 

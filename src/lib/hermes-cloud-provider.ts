@@ -1,4 +1,5 @@
 import { runHermesCli } from "@/lib/hermes-cli";
+import { redactKey, safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { setMany } from "@/lib/config-store";
 import {
   getModelOptions,
@@ -55,8 +56,14 @@ export interface HermesCloudApplyResult {
  * Store an API key for a cloud provider on Hermes and, when a model can be
  * resolved for it, make it the active provider.
  *
- * @throws HermesCloudApplyError with only ClawBox-authored text — a raw hermes
+ * @throws HermesCloudApplyError carrying either ClawBox-authored text or a
+ *   `hermes` message that has been through `safeHermesFailureMessage` — a raw
  *   stderr can carry the binary path, and the key must never be echoed back.
+ *
+ *   That sentence used to read "with only ClawBox-authored text", twenty-eight
+ *   lines above a `throw` that handed back `add.stderr` verbatim. The docstring
+ *   was right about the risk and wrong about the code; the code now matches it,
+ *   and the promise is kept by a function rather than by a comment.
  */
 export async function applyCloudProviderKeyToHermes(opts: {
   openclawProvider: string;
@@ -82,8 +89,27 @@ export async function applyCloudProviderKeyToHermes(opts: {
     { timeoutMs: 20_000 },
   );
   if (add.code !== 0) {
-    // Never echo the key. hermes stderr may name the provider but not the secret.
-    throw new HermesCloudApplyError(add.stderr || "Failed to save the API key.");
+    // Two separate things must not reach the Settings banner, and the old
+    // comment ("hermes stderr may name the provider but not the secret") was
+    // only thinking about one of them — and was wrong about that one too.
+    //
+    // 1. The KEY. True of a clean refusal, false of an argparse usage error,
+    //    which prints the offending argv and the key is IN the argv. Redacted
+    //    rather than assumed absent, and redacted BEFORE the parser so the cap
+    //    counts the text a person will actually see.
+    // 2. The CRASH. `hermes auth add` is the first command a customer's saved
+    //    key runs through, and a traceback here rendered verbatim in the save
+    //    banner: CPython frames naming /home/clawbox/.hermes. That is the input
+    //    PR #515 cleaned out of the chat bubble, on a screen its grep did not
+    //    reach.
+    //
+    // The raw stream still goes to the journal, so nothing is lost for the
+    // person diagnosing it — it just stops being published.
+    console.error("[hermes cloud-provider] auth add exit", add.code, redactKey(add.stderr, key));
+    throw new HermesCloudApplyError(
+      safeHermesFailureMessage(redactKey(add.stdout, key), redactKey(add.stderr, key))
+        || "Failed to save the API key.",
+    );
   }
   invalidateModelOptions();
 
@@ -109,13 +135,23 @@ export async function applyCloudProviderKeyToHermes(opts: {
     return { provider: slug, model: "", activated: false };
   }
 
+  // The two ACTIVATION writes are the same call site three lines apart, and the
+  // sibling-call-site shape is exactly what gets missed: a fix applied to the
+  // `auth add` above and not to these would have left the leak live for every
+  // customer whose key stored fine and whose config write did not.
   const setProvider = await runHermesCli(["config", "set", "model.provider", slug], { timeoutMs: 15_000 });
   if (setProvider.code !== 0) {
-    throw new HermesCloudApplyError(setProvider.stderr || "Failed to select the provider.");
+    console.error("[hermes cloud-provider] config set model.provider exit", setProvider.code, setProvider.stderr);
+    throw new HermesCloudApplyError(
+      safeHermesFailureMessage(setProvider.stdout, setProvider.stderr) || "Failed to select the provider.",
+    );
   }
   const setModel = await runHermesCli(["config", "set", "model.default", model], { timeoutMs: 15_000 });
   if (setModel.code !== 0) {
-    throw new HermesCloudApplyError(setModel.stderr || "Failed to set the model.");
+    console.error("[hermes cloud-provider] config set model.default exit", setModel.code, setModel.stderr);
+    throw new HermesCloudApplyError(
+      safeHermesFailureMessage(setModel.stdout, setModel.stderr) || "Failed to set the model.",
+    );
   }
 
   // Keep the wizard's own status route consistent: without ai_model_configured
