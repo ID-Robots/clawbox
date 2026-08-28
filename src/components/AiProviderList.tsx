@@ -6,9 +6,10 @@ import { useProviderStatus } from "@/hooks/useProviderStatus";
 import type { ProviderStatusRow } from "@/lib/provider-status";
 
 /**
- * Every AI provider the box knows about — cloud and on-device — in one list,
- * each row with its connection state, whether it is the default, and a switch
- * that takes it out of routing without touching its credential.
+ * The providers the owner has connected — cloud and on-device — each row with
+ * its state, whether it is the default, and a switch that takes it out of
+ * routing without touching its credential. Providers without a sign-in are
+ * not listed; connecting one is the panel below this list.
  *
  * WHY A SWITCH AND NOT "DISCONNECT": a disabled provider keeps its key (or its
  * OAuth grant, which has no re-auth path in this UI) and simply stops being
@@ -31,9 +32,12 @@ const STATE_WORD: Record<ProviderStatusRow["state"], string> = {
 
 export default function AiProviderList({
   onOpen,
+  filter,
 }: {
   /** Open the tab that configures this row: cloud sign-in or the local model. */
   onOpen?: (tab: "cloud" | "local") => void;
+  /** Show only the providers a tab owns: cloud sign-ins, or the on-device engines. */
+  filter?: "cloud" | "local";
 }) {
   const { summary, loading, error, settingDefault, defaultError, setDefault, refresh } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
@@ -60,13 +64,22 @@ export default function AiProviderList({
     }
   }, [refresh]);
 
-  const rows = (summary?.providers ?? []) as Row[];
+  // Only providers that actually hold a sign-in belong here: this list is
+  // about which of the owner's providers answer, in what order, and which are
+  // switched off. Connecting a new one is the panel below. A provider whose
+  // sign-in needs refreshing is still theirs and stays listed.
+  const rows = ((summary?.providers ?? []) as Row[]).filter((row) =>
+    (row.state === "connected" || row.state === "needs-reauth")
+    && (!filter || (filter === "local" ? row.section === "localAi" : row.section !== "localAi")),
+  );
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">
       <div className="flex items-center gap-2 mb-1">
         <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">Providers</label>
+        <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+          {filter === "local" ? "On this box" : filter === "cloud" ? "Cloud providers" : "Providers"}
+        </label>
       </div>
       <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">
         The default answers first; a switched-off provider keeps its sign-in but is never used.
@@ -157,7 +170,9 @@ export default function AiProviderList({
             );
           })}
           {rows.length === 0 && (
-            <li className="px-3 py-3 text-[11px] text-[var(--text-muted)]">No providers are known to this box yet.</li>
+            <li className="px-3 py-3 text-[11px] text-[var(--text-muted)]">
+              {filter === "local" ? "No on-device model is set up yet." : "No provider is connected yet — connect one below."}
+            </li>
           )}
         </ul>
       )}

@@ -17,7 +17,8 @@ vi.mock("@/components/AIProviderIcon", () => ({ default: () => <span data-testid
 const ROWS = [
   { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
   { id: "openai", label: "OpenAI", state: "connected", isDefault: false, section: "ai", enabled: true },
-  { id: "anthropic", label: "Anthropic", state: "disconnected", isDefault: false, section: "ai", enabled: false },
+  { id: "anthropic", label: "Anthropic", state: "connected", isDefault: false, section: "ai", enabled: false },
+  { id: "google", label: "Google", state: "disconnected", isDefault: false, section: "ai", enabled: true },
   { id: "llamacpp", label: "Gemma 4", state: "connected", isDefault: false, section: "localAi", enabled: true },
 ];
 
@@ -50,12 +51,14 @@ afterEach(() => {
 });
 
 describe("AiProviderList", () => {
-  it("lists every provider — cloud and on-device — with its state and the default marked", async () => {
+  it("lists the connected providers — cloud and on-device — with the default marked, and not the unconnected ones", async () => {
     stubFetch();
     render(<AiProviderList />);
-    for (const row of ROWS) {
+    for (const row of ROWS.filter((r) => r.state === "connected")) {
       expect(await screen.findByTestId(`ai-provider-${row.id}`)).toBeInTheDocument();
     }
+    // Connecting a provider is the panel below the list, not a row in it.
+    expect(screen.queryByTestId("ai-provider-google")).not.toBeInTheDocument();
     expect(screen.getByTestId("ai-provider-default-clawai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-default-openai")).not.toBeInTheDocument();
     // A switched-off provider says so instead of pretending to be disconnected.
@@ -96,6 +99,7 @@ describe("AiProviderList", () => {
     await screen.findByTestId("ai-provider-openai");
     expect(screen.getByTestId("ai-provider-make-default-openai")).toBeInTheDocument();
     expect(screen.queryByTestId("ai-provider-make-default-clawai")).not.toBeInTheDocument();
+    // Switched off, so not offered as a default either.
     expect(screen.queryByTestId("ai-provider-make-default-anthropic")).not.toBeInTheDocument();
     fireEvent.click(screen.getByTestId("ai-provider-make-default-openai"));
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/providers/default", body: { provider: "openai" } }));
@@ -116,5 +120,16 @@ describe("AiProviderList", () => {
     expect(onOpen).toHaveBeenCalledWith("local");
     fireEvent.click(screen.getByTestId("ai-provider-openai").querySelector("button")!);
     expect(onOpen).toHaveBeenCalledWith("cloud");
+  });
+
+  it("shows only the tab's own providers when filtered", async () => {
+    stubFetch();
+    const { unmount } = render(<AiProviderList filter="cloud" />);
+    await screen.findByTestId("ai-provider-openai");
+    expect(screen.queryByTestId("ai-provider-llamacpp")).not.toBeInTheDocument();
+    unmount();
+    render(<AiProviderList filter="local" />);
+    await screen.findByTestId("ai-provider-llamacpp");
+    expect(screen.queryByTestId("ai-provider-openai")).not.toBeInTheDocument();
   });
 });

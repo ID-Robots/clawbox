@@ -3403,7 +3403,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             routes and simply became tabs. */}
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
-            <AiProviderList onOpen={setAiTab} />
             <div role="tablist" aria-label="AI configuration" className="flex rounded-xl bg-white/[0.04] border border-white/[0.06] p-1 gap-1">
               {(["cloud", "local"] as const).map((tab) => (
                 <button
@@ -3429,6 +3428,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── AI Models · Cloud tab ─── */}
         {activeSection === "ai" && aiTab === "cloud" && (
           <div className="max-w-xl space-y-5">
+            <AiProviderList filter="cloud" onOpen={setAiTab} />
 
             {/* Provider status card — suppressed on the Hermes edition, where the
                 AI Providers hero below already names the active provider, its
@@ -3544,6 +3544,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {/* ─── AI Models · Local tab ─── */}
         {activeSection === "ai" && aiTab === "local" && (
           <div className="max-w-xl space-y-5">
+            <AiProviderList filter="local" onOpen={setAiTab} />
 
             <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
               <div className="flex items-center gap-2 mb-4">
