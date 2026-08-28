@@ -16,6 +16,7 @@ import {
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
+  readConfigStrict as readOpenClawConfigStrict,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
   setProviderPlugins,
@@ -1033,6 +1034,33 @@ async function writeOpenAICompatProvider(opts: {
 }
 
 /**
+ * Providers whose SUBSCRIPTION credential is routed by the provider's own
+ * OpenClaw plugin instead of by a `models.providers.<p>` openai-compat
+ * override.
+ *
+ * Anthropic, and deliberately NOT "every provider that has an OAuth flow".
+ * `OAUTH_PROVIDERS` also carries google (Gemini Code Assist), and google's
+ * subscription reaches {@link applyCloudProviderTransport} the same way
+ * anthropic's does — but nothing gives it a native route to fall back on.
+ * `setProviderPlugins` toggles the anthropic plugin and no other, and the
+ * google branch below records that the native google plugin's auth fails at
+ * call time. Dropping google's override would hand its turns to a route this
+ * change has no evidence about and no device to test on: the same mistake as
+ * the bug being fixed here, pointed the other way. Google stays on the
+ * override until someone proves the native path on hardware.
+ *
+ * A Set rather than a literal comparison so the next provider to earn a native
+ * subscription route is added HERE, where the reason it qualifies is written
+ * down, rather than by widening a condition somewhere further down the file.
+ */
+const NATIVE_SUBSCRIPTION_ROUTING: ReadonlySet<string> = new Set(["anthropic"]);
+
+/** Does this provider+authMode pair route through the native plugin? */
+function routesSubscriptionNatively(provider: string, authMode: string): boolean {
+  return authMode === "subscription" && NATIVE_SUBSCRIPTION_ROUTING.has(provider);
+}
+
+/**
  * Take a `models.providers.<p>` openai-compat override back out.
  *
  * Only ever called on the subscription path, and only when the device actually
@@ -1043,10 +1071,16 @@ async function writeOpenAICompatProvider(opts: {
  */
 async function clearOpenAICompatProvider(provider: string): Promise<void> {
   const configPath = `models.providers.${provider}`;
-  const config = await readOpenClawConfig();
+  // STRICT read, because this check can only ever decide to do NOTHING. The
+  // ordinary `readConfig` answers `{}` to an EACCES or a half-written file just
+  // as it does to a clean config, and `{}` here reads as "no override to
+  // remove" — so an unreadable config would skip the repair, return 200, and
+  // leave the poisoned override exactly where it was. That is the failure this
+  // whole fix exists to remove, so an unreadable config throws instead.
+  const config = await readOpenClawConfigStrict();
   if (!config.models?.providers?.[provider]) return;
   await runOpenclawConfigUnset(configPath, { uid: CLAWBOX_UID, gid: CLAWBOX_GID });
-  console.log(`[AI Config] Removed stale openai-compat override ${configPath}`);
+  console.log(`[AI Config] Removed stale openai-compat override ${logSafe(configPath)}`);
 }
 
 /**
@@ -1067,11 +1101,17 @@ async function clearOpenAICompatProvider(provider: string): Promise<void> {
  * subscription look permanently rate-limited on the OpenClaw edition while the
  * same sign-in worked on Hermes, which routes natively.
  *
- * So on a subscription save the override is not written, and any override the
- * device already had is removed — the second half matters as much as the first,
- * because a box configured with an API key and later switched to a
- * subscription kept the old entry (nothing here ever deleted one) and stayed
- * broken. Routing then belongs to the provider's native plugin, which is what
+ * The override also FREEZES the credential. `apiKey` is written inline at save
+ * time, and a subscription access token is short-lived — so even a save that
+ * worked for a while expired within hours and never self-healed, because an
+ * inline key never goes back through the auth profile that holds the refresh
+ * token. An affected device was found with an inline token six hours dead.
+ *
+ * So on an anthropic subscription save the override is not written, and any
+ * override the device already had is removed — the second half matters as much
+ * as the first, because a box configured with an API key and later switched to
+ * a subscription kept the old entry (nothing here ever deleted one) and stayed
+ * broken. Routing then belongs to the anthropic plugin, which is what
  * `setProviderPlugins` enables a few steps later.
  */
 async function applyCloudProviderTransport(opts: {
@@ -1082,10 +1122,10 @@ async function applyCloudProviderTransport(opts: {
   defaultModel: string;
   curatedModels: readonly { id: string }[];
 }): Promise<void> {
-  if (opts.authMode !== "subscription") {
+  if (!routesSubscriptionNatively(opts.provider, opts.authMode)) {
     await writeOpenAICompatProvider(opts);
     console.log(
-      `[AI Config] Set ${opts.provider} provider (openai-compat): ${logSafe(opts.defaultModel)}`,
+      `[AI Config] Set ${logSafe(opts.provider)} provider (openai-compat): ${logSafe(opts.defaultModel)}`,
     );
     return;
   }
@@ -1103,7 +1143,7 @@ async function applyCloudProviderTransport(opts: {
   ]);
   await ensureFallbackModel(opts.defaultModel);
   console.log(
-    `[AI Config] Set ${opts.provider} provider (native plugin, subscription auth): ${logSafe(opts.defaultModel)}`,
+    `[AI Config] Set ${logSafe(opts.provider)} provider (native plugin, subscription auth): ${logSafe(opts.defaultModel)}`,
   );
 }
 
@@ -2019,8 +2059,9 @@ export async function POST(request: Request) {
       console.log(`[AI Config] Set llama.cpp provider in openclaw.json: ${logSafe(modelName)} (context=${llamaCppContextWindow}, mode=replace)`);
     } else if (isOpenRouter) {
       // OpenRouter has no native OpenClaw adapter, so without this explicit
-      // provider entry the chat turn silently returns usage 0/0/0. (API-key
-      // only today — the wizard offers OpenRouter no subscription sign-in.)
+      // provider entry the chat turn silently returns usage 0/0/0 — and no
+      // OAuth flow either (it is absent from OAUTH_PROVIDERS), so every save
+      // that reaches here is key-based and keeps the override.
       await applyCloudProviderTransport({
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
@@ -2032,7 +2073,11 @@ export async function POST(request: Request) {
     } else if (isGoogle) {
       // Native google plugin registers Gemini models but its 2026.6.8 auth
       // fails at call time (runs fall back with reason=auth). Route through
-      // Google's OpenAI-compat endpoint instead.
+      // Google's OpenAI-compat endpoint instead — for the SUBSCRIPTION
+      // (Gemini Code Assist OAuth) sign-in too. Google is the one sibling of
+      // the anthropic bug fixed here, and it is deliberately left alone: see
+      // NATIVE_SUBSCRIPTION_ROUTING for why taking its override away without
+      // a device to prove the native route on would repeat the same mistake.
       await applyCloudProviderTransport({
         provider: "google",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
