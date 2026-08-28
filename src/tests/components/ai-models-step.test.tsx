@@ -30,6 +30,7 @@ vi.mock("@/lib/i18n", () => ({
         connecting: "Connecting...",
         "settings.connect": "Connect",
         "settings.aiProvider": "AI Provider",
+        "settings.providers.radioGroupLabel": "AI Provider",
       };
       return translations[key] ?? key;
     },

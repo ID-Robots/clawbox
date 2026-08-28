@@ -32,9 +32,7 @@ import type { UpdateState } from "@/lib/updater";
 import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { BuildDriftBanner, BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
-import { CLAWBOX_AI_TIER_LABEL, normalizeClawboxAiTier } from "@/lib/clawbox-ai-models";
 import { useReconnect } from "@/hooks/useReconnect";
-import { PORTAL_DASHBOARD_URL } from "@/lib/max-subscription";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import { isGenerationLocale } from "@/lib/mascot-phrases";
 
@@ -3496,96 +3494,15 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         {activeSection === "ai" && (
           <div className="max-w-xl space-y-5">
 
-            {/* Provider status card — suppressed on the Hermes edition, where the
-                AI Providers hero below already names the active provider, its
-                model and its connection. Kept verbatim on openclaw/dual, which
-                have no hero. */}
-            {edition !== "hermes" && (
-            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>smart_toy</span>
-                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("settings.status")}</label>
-              </div>
-              {aiProvider === null ? (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5 animate-pulse">
-                  <div className="w-10 h-10 rounded-full bg-white/[0.08] shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-3 w-32 rounded bg-white/[0.08]" />
-                    <div className="h-2 w-20 rounded bg-white/[0.06]" />
-                  </div>
-                </div>
-              ) : aiProvider.connected ? (
-                (() => {
-                  const isClawai = aiProvider.provider === "clawai";
-                  const cardClass = `flex items-center gap-4 bg-green-500/[0.06] border border-green-500/15 rounded-xl px-4 py-3.5${
-                    isClawai ? " hover:bg-green-500/[0.1] hover:border-green-500/25 transition-colors cursor-pointer no-underline group" : ""
-                  }`;
-                  const inner = (
-                    <>
-                      <div className="relative w-10 h-10 rounded-full bg-green-500/15 border border-green-400/10 flex items-center justify-center shrink-0">
-                        <AIProviderIcon provider={aiProvider.provider} size={24} />
-                        <span className="absolute -right-1 -bottom-1 w-5 h-5 rounded-full bg-[#10261d] border border-green-500/25 flex items-center justify-center">
-                          <span className="material-symbols-rounded text-green-400" style={{ fontSize: 14 }}>check</span>
-                        </span>
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm text-[var(--text-primary)] font-medium truncate">{aiProvider.providerLabel}</span>
-                          {(() => {
-                            const tier = isClawai ? normalizeClawboxAiTier(aiProvider.clawaiTier) : null;
-                            if (!tier) return null;
-                            return (
-                              <span
-                                className={`shrink-0 text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded-md border ${
-                                  tier === "pro"
-                                    ? "bg-fuchsia-500/15 border-fuchsia-400/30 text-fuchsia-200"
-                                    : "bg-orange-500/15 border-orange-400/30 text-orange-200"
-                                }`}
-                              >
-                                {CLAWBOX_AI_TIER_LABEL[tier]}
-                              </span>
-                            );
-                          })()}
-                        </div>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
-                          <span className="text-xs text-green-400/80">
-                            {aiProvider.model ? aiProvider.model.split("/").pop() : t("settings.connected")}
-                          </span>
-                        </div>
-                      </div>
-                      {isClawai && (
-                        <span className="material-symbols-rounded text-[var(--text-muted)] opacity-50 group-hover:opacity-100 group-hover:text-green-400 transition-all shrink-0" style={{ fontSize: 18 }} aria-hidden="true">open_in_new</span>
-                      )}
-                    </>
-                  );
-                  return isClawai ? (
-                    <a
-                      href={PORTAL_DASHBOARD_URL}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className={cardClass}
-                      aria-label="Open ClawBox AI portal dashboard"
-                    >
-                      {inner}
-                    </a>
-                  ) : (
-                    <div className={cardClass}>{inner}</div>
-                  );
-                })()
-              ) : (
-                <div className="flex items-center gap-4 bg-white/[0.03] border border-white/[0.06] rounded-xl px-4 py-3.5">
-                  <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center shrink-0">
-                    <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 22 }}>link_off</span>
-                  </div>
-                  <div>
-                    <div className="text-sm text-[var(--text-muted)]">{t("settings.noProviderConnected")}</div>
-                    <div className="text-xs text-[var(--text-muted)] opacity-50 mt-0.5">{t("settings.selectProvider")}</div>
-                  </div>
-                </div>
-              )}
-            </div>
-            )}
+            {/* No status card here. The AI Providers panel below opens with the
+                hero, which names the active provider, its model and its
+                connection — this card said the same three things one card
+                higher. It was already suppressed on the Hermes edition for
+                exactly that reason; the hero now renders on every edition, so
+                the reason applies everywhere and the twin is gone. The two
+                affordances only this card carried both survive inside the
+                panel: the plan picker shows the ClawBox AI tier and links the
+                portal dashboard. */}
 
             <I18nProvider><AIModelsStep
               embedded

@@ -77,9 +77,7 @@ export const ja: Record<string, string> = {
   "hermesProvider.title": "AI プロバイダー",
   "hermesProvider.intro":
     "このデバイスは Hermes で動作します。プロバイダーを接続して既定を選んでください。状態の確認、サインイン、切り替えはすべてここで行えます。",
-  "hermesProvider.radioGroupLabel": "AI プロバイダー",
   "hermesProvider.hero.nativeSwitch": "Hermes を通じてネイティブに切り替わります",
-  "hermesProvider.hero.changeModel": "モデルを変更",
   "hermesProvider.continue": "次へ",
   "hermesProvider.connected.affirmation": "接続しました",
 

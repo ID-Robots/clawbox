@@ -75,9 +75,7 @@ export const fr: Record<string, string> = {
   "hermesProvider.title": "Fournisseurs d'IA",
   "hermesProvider.intro":
     "Cet appareil fonctionne avec Hermes. Connectez des fournisseurs et choisissez celui par défaut — état, connexion et changement se font tous ici.",
-  "hermesProvider.radioGroupLabel": "Fournisseur IA",
   "hermesProvider.hero.nativeSwitch": "bascule nativement via Hermes",
-  "hermesProvider.hero.changeModel": "Changer de modèle",
   "hermesProvider.continue": "Continuer",
   "hermesProvider.connected.affirmation": "Connecté",
 

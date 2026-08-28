@@ -19,6 +19,12 @@ import type { ProviderConnectionState } from "@/lib/provider-status";
  *  - The state colours are cyan (verified) and amber (needs attention), never
  *    coral. Coral is this product's ACTION colour on every surface; a status
  *    painted in it reads as a button.
+ *  - The two QUIET states are quiet in the DOT, not in the word. They used to
+ *    be `--text-muted`, and `unknown` dimmed that again to 70% — 3.56:1 and
+ *    2.41:1 against the row, i.e. under AA for 11px text, on the two states a
+ *    customer is most likely to be squinting at because something is wrong.
+ *    The word is now `--text-secondary` (6.79:1 plain, 5.08:1 on a hovered
+ *    row) and the dot alone carries "we are less sure about this one".
  */
 const STATE_STYLES: Record<
   ProviderConnectionState,
@@ -36,12 +42,12 @@ const STATE_STYLES: Record<
   },
   disconnected: {
     dot: "bg-[var(--text-muted)] opacity-60",
-    text: "text-[var(--text-muted)]",
+    text: "text-[var(--text-secondary)]",
     labelKey: "settings.providers.notConnected",
   },
   unknown: {
     dot: "bg-[var(--text-muted)] opacity-30",
-    text: "text-[var(--text-muted)] opacity-70",
+    text: "text-[var(--text-secondary)]",
     labelKey: "settings.providers.unknown",
   },
 };

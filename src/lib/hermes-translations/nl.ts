@@ -75,9 +75,7 @@ export const nl: Record<string, string> = {
   "hermesProvider.title": "AI-providers",
   "hermesProvider.intro":
     "Dit apparaat draait op Hermes. Verbind providers en kies de standaard — status, aanmelden en wisselen gebeuren allemaal hier.",
-  "hermesProvider.radioGroupLabel": "AI-provider",
   "hermesProvider.hero.nativeSwitch": "schakelt native via Hermes",
-  "hermesProvider.hero.changeModel": "Model wijzigen",
   "hermesProvider.continue": "Doorgaan",
   "hermesProvider.connected.affirmation": "Verbonden",
 

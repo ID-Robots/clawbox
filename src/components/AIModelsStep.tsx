@@ -29,6 +29,10 @@ import { useProviderCatalog } from "@/hooks/useProviderCatalog";
 import { HeaderDropdown, type HeaderDropdownOption } from "./HeaderDropdown";
 import { ButtonSpinner } from "./ButtonSpinner";
 import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
+import ProviderRadioRow from "./ProviderRadioRow";
+import ProviderConnectionLabel from "./ProviderConnectionLabel";
+import ProviderDefaultHero from "./ProviderDefaultHero";
+import { useProviderStatus } from "@/hooks/useProviderStatus";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
@@ -596,6 +600,59 @@ export default function AIModelsStep({
   // this — `selectedModelId` / `customModelId` live above it either way.
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
+  // ── Connection state, for the hero and every row ─────────────────────────
+  //
+  // The same aggregate the Hermes panel reads: ONE call to
+  // /setup-api/providers/status for every provider at once, re-read on the
+  // shared providers-changed signal. It is presentation ONLY here — this panel
+  // never POSTs /providers/default, because on OpenClaw picking a radio means
+  // "configure this one", not "switch to it", and that verb is not something a
+  // restyle gets to change.
+  //
+  // Not fetched on the Hermes branch (HermesProviderConfig owns the same hook
+  // and would double the request), nor on Settings -> Local AI, whose single
+  // on-device row is not a "which provider answers" question and whose section
+  // already carries its own status card.
+  const providerStatusEnabled = configureScope !== "local" && edition !== null && edition !== "hermes";
+  const { summary: providerStatus } = useProviderStatus({ enabled: providerStatusEnabled });
+  const statusById = useMemo(
+    () => new Map((providerStatus?.providers ?? []).map((row) => [row.id, row])),
+    [providerStatus],
+  );
+  const defaultRow = useMemo(
+    () => providerStatus?.providers.find((row) => row.isDefault) ?? null,
+    [providerStatus],
+  );
+  /** A row's connection state, as a dot AND a word. */
+  const rowStatus = useCallback((id: string) => {
+    const row = statusById.get(id);
+    return row ? <ProviderConnectionLabel state={row.state} className="shrink-0" /> : null;
+  }, [statusById]);
+
+  // "Change model" sends the customer to the model picker they already know
+  // rather than growing a second one in the hero. Bumped as a counter, not a
+  // boolean, so pressing it again re-scrolls after they have clicked away.
+  const [focusModelRequest, setFocusModelRequest] = useState(0);
+  // The last request this effect actually landed. The counter never returns to
+  // zero, and the effect has to watch the row/catalog/picker state because the
+  // picker is not in the DOM until all three have settled — so without this,
+  // every later click on ANY provider row would re-run the effect, scroll the
+  // page and steal focus into that provider's model field, long after the one
+  // "Change model" press that asked for it.
+  const handledFocusRequestRef = useRef(0);
+  useEffect(() => {
+    if (!focusModelRequest) return;
+    if (handledFocusRequestRef.current === focusModelRequest) return;
+    // Re-runs as the row switches and its catalog lands, because the picker
+    // does not exist in the DOM until both have happened. The request is only
+    // marked handled once the element is really there, so the retry survives.
+    const el = document.getElementById("ai-provider-model");
+    if (!el) return;
+    handledFocusRequestRef.current = focusModelRequest;
+    el.scrollIntoView({ block: "center", behavior: "smooth" });
+    el.focus();
+  }, [focusModelRequest, selectedProvider, activeCatalog, modelPickerOpen]);
+
   useEffect(() => {
     if (!activeCatalog || !selectedProvider) {
       setSelectedModelId("");
@@ -1090,6 +1147,21 @@ export default function AIModelsStep({
     setShowMoreProviders(false);
     syncProviderSelection(id);
   }, [syncProviderSelection]);
+
+  /**
+   * The hero's one action. It selects the default provider's row (so the row's
+   * own controls, including the model picker, are on screen), forces that
+   * picker open past its one-line summary, and scrolls to it.
+   *
+   * Every step of that is something the customer can already do by hand; the
+   * button just does it in one gesture. Nothing is saved and no default moves.
+   */
+  const changeModel = useCallback(() => {
+    if (!defaultRow) return;
+    selectProvider(defaultRow.id);
+    setModelPickerOpen(true);
+    setFocusModelRequest((n) => n + 1);
+  }, [defaultRow, selectProvider]);
 
   const saveProviderConfig = useCallback(async (payload: Record<string, unknown>) => {
     saveControllerRef.current?.abort();
@@ -1968,9 +2040,35 @@ export default function AIModelsStep({
           {resolvedDescription}
         </p>
 
-        <div role="radiogroup" aria-label="AI Provider" className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
+        {/* THE HERO — what is answering right now: vendor, model, connection,
+            in one line of sight. Absent until the box HAS a default, which is
+            the honest state through most of first-run setup, and absent on
+            Settings -> Local AI, where the box's cloud default is not the
+            question the page is asking. */}
+        {defaultRow && configureScope !== "local" && (
+          <ProviderDefaultHero
+            row={defaultRow}
+            model={currentModel ?? ""}
+            // "Change model" scrolls to the model picker — which exists only
+            // for a provider this panel has a row AND a catalog for, and only
+            // in Settings (picking a default model is a post-setup concern the
+            // wizard deliberately hides). An action that cannot land anywhere
+            // is worse than no action, so it is simply not offered otherwise.
+            onChangeModel={
+              embedded
+              && baseProviders.some((provider) => provider.id === defaultRow.id)
+              && isCatalogProvider(defaultRow.id)
+              && defaultRow.id !== "clawai"
+                ? changeModel
+                : undefined
+            }
+          />
+        )}
+
+        <div role="radiogroup" aria-label={t("settings.providers.radioGroupLabel")} className="border border-[var(--border-subtle)] rounded-[var(--r-1)] bg-[var(--bg-deep)]/50 overflow-hidden">
           {displayedProviders.map((provider) => {
             const isSelected = selectedProvider === provider.id;
+            const isDefault = statusById.get(provider.id)?.isDefault ?? false;
             // ClawBox AI's row is shared verbatim with the Hermes provider panel
             // (same component, not a lookalike) so the two can never drift.
             if (provider.id === "clawai") {
@@ -1980,59 +2078,32 @@ export default function AIModelsStep({
                   radioName="ai-provider"
                   selected={isSelected}
                   onSelect={() => selectProvider(provider.id)}
+                  isDefault={isDefault}
+                  statusSlot={rowStatus(provider.id)}
                 />
               );
             }
             return (
-              <label
+              <ProviderRadioRow
                 key={provider.id}
-                className={`flex items-center gap-3 px-4 py-3.5 w-full text-left border-b border-[var(--hair)] last:border-b-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] cursor-pointer has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-[var(--coral-bright)] has-[:focus-visible]:ring-inset ${
-                  isSelected
-                    ? "bg-[var(--coral-wash)]"
-                    : "hover:bg-[var(--fill-3)]"
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="ai-provider"
-                  value={provider.id}
-                  checked={isSelected}
-                  onChange={() => selectProvider(provider.id)}
-                  className="sr-only"
-                />
-                <span
-                  aria-hidden="true"
-                  className={`flex items-center justify-center w-5 h-5 rounded-full border-2 shrink-0 transition-colors duration-[var(--d-2)] ease-[var(--ease-standard)] ${
-                    isSelected
-                      ? "border-[var(--coral-bright)]"
-                      : "border-[var(--border-subtle)]"
-                  }`}
-                >
-                  {isSelected && (
-                    <span className="w-2.5 h-2.5 rounded-full bg-[var(--coral-bright)]" />
-                  )}
-                </span>
-                <span aria-hidden="true" className="flex items-center justify-center w-8 h-8 rounded-[var(--r-1)] bg-[var(--fill-2)] shrink-0">
-                  <AIProviderIcon provider={provider.id} size={22} />
-                </span>
-                <div className="flex-1 min-w-0">
-                  <span className="flex flex-wrap items-center gap-2 text-[length:var(--t-4)] font-semibold text-[var(--text-primary)]">
-                    {provider.name}
-                    {provider.id === "llamacpp" && (
-                      /* Cyan is DONE-and-verified everywhere else in the box;
-                         "runs entirely on this device" is the one other fact
-                         it is allowed to carry, and it is the fact this row
-                         exists to state. */
-                      <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--cyan-wash)] text-[var(--cyan-bright)] leading-none">
-                        {t("ai.fullyLocal")}
-                      </span>
-                    )}
+                radioName="ai-provider"
+                value={provider.id}
+                selected={isSelected}
+                onSelect={() => selectProvider(provider.id)}
+                isDefault={isDefault}
+                name={provider.name}
+                description={providerDesc[provider.id] ?? provider.description}
+                statusSlot={rowStatus(provider.id)}
+                badges={provider.id === "llamacpp" ? (
+                  /* Cyan is DONE-and-verified everywhere else in the box;
+                     "runs entirely on this device" is the one other fact it is
+                     allowed to carry, and it is the fact this row exists to
+                     state. */
+                  <span className="px-1.5 py-0.5 text-[length:var(--t-1)] font-bold uppercase tracking-[0.06em] rounded-[var(--r-1)] bg-[var(--cyan-wash)] text-[var(--cyan-bright)] leading-none">
+                    {t("ai.fullyLocal")}
                   </span>
-                  <span className="block text-[length:var(--t-2)] leading-[1.45] text-[var(--text-muted)]">
-                    {providerDesc[provider.id] ?? provider.description}
-                  </span>
-                </div>
-              </label>
+                ) : null}
+              />
             );
           })}
           {shouldShowMoreProviders && (
