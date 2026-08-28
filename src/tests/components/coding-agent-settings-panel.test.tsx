@@ -9,7 +9,7 @@
  * than on screen.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentSettingsPanel from "@/components/CodingAgentSettingsPanel";
 import { CODING_AGENT_CHANGED_EVENT } from "@/lib/ui-events";
@@ -55,7 +55,15 @@ function stubFetch(
     maxTurns?: number;
     tokenLimit?: number | null;
   },
-  opts: { resolveTo?: string; rejectDir?: string; forbidSwitch?: boolean; github?: Record<string, unknown> } = {},
+  opts: {
+    resolveTo?: string;
+    rejectDir?: string;
+    forbidSwitch?: boolean;
+    github?: Record<string, unknown>;
+    /** How the GitHub read fails: a non-2xx answer, or no answer at all. */
+    gitStatus?: number;
+    gitThrows?: boolean;
+  } = {},
 ) {
   posts = [];
   let stored: string | null = status.defaultDirectory ?? null;
@@ -82,7 +90,11 @@ function stubFetch(
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     if (url.startsWith("/setup-api/coding-agent/status")) return json(payload());
-    if (url.startsWith("/setup-api/coding-agent/git")) return json(opts.github ?? GH_OFF);
+    if (url.startsWith("/setup-api/coding-agent/git")) {
+      if (opts.gitThrows) throw new TypeError("Failed to fetch");
+      if (opts.gitStatus && opts.gitStatus !== 200) return json({ error: "gh fell over" }, opts.gitStatus);
+      return json(opts.github ?? GH_OFF);
+    }
     if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
       const body = JSON.parse(String(init.body));
       posts.push({ url, body });
@@ -117,6 +129,11 @@ afterEach(() => {
 
 const SWITCH = translations.en["codingAgent.switchLabel"];
 const SAVE = translations.en["codingAgent.folderSave"];
+
+/** Let a handler's promise chain settle: a save that WOULD have posted has by now. */
+async function flush() {
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+}
 
 describe("the owner's switch", () => {
   it("renders off and turns on only after the route says so", async () => {
@@ -256,8 +273,11 @@ describe("effort and the ceilings", () => {
     const turns = await screen.findByTestId("coding-agent-turns");
     await waitFor(() => expect(turns).toHaveValue(150));
 
-    // Leaving it untouched is not a save.
+    // Leaving it untouched is not a save. The handler is async, so the
+    // assertion waits for the tick in which a post would have gone out —
+    // checked synchronously it passed before the code under test had run.
     fireEvent.blur(turns);
+    await flush();
     expect(posts).toEqual([]);
 
     fireEvent.change(turns, { target: { value: "40" } });
@@ -297,5 +317,213 @@ describe("effort and the ceilings", () => {
     fireEvent.change(tokens, { target: { value: "" } });
     fireEvent.blur(tokens);
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { tokenLimit: null } }));
+  });
+});
+
+describe("the two reads on mount", () => {
+  it("renders the switch when the GitHub read answers an error", async () => {
+    // The two reads used to share one Promise.all, so gh falling over took
+    // the switch down with it. A 500 from /git is gh's problem, not the
+    // panel's.
+    stubFetch({ enabled: true, readiness: READY }, { gitStatus: 500 });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: SWITCH });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toBeEnabled();
+    expect(screen.queryByText(translations.en["codingAgent.loadFailed"])).not.toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-github-card")).not.toBeInTheDocument();
+  });
+
+  it("renders the switch when the GitHub read does not answer at all", async () => {
+    stubFetch({ enabled: false, readiness: READY }, { gitThrows: true });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: SWITCH });
+    expect(toggle).toBeEnabled();
+    expect(screen.queryByText(translations.en["codingAgent.loadFailed"])).not.toBeInTheDocument();
+  });
+});
+
+describe("a GitHub read that failed is asked again", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  async function settle(ms = 50) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
+
+  it("re-probes after a 500, and shows the account once the route answers", async () => {
+    // `github` stays null after a failed read, and null used to be excluded
+    // from the inconclusive states — so the card asked once, got nothing,
+    // and never asked again: a gh hiccup at mount hid the account for as
+    // long as the panel stayed up.
+    let gitStatus = 500;
+    let gitCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/status")) {
+        return json({ enabled: true, ready: true, readiness: READY, running: 0, defaultDirectory: null, effort: "max", effortLevels: ["max"] });
+      }
+      if (url.startsWith("/setup-api/coding-agent/git")) {
+        gitCalls += 1;
+        if (gitStatus !== 200) return json({ error: "gh fell over" }, gitStatus);
+        return json({ installed: true, connected: true, login: "yalexx", loginCommand: GH_OFF.loginCommand });
+      }
+      return json({ error: "unexpected" }, 404);
+    }));
+    render(<CodingAgentSettingsPanel />);
+    await settle();
+    expect(gitCalls).toBe(1);
+    expect(screen.queryByTestId("coding-agent-github-card")).not.toBeInTheDocument();
+
+    await settle(15_100);
+    expect(gitCalls).toBe(2);
+
+    gitStatus = 200;
+    await settle(15_100);
+    expect(gitCalls).toBe(3);
+    expect(screen.getByTestId("coding-agent-github-login").textContent).toBe("yalexx");
+
+    // A trusted answer ends the polling.
+    await settle(60_000);
+    expect(gitCalls).toBe(3);
+  });
+});
+
+describe("one setting write at a time", () => {
+  /** The enable route with its answers held back until the test lets go. */
+  function stubDeferredWrites(statusBody: Record<string, unknown>) {
+    posts = [];
+    const pending: Array<(body: Record<string, unknown>) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/status")) return json(statusBody);
+      if (url.startsWith("/setup-api/coding-agent/git")) return json(GH_OFF);
+      if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
+        posts.push({ url, body: JSON.parse(String(init.body)) });
+        return await new Promise<Response>((resolve) => {
+          pending.push((body) => resolve(json(body)));
+        });
+      }
+      return json({ error: "unexpected" }, 404);
+    }));
+    return {
+      /** Answer the oldest write still waiting. */
+      answer: async (body: Record<string, unknown>) => {
+        const release = pending.shift();
+        if (!release) throw new Error("no write is waiting");
+        await act(async () => { release(body); await new Promise((r) => setTimeout(r, 0)); });
+      },
+    };
+  }
+
+  const STATUS = {
+    enabled: true, ready: true, readiness: READY, running: 0, defaultDirectory: "/home/clawbox/projects",
+    effort: "max", effortLevels: ["low", "xhigh", "max"], subagents: true,
+    maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000, tokenLimit: null, minTokenLimit: 10_000,
+  };
+
+  it("disables every setting control while a write is in flight, and queues rather than races a second", async () => {
+    // Two writes in flight at once can land in either order, and the older
+    // answer — the route re-reads the whole status — would overwrite the
+    // newer one on screen. So: one at a time, and the controls say so.
+    const route = stubDeferredWrites(STATUS);
+    render(<CodingAgentSettingsPanel />);
+    const low = await screen.findByTestId("coding-agent-effort-low");
+    const xhigh = screen.getByTestId("coding-agent-effort-xhigh");
+    expect(xhigh).toBeEnabled();
+
+    fireEvent.click(low);
+    await flush();
+    expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { effort: "low" } }]);
+
+    // Everything that writes a setting is off until the route answers.
+    expect(xhigh).toBeDisabled();
+    expect(screen.getByRole("switch", { name: SWITCH })).toBeDisabled();
+    expect(screen.getByTestId("coding-agent-turns")).toBeDisabled();
+    expect(screen.getByTestId("coding-agent-tokens")).toBeDisabled();
+    fireEvent.change(screen.getByTestId("coding-agent-folder"), { target: { value: "/home/clawbox/next" } });
+    expect(screen.getByRole("button", { name: SAVE })).toBeDisabled();
+
+    // Enter in the folder field (still typeable) is the one way a second
+    // write can be asked for mid-flight. It waits; it is not posted.
+    fireEvent.keyDown(screen.getByTestId("coding-agent-folder"), { key: "Enter" });
+    await flush();
+    expect(posts).toHaveLength(1);
+
+    await route.answer({ ...STATUS, effort: "low" });
+    expect(low).toHaveAttribute("aria-pressed", "true");
+    // Now the queued write goes out — after the first, never beside it.
+    expect(posts).toEqual([
+      { url: "/setup-api/coding-agent/enable", body: { effort: "low" } },
+      { url: "/setup-api/coding-agent/enable", body: { defaultDirectory: "/home/clawbox/next" } },
+    ]);
+    expect(xhigh).toBeDisabled();
+
+    await route.answer({ ...STATUS, effort: "low", defaultDirectory: "/home/clawbox/next" });
+    // The latest answer is what is on screen, and the controls are back.
+    expect(screen.getByTestId("coding-agent-folder")).toHaveValue("/home/clawbox/next");
+    expect(low).toHaveAttribute("aria-pressed", "true");
+    expect(xhigh).toBeEnabled();
+    expect(screen.getByRole("switch", { name: SWITCH })).toBeEnabled();
+  });
+});
+
+describe("motion", () => {
+  /** The device, with the first status held back so the skeleton can be seen. */
+  function stubSlowStatus() {
+    posts = [];
+    let releaseStatus: (() => void) | null = null;
+    let releaseSwitch: (() => void) | null = null;
+    const body = (enabled: boolean) => ({
+      enabled, ready: true, readiness: READY, running: 0, defaultDirectory: null,
+      effort: "max", effortLevels: ["max"], maxTurns: 150, minMaxTurns: 10, maxMaxTurns: 2000, tokenLimit: null, minTokenLimit: 10_000,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/status")) {
+        await new Promise<void>((r) => { releaseStatus = r; });
+        return json(body(false));
+      }
+      if (url.split("?")[0] === "/setup-api/coding-agent/git") return json(GH_OFF);
+      if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
+        await new Promise<void>((r) => { releaseSwitch = r; });
+        return json(body(true));
+      }
+      if (url.startsWith("/setup-api/coding-agent/github-login")) {
+        const { action } = JSON.parse(String(init?.body)) as { action: string };
+        if (action === "start") return json({ userCode: "8A5B-0396", verificationUri: "https://github.com/login/device", interval: 5 });
+        return json({ status: "pending", interval: 5 });
+      }
+      return json({ error: "unexpected" }, 404);
+    }));
+    return {
+      status: async () => { await act(async () => { releaseStatus?.(); await new Promise((r) => setTimeout(r, 0)); }); },
+      toggle: async () => { await act(async () => { releaseSwitch?.(); await new Promise((r) => setTimeout(r, 0)); }); },
+    };
+  }
+
+  it("animates the skeleton, the switch's spinner and the device-flow wait only when motion is welcome", async () => {
+    // Tailwind's `motion-safe:` variant is the OS's reduced-motion setting,
+    // honoured: an owner who turned animation off must not get a spinner
+    // that keeps turning and a card that keeps pulsing.
+    const route = stubSlowStatus();
+    render(<CodingAgentSettingsPanel />);
+    const skeleton = screen.getByTestId("coding-agent-settings-loading");
+    expect(skeleton.className.split(/\s+/)).toContain("motion-safe:animate-pulse");
+    expect(skeleton.className.split(/\s+/)).not.toContain("animate-pulse");
+
+    await route.status();
+    fireEvent.click(await screen.findByRole("switch", { name: SWITCH }));
+    const spinner = await screen.findByTestId("coding-agent-switch-busy");
+    expect(spinner.className.split(/\s+/)).toContain("motion-safe:animate-spin");
+    expect(spinner.className.split(/\s+/)).not.toContain("animate-spin");
+    await route.toggle();
+    await waitFor(() => expect(screen.queryByTestId("coding-agent-switch-busy")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("coding-agent-github-connect"));
+    const waiting = await screen.findByTestId("coding-agent-github-device-waiting");
+    expect(waiting.textContent).toBe(translations.en["codingAgent.githubDeviceWaiting"]);
+    expect(waiting.className.split(/\s+/)).toContain("motion-safe:animate-pulse");
+    expect(waiting.className.split(/\s+/)).not.toContain("animate-pulse");
   });
 });

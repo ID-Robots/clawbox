@@ -170,6 +170,24 @@ describe("Voice panel", () => {
     expect(screen.getByTestId("voice-sample-audio")).toBeInTheDocument();
   });
 
+  it("cannot play a sample with an engine the box does not have", async () => {
+    // `choice: "cloud"` is a legacy value the panel honours, so the source can
+    // be an engine whose own option is greyed out. Play used to ask the box
+    // to speak with it anyway, and all it produced was a refusal to read.
+    stubAudio();
+    const s = status({ choice: "cloud" });
+    s.engines[1] = engine({ id: "cloud", providerId: "openai", label: "ClawBox cloud", configured: false, usable: false });
+    mockFetch(s);
+    render(<VoiceOutputPanel active />);
+    const play = await screen.findByTestId("voice-play");
+    expect(screen.getByTestId("voice-source")).toHaveValue("cloud");
+    expect(play).toBeDisabled();
+    fireEvent.click(play);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(posts.filter((p) => p.url === "/setup-api/tts/sample")).toEqual([]);
+    expect(screen.queryByTestId("voice-sample-audio")).toBeNull();
+  });
+
   it("shows the box's refusal in its own words", async () => {
     stubAudio();
     mockFetch(status(), { sample: { status: 409, error: "The cloud voice is not set up on this box." } });

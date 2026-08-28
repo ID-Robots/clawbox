@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import { useModalDialog } from "@/hooks/useModalDialog";
 
 // The pieces ClawKeep and Memory Shard draw with in common.
 //
@@ -96,20 +97,21 @@ export function ConfirmDialog({
   onConfirm: () => void;
 }) {
   const { t } = useT();
-  // Esc closes via a global listener (the dialog itself doesn't focus a
-  // text input, so an inline onKeyDown wouldn't fire reliably). Enter is
-  // handled by whichever button has focus — autoFocus puts it on Confirm
-  // but tabbing to Cancel and pressing Enter must cancel, not confirm.
+  // The desktop's one modal behaviour: Escape closes, Tab and Shift-Tab stay
+  // inside the panel, the page behind is inert, and focus goes back to the
+  // control that opened the dialog when it closes. This dialog used to
+  // hand-roll Escape alone, so a keyboard user could Tab straight out of
+  // "delete every backup?" into the window behind it.
+  const panelRef = useModalDialog<HTMLDivElement>({ onClose: onCancel });
+  // Enter is handled by whichever button has focus, and that is Confirm to
+  // begin with — the affordance this dialog has always had. The hook lands on
+  // the FIRST control, which is Cancel; this runs after it (effects run in
+  // declaration order) and moves focus on. Tabbing to Cancel and pressing
+  // Enter still cancels.
+  const confirmRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+    confirmRef.current?.focus();
+  }, []);
 
   const confirmClasses = danger
     ? "bg-red-500 hover:bg-red-400 text-white"
@@ -117,13 +119,16 @@ export function ConfirmDialog({
 
   return (
     <div
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="clawkeep-confirm-title"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={onCancel}
     >
+      {/* The role sits on the PANEL, where the trap is attached: on the
+          backdrop the accessible dialog would be the whole viewport. */}
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="clawkeep-confirm-title"
         className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
@@ -154,9 +159,9 @@ export function ConfirmDialog({
             {t("clawkeep.cancel")}
           </button>
           <button
+            ref={confirmRef}
             type="button"
             onClick={onConfirm}
-            autoFocus
             className={`px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer ${confirmClasses}`}
           >
             {confirmLabel}

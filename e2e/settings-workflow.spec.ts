@@ -264,4 +264,50 @@ test("settings reads an unlinked box's cloud voice as unavailable", async ({ pag
   await expect(cloudOption).toHaveText(/not available/);
   await expect(source.locator("option[value=local]")).toHaveJSProperty("disabled", false);
   await expect(voice.getByTestId("voice-cloud-warning")).toHaveCount(0);
+
+  // The greyed-out option is why no click can send this request, so the mock's
+  // answer is asked for directly: the real route refuses a cloud voice this box
+  // cannot call with a 409, and a mock that said 200 instead would let a future
+  // control that skipped the greying pass against a box it would fail on.
+  const refused = await page.evaluate(async () => {
+    const res = await fetch("/setup-api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "select", choice: "cloud" }),
+    });
+    return { status: res.status, body: await res.json() as { error?: string } };
+  });
+  expect(refused.status).toBe(409);
+  expect(refused.body.error).toBe("That voice is not available on this box.");
+  await expect(source).toHaveValue("local");
+});
+
+// The local row on Providers is whichever engine the box runs, not a fixed
+// Gemma 4: the setup mocks can leave Ollama as the local provider, and the
+// real route names it "Ollama Local" under the id `ollama`. Unlinked, so that
+// row is the default and the hero has to say its name.
+test("settings names the local engine the box actually runs", async ({ page }) => {
+  await installClawboxMocks(page, {
+    initialSetup: {
+      setup_complete: true,
+      wifi_configured: true,
+      update_completed: true,
+      password_configured: true,
+      local_ai_configured: true,
+      local_ai_provider: "ollama",
+      local_ai_model: "ollama/llama3.2:3b",
+      ai_model_configured: false,
+      telegram_configured: false,
+    },
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+  await page.getByTestId("shelf-app-settings").click();
+  const settingsWindow = page.getByTestId("chrome-window-settings");
+  await expect(settingsWindow).toBeVisible();
+
+  const hero = settingsWindow.getByTestId("provider-default-hero");
+  await expect(hero).toContainText("Ollama Local");
+  await expect(hero).not.toContainText("Gemma 4");
 });

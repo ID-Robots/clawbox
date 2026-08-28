@@ -114,6 +114,16 @@ export const NEW_APP_NAME_MAX = 60;
 /** Order and default of the "start from" select — initProject's templates. */
 const NEW_APP_TEMPLATES: readonly NewAppTemplate[] = ["app", "blank"];
 
+/**
+ * The desktop's id for a deployed web app. page.tsx builds every installed
+ * app's id as `installed-<appId>`, and a web app's appId is its folder under
+ * data/webapps — the project folder. Exported so the test can pin the
+ * spelling against the one the desktop matches on.
+ */
+export function installedAppId(folder: string): string {
+  return `installed-${folder}`;
+}
+
 /** One page of runs. The list is open by default now, so it has to be paged
  *  rather than unbounded — a long history should not push the settings off
  *  the top of the window. */
@@ -741,7 +751,11 @@ export default function CodingAgentApp() {
                     {project.onDesktop && (
                       <button
                         type="button"
-                        onClick={() => dispatchOpenApp(project.folder)}
+                        // The desktop registers a deployed web app under
+                        // `installed-<folder>` (page.tsx, getAllApps); the
+                        // bare folder name matches no app there, and the
+                        // click did nothing at all.
+                        onClick={() => dispatchOpenApp(installedAppId(project.folder))}
                         data-testid={`coding-agent-open-${project.folder}`}
                         className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
                       >

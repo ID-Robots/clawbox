@@ -61,6 +61,14 @@ const DEFAULT_SETUP: SetupState = {
   telegram_configured: false,
 };
 
+// The ids and labels /setup-api/providers/status gives the on-device engine
+// (LOCAL_PROVIDER_LABELS in src/lib/provider-status.ts). A provider outside
+// this map gets no row there, and so gets none here.
+const LOCAL_PROVIDER_LABELS: Record<string, string> = {
+  llamacpp: "Gemma 4 (on-device)",
+  ollama: "Ollama Local",
+};
+
 const DEFAULT_PREFERENCES: Record<string, unknown> = {
   ui_language: "en",
   wp_id: "clawbox",
@@ -516,6 +524,20 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       ],
       unavailable: [],
     };
+  };
+
+  // Mirrors selectionError in src/lib/voice-output.ts, so the mock refuses
+  // exactly the selections the real route refuses, with the same words.
+  const voiceSelectionError = (
+    choice: "auto" | "local" | "cloud",
+    engines: { id: string; configured: boolean }[],
+  ): string | null => {
+    if (choice === "auto") {
+      return engines.some((e) => e.configured) ? null : "This box has no voice it can use.";
+    }
+    const engine = engines.find((e) => e.id === choice);
+    if (!engine || !engine.configured) return "That voice is not available on this box.";
+    return null;
   };
 
   // The shape /setup-api/tts answers with (src/lib/voice-output.ts). `auto` is
@@ -1299,15 +1321,20 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
 
     // Settings -> Providers. The connection overview every provider surface
     // reads: which providers hold a sign-in, and which one answers first. The
-    // rows follow the same setup facts ai-models/status answers from.
+    // rows follow the same setup facts ai-models/status answers from, and the
+    // local row is the engine `local_ai_provider` names — the setup mocks can
+    // put Ollama there, and a strip that called it Gemma 4 regardless would
+    // let a spec pass against a box the real route never describes.
     if (path === "/setup-api/providers/status") {
+      const localProvider = setupState.local_ai_configured ? setupState.local_ai_provider ?? null : null;
+      const localLabel = localProvider ? LOCAL_PROVIDER_LABELS[localProvider] : undefined;
       const providers = [
         ...(setupState.ai_model_configured
           ? [{ id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, enabled: true, section: "ai" }]
           : []),
-        ...(setupState.local_ai_configured
+        ...(localProvider && localLabel
           ? [{
-              id: "llamacpp", label: "Gemma 4 (on-device)", state: "connected",
+              id: localProvider, label: localLabel, state: "connected",
               isDefault: !setupState.ai_model_configured, enabled: true, section: "localAi",
             }]
           : []),
@@ -1357,6 +1384,15 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
           voice?: string;
         }>(route);
         if (payload.action === "select" && (payload.choice === "auto" || payload.choice === "local" || payload.choice === "cloud")) {
+          // The real route refuses to write a primary the box cannot honour
+          // (selectionError in src/lib/voice-output.ts): on an unlinked box
+          // the cloud voice is not configured, and picking it must answer 409,
+          // not a 200 that the Voice tab would read as a working choice.
+          const refusal = voiceSelectionError(payload.choice, buildVoiceStatus().engines);
+          if (refusal) {
+            await fulfillJson(route, { error: refusal }, 409);
+            return;
+          }
           voiceChoice = payload.choice;
         } else if (payload.action === "language" && typeof payload.language === "string") {
           voiceLanguage = payload.language;

@@ -106,7 +106,14 @@ function Switch({
   return (
     <div className="flex items-center gap-2 shrink-0">
       {busy && (
-        <span className="material-symbols-rounded animate-spin text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
+        // motion-safe: a spinner that keeps turning for an owner who asked
+        // the OS for reduced motion is the one thing a spinner must not do.
+        <span
+          className="material-symbols-rounded motion-safe:animate-spin text-[var(--text-muted)]"
+          style={{ fontSize: 18 }}
+          aria-hidden="true"
+          data-testid="coding-agent-switch-busy"
+        >
           progress_activity
         </span>
       )}
@@ -140,8 +147,16 @@ export default function CodingAgentSettingsPanel({
   const { t } = useT();
   const [status, setStatus] = useState<AgentStatus | null>(null);
   const [github, setGithub] = useState<GitHubState | null>(null);
+  /** True after a GitHub read that did not answer — the fetch threw, or the
+   *  route answered non-2xx. Kept apart from `github === null`, which is also
+   *  what the card holds before the first read has come back. */
+  const [githubUnread, setGithubUnread] = useState(false);
   const [loading, setLoading] = useState(true);
+  /** Which control's write is in flight — for that control's spinner. */
   const [busy, setBusy] = useState<string | null>(null);
+  /** Setting writes queued or in flight. Every setting control is disabled
+   *  while this is above zero, so no second write can be started by hand. */
+  const [pendingWrites, setPendingWrites] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [confirmSignOut, setConfirmSignOut] = useState(false);
   /** A device-flow login in flight: the code the card shows and how often to
@@ -171,19 +186,17 @@ export default function CodingAgentSettingsPanel({
     onStatusRef.current?.(next);
   }, []);
 
-  const load = useCallback(async () => {
+  /** The switch and the settings — the half of the panel that must render
+   *  whatever GitHub is doing. */
+  const loadStatus = useCallback(async () => {
     try {
-      const [s, g] = await Promise.all([
-        fetch("/setup-api/coding-agent/status", { cache: "no-store" }),
-        fetch("/setup-api/coding-agent/git", { cache: "no-store" }),
-      ]);
+      const s = await fetch("/setup-api/coding-agent/status", { cache: "no-store" });
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
       publish(next);
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
       setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
       setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
-      if (g.ok) setGithub(await g.json() as GitHubState);
     } catch {
       setError(tRef.current("codingAgent.loadFailed"));
     } finally {
@@ -191,20 +204,30 @@ export default function CodingAgentSettingsPanel({
     }
   }, [publish]);
 
-  useEffect(() => { void load(); }, [load]);
-
-  /** Just the GitHub half of `load()`. The re-probe below wants this one answer
-   *  refreshed and nothing else: re-running the whole load on a timer would also
+  /** The GitHub card's answer, on its own: the re-probe below wants this one
+   *  refreshed and nothing else — re-running the status load on a timer would
    *  fight the folder draft for no reason. */
   const loadGithub = useCallback(async () => {
     try {
       const g = await fetch("/setup-api/coding-agent/git", { cache: "no-store" });
-      if (g.ok) setGithub(await g.json() as GitHubState);
+      if (!g.ok) throw new Error(`HTTP ${g.status}`);
+      setGithub(await g.json() as GitHubState);
+      setGithubUnread(false);
     } catch {
-      // A failed re-probe is not new information — the card already says the
-      // uplink is down. Leave the badge alone and ask again next tick.
+      // Not new information about the account — the card keeps what it last
+      // knew. It IS a reason to ask again: before anything is known, this flag
+      // is what makes the re-probe below run at all.
+      setGithubUnread(true);
     }
   }, []);
+
+  // Two reads, each on its own. They used to share one `Promise.all`, so a
+  // GitHub read that threw took the switch down with it — the panel sat
+  // disabled over a perfectly good status because gh could not be asked.
+  useEffect(() => {
+    void loadStatus();
+    void loadGithub();
+  }, [loadStatus, loadGithub]);
 
   // `githubStatus()` refuses to cache an `unreachable` answer, and says why:
   // "caching one would outlive the outage that produced it and go on refusing
@@ -220,7 +243,12 @@ export default function CodingAgentSettingsPanel({
   // which reads as the login having failed. "not_installed" and
   // "not_runnable" are properties of the box, not of this moment, and
   // polling them would be a timer with nothing to learn.
-  const githubInconclusive = github?.reason === "unreachable"
+  //
+  // A read that never answered is inconclusive too: `github` stays null after
+  // a 500 or a dropped connection, and null used to be excluded here — so the
+  // card asked once, got nothing, and never asked again.
+  const githubInconclusive = (github === null && githubUnread)
+    || github?.reason === "unreachable"
     || (github !== null && github.installed && !github.connected && !github.reason);
   useEffect(() => {
     if (!githubInconclusive) return;
@@ -280,30 +308,48 @@ export default function CodingAgentSettingsPanel({
     }
   };
 
-  /** One writer for every setting — the route takes any one field and
-   *  answers the whole re-read status. */
-  const saveSetting = async (patch: Record<string, unknown>, key: string, failMsg: string): Promise<AgentStatus | null> => {
-    setBusy(key);
-    setError(null);
-    try {
-      const res = await fetch("/setup-api/coding-agent/enable", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) throw new Error(await readError(res, failMsg));
-      const next = await res.json() as AgentStatus;
-      publish(next);
-      // The Coding Agent app is another window; its On/Off chip and its
-      // readiness checklist follow what was just saved.
-      notifyCodingAgentChanged();
-      return next;
-    } catch (err) {
-      setError(err instanceof Error ? err.message : failMsg);
-      return null;
-    } finally {
-      setBusy(null);
-    }
+  /** The setting write in flight, if any; the next one waits behind it. */
+  const writeChain = useRef<Promise<unknown>>(Promise.resolve());
+
+  /**
+   * One writer for every setting — the route takes any one field and answers
+   * the whole re-read status — and ONE AT A TIME. The route answers the
+   * status as of its own write, so two writes in flight at once could land in
+   * either order, and the older answer would then overwrite the newer state
+   * on screen (and, through `publish`, in the sidebar). The controls are
+   * disabled while a write is pending, and a write that slips in anyway (a
+   * blur and a click in the same tick) is queued, not raced.
+   */
+  const saveSetting = (patch: Record<string, unknown>, key: string, failMsg: string): Promise<AgentStatus | null> => {
+    setPendingWrites((n) => n + 1);
+    const write = async (): Promise<AgentStatus | null> => {
+      setBusy(key);
+      setError(null);
+      try {
+        const res = await fetch("/setup-api/coding-agent/enable", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        });
+        if (!res.ok) throw new Error(await readError(res, failMsg));
+        const next = await res.json() as AgentStatus;
+        publish(next);
+        // The Coding Agent app is another window; its On/Off chip and its
+        // readiness checklist follow what was just saved.
+        notifyCodingAgentChanged();
+        return next;
+      } catch (err) {
+        setError(err instanceof Error ? err.message : failMsg);
+        return null;
+      } finally {
+        setBusy(null);
+        setPendingWrites((n) => n - 1);
+      }
+    };
+    // `write` settles on its own (it catches), so the chain never poisons.
+    const next = writeChain.current.then(write);
+    writeChain.current = next;
+    return next;
   };
 
   const toggle = (next: boolean) => saveSetting({ enabled: next }, "switch", t("codingAgent.toggleFailed"));
@@ -404,12 +450,13 @@ export default function CodingAgentSettingsPanel({
   if (loading) {
     return (
       <div className="max-w-xl" data-testid="coding-agent-settings-panel">
-        <div className={`${CARD} h-24 animate-pulse`} />
+        <div className={`${CARD} h-24 motion-safe:animate-pulse`} data-testid="coding-agent-settings-loading" />
       </div>
     );
   }
 
   const readiness = status?.readiness;
+  const saving = pendingWrites > 0;
 
   return (
     <div className="max-w-xl space-y-5" data-testid="coding-agent-settings-panel">
@@ -428,7 +475,7 @@ export default function CodingAgentSettingsPanel({
           <Switch
             checked={status?.enabled ?? false}
             busy={busy === "switch"}
-            disabled={!status}
+            disabled={!status || saving}
             label={t("codingAgent.switchLabel")}
             onChange={(next) => void toggle(next)}
           />
@@ -466,7 +513,7 @@ export default function CodingAgentSettingsPanel({
             <button
               type="button"
               onClick={() => void saveDirectory()}
-              disabled={busy === "dir" || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
+              disabled={saving || (dirDraft ?? "") === (status?.defaultDirectory ?? "")}
               className="px-3 py-1.5 rounded-lg border border-white/10 text-xs text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
             >
               {t("codingAgent.folderSave")}
@@ -487,7 +534,7 @@ export default function CodingAgentSettingsPanel({
                   key={level}
                   type="button"
                   onClick={() => void saveSetting({ effort: level }, "effort", t("codingAgent.effortFailed"))}
-                  disabled={busy === "effort"}
+                  disabled={saving}
                   aria-pressed={active}
                   data-testid={`coding-agent-effort-${level}`}
                   className={`flex-1 px-2 py-1.5 rounded-lg border text-[11px] capitalize transition-colors disabled:opacity-50 ${
@@ -522,7 +569,7 @@ export default function CodingAgentSettingsPanel({
               onChange={(e) => setTurnsDraft(e.target.value)}
               onBlur={() => void saveTurns()}
               onKeyDown={(e) => { if (e.key === "Enter") void saveTurns(); }}
-              disabled={busy === "turns"}
+              disabled={saving}
               data-testid="coding-agent-turns"
               className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
             />
@@ -541,7 +588,7 @@ export default function CodingAgentSettingsPanel({
               onChange={(e) => setTokensDraft(e.target.value)}
               onBlur={() => void saveTokens()}
               onKeyDown={(e) => { if (e.key === "Enter") void saveTokens(); }}
-              disabled={busy === "tokens"}
+              disabled={saving}
               data-testid="coding-agent-tokens"
               className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
             />
@@ -629,7 +676,9 @@ export default function CodingAgentSettingsPanel({
               >
                 {t("codingAgent.githubDeviceOpen")}
               </a>
-              <p className="mt-2 text-center text-[11px] text-[var(--text-muted)] animate-pulse">{t("codingAgent.githubDeviceWaiting")}</p>
+              <p className="mt-2 text-center text-[11px] text-[var(--text-muted)] motion-safe:animate-pulse" data-testid="coding-agent-github-device-waiting">
+                {t("codingAgent.githubDeviceWaiting")}
+              </p>
               <div className="mt-1.5 flex items-center justify-between">
                 <button
                   type="button"

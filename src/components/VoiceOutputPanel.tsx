@@ -237,6 +237,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const voices = source === "local" ? LOCAL_VOICES : cloudVoicesFor(status.cloudModel);
   const text = sample ?? sampleSentence(status.language);
   const disabled = busy !== null;
+  // An engine the box does not have cannot audition. `choice: "cloud"` is a
+  // legacy value the panel still honours, so the source CAN be an engine
+  // whose option is greyed out — and a Play that then asked the box to speak
+  // with it only produced a refusal to read.
+  const canSpeak = engineById(source)?.configured === true;
 
   const chooseSource = (next: VoiceEngineId) => {
     const choice: VoiceChoice = next === "local" ? "local" : "auto";
@@ -326,9 +331,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           <button
             type="button"
             data-testid="voice-play"
-            disabled={disabled || !text.trim()}
+            disabled={disabled || !canSpeak || !text.trim()}
             aria-busy={busy === "play"}
-            onClick={() => void play(source, voice, text)}
+            onClick={() => { if (canSpeak) void play(source, voice, text); }}
             className="rounded-xl bg-[var(--coral-bright)] px-4 py-2 text-sm font-semibold text-white cursor-pointer disabled:opacity-50 shrink-0"
           >
             {busy === "play" ? "Speaking…" : "Play"}

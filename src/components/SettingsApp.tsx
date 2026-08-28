@@ -1370,12 +1370,18 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (!codingAgentTabOpen && !isMobile) return;
     let alive = true;
     fetch("/setup-api/coding-agent/status", { cache: "no-store" })
-      .then(r => r.json())
+      // A 500 has no `enabled` field, and reading one off its error body
+      // turned every failure into "Off" — the sidebar said the switch was
+      // off while the panel beside it said it could not read the box.
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then(data => {
         if (!alive) return;
         setCodingAgentStatus({ enabled: !!data.enabled, effort: typeof data.effort === "string" ? data.effort : "max" });
       })
-      .catch(() => { if (alive) setCodingAgentStatus({ enabled: false, effort: "max" }); });
+      .catch(() => {
+        // Keep whatever the sidebar last knew: a failed read is not a state
+        // of the switch, and the panel reports the failure in words.
+      });
     return () => { alive = false; };
   }, [codingAgentTabOpen, isMobile]);
 

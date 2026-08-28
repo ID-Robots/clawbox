@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
@@ -134,5 +134,68 @@ describe("the local voice file", () => {
     await expect(writeLocalVoice("")).rejects.toThrow(/Unknown local voice/);
     expect(await fs.readFile(file, "utf8")).toBe("bm_george\n");
     expect(await readLocalVoice()).toBe("bm_george");
+  });
+});
+
+/**
+ * rename() is a write to the DIRECTORY, durable only once the directory is
+ * synced: without that, a power cut can leave the old name pointing at the
+ * old file — the write "succeeded" and was gone after the reboot.
+ */
+describe("durability of the swap", () => {
+  /**
+   * Every handle the store opens, with its sync() watched — and, for a
+   * directory, answered the way `refuse` says. The file handles are left
+   * alone: their sync is the part that already worked.
+   */
+  function watchSyncs(refuse?: NodeJS.ErrnoException) {
+    const synced: string[] = [];
+    const realOpen = fs.open;
+    const spy = vi.spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      const handle = await realOpen.apply(fs, args);
+      const target = String(args[0]);
+      const isDirectory = (await fs.stat(target)).isDirectory();
+      const realSync = handle.sync.bind(handle);
+      vi.spyOn(handle, "sync").mockImplementation(async () => {
+        synced.push(target);
+        if (isDirectory && refuse) throw refuse;
+        await realSync();
+      });
+      return handle;
+    });
+    return { synced, restore: () => spy.mockRestore() };
+  }
+
+  it("syncs the folder after both writers' renames", async () => {
+    const watch = watchSyncs();
+    try {
+      const { readVoiceState, writeVoiceState, readLocalVoice, writeLocalVoice } = await store();
+      await writeVoiceState({ choice: "local", engineChecks: {}, lastCheck: null });
+      expect(watch.synced).toContain(path.join(dir, "data"));
+      expect((await readVoiceState()).choice).toBe("local");
+
+      const voiceFile = process.env.CLAWBOX_TTS_VOICE_FILE!;
+      await writeLocalVoice("bm_george");
+      expect(watch.synced).toContain(path.dirname(voiceFile));
+      expect(await readLocalVoice()).toBe("bm_george");
+    } finally {
+      watch.restore();
+    }
+  });
+
+  it("still lands the write on a filesystem that refuses to sync a directory", async () => {
+    // Some FUSE and network mounts answer EINVAL to fsync on a directory. The
+    // bytes were synced and swapped in; the swap's durability is best effort.
+    const refusal = Object.assign(new Error("fsync: invalid argument"), { code: "EINVAL" });
+    const watch = watchSyncs(refusal);
+    try {
+      const { readVoiceState, writeVoiceState } = await store();
+      await expect(writeVoiceState({ choice: "cloud", engineChecks: {}, lastCheck: null })).resolves.toBeUndefined();
+      expect(watch.synced).toContain(path.join(dir, "data"));
+      expect((await readVoiceState()).choice).toBe("cloud");
+      expect((await fs.readdir(path.join(dir, "data"))).filter((f) => f.includes(".tmp"))).toEqual([]);
+    } finally {
+      watch.restore();
+    }
   });
 });

@@ -172,6 +172,32 @@ describe("GET projects", () => {
       expect(projects[2]).toMatchObject({ name: "Notes", lastCommit: null, onDesktop: false, latestRun: null });
     });
 
+    it("does not read a project.json past the bound, and names the folder instead", async () => {
+      // A delegated run writes whatever it likes into its folder, and the app
+      // polls this listing: a project.json grown to gigabytes must not be
+      // read into memory on every poll. Over the bound it is still a code
+      // project — it just has no name the listing will trust.
+      const bloated = path.join(codeProjectsDir, "bloated");
+      fs.mkdirSync(bloated, { recursive: true });
+      fs.writeFileSync(
+        path.join(bloated, "project.json"),
+        JSON.stringify({ projectId: "bloated", name: "Huge", padding: "x".repeat(80 * 1024) }),
+      );
+      // Under the bound, the name is read as before — the bound is not tight.
+      const roomy = path.join(codeProjectsDir, "roomy");
+      fs.mkdirSync(roomy, { recursive: true });
+      fs.writeFileSync(
+        path.join(roomy, "project.json"),
+        JSON.stringify({ projectId: "roomy", name: "Roomy", padding: "x".repeat(48 * 1024) }),
+      );
+
+      const { projects } = await body();
+      expect(projects.map((p) => [p.folder, p.kind, p.name])).toEqual([
+        ["bloated", "codeProject", "bloated"],
+        ["roomy", "codeProject", "Roomy"],
+      ]);
+    });
+
     it("never reports the checkout's own history as a git-less project's", async () => {
       // data/code-projects sits inside the ClawBox checkout. `git log` in a
       // folder with no repository of its own walks up to the nearest one —

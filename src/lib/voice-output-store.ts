@@ -160,6 +160,11 @@ export async function writeVoiceState(state: VoiceOutputState): Promise<void> {
  * and silently resets the customer's choice, exactly the loss the atomic
  * write is here to prevent. So sync before swapping. 0600 because the state
  * is the box's own; the temp name is unique so two writers cannot share one.
+ *
+ * The rename itself is a write to the DIRECTORY, and it is durable only once
+ * the directory is synced too: without that, a power cut can leave the old
+ * name pointing at the old file — the write "succeeded" and was not there
+ * after the reboot. Both writers here go through this one function.
  */
 async function writeFileAtomically(target: string, contents: string): Promise<void> {
   const tmp = `${target}.tmp.${crypto.randomBytes(4).toString("hex")}`;
@@ -175,5 +180,34 @@ async function writeFileAtomically(target: string, contents: string): Promise<vo
   } catch (err) {
     await fs.unlink(tmp).catch(() => {});
     throw err;
+  }
+  await syncDirectory(path.dirname(target));
+}
+
+/**
+ * fsync a directory, so a rename inside it survives a power cut.
+ *
+ * Best effort by design: the file's bytes were already synced and swapped in,
+ * so the one thing left to lose is the swap itself, and a filesystem that
+ * refuses to fsync a directory (some FUSE and network mounts answer EINVAL,
+ * EPERM or EISDIR; one without the concept answers ENOTSUP) is not a reason
+ * to fail a write that has otherwise landed.
+ */
+const DIRECTORY_SYNC_REFUSALS = new Set(["EISDIR", "EPERM", "EINVAL", "ENOTSUP", "EBADF", "EACCES"]);
+
+async function syncDirectory(dir: string): Promise<void> {
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(dir, "r");
+  } catch {
+    return;
+  }
+  try {
+    await handle.sync();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? "";
+    if (!DIRECTORY_SYNC_REFUSALS.has(code)) throw err;
+  } finally {
+    await handle.close();
   }
 }

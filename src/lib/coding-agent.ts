@@ -822,7 +822,7 @@ async function describeProject({ base, folder, kind }: ProjectCandidate): Promis
 async function projectNameOf(directory: string, folder: string): Promise<string | null> {
   let raw: string;
   try {
-    raw = await fs.promises.readFile(path.join(directory, "project.json"), "utf-8");
+    raw = await readProjectJson(path.join(directory, "project.json"));
   } catch {
     return null;
   }
@@ -834,6 +834,36 @@ async function projectNameOf(directory: string, folder: string): Promise<string 
     // Not JSON, or not the shape expected: the folder's own name will do.
   }
   return folder;
+}
+
+/**
+ * The most of a project.json this listing will read. code_project_init writes
+ * a few hundred bytes; a delegated run can write anything into its folder,
+ * and the app polls this listing — so a file it grew to gigabytes must not be
+ * read into memory on every poll.
+ */
+const MAX_PROJECT_JSON_BYTES = 64 * 1024;
+
+/**
+ * project.json, read through one handle so the size checked is the size
+ * read. Rejects when there is no such file (that is what tells a code
+ * project from a plain folder under data/code-projects). A file over the
+ * bound answers "" — which parses as nothing, so the folder's own name is
+ * used, the same as for a file that is not JSON: it is still a project, it
+ * just has no name this listing will trust.
+ */
+async function readProjectJson(file: string): Promise<string> {
+  const handle = await fs.promises.open(file, "r");
+  try {
+    const { size } = await handle.stat();
+    if (size > MAX_PROJECT_JSON_BYTES) return "";
+    // Never more than the bound, whatever the file grew to since the stat.
+    const buf = Buffer.alloc(Math.min(size, MAX_PROJECT_JSON_BYTES));
+    const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+    return buf.subarray(0, bytesRead).toString("utf-8");
+  } finally {
+    await handle.close();
+  }
 }
 
 /**

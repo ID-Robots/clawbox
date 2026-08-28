@@ -452,6 +452,16 @@ describe("htmlHint", () => {
     // 5 MB of openings with no close. The lazy `[\s\S]*?` this replaced
     // rescanned to the end of the page from every one of them, which is
     // 650 000 × 5 MB of work — minutes, on the request path of every create.
+    //
+    // The ceiling is generous on purpose: this runs on a Jetson under the
+    // full suite, and a tight wall-clock budget failed on load rather than
+    // on the algorithm. The quadratic regression is minutes, not seconds.
+    const time = (page: string) => {
+      const started = performance.now();
+      const hint = mod.htmlHint(page);
+      expect(typeof hint).toBe("string");
+      return performance.now() - started;
+    };
     for (const page of [
       "<title>a".repeat(650_000),
       "<h1>a".repeat(1_000_000),
@@ -459,12 +469,26 @@ describe("htmlHint", () => {
       `<title>${"<".repeat(5_000_000)}</title>`,
       `<h1>${"&amp;".repeat(1_000_000)}`,
     ]) {
-      const started = performance.now();
-      const hint = mod.htmlHint(page);
-      const elapsed = performance.now() - started;
-      expect(typeof hint).toBe("string");
-      expect(elapsed).toBeLessThan(250);
+      // The scan is capped at 64 KiB, so what these cost is the algorithm on
+      // that window: sub-millisecond as written, ~780 ms on this box with the
+      // lazy pattern. 500 ms sits between the two with room for a loaded
+      // runner, where 2 s would have let the regression through.
+      expect(time(page)).toBeLessThan(500);
     }
+    // And the shape of the cost. Both inputs must sit INSIDE the 64 KiB
+    // window — a megabyte and four megabytes are the same 64 KiB once sliced,
+    // and timed the same whatever the algorithm. 16 KiB against the full
+    // window: four times the openings must not cost more than a linear pass
+    // would. A rescan-from-every-opening is sixteen times and up (49 ms
+    // against 779 ms, measured with the old pattern). The warm-up keeps the
+    // first call's compilation out of the ratio; the floor keeps a
+    // sub-millisecond reading from turning noise into one.
+    const inWindow = (openings: number) => "<title>a".repeat(openings);
+    expect(inWindow(8_192).length).toBe(64 * 1024);
+    time(inWindow(8_192));
+    const small = time(inWindow(2_048));
+    const large = time(inWindow(8_192));
+    expect(large).toBeLessThan(8 * Math.max(small, 5));
   });
 
   it("looks only at the head of the page: a title past the window is no title", () => {

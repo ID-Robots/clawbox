@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import CodingAgentApp, { NEW_APP_NAME_MAX } from "@/components/CodingAgentApp";
+import CodingAgentApp, { installedAppId, NEW_APP_NAME_MAX } from "@/components/CodingAgentApp";
 import { MAX_PROJECT_NAME_LENGTH } from "@/lib/code-projects";
 import { buildNewAppPrompt, CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT } from "@/lib/ui-events";
 
@@ -529,8 +529,11 @@ describe("projects", () => {
       // Open exists only for a project the desktop knows.
       expect(screen.queryByTestId("coding-agent-open-scratch")).not.toBeInTheDocument();
 
+      // The id the DESKTOP matches on — page.tsx registers a deployed web app
+      // as `installed-<folder>`. The bare folder name opened nothing.
       fireEvent.click(screen.getByTestId("coding-agent-open-site"));
-      expect(apps).toEqual(["site"]);
+      expect(apps).toEqual([installedAppId("site")]);
+      expect(apps).toEqual(["installed-site"]);
     } finally {
       window.removeEventListener("clawbox:open-app", onApp);
     }
