@@ -715,16 +715,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [hotspotEnabled, setHotspotEnabled] = useState<boolean | null>(null);
   const [hotspotSSID, setHotspotSSID] = useState("ClawBox-Setup");
   const [hotspotToggling, setHotspotToggling] = useState(false);
+  // The hotspot route saves the SETTINGS and then tries to move the radio, and
+  // those are two different outcomes. It used to answer both with
+  // `{ success: true, apRestarted: false }`, so a toggle whose AP command threw
+  // flipped this switch and said nothing — a box still broadcasting behind a
+  // control that reads "off". It now names the verdict; this is where a failed
+  // one is shown.
+  const [hotspotApWarning, setHotspotApWarning] = useState<string | null>(null);
   const [hotspotSSIDInput, setHotspotSSIDInput] = useState("ClawBox-Setup");
   const [hotspotSSIDSaving, setHotspotSSIDSaving] = useState(false);
-  const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [hotspotSSIDStatus, setHotspotSSIDStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [hotspotHasPassword, setHotspotHasPassword] = useState(false);
   const [hotspotActive, setHotspotActive] = useState<boolean | null>(null);
   const [hotspotBlockedBy, setHotspotBlockedBy] = useState<string | null>(null);
   const [hotspotPassword, setHotspotPassword] = useState("");
   const [hotspotPasswordShow, setHotspotPasswordShow] = useState(false);
   const [hotspotPasswordSaving, setHotspotPasswordSaving] = useState(false);
-  const [hotspotPasswordStatus, setHotspotPasswordStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [hotspotPasswordStatus, setHotspotPasswordStatus] = useState<{ type: "success" | "error" | "info"; message: string } | null>(null);
   const [hotspotConfirmEnable, setHotspotConfirmEnable] = useState(false);
   const [savedNetworks, setSavedNetworks] = useState<{ name: string; priority: number; device: string | null }[]>([]);
   const [savedEditing, setSavedEditing] = useState<string | null>(null);
@@ -1129,8 +1136,25 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     }
   };
 
+  /**
+   * What a 200 from the hotspot route actually achieved.
+   *
+   * `apAction` separates the three things the old `apRestarted: false` collapsed
+   * into one: a deliberate deferral (the radio is a client, so bouncing the AP
+   * would sever this connection), a clean stop, and a toggle that THREW. Only
+   * the last one is a problem, and only it carries a `warning`.
+   */
+  const readHotspotVerdict = async (res: Response): Promise<string | null> => {
+    const data = await res.json().catch(() => ({})) as { apAction?: unknown; warning?: unknown };
+    if (data.apAction !== "failed") return null;
+    return typeof data.warning === "string" && data.warning.trim()
+      ? data.warning
+      : "Your hotspot settings were saved, but the hotspot itself did not change.";
+  };
+
   const performHotspotToggle = async (newEnabled: boolean) => {
     setHotspotToggling(true);
+    setHotspotApWarning(null);
     try {
       const res = await fetch("/setup-api/system/hotspot", {
         method: "POST",
@@ -1138,7 +1162,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         body: JSON.stringify({ ssid: hotspotSSID, enabled: newEnabled }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Failed");
+      // The switch follows the SAVED setting, which did change. What may not
+      // have changed is the radio, and that is what the warning is for — the
+      // "off" case especially, where a box goes on broadcasting behind a
+      // control that says it stopped.
       setHotspotEnabled(newEnabled);
+      setHotspotApWarning(await readHotspotVerdict(res));
     } catch { /* leave state unchanged */ } finally {
       setHotspotToggling(false);
     }
@@ -1179,7 +1208,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         throw new Error(data.error || "Failed");
       }
       setHotspotSSID(next);
-      setHotspotSSIDStatus({ type: "success", message: "Hotspot name updated" });
+      const apWarning = await readHotspotVerdict(res);
+      setHotspotSSIDStatus(apWarning
+        ? { type: "info", message: apWarning }
+        : { type: "success", message: "Hotspot name updated" });
     } catch (err) {
       setHotspotSSIDStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -1210,7 +1242,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       }
       setHotspotHasPassword(true);
       setHotspotPassword("");
-      setHotspotPasswordStatus({ type: "success", message: "Hotspot password updated" });
+      const apWarning = await readHotspotVerdict(res);
+      setHotspotPasswordStatus(apWarning
+        ? { type: "info", message: apWarning }
+        : { type: "success", message: "Hotspot password updated" });
     } catch (err) {
       setHotspotPasswordStatus({ type: "error", message: err instanceof Error ? err.message : "Failed" });
     } finally {
@@ -3211,6 +3246,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${hotspotEnabled ? "translate-x-5" : "translate-x-0"}`} />
                 </button>
               </div>
+              {hotspotApWarning && (
+                <div className="mt-3"><StatusMessage type="info" message={hotspotApWarning} /></div>
+              )}
               {hotspotEnabled && hotspotActive !== false && (
                 <p className="text-[11px] text-[var(--text-muted)] opacity-50 mt-3 leading-relaxed">
                   {t("settings.hotspotDesc", { ssid: hotspotSSID })}

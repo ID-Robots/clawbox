@@ -61,10 +61,16 @@ export async function GET(request: Request) {
     let restarted = false;
     if (mayRestart()) {
       try {
-        await startTunnelService();
+        // The `enable` verdict is read, not discarded. It is NOT surfaced in the
+        // body: this path restarts a unit that was already running, so it was
+        // already enabled, and the timer has no owner watching it. What a failure
+        // here means is that the box's own repair could not re-arm boot start —
+        // worth a line in the journal an operator can find, and nothing more.
+        const { bootPersisted, bootPersistWarning } = await startTunnelService();
         markRestarted();
         restarted = true;
         console.warn(`[heartbeat-tick] tunnel hostname dead, restarted clawbox-tunnel (was ${tunnelUrl})`);
+        if (!bootPersisted) console.warn(`[heartbeat-tick] ${bootPersistWarning}`);
       } catch (err) {
         console.warn("[heartbeat-tick] tunnel restart failed:", err instanceof Error ? err.message : err);
       }

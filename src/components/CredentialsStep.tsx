@@ -136,7 +136,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // rather than merely hinting there is a field.
   const [hotspotSecretOpen, setHotspotSecretOpen] = useState(false);
   const [status, setStatus] = useState<{
-    type: "success" | "error";
+    // "info" is the saved-but-not-fully-applied case: the hotspot settings are
+    // on disk, and the radio did not do what they say. Reporting that as plain
+    // success is what let a failed AP toggle read as "Settings saved!".
+    type: "success" | "error" | "info";
     message: string;
   } | null>(null);
   // When a save restarts the setup AP (and/or renames the device), the connection
@@ -337,6 +340,11 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       // device name changed the box reappears at a new *.local origin. Either
       // way the overlay probes until the box answers, then continues.
       const apRestarted = hotspotData.apRestarted === true;
+      // A save whose AP toggle THREW is saved, not applied. The route now says
+      // which of the two happened (`apAction`) instead of answering both with
+      // apRestarted:false, and the owner is told rather than shown "Settings
+      // saved!". The text comes from the route, like the error text above it.
+      const apFailed = hotspotData.apAction === "failed";
       const currentHost = window.location.hostname.toLowerCase();
       const hostnameChanged =
         currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
@@ -350,6 +358,18 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
           sameOrigin: !hostnameChanged,
           hotspotSsid: apRestarted && submission.hotspotEnabled ? submission.hotspotName : null,
         });
+        return;
+      }
+
+      if (apFailed) {
+        setStatus({
+          type: "info",
+          message: typeof hotspotData.warning === "string" && hotspotData.warning.trim()
+            ? hotspotData.warning
+            : t("credentials.failedSaveHotspot"),
+        });
+        // No auto-advance: the one thing that must not happen here is the
+        // message being replaced by the next step before it has been read.
         return;
       }
 
