@@ -800,6 +800,72 @@ export async function readConfigStrict(): Promise<OpenClawConfig> {
   return JSON.parse(raw);
 }
 
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Return `container[key]` as a plain object, REPLACING first whatever else is
+ * there — an array, a string, a number, a boolean.
+ *
+ * `??=` is not enough for this, and the difference does not show up until the
+ * write has already been reported as successful:
+ *
+ *   * `[]` is not nullish, so `config.plugins ??= {}` keeps the array. The next
+ *     assignment attaches a NAMED PROPERTY to it, and `JSON.stringify` — which
+ *     is how every config write in this module reaches disk — drops named
+ *     properties of arrays. The save writes a config missing the very key it
+ *     was called to add, and answers 200.
+ *   * `[].entries` is not nullish either: it is `Array.prototype.entries`. So
+ *     `plugins.entries ??= {}` keeps the intrinsic and the channel's trust
+ *     entry is written onto a shared JS function. Measured: after one such
+ *     save, an unrelated `[].entries.discord` reads `{"enabled":true}` for the
+ *     rest of the server process's life.
+ *   * a string or a number is worse again — assigning a property to a
+ *     primitive THROWS in strict mode (ES modules always are), so the save dies
+ *     halfway as an opaque 500.
+ *
+ * Replacing rather than refusing is deliberate, and it is the opposite of the
+ * choice {@link envSecretRef} makes one screen down. A non-object `secrets` is
+ * the operator's own credential wiring: we cannot interpret it, and overwriting
+ * it would break channels that resolve through it today, so that path refuses
+ * and writes nothing. A non-object `plugins`/`channels`/`agents`/`gateway` is
+ * not a shape OpenClaw's schema can load at all — the gateway exits 78/CONFIG
+ * on it — so there is no working configuration to protect, and refusing would
+ * only leave the box stuck in the state it is already broken in. Normalising
+ * repairs it inside the same atomic write.
+ */
+function ensurePlainObject(container: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = container[key];
+  if (isPlainObject(existing)) return existing;
+  const replacement: Record<string, unknown> = {};
+  container[key] = replacement;
+  return replacement;
+}
+
+/** The config as a bag of keys, for the container helpers above. */
+function asBag(config: OpenClawConfig): Record<string, unknown> {
+  return config as Record<string, unknown>;
+}
+
+/**
+ * The existing block for one channel, as something safe to spread.
+ *
+ * Every channel writer here rebuilds the block as `{...existing, enabled, …}`
+ * so it can drop the keys it re-secures. Spreading a STRING splits it into
+ * indexed characters (`"on"` becomes `{"0":"o","1":"n"}`), and one key OpenClaw
+ * does not know takes the whole gateway down with exit 78/CONFIG — every other
+ * channel with it. A block that is not a plain object carries nothing worth
+ * merging, so it is treated as absent.
+ */
+function existingChannelBlock(
+  channels: Record<string, unknown>,
+  channelId: string,
+): Record<string, unknown> {
+  const existing = channels[channelId];
+  return isPlainObject(existing) ? existing : {};
+}
+
 async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";
@@ -839,14 +905,14 @@ export async function ensureCompactionReserveFloor(
   reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
 ): Promise<void> {
   const config = await readConfig();
-  config.agents ??= {};
-  config.agents.defaults ??= {};
-  config.agents.defaults.compaction ??= {};
+  const agents = ensurePlainObject(asBag(config), "agents");
+  const defaults = ensurePlainObject(agents, "defaults");
+  const compaction = ensurePlainObject(defaults, "compaction");
   if (
-    typeof config.agents.defaults.compaction.reserveTokensFloor !== "number" ||
-    config.agents.defaults.compaction.reserveTokensFloor < reserveTokensFloor
+    typeof compaction.reserveTokensFloor !== "number" ||
+    compaction.reserveTokensFloor < reserveTokensFloor
   ) {
-    config.agents.defaults.compaction.reserveTokensFloor = reserveTokensFloor;
+    compaction.reserveTokensFloor = reserveTokensFloor;
     await writeConfig(config);
   }
 }
@@ -858,8 +924,8 @@ export async function ensureCompactionReserveFloor(
  */
 export async function setControlUiAllowedOrigins(hostname: string): Promise<void> {
   const config = await readConfig();
-  const gateway = (config.gateway ?? {}) as Record<string, unknown>;
-  const controlUi = (gateway.controlUi ?? {}) as Record<string, unknown>;
+  const gateway = ensurePlainObject(asBag(config), "gateway");
+  const controlUi = ensurePlainObject(gateway, "controlUi");
   const existing = Array.isArray(controlUi.allowedOrigins)
     ? (controlUi.allowedOrigins as unknown[]).filter((v): v is string => typeof v === "string")
     : [];
@@ -872,16 +938,15 @@ export async function setControlUiAllowedOrigins(hostname: string): Promise<void
     "http://10.43.0.1", // alt subnet when home network collides with 10.42.0.0/24
   ]);
   controlUi.allowedOrigins = Array.from(origins);
-  gateway.controlUi = controlUi;
-  config.gateway = gateway;
   await writeConfig(config);
 }
 
+/** OpenClaw's id for the Telegram channel — the config key's, and the plugin's. */
+const TELEGRAM_CHANNEL_ID = "telegram";
+
 export async function setTelegramToken(botToken: string): Promise<void> {
   const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
+  const channels = ensurePlainObject(asBag(config), "channels");
   // Do NOT set `dmPolicy` or `allowFrom` here. OpenClaw's default
   // (`dmPolicy: "pairing"`) requires the owner to approve every new sender
   // via an in-Telegram pairing code before the agent responds. Writing
@@ -890,8 +955,12 @@ export async function setTelegramToken(botToken: string): Promise<void> {
   // finds the handle. Reconfiguring a bot token on a device with those
   // values already stored should re-secure the channel, so strip them here
   // too rather than merging on top of the stale insecure config.
-  const { dmPolicy: _dmPolicy, allowFrom: _allowFrom, ...rest } = config.channels.telegram ?? {};
-  config.channels.telegram = {
+  const {
+    dmPolicy: _dmPolicy,
+    allowFrom: _allowFrom,
+    ...rest
+  } = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
+  channels[TELEGRAM_CHANNEL_ID] = {
     ...rest,
     enabled: true,
     botToken,
@@ -912,17 +981,15 @@ export async function getTelegramProgressStreaming(): Promise<boolean> {
 
 export async function setTelegramProgressStreaming(enabled: boolean): Promise<void> {
   const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
-  const existing = config.channels.telegram ?? {};
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const existing = existingChannelBlock(channels, TELEGRAM_CHANNEL_ID);
   if (enabled) {
     // Restore OpenClaw's default by dropping our override entirely.
     const { streaming: _streaming, ...rest } = existing;
-    config.channels.telegram = { ...rest };
+    channels[TELEGRAM_CHANNEL_ID] = { ...rest };
   } else {
     // Final-answer-only: suppress the progress/preview draft.
-    config.channels.telegram = { ...existing, streaming: { mode: "off" } };
+    channels[TELEGRAM_CHANNEL_ID] = { ...existing, streaming: { mode: "off" } };
   }
   // Note: unlike setTelegramToken this does not strip dmPolicy/allowFrom — it's
   // a preference toggle, not a token re-secure; gateway-pre-start.sh already
@@ -1015,10 +1082,6 @@ export class EnvSecretProviderConflictError extends Error {
     );
     this.name = "EnvSecretProviderConflictError";
   }
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function envSecretRef(
@@ -1160,23 +1223,29 @@ export async function writeDiscordGatewayEnv(botToken: string): Promise<void> {
  * keys this repo knows nothing about.
  */
 export function trustChannelPlugin(config: OpenClawConfig, channelId: string): void {
-  const plugins = (config.plugins ??= {});
-  const entries = (plugins.entries ??= {});
-  entries[channelId] = { ...entries[channelId], enabled: true };
+  // `??=` cannot be used for either container: `"plugins": []` is not nullish
+  // and neither is `[].entries` (it is `Array.prototype.entries`), so the entry
+  // would be attached to an array — dropped by `JSON.stringify` on the way to
+  // disk — or onto a JS intrinsic. Both look like a successful save and leave
+  // the gateway answering `unknown channel` for a channel it is configured for,
+  // which is the failure this whole function exists to prevent. See
+  // {@link ensurePlainObject}.
+  const plugins = ensurePlainObject(asBag(config), "plugins");
+  const entries = ensurePlainObject(plugins, "entries");
+  const existing = entries[channelId];
+  entries[channelId] = { ...(isPlainObject(existing) ? existing : {}), enabled: true };
 }
 
 export async function setDiscordToken(botToken: string): Promise<void> {
   const config = await readConfig();
-  if (!config.channels) {
-    config.channels = {};
-  }
+  const channels = ensurePlainObject(asBag(config), "channels");
   const {
     dmPolicy: _dmPolicy,
     allowFrom: _allowFrom,
     botToken: _legacyLiteralToken,
     ...rest
-  } = config.channels.discord ?? {};
-  config.channels.discord = {
+  } = existingChannelBlock(channels, DISCORD_CHANNEL_ID);
+  channels[DISCORD_CHANNEL_ID] = {
     ...rest,
     enabled: true,
     // envSecretRef also installs `secrets.providers.default`, without which
