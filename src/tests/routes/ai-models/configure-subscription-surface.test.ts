@@ -62,6 +62,13 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
+  // The configure route imports this to remove a stale openai-compat override.
+  // A factory mock replaces the whole module, so an export the route imports but
+  // the factory omits fails module loading the moment a test reaches it.
+  runOpenclawConfigUnset: vi.fn(),
+  // The configure route reads the config STRICTLY before it removes an
+  // openai-compat override, so the mock has to carry both readers.
+  readConfigStrict: vi.fn().mockResolvedValue({}),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
@@ -94,6 +101,7 @@ import { promises as nodeFsPromises } from "fs";
 import { getAll, setMany } from "@/lib/config-store";
 import {
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -194,6 +202,7 @@ describe("POST /setup-api/ai-models/configure and the Claude subscription surfac
     vi.mocked(getAll).mockResolvedValue({});
     vi.mocked(setMany).mockResolvedValue();
     vi.mocked(readConfig).mockResolvedValue({} as never);
+    vi.mocked(readConfigStrict).mockResolvedValue({} as never);
     vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
     vi.mocked(restartGateway).mockResolvedValue();
     vi.mocked(runOpenclawConfigSet).mockResolvedValue(undefined);

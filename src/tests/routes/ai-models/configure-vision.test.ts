@@ -85,9 +85,13 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
+  // The configure route reads the config STRICTLY before it removes an
+  // openai-compat override, so the mock has to carry both readers.
+  readConfigStrict: vi.fn().mockResolvedValue({}),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
+  runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn(parseFullyQualifiedModelImpl),
   setProviderPlugins: vi.fn().mockResolvedValue(undefined),
@@ -121,6 +125,7 @@ import { unpairLocal } from "@/lib/clawkeep";
 import {
   inferConfiguredLocalModel,
   readConfig,
+  readConfigStrict,
   restartGateway,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -133,6 +138,7 @@ const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
 const mockSetMany = vi.mocked(setMany);
 const mockReadConfig = vi.mocked(readConfig);
+const mockReadConfigStrict = vi.mocked(readConfigStrict);
 const mockRunOpenclawConfigSet = vi.mocked(runOpenclawConfigSet);
 const mockRunOpenclawConfigSetBatch = vi.mocked(runOpenclawConfigSetBatch);
 const mockFs = vi.mocked(fsp);
@@ -209,6 +215,7 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
     mockReadConfig.mockResolvedValue({});
+    mockReadConfigStrict.mockResolvedValue({});
     vi.mocked(inferConfiguredLocalModel).mockReturnValue(null);
     mockSetMany.mockResolvedValue();
     vi.mocked(restartGateway).mockResolvedValue();

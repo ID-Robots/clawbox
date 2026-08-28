@@ -354,6 +354,70 @@ describe("/setup-api/chat/model and the Claude subscription surface", () => {
     expect(vi.mocked(fsp.readFile)).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * Gap A1's other half, in the OTHER route that knows about
+   * `OPENAI_COMPAT_PROVIDERS`.
+   *
+   * Once ai-models/configure stops writing the openai-completions override for
+   * a subscription sign-in, a subscription box correctly has NO
+   * `models.providers.anthropic` at all. This block's auto-extend exists only
+   * to keep that override's `models` list in sync, and its "is it complete?"
+   * check reads a missing entry as a half-written one — so every model switch
+   * on a fixed box would answer 409 "Re-save it in Settings", which is exactly
+   * the wrong next step for a box whose settings are now right.
+   *
+   * Native routing needs no list: the plugin resolves ids from its own
+   * catalog, which is why clawai/openai/codex never enter this block.
+   */
+  describe("a subscription box that routes natively", () => {
+    /** Subscription auth, and no openai-compat override — the fixed state. */
+    function nativeSubscriptionConfig(mode: "oauth" | "api_key" = "oauth") {
+      return {
+        auth: { profiles: { "anthropic:default": { provider: "anthropic", mode } } },
+        models: { mode: "merge", providers: {} },
+        agents: { defaults: { model: { primary: "anthropic/claude-sonnet-4-6" } } },
+      };
+    }
+
+    it("switches model without demanding a re-save", async () => {
+      vi.mocked(readConfig).mockResolvedValue(nativeSubscriptionConfig() as never);
+
+      const response = await postModel(POST, "anthropic/claude-opus-4-8");
+
+      expect(response.status).toBe(200);
+      expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+        "agents.defaults.model.primary",
+        "anthropic/claude-opus-4-8",
+      ]);
+    });
+
+    it("does not recreate the override it was just freed from", async () => {
+      // Appending to `models.providers.anthropic.models` would resurrect the
+      // very entry whose presence made every turn 429.
+      vi.mocked(readConfig).mockResolvedValue(nativeSubscriptionConfig() as never);
+
+      await postModel(POST, "anthropic/claude-opus-4-8");
+
+      const wrotePaths = vi.mocked(runOpenclawConfigSet).mock.calls
+        .map(([args]) => (args as string[])[0]);
+      expect(wrotePaths).not.toContain("models.providers.anthropic.models");
+    });
+
+    it("still demands a re-save when an API-key box has no provider entry", async () => {
+      // The guard keys on subscription auth, not on "entry missing". An
+      // API-key box with no override cannot authenticate through the native
+      // plugin (it reads a sqlite auth store ClawBox does not populate), so
+      // that case keeps the 409 it has always had.
+      vi.mocked(readConfig).mockResolvedValue(nativeSubscriptionConfig("api_key") as never);
+
+      const response = await postModel(POST, "anthropic/claude-opus-4-8");
+
+      expect(response.status).toBe(409);
+      const { error } = await response.json();
+      expect(error).toContain("Re-save it in Settings");
+    });
+  });
+
   it("re-reads the surface on every request instead of probing once", async () => {
     // The cache is refreshed by the catalog route on its own schedule. A
     // module-level memo here would pin this guard to whatever the surface

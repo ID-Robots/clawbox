@@ -530,46 +530,61 @@ export async function POST(request: Request) {
           const providerDef = openclawConfig.models?.providers?.[providerId] as
             | { models?: { id?: string; name?: string }[]; apiKey?: string; baseUrl?: string; api?: string }
             | undefined;
-          // The reroute (ai-models/configure) writes baseUrl + api + apiKey
-          // alongside models. If the endpoint, api type, or inline key is missing
-          // (legacy or half-written state), appending only `.models` would leave
-          // a provider that can't authenticate — make the user re-save rather
-          // than switch the primary onto an incomplete provider.
-          if (!providerDef?.apiKey || !providerDef?.baseUrl || !providerDef?.api) {
-            return NextResponse.json(
-              { error: `${labelForProvider(providerId, providerId)} isn't fully configured. Re-save it in Settings, then pick the model again.` },
-              { status: 409 },
-            );
-          }
-          const existingModels = providerDef.models ?? [];
-          const configuredIds = existingModels
-            .map((m) => m?.id)
-            .filter((id): id is string => typeof id === "string" && id.length > 0);
-          // Append whenever the requested slug isn't already there — even for a
-          // freshly-configured provider whose seed providerDef has only the
-          // user's chosen default (the earlier `length > 0` guard silently fell
-          // back to local on the first switch after a clean setup).
-          if (!configuredIds.includes(effectiveModelId)) {
-            // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
-            // modalities, cost) up from its bundled provider catalog by id.
-            const nextModels = [
-              ...existingModels,
-              { id: effectiveModelId, name: effectiveModelId },
-            ];
-            try {
-              await runOpenclawConfigSet([
-                `models.providers.${providerId}.models`,
-                JSON.stringify(nextModels),
-                "--json",
-              ]);
-            } catch (err) {
-              console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
+          // A SUBSCRIPTION box has no `models.providers.<p>` entry at all, and
+          // that is the fixed state, not a broken one: the openai-compat
+          // override is an API-key construction, and writing an OAuth token
+          // into it made every Anthropic turn 429 (see ai-models/configure).
+          // Routing belongs to the native plugin, whose own catalog resolves
+          // any id — the same reason clawai/openai/codex skip this block
+          // entirely. Without this the 409 below would fire on every model
+          // switch such a box makes, because there is correctly nothing to
+          // extend. An entry that EXISTS but is half-written still 409s.
+          const nativeSubscriptionRouting =
+            !providerDef
+            && subscriptionOnlyProviders(openclawConfig.auth?.profiles, normalizeProvider)
+              .includes(providerId);
+          if (!nativeSubscriptionRouting) {
+            // The reroute (ai-models/configure) writes baseUrl + api + apiKey
+            // alongside models. If the endpoint, api type, or inline key is
+            // missing (legacy or half-written state), appending only `.models`
+            // would leave a provider that can't authenticate — make the user
+            // re-save rather than switch the primary onto an incomplete provider.
+            if (!providerDef?.apiKey || !providerDef?.baseUrl || !providerDef?.api) {
               return NextResponse.json(
-                {
-                  error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
-                },
-                { status: 502 },
+                { error: `${labelForProvider(providerId, providerId)} isn't fully configured. Re-save it in Settings, then pick the model again.` },
+                { status: 409 },
               );
+            }
+            const existingModels = providerDef.models ?? [];
+            const configuredIds = existingModels
+              .map((m) => m?.id)
+              .filter((id): id is string => typeof id === "string" && id.length > 0);
+            // Append whenever the requested slug isn't already there — even for a
+            // freshly-configured provider whose seed providerDef has only the
+            // user's chosen default (the earlier `length > 0` guard silently fell
+            // back to local on the first switch after a clean setup).
+            if (!configuredIds.includes(effectiveModelId)) {
+              // Emit only `id`+`name`; OpenClaw looks the rest (contextWindow,
+              // modalities, cost) up from its bundled provider catalog by id.
+              const nextModels = [
+                ...existingModels,
+                { id: effectiveModelId, name: effectiveModelId },
+              ];
+              try {
+                await runOpenclawConfigSet([
+                  `models.providers.${providerId}.models`,
+                  JSON.stringify(nextModels),
+                  "--json",
+                ]);
+              } catch (err) {
+                console.error(`[chat/model] auto-extend ${providerId} providerDef failed:`, err);
+                return NextResponse.json(
+                  {
+                    error: `Could not register ${requestedModel} with the ${labelForProvider(providerId, providerId)} provider. Re-save it in Settings to refresh the model list.`,
+                  },
+                  { status: 502 },
+                );
+              }
             }
           }
         }

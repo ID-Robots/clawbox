@@ -37,9 +37,13 @@ vi.mock("@/lib/openclaw-config", () => ({
   restartGateway: vi.fn(),
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
+  // The configure route reads the config STRICTLY before it removes an
+  // openai-compat override, so the mock has to carry both readers.
+  readConfigStrict: vi.fn().mockResolvedValue({}),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawConfigSetBatch: vi.fn(),
+  runOpenclawConfigUnset: vi.fn(),
   applyModelOverrideToAllAgentSessions: vi.fn().mockResolvedValue(undefined),
   parseFullyQualifiedModel: vi.fn((fq: string) => {
     const i = fq.indexOf("/");

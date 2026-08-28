@@ -362,6 +362,40 @@ export async function runOpenclawConfigSetBatch(
     "runOpenclawConfigSetBatch",
   );
 }
+
+/**
+ * Run `openclaw config unset <path>`, with the same conflict retry as
+ * {@link runOpenclawConfigSet}.
+ *
+ * `config set` has no way to say "remove this key": a `null` or `{}` value
+ * leaves the path present, and a present-but-empty `models.providers.<p>` is
+ * still read by the gateway as a provider definition. Removal needs the CLI's
+ * own `unset` verb — and it races the gateway's config reload exactly like a
+ * set does, so it gets the same retry rather than a bare spawn.
+ *
+ * NOT safe to call unconditionally: verified against OpenClaw 2026.7.1-2, the
+ * CLI exits 1 with "Config path not found: <path>. Nothing was changed." when
+ * the path is absent. Callers must check the config first and only unset a path
+ * that is actually there, so a real removal failure stays loud.
+ */
+export async function runOpenclawConfigUnset(
+  configPath: string,
+  options: OpenclawConfigSetOptions = {},
+): Promise<void> {
+  await withConfigMutationRetry(
+    (timeoutMs) =>
+      spawnOpenclaw(["config", "unset", configPath], {
+        timeoutMs,
+        uid: options.uid,
+        gid: options.gid,
+        cwd: options.cwd,
+        env: options.env,
+      }).then(() => undefined),
+    options,
+    "runOpenclawConfigUnset",
+  );
+}
+
 export const OPENCLAW_HOME = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
@@ -700,6 +734,35 @@ export async function readConfig(): Promise<OpenClawConfig> {
   } catch {
     return {};
   }
+}
+
+/**
+ * {@link readConfig}, except that only an ENOENT is allowed to mean "there is
+ * no config".
+ *
+ * `readConfig` answers `{}` to every failure alike — a missing file, an EACCES,
+ * a file caught half-written by a concurrent `config set`. That is the right
+ * default for the many callers asking "is X switched on?", where UNKNOWN and NO
+ * lead to the same harmless place.
+ *
+ * It is the wrong default for a caller that is about to SKIP a repair because
+ * the thing it repairs reads as already absent. There, `{}` from an unreadable
+ * file is indistinguishable from a genuinely clean config, so the repair is
+ * quietly declared unnecessary and the route reports success while the state it
+ * promised to remove is still on disk.
+ *
+ * So: ENOENT returns `{}` (there is nothing to read, and nothing to repair),
+ * and every other read or parse failure throws.
+ */
+export async function readConfigStrict(): Promise<OpenClawConfig> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(CONFIG_PATH, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return {};
+    throw err;
+  }
+  return JSON.parse(raw);
 }
 
 async function writeConfig(config: OpenClawConfig): Promise<void> {
