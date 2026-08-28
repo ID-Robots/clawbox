@@ -28,6 +28,13 @@ export default defineConfig({
       // failed. Tests that need their own root still set one in beforeEach;
       // this is the floor that keeps a forgotten one harmless.
       CLAWBOX_ROOT: path.join(os.tmpdir(), `clawbox-test-root-${process.pid}`),
+      // Same rule for OpenClaw's own store: `OPENCLAW_HOME` falls back to the
+      // hard-coded /home/clawbox/.openclaw, so on the device a test that
+      // "never linked" the box still found the box's REAL ClawBox AI token in
+      // the real openclaw.json and went on to call the proxy. CI has no such
+      // file; the suite must see the same nothing everywhere. Tests that need
+      // an openclaw.json point OPENCLAW_HOME at their own fixture dir.
+      OPENCLAW_HOME: path.join(os.tmpdir(), `clawbox-test-openclaw-${process.pid}`),
     },
     projects: [
       {

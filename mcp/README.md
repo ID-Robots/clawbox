@@ -167,6 +167,13 @@ with no `DISPLAY`, and the desktop is the VNC Xvfb, not `:0`.
 `code_project_list` · `code_project_build` · `code_project_delete` (needs
 `confirm: true`)  &nbsp;&nbsp;*(\* OpenClaw only)*
 
+An app `webapp_create` or `code_project_build` puts on the desktop without an
+icon gets one drawn by ClawBox AI's image model when the box is linked — after
+the tool has answered, never overwriting an icon that exists, one picture per
+app and one at a time (a rebuild while it is being drawn does not pay twice),
+dropped if the app is uninstalled meanwhile, and silently skipped on an
+unlinked box (`src/lib/webapp-icon.ts`).
+
 `code_project_init` and `code_project_list` report the project directory as an
 ABSOLUTE path. The agent edits those files with its harness's own file tools,
 and that process has a different working directory than the web tier — a

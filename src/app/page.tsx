@@ -25,6 +25,7 @@ import BrowserApp from "@/components/BrowserApp";
 import VNCApp from "@/components/VNCApp";
 import ChatPopup from "@/components/ChatPopup";
 import ToastHost from "@/components/ToastHost";
+import InstalledAppIcon from "@/components/InstalledAppIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -235,34 +236,6 @@ interface OpenWindow {
   width?: number;
   height?: number;
   meta?: Record<string, string>;
-}
-
-// Icon component for installed store apps — tries local cached icon first, then store URL
-function InstalledAppIcon({ iconUrl, appId, name, size = "w-6 h-6" }: { iconUrl?: string; appId?: string; name?: string; size?: string }) {
-  const px = size.includes("w-12") ? 48 : size.includes("w-7") ? 28 : size.includes("w-6") ? 24 : size.includes("w-3") ? 12 : 24;
-  const localSrc = appId ? `/setup-api/apps/icon/${appId}` : undefined;
-  const sources = [localSrc, iconUrl].filter(Boolean) as string[];
-  const [srcIdx, setSrcIdx] = useState(0);
-  const [failed, setFailed] = useState(false);
-
-  const src = sources[srcIdx];
-  if (src && !failed) {
-    return (
-      <img
-        src={src}
-        alt={name || ""}
-        className="w-full h-full object-cover rounded-[inherit]"
-        onError={() => {
-          if (srcIdx + 1 < sources.length) {
-            setSrcIdx(srcIdx + 1);
-          } else {
-            setFailed(true);
-          }
-        }}
-      />
-    );
-  }
-  return <span className="material-symbols-rounded text-white" style={{ fontSize: px }}>extension</span>;
 }
 
 function ChromeDesktopInner() {

@@ -1246,6 +1246,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Connect to gateway
   const gatewayTokenRef = useRef('')
+  // The gateway's own chat UI is opened from the strip with these two (see
+  // openInOpenclaw); OpenClawApp builds the same URL for its iframe.
+  const gatewayWsUrlRef = useRef('')
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -1296,6 +1299,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       token = config.token
       wsUrl = config.wsUrl
       gatewayTokenRef.current = token
+      gatewayWsUrlRef.current = wsUrl
     } catch {
       // Auto-retry if gateway config not ready yet. Extend the budget
       // during skill-install windows so the chat silently recovers once
@@ -1808,7 +1812,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // Load chat history, auto-greet if empty
   const greetedRef = useRef(false)
-  const [startingSession, setStartingSession] = useState(false)
   const loadHistory = useCallback(async () => {
     // A harness with no durable transcript has nothing to replay. Returning
     // before the bootstrap bookkeeping rather than calling and catching keeps
@@ -1933,23 +1936,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const resetSessionRef = useRef(resetSession)
   useEffect(() => { resetSessionRef.current = resetSession }, [resetSession])
 
-  const startNewSession = useCallback(async () => {
-    setStartingSession(true)
-    try {
-      await resetSession()
-    } catch (err) {
-      // Blanking the view on a failed reset is the worst outcome: the agent
-      // still holds the thread, but the user believes it is gone.
-      setMessages(prev => [...prev, {
-        role: 'system',
-        text: `Could not start a new chat: ${err instanceof Error ? err.message : 'unknown error'}`,
-        timestamp: Date.now(),
-        variant: 'error',
-      }])
-    } finally {
-      setStartingSession(false)
-    }
-  }, [resetSession])
+  /**
+   * The "+" in the strip opens the gateway's OWN chat UI in a new browser tab —
+   * the same page OpenClawApp iframes, with the gateway URL and token in the
+   * URL so the SPA needs no sessionStorage of its own. It used to reset this
+   * popup's session in place; the owner asked for a fresh OpenClaw session in
+   * a new tab instead, which this is. The URL is built synchronously from what
+   * the connect step cached, because a window.open that follows an await is
+   * what popup blockers refuse.
+   */
+  const openInOpenclaw = useCallback(() => {
+    const wsUrl = gatewayWsUrlRef.current
+    const token = gatewayTokenRef.current
+    const url = wsUrl && token
+      ? `/chat?gatewayUrl=${encodeURIComponent(wsUrl)}#token=${encodeURIComponent(token)}`
+      : '/chat'
+    window.open(url, '_blank', 'noopener,noreferrer')
+  }, [])
 
   // While a picture is being generated, go and look for it. The background run
   // that produces it does not deliver renderable media over this socket, so a
@@ -3566,25 +3569,33 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       <div
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
+          // The controls FLOAT over the transcript instead of taking a row
+          // of it: once the model pills moved under the composer this bar
+          // carries only the status dot and three small buttons, and a
+          // whole row for those was the tallest thing between the owner and
+          // their messages. The strip is still the drag handle; the fade
+          // behind it keeps the buttons legible over a light bubble. The
+          // transcript pads its top by the strip's height so nothing hides
+          // under it at rest, and scrolls beneath it after that. No
+          // backdrop blur — a per-frame filter on the Jetson iGPU is the
+          // frame drop the burst animation's note warns about.
+          position: 'absolute',
+          top: 0, left: 0, right: 0,
+          zIndex: 5,
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '8px 12px',
-          background: 'linear-gradient(135deg, rgba(249,115,22,0.15) 0%, rgba(17,24,39,0.95) 100%)',
-          borderBottom: '1px solid rgba(249,115,22,0.2)',
-          flexShrink: 0,
+          justifyContent: 'flex-end',
+          gap: 8,
+          // The strip is taller than its buttons and darker at the top, so
+          // a light bubble scrolling under it never swallows the controls;
+          // the fade runs out over ~44px, which is a gradient, not a blur —
+          // blur here would be recomposited on every scrolled frame.
+          padding: '4px 8px 16px',
+          background: 'linear-gradient(180deg, rgba(8,12,22,0.95) 0%, rgba(8,12,22,0.8) 40%, rgba(8,12,22,0.45) 70%, rgba(8,12,22,0) 100%)',
           userSelect: 'none',
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        {/* The model, provider and effort pills used to sit here. They now
-            live under the composer, beside the text they apply to — the
-            shape people know from Claude's own UI — and the header is
-            just a title and the window controls. */}
-        <span style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.85)', letterSpacing: 0.2, flexShrink: 0 }}>
-          {t("chat.title")}
-        </span>
-        <div style={{ flex: 1 }} />
         {(status === 'connecting' || switchingModel) && (
           <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
             <div style={{
@@ -3596,11 +3607,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             }} />
           </div>
         )}
-        {status === 'connected' && !switchingModel && (
-          <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#22c55e', boxShadow: '0 0 6px rgba(34,197,94,0.5)' }} />
-          </div>
-        )}
+        {/* No "connected" dot: connected is the normal state and the composer
+            already says when it is not (the placeholder reads "Connecting…"
+            and the input is gated). Only the in-flight spinner above earns a
+            place in the strip. */}
         {onOpenFull && (
           <button
             onPointerDown={stopHeaderDrag}
@@ -3621,10 +3631,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
         <button
           onPointerDown={stopHeaderDrag}
-          onClick={() => { void startNewSession() }}
-          disabled={startingSession}
-          title="New chat"
-          aria-label="New chat"
+          onClick={openInOpenclaw}
+          title="Open in OpenClaw"
+          aria-label="Open in OpenClaw"
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', padding: 4, borderRadius: 6,
@@ -3634,7 +3643,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 5v14M5 12h14" />
+            <path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1h5" />
           </svg>
         </button>
         {!mobile && (
@@ -3675,9 +3684,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </button>
       </div>
 
-      {/* Messages area */}
+      {/* Messages area — its top padding is the floating control strip's
+          height, so the first line is readable at rest and everything
+          scrolls under the strip after that. */}
       <div style={{
-        flex: 1, overflowY: 'auto', padding: '12px 14px',
+        flex: 1, overflowY: 'auto', padding: '36px 14px 12px',
         display: 'flex', flexDirection: 'column', gap: 10,
         userSelect: 'text',
         scrollbarWidth: 'thin',
@@ -4237,13 +4248,48 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
       )}
 
-      {/* Input area */}
+      {/* Composer — the shape people know from Claude's own UI: the text
+          box on top, full width, and one row under it with the attach,
+          microphone and picture buttons on the left and, on the right, the
+          provider / model / effort pills beside the send button. */}
       <div style={{
-        padding: '10px 14px 6px',
+        padding: '10px 14px 10px',
         borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
-        display: 'flex', gap: 8, alignItems: 'flex-end',
+        display: 'flex', flexDirection: 'column', gap: 8,
       }}>
+        <textarea
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={
+            status !== 'connected'
+              ? t("chat.connectingPlaceholder")
+              : greetingPending
+                ? t("chat.greetingPlaceholder")
+                : t("chat.messagePlaceholder")
+          }
+          // Block input while the WS handshake is still in flight. Allowing
+          // sends during 'connecting' caused them to queue behind a busy
+          // gateway loop and feel broken to users — better to clearly gate
+          // the input until the connection is ready.
+          disabled={status !== 'connected' || greetingPending}
+          rows={1}
+          style={{
+            width: '100%', background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
+            borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
+            resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
+            fontFamily: 'inherit',
+          }}
+          onInput={(e) => {
+            const el = e.currentTarget
+            el.style.height = 'auto'
+            el.style.height = Math.min(el.scrollHeight, 100) + 'px'
+          }}
+        />
+        <div data-testid="chat-composer-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         {/* Shown only where a file staged here can actually reach the model.
             The alternative is worse than a missing button: the picture is drawn
             into the user's own bubble and then dropped, so the customer sees
@@ -4349,87 +4395,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </span>
           </button>
         )}
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder={
-            status !== 'connected'
-              ? t("chat.connectingPlaceholder")
-              : greetingPending
-                ? t("chat.greetingPlaceholder")
-                : t("chat.messagePlaceholder")
-          }
-          // Block input while the WS handshake is still in flight. Allowing
-          // sends during 'connecting' caused them to queue behind a busy
-          // gateway loop and feel broken to users — better to clearly gate
-          // the input until the connection is ready.
-          disabled={status !== 'connected' || greetingPending}
-          rows={1}
-          style={{
-            flex: 1, background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
-            borderRadius: 12, padding: '8px 12px', color: '#fff', fontSize: 13.5,
-            resize: 'none', outline: 'none', maxHeight: 100, lineHeight: 1.4,
-            fontFamily: 'inherit',
-          }}
-          onInput={(e) => {
-            const el = e.currentTarget
-            el.style.height = 'auto'
-            el.style.height = Math.min(el.scrollHeight, 100) + 'px'
-          }}
-        />
-        {sending ? (
-          <button
-            onClick={abort}
-            title={t("chat.stop")}
-            style={{
-              width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: 'rgba(239,68,68,0.2)', color: '#ef4444',
-              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'background 0.15s',
-            }}
-            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.35)'}
-            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
-          </button>
-        ) : (
-          <button
-            onClick={sendMessage}
-            disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
-            title={t("chat.send")}
-            style={{
-              width: 36, height: 36, borderRadius: 10, border: 'none',
-              background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
-              color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
-              cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexShrink: 0, transition: 'all 0.15s',
-            }}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
-            </svg>
-          </button>
-        )}
-      </div>
-
-      {/* Which model answers, from which provider, with how much thinking —
-          under the text they apply to, the way Claude's composer does it.
-          The same three pills for both harnesses, unchanged; only their
-          home moved (see the note in the header). */}
-      <div
-        data-testid="chat-model-row"
-        style={{
-          padding: '0 14px 10px',
-          background: 'rgba(0,0,0,0.2)',
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-        }}>
-        <div className="chat-header-pills">
+          <div className="chat-header-pills" style={{ justifyContent: 'flex-end' }}>
           {harnessId === 'hermes' ? (
             // Same three pills, same order and widths as the OpenClaw branch
             // below — provider → model (scoped to it) → thinking effort. The
@@ -4681,6 +4647,43 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             />
           )}
           </>)}
+        </div>
+        {sending ? (
+          <button
+            onClick={abort}
+            title={t("chat.stop")}
+            style={{
+              width: 36, height: 36, borderRadius: 10, border: 'none',
+              background: 'rgba(239,68,68,0.2)', color: '#ef4444',
+              cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'background 0.15s',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.35)'}
+            onMouseLeave={(e) => e.currentTarget.style.background = 'rgba(239,68,68,0.2)'}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <rect x="6" y="6" width="12" height="12" rx="2" />
+            </svg>
+          </button>
+        ) : (
+          <button
+            onClick={sendMessage}
+            disabled={(!input.trim() && attachments.length === 0) || status === 'error'}
+            title={t("chat.send")}
+            style={{
+              width: 36, height: 36, borderRadius: 10, border: 'none',
+              background: (input.trim() || attachments.length > 0) ? 'linear-gradient(135deg, #f97316, #ea580c)' : 'rgba(255,255,255,0.06)',
+              color: (input.trim() || attachments.length > 0) ? '#fff' : 'rgba(255,255,255,0.2)',
+              cursor: (input.trim() || attachments.length > 0) ? 'pointer' : 'default',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 0.15s',
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M22 2L11 13M22 2l-7 20-4-9-9-4z" />
+            </svg>
+          </button>
+        )}
         </div>
       </div>
 
