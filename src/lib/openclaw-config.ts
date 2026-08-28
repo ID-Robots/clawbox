@@ -970,10 +970,19 @@ export const ENV_SECRET_PROVIDER = "default";
  * written apart. Grep `source: "env"` across `src/` and this is the only
  * production writer of one; `gateway-proxy.ts` only ever READS the shape.
  *
- * A `default` provider pointing anywhere else is repaired rather than left
- * alone: `source: "file"` would send an env-backed reference to a path that
- * does not exist, which is the same silent failure with a different message.
- * Any other provider an operator configured is preserved untouched.
+ * CREATE-IF-ABSENT, never rewrite. `secrets.providers` is shared config: the
+ * name is a plain map key and OpenClaw resolves purely on the entry's `source`
+ * (resolveProviderRefs switches on it and uses the name only for the lookup and
+ * the error text). So an entry already there was put there by whoever
+ * administers the box, and silently repointing it at the environment because
+ * one channel wanted that is how a change that "fixed Discord" would quietly
+ * break somebody's file- or exec-backed secrets.
+ *
+ * When the entry exists and is NOT env-backed, the reference we return will not
+ * resolve — and that is reported rather than hidden: the gateway answers
+ * `tokenStatus: "configured_unavailable"`, which /discord/configure surfaces as
+ * `token_unresolved` and /discord/status maps to a channel that is not
+ * connected. An honest dead end beats a silent rewrite of config we do not own.
  */
 export function envSecretRef(
   config: OpenClawConfig,
@@ -981,10 +990,7 @@ export function envSecretRef(
 ): { source: "env"; provider: string; id: string } {
   const secrets = (config.secrets ??= {});
   const providers = (secrets.providers ??= {});
-  const existing = providers[ENV_SECRET_PROVIDER];
-  if (existing?.source !== "env") {
-    providers[ENV_SECRET_PROVIDER] = { ...existing, source: "env" };
-  }
+  providers[ENV_SECRET_PROVIDER] ??= { source: "env" };
   return { source: "env", provider: ENV_SECRET_PROVIDER, id: envVar };
 }
 

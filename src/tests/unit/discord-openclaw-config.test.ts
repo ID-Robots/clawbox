@@ -260,13 +260,21 @@ describe("env SecretRef provider (the chokepoint)", () => {
     });
   });
 
-  it("repairs a default provider that points somewhere an env var cannot resolve", async () => {
+  it("does not rewrite a provider somebody else configured", async () => {
+    // `secrets.providers` is shared config and the entry is not ours to
+    // repoint. Silently turning a file-backed provider into an env-backed one
+    // because Discord wanted that would break whatever else resolved through
+    // it — the same shape as the authMode-only guard that broke Google in #532.
+    // The reference simply will not resolve, and the gateway says so
+    // (`tokenStatus: "configured_unavailable"` -> `token_unresolved`).
     mockFs.readFile.mockResolvedValue(
-      JSON.stringify({ secrets: { providers: { default: { source: "file" } } } }),
+      JSON.stringify({ secrets: { providers: { default: { source: "file", path: "/run/secrets" } } } }),
     );
 
     await openclawConfig.setDiscordToken(TOKEN);
 
-    expect(writtenJsonConfig().secrets).toEqual({ providers: { default: { source: "env" } } });
+    expect(writtenJsonConfig().secrets).toEqual({
+      providers: { default: { source: "file", path: "/run/secrets" } },
+    });
   });
 });
