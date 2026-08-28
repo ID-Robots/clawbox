@@ -281,7 +281,9 @@ export default function CodingAgentActivityPill(
           aria-label={labels.busy ?? "working"}
           title={labels.busy ?? "working"}
         >
-          <span /><span /><span />
+          <span className="coding-agent-working-dot" />
+          <span className="coding-agent-working-dot" style={{ animationDelay: "0.15s" }} />
+          <span className="coding-agent-working-dot" style={{ animationDelay: "0.3s" }} />
         </span>
       ) : null}
     </span>,
