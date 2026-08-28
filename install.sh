@@ -1001,6 +1001,33 @@ wait_for_apt() {
   recover_dpkg
 }
 
+# Best-effort pipx bootstrap. step_apt_update installs pipx as part of the
+# full-install/update sequence, but step_clawkeep_install and (the Hugging
+# Face CLI install inside) step_llamacpp_install can also run standalone via
+# a root-owned standalone step service, outside that sequence — so each calls
+# this first rather than assuming apt_update already ran on this boot.
+#
+# pipx is what keeps these installs working under PEP 668 (the
+# externally-managed-environment policy Ubuntu enforces from 24.04 / JetPack
+# 7 onward); on JetPack 6.2 / Ubuntu 22.04 it is optional polish; pip --user
+# still works there, so callers fall back to it when this returns non-zero.
+ensure_pipx() {
+  as_clawbox_login "command -v pipx" &>/dev/null && return 0
+  wait_for_apt
+  # Refresh package metadata first — a standalone dispatch (see comment
+  # above) may run on a boot where step_apt_update never ran, so the local
+  # apt cache can be stale or empty and "apt-get install pipx" would 404 on
+  # a fresh image. Tolerate failure here (offline JetPack 6.2 hosts still
+  # need to fall through to the pip --user path below) but don't hide it.
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+    echo "  Warning: apt-get update failed (offline?) — trying pipx install from the existing cache" >&2
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq pipx; then
+    echo "  Warning: apt-get install pipx failed" >&2
+  fi
+  as_clawbox_login "command -v pipx" &>/dev/null
+}
+
 step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
@@ -1016,7 +1043,7 @@ step_apt_update() {
   # filters those formats need (and pulls in libreoffice-common, which owns the
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
   # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
   # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
   # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
@@ -2326,7 +2353,7 @@ for p in d.get("plugins", []):
 step_clawkeep_install() {
   # Install (or refresh) the device-side ClawKeep Python package from the
   # in-tree source. The user-runtime CLI lives at ~/.local/bin/clawkeep
-  # and ~/.local/bin/clawkeepd; without --force-reinstall, an existing
+  # and ~/.local/bin/clawkeepd; without a forced reinstall, an existing
   # install with the same version string ("0.1.0") would skip the upgrade
   # and leave stale code on disk after a `git pull`.
   if [ ! -d "$PROJECT_DIR/clawkeep" ]; then
@@ -2334,6 +2361,45 @@ step_clawkeep_install() {
     return 0
   fi
 
+  # pipx builds into its own isolated venv, which sidesteps PEP 668
+  # (externally-managed-environment, enforced on Ubuntu 24.04+ / JetPack 7)
+  # and, as a side effect, the Jetson UNKNOWN-0.0.0 wheel failure the pip
+  # fallback below works around — pipx's venv bootstraps its own pip rather
+  # than reusing the stock L4T pip 22.0.2 + setuptools 59.6.0 combination
+  # that triggers it. Prefer pipx; fall back to the pip --user path — still
+  # correct on JetPack 6.2 / Ubuntu 22.04, where PEP 668 does not apply —
+  # only when pipx could not be provisioned.
+  if ! ensure_pipx; then
+    echo "  Warning: pipx unavailable — falling back to pip --user (blocked by PEP 668 on Ubuntu 24.04+)" >&2
+    step_clawkeep_install_pip_user_fallback
+    return $?
+  fi
+
+  echo "  Installing ClawKeep CLI via pipx"
+  # A device upgraded from a pre-pipx install has real pip-installed scripts
+  # at these paths; pipx refuses to overwrite files it did not create, so the
+  # stale scripts would keep running after every future `git pull` unless
+  # removed first.
+  as_clawbox_login "rm -f $CLAWBOX_HOME/.local/bin/clawkeep $CLAWBOX_HOME/.local/bin/clawkeepd" \
+    2>/dev/null || true
+  if ! as_clawbox_login "pipx install --force '$PROJECT_DIR/clawkeep'"; then
+    echo "  Warning: clawkeep pipx install failed (non-fatal — restore/scheduler will be unavailable)" >&2
+    return 0
+  fi
+
+  local CLAWKEEPD_BIN="$CLAWBOX_HOME/.local/bin/clawkeepd"
+  if [ ! -x "$CLAWKEEPD_BIN" ]; then
+    echo "Error: clawkeep pipx install completed but $CLAWKEEPD_BIN is missing." >&2
+    echo "       Try: pipx uninstall clawkeep && sudo bash install.sh" >&2
+    return 1
+  fi
+  echo "  ClawKeep CLI installed: $(as_clawbox_login 'clawkeep --help' 2>&1 | head -n1 || echo 'verify failed')"
+}
+
+# Legacy path, used only when pipx could not be provisioned. Still the
+# expected path on JetPack 6.2 / Ubuntu 22.04 hosts where apt could not
+# install pipx (e.g. offline) — PEP 668 does not block pip --user there.
+step_clawkeep_install_pip_user_fallback() {
   # Jetson L4T ships pip 22.0.2 + setuptools 59.6.0. setuptools 59
   # predates PEP 621 ([project] in pyproject.toml), and pip 22's build
   # isolation is patched on Debian/Ubuntu in a way that lets the legacy
@@ -4289,11 +4355,30 @@ step_llamacpp_install() {
     apt-get install -y -qq git curl python3 python3-pip python-is-python3 build-essential cmake ninja-build pkg-config
   fi
 
-  if ! as_clawbox_login "command -v hf" &>/dev/null; then
-    echo "  Installing Hugging Face CLI..."
-    as_clawbox_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'"
+  # Run the pipx migration whether or not `hf` already resolves: a device
+  # upgraded from a pre-pipx install has a real pip --user-installed `hf` on
+  # PATH already, and gating this on "hf missing" (as before) would leave
+  # that stale shim running forever instead of migrating it to pipx. Only
+  # fall back to "leave it alone" / pip --user when pipx could not be
+  # provisioned at all.
+  if ensure_pipx; then
+    echo "  Installing Hugging Face CLI via pipx"
+    # A device upgraded from a pre-pipx install may have a real pip-
+    # installed `hf` at these paths; pipx refuses to overwrite files it
+    # did not create, so remove them first or the stale scripts keep
+    # running after every future update.
+    as_clawbox_login "rm -f $CLAWBOX_HOME/.local/bin/hf $CLAWBOX_HOME/.local/bin/huggingface-cli" \
+      2>/dev/null || true
+    as_clawbox_login "pipx install --force 'huggingface_hub[cli]'" \
+      || echo "  Warning: pipx install of huggingface_hub failed" >&2
+  elif as_clawbox_login "command -v hf" &>/dev/null; then
+    echo "  Hugging Face CLI already installed (pipx unavailable — leaving existing install as-is)"
   else
-    echo "  Hugging Face CLI already installed"
+    # pipx unavailable (e.g. offline apt) — pip --user still works on
+    # JetPack 6.2 / Ubuntu 22.04, where PEP 668 does not apply.
+    echo "  Warning: pipx unavailable — falling back to pip --user (blocked by PEP 668 on Ubuntu 24.04+)" >&2
+    as_clawbox_login "python3 -m pip install --user --upgrade 'huggingface_hub[cli]'" \
+      || echo "  Warning: Hugging Face CLI install failed (pipx unavailable, pip blocked by PEP 668 on newer bases)" >&2
   fi
 
   # Determine if a rebuild is needed. Rebuild when:
