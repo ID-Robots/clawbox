@@ -116,8 +116,7 @@ Handles two concerns:
 #### Desktop Environment
 - **`ChromeShelf.tsx`** — app launcher taskbar with pinned icons
 - **`ChromeLauncher.tsx`** — app discovery context menu
-- **`ChromeWindow.tsx`** / **`Window.tsx`** — draggable, resizable windows with title bar controls
-- **`Taskbar.tsx`** — bottom bar with system tray, clock, actions
+- **`ChromeWindow.tsx`** — the draggable, resizable desktop window with title bar controls
 - **`SystemTray.tsx`** — WiFi, battery, Telegram status indicators
 - **`Mascot.tsx`** — animated crab mascot with personality states
 - **`AndroidStatusBar.tsx`** / **`AndroidNavBar.tsx`** / **`AppDrawer.tsx`** — mobile UI
@@ -137,7 +136,6 @@ Handles two concerns:
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper
 
 #### Hooks
-- **`useWindows.ts`** — window state management (reducer pattern)
 - **`useOllamaModels.ts`** — Ollama model management
 
 ### MCP Server (`mcp/`)
