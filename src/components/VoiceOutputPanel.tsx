@@ -74,8 +74,10 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"post" | "play" | null>(null);
   const [sample, setSample] = useState<string | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const audioUrl = useRef<string | null>(null);
+  const [clipUrl, setClipUrl] = useState<string | null>(null);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const playerRef = useRef<HTMLAudioElement | null>(null);
+  const clipUrlRef = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -99,9 +101,27 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
 
   // Release the last clip's object URL when the panel goes away.
   useEffect(() => () => {
-    audioRef.current?.pause();
-    if (audioUrl.current) URL.revokeObjectURL(audioUrl.current);
+    if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
   }, []);
+
+  /**
+   * Start the clip the moment it arrives, and say so when the browser refuses.
+   *
+   * A browser may decline programmatic playback — Safari and every browser in
+   * a stricter mode want the gesture and the sound in the same tick, and an
+   * await for the audio breaks that. That refusal used to be the end of it:
+   * the panel said "Could not play that here" and the owner had nothing to
+   * press. The player below is rendered either way, so a refusal costs one
+   * click on a real control rather than the feature.
+   */
+  useEffect(() => {
+    if (!clipUrl) return;
+    // Pre-2016 browsers and jsdom return nothing from play().
+    const started = playerRef.current?.play();
+    if (started && typeof started.catch === "function") {
+      started.catch(() => setAutoplayBlocked(true));
+    }
+  }, [clipUrl]);
 
   const post = useCallback(async (body: Record<string, unknown>) => {
     setBusy("post");
@@ -141,6 +161,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const play = useCallback(async (engine: VoiceEngineId, voice: string, text: string) => {
     setBusy("play");
     setError(null);
+    setAutoplayBlocked(false);
     try {
       const res = await fetch("/setup-api/tts/sample", {
         method: "POST",
@@ -149,18 +170,18 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setError(typeof data?.error === "string" ? data.error : "Could not speak that.");
+        setError(typeof data?.error === "string" ? data.error : `The box could not speak that (HTTP ${res.status}).`);
         return;
       }
       const blob = await res.blob();
-      audioRef.current?.pause();
-      if (audioUrl.current) URL.revokeObjectURL(audioUrl.current);
-      audioUrl.current = URL.createObjectURL(blob);
-      const clip = new Audio(audioUrl.current);
-      audioRef.current = clip;
-      await clip.play();
-    } catch {
-      setError("Could not play that here.");
+      if (clipUrlRef.current) URL.revokeObjectURL(clipUrlRef.current);
+      clipUrlRef.current = URL.createObjectURL(blob);
+      setClipUrl(clipUrlRef.current);
+    } catch (err) {
+      // The reason, not a shrug: a request the network dropped and a browser
+      // that would not hand over the bytes are different faults with
+      // different fixes, and "could not play that here" named neither.
+      setError(`Could not fetch the sample: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
       setBusy(null);
     }
@@ -304,6 +325,29 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             {busy === "play" ? "Speaking…" : "Play"}
           </button>
         </div>
+
+        {/* Keyed by the URL so each clip gets its own element — a reused one
+            keeps the previous decode and will not start the new sound. */}
+        {clipUrl && (
+          <div className="space-y-1">
+            <audio
+              key={clipUrl}
+              ref={playerRef}
+              data-testid="voice-sample-audio"
+              aria-label="The spoken sample"
+              controls
+              autoPlay
+              src={clipUrl}
+              onError={() => setError("This browser could not play the audio the box sent.")}
+              style={{ width: "100%", height: 34 }}
+            />
+            {autoplayBlocked && (
+              <p className="text-xs text-[var(--text-muted)]" data-testid="voice-autoplay-blocked">
+                Your browser would not start it by itself — press play above.
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

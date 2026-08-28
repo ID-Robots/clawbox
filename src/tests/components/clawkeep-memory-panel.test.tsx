@@ -89,8 +89,11 @@ describe("the memory index panel in ClawKeep", () => {
     render(<I18nProvider><ClawKeepApp /></I18nProvider>);
     // The privacy claim is the feature. If this reads "Cloud" on a local
     // embedder, or reads nothing, the panel is worse than not shipping it.
-    expect(await screen.findByText("On device")).toBeTruthy();
-    expect(await screen.findByText("Embedding with qwen3-embedding:0.6b")).toBeTruthy();
+    // ClawKeep is a heavy mount, and this file runs beside 500 others on a
+    // six-core Jetson: the default one-second wait was the only thing that
+    // ever failed here, and only under that load.
+    expect(await screen.findByText("On device", {}, { timeout: 5000 })).toBeTruthy();
+    expect(await screen.findByText("Embedding with qwen3-embedding:0.6b", {}, { timeout: 5000 })).toBeTruthy();
     expect(screen.getByText("Healthy")).toBeTruthy();
   });
 

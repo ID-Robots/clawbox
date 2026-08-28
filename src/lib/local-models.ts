@@ -380,6 +380,13 @@ interface EmbeddingProbe {
    * and only one of them is a fault.
    */
   supported: boolean;
+  /**
+   * The status has actually been read. False while the background probe is
+   * still running, which is NOT the same as "no embedding model is
+   * answering" — saying that to a customer whose box was simply not asked yet
+   * is the same class of lie as `supported` exists to prevent.
+   */
+  ready: boolean;
   available: boolean;
   provider: string | null;
   model: string | null;
@@ -499,10 +506,16 @@ export async function buildLocalModelInventory(probes: InventoryProbes): Promise
   const models = settled.map(r => r.entry).filter((e): e is LocalModelEntry => e !== null);
   const unavailable = settled.filter(r => r.entry === null).map(r => r.id);
   // Embeddings last and alone: it is the only row read against another row.
-  try {
-    models.push(embeddingEntry(probes.embeddings, models));
-  } catch {
-    unavailable.push("embeddings");
+  // And only once the box has been asked — until then the row is not there
+  // yet rather than the whole page waiting on an OpenClaw boot for it. Not
+  // `unavailable` either: nothing failed, the answer is simply not in yet, and
+  // the panel polls.
+  if (probes.embeddings.ready || !probes.embeddings.supported) {
+    try {
+      models.push(embeddingEntry(probes.embeddings, models));
+    } catch {
+      unavailable.push("embeddings");
+    }
   }
   return { models, unavailable };
 }

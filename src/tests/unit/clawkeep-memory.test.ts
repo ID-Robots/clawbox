@@ -261,6 +261,27 @@ describe("the status cache", () => {
     vi.useRealTimers();
   });
 
+  it("never blocks the caller that peeks, and starts the probe for it", async () => {
+    const calls = path.join(tmpDir, "peek-calls");
+    const script = path.join(tmpDir, "slow-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\necho x >> ${calls}\nsleep 1\ncat <<'JSON'\n${JSON.stringify(REAL_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    vi.resetModules();
+    const { peekMemoryStatus } = await import("@/lib/clawkeep-memory");
+
+    // Cold: no reading yet, and the caller is not made to wait for one.
+    const started = performance.now();
+    expect(peekMemoryStatus()).toBeNull();
+    expect(performance.now() - started).toBeLessThan(200);
+
+    // ...but the probe it started fills the cache, so the next peek answers.
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(peekMemoryStatus()?.available).toBe(true);
+    // One probe for the burst, not one per peek.
+    peekMemoryStatus();
+    expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(1);
+  });
+
   it("answers a stale reading immediately and refreshes it in the background", async () => {
     const calls = path.join(tmpDir, "calls");
     const script = path.join(tmpDir, "slow-openclaw");

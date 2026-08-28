@@ -17,7 +17,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => mockOpenclawIsAbsent(),
 }));
 vi.mock("@/lib/clawkeep-memory", () => ({
-  getMemoryStatus: () => memoryStatus(),
+  peekMemoryStatus: () => memoryStatus(),
 }));
 vi.mock("@/lib/local-models", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/local-models")>();

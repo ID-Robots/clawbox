@@ -79,7 +79,11 @@ async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, te
     res = await fetch(`${target.baseUrl}/audio/speech`, {
       method: "POST",
       headers: { Authorization: `Bearer ${target.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: target.model ?? DEFAULT_CLOUD_MODEL, input: text, voice, response_format: "mp3" }),
+      // WAV, the same format the on-device engine returns. An audition is one
+      // short clip on a click, so the bytes are cheap — and PCM is the one
+      // format no browser can decline to decode, which an audition of a voice
+      // must never be lost to.
+      body: JSON.stringify({ model: target.model ?? DEFAULT_CLOUD_MODEL, input: text, voice, response_format: "wav" }),
       signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
     });
   } catch {
@@ -89,7 +93,7 @@ async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, te
   const audio = new Uint8Array(await res.arrayBuffer());
   if (audio.byteLength < MIN_AUDIO_BYTES) return refuse("The cloud voice sent no audio.", 502);
   const type = res.headers.get("content-type")?.split(";")[0].trim();
-  return new Response(audio, { headers: { "Content-Type": type?.startsWith("audio/") ? type : "audio/mpeg", ...NO_STORE } });
+  return new Response(audio, { headers: { "Content-Type": type?.startsWith("audio/") ? type : "audio/wav", ...NO_STORE } });
 }
 
 /**

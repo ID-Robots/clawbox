@@ -527,6 +527,31 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   };
 }
 
+/**
+ * The reading this box already has, or null when it has never been probed —
+ * and in that case, start the probe in the background.
+ *
+ * For the caller that must not wait: the probe boots a whole OpenClaw process
+ * (~8 s on a Jetson), and Settings → Local AI polls its inventory every five
+ * seconds. Blocking that page on the one row that costs a process boot is what
+ * made the first open after a restart sit on a skeleton. A caller that gets
+ * null shows everything else and picks this row up on its next poll.
+ *
+ * Deliberately without the run/schedule refresh `getMemoryStatus` does: this
+ * answers "which model embeds, and is it answering", not "is an index run in
+ * flight", and it must stay synchronous to be useful here.
+ */
+export function peekMemoryStatus(): ClawKeepMemoryStatus | null {
+  if (!cachedStatus) {
+    reloadMemoryStatus().catch(() => { /* the next peek asks again */ });
+    return null;
+  }
+  if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
+    reloadMemoryStatus().catch(() => { /* keep serving the reading we have */ });
+  }
+  return cachedStatus;
+}
+
 /** Pay the cold probe at boot so the first Settings open after a restart does not. */
 export function warmMemoryStatusCache(): Promise<void> {
   return reloadMemoryStatus().then(() => undefined);

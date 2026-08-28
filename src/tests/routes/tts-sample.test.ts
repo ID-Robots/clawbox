@@ -141,7 +141,11 @@ describe("POST /setup-api/tts/sample — the cloud", () => {
     expect(url).toBe("https://clawbox.com/api/ai/audio/speech");
     expect((init.headers as Record<string, string>).Authorization).toBe("Bearer claw_84d065b");
     // The configured cloud voice is the default when none is asked for.
-    expect(JSON.parse(String(init.body))).toMatchObject({ model: "gpt-4o-mini-tts", input: "Hello from the cloud.", voice: "nova" });
+    // WAV, like the on-device engine: no browser can decline to decode PCM,
+    // and an audition lost to a codec is the bug this pins.
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: "gpt-4o-mini-tts", input: "Hello from the cloud.", voice: "nova", response_format: "wav",
+    });
     expect(runChildMock).not.toHaveBeenCalled();
   });
 

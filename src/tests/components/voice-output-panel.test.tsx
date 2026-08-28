@@ -63,24 +63,16 @@ function mockFetch(first: unknown, opts: { answer?: unknown; refuse?: { status: 
   return fn;
 }
 
-/** jsdom has neither object URLs nor a playing Audio element. */
-const played: string[] = [];
+/** jsdom has no object URLs, and its media elements never really play. */
 function stubAudio() {
   vi.stubGlobal("URL", Object.assign(URL, {
     createObjectURL: vi.fn(() => "blob:sample"),
     revokeObjectURL: vi.fn(),
   }));
-  vi.stubGlobal("Audio", class {
-    src: string;
-    constructor(src: string) { this.src = src; played.push(src); }
-    play() { return Promise.resolve(); }
-    pause() {}
-  });
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  played.length = 0;
 });
 
 describe("Voice panel", () => {
@@ -128,7 +120,7 @@ describe("Voice panel", () => {
     await waitFor(() => expect(screen.getByTestId("voice-sample-text")).toHaveValue(sampleSentence("fr")));
   });
 
-  it("plays the text in the box with the engine and voice on screen", async () => {
+  it("hands the clip to a real player, with the engine and voice on screen", async () => {
     stubAudio();
     mockFetch(status({ choice: "local", voice: { local: "bm_george", cloud: "alloy" } }));
     render(<VoiceOutputPanel active />);
@@ -138,7 +130,26 @@ describe("Voice panel", () => {
       url: "/setup-api/tts/sample",
       body: { text: "Testing, one two three.", engine: "local", voice: "bm_george" },
     }));
-    await waitFor(() => expect(played).toEqual(["blob:sample"]));
+    // A controls element the owner can press, not a detached Audio object the
+    // browser may refuse with nothing left to click.
+    const player = await screen.findByTestId("voice-sample-audio");
+    expect(player).toHaveAttribute("src", "blob:sample");
+    expect(player).toHaveAttribute("controls");
+  });
+
+  it("says the sound was blocked rather than losing the sample, when the browser refuses to start it", async () => {
+    stubAudio();
+    // A browser that declines programmatic playback — Safari's rule once the
+    // audio arrived after an await.
+    const refuse = vi.fn(() => Promise.reject(new Error("NotAllowedError")));
+    Object.defineProperty(window.HTMLMediaElement.prototype, "play", { configurable: true, value: refuse });
+    mockFetch(status());
+    render(<VoiceOutputPanel active />);
+    fireEvent.click(await screen.findByTestId("voice-play"));
+    expect(await screen.findByTestId("voice-autoplay-blocked")).toBeInTheDocument();
+    // ...and the player is still there to press.
+    expect(screen.getByTestId("voice-sample-audio")).toBeInTheDocument();
+    Reflect.deleteProperty(window.HTMLMediaElement.prototype, "play");
   });
 
   it("shows the box's refusal in its own words", async () => {
@@ -147,7 +158,7 @@ describe("Voice panel", () => {
     render(<VoiceOutputPanel active />);
     fireEvent.click(await screen.findByTestId("voice-play"));
     expect(await screen.findByRole("alert")).toHaveTextContent("The cloud voice is not set up on this box.");
-    expect(played).toEqual([]);
+    expect(screen.queryByTestId("voice-sample-audio")).toBeNull();
   });
 
   it("notes that the box's own voice is English only when another language is picked", async () => {

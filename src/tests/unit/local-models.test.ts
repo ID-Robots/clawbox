@@ -79,7 +79,7 @@ function bareBox() {
 const PROBES = {
   ollamaBaseUrl: "http://127.0.0.1:11434",
   llamacpp: { installed: false, running: false, model: null },
-  embeddings: { supported: true, available: false, provider: null, model: null, local: false },
+  embeddings: { supported: true, ready: true, available: false, provider: null, model: null, local: false },
 };
 
 function entry(models: { id: string }[], id: string) {
@@ -155,6 +155,7 @@ describe("local model inventory", () => {
       ...PROBES,
       embeddings: {
         supported: true,
+        ready: true,
         get available(): boolean { throw new Error("probe exploded"); },
         provider: null, model: null, local: false,
       },
@@ -252,7 +253,7 @@ describe("embeddings are checked against the engine that serves them", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("idle");
@@ -267,7 +268,7 @@ describe("embeddings are checked against the engine that serves them", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
+      embeddings: { supported: true, ready: true, available: true, provider: "ollama", model: "qwen3-embedding:0.6b", local: true },
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("running");
@@ -281,7 +282,7 @@ describe("the embeddings row on an edition that has no memory index", () => {
     const { buildLocalModelInventory } = await lib();
     const { models } = await buildLocalModelInventory({
       ...PROBES,
-      embeddings: { supported: false, available: false, provider: null, model: null, local: false },
+      embeddings: { supported: false, ready: true, available: false, provider: null, model: null, local: false },
     });
     const emb = entry(models, "embeddings") as unknown as {
       running: string;
@@ -296,6 +297,38 @@ describe("the embeddings row on an edition that has no memory index", () => {
     // ClawKeep is absent on the same edition, so pointing at it would be a
     // second dead end inside the first.
     expect(emb.managedBy).toBeUndefined();
+  });
+});
+
+describe("the memory row waits for nobody", () => {
+  /**
+   * Reading it costs an OpenClaw process boot (~8 s on a Jetson) and Settings
+   * → Local AI polls this inventory every five seconds. The first open after a
+   * restart used to sit on a skeleton for the length of that boot, because the
+   * whole page was built behind the one row that needed it.
+   */
+  it("leaves the row out until the box has actually been asked", async () => {
+    bareBox();
+    const { buildLocalModelInventory } = await import("@/lib/local-models");
+    const { models, unavailable } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { ...PROBES.embeddings, ready: false },
+    });
+    expect(models.find(m => m.id === "embeddings")).toBeUndefined();
+    // Not a failure either — nothing broke, the answer is simply not in yet.
+    expect(unavailable).not.toContain("embeddings");
+    // Every other engine is there, which is the whole point.
+    expect(models.map(m => m.id)).toEqual(["llamacpp", "ollama", "kokoro", "whisper"]);
+  });
+
+  it("still says so on an edition that has no memory index at all", async () => {
+    bareBox();
+    const { buildLocalModelInventory } = await import("@/lib/local-models");
+    const { models } = await buildLocalModelInventory({
+      ...PROBES,
+      embeddings: { ...PROBES.embeddings, supported: false, ready: false },
+    });
+    expect(entry(models, "embeddings").running).toBe("not-on-this-edition");
   });
 });
 
