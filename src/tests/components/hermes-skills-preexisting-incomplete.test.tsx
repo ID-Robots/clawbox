@@ -174,6 +174,22 @@ describe("an install refused over a skill that is still installed", () => {
     await waitFor(() => expect(installedCalls()).toBeGreaterThan(before));
   });
 
+  it("offers Remove on the card, not the Retry that cannot work", async () => {
+    // The message says to remove it and install it again. Retry re-enters this
+    // same branch: the installer meets the surviving lock entry, exits 0
+    // without fetching, and the completeness check fails on the same files.
+    mockStore({
+      installedPages: [EMPTY_INSTALLED, { skills: [HUB_ROW], counts: { total: 1 }, categories: [] }],
+      body: PREEXISTING,
+    });
+    await openBrowseTab();
+    await installFromBrowse();
+
+    await screen.findByText(/already installed before this request/i);
+    await waitFor(() => expect(screen.getByRole("button", { name: /^remove$/i })).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /^retry$/i })).toBeNull();
+  });
+
   it("keeps the download story for the state it actually describes", async () => {
     // The guard against fixing this by deleting the branch: when nothing was
     // installed, "the download was incomplete" is the true sentence and the
@@ -190,5 +206,17 @@ describe("an install refused over a skill that is still installed", () => {
     expect(await screen.findByText(/download was incomplete/i)).toBeTruthy();
     // Nothing landed on the device, so there is no new row to go and find.
     expect(installedCalls()).toBe(before);
+  });
+
+  it("keeps Retry for a failure that left nothing on the device", async () => {
+    // The guard on the button swap: no hub row for this skill, so there is
+    // nothing to remove and Retry is the only step there is.
+    mockStore({ installedPages: [EMPTY_INSTALLED], body: DOWNLOAD_INCOMPLETE });
+    await openBrowseTab();
+    await installFromBrowse();
+
+    await screen.findByText(/download was incomplete/i);
+    await waitFor(() => expect(screen.getByRole("button", { name: /^retry$/i })).toBeTruthy());
+    expect(screen.queryByRole("button", { name: /^remove$/i })).toBeNull();
   });
 });

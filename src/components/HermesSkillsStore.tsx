@@ -308,6 +308,7 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
   const renderBrowseAction = useCallback(
     (skill: HermesSkill, size: 'card' | 'detail' = 'card'): ReactNode => {
       const state = progress[skill.id];
+      const target = uninstallTargetFor(skill);
       if (state?.status === 'working') {
         return (
           <span className="inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
@@ -324,13 +325,29 @@ export default function HermesSkillsStore({ testId }: { testId?: string }) {
             <span className="text-xs text-red-400 line-clamp-1" title={state.message}>
               {state.message}
             </span>
-            <GhostButton tone="danger" onClick={() => setConfirmInstall(skill)}>
-              {COPY.retry}
-            </GhostButton>
+            {/*
+              The button has to be the one the message asks for. A hub row
+              exists for this skill, so the install just failed over a copy that
+              is ON the device — the two refusals that say so ("remove it from
+              the Skills store and install it again", and the leftover a
+              rollback could not undo) both name removal as the next step, and
+              Retry is the one action that cannot work: the installer meets the
+              lock entry and exits 0 without fetching. `target` is null for
+              anything the store cannot remove, so a skill that is genuinely not
+              installed keeps Retry.
+            */}
+            {target ? (
+              <GhostButton tone="danger" onClick={() => setConfirmUninstall(target)}>
+                {COPY.remove}
+              </GhostButton>
+            ) : (
+              <GhostButton tone="danger" onClick={() => setConfirmInstall(skill)}>
+                {COPY.retry}
+              </GhostButton>
+            )}
           </span>
         );
       }
-      const target = uninstallTargetFor(skill);
       if (state?.status === 'success' || isInstalled(skill)) {
         return (
           <span className="flex items-center gap-2 flex-wrap">
