@@ -487,18 +487,7 @@ export function invalidateMemoryStatusCache(): void {
   cachedStatusAtMs = 0;
 }
 
-export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
-  const now = Date.now();
-  if (cachedStatus && now - cachedStatusAtMs < STATUS_CACHE_MS) {
-    // Run/schedule state changes independently from the expensive CLI probe.
-    const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
-    return {
-      ...cachedStatus,
-      run,
-      schedule,
-      nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()),
-    };
-  }
+function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   if (!statusInFlight) {
     statusInFlight = loadMemoryStatus().then((status) => {
       cachedStatus = status;
@@ -509,6 +498,33 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
     });
   }
   return statusInFlight;
+}
+
+/**
+ * The CLI probe behind this takes ~8 s on a Jetson (a whole OpenClaw process
+ * boots to answer it). Only a caller with NO reading yet waits for it: once a
+ * status has been read, a stale one is answered at once and refreshed in the
+ * background — otherwise Settings → Local AI, which polls the inventory every
+ * five seconds, froze on a skeleton for eight seconds every half minute.
+ */
+export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
+  if (!cachedStatus) return reloadMemoryStatus();
+  if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
+    reloadMemoryStatus().catch(() => { /* the next read tries again */ });
+  }
+  // Run/schedule state changes independently from the expensive CLI probe.
+  const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
+  return {
+    ...cachedStatus,
+    run,
+    schedule,
+    nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()),
+  };
+}
+
+/** Pay the cold probe at boot so the first Settings open after a restart does not. */
+export function warmMemoryStatusCache(): Promise<void> {
+  return reloadMemoryStatus().then(() => undefined);
 }
 
 /**

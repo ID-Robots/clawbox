@@ -179,7 +179,7 @@ describe("local model inventory", () => {
     const ollama = entry(models, "ollama") as unknown as { running: string; diskBytes: number; detail: string; control: string };
     expect(ollama.running).toBe("running");
     expect(ollama.diskBytes).toBe(639_000_000);
-    expect(ollama.detail).toContain("qwen3-embedding:0.6b");
+    expect(ollama.detail).toContain("Qwen 3");
     expect(ollama.control).toBe("system-unit");
   });
 });
@@ -256,7 +256,7 @@ describe("embeddings are checked against the engine that serves them", () => {
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("idle");
-    expect(emb.detail).toMatch(/Ollama is stopped/i);
+    expect(emb.detail).toMatch(/Ollama is off/i);
   });
 
   it("still reports embedding as running when its engine is up", async () => {
@@ -271,7 +271,7 @@ describe("embeddings are checked against the engine that serves them", () => {
     });
     const emb = entry(models, "embeddings") as unknown as { running: string; detail: string };
     expect(emb.running).toBe("running");
-    expect(emb.detail).toMatch(/on the box/i);
+    expect(emb.detail).toMatch(/on this box/i);
   });
 });
 
@@ -296,5 +296,21 @@ describe("the embeddings row on an edition that has no memory index", () => {
     // ClawKeep is absent on the same edition, so pointing at it would be a
     // second dead end inside the first.
     expect(emb.managedBy).toBeUndefined();
+  });
+});
+
+describe("the name a model is shown under", () => {
+  it("is the family and version, never the file-name recipe", async () => {
+    const { friendlyModelName } = await import("@/lib/local-models");
+    // The owner asked for "Gemma 4", not "gemma4-e2b-it-q4_0": size, tuning
+    // and quantisation are the installer's choices, not the owner's.
+    expect(friendlyModelName("gemma4-e2b-it-q4_0")).toBe("Gemma 4");
+    expect(friendlyModelName("qwen3-embedding:0.6b")).toBe("Qwen 3");
+    expect(friendlyModelName("Llama-3.1-8B-Instruct")).toBe("Llama 3.1");
+    expect(friendlyModelName("nomic-embed-text")).toBe("Nomic");
+    // An unknown family is still named, not blanked.
+    expect(friendlyModelName("smollm2-360m")).toBe("Smollm 2");
+    expect(friendlyModelName("")).toBeNull();
+    expect(friendlyModelName(null)).toBeNull();
   });
 });

@@ -248,6 +248,48 @@ describe("what the first Index now click actually runs", () => {
   });
 });
 
+describe("the status cache", () => {
+  /**
+   * The probe boots a whole OpenClaw process, ~8 s on a Jetson. Settings →
+   * Local AI polls the inventory every five seconds and blocked on that probe
+   * whenever the cache had aged out — a skeleton for eight seconds every half
+   * minute. A stale reading must be answered at once and refreshed behind it;
+   * only a caller with no reading at all waits.
+   */
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    vi.useRealTimers();
+  });
+
+  it("answers a stale reading immediately and refreshes it in the background", async () => {
+    const calls = path.join(tmpDir, "calls");
+    const script = path.join(tmpDir, "slow-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\necho x >> ${calls}\nsleep 1\ncat <<'JSON'\n${JSON.stringify(REAL_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    vi.resetModules();
+    const { getMemoryStatus } = await import("@/lib/clawkeep-memory");
+
+    // Cold: the only time a reader waits on the probe.
+    const first = await getMemoryStatus();
+    expect(first.available).toBe(true);
+    expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(1);
+
+    // Aged out: the stale reading comes back at once, not after the probe.
+    const realNow = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(realNow + 60_000);
+    const started = performance.now();
+    const stale = await getMemoryStatus();
+    expect(performance.now() - started).toBeLessThan(500);
+    expect(stale.available).toBe(true);
+
+    // ...and the probe ran again behind it, exactly once for the burst.
+    await getMemoryStatus();
+    await new Promise((r) => setTimeout(r, 1500));
+    expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(2);
+    vi.restoreAllMocks();
+  });
+});
+
 describe("the process the run supervises", () => {
   it("is the indexer itself, not a flock wrapper around it", async () => {
     /**

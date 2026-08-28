@@ -76,6 +76,16 @@ export async function register() {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)
   }
   try {
+    // The memory-status probe boots a whole OpenClaw process (~8 s on a
+    // Jetson). Pay it now, in the background, so the first Settings → Local AI
+    // open after a restart answers from the cache instead of waiting on it.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { warmMemoryStatusCache } = require('./lib/clawkeep-memory')
+    void warmMemoryStatusCache().catch(() => { /* the first reader retries */ })
+  } catch (err) {
+    console.error('[instrumentation] Could not warm the memory status cache:', err instanceof Error ? err.message : err)
+  }
+  try {
     // Memory indexing is armed the same way, from its own persisted schedule.
     // Rebuilding the timer at every boot is what makes the schedule survive a
     // reboot and an update without a crontab entry to duplicate or orphan.

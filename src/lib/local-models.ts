@@ -258,6 +258,38 @@ function shortModelName(name: string): string {
   return name.replace(/:latest$/, "");
 }
 
+const MODEL_FAMILIES: [RegExp, string][] = [
+  [/^gemma/, "Gemma"],
+  [/^qwen/, "Qwen"],
+  [/^llama/, "Llama"],
+  [/^mistral/, "Mistral"],
+  [/^phi/, "Phi"],
+  [/^deepseek/, "DeepSeek"],
+  [/^nomic/, "Nomic"],
+];
+
+/**
+ * "gemma4-e2b-it-q4_0" → "Gemma 4", "qwen3-embedding:0.6b" → "Qwen 3".
+ *
+ * The file name of a model is a recipe (family, size, tuning, quantisation),
+ * and the owner asked for the family alone: the rest is what the installer
+ * chose for this box, not a decision the owner makes on this screen. An alias
+ * that is not a known family keeps its first word, capitalised, so an
+ * unfamiliar model is still named rather than blanked.
+ */
+export function friendlyModelName(raw: string | null | undefined): string | null {
+  const alias = (raw ?? "").trim().toLowerCase();
+  if (!alias) return null;
+  const [head, next = ""] = alias.split(/[-_:/\s]/);
+  const family = MODEL_FAMILIES.find(([re]) => re.test(head))?.[1]
+    ?? head.replace(/\d.*$/, "").replace(/^./, (c) => c.toUpperCase());
+  // "gemma4" carries its version; "llama-3.1-8b" carries it as the next word
+  // (a bare number — "8b" is a size, not a version).
+  const version = head.replace(/^[a-z]+/, "").match(/^\d+(?:\.\d+)?/)?.[0]
+    ?? next.match(/^\d+(?:\.\d+)?$/)?.[0];
+  return version ? `${family} ${version}` : family;
+}
+
 async function kokoroEntry(): Promise<LocalModelEntry> {
   const [stamped, unit] = await Promise.all([
     exists(KOKORO_STAMP),
@@ -273,7 +305,7 @@ async function kokoroEntry(): Promise<LocalModelEntry> {
     id: "kokoro",
     name: "Kokoro",
     kind: "tts",
-    runtime: "systemd user service",
+    runtime: "Voice on this box",
     installed,
     enabled: installed ? unit.enabled : null,
     running: !installed ? "not-installed" : unit.active ? "running" : "idle",
@@ -282,11 +314,11 @@ async function kokoroEntry(): Promise<LocalModelEntry> {
     control: installed ? "user-unit" : "none",
     detail: installed
       ? unit.active
-        ? "Running as the GPU voice."
-        : "Installed and stopped."
+        ? "Speaking from this box."
+        : "Off. Turn it on from the menu."
       : stamped
-        ? "Marked as installed but its service is missing, so it cannot speak."
-        : "Not installed on this box. Speech uses the cloud voice.",
+        ? "Its service is missing, so it cannot speak."
+        : "Not installed. The cloud voice speaks instead.",
   };
 }
 
@@ -297,7 +329,7 @@ async function whisperEntry(): Promise<LocalModelEntry> {
     id: "whisper",
     name: "Whisper",
     kind: "stt",
-    runtime: "systemd user service",
+    runtime: "Transcribes on this box",
     installed: unit.present,
     enabled: unit.present ? unit.enabled : null,
     running: !unit.present ? "not-installed" : unit.active ? "running" : "idle",
@@ -306,9 +338,9 @@ async function whisperEntry(): Promise<LocalModelEntry> {
     control: unit.present ? "user-unit" : "none",
     detail: unit.present
       ? unit.active
-        ? "Running and ready to transcribe."
-        : "Installed and stopped. It starts on demand when you speak."
-      : "Not installed on this box. Speech is transcribed in the cloud.",
+        ? "Ready to transcribe."
+        : "Off. Starts by itself when you speak."
+      : "Not installed. Speech is transcribed in the cloud.",
   };
 }
 
@@ -317,12 +349,12 @@ async function ollamaEntry(baseUrl: string): Promise<LocalModelEntry> {
   const models = unit.active ? await ollamaModels(baseUrl) : null;
   const memoryBytes = unit.active ? await processMemoryBytes("ollama") : null;
   const diskBytes = models?.length ? models.reduce((sum, m) => sum + m.size, 0) : null;
-  const names = (models ?? []).map(m => shortModelName(m.name));
+  const names = Array.from(new Set((models ?? []).map(m => friendlyModelName(shortModelName(m.name)) ?? m.name)));
   return {
     id: "ollama",
     name: "Ollama",
     kind: "llm",
-    runtime: "System service",
+    runtime: "Runs extra models on this box",
     installed: unit.present,
     enabled: unit.present ? unit.enabled : null,
     running: !unit.present ? "not-installed" : unit.active ? "running" : "idle",
@@ -330,12 +362,12 @@ async function ollamaEntry(baseUrl: string): Promise<LocalModelEntry> {
     memoryBytes,
     control: unit.present ? "system-unit" : "none",
     detail: !unit.present
-      ? "Not installed on this box."
+      ? "Not installed."
       : !unit.active
-        ? "Installed and stopped."
+        ? "Off. Turn it on from the menu."
         : names.length
-          ? `Serving ${names.length} model${names.length === 1 ? "" : "s"}: ${names.join(", ")}.`
-          : "Running with no models pulled yet.",
+          ? `Serving ${names.join(", ")}.`
+          : "On, with no models downloaded yet.",
   };
 }
 
@@ -351,9 +383,9 @@ async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
     : null;
   return {
     id: "llamacpp",
-    name: probe.model ? `Local LLM (${probe.model})` : "Local LLM",
+    name: friendlyModelName(probe.model) ?? "Local model",
     kind: "llm",
-    runtime: "llama.cpp",
+    runtime: "Answers on this box",
     installed: probe.installed,
     enabled: null,
     running: !probe.installed ? "not-installed" : probe.running ? "running" : "idle",
@@ -362,10 +394,10 @@ async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
     control: "none",
     managedBy: "localAi",
     detail: !probe.installed
-      ? "Not installed on this box."
+      ? "Not installed."
       : probe.running
-        ? "Answering on the box right now."
-        : "Installed and in standby to free memory until it is needed.",
+        ? "Answering right now."
+        : "Ready. Sleeps until needed to save memory.",
   };
 }
 
@@ -403,9 +435,9 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
   if (!probe.supported) {
     return {
       id: "embeddings",
-      name: "Memory embeddings",
+      name: "Memory search",
       kind: "embedding",
-      runtime: "OpenClaw memory",
+      runtime: "Finds things in your memory",
       installed: false,
       enabled: null,
       running: "not-on-this-edition",
@@ -423,11 +455,13 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
     : hostStopped
       ? "idle"
       : probe.local ? "running" : "on-demand";
+  const model = friendlyModelName(probe.model);
+  const via = host?.name ?? (probe.provider ? probe.provider.replace(/^./, (c) => c.toUpperCase()) : null);
   return {
     id: "embeddings",
-    name: probe.model ? `Memory embeddings (${probe.model})` : "Memory embeddings",
+    name: "Memory search",
     kind: "embedding",
-    runtime: probe.provider ?? "unknown",
+    runtime: [model, via ? `via ${via}` : null].filter(Boolean).join(" ") || "Finds things in your memory",
     installed: probe.available,
     enabled: null,
     running,
@@ -436,12 +470,12 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
     control: "none",
     managedBy: "clawkeep",
     detail: !probe.available
-      ? "No embedding model is answering, so memory search cannot run."
+      ? "No memory model is answering, so memory search is off."
       : hostStopped
-        ? `${host?.name ?? "Its engine"} is stopped, so memory cannot be embedded until you turn it back on.`
+        ? `${host?.name ?? "Its engine"} is off, so memory search is paused.`
         : probe.local
-          ? "Embedding your memory on the box. Manage it in ClawKeep."
-          : "Embedding your memory in the cloud. Manage it in ClawKeep.",
+          ? "Searching your memory on this box."
+          : "Searching your memory in the cloud.",
   };
 }
 

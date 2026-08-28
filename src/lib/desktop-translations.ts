@@ -347,7 +347,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.network": "Network",
     "settings.aiProvider": "AI Provider",
     "settings.telegram": "Telegram",
-    "settings.channels": "Messaging Channels",
+    "settings.channels": "Channels",
     "settings.providers": "Providers",
     "settings.channelsConnect": "Connect a channel",
     "settings.channelsHelper": "Connect a channel so the assistant can reach you there.",
