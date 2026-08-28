@@ -143,7 +143,30 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "accounts", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+
+/**
+ * The connectors that live behind the single "Accounts" entry — the same idea
+ * as GNOME's Online Accounts: one page listing every outside service the
+ * assistant can be reached through, each row opening its own settings.
+ *
+ * They are still ordinary Sections, so their panes, their deep links
+ * (`clawbox:open-settings`) and their status lines are unchanged; only the
+ * sidebar stops carrying four near-identical entries.
+ */
+const ACCOUNT_SECTIONS = ["telegram", "email", "whatsapp", "discord"] as const;
+type AccountSection = typeof ACCOUNT_SECTIONS[number];
+
+const ACCOUNT_ITEMS: { id: AccountSection; icon: string; labelKey: string; hintKey: string }[] = [
+  { id: "telegram", icon: "send", labelKey: "settings.telegram", hintKey: "settings.accountsTelegramHint" },
+  { id: "email", icon: "mail", labelKey: "settings.email", hintKey: "settings.accountsEmailHint" },
+  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp", hintKey: "settings.accountsWhatsappHint" },
+  { id: "discord", icon: "forum", labelKey: "settings.discord", hintKey: "settings.accountsDiscordHint" },
+];
+
+function isAccountSection(id: string): id is AccountSection {
+  return (ACCOUNT_SECTIONS as readonly string[]).includes(id);
+}
 
 /** The three mailbox modes, in increasing order of what the assistant may do. */
 const EMAIL_MODE_OPTIONS: { id: EmailMode; labelKey: string; hintKey: string }[] = [
@@ -201,10 +224,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "localAi", icon: "memory", labelKey: "settings.localAi" },
   { id: "localModels", icon: "deployed_code", labelKey: "settings.localModels" },
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
-  { id: "telegram", icon: "send", labelKey: "settings.telegram" },
-  { id: "email", icon: "mail", labelKey: "settings.email" },
-  { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp" },
-  { id: "discord", icon: "forum", labelKey: "settings.discord" },
+  // One entry for every messaging/mail connector; the four panes live behind
+  // it (ACCOUNT_ITEMS) rather than each claiming a sidebar row of its own.
+  { id: "accounts", icon: "account_circle", labelKey: "settings.accounts" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
@@ -375,6 +397,10 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const setSectionGated = useCallback((next: Section) => {
     if (next === "remote" && requireLoginFor("remote")) return;
     setSection(next);
+    // Both, so one navigation call works on either layout: the mobile view
+    // reads `mobileSection`, and a hub row that only set `section` would
+    // leave a phone sitting on the page it was already showing.
+    setMobileSection(next);
   }, [requireLoginFor]);
 
   // Allow other parts of the desktop (e.g. the "new version available" toast)
@@ -2522,6 +2548,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   }, []);
 
   const activeSection = isMobile ? (mobileSection ?? section) : section;
+  // A connector pane keeps the Accounts entry lit: the sidebar no longer has a
+  // row of its own to highlight, and an unlit sidebar reads as "nowhere".
+  const navSection: Section = isAccountSection(activeSection) ? "accounts" : activeSection;
   const visibleNavItems = NAV_ITEMS;
   const resetProgressSteps = [
     {
@@ -3651,6 +3680,74 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         {activeSection === "localModels" && (
           <LocalModelsPanel active={activeSection === "localModels"} />
+        )}
+
+        {/* ─── Accounts (the hub) ───
+            One page for every outside service the assistant can be reached
+            through, in the shape people already know from GNOME's Online
+            Accounts: a row per connector with its live status, opening that
+            connector's own settings. */}
+        {activeSection === "accounts" && (
+          <div className="max-w-xl space-y-5">
+            <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 18 }}>account_circle</span>
+                <label className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">
+                  {t("settings.accountsConnect")}
+                </label>
+              </div>
+              <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.accountsHelper")}</p>
+              <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-accounts-list">
+                {ACCOUNT_ITEMS.map((item) => {
+                  const connected = accountConnected(item.id);
+                  const { subtitle } = sectionStatus(item.id);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => setSectionGated(item.id)}
+                      data-testid={`settings-account-${item.id}`}
+                      className="w-full flex items-center gap-3 px-3 py-3 text-left bg-transparent border-none cursor-pointer hover:bg-white/[0.04] transition-colors"
+                    >
+                      <span className="flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06]">
+                        <span className="material-symbols-rounded" style={{ fontSize: 20, color: connected ? "var(--coral-bright)" : "var(--text-muted)" }}>
+                          {item.icon}
+                        </span>
+                      </span>
+                      <span className="flex-1 min-w-0">
+                        <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
+                        <span className="block text-[11px] text-[var(--text-muted)] truncate">
+                          {subtitle ?? t(item.hintKey)}
+                        </span>
+                      </span>
+                      {connected && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" aria-hidden="true" />
+                      )}
+                      <span className="material-symbols-rounded text-[var(--text-muted)] shrink-0" style={{ fontSize: 18 }} aria-hidden="true">
+                        chevron_right
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* The way back out of a connector pane, now that the sidebar has no
+            row of its own for it. */}
+        {isAccountSection(activeSection) && (
+          <div className="max-w-xl">
+            <button
+              type="button"
+              onClick={() => setSectionGated("accounts")}
+              data-testid="settings-accounts-back"
+              className="flex items-center gap-1 mb-3 px-2 py-1 -ml-2 rounded-lg bg-transparent border-none cursor-pointer text-[13px] text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-white/[0.05] transition-colors"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">chevron_left</span>
+              {t("settings.accounts")}
+            </button>
+          </div>
         )}
 
         {/* ─── Telegram ─── */}
@@ -5526,8 +5623,26 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   // ─── Section status (subtitle) shared by mobile list + desktop sidebar ───
   // SectionStatus type is declared at module scope (above component)
+  /** Whether a connector actually holds a working account right now. */
+  const accountConnected = (id: AccountSection): boolean => {
+    switch (id) {
+      case "telegram": return tgConfigured === true;
+      case "email": return emailStatus?.configured === true;
+      case "whatsapp": return waStatus?.state === "paired";
+      case "discord": return dcConfigured === true;
+    }
+  };
+
   const sectionStatus = (id: Section): SectionStatus => {
     switch (id) {
+      case "accounts": {
+        const connected = ACCOUNT_ITEMS.filter((a) => accountConnected(a.id)).length;
+        return {
+          subtitle: connected > 0
+            ? t("settings.accountsConnectedCount", { n: connected })
+            : (t("settings.notConfigured") || "Not configured"),
+        };
+      }
       case "appearance": {
         const sub = ui.wallpaperId.startsWith("custom-")
           ? `Custom ${parseInt(ui.wallpaperId.split("-")[1] || "0") + 1}`
@@ -5785,7 +5900,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           grow the row past the window body and paint outside the frame. */}
       <nav className="w-60 shrink-0 min-h-0 overflow-y-auto bg-[var(--bg-surface)] border-r border-[var(--border-subtle)] py-4 px-2 flex flex-col gap-0.5">
         {visibleNavItems.map(item => {
-          const active = activeSection === item.id;
+          const active = navSection === item.id;
           const status = sectionStatus(item.id);
           return (
             <button
