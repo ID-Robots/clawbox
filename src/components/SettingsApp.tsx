@@ -20,6 +20,7 @@ import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
+import { installPendingRefresh } from "@/lib/email-pending-refresh";
 import ClawBoxLoginModal, { type ClawBoxLoginFeature } from "./ClawBoxLoginModal";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import { I18nProvider, useT, LANGUAGES, type Locale } from "@/lib/i18n";
@@ -151,16 +152,11 @@ function parseChatApprovalState(d: unknown): ChatApprovalState {
   };
 }
 
-/**
- * How often the open approvals strip re-reads the queue.
- *
- * Fifteen seconds is chosen against what it is for: a draft approved from
- * Telegram should stop being listed here while the owner is still looking at
- * the page, and "within a few seconds" is what makes the list believable. It is
- * two small local requests, only while this section is on screen and the tab is
- * in front.
- */
-const PENDING_REFRESH_MS = 15_000;
+// How often the open approvals strip re-reads the queue, and the focus /
+// visible-edge / not-behind-a-hidden-tab rules around it, now live in
+// `@/lib/email-pending-refresh` — shared with the chat surface's batch card,
+// which asks the same question about the same queue and must not answer it on
+// a different schedule.
 
 interface SwapStats { used: number; total: number; percent: number }
 interface DiskMount { filesystem: string; size: string; used: string; avail: string; usePercent: number; mountpoint: string }
@@ -1794,26 +1790,17 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
   useEffect(() => {
     if (!emailPanelVisible) return;
-    const refresh = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    // The pacing — interval, focus, visible-edge, and never behind a hidden tab
+    // — is `installPendingRefresh`, shared with the chat surface's batch card so
+    // the two cannot drift into disagreeing about how fresh this list is.
+    return installPendingRefresh(() => {
       refreshEmailStatus();
       refreshEmailPending();
       // The panel's own state can go stale the same way: an owner who pairs
       // with the approvals bot in Telegram while this is open should stop
       // being told nobody can be asked.
       refreshChatApproval();
-    };
-    const onVisibility = () => {
-      if (typeof document !== "undefined" && document.visibilityState === "visible") refresh();
-    };
-    const timer = setInterval(refresh, PENDING_REFRESH_MS);
-    window.addEventListener("focus", refresh);
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => {
-      clearInterval(timer);
-      window.removeEventListener("focus", refresh);
-      document.removeEventListener("visibilitychange", onVisibility);
-    };
+    });
   }, [emailPanelVisible, refreshEmailStatus, refreshEmailPending, refreshChatApproval]);
 
   /** Save a token, flip the switch, or forget the bot. One busy flag for all three. */

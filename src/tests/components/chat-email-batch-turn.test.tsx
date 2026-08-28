@@ -159,17 +159,34 @@ describe("a turn that queued mail", () => {
     ]);
   });
 
-  it("does not go looking when the turn never asked to send mail", async () => {
+  it("a turn that never asked to send mail does not collect at its end", async () => {
+    // The turn-end collect is still gated on `emailSendSeenRef`, and this is
+    // what that gate now means: a turn that did not ask to send mail does not
+    // go and look the moment it finishes.
+    //
+    // It is no longer provable by asserting the queue was never read at all —
+    // the surface also reads it on open and on a timer now, so that a draft
+    // queued anywhere else is still approvable here (chat-email-recovery
+    // .test.tsx). So the queue starts EMPTY, which is what the open-time read
+    // sees; anything that appears afterwards can only have come from the turn.
+    queued = [];
     const box = installBoxWithMailQueue();
     const textarea = await mountHermesChat(box);
+    await waitFor(() => {
+      expect(vi.mocked(globalThis.fetch).mock.calls.some((c) => String(c[0]).includes("/setup-api/email/pending"))).toBe(true);
+    });
+
+    // Mail lands in the queue, but this turn is about disk usage and says so.
+    queued = [pendingDraft(1)];
     await send(textarea, "What is the disk usage?");
     await push(frame("tool", { kind: "tool", phase: "result", id: "t1", name: "disk_usage", status: "ok" }));
     await push(frame("done", { text: "42% used." }));
     await push(null);
 
-    await waitFor(() => expect(screen.queryByTestId("chat-email-batch")).toBeNull());
-    const urls = vi.mocked(globalThis.fetch).mock.calls.map((call) => String(call[0]));
-    expect(urls.some((url) => url.includes("/setup-api/email/pending"))).toBe(false);
+    // No focus, no visibility change, no tick — so nothing but the turn could
+    // have produced a card, and the turn must not have.
+    await waitFor(() => expect(screen.getByText("42% used.")).toBeTruthy());
+    expect(screen.queryByTestId("chat-email-batch")).toBeNull();
   });
 
   it("approves the whole batch on one click, naming every draft", async () => {
