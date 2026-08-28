@@ -33,6 +33,9 @@ const OPENCLAW_STATUS = {
   drifted: false,
   warning: null,
   lastCheck: null,
+  language: "en",
+  voice: { local: "af_heart", cloud: "alloy" },
+  voices: { local: [{ id: "af_heart", label: "Heart" }], cloud: [{ id: "alloy", label: "Alloy" }] },
 };
 
 function installFetch(payload: unknown) {
@@ -85,7 +88,7 @@ describe("Settings → Voice on the OpenClaw edition", () => {
     expect(screen.queryByTestId("voice-output-unsupported")).toBeNull();
     // The cloud voice is named on the order cards ("Primary: … · Fallback: …"),
     // so a substring match rather than a whole-element one.
-    expect(screen.getByTestId("voice-speaking-now")).toBeInTheDocument();
+    expect(screen.getByTestId("voice-panel")).toBeInTheDocument();
     expect(screen.getAllByText(/ClawBox cloud/).length).toBeGreaterThan(0);
   });
 });

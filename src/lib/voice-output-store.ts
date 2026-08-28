@@ -12,9 +12,11 @@
  * than an "unproven" badge until the next check.
  */
 import { promises as fs } from "fs";
+import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
+import { isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
 import {
   DEFAULT_VOICE_STATE,
   isVoiceChoice,
@@ -103,7 +105,35 @@ export async function readVoiceState(): Promise<VoiceOutputState> {
     choice: isVoiceChoice(raw.choice) ? raw.choice : DEFAULT_VOICE_STATE.choice,
     engineChecks,
     lastCheck: readCheck(raw.lastCheck),
+    language: isVoiceLanguage(raw.language) ? raw.language : DEFAULT_VOICE_STATE.language,
   };
+}
+
+/**
+ * The on-device voice lives where the local script reads it
+ * (`clawbox-tts.sh --set-voice` writes the same file), so the gateway and this
+ * tab can never disagree about which Kokoro voice speaks.
+ */
+export function localVoicePath(): string {
+  return process.env.CLAWBOX_TTS_VOICE_FILE
+    || path.join(process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox", ".openclaw", "clawbox-tts-voice");
+}
+
+/** The saved local voice, or null when none is saved or the file names an unknown one. */
+export async function readLocalVoice(): Promise<string | null> {
+  try {
+    const raw = (await fs.readFile(localVoicePath(), "utf8")).trim();
+    return isLocalVoice(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeLocalVoice(voice: string): Promise<void> {
+  if (!isLocalVoice(voice)) throw new Error("Unknown local voice.");
+  const target = localVoicePath();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, `${voice}\n`, { mode: 0o600 });
 }
 
 export async function writeVoiceState(state: VoiceOutputState): Promise<void> {

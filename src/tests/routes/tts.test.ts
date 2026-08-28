@@ -33,6 +33,8 @@ vi.mock("@/lib/local-models", async (importOriginal) => {
 vi.mock("@/lib/voice-output-store", () => ({
   readVoiceState: (...a: unknown[]) => readStateMock(...a),
   writeVoiceState: (...a: unknown[]) => writeStateMock(...a),
+  readLocalVoice: async () => null,
+  writeLocalVoice: vi.fn(async () => {}),
 }));
 
 vi.mock("child_process", async (importOriginal) => {
@@ -353,5 +355,52 @@ describe("POST /setup-api/tts — failure boundary", () => {
     expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", "openai"]);
     // And the box stops reporting the old failure about a choice just re-made.
     expect(writeStateMock.mock.calls[0][0].engineChecks.cloud).toBeUndefined();
+  });
+});
+
+describe("POST /setup-api/tts — voice and language", () => {
+  it("saves the on-device voice where the local script reads it, and refuses one it does not have", async () => {
+    const { writeLocalVoice } = await import("@/lib/voice-output-store");
+    const { POST } = await route();
+    const ok = await POST(post({ action: "voice", engine: "local", voice: "bm_george" }));
+    expect(ok.status).toBe(200);
+    expect(writeLocalVoice).toHaveBeenCalledWith("bm_george");
+    expect(configSetMock).not.toHaveBeenCalled();
+    const bad = await POST(post({ action: "voice", engine: "local", voice: "hal9000" }));
+    expect(bad.status).toBe(400);
+  });
+
+  it("writes the cloud voice into the provider OpenClaw speaks with", async () => {
+    readConfigMock.mockResolvedValue(config({
+      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" }, openai: { apiKey: "claw_84d065b", baseUrl: "https://clawbox.com/api/ai" } } } },
+    }));
+    const { POST } = await route();
+    const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
+    expect(res.status).toBe(200);
+    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
+  });
+
+  it("refuses a cloud voice for a box that has no cloud voice", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
+    expect(res.status).toBe(409);
+    expect(configSetMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the sample language beside the choice, and only one it offers", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "language", language: "de" }));
+    expect(res.status).toBe(200);
+    expect(writeStateMock).toHaveBeenCalledWith(expect.objectContaining({ language: "de" }));
+    expect((await POST(post({ action: "language", language: "tlh" }))).status).toBe(400);
+  });
+
+  it("reports the voices each engine can speak with", async () => {
+    const { GET } = await route();
+    const data = await (await GET()).json();
+    expect(data.voice).toEqual({ local: "af_heart", cloud: "alloy" });
+    expect(data.voices.local.map((v: { id: string }) => v.id)).toContain("bm_george");
+    expect(data.voices.cloud.map((v: { id: string }) => v.id)).toContain("nova");
+    expect(data.language).toBe("en");
   });
 });

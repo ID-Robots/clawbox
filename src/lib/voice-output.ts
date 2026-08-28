@@ -41,6 +41,16 @@
  */
 import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { buildCloudTtsWarning } from "@/lib/tts-cloud-warning";
+import {
+  CLOUD_VOICES,
+  DEFAULT_CLOUD_VOICE,
+  DEFAULT_LOCAL_VOICE,
+  DEFAULT_VOICE_LANGUAGE,
+  isCloudVoice,
+  isLocalVoice,
+  LOCAL_VOICES,
+  type VoiceOption,
+} from "@/lib/voice-catalog";
 
 /**
  * The slice of openclaw.json this module reads.
@@ -142,6 +152,12 @@ export interface VoiceOutputStatus {
    * uses, so the two surfaces cannot word the same fact differently.
    */
   warning: string | null;
+  /** The language the sample sentence comes in; the owner's pick. */
+  language: string;
+  /** The voice each engine speaks with right now, always one from `voices`. */
+  voice: Record<VoiceEngineId, string>;
+  /** What each engine can be asked to speak with. */
+  voices: Record<VoiceEngineId, readonly VoiceOption[]>;
 }
 
 /** Persisted in the setup app's own data dir; see voice-output-store.ts. */
@@ -150,12 +166,15 @@ export interface VoiceOutputState {
   /** The most recent real attempt through each engine, by engine id. */
   engineChecks: Partial<Record<VoiceEngineId, VoiceAttempt & { at: number }>>;
   lastCheck: VoiceCheck | null;
+  /** Sample-sentence language on the Voice tab; absent in files written before it existed. */
+  language?: string;
 }
 
 export const DEFAULT_VOICE_STATE: VoiceOutputState = {
   choice: "auto",
   engineChecks: {},
   lastCheck: null,
+  language: DEFAULT_VOICE_LANGUAGE,
 };
 
 export function normalizeProviderId(value: unknown): string | null {
@@ -185,6 +204,18 @@ interface TtsProviderEntry {
   command?: unknown;
   apiKey?: unknown;
   baseUrl?: unknown;
+  voice?: unknown;
+}
+
+/**
+ * The cloud voice openclaw.json names (`messages.tts.providers.<cloud>.voice`),
+ * or the engine's own default when nothing is written — which is what the
+ * gateway speaks with in that case, so the dropdown shows the same thing.
+ */
+export function cloudVoiceFrom(config: VoiceConfigView): string {
+  const providerId = cloudProviderIdFor(config);
+  const voice = providerId ? ttsProviders(config)[providerId]?.voice : undefined;
+  return isCloudVoice(voice) ? voice : DEFAULT_CLOUD_VOICE;
 }
 
 function ttsProviders(config: VoiceConfigView): Record<string, TtsProviderEntry> {
@@ -410,6 +441,8 @@ export function buildVoiceOutputStatus(
   config: VoiceConfigView,
   probe: LocalVoiceProbe,
   state: VoiceOutputState,
+  /** The voice the local script is saved to speak with; its default when unset. */
+  localVoice: string | null = null,
 ): VoiceOutputStatus {
   const engines = [localEngine(probe, state), cloudEngine(config, state)];
   const activeProviderId = configuredTtsProviderId(config);
@@ -426,6 +459,12 @@ export function buildVoiceOutputStatus(
     engines,
     lastCheck: state.lastCheck,
     warning: buildVoiceDisclosure(activeProviderId, engines),
+    language: state.language ?? DEFAULT_VOICE_LANGUAGE,
+    voice: {
+      local: isLocalVoice(localVoice) ? localVoice : DEFAULT_LOCAL_VOICE,
+      cloud: cloudVoiceFrom(config),
+    },
+    voices: { local: LOCAL_VOICES, cloud: CLOUD_VOICES },
   };
 }
 
