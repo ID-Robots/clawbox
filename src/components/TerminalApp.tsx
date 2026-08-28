@@ -19,7 +19,6 @@ import React, {
 } from "react";
 import dynamic from "next/dynamic";
 import "@xterm/xterm/css/xterm.css";
-import { WIN_GROUND } from "@/lib/window-chrome";
 
 export interface TerminalAppProps {
   /** Command typed into the shell once, per connection, after it first speaks. */
@@ -77,10 +76,10 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
     if (!termRef.current) {
       const term = new Terminal({
         theme: {
-          background: WIN_GROUND,
+          background: "#0d0d1a",
           foreground: "#e0e0e0",
           cursor: "#22c55e",
-          cursorAccent: WIN_GROUND,
+          cursorAccent: "#0d0d1a",
           selectionBackground: "rgba(34, 197, 94, 0.3)",
           black: "#1a1a2e",
           red: "#f87171",
@@ -356,7 +355,7 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
   return (
     <div
       className="flex flex-col h-full"
-      style={{ background: WIN_GROUND }}
+      style={{ background: "#0d0d1a" }}
       onKeyDown={handleKeyDown}
     >
       {/* Status bar — only shown when disconnected/error */}
@@ -364,7 +363,7 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
         <div
           className="flex items-center gap-2 px-3 py-1.5 border-b shrink-0"
           style={{
-            background: "var(--bg-deep)",
+            background: "#12122a",
             borderColor: "rgba(255,255,255,0.06)",
           }}
         >
@@ -397,7 +396,7 @@ function TerminalInner({ initialCommand }: TerminalAppProps) {
         className="flex-1 overflow-hidden outline-none"
         style={{
           padding: "6px 4px",
-          background: WIN_GROUND,
+          background: "#0d0d1a",
         }}
         onClick={handleContainerClick}
         onFocus={handleContainerClick}
@@ -413,7 +412,7 @@ const TerminalApp = dynamic(
     loading: () => (
       <div
         className="h-full flex flex-col items-center justify-center gap-3"
-        style={{ background: WIN_GROUND }}
+        style={{ background: "#0d0d1a" }}
       >
         <div
           className="w-8 h-8 rounded-full border-2 border-t-transparent animate-spin"
