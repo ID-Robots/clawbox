@@ -69,7 +69,7 @@ import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts } from "@/lib/coding-agent-artifacts";
+import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
 import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { projectPath, validateProjectId } from "@/lib/code-projects";
@@ -1830,6 +1830,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.completedAt = null;
       run.exitCode = null;
       run.error = null;
+      // The first attempt's closing words too: a 503 arrives as a result event
+      // and lands in the summary, and the report is filed from the summary
+      // once the run settles. Left in place, a second attempt that dies
+      // without a result would file the first one's error as its report.
+      run.summary = null;
       run.sessionId = null;
       run.numTurns = 0;
       run.subagentsTotal = 0;
@@ -1848,6 +1853,13 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       }
     }
   }
+
+  // The closing message becomes report.md beside the run's screenshots — for
+  // a run that did not finish too, when it said anything, because a partial
+  // account is what the owner reads before deciding whether to resume. After
+  // the retry decision above, so a restarted run never files its first
+  // attempt's words; never throwing, so the record settles regardless.
+  if (run.summary) writeRunReport(run.id, run.summary);
 
   pushProgress(run, `Finished: ${run.status}`);
   persist(true);

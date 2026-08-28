@@ -20,7 +20,13 @@ import { EventEmitter } from "events";
 import { saveEnv } from "@/tests/helpers/env";
 
 const spawnMock = vi.hoisted(() => vi.fn());
-vi.mock("child_process", () => ({ spawn: spawnMock }));
+// Only spawn is the subject here. The rest of child_process stays real,
+// because modules further down the import graph (openclaw-config's execFile)
+// need it at load time, and a mock that drops them fails before the test runs.
+vi.mock("child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("child_process")>()),
+  spawn: spawnMock,
+}));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 
 type Lib = typeof import("@/lib/coding-agent");

@@ -61,7 +61,7 @@ let posts: { url: string; body: unknown }[];
 function stubFetch(
   status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY; defaultDirectory?: string | null },
   runsArg: unknown[] = [],
-  opts: { resolveTo?: string; rejectDir?: string } = {},
+  opts: { resolveTo?: string; rejectDir?: string; artifacts?: Record<string, string> } = {},
 ) {
   let runs = runsArg;
   posts = [];
@@ -86,6 +86,13 @@ function stubFetch(
       return json({ cleared: before - runs.length });
     }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });
+    if (url.startsWith("/setup-api/coding-agent/artifacts")) {
+      // The route serves every non-image as text/plain, whatever it holds.
+      const file = new URL(url, "http://box").searchParams.get("file") ?? "";
+      const text = opts.artifacts?.[file];
+      if (text === undefined) return json({ error: "There is no such artifact.", kind: "not_found" }, 404);
+      return new Response(text, { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } });
+    }
     if (url === "/setup-api/coding-agent/enable" && init?.method === "POST") {
       const body = JSON.parse(String(init.body));
       posts.push({ url, body });
@@ -356,5 +363,103 @@ describe("the harness self-test", () => {
     render(<CodingAgentApp />);
     await openRuns();
     expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
+  });
+});
+
+describe("the summary and the report", () => {
+  const SHOW = translations.en["codingAgent.showDetails"];
+  /** What a run's closing message looks like — with what an agent must never
+   *  get to run on the owner's screen. */
+  const REPORT = [
+    "## What I built",
+    "",
+    "**index.html** with a toggle.",
+    "",
+    "| File | Change |",
+    "|---|---|",
+    "| index.html | added the toggle |",
+    "",
+    "See [the docs](https://example.com/docs).",
+    "",
+    "<img src=x onerror=alert(1)>",
+    "<script>alert(1)</script>",
+  ].join("\n");
+  const REPORT_ARTIFACT = { name: "report.md", bytes: REPORT.length, kind: "markdown" };
+  const TEXT_ARTIFACT = { name: "tests.txt", bytes: 12, kind: "text" };
+
+  async function openDetails() {
+    await openRuns();
+    fireEvent.click(await screen.findByRole("button", { name: SHOW }));
+  }
+
+  it("draws the summary as markdown, not as hashes", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: "## What I built\n\n**index.html** with a toggle." }]);
+    render(<CodingAgentApp />);
+    await openDetails();
+    const summary = await screen.findByTestId("coding-agent-summary");
+    expect(summary.querySelector("h2")?.textContent).toBe("What I built");
+    expect(summary.querySelector("strong")?.textContent).toBe("index.html");
+    expect(summary.textContent).not.toContain("##");
+    expect(summary.textContent).not.toContain("**");
+  });
+
+  it("keeps agent-written HTML as text, and sends links to a new tab", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: REPORT }]);
+    render(<CodingAgentApp />);
+    await openDetails();
+    const summary = await screen.findByTestId("coding-agent-summary");
+    expect(summary.querySelector("script")).toBeNull();
+    expect(summary.querySelector("[onerror]")).toBeNull();
+    expect(summary.querySelector("img")).toBeNull();
+    expect(summary.textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(summary.querySelector("table")).not.toBeNull();
+    const link = summary.querySelector("a");
+    expect(link).toHaveAttribute("href", "https://example.com/docs");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link?.getAttribute("rel")).toContain("noopener");
+  });
+
+  it("opens report.md rendered in a dialog, which Escape closes", async () => {
+    stubFetch(
+      { enabled: true, readiness: READY },
+      [{ ...RUN, artifacts: [REPORT_ARTIFACT, TEXT_ARTIFACT] }],
+      { artifacts: { "report.md": REPORT } },
+    );
+    render(<CodingAgentApp />);
+    await openDetails();
+    // A plain text file still opens the way it did: as a link to the route.
+    expect(screen.getByRole("link", { name: "tests.txt" })).toHaveAttribute("href", expect.stringContaining("file=tests.txt"));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    const opener = screen.getByRole("button", { name: "report.md" });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = await screen.findByRole("dialog", { name: "report.md" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    await waitFor(() => expect(dialog.querySelector("h2")?.textContent).toBe("What I built"));
+    expect(dialog.textContent).not.toContain("##");
+    expect(dialog.querySelector("script")).toBeNull();
+    expect(dialog.querySelector("[onerror]")).toBeNull();
+    expect(dialog.querySelector("table")).not.toBeNull();
+    // Focus moved in with the dialog.
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    // The same bytes as text remain a click away.
+    expect(screen.getByRole("link", { name: translations.en["codingAgent.reportOpenText"] }))
+      .toHaveAttribute("href", expect.stringContaining("file=report.md"));
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("says in words when the report cannot be loaded", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, artifacts: [REPORT_ARTIFACT] }]);
+    render(<CodingAgentApp />);
+    await openDetails();
+    fireEvent.click(screen.getByRole("button", { name: "report.md" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(t("codingAgent.reportFailed", { name: "report.md" }));
+    fireEvent.click(screen.getByRole("button", { name: translations.en["codingAgent.reportClose"] }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 });

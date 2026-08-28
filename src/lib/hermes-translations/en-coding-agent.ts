@@ -92,6 +92,12 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.denials": "{n} actions were not allowed",
   "codingAgent.deniedTitle": "Not allowed",
   "codingAgent.artifactsTitle": "Evidence from this run",
+  // The report dialog: a run's report.md (or any .md it wrote) drawn as
+  // markdown over the app. {name} is the artifact's file name.
+  "codingAgent.reportLoading": "Loading {name}…",
+  "codingAgent.reportFailed": "Could not load {name}.",
+  "codingAgent.reportOpenText": "Open as text",
+  "codingAgent.reportClose": "Close",
   "codingAgent.githubDeviceIntro": "Enter this code on github.com to connect your account:",
   "codingAgent.githubDeviceOpen": "Open github.com/login/device",
   "codingAgent.githubDeviceWaiting": "Waiting for the code to be entered…",

@@ -1027,3 +1027,109 @@ describe("naming the sub-agents that are out", () => {
     expect(done.subagentsActive).toBe(0);
   });
 });
+
+describe("the report", () => {
+  beforeEach(() => readyDevice());
+
+  const reportOf = (id: string) => path.join(root, "data", "coding-agent-artifacts", id, "report.md");
+
+  it("files the closing message as report.md beside the run's evidence", async () => {
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.status).toBe("completed");
+    expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe(`${done.summary}\n`);
+    // Renamed into place: nothing half-written is left beside it.
+    expect(fs.readdirSync(path.dirname(reportOf(run.id)))).toEqual(["report.md"]);
+    // The listing the app reads carries it as markdown, which is what opens
+    // it rendered rather than as plain text.
+    const artifactsLib = await import("@/lib/coding-agent-artifacts");
+    expect(artifactsLib.listArtifacts(run.id)).toMatchObject([{ name: "report.md", kind: "markdown" }]);
+  });
+
+  it("files the closing message of a run that did not finish, too", async () => {
+    // A partial account is what the owner reads before deciding whether to
+    // resume, so a failure with words still gets its report.
+    const failed = JSON.stringify({
+      type: "result", subtype: "success", is_error: true, num_turns: 1,
+      result: "## Blocked\nThe build needs node 22.",
+    });
+    installFakeWrapper([`echo '${INIT}'`, `printf '%s\\n' '${failed}'`, "exit 1"].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.status).toBe("failed");
+    expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe("## Blocked\nThe build needs node 22.\n");
+  });
+
+  it("never files the first attempt's words when the retry dies without any", async () => {
+    // A 503 arrives as a RESULT event, so its text lands in the summary
+    // before the retry decision. The second attempt exits with no result at
+    // all; the report must be empty, not the first attempt's error text
+    // filed as though it were this run's account of itself.
+    const counter = path.join(home, "attempts.txt");
+    const first = JSON.stringify({
+      type: "result", subtype: "success", is_error: true, num_turns: 1,
+      result: "API Error: 503 Service Unavailable",
+    });
+    installFakeWrapper([
+      `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "${counter}"`,
+      `echo '${INIT}'`,
+      'if [ "$n" = "1" ]; then',
+      `  printf '%s\\n' '${first}'`,
+      "  exit 0",
+      "fi",
+      "exit 1",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.retries).toBe(1);
+    expect(done.status).toBe("failed");
+    expect(done.summary).toBeNull();
+    expect(done.error).not.toContain("503");
+    expect(fs.existsSync(reportOf(run.id))).toBe(false);
+  });
+
+  it("leaves a report the run wrote itself alone", async () => {
+    // The brief invites a run to write its own report.md; that file knows
+    // more about the work than the closing message does, so it wins.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `printf '# Mine\\n' > "$CLAWBOX_RUN_ARTIFACTS_DIR/report.md"`,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+    const done = await finished(run.id);
+    expect(done.status).toBe("completed");
+    expect(done.summary).toContain("Changed index.html");
+    expect(fs.readFileSync(reportOf(run.id), "utf-8")).toBe("# Mine\n");
+  });
+
+  it("keeps the run's outcome when the report cannot be written", async () => {
+    // The run replaces its own evidence folder with a plain file, so the
+    // write fails in a way no permission bit could rescue — and the record
+    // must still say what the run did.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `rmdir "$CLAWBOX_RUN_ARTIFACTS_DIR" && touch "$CLAWBOX_RUN_ARTIFACTS_DIR"`,
+      `echo '${RESULT}'`,
+      "exit 0",
+    ].join("\n"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      makeProject("site");
+      const run = await lib.startRun({ task: "Build it", projectId: "site", source: "agent" });
+      const done = await finished(run.id);
+      expect(done.status).toBe("completed");
+      expect(done.summary).toContain("Changed index.html");
+      expect(done.error).toBeNull();
+      expect(fs.statSync(path.dirname(reportOf(run.id))).isFile()).toBe(true);
+      expect(warn.mock.calls.filter((c) => String(c[0]).includes("report.md"))).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
