@@ -20,6 +20,7 @@
     "test:components": "vitest run --config vitest.config.ts --project components",
     "test:watch": "vitest --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
+    "test:coverage:ci": "vitest run --config vitest.config.ts --coverage --coverage.reporter=json-summary",
     "test:e2e": "playwright test",
     "test:e2e:coverage": "rm -f coverage/e2e-summary.json coverage/e2e-bundles.json && playwright test && node scripts/e2e-coverage-report.mjs",
     "test:e2e:ui": "playwright test --ui",

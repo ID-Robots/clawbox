@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import SetupWizard from "@/components/SetupWizard";
 import { resetHarnessCache } from "@/lib/client-harness";
@@ -68,6 +68,24 @@ vi.mock("@/components/StatusMessage", () => ({
   default: ({ message }: { message: string }) => <div>{message}</div>,
 }));
 
+// The completion overlay runs on real time: 0.9 s before the first phase, a
+// readiness poll of SETUP_COMPLETION_MAX_HEALTH_CHECKS (6) attempts 2 s apart,
+// and 2 s in the finished phase before onComplete. A device whose agent never
+// reports ready therefore takes ~15 s to finish — which two cases below wait
+// out for real, and a third waits ~3 s. Fake timers (advancing on their own so
+// RTL's waitFor and React's scheduler keep working, as elsewhere in this
+// suite) jump the clock instead; the phases, the attempt budget and the
+// interval are the wizard's own and are not changed here.
+const FIRST_PHASE_MS = 900;
+const HEALTH_POLL_BUDGET_MS = 6 * 2_000;
+const FINISHED_PHASE_MS = 2_000;
+
+async function advance(ms: number): Promise<void> {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms);
+  });
+}
+
 function jsonResponse(data: unknown, ok = true): Response {
   return {
     ok,
@@ -83,7 +101,7 @@ function called(fetchMock: ReturnType<typeof vi.fn>, path: string): boolean {
 
 describe("SetupWizard", () => {
   beforeEach(() => {
-    vi.useRealTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     // The edition is cached for the lifetime of a document; without this the
     // first test's answer would decide every later test's edition.
     resetHarnessCache();
@@ -201,17 +219,24 @@ describe("SetupWizard", () => {
 
     fireEvent.click(await screen.findByText("telegram-next"));
 
+    // The whole attempt budget has to run out first — an offline gateway must
+    // not end setup early, and must not stop it either.
+    await advance(FIRST_PHASE_MS + HEALTH_POLL_BUDGET_MS / 2);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    await advance(HEALTH_POLL_BUDGET_MS / 2 + FINISHED_PHASE_MS);
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledTimes(1);
-    }, { timeout: 30_000 });
+    });
 
     // An OpenClaw box still waits on its gateway, and never on the Hermes side.
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(true);
     expect(called(fetchMock, "/setup-api/hermes/models")).toBe(false);
-  }, 35_000);
+  });
 
   it("waits on the Hermes agent, not the OpenClaw gateway, on a hermes device", async () => {
     const onComplete = vi.fn();
+    let modelsCalls = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString();
       if (url === "/setup-api/setup/status") {
@@ -237,8 +262,16 @@ describe("SetupWizard", () => {
       }
       if (url === "/setup-api/hermes/models") {
         // `stale: false` is the models route's "the live Hermes dashboard
-        // answered" signal.
-        return jsonResponse({ stale: false, source: "dashboard", models: [] });
+        // answered" signal. It comes on the SECOND attempt: the copy under
+        // test is on screen only while the wizard is polling, and a first
+        // answer that is already ready ends the poll in the same tick the
+        // edition is resolved — there is nothing in between to look at.
+        modelsCalls += 1;
+        return jsonResponse(
+          modelsCalls === 1
+            ? { stale: true, source: "cold-start", models: [] }
+            : { stale: false, source: "dashboard", models: [] },
+        );
       }
 
       return jsonResponse({});
@@ -250,6 +283,9 @@ describe("SetupWizard", () => {
     fireEvent.click(await screen.findByText("telegram-next"));
 
     expect(await screen.findByTestId("setup-completion-overlay")).toBeInTheDocument();
+    // The edition is resolved once the first phase has passed, and the first
+    // poll has been answered "not yet".
+    await advance(FIRST_PHASE_MS);
     // The copy names the agent this device actually runs...
     await waitFor(() => {
       expect(screen.getByText("wizard.completionHermesTitle")).toBeInTheDocument();
@@ -262,13 +298,16 @@ describe("SetupWizard", () => {
     expect(screen.queryByText("telegram.waitingGateway")).not.toBeInTheDocument();
     expect(screen.queryByText("telegram.pleaseWait")).not.toBeInTheDocument();
 
+    // One poll interval to the answer that is ready, then the finished phase.
+    await advance(2_000 + FINISHED_PHASE_MS);
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledTimes(1);
-    }, { timeout: 30_000 });
+    });
 
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
-    expect(called(fetchMock, "/setup-api/hermes/models")).toBe(true);
-  }, 35_000);
+    // Asked, told "not yet", asked again — and not a third time once ready.
+    expect(modelsCalls).toBe(2);
+  });
 
   it("still finishes on a hermes device whose agent never reports ready", async () => {
     const onComplete = vi.fn();
@@ -308,14 +347,18 @@ describe("SetupWizard", () => {
 
     fireEvent.click(await screen.findByText("telegram-next"));
 
+    await advance(FIRST_PHASE_MS + HEALTH_POLL_BUDGET_MS / 2);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    await advance(HEALTH_POLL_BUDGET_MS / 2 + FINISHED_PHASE_MS);
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalledTimes(1);
-    }, { timeout: 30_000 });
+    });
 
     // Both halves matter. The negative alone would also hold if the wizard
     // polled NOTHING — a different bug with the same symptom — so assert that
     // it did reach for the Hermes readiness signal and simply never got it.
     expect(called(fetchMock, "/setup-api/gateway/health")).toBe(false);
     expect(called(fetchMock, "/setup-api/hermes/models")).toBe(true);
-  }, 35_000);
+  });
 });

@@ -2,6 +2,7 @@ import os from "os";
 import path from "path";
 import { defineConfig } from "vitest/config";
 import tsconfigPaths from "vite-tsconfig-paths";
+import SlowFirstSequencer from "./src/tests/helpers/slow-first-sequencer";
 
 export default defineConfig({
   plugins: [tsconfigPaths()],
@@ -9,6 +10,11 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     mockReset: true,
+    // Start the files known to take longest first (see the sequencer for the
+    // measurements). Without a timing cache — every CI run — vitest orders by
+    // file size, and the 50 s sudoers file and the 28 s tsc gate then started
+    // late enough to be the tail of a four-worker run.
+    sequence: { sequencer: SlowFirstSequencer },
     // Keep the suite HERMETIC. src/lib/edition-source.ts reads the device's
     // real /etc/clawbox/edition.env to resolve the SKU, so running the tests on
     // an actual ClawBox made them assert against that box's edition instead of
