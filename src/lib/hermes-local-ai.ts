@@ -5,6 +5,7 @@ import { invalidateModelOptions } from "@/lib/hermes-model-options";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { getDefaultLlamaCppModel } from "@/lib/llamacpp";
 import { getLocalAiOpenAiBaseUrl, getLocalAiProxyRootUrl } from "@/lib/local-ai-runtime";
+import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 
 /**
  * Register the on-device model with Hermes.
@@ -69,8 +70,14 @@ export async function applyLocalAiToHermes(options: {
   try {
     await patchHermesConfig({ set });
   } catch (err) {
+    // Guarded here as well as at the source, because this catch is `catch
+    // (err)` — it re-publishes the message of ANY throw from the write path,
+    // not only the `HermesConfigWriteError` that path cleans. A wrapper whose
+    // safety depends on every future thrower having remembered is the shape
+    // this whole round is about.
     throw new HermesLocalApplyError(
-      err instanceof Error ? err.message : "Failed to register the local model with Hermes",
+      sanitizeErrorMessage(err instanceof Error ? err.message : "")
+        || "Failed to register the local model with Hermes",
     );
   }
 

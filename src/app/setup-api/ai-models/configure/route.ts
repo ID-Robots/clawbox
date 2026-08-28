@@ -1650,7 +1650,17 @@ export async function POST(request: Request) {
           || err instanceof HermesLocalApplyError
           || err instanceof ClawaiApplyError
         ) {
-          // Author-controlled, non-credential message — safe to echo.
+          // Safe to echo because each of these classes now CLEANS its message
+          // before constructing itself — `safeHermesFailureMessage` for a
+          // `hermes` stream, `sanitizeErrorMessage` for an fs error — and falls
+          // back to a fixed sentence when nothing survives.
+          //
+          // The comment here used to read "Author-controlled, non-credential
+          // message — safe to echo", and it was false for all three: every one
+          // of them was built from a raw `hermes` stderr or a raw Node fs
+          // error, and this line published it to the save banner. The claim is
+          // now an invariant the throw sites keep rather than an assumption
+          // this one makes.
           return NextResponse.json({ error: err.message }, { status: 502 });
         }
         throw err; // unexpected — fall to the outer catch, which classifies it

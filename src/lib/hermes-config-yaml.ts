@@ -40,7 +40,9 @@ import fs from "fs/promises";
 import path from "path";
 
 import { runHermesCli } from "@/lib/hermes-cli";
+import { safeHermesFailureMessage } from "@/lib/hermes-cli-message";
 import { invalidateHermesConfigCache } from "@/lib/hermes-config-cache";
+import { sanitizeErrorMessage } from "@/lib/safe-error-text";
 import { hermesHome } from "@/lib/hermes-env";
 import { getYamlPath, setYamlPath, unsetYamlPath, YamlEditUnsupported } from "@/lib/yaml-block-edit";
 
@@ -132,7 +134,16 @@ async function applyViaCli(patch: HermesConfigPatch): Promise<void> {
   for (const [key, value] of Object.entries(patch.set ?? {})) {
     const r = await runHermesCli(["config", "set", key, value], { timeoutMs: 15_000 });
     if (r.code !== 0) {
-      throw new HermesConfigWriteError(r.stderr.trim() || `Failed to set ${key} in the Hermes config`);
+      // `HermesConfigWriteError` is re-wrapped by hermes-local-ai as
+      // `HermesLocalApplyError` and returned to the browser as `{ error }`, so
+      // this string is a save banner. A raw `hermes config set` stderr is
+      // Python: a traceback here names /home/clawbox/.hermes on the customer's
+      // screen. Same parser as every other `hermes` surface; raw goes to the
+      // journal.
+      console.error("[hermes-config-yaml] config set exit", r.code, r.stderr);
+      throw new HermesConfigWriteError(
+        safeHermesFailureMessage(r.stdout, r.stderr) || `Failed to set ${key} in the Hermes config`,
+      );
     }
   }
   for (const key of patch.unset ?? []) {
@@ -165,8 +176,21 @@ export async function patchHermesConfig(patch: HermesConfigPatch): Promise<Herme
       if (!(err instanceof YamlEditUnsupported)) {
         // A read or write error is not something the CLI would do better at —
         // it writes the same file, as the same user.
+        //
+        // And it is the COMMON leak on this path, not the rare one: the CLI
+        // fallback below runs only for a file the merge cannot parse, while
+        // every EACCES on config.yaml lands here, and Node writes the path into
+        // the message it hands over —
+        //
+        //   EACCES: permission denied, open '/home/clawbox/.hermes/config.yaml'
+        //
+        // — which then became the save banner verbatim. `sanitizeErrorMessage`
+        // is the repo's whitelist-by-shape; null from it means "say something
+        // generic", never "say nothing", so the fixed sentence stands in.
+        console.error("[hermes-config-yaml] merge write failed", err);
         throw new HermesConfigWriteError(
-          err instanceof Error ? err.message : "Failed to update the Hermes config",
+          sanitizeErrorMessage(err instanceof Error ? err.message : "")
+            || "Failed to update the Hermes config",
         );
       }
       fallbackReason = err.message;
