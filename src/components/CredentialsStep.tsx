@@ -349,6 +349,13 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       const hostnameChanged =
         currentHost.endsWith(".local") && currentHost !== newHost && isAllowedRedirect;
 
+      // The handoff wins over the AP warning, and only in one combination: the
+      // device was ALSO renamed, so this origin is about to stop answering.
+      // (`apRestarted` and `apFailed` are mutually exclusive — a toggle that
+      // threw restarted nothing.) Holding a message on a page the box is no
+      // longer reachable at would strand the customer, so the reconnect goes
+      // first; the hotspot warning is still recoverable from Settings, where
+      // the same verdict is read.
       if (apRestarted || hostnameChanged) {
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         setHandoff({
