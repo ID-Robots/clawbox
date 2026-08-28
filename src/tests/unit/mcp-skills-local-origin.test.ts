@@ -14,9 +14,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  *
  * `hermes skills uninstall` works off the HUB LOCK, so only `hub` is removable.
  * The Skills page has always said so — `HermesSkillsStore.tsx` offers Remove
- * only for `origin === 'hub'` and badges a `local` skill as unremovable — but
+ * only for a hub skill and badges a `local` one as unremovable — but
  * `mcp/tools/skills.ts` decided removability with `origin !== "builtin"`, which
- * puts `local` on the removable side.
+ * puts `local` on the removable side. There is now ONE exported rule,
+ * `isRemovableOrigin()`, and both surfaces read it.
  *
  * So for one device state the agent and the customer's own Skills page told two
  * different stories:
@@ -70,6 +71,7 @@ vi.mock("../../../mcp/lib/api", async () => {
   };
 });
 
+import { isRemovableOrigin } from "@/lib/hermes-skills";
 import { ApiError } from "../../../mcp/lib/errors";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { captureRegistrar } from "../helpers/mcp-registrar";
@@ -349,28 +351,33 @@ describe("anti-regression — the refusals #513 shipped", () => {
 // ── Anti-drift: one device state, one story ─────────────────────────────────
 
 describe("the agent and the Skills page must answer one device state the same way", () => {
-  /**
-   * The defect was a SECOND definition of "removable" that had drifted from the
-   * store's. This is the check that stops a third appearing: the removability
-   * test is spelled against `hub`, in one named predicate, and `!== "builtin"`
-   * survives only inside the wider isStoreSkill() the post-condition needs.
-   */
-  it("no removability test in mcp/tools/skills.ts is written as `!== builtin`", () => {
-    const src = fs.readFileSync(path.join(process.cwd(), "mcp/tools/skills.ts"), "utf-8");
-    expect(src, "isRemovable() is gone or was renamed").toMatch(/function isRemovable\s*\(/);
-    expect(src).toMatch(/origin\s*===\s*"hub"/);
-    const notBuiltin = src.match(/origin\s*!==\s*"builtin"/g) ?? [];
-    expect(notBuiltin.length, "`origin !== \"builtin\"` leaked back out of isStoreSkill()").toBe(1);
+  it("the shared rule removes hub skills and nothing else", () => {
+    expect(isRemovableOrigin("hub")).toBe(true);
+    expect(isRemovableOrigin("builtin")).toBe(false);
+    expect(isRemovableOrigin("local")).toBe(false);
+    // A row from an older build that carries no origin at all.
+    expect(isRemovableOrigin(undefined)).toBe(false);
+    expect(isRemovableOrigin("")).toBe(false);
   });
 
-  it("agrees with HermesSkillsStore.tsx on which origin can be removed", () => {
-    const store = fs.readFileSync(
-      path.join(process.cwd(), "src/components/HermesSkillsStore.tsx"),
-      "utf-8",
-    );
-    // The store's rule, unchanged by this fix and the reference the MCP side is
-    // now aligned to.
-    expect(store).toMatch(/match\.origin\s*!==\s*'hub'/);
-    expect(store).toMatch(/skill\.origin\s*!==\s*'hub'/);
+  /**
+   * The defect was a SECOND definition of "removable", in the MCP package, that
+   * had drifted from the Skills page's. There is now one exported rule and both
+   * read it, so the drift is not possible rather than merely absent — and these
+   * two checks are what keep a third definition from being written.
+   */
+  it("both surfaces import the rule rather than re-deriving it", () => {
+    for (const file of ["mcp/tools/skills.ts", "src/components/HermesSkillsStore.tsx"]) {
+      const src = fs.readFileSync(path.join(process.cwd(), file), "utf-8");
+      expect(src, `${file} does not use the shared rule`).toContain("isRemovableOrigin");
+    }
+  });
+
+  it("keeps `!== builtin` to the one place that is not a removability test", () => {
+    const src = fs.readFileSync(path.join(process.cwd(), "mcp/tools/skills.ts"), "utf-8");
+    const notBuiltin = src.match(/origin\s*!==\s*"builtin"/g) ?? [];
+    // isStoreSkill() — the POST-condition's wider test. Anywhere else it is the
+    // bug this file exists to close.
+    expect(notBuiltin.length, "`origin !== \"builtin\"` leaked out of isStoreSkill()").toBe(1);
   });
 });

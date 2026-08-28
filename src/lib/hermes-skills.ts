@@ -39,6 +39,27 @@ export interface HermesSkill {
 
 export type SkillOrigin = 'builtin' | 'hub' | 'local';
 
+/**
+ * Can `hermes skills uninstall` remove a skill with this origin?
+ *
+ * `builtin` shipped with the device, `hub` came from the store, and `local` is a
+ * skill directory that is NEITHER — written by the agent, hand-copied, or left
+ * behind by a failed install rollback or a partial removal. The CLI works off
+ * the hub LOCK, so only `hub` can be removed; the other two need someone to
+ * delete the folder on the device.
+ *
+ * This is one exported rule rather than a comparison repeated per call site
+ * because BOTH surfaces that answer the question read it — the Skills page
+ * (src/components/HermesSkillsStore.tsx) and the agent's skill_list /
+ * skill_uninstall (mcp/tools/skills.ts) — and one device state that gets two
+ * answers is a bug the customer sees as their own page and their assistant
+ * disagreeing. That is exactly what happened: the MCP side had spelled the rule
+ * "not builtin", which put `local` on the removable side.
+ */
+export function isRemovableOrigin(origin?: string): boolean {
+  return origin === 'hub';
+}
+
 /** Card payload for the Installed grid — everything comes from disk. */
 export interface InstalledHermesSkill {
   /** Skill name — the lock.json key and the `uninstall` positional argument. */

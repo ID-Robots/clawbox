@@ -14,6 +14,7 @@ import {
   SORT_OPTIONS,
   checkInstallIdentifier,
   isBrowsableSource,
+  isRemovableOrigin,
   isValidQuery,
   isValidSkillName,
 } from "../../src/lib/hermes-skills";
@@ -237,37 +238,16 @@ async function installedSkills(): Promise<InstalledSkill[] | null> {
 }
 
 /**
- * Can `hermes skills uninstall` remove this row?
- *
- * There are THREE origins, not two (src/lib/hermes-skills.ts): `builtin` is a
- * name in .bundled_manifest, `hub` is a key in the hub lock, and `local` is a
- * skill directory that is NEITHER — left by a failed install rollback or a
- * partial removal, hand-copied, written by the agent itself, or every hub skill
- * at once on a box whose lock file got truncated (readHubLock() answers {} for
- * an unreadable lock).
- *
- * The CLI works off the LOCK, so only `hub` can be removed. Deciding this as
- * "not builtin" put `local` on the removable side, which is what let skill_list
- * mark such a row "from the store" and skill_uninstall wave it through to a
- * route that can only answer 404. The Skills page has always used this rule —
- * HermesSkillsStore.tsx offers Remove for `origin === 'hub'` and badges a local
- * skill as unremovable — and the agent and the customer's own page have to give
- * one answer for one device state.
- */
-function isRemovable(s: InstalledSkill): boolean {
-  return s.origin === "hub";
-}
-
-/**
  * Is this row anything OTHER than a skill that shipped with the device? A row
  * with no origin at all is treated as built in, exactly as the uninstall
  * pre-condition does.
  *
- * Deliberately wider than isRemovable(): this is the POST-condition's test, and
- * the half-removed state #517 and TASK-547 both name — the CLI drops the lock
- * entry and cannot delete the directory — brings the row back as `local`. That
- * is a failed uninstall, and narrowing this to `hub` would report it as a
- * success. Only un-shadowing a builtin counts as the name legitimately staying.
+ * Deliberately wider than isRemovableOrigin(), which is what decides whether a
+ * skill can be uninstalled: this is the POST-condition's test, and the
+ * half-removed state #517 and TASK-547 both name — the CLI drops the lock entry
+ * and cannot delete the directory — brings the row back as `local`, which is a
+ * FAILED uninstall. Narrowing this to `hub` would report it as a success. Only
+ * un-shadowing a builtin counts as the name legitimately staying.
  */
 function isStoreSkill(s: InstalledSkill): boolean {
   return !!s.origin && s.origin !== "builtin";
@@ -547,7 +527,7 @@ export function registerSkillTools(reg: Registrar): void {
         // so it has to be the removable rule and nothing wider. A `local` row is
         // not built in either, and saying nothing about it would leave the only
         // unexplained row on the list, so it gets its own mark.
-        if (isRemovable(s)) marks.push("from the store");
+        if (isRemovableOrigin(s.origin)) marks.push("from the store");
         else if (s.origin === "local") marks.push("made on this device, cannot be removed from here");
         if (s.incompatible) marks.push("cannot run here");
         if (s.enabled === false) marks.push("disabled");
@@ -743,11 +723,11 @@ export function registerSkillTools(reg: Registrar): void {
         // The hub copy, not the builtin it may be shadowing: when both are
         // listed under one name, the hub one is the only removable row and its
         // identifier is what the post-condition needs.
-        const entry = before.find((sk) => sk.name === name && isRemovable(sk)) ?? before.find((sk) => sk.name === name);
+        const entry = before.find((sk) => sk.name === name && isRemovableOrigin(sk.origin)) ?? before.find((sk) => sk.name === name);
         if (!entry) {
           throw new ToolError("NOT_FOUND", notInstalledMessage(name), NOT_INSTALLED_NEXT);
         }
-        if (!isRemovable(entry)) {
+        if (!isRemovableOrigin(entry.origin)) {
           // Three origins, three answers. Calling a `local` skill built in would
           // be wrong (it did not ship with the device) and letting it through to
           // the route would earn a 404 that reads as "there is no such skill" —
