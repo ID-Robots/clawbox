@@ -134,3 +134,22 @@ describe("an inconclusive GitHub answer is asked again", () => {
     expect(calls.count).toBe(afterMount);
   });
 });
+
+describe("a login made somewhere else", () => {
+  it("shows up without a reload: the card keeps asking while merely not connected", async () => {
+    // Not installed / not runnable are settled and stop the timer; plain
+    // "not connected" is not: the owner may be finishing `gh auth login` in a
+    // terminal right now, and a card that never asks again reads as "failed".
+    let answer: Record<string, unknown> = { installed: true, connected: false, login: null, loginCommand: LOGIN_COMMAND };
+    const calls = stubFetch(() => answer);
+    render(<CodingAgentApp />);
+    await settle();
+    const afterMount = calls.count;
+
+    answer = CONNECTED;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+
+    expect(calls.count).toBeGreaterThan(afterMount);
+    expect(screen.queryByText(/yalexx/)).not.toBeNull();
+  });
+});

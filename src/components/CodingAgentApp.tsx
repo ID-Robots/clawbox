@@ -305,10 +305,15 @@ export default function CodingAgentApp() {
   // "GitHub unreachable" for as long as the panel stayed mounted, with no
   // refresh affordance, long after the uplink was back.
   //
-  // Only the inconclusive reason re-probes. "not_installed" and "not_runnable"
-  // are properties of the box, not of this moment, and polling them would be a
-  // timer with nothing to learn.
-  const githubInconclusive = github?.reason === "unreachable";
+  // Two states re-probe. "unreachable" is inconclusive by nature. "Not
+  // connected" with no settled reason is the other one that changes behind
+  // the card's back: the owner logs in from a terminal (`gh auth login`) or
+  // from a phone, and the card kept saying "not connected" until a reload —
+  // which reads as the login having failed. "not_installed" and
+  // "not_runnable" are properties of the box, not of this moment, and
+  // polling them would be a timer with nothing to learn.
+  const githubInconclusive = github?.reason === "unreachable"
+    || (github !== null && github.installed && !github.connected && !github.reason);
   useEffect(() => {
     if (!githubInconclusive) return;
     const id = setInterval(() => { void loadGithub(); }, GITHUB_REPROBE_MS);
