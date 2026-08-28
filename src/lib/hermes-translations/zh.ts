@@ -498,6 +498,7 @@ export const zh: Record<string, string> = {
   "codingAgent.runMeta": "{turns} 轮 · {files} 个文件已更改 · {duration}",
   "codingAgent.denials": "{n} 项操作未被允许",
   "codingAgent.deniedTitle": "不被允许",
+  "codingAgent.artifactsTitle": "本次运行的证据",
   "codingAgent.deniedHelp": "编码助手只能在自己的文件夹内运行固定的一组命令。这是安全限制在起作用，并非故障——运行通常会找到其他办法。",
   "codingAgent.stop": "停止",
   "codingAgent.openLive": "实时查看",

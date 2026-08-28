@@ -11,7 +11,7 @@ import {
   type ChatMessage as BaseChatMessage,
 } from '@/lib/chat-history-cache'
 import { useChatToolCalls, ToolCallPills, ToolCallSummaryChips, isImageGenerationTool } from '@/lib/chat-tool-events'
-import { useCodingAgentActivity, isCodingAgentTool } from '@/lib/use-coding-agent-activity'
+import { useCodingAgentActivity, isCodingAgentTool, type CodingAgentActivity } from '@/lib/use-coding-agent-activity'
 import { pickSpinnerVerb } from '@/lib/spinner-verbs'
 import CodingAgentActivityPill from '@/components/CodingAgentActivityPill'
 import { ReasoningDisclosure } from '@/lib/chat-reasoning-disclosure'
@@ -553,6 +553,29 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // driven by the device's run record rather than the tool pills. Only probed
   // while the chat is open, and only polled while a run is actually in flight.
   const { runs: codingRuns, nudge: nudgeCodingAgent } = useCodingAgentActivity(isOpen)
+  // Partitioned ONCE so "every run renders on exactly one surface" is
+  // structural: in flight → the pinned bar, settled → the transcript.
+  const liveCodingRuns = codingRuns.filter(r => r.status === 'running')
+  const settledCodingRuns = codingRuns.filter(r => r.status !== 'running')
+  // One card builder for both surfaces.
+  const codingAgentCard = (run: CodingAgentActivity) => (
+    <CodingAgentActivityPill
+      key={run.id}
+      run={run}
+      labels={{
+        running: t("codingAgent.chatWorking"),
+        runningOwner: t("codingAgent.chatWorkingOwner"),
+        completed: t("codingAgent.chatFinished"),
+        failed: t("codingAgent.chatFailed"),
+        stopped: t("codingAgent.chatStopped"),
+        // A template, not a sentence: the card fills in the count.
+        agents: t("codingAgent.chatAgents"),
+        tokensWord: t("codingAgent.tokensWord"),
+      }}
+      openLabel={t("codingAgent.chatOpenApp")}
+      onOpen={() => dispatchOpenApp("coding")}
+    />
+  )
   // The questions the agent is currently parked on, newest last.
   //
   // DELIBERATELY NOT PERSISTED. Every other thing a turn produces — the reply,
@@ -3836,6 +3859,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </button>
       </div>
 
+      {/* A run in flight is PINNED above the transcript — the owner sees what
+          the coding agent is working on without scrolling, wherever the
+          conversation has moved on to. The card returns to the transcript
+          below once the run settles. */}
+      {liveCodingRuns.length > 0 && (
+        <div
+          data-testid="coding-agent-pinned"
+          style={{
+            flexShrink: 0,
+            padding: '8px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 6,
+            borderBottom: '1px solid rgba(255,255,255,0.07)',
+            background: 'rgba(249,115,22,0.05)',
+          }}
+        >
+          {liveCodingRuns.map(codingAgentCard)}
+        </div>
+      )}
+
       {/* Messages area */}
       <div style={{
         flex: 1, overflowY: 'auto', padding: '12px 14px',
@@ -4106,25 +4150,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             fed by the device's run record. They stay after the run ends and
             report the outcome — a badge that vanished with the run was gone
             before the owner had read the message above it, since runs here
-            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts. */}
-        {codingRuns.map(run => (
-          <CodingAgentActivityPill
-            key={run.id}
-            run={run}
-            labels={{
-              running: t("codingAgent.chatWorking"),
-              runningOwner: t("codingAgent.chatWorkingOwner"),
-              completed: t("codingAgent.chatFinished"),
-              failed: t("codingAgent.chatFailed"),
-              stopped: t("codingAgent.chatStopped"),
-              // A template, not a sentence: the card fills in the count.
-              agents: t("codingAgent.chatAgents"),
-              tokensWord: t("codingAgent.tokensWord"),
-            }}
-            openLabel={t("codingAgent.chatOpenApp")}
-            onOpen={() => dispatchOpenApp("coding")}
-          />
-        ))}
+            take 9-15 seconds. See src/lib/use-coding-agent-activity.ts.
+            Runs still in flight render in the PINNED bar above the transcript
+            instead, and drop back in here when they settle. */}
+        {settledCodingRuns.map(codingAgentCard)}
 
         {/* Attached to the IN-FLIGHT turn, next to the pills, and never to a
             message: see the note on `clarifies` above for why this is the one

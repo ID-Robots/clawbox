@@ -163,6 +163,25 @@ export default function CodingAgentActivityPill(
           </span>
         ))}
       </div>
+      {live && run.lastProgress ? (
+        // What the run is doing RIGHT NOW, straight off the record's newest
+        // progress line. Only while live: a finished card reports the outcome,
+        // not its last step. aria-hidden — it changes every few seconds, and a
+        // live region would narrate every step.
+        <div
+          data-testid="coding-agent-activity-progress"
+          aria-hidden="true"
+          style={{
+            color: "rgba(255,255,255,0.45)",
+            fontSize: 11,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {firstLine(run.lastProgress, 90)}
+        </div>
+      ) : null}
       {subTotal > 0 ? (
         // One dot per sub-agent, capped so a fan-out cannot flood the card;
         // filled + pulsing while that helper is still out, hollow once it is

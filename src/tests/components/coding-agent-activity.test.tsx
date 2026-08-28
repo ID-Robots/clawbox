@@ -198,6 +198,17 @@ describe("the badge", () => {
     expect(el.textContent).not.toContain(LABELS.running);
   });
 
+  it("shows the newest progress line while the run is live", () => {
+    const el = pill({ lastProgress: "$ npm test" });
+    expect(el.textContent).toContain("$ npm test");
+    expect(screen.getByTestId("coding-agent-activity-progress")).toBeInTheDocument();
+  });
+
+  it("drops the progress line once the run has settled — the card reports the outcome, not its last step", () => {
+    const el = pill({ status: "completed", completedAt: NOW, lastProgress: "$ npm test" });
+    expect(el.textContent).not.toContain("$ npm test");
+  });
+
   it("offers a way into the app only when there is somewhere to go", () => {
     const onOpen = vi.fn();
     const run = {

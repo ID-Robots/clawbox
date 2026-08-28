@@ -76,6 +76,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.runMeta": "{turns} turns · {files} files changed · {duration}",
   "codingAgent.denials": "{n} actions were not allowed",
   "codingAgent.deniedTitle": "Not allowed",
+  "codingAgent.artifactsTitle": "Evidence from this run",
   "codingAgent.deniedHelp":
     "The coding agent may only run a fixed set of commands inside its own folder. This is the safety limit working, not a fault — the run usually finds another way.",
   "codingAgent.stop": "Stop",

@@ -60,6 +60,8 @@ export interface CodingAgentActivity {
   subagentsByType: Record<string, number>;
   tokensUsed: number;
   filesTouched: number;
+  /** The run's newest progress line — "what it is doing right now". */
+  lastProgress: string | null;
 }
 
 interface RunPayload {
@@ -75,6 +77,7 @@ interface RunPayload {
   subagentsByType?: Record<string, number>;
   tokensUsed?: number;
   filesTouched?: string[];
+  progress?: string[];
 }
 
 /** How often to re-ask while a run is actually in flight. */
@@ -109,6 +112,9 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     subagentsByType: r.subagentsByType && typeof r.subagentsByType === "object" ? r.subagentsByType : {},
     tokensUsed: typeof r.tokensUsed === "number" ? r.tokensUsed : 0,
     filesTouched: Array.isArray(r.filesTouched) ? r.filesTouched.length : 0,
+    lastProgress: Array.isArray(r.progress) && r.progress.length > 0
+      ? String(r.progress[r.progress.length - 1])
+      : null,
   };
 }
 

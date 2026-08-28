@@ -498,6 +498,7 @@ export const it: Record<string, string> = {
   "codingAgent.runMeta": "{turns} passaggi · {files} file modificati · {duration}",
   "codingAgent.denials": "{n} azioni non sono state consentite",
   "codingAgent.deniedTitle": "Non consentito",
+  "codingAgent.artifactsTitle": "Prove di questa esecuzione",
   "codingAgent.deniedHelp": "L'agente di codice può eseguire solo un insieme fisso di comandi nella propria cartella. È il limite di sicurezza che funziona, non un errore: l'esecuzione di solito trova un'altra strada.",
   "codingAgent.stop": "Interrompi",
   "codingAgent.openLive": "Guarda dal vivo",

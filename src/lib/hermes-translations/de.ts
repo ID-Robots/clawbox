@@ -486,6 +486,7 @@ export const de: Record<string, string> = {
   "codingAgent.runMeta": "{turns} Schritte · {files} Dateien geändert · {duration}",
   "codingAgent.denials": "{n} Aktionen wurden nicht erlaubt",
   "codingAgent.deniedTitle": "Nicht erlaubt",
+  "codingAgent.artifactsTitle": "Belege aus diesem Lauf",
   "codingAgent.deniedHelp": "Der Coding-Agent darf nur einen festen Satz Befehle in seinem eigenen Ordner ausführen. Das ist die Schutzgrenze bei der Arbeit, kein Fehler — der Lauf findet meist einen anderen Weg.",
   "codingAgent.stop": "Stoppen",
   "codingAgent.openLive": "Live ansehen",

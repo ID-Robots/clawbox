@@ -483,6 +483,7 @@ export const sv: Record<string, string> = {
   "codingAgent.runMeta": "{turns} steg · {files} filer ändrade · {duration}",
   "codingAgent.denials": "{n} åtgärder tilläts inte",
   "codingAgent.deniedTitle": "Inte tillåtet",
+  "codingAgent.artifactsTitle": "Bevis från denna körning",
   "codingAgent.deniedHelp": "Kodagenten får bara köra en fast uppsättning kommandon i sin egen mapp. Det är säkerhetsgränsen som fungerar, inte ett fel — körningen hittar oftast en annan väg.",
   "codingAgent.stop": "Stoppa",
   "codingAgent.openLive": "Följ live",

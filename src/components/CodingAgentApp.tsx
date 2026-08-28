@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
+import { formatBytes } from "@/components/LocalModelsPanel";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.
@@ -98,6 +99,13 @@ interface Run {
   sessionId?: string | null;
   /** Where Claude Code keeps this run's transcript, for the live preview. */
   transcriptPath?: string | null;
+  /** The run's evidence folder — screenshots and test output it saved. */
+  artifacts?: { name: string; bytes: number; kind: "image" | "text" | "other" }[];
+}
+
+/** The served URL of one run artifact — cookie auth rides along like any app asset. */
+function artifactUrl(runId: string, name: string): string {
+  return `/setup-api/coding-agent/artifacts?runId=${encodeURIComponent(runId)}&file=${encodeURIComponent(name)}`;
 }
 
 /** One page of runs. The list is open by default now, so it has to be paged
@@ -221,7 +229,7 @@ export default function CodingAgentApp() {
     try {
       const [s, r, g] = await Promise.all([
         fetch("/setup-api/coding-agent/status", { cache: "no-store" }),
-        fetch(`/setup-api/coding-agent/runs?limit=30`, { cache: "no-store" }),
+        fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }),
         fetch("/setup-api/coding-agent/git", { cache: "no-store" }),
       ]);
       if (!s.ok) throw new Error("status");
@@ -664,6 +672,7 @@ export default function CodingAgentApp() {
               <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
                 {runs.slice(0, runsShown).map((run) => {
                   const details = [run.error, run.summary].filter(Boolean).join("\n\n");
+                  const artifacts = run.artifacts ?? [];
                   const open = expanded === run.id;
                   return (
                     <li key={run.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
@@ -768,7 +777,7 @@ export default function CodingAgentApp() {
                           >
                             {run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
                           </button>
-                          {details && (
+                          {(details || artifacts.length > 0) && (
                             <button
                               type="button"
                               onClick={() => setExpanded(open ? null : run.id)}
@@ -816,6 +825,61 @@ export default function CodingAgentApp() {
                           </p>
                         </div>
                       )}
+
+                      {/* The run's evidence: screenshots it took while
+                          verifying its work, plus whatever test output it
+                          saved. Images render as thumbnails; every file opens
+                          in a new tab (non-images are served as plain text). */}
+                      {open && artifacts.length > 0 && (() => {
+                        const images = artifacts.filter((a) => a.kind === "image");
+                        const files = artifacts.filter((a) => a.kind !== "image");
+                        return (
+                          <div className="mt-2" data-testid="coding-agent-artifacts">
+                            <p className="text-[11px] font-medium text-sky-300">
+                              {t("codingAgent.artifactsTitle")}
+                            </p>
+                            {images.length > 0 && (
+                              <div className="mt-1.5 flex flex-wrap gap-2">
+                                {images.map((a) => (
+                                  <a
+                                    key={a.name}
+                                    href={artifactUrl(run.id, a.name)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    title={[a.name, formatBytes(a.bytes)].filter(Boolean).join(" · ")}
+                                    className="block rounded-lg border border-white/10 overflow-hidden hover:border-white/25"
+                                  >
+                                    {/* eslint-disable-next-line @next/next/no-img-element -- device-served bytes, no next/image loader on the box */}
+                                    <img
+                                      src={artifactUrl(run.id, a.name)}
+                                      alt={a.name}
+                                      loading="lazy"
+                                      className="h-20 w-auto max-w-[10rem] object-cover"
+                                    />
+                                  </a>
+                                ))}
+                              </div>
+                            )}
+                            {files.length > 0 && (
+                              <ul className="mt-1.5 space-y-0.5">
+                                {files.map((a) => (
+                                  <li key={a.name} className="text-[11px]">
+                                    <a
+                                      href={artifactUrl(run.id, a.name)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-[var(--text-secondary)] hover:text-white underline decoration-white/20 break-all"
+                                    >
+                                      {a.name}
+                                    </a>
+                                    {formatBytes(a.bytes) && <span className="text-[var(--text-muted)]"> · {formatBytes(a.bytes)}</span>}
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       {open && details && (
                         <pre className="mt-2 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto font-sans leading-relaxed">

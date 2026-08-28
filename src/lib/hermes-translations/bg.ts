@@ -474,6 +474,7 @@ export const bg: Record<string, string> = {
   "codingAgent.runMeta": "{turns} стъпки · {files} променени файла · {duration}",
   "codingAgent.denials": "{n} действия не бяха разрешени",
   "codingAgent.deniedTitle": "Не е разрешено",
+  "codingAgent.artifactsTitle": "Доказателства от това изпълнение",
   "codingAgent.deniedHelp": "Кодиращият агент може да изпълнява само определен набор команди в собствената си папка. Това е защитата, която работи, а не грешка — изпълнението обикновено намира друг начин.",
   "codingAgent.stop": "Спри",
   "codingAgent.openLive": "Наблюдавай на живо",
