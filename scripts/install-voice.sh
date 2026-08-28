@@ -901,6 +901,11 @@ if kokoro_predownload_model; then
     kokoro_mark_installed
   fi
 else
+  # Clears the flag for the same reason install_cuda_torch and
+  # install_kokoro_packages do: without the model there is no engine, and this
+  # arm is the one that skips kokoro_mark_installed. Leaving the flag true left
+  # the only in-memory record of the failure at a Warning line.
+  KOKORO_FULL_OK=false
   echo "  Warning: Kokoro model pre-download reported an error"
 fi
 
@@ -916,7 +921,33 @@ deploy_voice_scripts
 # Install systemd user services for persistent model servers. The Kokoro unit
 # comes from the shared writer so this path and --tts-only cannot disagree
 # about it; the Whisper unit is STT and only exists on this path.
-write_kokoro_unit
+# Still fatal, exactly as the bare call was under `set -e` — the only thing
+# added is that the box is left with a RECORD of why, instead of dying with the
+# Kokoro half of its verdict file unwritten.
+if ! write_kokoro_unit; then
+  kokoro_report "failed:unit"
+  echo "  ERROR: could not write $SYSTEMD_USER/kokoro-server.service" >&2
+  exit 1
+fi
+
+# PUBLISH the Kokoro verdict on this path too. This file installs the GPU stack
+# inline rather than through install_kokoro_tts, which is the only other writer
+# of KOKORO=, so a full-pipeline run left that half of the verdict file
+# UNWRITTEN — or, worse, stale from an earlier run — and install.sh's
+# step_validate_services then reported "no on-device TTS verdict for Kokoro" on
+# a box that had just built one. The summary below reads it back, so the run
+# states a fact about the engine instead of asserting one.
+if ! $HAS_CUDA; then
+  kokoro_report "skipped:no-cuda"
+elif $KOKORO_FULL_OK; then
+  kokoro_report "ready"
+else
+  # One of install_cuda_torch / install_kokoro_packages / the model pre-download
+  # reported an error above. Each printed a Warning and the pipeline carried on,
+  # which is how "TTS: Kokoro-82M via on-demand server" ended up on the summary
+  # of a run whose GPU stack never finished.
+  kokoro_report "failed:install"
+fi
 
 cat > "$SYSTEMD_USER/whisper-server.service" << EOF
 [Unit]
@@ -947,15 +978,28 @@ else
   echo "  Mode: CPU"
 fi
 echo "  STT: Whisper (base) via on-demand server (~1.8s)"
-# The fallback is named from the PUBLISHED verdict, not from the fact that
-# install_piper was called a few lines up. This is the third caller of
-# install_piper and it was the least honest of them: it asserted a Piper CPU
-# fallback on every run, including the x86 runs where install_piper_engine
-# declines for want of a pinned artifact and the runs where its download failed.
+# BOTH engines are named from their PUBLISHED verdicts, not from the fact that
+# install_piper and the Kokoro steps were called a few lines up.
+#
+# The Piper half was converted first: this is the third caller of install_piper
+# and it was the least honest of them, asserting a Piper CPU fallback on every
+# run — including the x86 runs where install_piper_engine declines for want of a
+# pinned artifact and the runs where its download failed.
+#
+# The Kokoro half was worse still, because it read no status at all: every one
+# of those three arms opened with "TTS: Kokoro-82M via on-demand server (~2s)",
+# printed identically on the runs where install_cuda_torch, the Kokoro packages
+# or the model pre-download had reported an error a few dozen lines above and
+# the pipeline carried on. Same class, same fix: state the verdict.
+case "$TTS_KOKORO_VERDICT" in
+  ready)      echo "  TTS engine: Kokoro-82M via on-demand server (~2s)" ;;
+  skipped:?*) echo "  TTS engine: no Kokoro GPU engine applies to this board ($TTS_KOKORO_VERDICT)" ;;
+  *)          echo "  TTS engine: the Kokoro GPU engine did NOT install (${TTS_KOKORO_VERDICT:-unreported})" >&2 ;;
+esac
 case "$TTS_PIPER_VERDICT" in
-  ready)      echo "  TTS: Kokoro-82M via on-demand server (~2s), Piper CPU fallback" ;;
-  skipped:?*) echo "  TTS: Kokoro-82M via on-demand server (~2s); no Piper fallback applies to this board ($TTS_PIPER_VERDICT)" ;;
-  *)          echo "  TTS: Kokoro-82M via on-demand server (~2s); the Piper CPU fallback did NOT install (${TTS_PIPER_VERDICT:-unreported})" >&2 ;;
+  ready)      echo "  TTS fallback: Piper CPU" ;;
+  skipped:?*) echo "  TTS fallback: no Piper fallback applies to this board ($TTS_PIPER_VERDICT)" ;;
+  *)          echo "  TTS fallback: the Piper CPU fallback did NOT install (${TTS_PIPER_VERDICT:-unreported})" >&2 ;;
 esac
 echo "  TTS entrypoint: $WORKSPACE/scripts/openclaw/clawbox-tts.sh"
 echo "  Services: kokoro-server, whisper-server (on-demand, auto-stop after idle)"

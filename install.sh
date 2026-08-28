@@ -2600,6 +2600,28 @@ step_openclaw_tts() {
   local VOICE_RC=0
   CLAWBOX_TTS_STATUS_FILE="$TTS_STATUS_FILE" \
     bash "$PROJECT_DIR/scripts/install-voice.sh" --tts-only || VOICE_RC=$?
+
+  # WHICH engines this box has is a fact the run just PUBLISHED; $VOICE_RC only
+  # says how far it got. Reading the first off the second is the defect this
+  # step was built around and then reproduced one line lower: exit 1 means "an
+  # engine survives, the other half did not complete", and the engine line below
+  # printed "Kokoro GPU TTS NOT installed" over a box whose GPU engine had
+  # installed, warmed up and written KOKORO=ready — while
+  # step_validate_services, reading the same file, correctly reported the PIPER
+  # half as the missing one. One run, two mutually exclusive facts.
+  #
+  # `tr -d '\r'` for the same reason the other two readers of this file do it
+  # (install.sh's probe, install-voice.sh's tts_status_load): the file is also
+  # restored from tarballs and edited by hand, and a CRLF `ready\r` is not
+  # `ready`. Absent or unreadable leaves both empty, and every claim below then
+  # falls back to what the exit code carries — nothing to read is not licence
+  # to invent.
+  local KOKORO_VERDICT="" PIPER_VERDICT=""
+  if [ -r "$TTS_STATUS_FILE" ]; then
+    KOKORO_VERDICT=$(sed -n 's/^KOKORO=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+    PIPER_VERDICT=$(sed -n 's/^PIPER=//p' "$TTS_STATUS_FILE" 2>/dev/null | tr -d '\r' | tail -1)
+  fi
+
   local KOKORO_READY=false KOKORO_REASON=""
   # The status this STEP returns, separate from whether TTS could be configured.
   # A Kokoro that was asked for and did not arrive is a failure of this step
@@ -2690,13 +2712,32 @@ step_openclaw_tts() {
         record_provision_failure openclaw_tts
         ;;
   esac
-  if [ "$KOKORO_READY" = true ]; then
-    echo "  Kokoro GPU TTS installed (Piper CPU fallback behind it)"
-  else
+  # The GPU engine, named from the verdict where there is one. KOKORO_READY (an
+  # inference from $VOICE_RC) is only the answer when the run published nothing.
+  local KOKORO_HAVE="$KOKORO_READY"
+  case "$KOKORO_VERDICT" in
+    ready) KOKORO_HAVE=true ;;
+    ?*)    KOKORO_HAVE=false
+           # Only reachable if the verdict contradicts a clean exit, which the
+           # contract does not allow — but "the file says the engine is not
+           # there" beats "the status code implied it was", and the reason has
+           # to come from somewhere when the exit code named none.
+           [ -n "$KOKORO_REASON" ] || KOKORO_REASON="the voice install published KOKORO=$KOKORO_VERDICT"
+           ;;
+  esac
+  if [ "$KOKORO_HAVE" != true ]; then
     # No engine claim here: on VOICE_RC=1 the Piper half is the thing that
     # failed, so "Piper is the active engine" would be its own small lie. The
     # summary at the end of the step names the engine.
     echo "  Kokoro GPU TTS NOT installed: $KOKORO_REASON"
+  elif [ "$VOICE_RC" -eq 0 ]; then
+    echo "  Kokoro GPU TTS installed (Piper CPU fallback behind it)"
+  elif [ "$PIPER_VERDICT" = "ready" ]; then
+    # Both engines are there and the run still did not finish clean, so what is
+    # missing is the deploy behind them — say that rather than pick a half.
+    echo "  Kokoro GPU TTS installed, and so is the Piper CPU fallback — but the voice install did not complete"
+  else
+    echo "  Kokoro GPU TTS installed, but the CPU fallback did not — no CPU fallback behind this box's GPU engine (Piper: ${PIPER_VERDICT:-unreported})"
   fi
 
   # Seed-if-unset, same contract as the primary model above: an owner who has
@@ -2781,7 +2822,7 @@ step_openclaw_tts() {
   # Only claim Kokoro when Kokoro is genuinely there. This line asserting
   # "Kokoro GPU" unconditionally is what kept TASK-420 invisible: three
   # freshly flashed boxes printed it while running entirely on Piper.
-  if [ "$KOKORO_READY" = true ]; then
+  if [ "$KOKORO_HAVE" = true ] && [ "$VOICE_RC" -eq 0 ]; then
     echo "  On-device TTS configured (Kokoro GPU, Piper fallback)"
   else
     # "Piper CPU only" is a claim about an engine, so it is made ONLY for the
@@ -2818,10 +2859,19 @@ step_openclaw_tts() {
         # An engine SURVIVES here — install-voice.sh returns 13, not 1, when
         # none does — so "NO engine is confirmed installed", which is where this
         # case used to land, is a failure report over something that succeeded.
-        # It still says nothing about WHICH engine: exit 1 is also reachable
+        # It said nothing about WHICH engine, because exit 1 is also reachable
         # with Kokoro skipped and the script deploy failing behind a ready
-        # Piper, and naming the wrong survivor would just be a smaller lie.
-        echo "  On-device TTS configured on the engine that installed, but the voice install did not complete ($KOKORO_REASON)"
+        # Piper, and naming the wrong survivor would just be a smaller lie. The
+        # VERDICT knows, though, and an operator reading this line is about to
+        # be told by step_validate_services which half is missing — so when the
+        # file names a ready Kokoro and a Piper that is not ready, say it here
+        # too. NOT by setting KOKORO_READY: that would route into the "Kokoro
+        # GPU, Piper fallback" line above and claim the very thing that is gone.
+        if [ "$KOKORO_VERDICT" = "ready" ] && [ "$PIPER_VERDICT" != "ready" ]; then
+          echo "  On-device TTS configured (Kokoro GPU, NO CPU fallback behind it — Piper: ${PIPER_VERDICT:-unreported})"
+        else
+          echo "  On-device TTS configured on the engine that installed, but the voice install did not complete ($KOKORO_REASON)"
+        fi
         ;;
       13)
         echo "  On-device TTS configured, but this box has NO working engine — it answers speech with SILENCE ($KOKORO_REASON)"
