@@ -12,6 +12,22 @@ import { CLAWBOX_AI_PROVIDER } from "@/lib/clawbox-ai-models";
 // proxies rather than letting the browser call out because the ClawBox AI token
 // is the device's credential — in the browser it would sit in every devtools
 // network panel. TASK-381.
+//
+// The on-box engine is mocked at its module boundary and reports "not
+// installed" unless a test says otherwise, so every test above the fallback
+// section exercises exactly the single-engine behaviour the route always had.
+// It has to be a mock: the real probe looks at HOME, and on a box that has
+// whisper installed a cloud failure would otherwise spawn python mid-test.
+
+const localStt = vi.hoisted(() => ({ installed: vi.fn(), transcribe: vi.fn() }));
+vi.mock("@/lib/stt-local", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/stt-local")>();
+  return {
+    ...actual,
+    localSttInstalled: (...a: unknown[]) => localStt.installed(...a),
+    transcribeLocally: (...a: unknown[]) => localStt.transcribe(...a),
+  };
+});
 
 let tmpHome: string;
 let openclawHome: string;
@@ -43,6 +59,17 @@ function writeHermesToken(token: string | null): void {
     path.join(dataDir, "config.json"),
     JSON.stringify(token === null ? {} : { clawai_token: token }, null, 2),
   );
+}
+
+/** The owner's engine order, in the same store (the token stays in openclaw.json). */
+function writePrimary(primary: "cloud" | "local"): void {
+  const dataDir = path.join(tmpHome, "data");
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ stt_primary: primary }, null, 2));
+}
+
+function boxHasWhisper(): void {
+  localStt.installed.mockResolvedValue({ installed: true, detail: "faster-whisper, kept warm by whisper-server." });
 }
 
 /**
@@ -97,6 +124,8 @@ describe("/setup-api/chat/transcribe", () => {
     process.env.CLAWBOX_ROOT = tmpHome;
     writeConfig(linkedConfig());
     writeHermesToken(null);
+    localStt.installed.mockResolvedValue({ installed: false, detail: "The on-box transcriber is not installed." });
+    localStt.transcribe.mockResolvedValue({ ok: false, error: "not installed" });
     fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     vi.resetModules();
@@ -463,5 +492,103 @@ describe("/setup-api/chat/transcribe", () => {
     const body = await res.json();
     expect(body.ok).toBe(true);
     expect(body.text).toBe("");
+  });
+
+  describe("with an engine on the box as well", () => {
+    it("says which engine answered", async () => {
+      fetchMock.mockResolvedValue(jsonResponse({ text: "from the cloud" }));
+      const body = await (await POST(audioRequest())).json();
+      expect(body).toEqual({ ok: true, text: "from the cloud", engine: "cloud" });
+    });
+
+    it("falls back to the box when the cloud fails", async () => {
+      boxHasWhisper();
+      fetchMock.mockResolvedValue(jsonResponse({ error: "upstream down" }, 500));
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "from the box" });
+
+      const res = await POST(audioRequest(AUDIO, "voice-note.webm"));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, text: "from the box", engine: "local" });
+      // The box got the same bytes and the same container hint the cloud would have.
+      const [bytes, name] = localStt.transcribe.mock.calls[0];
+      expect(Buffer.from(bytes).equals(AUDIO)).toBe(true);
+      expect(name).toBe("voice-note.webm");
+    });
+
+    it("tries the box first when the owner put it first, and never calls out", async () => {
+      boxHasWhisper();
+      writePrimary("local");
+      localStt.transcribe.mockResolvedValue({ ok: true, text: "heard on the box" });
+
+      const body = await (await POST(audioRequest())).json();
+
+      expect(body).toEqual({ ok: true, text: "heard on the box", engine: "local" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the cloud when the box was first and failed", async () => {
+      boxHasWhisper();
+      writePrimary("local");
+      localStt.transcribe.mockResolvedValue({ ok: false, error: "decoder crashed" });
+      fetchMock.mockResolvedValue(jsonResponse({ text: "from the cloud" }));
+
+      const body = await (await POST(audioRequest())).json();
+
+      expect(body).toEqual({ ok: true, text: "from the cloud", engine: "cloud" });
+    });
+
+    it("reports the primary's failure when both fail — the cloud's here", async () => {
+      boxHasWhisper();
+      fetchMock.mockResolvedValue(new Response("boom", { status: 500 }));
+      localStt.transcribe.mockResolvedValue({ ok: false, error: "decoder crashed" });
+
+      const res = await POST(audioRequest());
+
+      // Byte-for-byte what a cloud-only box answered: the engine the owner
+      // chose is the one whose message names their next step.
+      expect(res.status).toBe(502);
+      expect((await res.json()).error).toBe("Transcription failed (upstream 500).");
+      expect(localStt.transcribe).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports the box's failure when the box was first, without its stderr", async () => {
+      boxHasWhisper();
+      writePrimary("local");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      localStt.transcribe.mockResolvedValue({ ok: false, error: "Traceback in /tmp/clawbox-stt-abc/recording.webm" });
+      fetchMock.mockResolvedValue(new Response("boom", { status: 500 }));
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(500);
+      const text = await res.text();
+      expect(JSON.parse(text).error).toBe("Transcription failed on this box.");
+      // The path and the traceback belong in the log, not on a status line.
+      expect(text).not.toContain("/tmp/");
+      expect(warn).toHaveBeenCalled();
+    });
+
+    it("skips a box with no engine without counting it as a failure", async () => {
+      // "Not installed" is a fact about the box, not about this recording:
+      // the cloud is simply the only engine, exactly as before.
+      writePrimary("local");
+      fetchMock.mockResolvedValue(jsonResponse({ text: "cloud only" }));
+
+      const body = await (await POST(audioRequest())).json();
+
+      expect(body).toEqual({ ok: true, text: "cloud only", engine: "cloud" });
+      expect(localStt.transcribe).not.toHaveBeenCalled();
+    });
+
+    it("still names the missing link when the box has no engine and no token", async () => {
+      writeConfig({ models: { providers: {} } });
+      writePrimary("local");
+
+      const res = await POST(audioRequest());
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).error).toContain("not linked");
+    });
   });
 });

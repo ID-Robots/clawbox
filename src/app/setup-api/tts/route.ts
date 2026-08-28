@@ -9,7 +9,6 @@ import crypto from "crypto";
 import {
   buildTtsInventory,
   KOKORO_STAMP,
-  PIPER_BINARY,
   type LocalModelEntry,
 } from "@/lib/local-models";
 import {
@@ -78,7 +77,7 @@ async function probeBox() {
   // own artefacts when no command is configured at all.
   const commandPresent = command
     ? await exists(command)
-    : (await exists(PIPER_BINARY)) || (await exists(KOKORO_STAMP));
+    : await exists(KOKORO_STAMP);
   return { config, probe: localProbeFrom(config, models, commandPresent) };
 }
 

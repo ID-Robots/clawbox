@@ -3,7 +3,7 @@
  *
  * Everything here is a MEASUREMENT of the device, never a claim from a config
  * file. That is the whole point of the tab: `install.sh` printed "On-device TTS
- * configured (Kokoro GPU, Piper fallback)" on boxes where Kokoro had never been
+ * configured (Kokoro GPU)" on boxes where Kokoro had never been
  * installed, and nothing in the UI could contradict it (TASK-420). So an engine
  * is "installed" only when the artefact it needs is on disk, and "running" only
  * when systemd or the process table says so.
@@ -77,9 +77,6 @@ export interface LocalModelsSnapshot {
 const HOME = process.env.CLAWBOX_HOME || os.homedir() || "/home/clawbox";
 
 /** Paths written by scripts/install-voice.sh — see the contract test. */
-export const PIPER_DIR = path.join(HOME, ".local/share/piper");
-export const PIPER_BINARY = path.join(PIPER_DIR, "piper");
-export const PIPER_VOICE_DIR = path.join(PIPER_DIR, "voices");
 export const KOKORO_STAMP = path.join(HOME, ".cache/clawbox/kokoro-installed");
 export const SYSTEMD_USER_DIR = path.join(HOME, ".config/systemd/user");
 export const KOKORO_UNIT = "kokoro-server.service";
@@ -261,43 +258,6 @@ function shortModelName(name: string): string {
   return name.replace(/:latest$/, "");
 }
 
-async function piperEntry(): Promise<LocalModelEntry> {
-  const [binary, voiceBytes, voices] = await Promise.all([
-    exists(PIPER_BINARY),
-    dirBytes(PIPER_VOICE_DIR),
-    listVoices(),
-  ]);
-  // Piper is a binary invoked per utterance, not a server. "idle" would imply
-  // something that could be running and isn't; on-demand is the truth.
-  const installed = binary && voices.length > 0;
-  return {
-    id: "piper",
-    name: "Piper",
-    kind: "tts",
-    runtime: "On-demand binary",
-    installed,
-    enabled: null,
-    running: installed ? "on-demand" : "not-installed",
-    diskBytes: voiceBytes,
-    memoryBytes: null,
-    control: "none",
-    detail: installed
-      ? `Speaks on demand. ${voices.length} voice${voices.length === 1 ? "" : "s"} installed: ${voices.join(", ")}.`
-      : binary
-        ? "The Piper program is installed but no voice is, so it cannot speak yet."
-        : "Not installed on this box.",
-  };
-}
-
-async function listVoices(): Promise<string[]> {
-  try {
-    const entries = await fs.readdir(PIPER_VOICE_DIR);
-    return entries.filter(f => f.endsWith(".onnx")).map(f => f.replace(/\.onnx$/, "")).sort();
-  } catch {
-    return [];
-  }
-}
-
 async function kokoroEntry(): Promise<LocalModelEntry> {
   const [stamped, unit] = await Promise.all([
     exists(KOKORO_STAMP),
@@ -326,7 +286,7 @@ async function kokoroEntry(): Promise<LocalModelEntry> {
         : "Installed and stopped."
       : stamped
         ? "Marked as installed but its service is missing, so it cannot speak."
-        : "Not installed on this box. Speech falls back to Piper.",
+        : "Not installed on this box. Speech uses the cloud voice.",
   };
 }
 
@@ -495,12 +455,11 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
  * more systemctl round trips that cannot change the answer.
  */
 export async function buildTtsInventory(): Promise<LocalModelEntry[]> {
-  const settled = await Promise.all([kokoroEntry, piperEntry].map(async build => {
+  const settled = await Promise.all([kokoroEntry].map(async build => {
     try {
       return await build();
     } catch {
-      // One unreadable engine must not hide the other: a box with Piper
-      // installed can still speak while Kokoro's unit refuses to answer.
+      // An unreadable engine reads as absent, never as a broken tab.
       return null;
     }
   }));
@@ -527,7 +486,6 @@ export async function buildLocalModelInventory(probes: InventoryProbes): Promise
     ["llamacpp", () => llamaCppEntry(probes.llamacpp)],
     ["ollama", () => ollamaEntry(probes.ollamaBaseUrl)],
     ["kokoro", kokoroEntry],
-    ["piper", piperEntry],
     ["whisper", whisperEntry],
   ];
   const settled = await Promise.all(builders.map(async ([id, build]) => {

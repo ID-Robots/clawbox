@@ -14,15 +14,26 @@ export async function register() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { startTerminalServer } = require('./instrumentation-node')
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { ensureLocalAiProxyUrls, restartGateway } = require('./lib/openclaw-config')
+  const { ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, restartGateway } = require('./lib/openclaw-config')
   startTerminalServer()
-  void ensureLocalAiProxyUrls()
-    .then((changed: boolean) => {
-      if (!changed) return
+  // Both are one-time repairs of openclaw.json; the gateway restarts once if
+  // either of them wrote anything.
+  void Promise.all([
+    ensureLocalAiProxyUrls().catch((err: unknown) => {
+      console.error('[instrumentation] Failed to migrate Local AI proxy URLs:', err instanceof Error ? err.message : err)
+      return false
+    }),
+    ensureMicrosoftTtsExcluded().catch((err: unknown) => {
+      console.error('[instrumentation] Failed to exclude Microsoft TTS:', err instanceof Error ? err.message : err)
+      return false
+    }),
+  ])
+    .then((changed: boolean[]) => {
+      if (!changed.some(Boolean)) return
       return restartGateway()
     })
     .catch((err: unknown) => {
-      console.error('[instrumentation] Failed to migrate Local AI proxy URLs:', err instanceof Error ? err.message : err)
+      console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
     })
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports

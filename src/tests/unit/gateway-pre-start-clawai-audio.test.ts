@@ -20,7 +20,16 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 
 const PROXY = "https://clawbox.com/api/ai";
 const TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
-const OURS = [{ provider: "openai", model: TRANSCRIBE_MODEL }];
+const CLOUD = { provider: "openai", model: TRANSCRIBE_MODEL };
+const OURS = [CLOUD];
+/** The on-box row Settings adds (src/lib/stt-preference.ts builds it). */
+const LOCAL_CLI = {
+  type: "cli",
+  command: "/usr/bin/python3",
+  args: ["/home/clawbox/.openclaw/workspace/scripts/stt-client.py", "{{MediaPath}}"],
+  timeoutSeconds: 120,
+  capabilities: ["audio"],
+};
 
 function slice(from: string, to: string): string {
   const src = readFileSync(SCRIPT, "utf-8");
@@ -230,12 +239,76 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI speech-to-text mig
   });
 
   it("pins the model the transcribe route uses, so both paths bill the same thing", () => {
-    const route = readFileSync(
-      path.resolve(process.cwd(), "src/app/setup-api/chat/transcribe/route.ts"),
+    // The constant moved next to the audio-config builder so the chat mic and
+    // the gateway read one definition; the shell copy has to match it.
+    const preference = readFileSync(
+      path.resolve(process.cwd(), "src/lib/stt-preference.ts"),
       "utf-8",
     );
 
-    expect(route).toContain(`"${TRANSCRIBE_MODEL}"`);
+    expect(preference).toContain(`"${TRANSCRIBE_MODEL}"`);
     expect(POLICY).toContain(`CLAWBOX_TRANSCRIBE_MODEL_ID = "${TRANSCRIBE_MODEL}"`);
+  });
+
+  describe("an engine order saved from Settings", () => {
+    // /setup-api/stt writes the on-box CLI row into the same list, in the
+    // order the owner chose. Before this the migration knew exactly one shape
+    // and called everything else the owner's own route — which would have
+    // been right about the words and wrong about the effect: a preference
+    // saved from Settings was ours, and a boot must not undo it.
+
+    it("leaves [cloud, on-box] alone", () => {
+      const saved = { baseUrl: PROXY, models: [CLOUD, LOCAL_CLI] };
+      const { cfg, changed, log } = migrate({ tools: { media: { audio: { ...saved } } } });
+
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual(saved);
+      expect(log).not.toContain("Skipped");
+    });
+
+    it("leaves [on-box, cloud] alone — the order IS the preference", () => {
+      const saved = { baseUrl: PROXY, models: [LOCAL_CLI, CLOUD] };
+      const { cfg, changed } = migrate({ tools: { media: { audio: { ...saved } } } });
+
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual(saved);
+    });
+
+    it("repairs the endpoint's trailing slash without touching a saved order", () => {
+      const { cfg, changed } = migrate({
+        tools: { media: { audio: { baseUrl: `${PROXY}/`, models: [LOCAL_CLI, CLOUD] } } },
+      });
+
+      expect(changed).toBe(true);
+      expect(audio(cfg)).toEqual({ baseUrl: PROXY, models: [LOCAL_CLI, CLOUD] });
+    });
+
+    it("recognises the on-box row wherever the workspace lives", () => {
+      // Matched on the script's name, not its full path: HOME is the script's
+      // to resolve, and a moved workspace is still ours.
+      const moved = { ...LOCAL_CLI, args: ["/srv/openclaw/workspace/scripts/stt-client.py", "{{MediaPath}}"] };
+      const { changed } = migrate({ tools: { media: { audio: { baseUrl: PROXY, models: [CLOUD, moved] } } } });
+
+      expect(changed).toBe(false);
+    });
+
+    it("treats a CLI row running some other script as the owner's own route", () => {
+      const owner = {
+        baseUrl: PROXY,
+        models: [{ type: "cli", command: "/usr/local/bin/whisper-cpp", args: ["{{MediaPath}}"] }],
+      };
+      const { cfg, changed, log } = migrate({ tools: { media: { audio: { ...owner } } } });
+
+      expect(changed).toBe(false);
+      expect(audio(cfg)).toEqual(owner);
+      expect(log).toContain("Skipped ClawBox AI speech to text");
+    });
+
+    it("seeds the cloud row alone on a fresh box; the on-box row is Settings' to add", () => {
+      // Only the route knows whether faster-whisper is installed here, and a
+      // CLI row pointing at nothing would cost every voice note its timeout.
+      const { cfg } = migrate({});
+      expect(audio(cfg)!.models).toEqual(OURS);
+    });
   });
 });

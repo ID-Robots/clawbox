@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import Busboy from "busboy";
 import { Readable } from "stream";
 import { CLAWBOX_AI_PROXY_URL, resolveClawaiToken } from "@/lib/harness/credentials";
+import { localSttInstalled, transcribeLocally } from "@/lib/stt-local";
+import { getSttPrimary, sttEngineOrder, TRANSCRIBE_MODEL } from "@/lib/stt-preference";
 
 export const dynamic = "force-dynamic";
 
@@ -10,6 +12,13 @@ export const dynamic = "force-dynamic";
 // Turns a recording made in device chat into text. The mascot chat composer
 // records with `MediaRecorder`, POSTs the blob here, and sends the returned
 // text through the ordinary chat-turn path.
+//
+// Two engines can do it: ClawBox AI (the cloud) and faster-whisper on the box
+// itself. The owner picks which goes first (src/lib/stt-preference.ts) and the
+// other is the fallback, so a box with no uplink still takes dictation and a
+// box whose whisper is cold still answers quickly. When both fail the caller
+// hears about the PRIMARY's failure — that is the engine they chose, and its
+// message is the one that names their next step.
 //
 // Why the device proxies instead of the browser calling out directly: the
 // ClawBox AI token is the device's credential, not the page's. Handing it to
@@ -34,17 +43,10 @@ export const dynamic = "force-dynamic";
 // Session-gated by middleware, which lists /setup-api/chat among the surfaces
 // that stay closed even during the pre-setup AP window.
 
-/**
- * The transcription model.
- *
- * `gpt-4o-mini-transcribe` at $0.003/minute is the cheapest of OpenAI's eight
- * transcription options -- half of Whisper's $0.006, and a sixth of
- * `gpt-live-transcribe`. At roughly an hour of dictation per user per month
- * that is about $0.18. Overridable so a staging box can be pointed elsewhere
- * without a code change.
- */
-export const TRANSCRIBE_MODEL =
-  process.env.CLAWBOX_AI_TRANSCRIBE_MODEL?.trim() || "gpt-4o-mini-transcribe";
+// The cloud model is defined next to the gateway's audio config so the two
+// surfaces cannot drift; re-exported here because this route is where callers
+// have always read it from.
+export { TRANSCRIBE_MODEL };
 
 // A minute of Opus at the bitrate MediaRecorder picks is well under a
 // megabyte, so this is generous for dictation while still bounding what one
@@ -250,31 +252,19 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
   }
 }
 
-// POST /setup-api/chat/transcribe
-// Body: multipart/form-data with one `file` part holding the recording.
-// Returns { ok: true, text } -- the transcript for the voice turn to send.
-export async function POST(req: NextRequest) {
-  const contentType = req.headers.get("content-type") ?? "";
-  if (!contentType.includes("multipart/form-data")) {
-    return NextResponse.json({ error: "Expected multipart/form-data" }, { status: 400 });
-  }
-  if (!/;\s*boundary=/i.test(contentType)) {
-    return NextResponse.json({ error: "Expected multipart/form-data with a boundary" }, { status: 400 });
-  }
+type Audio = { file: Blob; name: string };
+type Transcript = { text: string };
 
-  const audio = await readAudio(req);
-  if ("status" in audio) {
-    return NextResponse.json({ error: audio.error }, { status: audio.status });
-  }
-
+/** The cloud engine: the recording goes to the ClawBox AI proxy. */
+async function transcribeInCloud(req: NextRequest, audio: Audio): Promise<Transcript | Failure> {
   const token = await resolveClawaiToken();
   if (!token) {
     // Actionable on purpose: this is the one failure the user can actually do
     // something about, and "transcription failed" would send them nowhere.
-    return NextResponse.json(
-      { error: "This ClawBox is not linked to ClawBox AI yet, so it cannot transcribe audio." },
-      { status: 503 },
-    );
+    return {
+      status: 503,
+      error: "This ClawBox is not linked to ClawBox AI yet, so it cannot transcribe audio.",
+    };
   }
 
   const upstream = new FormData();
@@ -295,10 +285,10 @@ export async function POST(req: NextRequest) {
     // A box on a flaky uplink is the common case here, and the distinction
     // matters to the user: "try again" versus "check your internet".
     const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
-    return NextResponse.json(
-      { error: timedOut ? "Transcription timed out. Please try again." : "Could not reach ClawBox AI to transcribe the recording." },
-      { status: 504 },
-    );
+    return {
+      status: 504,
+      error: timedOut ? "Transcription timed out. Please try again." : "Could not reach ClawBox AI to transcribe the recording.",
+    };
   }
 
   if (!res.ok) {
@@ -312,22 +302,74 @@ export async function POST(req: NextRequest) {
     const error = status === 503
       ? "ClawBox AI rejected this device's credentials. Re-link the device and try again."
       : `Transcription failed (upstream ${res.status}).`;
-    return NextResponse.json({ error }, { status });
+    return { status, error };
   }
 
   let payload: unknown;
   try {
     payload = await res.json();
   } catch {
-    return NextResponse.json({ error: "Transcription returned an unreadable response." }, { status: 502 });
+    return { status: 502, error: "Transcription returned an unreadable response." };
   }
 
   const text = (payload as { text?: unknown } | null)?.text;
   if (typeof text !== "string") {
-    return NextResponse.json({ error: "Transcription returned no text." }, { status: 502 });
+    return { status: 502, error: "Transcription returned no text." };
   }
-  // An empty transcript is a successful call that heard nothing -- silence, or
-  // a microphone that captured only room noise. The composer says so; it is
-  // not an error and must not be reported as one.
-  return NextResponse.json({ ok: true, text: text.trim() });
+  return { text };
+}
+
+/**
+ * The on-box engine, or null when it is not installed — which is a fact about
+ * the box, not a failure of this recording, so it must not become the error
+ * the caller sees.
+ */
+async function transcribeOnBox(audio: Audio): Promise<Transcript | Failure | null> {
+  if (!(await localSttInstalled()).installed) return null;
+  const result = await transcribeLocally(Buffer.from(await audio.file.arrayBuffer()), audio.name);
+  if (!result.ok) {
+    // The detail names a temp path and whatever python printed. Worth having
+    // in the box's log; not something to hand the composer's status line.
+    console.warn("[chat/transcribe] on-box transcription failed:", result.error);
+    return { status: 500, error: "Transcription failed on this box." };
+  }
+  return { text: result.text };
+}
+
+// POST /setup-api/chat/transcribe
+// Body: multipart/form-data with one `file` part holding the recording.
+// Returns { ok: true, text, engine } -- the transcript for the voice turn to
+// send, and which engine ("cloud" | "local") produced it.
+export async function POST(req: NextRequest) {
+  const contentType = req.headers.get("content-type") ?? "";
+  if (!contentType.includes("multipart/form-data")) {
+    return NextResponse.json({ error: "Expected multipart/form-data" }, { status: 400 });
+  }
+  if (!/;\s*boundary=/i.test(contentType)) {
+    return NextResponse.json({ error: "Expected multipart/form-data with a boundary" }, { status: 400 });
+  }
+
+  const audio = await readAudio(req);
+  if ("status" in audio) {
+    return NextResponse.json({ error: audio.error }, { status: audio.status });
+  }
+
+  let firstFailure: Failure | null = null;
+  for (const engine of sttEngineOrder(await getSttPrimary())) {
+    const result = engine === "cloud" ? await transcribeInCloud(req, audio) : await transcribeOnBox(audio);
+    if (result === null) continue;
+    if ("status" in result) {
+      firstFailure ??= result;
+      continue;
+    }
+    // An empty transcript is a successful call that heard nothing -- silence,
+    // or a microphone that captured only room noise. The composer says so; it
+    // is not an error and must not be reported as one.
+    return NextResponse.json({ ok: true, text: result.text.trim(), engine });
+  }
+  // The cloud engine always answers, so the null case is unreachable today;
+  // it is spelled out rather than asserted away so a chain of two optional
+  // engines would still fail with a status instead of a crash.
+  const failure = firstFailure ?? { status: 503, error: "No transcription engine is available on this ClawBox." };
+  return NextResponse.json({ error: failure.error }, { status: failure.status });
 }

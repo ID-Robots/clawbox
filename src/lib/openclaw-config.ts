@@ -608,6 +608,13 @@ export interface OpenClawConfig {
   tools?: {
     profile?: string;
     web?: { search?: { enabled?: boolean } };
+    // Media understanding — the surface a channel voice note is transcribed
+    // through. Not a models[] row: it has its own endpoint and its own ordered
+    // list of engines (src/lib/stt-preference.ts builds the audio one).
+    media?: {
+      audio?: { baseUrl?: string; models?: unknown[]; [key: string]: unknown };
+      [key: string]: unknown;
+    };
   };
   auth?: {
     profiles?: Record<string, { provider?: string; mode?: string }>;
@@ -707,6 +714,38 @@ async function writeConfig(config: OpenClawConfig): Promise<void> {
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
   await fs.rename(tmpPath, CONFIG_PATH);
+}
+
+/**
+ * Keep Microsoft's bundled Edge TTS out of the speech chain.
+ *
+ * OpenClaw's fallback order is every registered speech provider sorted by a
+ * hard-coded rank, and Microsoft (rank 30) sits between our cloud voice and
+ * the on-device voice (rank 1000). Measured on this box: a failing ClawBox AI
+ * call fell back to Microsoft's public web endpoint — a second cloud the
+ * privacy notice never named — before Kokoro ever got the text. Nothing
+ * reorders that rank; the documented switch is `providers.microsoft.enabled`,
+ * which the provider's own isConfigured() honours everywhere: synthesis, the
+ * auto-selected primary, the gateway's startup scope and `tts.status`.
+ *
+ * Two guards keep this a default, not a decree: an explicit boolean either way
+ * is the owner's and is left alone, and the switch is only written on a box
+ * that HAS its own voice (`tts-local-cli` registered). A box with no local
+ * voice and no cloud entitlement would otherwise have no voice at all.
+ */
+export async function ensureMicrosoftTtsExcluded(): Promise<boolean> {
+  const config = await readConfig();
+  const messages = (config as { messages?: Record<string, unknown> }).messages;
+  const tts = messages?.tts as { providers?: Record<string, unknown> } | undefined;
+  const providers = tts?.providers;
+  if (!providers || typeof providers !== "object") return false;
+  if (!providers["tts-local-cli"]) return false;
+  const microsoft = providers.microsoft;
+  const entry = microsoft && typeof microsoft === "object" ? (microsoft as Record<string, unknown>) : {};
+  if (typeof entry.enabled === "boolean") return false;
+  providers.microsoft = { ...entry, enabled: false };
+  await writeConfig(config);
+  return true;
 }
 
 export async function ensureLocalAiProxyUrls(): Promise<boolean> {

@@ -881,12 +881,49 @@ if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
 # itself from src/app/setup-api/chat/transcribe/route.ts — which is exactly why
 # this stayed invisible until a channel voice note was tried on real hardware.
 #
-# The model id is duplicated from TRANSCRIBE_MODEL in that route for the same
-# reason the image id is duplicated above: a shell migration cannot import a TS
-# constant. It must name a model production allows, because the proxy matches
-# the bare id and answers 400 on a miss.
+# The model id is duplicated from TRANSCRIBE_MODEL in src/lib/stt-preference.ts
+# for the same reason the image id is duplicated above: a shell migration cannot
+# import a TS constant. It must name a model production allows, because the
+# proxy matches the bare id and answers 400 on a miss.
 CLAWBOX_TRANSCRIBE_MODEL_ID = "gpt-4o-mini-transcribe"
-CLAWBOX_AUDIO_MODELS = [{"provider": "openai", "model": CLAWBOX_TRANSCRIBE_MODEL_ID}]
+CLAWBOX_CLOUD_AUDIO_MODEL = {"provider": "openai", "model": CLAWBOX_TRANSCRIBE_MODEL_ID}
+# What a box with no audio config gets: the cloud alone. The on-box engine is
+# a `type: "cli"` row running the workspace's stt-client.py, and it is
+# Settings (src/app/setup-api/stt) that adds it — only that route knows
+# whether faster-whisper is installed here. The script name is duplicated from
+# src/lib/stt-local.ts; it is matched by name rather than full path because
+# HOME is the script's to resolve, and a path check here would call a moved
+# workspace foreign.
+CLAWBOX_AUDIO_MODELS = [CLAWBOX_CLOUD_AUDIO_MODEL]
+CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
+
+
+def _is_clawbox_audio_model(_entry):
+    """Is one models[] row one of the two ClawBox itself writes?"""
+    if not isinstance(_entry, dict):
+        return False
+    if _entry.get("type") == "cli":
+        _args = _entry.get("args")
+        _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
+        return any(isinstance(_v, str) and _v.endswith(CLAWBOX_STT_CLIENT_SCRIPT) for _v in _named)
+    return _entry == CLAWBOX_CLOUD_AUDIO_MODEL
+
+
+def _is_clawbox_audio_models(_models):
+    """Could src/lib/stt-preference.ts have built this whole list?
+
+    Cloud only, [cloud, on-box] or [on-box, cloud]: the ORDER is the owner's
+    speech-to-text preference, saved from Settings, and this migration has no
+    say in it. It matches row by row rather than the list against one fixed
+    shape so that preference survives the next boot. Anything else — an empty
+    list, a foreign model, a CLI row naming some other script — is the owner's
+    own transcription setup.
+    """
+    return (
+        isinstance(_models, list)
+        and len(_models) > 0
+        and all(_is_clawbox_audio_model(_entry) for _entry in _models)
+    )
 
 
 def _same_endpoint(_a, _b):
@@ -934,15 +971,18 @@ if _clawai_openai_route_is_ours:
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
     _audio_route_taken = bool(
         (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
-        or (_audio_models is not None and _audio_models != CLAWBOX_AUDIO_MODELS)
+        or (_audio_models is not None and not _is_clawbox_audio_models(_audio_models))
     )
     if _audio_route_taken:
         print(
             "  Skipped ClawBox AI speech to text: tools.media.audio already names its own transcription route"
         )
-    elif _audio_base_url != _clawai_proxy_base_url or _audio_models != CLAWBOX_AUDIO_MODELS:
+    elif _audio_base_url != _clawai_proxy_base_url or _audio_models is None:
         _audio["baseUrl"] = _clawai_proxy_base_url
-        _audio["models"] = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
+        # Seed the list only where there is none. A list this migration
+        # recognises is left exactly as Settings wrote it, order included.
+        if _audio_models is None:
+            _audio["models"] = [dict(_entry) for _entry in CLAWBOX_AUDIO_MODELS]
         _media["audio"] = _audio
         _tools["media"] = _media
         cfg["tools"] = _tools

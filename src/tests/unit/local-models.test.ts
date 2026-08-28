@@ -7,7 +7,7 @@ import path from "node:path";
  * TASK-435 — Settings → Local Models.
  *
  * The tab exists because `install.sh` announced "On-device TTS configured
- * (Kokoro GPU, Piper fallback)" on boxes where Kokoro had never been installed,
+ * (Kokoro GPU)" on boxes where Kokoro had never been installed,
  * and nothing in the UI could contradict it. So the cases that matter here are
  * the ones where the box LOOKS equipped and is not: weights on disk with no
  * runtime, a stamp with no service, a binary with no voice.
@@ -102,7 +102,7 @@ describe("local model inventory", () => {
     expect(kokoro.running).toBe("not-installed");
     expect(kokoro.control).toBe("none");
     expect(kokoro.enabled).toBeNull();
-    expect(kokoro.detail).toMatch(/falls back to Piper/i);
+    expect(kokoro.detail).toMatch(/cloud voice/i);
   });
 
   it("calls Kokoro not installed when it is stamped but its service is gone", async () => {
@@ -146,36 +146,6 @@ describe("local model inventory", () => {
     expect(whisper.control).toBe("user-unit");
   });
 
-  it("does not call Piper installed when the binary has no voice", async () => {
-    const piper = path.join(tmpHome, ".local/share/piper");
-    await fs.mkdir(piper, { recursive: true });
-    await fs.writeFile(path.join(piper, "piper"), "#!/bin/sh\n");
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const entryPiper = entry(models, "piper") as unknown as { installed: boolean; detail: string };
-    expect(entryPiper.installed).toBe(false);
-    expect(entryPiper.detail).toMatch(/no voice/i);
-  });
-
-  it("names the installed Piper voices and reports it as on demand, not idle", async () => {
-    const piper = path.join(tmpHome, ".local/share/piper");
-    await fs.mkdir(path.join(piper, "voices"), { recursive: true });
-    await fs.writeFile(path.join(piper, "piper"), "#!/bin/sh\n");
-    await fs.writeFile(path.join(piper, "voices/en_US-lessac-medium.onnx"), "x".repeat(1024));
-    await fs.writeFile(path.join(piper, "voices/en_US-lessac-medium.onnx.json"), "{}");
-    bareBox();
-    const { buildLocalModelInventory } = await lib();
-    const { models } = await buildLocalModelInventory(PROBES);
-    const entryPiper = entry(models, "piper") as unknown as { installed: boolean; running: string; detail: string; diskBytes: number };
-    expect(entryPiper.installed).toBe(true);
-    // A per-utterance binary is never "stopped"; calling it idle would invite
-    // the customer to look for a switch that does not exist.
-    expect(entryPiper.running).toBe("on-demand");
-    expect(entryPiper.detail).toContain("en_US-lessac-medium");
-    expect(entryPiper.diskBytes).toBeGreaterThan(1000);
-  });
-
   it("keeps the rest of the inventory when one engine cannot be read", async () => {
     // A subordinate row must not cost the customer the tab — the failure mode
     // a bad payload caused in the whole ClawKeep window on TASK-398.
@@ -191,7 +161,7 @@ describe("local model inventory", () => {
     } as unknown as Parameters<typeof mod.buildLocalModelInventory>[0];
     const { models, unavailable } = await mod.buildLocalModelInventory(broken);
     expect(unavailable).toContain("embeddings");
-    expect(models.map(m => m.id)).toEqual(expect.arrayContaining(["piper", "kokoro", "whisper", "ollama"]));
+    expect(models.map(m => m.id)).toEqual(expect.arrayContaining(["kokoro", "whisper", "ollama"]));
   });
 
   it("sums the pulled Ollama models into a disk figure", async () => {
@@ -262,7 +232,7 @@ describe("unit lookup", () => {
     expect(unitForEngine("ollama")).toEqual({ unit: "ollama.service", scope: "system" });
     expect(unitForEngine("kokoro")).toEqual({ unit: "kokoro-server.service", scope: "user" });
     expect(unitForEngine("whisper")).toEqual({ unit: "whisper-server.service", scope: "user" });
-    // Piper is a binary and llama.cpp is owned by Settings → Local AI.
+    // Piper is gone from the box (Kokoro-only voice) and llama.cpp is owned by Settings → Local AI.
     expect(unitForEngine("piper")).toBeNull();
     expect(unitForEngine("llamacpp")).toBeNull();
   });

@@ -69,7 +69,7 @@ describe("Local Models panel", () => {
 
   it("offers no switch for an engine that is not installed", async () => {
     mockFetch([{
-      models: [model({ id: "kokoro", name: "Kokoro", kind: "tts", installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed on this box. Speech falls back to Piper." })],
+      models: [model({ id: "kokoro", name: "Kokoro", kind: "tts", installed: false, enabled: null, running: "not-installed", control: "none", detail: "Not installed on this box. Speech uses the cloud voice." })],
       unavailable: [],
     }]);
     await renderPanel();
