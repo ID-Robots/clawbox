@@ -199,6 +199,12 @@ function isGatewayOnlyPath(pathname: string): boolean {
 
 const PUBLIC_EXACT = new Set([
   "/manifest.json",
+  // The service worker script. A browser that once registered /sw.js re-fetches
+  // it on navigations to look for an update — and treats a redirect (to /login)
+  // as "no update", so an old worker with its cache-first rules stayed in
+  // charge forever and the desktop kept showing the previous build. The file
+  // is public by nature (it is what every visitor already holds).
+  "/sw.js",
   "/favicon.ico",
   "/favicon.svg",
   "/favicon-32.png",
