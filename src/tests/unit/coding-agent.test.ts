@@ -314,6 +314,12 @@ describe("a run", () => {
     expect(joined).toContain(`--tools ${lib.toolsFor(true)}`);
     expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
+    // The file tools reach as far as the shell does: `--add-dir /` opens the
+    // working-folder gate that no rule can open, and the bare tool names are
+    // the file-tool spelling of Bash(*). Without both, a Grep one folder up
+    // stops the run dead waiting for an approval -p mode cannot deliver.
+    expect(joined).toContain("--add-dir /");
+    for (const rule of lib.FILE_ALLOW_RULES) expect(argv).toContain(rule);
     expect(argv).toContain("--disallowedTools");
     expect(argv).toContain("--agents");
     // The credential folders and this checkout's secrets are denied to
@@ -327,6 +333,18 @@ describe("a run", () => {
     expect(lib.denyRulesCover(denyRules, run.directory)).toBe(false);
     expect(lib.denyRulesCover(denyRules, path.join(root, "data", "config.json"))).toBe(true);
     expect(lib.denyRulesCover(denyRules, path.join(home, ".ssh", "id_ed25519"))).toBe(true);
+    // …and they are still covered with the file tools opened up, because a
+    // deny rule is evaluated before both the allow rules and `--add-dir /`.
+    // This is the line the widening must not cross: the gateway token, the
+    // Hermes provider keys and the session secret stay unreadable.
+    for (const secret of [
+      path.join(home, ".openclaw", "openclaw.json"),
+      path.join(home, ".hermes", ".env"),
+      path.join(home, ".claude-ds", "auth.json"),
+      path.join(root, "data", ".session-secret"),
+    ]) {
+      expect(lib.denyRulesCover(denyRules, secret), `${secret} must stay denied`).toBe(true);
+    }
     expect(argv).not.toContain("--resume");
     // No positional task: it went over stdin.
     expect(fs.readFileSync(stdinFile(), "utf-8")).toBe("Add a dark mode toggle");

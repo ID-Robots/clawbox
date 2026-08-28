@@ -1291,6 +1291,37 @@ export function fileDenyRules(): string[] {
   return rules;
 }
 
+/**
+ * Folders a run may reach beyond the one it was started in.
+ *
+ * Claude Code gates the file tools on TWO things and the allow-list is only
+ * one of them. A Read, Grep or Glob whose path lies outside the working folder
+ * first trips the working-folder gate — "Claude requested permissions to read
+ * from …" — which no rule opens; only `--add-dir` does. In headless -p mode
+ * there is nobody to answer it, so the run simply stops. That is what killed
+ * the Snake build: `Bash(*)` approved its `ls` on the projects folder, and the
+ * Grep of that same folder a moment later hung waiting for a human.
+ *
+ * `/` — the whole filesystem — because `Bash(*)` already reaches all of it.
+ * `cat` is not narrower than Read and `tee` is not narrower than Write, so a
+ * narrower file-tool reach never bought any secrecy; it only bought stalls
+ * and, worse, taught runs to route around a refusal through the shell. The
+ * deny rules below are evaluated BEFORE any allow rule and before any added
+ * directory, so the credential stores stay shut to Read/Edit/Write either way.
+ */
+export const RUN_ADDITIONAL_DIRS: readonly string[] = ["/"];
+
+/**
+ * The file tools, granted for every path — the file-tool spelling of
+ * `Bash(*)`. A bare tool name is Claude Code's "any use of this tool" rule.
+ *
+ * Deliberately not path-scoped: Claude Code consults path rules for `Read`
+ * and `Edit` only, so a `Write(…)` or `Glob(…)` allow rule would be an
+ * assertion the CLI accepts, warns about and never reads. And a narrower
+ * allow rule could never carry an exception past a deny rule anyway.
+ */
+export const FILE_ALLOW_RULES: readonly string[] = ["Read", "Edit", "Write", "Glob", "Grep", "NotebookEdit"];
+
 /** True when a Read/Edit/Write deny rule would cover `directory` — the check the contract test runs. */
 export function denyRulesCover(rules: readonly string[], directory: string): boolean {
   return rules.some((rule) => {
@@ -1312,6 +1343,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", HEADLESS_BRIEF,
   ];
+  // Variadic too (`--add-dir <directories...>`), so it goes ahead of every
+  // other variadic flag rather than after them.
+  if (RUN_ADDITIONAL_DIRS.length) args.push("--add-dir", ...RUN_ADDITIONAL_DIRS);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
@@ -1323,10 +1357,13 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // Withholding grants nothing: in headless -p mode the allow-list is what
     // approves a command, and with no list at all every Bash call just waits
     // for an approval nobody is there to give (verified on the box: curl was
-    // still denied with the lists absent). The FILE rules still ship, and a
-    // deny rule outranks any allow, so the credential stores stay closed.
-    // Full access is about commands, not secrets.
-    args.push("--allowedTools", "Bash(*)");
+    // still denied with the lists absent). The same reasoning now covers the
+    // FILE tools: they too approve nothing on their own in -p mode, so
+    // withholding a grant from Read/Grep/Glob only stalls the run. The FILE
+    // DENY rules still ship, and a deny rule outranks any allow and any added
+    // directory, so the credential stores stay closed.
+    // Full access is about reach, not secrets.
+    args.push("--allowedTools", "Bash(*)", ...FILE_ALLOW_RULES);
     args.push("--disallowedTools", ...fileDenyRules());
   }
   return args;
