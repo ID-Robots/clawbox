@@ -142,6 +142,15 @@ describe("chat-media", () => {
       expect(mediaFileName("https://e.com/pics/cat.png?v=2")).toBe("cat.png");
     });
 
+    it("recovers a run screenshot's own name from the coding agent's artifact route", () => {
+      // The pill hands this URL to the chat's preview; its download button
+      // must not save the picture as a file called "artifacts".
+      expect(mediaFileName("/setup-api/coding-agent/artifacts?runId=run-k3x9q2ab&file=after.png"))
+        .toBe("after.png");
+      expect(mediaFileName("/setup-api/coding-agent/artifacts?runId=run-abcdefgh&file=shot%201.png"))
+        .toBe("shot 1.png");
+    });
+
     it("falls back for a data URL, which has no name", () => {
       expect(mediaFileName("data:image/png;base64,AAAA")).toBe("image.png");
     });

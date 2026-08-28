@@ -571,9 +571,32 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // A template, not a sentence: the card fills in the count.
         agents: t("codingAgent.chatAgents"),
         tokensWord: t("codingAgent.tokensWord"),
+        // The expanded "live work" panel and the tooltip on its header.
+        liveWork: t("codingAgent.chatLiveWork"),
+        showDetails: t("codingAgent.showDetails"),
+        hideDetails: t("codingAgent.hideDetails"),
+        thinking: t("codingAgent.thinking"),
+        filesTouched: t("codingAgent.chatFilesTouched"),
+        turns: t("codingAgent.chatTurns"),
+        // One word per kind of step the card can draw as a chip — the
+        // owner's language for what the harness names by tool.
+        steps: {
+          screenshot: t("codingAgent.chatScreenshot"),
+          lookingAtPage: t("codingAgent.chatLookingAtPage"),
+          openingPage: t("codingAgent.chatOpeningPage"),
+          drivingPage: t("codingAgent.chatDrivingPage"),
+          closingPage: t("codingAgent.chatClosingPage"),
+          write: t("codingAgent.chatWrite"),
+          edit: t("codingAgent.chatEdit"),
+          read: t("codingAgent.chatRead"),
+        },
       }}
       openLabel={t("codingAgent.chatOpenApp")}
       onOpen={() => dispatchOpenApp("coding")}
+      // A run's screenshot opens in the SAME full-size preview the generated
+      // and attached images use (the portal at the end of this component),
+      // not a second lightbox of the card's own.
+      onPreview={(src, alt) => setPreview({ src, alt })}
     />
   )
   // The questions the agent is currently parked on, newest last.
