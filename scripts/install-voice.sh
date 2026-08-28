@@ -521,7 +521,11 @@ activate_user_units() {
 #
 #   ready       requested, installed, usable.
 #   skipped:*   NOT applicable to this board (no CUDA, no Jetson build for this
-#               architecture). Nothing was asked for and nothing is missing.
+#               architecture). This engine is absent by the board's own
+#               design — but it is still ABSENT. `skipped:*` says nothing is
+#               missing only as long as the OTHER half is `ready`; a box where
+#               both halves are `skipped:*` has no engine at all and is mute,
+#               which is a broken box however politely each half declined.
 #   failed:*    requested and NOT delivered. The owner asked for GPU TTS, the
 #               box is answering speech on the Piper CPU fallback instead, and
 #               something is broken that a human has to fix.
@@ -598,8 +602,34 @@ piper_report() {
 # `ready` is the only verdict that means "this engine can speak". `skipped:*` is
 # a board that was never going to run it and `failed:*` is one that was asked
 # and could not - neither of those is an engine, and neither may be read as one.
+#
+# There is deliberately no `tts_verdict_is_failure` beside this any more. It
+# existed to separate "both halves FAILED" (reported) from "both halves
+# SKIPPED" (silently clean), and that separation is the defect: the two produce
+# the identical box, one that cannot speak. WHY each engine is absent is a
+# sentence for the operator — tts_verdict_explain below writes it — not an
+# input to whether the run passed.
 tts_verdict_is_ready() { [ "$1" = "ready" ]; }
-tts_verdict_is_failure() { case "$1" in failed:*) return 0 ;; *) return 1 ;; esac; }
+
+# One engine's verdict, spelled out for a human reading a flash log.
+#
+# Every place that reports "this box cannot speak" has to name WHICH engines it
+# tried and WHY each one is not there, or the operator is left to go and read
+# $TTS_STATUS_FILE to learn what the run already knew. Kept in one function so
+# the three reporting sites below cannot drift into three vocabularies.
+#
+# Always returns 0: it is called inside `echo "$(...)"` under `set -e`, and a
+# verdict this cannot classify is still something to print, not something to
+# die on.
+tts_verdict_explain() {
+  case "${1:-}" in
+    ready)      printf 'ready' ;;
+    skipped:?*) printf 'SKIPPED (%s) - this board does not run it' "${1#skipped:}" ;;
+    failed:?*)  printf 'FAILED (%s) - it was asked for and did not install' "${1#failed:}" ;;
+    "")         printf 'no verdict published - the install left no record of it' ;;
+    *)          printf 'unreadable verdict "%s" - not evidence of an engine' "$1" ;;
+  esac
+}
 
 # Install the GPU Kokoro stack. NEVER fatal: every exit path leaves Piper and
 # the deployed scripts untouched, because a box that lost its voice to a failed
@@ -690,42 +720,65 @@ if [ "${1:-}" = "--tts-only" ]; then
   #
   #   0        Kokoro is the engine and it is ready.
   #   10       No CUDA toolkit on an aarch64 board; the box speaks on Piper.
-  #   11       No Jetson build for this ARCHITECTURE — which is the very
-  #            condition under which install_piper_engine has no pinned
-  #            artifact either, so 11 means NO engine applies to the board at
-  #            all, not "the box speaks on Piper". install.sh names the engine
-  #            off this code, and bucketing 11 with 10 put the name of a
-  #            fallback that does not exist on a box that has none.
+  #            Reachable ONLY with a ready Piper — the guard below returns 13
+  #            otherwise — so 10 is a box that speaks, and it stays clean.
   #   12       Kokoro was REQUESTED and did not install; the box speaks on Piper.
   #   1        the Piper half did not complete, but an engine survives.
   #   13       NO usable engine at all - this box answers speech with SILENCE.
+  #            Every route to a box with no `ready` engine ends here, whether
+  #            the halves failed or declined; see the guard below for why the
+  #            "both declined" route stopped being a clean exit.
   #
-  # 13 is new, and it exists because the guard below used to be a bare `exit 1`
-  # placed BEFORE `exit "$KOKORO_RC"`. Any Piper problem therefore overwrote the
-  # GPU verdict, 12 included - the hard-failure code that was landed precisely
-  # so a failed engine could not ship as a soft fallback - and install.sh's
-  # handler for 1 printed a warning and recorded nothing. A board with no CUDA
-  # (install-x64.sh, or an Orin with no nvcc) whose Piper download flaked
-  # therefore finished provisioning as "All checks healthy" and then answered
-  # every spoken request with silence.
+  # 11 (install_kokoro_tts's "no Jetson build for this ARCHITECTURE") is no
+  # longer reachable as an exit STATUS of this mode. It is emitted on exactly
+  # the board where install_piper_engine has no pinned artifact either, so it
+  # always arrives with no engine ready and is answered by 13 above. install.sh
+  # still carries a branch for it, because a code that means "no engine applies"
+  # must never grade clean if some future path revives it.
+  #
+  # 13 exists because the guard below used to be a bare `exit 1` placed BEFORE
+  # `exit "$KOKORO_RC"`. Any Piper problem therefore overwrote the GPU verdict,
+  # 12 included - the hard-failure code that was landed precisely so a failed
+  # engine could not ship as a soft fallback - and install.sh's handler for 1
+  # printed a warning and recorded nothing. An aarch64 Orin with no nvcc (a
+  # legitimate `skipped:no-cuda`) whose Piper download flaked therefore finished
+  # provisioning as "All checks healthy" and then answered every spoken request
+  # with silence.
   #
   # Which engines survived is read from the published VERDICTS, not from the
   # return codes: install_piper returns 0 for a board with no pinned artifact
   # too, and a board with no artifact has no engine however cleanly it declined
   # to install one.
   if ! tts_verdict_is_ready "$TTS_KOKORO_VERDICT" && ! tts_verdict_is_ready "$TTS_PIPER_VERDICT"; then
-    if tts_verdict_is_failure "$TTS_KOKORO_VERDICT" || tts_verdict_is_failure "$TTS_PIPER_VERDICT"; then
-      echo "=== NO WORKING TTS ENGINE (Kokoro: ${TTS_KOKORO_VERDICT:-unreported}, Piper: ${TTS_PIPER_VERDICT:-unreported}) ===" >&2
-      echo "=== This box will answer every spoken request with SILENCE ===" >&2
-      exit 13
-    fi
-    # Both halves declined for the board itself: no Jetson CUDA build and no
-    # pinned Piper artifact for this architecture. Nothing was asked for and
-    # nothing is missing, which is the same rule `skipped:*` has always carried
-    # - failing every install-x64.sh run would only teach everyone to ignore
-    # this check.
-    echo "=== No on-device TTS engine applies to this board (Kokoro: $TTS_KOKORO_VERDICT, Piper: $TTS_PIPER_VERDICT) ==="
-    exit "$KOKORO_RC"
+    # ── No engine is no engine, however each half came to decline ────────────
+    # This used to be two outcomes. "One half FAILED" exited 13 and was
+    # reported; "both halves SKIPPED" printed "No on-device TTS engine applies
+    # to this board" on stdout and exited $KOKORO_RC (10 or 11), which
+    # install.sh graded as a clean provision and step_validate_services scored
+    # as a PASS. The box that came out of it is the same box either way: it
+    # answers every spoken request with silence.
+    #
+    # The reason given for the split was that failing a board neither engine
+    # ships for "would only teach everyone to ignore this check", naming
+    # install-x64.sh as the run it would fail. That run does not exist:
+    # install-x64.sh contains no reference to voice, TTS, Piper or Kokoro and
+    # never calls this script - `grep -n 'install-voice.sh' *.sh` returns
+    # install.sh:2602 and nothing else. So nothing legitimate lands here. What
+    # does land here is install.sh run on a host whose `uname -m` is not
+    # aarch64, which is the ONLY way both halves skip: install_piper_engine's
+    # single non-failure skip is the architecture test, and on that same board
+    # install_kokoro_tts returns 11 for the same reason. The outcome is a box
+    # with no speech, and it was being reported as a healthy one.
+    #
+    # A silent box is not a healthy box. One exit code, one verdict, and every
+    # engine named with the concrete reason it is not here - a report that
+    # sends someone to $TTS_STATUS_FILE to find out what happened is not a
+    # report.
+    echo "=== NO WORKING TTS ENGINE - this box will answer every spoken request with SILENCE ===" >&2
+    echo "===   Kokoro (GPU): $(tts_verdict_explain "$TTS_KOKORO_VERDICT")" >&2
+    echo "===   Piper (CPU):  $(tts_verdict_explain "$TTS_PIPER_VERDICT")" >&2
+    echo "===   Verdicts recorded in $TTS_STATUS_FILE" >&2
+    exit 13
   fi
 
   if [ "$PIPER_RC" -ne 0 ] || [ "$DEPLOY_RC" -ne 0 ]; then
@@ -756,6 +809,29 @@ if [ "${1:-}" = "--piper-only" ]; then
   PIPER_ONLY_RC=0
   install_piper || PIPER_ONLY_RC=1
   deploy_voice_scripts || PIPER_ONLY_RC=1
+
+  # ── The mute-box question is asked FIRST, and it is asked of both halves ───
+  # The sibling call site. --tts-only above now refuses to grade a box with no
+  # `ready` engine as anything but a failure; this mode reached the same state
+  # by a different route and still exited 0 for it — `skipped:?*` below printed
+  # "No Piper artifact applies to this board" and returned success, and the
+  # `PIPER_ONLY_RC` guard returned a plain 1 that says "the fallback did not
+  # complete" even on a box where the fallback was the only engine there was.
+  #
+  # This mode installs ONE engine, so whether the box can speak is a question
+  # about the other half too — and tts_status_load has just read that half's
+  # verdict off disk for exactly this reason. Asked before the two guards below
+  # because it is the more severe fact: "no engine at all" outranks "the CPU
+  # half specifically did not land", and it must not be reported as the lesser
+  # one.
+  if ! tts_verdict_is_ready "$TTS_PIPER_VERDICT" && ! tts_verdict_is_ready "$TTS_KOKORO_VERDICT"; then
+    echo "=== NO WORKING TTS ENGINE - this box will answer every spoken request with SILENCE ===" >&2
+    echo "===   Piper (CPU):  $(tts_verdict_explain "$TTS_PIPER_VERDICT")" >&2
+    echo "===   Kokoro (GPU): $(tts_verdict_explain "$TTS_KOKORO_VERDICT")" >&2
+    echo "===   Verdicts recorded in $TTS_STATUS_FILE" >&2
+    exit 13
+  fi
+
   if [ "$PIPER_ONLY_RC" -ne 0 ]; then
     echo "=== Piper fallback INCOMPLETE — the box may answer speech with silence ===" >&2
     exit 1
@@ -776,10 +852,12 @@ if [ "${1:-}" = "--piper-only" ]; then
     ready) ;;
     skipped:?*)
       # The BOARD declines the engine — no pinned artifact for this
-      # architecture. Nothing was asked for and nothing is missing, which is
-      # the rule `skipped:*` already carries in --tts-only and in install.sh's
-      # health check, so this exits clean without claiming a fallback.
-      echo "=== No Piper artifact applies to this board (Piper: $TTS_PIPER_VERDICT) ==="
+      # architecture. Reached only past the guard above, so a `ready` Kokoro is
+      # already established and the box does speak; the CPU fallback being
+      # absent by design behind a working GPU engine is not a broken box. On a
+      # board with no Kokoro either, this line is unreachable — that box exited
+      # 13 above rather than being told nothing is missing.
+      echo "=== No Piper artifact applies to this board (Piper: $TTS_PIPER_VERDICT) — the box speaks on Kokoro ==="
       exit 0
       ;;
     *)
@@ -1003,3 +1081,20 @@ case "$TTS_PIPER_VERDICT" in
 esac
 echo "  TTS entrypoint: $WORKSPACE/scripts/openclaw/clawbox-tts.sh"
 echo "  Services: kokoro-server, whisper-server (on-demand, auto-stop after idle)"
+
+# ── The third caller, and the third route to a silent box ───────────────────
+# The two arms above got their engine NAMES from the verdicts in #544, and the
+# script then fell off its last `echo` — so a run that had just printed "no
+# Kokoro GPU engine applies to this board" AND "no Piper fallback applies to
+# this board" exited 0. This is the manual voice-pipeline install an operator
+# runs by hand; reporting a mute box to them as a clean run is the same defect
+# --tts-only and --piper-only carried, one caller further out. Same rule, same
+# exit code, same named reasons.
+if ! tts_verdict_is_ready "$TTS_KOKORO_VERDICT" && ! tts_verdict_is_ready "$TTS_PIPER_VERDICT"; then
+  echo "" >&2
+  echo "=== NO WORKING TTS ENGINE - this box will answer every spoken request with SILENCE ===" >&2
+  echo "===   Kokoro (GPU): $(tts_verdict_explain "$TTS_KOKORO_VERDICT")" >&2
+  echo "===   Piper (CPU):  $(tts_verdict_explain "$TTS_PIPER_VERDICT")" >&2
+  echo "===   Verdicts recorded in $TTS_STATUS_FILE" >&2
+  exit 13
+fi

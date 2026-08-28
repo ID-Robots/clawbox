@@ -350,20 +350,25 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
     expect(res.stdout).toMatch(reason as RegExp);
   });
 
-  it("names no engine at all when the voice install exits 11", () => {
+  it("names no engine at all when the voice install exits 11, and RECORDS it", () => {
     // 11 is "no Jetson CUDA build for this ARCHITECTURE" — `uname -m` is not
     // aarch64, which is the same test that leaves install_piper_engine without
-    // a pinned artifact. Both halves publish `skipped:arch-*`, install-voice.sh
-    // prints "=== No on-device TTS engine applies to this board ===" and exits
-    // 11, so the "Piper CPU only" line this case used to assert named a
-    // fallback the box does not have. It stays non-fatal and unrecorded — a
-    // board neither engine ships for was never asked for one.
+    // a pinned artifact. Both halves publish `skipped:arch-*`, so 11 means the
+    // box has NO engine, and the "Piper CPU only" line this case used to assert
+    // named a fallback it does not have.
+    //
+    // It stayed non-fatal AND unrecorded, so the step said "this box answers
+    // speech with SILENCE" and graded the provision clean. Non-fatal is right —
+    // a mute box must still come up reachable so it can be fixed — but silent
+    // is not: it is recorded now, and the two lines moved to stderr with the
+    // other failures. See install-tts-mute-box-fails.test.ts.
     const res = runStep(11);
     expect(res.openclaw).toContain("config set messages.tts.provider tts-local-cli");
     expect(res.stdout).not.toContain("Kokoro GPU, Piper fallback");
     expect(res.stdout, "a board with no engine was told it speaks on Piper").not.toContain("Piper CPU only");
-    expect(res.stdout).toMatch(/CPU architecture/);
-    expect(res.stdout).toMatch(/SILENCE/);
+    expect(res.stderr).toMatch(/CPU architecture/);
+    expect(res.stderr).toMatch(/SILENCE/);
+    expect(res.provisionFailures, "a box with no engine was not recorded as a failure").toContain("openclaw_tts");
   });
 
   // ── Requested-and-failed is not the same outcome as never-requested ────────
@@ -372,14 +377,21 @@ describe.skipIf(!hasBash)("step_openclaw_tts installs the engine it advertises",
   // install" as the same result — zero — so a flash host printed
   // "Setup: 1/1 succeeded" over a box that had told itself it was broken.
 
-  it.each([
-    [10, "no CUDA toolkit on this board"],
-    [11, "no Jetson build for this architecture"],
-  ])("exit %i is a SKIP: nothing was requested, so nothing is reported failed", (code) => {
-    const res = runStep(code as number);
-    expect(res.status, "a board that was never going to run Kokoro is not a failed install").toBe(0);
-    expect(res.provisionFailures, "a skip was recorded as a provisioning failure").toEqual([]);
-  });
+  // 11 used to be in this table beside 10 and is not any more. Both are skips
+  // of the GPU engine, but they leave DIFFERENT boxes: 10 is an aarch64 board
+  // with no nvcc, where install_piper still has its pinned artifact and the box
+  // speaks on the CPU fallback, while 11 is `uname -m` != aarch64, which is the
+  // same test that leaves install_piper with nothing to install — so 11 is a
+  // box with NO engine and is a recorded failure now. See
+  // install-tts-mute-box-fails.test.ts.
+  it.each([[10, "no CUDA toolkit on this board"]])(
+    "exit %i is a SKIP: the GPU engine was never requested and the box still speaks",
+    (code) => {
+      const res = runStep(code as number);
+      expect(res.status, "a board that was never going to run Kokoro is not a failed install").toBe(0);
+      expect(res.provisionFailures, "a skip was recorded as a provisioning failure").toEqual([]);
+    },
+  );
 
   it("exit 12 is a FAILURE: it leaves the step, the summary and the operator's screen", () => {
     const res = runStep(12);
@@ -698,11 +710,15 @@ describe.skipIf(!hasBash)("install-voice.sh --tts-only never costs the box its v
     expect(res.stdout).toMatch(/Piper voice ready/);
   });
 
-  it("skips Kokoro on an architecture with no Jetson build", () => {
+  it("skips Kokoro on an architecture with no Jetson build, and fails the run", () => {
     // install_piper already refuses to guess a digest off aarch64; the CUDA
-    // torch wheel is just as aarch64-only.
+    // torch wheel is just as aarch64-only. So this board declines BOTH halves
+    // and has nothing to speak with — the run exits 13 rather than the 11 it
+    // used to hand back as a clean provision. The verdict is unchanged: which
+    // engine skipped and why is still published, it just no longer decides
+    // whether the run passed. See install-tts-mute-box-fails.test.ts.
     const res = runTtsOnly({ FAKE_ARCH: "x86_64", WITH_CUDA: "1", KOKORO_IMPORT_EXIT: "1" });
-    expect(res.status).toBe(11);
+    expect(res.status).toBe(13);
     expect(res.stdout).toContain("CLAWBOX_TTS_KOKORO=skipped:arch-x86_64");
     expect(res.su.filter((c) => c.includes("pip3 install"))).toEqual([]);
   });
@@ -868,10 +884,28 @@ function runValidator(ttsStatusContents: string | null): { status: number; out: 
 
 describe.skipIf(!hasBash)("service validation refuses to call a Kokoro-less box healthy", () => {
   it("fails the install when the GPU engine was requested and did not install", () => {
+    // The fixture carries no PIPER line, so neither engine is `ready` here and
+    // the probe reports it as such. It used to match the Kokoro-specific arm,
+    // whose sentence ends "— this box answers speech on the Piper CPU
+    // fallback": a fallback claim made from an UNREPORTED verdict. That arm is
+    // now reached only with a ready Piper, and this state gets a sentence that
+    // names both halves and asserts a fallback for neither.
     const res = runValidator("KOKORO=failed:model\n");
     expect(res.status, `validation passed a box with no GPU TTS:\n${res.out}`).toBe(1);
-    expect(res.out).toMatch(/requested and did NOT install/);
+    expect(res.out).toMatch(/no on-device TTS engine on this box is confirmed ready/);
+    expect(res.out).toMatch(/failed:model/);
+    expect(res.out, "a fallback was claimed from an unreported verdict").not.toMatch(
+      /answers speech on the Piper CPU fallback/,
+    );
     expect(res.out).toMatch(/--step openclaw_tts/);
+  });
+
+  it("still names the Kokoro half specifically when the CPU fallback IS there", () => {
+    // The arm above did not disappear — it moved behind the evidence it needs.
+    const res = runValidator("KOKORO=failed:model\nPIPER=ready\n");
+    expect(res.status, `validation passed a box with no GPU TTS:\n${res.out}`).toBe(1);
+    expect(res.out).toMatch(/requested and did NOT install/);
+    expect(res.out).toMatch(/Piper CPU fallback/);
   });
 
   it("passes a board that was never going to run Kokoro", () => {
