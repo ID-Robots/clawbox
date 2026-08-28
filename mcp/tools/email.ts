@@ -148,13 +148,13 @@ function nextStep(prompt: string | undefined): string {
     case "sent":
       return `This ClawBox has also posted the draft to the owner's Telegram with an Approve button. ${where} ${doNotRetry} ${cannot}`;
     case "too_long":
-      return `${where} It was too long to review in Telegram, so no Telegram request was sent. ${doNotRetry}`;
+      return `${where} It was too long to review in Telegram, so no Telegram request was sent. ${doNotRetry} ${cannot}`;
     case "no_owner_chat":
-      return `${where} Nobody is paired with this ClawBox on Telegram, so no Telegram request could be sent. ${doNotRetry}`;
+      return `${where} Nobody is paired with this ClawBox on Telegram, so no Telegram request could be sent. ${doNotRetry} ${cannot}`;
     case "failed":
-      return `${where} The Telegram request could not be delivered. ${doNotRetry}`;
+      return `${where} The Telegram request could not be delivered. ${doNotRetry} ${cannot}`;
     default:
-      return `${where} Tell them it is waiting. ${doNotRetry}`;
+      return `${where} Tell them it is waiting. ${doNotRetry} ${cannot}`;
   }
 }
 
