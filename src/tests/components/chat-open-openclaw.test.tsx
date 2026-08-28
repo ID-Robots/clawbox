@@ -4,7 +4,11 @@ import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 
 /**
- * "New chat" has to actually reset the agent's thread, not just blank the view.
+ * The "+" in the chat strip opens the gateway's own chat UI in a NEW TAB — a
+ * fresh OpenClaw session — with the gateway URL and token in the URL, exactly
+ * as OpenClawApp's iframe carries them. It used to reset this popup's own
+ * thread in place; that is gone, and the test pins that it stays gone: the
+ * click must send no `sessions.reset` and leave the transcript alone.
  *
  * Clearing `messages` alone would look right and be wrong: the next question
  * would still be answered with the previous conversation in context. The button
@@ -110,69 +114,42 @@ async function mountReady() {
   await screen.findByText(SEED_TEXT);
 }
 
-describe("new chat button", () => {
+describe("the strip's + button", () => {
   beforeEach(() => {
     history = [assistantMessage(SEED_TEXT, 500)];
     sent.length = 0;
     resetFails = false;
     sockets.length = 0;
     resetHarnessCache();
-    window.localStorage.clear();
-    Element.prototype.scrollIntoView = vi.fn();
-    vi.stubGlobal("WebSocket", FakeGatewayWs as unknown as typeof WebSocket);
     installFetch();
+    vi.stubGlobal("WebSocket", FakeGatewayWs);
+    // jsdom has no layout: the transcript's scroll-to-bottom on every new
+    // message would otherwise throw off the React tree as an unhandled error.
+    Element.prototype.scrollIntoView = vi.fn();
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.clearAllMocks();
-    resetHarnessCache();
   });
 
-  it("resets the agent's session and clears the transcript", async () => {
+  it("opens the gateway's chat UI in a new tab, with the gateway URL and token", async () => {
+    const open = vi.fn();
+    vi.stubGlobal("open", open);
     await mountReady();
-
-    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
-
-    await waitFor(() => expect(resetFrames()).toHaveLength(1));
-    // Reason 'new' is what makes the agent start a fresh thread rather than
-    // merely rewinding — the provider switch uses the same pair.
-    expect(resetFrames()[0].params).toMatchObject({ key: "agent:main:main", reason: "new" });
-    await waitFor(() => expect(screen.queryByText(SEED_TEXT)).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Open in OpenClaw" }));
+    expect(open).toHaveBeenCalledWith(
+      "/chat?gatewayUrl=ws%3A%2F%2Flocalhost%2Fgw#token=t",
+      "_blank",
+      "noopener,noreferrer",
+    );
   });
 
-  it("does not auto-greet into the chat it just cleared", async () => {
+  it("does not touch this popup's own thread", async () => {
+    vi.stubGlobal("open", vi.fn());
     await mountReady();
-    const sendsBefore = sendFrames().length;
-
-    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
-    await waitFor(() => expect(screen.queryByText(SEED_TEXT)).toBeNull());
-
-    // Force a real history read against the now-empty transcript: that is the
-    // branch which would auto-greet if the reset had re-armed `greetedRef`.
-    // Asserting on a fixed sleep would only prove "nothing happened for 250ms"
-    // without ever exercising it.
-    const readsBefore = historyFrames().length;
-    socket()?.emit({
-      type: "event",
-      event: "session.message",
-      payload: { sessionKey: "agent:main:main", agentId: "main", message: assistantMessage("", 900) },
-    });
-    await waitFor(() => expect(historyFrames().length).toBeGreaterThan(readsBefore), { timeout: 3000 });
-    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-
-    expect(sendFrames()).toHaveLength(sendsBefore);
-  });
-
-  it("keeps the transcript and explains itself when the reset fails", async () => {
-    await mountReady();
-    resetFails = true;
-
-    fireEvent.click(screen.getByRole("button", { name: "New chat" }));
-
-    // Blanking the view on a failed reset would be the worst outcome: the
-    // agent still holds the thread, but the user believes it is gone.
-    await screen.findByText(/Could not start a new chat/);
-    expect(screen.queryByText(SEED_TEXT)).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open in OpenClaw" }));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(resetFrames()).toHaveLength(0);
+    expect(screen.getByText(SEED_TEXT)).toBeTruthy();
   });
 });
