@@ -112,17 +112,21 @@ describe("refreshProviderToolsIfSetChanged", () => {
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("reloads when a provider becomes offerable", async () => {
-    expect(await refreshProviderToolsIfSetChanged(["a"], ["a", "b"])).toBe(true);
+  it("reloads when a provider becomes offerable, and names it", async () => {
+    expect(await refreshProviderToolsIfSetChanged(["openrouter"], ["openrouter", "anthropic"])).toBe(true);
     expect(rpcMock).toHaveBeenCalledWith("reload.mcp", { confirm: true });
+    // The line has to be actionable. "the agent cannot switch to anthropic" is
+    // something an operator can go and check; "2 providers rather than 1" is not.
+    expect(String(logSpy.mock.calls[0][0])).toContain("gained anthropic");
   });
 
-  it("reloads when a provider stops being offerable", async () => {
+  it("reloads when a provider stops being offerable, and names that too", async () => {
     // A stale enum that still offers a provider the device no longer has is the
     // same bug pointing the other way: `ai_set_provider` accepts it and
     // `/setup-api/hermes/models` answers "Unknown provider".
-    expect(await refreshProviderToolsIfSetChanged(["a", "b"], ["a"])).toBe(true);
+    expect(await refreshProviderToolsIfSetChanged(["openrouter", "clawlocal"], ["openrouter"])).toBe(true);
     expect(rpcMock).toHaveBeenCalledWith("reload.mcp", { confirm: true });
+    expect(String(logSpy.mock.calls[0][0])).toContain("lost clawlocal");
   });
 
   it("refuses to act on a snapshot it does not have", async () => {

@@ -90,6 +90,26 @@ function sameSet(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
+ * What moved, in ids, for the log line.
+ *
+ * NAMES THEM rather than counting them, because the whole point of the line is
+ * to be actionable: "the agent cannot switch to anthropic" is a thing an
+ * operator can check, "2 providers rather than 1" is not. Provider ids are
+ * Hermes' own public slugs (`anthropic`, `openrouter`, `clawlocal`) — never a
+ * credential — and the list is bounded by the catalogue, so it cannot run away.
+ */
+function describeMove(before: readonly string[], after: readonly string[]): string {
+  const had = new Set(before);
+  const has = new Set(after);
+  const gained = after.filter((id) => !had.has(id));
+  const lost = before.filter((id) => !has.has(id));
+  const parts: string[] = [];
+  if (gained.length > 0) parts.push(`gained ${gained.join(", ")}`);
+  if (lost.length > 0) parts.push(`lost ${lost.join(", ")}`);
+  return `the providers this box can be switched to ${parts.join(" and ")}`;
+}
+
+/**
  * Reload the MCP servers, but ONLY if this request changed which providers the
  * agent may be handed.
  *
@@ -128,7 +148,7 @@ export async function refreshProviderToolsIfSetChanged(
   if (before === null || after === null) return options.alreadyReloaded === true;
   if (sameSet(before, after)) return options.alreadyReloaded === true;
 
-  const moved = `this box can now be switched to ${after.length} provider(s) rather than ${before.length}`;
+  const moved = describeMove(before, after);
   if (options.alreadyReloaded) {
     // Nothing to ask for: the respawn that already happened in this request
     // rebuilt EVERY family's tool list, this one included.
