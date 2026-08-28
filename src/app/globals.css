@@ -1314,28 +1314,6 @@ html {
   animation: chrome-window-restore 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
 }
 
-/* ═══ WINDOW CHROME — the chat popup's shell, shared by ChromeWindow (and ChatPopup in phase 2) ═══ */
-:root {
-  --win-ground: #0d1117;                 /* ChatPopup background */
-  --win-radius: 16px;                    /* ChatPopup floating borderRadius */
-  --win-strip-h: 36px;                   /* ChatPopup transcript top inset */
-  --win-strip-fade: linear-gradient(180deg, rgba(8,12,22,0.95) 0%, rgba(8,12,22,0.8) 40%, rgba(8,12,22,0.45) 70%, rgba(8,12,22,0) 100%);
-  --win-shadow: 0 8px 40px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.08);        /* chat floating = ACTIVE window */
-  --win-shadow-idle: 0 4px 20px rgba(0,0,0,0.35), 0 0 0 1px rgba(255,255,255,0.04);  /* ChromeWindow's existing inactive shadow, kept */
-  --win-strip-ink: rgba(255,255,255,0.4);
-  --win-title-ink: rgba(255,255,255,0.5);
-  --win-title-ink-idle: rgba(255,255,255,0.32);
-}
-.win-strip-btn { background: none; border: 0; color: var(--win-strip-ink); padding: 4px; border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: color .12s, background .12s; }
-.win-strip-btn:hover { color: #fff; background: var(--fill-3); }                      /* --fill-3 = rgba(255,255,255,0.10), the chat's literal */
-.win-strip-btn:active { background: var(--fill-4); }
-.win-strip-btn:focus-visible { outline: 2px solid var(--coral-ring); outline-offset: -2px; }  /* same pattern as .header-dropdown-trigger:focus-visible */
-.win-strip-btn[data-on="true"] { color: var(--coral-bright); background: rgba(249,115,22,0.2); }   /* the chat's docked state, for phase 2 */
-.win-strip-btn[data-on="true"]:hover { background: rgba(249,115,22,0.3); }
-.win-strip-title { font-size: 12px; font-weight: 500; letter-spacing: .01em; color: var(--win-title-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-[data-active="false"] .win-strip-title { color: var(--win-title-ink-idle); }
-/* ═══ end WINDOW CHROME ═══ */
-
 /* Toast notification animation */
 @keyframes toast-in {
   0% {
@@ -1557,52 +1535,4 @@ input[type="range"].appearance-none::-moz-range-track {
 @keyframes claw-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.82); }
-}
-
-/* ─────────────────────────────────────────────────────────────────────────
-   Coding agent card (CodingAgentActivityPill): "agent working" motion.
-   Three signs of life while a delegated run is in flight — the 🤖 breathes,
-   three dots step beside the status word, and the in-progress item of the
-   run's plan pulses. Opacity and transform ONLY: the Jetson's compositor
-   animates those without a repaint, and this card sits in a chat beside a
-   run that is already using the box. The card adds these classes while the
-   run is live and drops them when it settles, so a finished card is still.
-   ───────────────────────────────────────────────────────────────────────── */
-@keyframes coding-agent-breathe {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
-}
-@keyframes coding-agent-dot {
-  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
-  30% { opacity: 1; transform: translateY(-2px); }
-}
-.coding-agent-pulse {
-  animation: coding-agent-breathe 1.6s ease-in-out infinite;
-}
-.coding-agent-working {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  vertical-align: middle;
-}
-.coding-agent-working > span {
-  display: inline-block;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: coding-agent-dot 1.2s ease-in-out infinite;
-}
-.coding-agent-working > span:nth-child(2) { animation-delay: 0.15s; }
-.coding-agent-working > span:nth-child(3) { animation-delay: 0.3s; }
-/* Reduced motion: every one of these holds its resting frame. The blanket
-   0.01ms rule above catches them too; this is the card's own guard, so its
-   motion can be read — and tested — in one place. */
-@media (prefers-reduced-motion: reduce) {
-  .coding-agent-pulse,
-  .coding-agent-working > span {
-    animation: none;
-  }
-  .coding-agent-pulse { opacity: 1; }
-  .coding-agent-working > span { opacity: 0.6; }
 }

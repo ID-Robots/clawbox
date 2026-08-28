@@ -424,11 +424,7 @@ export default function CodingAgentApp() {
   const openInTerminal = (run: Run) => {
     let command: string;
     if (run.status === "running" && run.transcriptPath) {
-      // The run id is what the preview's heartbeat looks the record up by:
-      // a long model turn writes nothing to the transcript for minutes, and
-      // the record is the only place the reasoning count and the last sign
-      // of life live.
-      command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)} ${quoted(run.id)}`;
+      command = `${CLAWBOX_ROOT}/scripts/coding-run-preview ${quoted(run.transcriptPath)}`;
     } else if (run.sessionId) {
       command = `cd ${quoted(run.directory)} && claude-ds --resume ${run.sessionId}`;
     } else {
@@ -611,7 +607,7 @@ export default function CodingAgentApp() {
 
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
-  if (loading) return <div className="h-full bg-[var(--win-ground)]" data-testid="coding-agent-panel" />;
+  if (loading) return <div className="h-full bg-[#0f1219]" data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
   const checks: { label: string; ok: boolean; okText: string; badText: string }[] = readiness
@@ -627,7 +623,7 @@ export default function CodingAgentApp() {
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div className="h-full flex flex-col bg-[var(--win-ground)] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
+    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
 
         {/* One row: what this is, and whether it is on. The switch is the

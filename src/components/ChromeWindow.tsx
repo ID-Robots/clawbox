@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, useLayoutEffect, useId, ReactNode } from "react";
+import { useState, useRef, useCallback, useEffect, useLayoutEffect, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
-import { StripButton, StripIcon, WIN_STRIP_HEIGHT, win } from "@/components/window-chrome";
 import { createPortal } from "react-dom";
 import * as kv from "@/lib/client-kv";
 
@@ -101,7 +100,6 @@ function getInitialPosition(width: number, height: number, rInset = 0) {
 
 export default function ChromeWindow({
   title,
-  icon,
   children,
   appId,
   defaultWidth = 800,
@@ -118,7 +116,6 @@ export default function ChromeWindow({
   rightInset = 0,
 }: ChromeWindowProps) {
   const { t } = useT();
-  const titleId = useId();
   const [size, setSize] = useState(() => initialSize || getSavedSize(appId, defaultWidth, defaultHeight));
   const [position, setPosition] = useState(() => initialPosition || getInitialPosition(size.width, size.height, rightInset));
   const [maximized, setMaximized] = useState(false);
@@ -206,7 +203,7 @@ export default function ChromeWindow({
       const restoreW = prevSizeRef.current.width;
       const restoreH = prevSizeRef.current.height;
       const newX = clientX - restoreW / 2;
-      const newY = clientY - WIN_STRIP_HEIGHT / 2; // centre the strip on the cursor
+      const newY = clientY - 18; // center on titlebar
       setSize({ width: restoreW, height: restoreH });
       setPosition({ x: newX, y: Math.max(0, newY) });
       setSnapped(null);
@@ -418,9 +415,6 @@ export default function ChromeWindow({
     <div
       ref={windowRef}
       data-testid={appId ? `chrome-window-${appId}` : undefined}
-      role="region"
-      aria-labelledby={titleId}
-      data-active={isActive ? "true" : "false"}
       className={`fixed flex flex-col overflow-hidden ${
         opening ? "chrome-window-opening" : ""
       } ${closing ? "chrome-window-closing" : ""} ${
@@ -429,9 +423,10 @@ export default function ChromeWindow({
       style={{
         ...windowStyle,
         zIndex,
-        background: win.ground,
-        borderRadius: maximized || snapped ? 0 : win.radius,
-        boxShadow: isActive ? win.shadow : win.shadowIdle,
+        borderRadius: maximized || snapped ? 0 : 8,
+        boxShadow: isActive
+          ? "0 12px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.08)"
+          : "0 4px 20px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.04)",
         opacity: 1,
         transition: snapped && !isDragging
           ? "left 0.2s ease-out, top 0.2s ease-out, width 0.2s ease-out, height 0.2s ease-out, opacity 0.15s, box-shadow 0.15s"
@@ -439,70 +434,61 @@ export default function ChromeWindow({
       }}
       onMouseDown={isActive ? undefined : onFocus}
     >
-      {/*
-        The strip — the chat popup's control strip, in flow rather than absolute.
-        Window bodies are iframes (webapp, OpenClaw), an xterm canvas and a VNC
-        canvas that must own their top rows; nothing in a window scrolls under
-        the strip, and over the same ground an in-flow strip is pixel-identical
-        to the chat's at rest.
-      */}
+      {/* Title bar — ChromeOS style */}
       <div
-        data-testid="chrome-window-strip"
-        className="flex items-center gap-2 shrink-0 select-none"
+        className="flex items-center h-9 px-2 cursor-default select-none shrink-0"
         style={{
-          height: WIN_STRIP_HEIGHT,
-          paddingLeft: 10,
-          paddingRight: 8,
-          background: win.stripFade,
-          cursor: maximized ? "default" : "grab",
-          touchAction: "none",
+          background: isActive
+            ? "linear-gradient(180deg, #292d36 0%, #242830 100%)"
+            : "#1f2228",
+          borderBottom: "1px solid rgba(255, 255, 255, 0.06)",
+          borderRadius: maximized || snapped ? 0 : "8px 8px 0 0",
         }}
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}
         onDoubleClick={handleMaximize}
       >
-        {/*
-          Identity: icon + muted title. Always visible: unlike the single chat,
-          several windows can be open and a focused Terminal or Browser gives no
-          other cue of which app it is. A fade-on-focus title was considered and
-          rejected for that reason.
-        */}
-        {icon && (
-          <span
-            className="shrink-0 flex items-center [&>*]:w-4 [&>*]:h-4 [&>*]:rounded-[4px]"
-            style={{ opacity: isActive ? 0.9 : 0.6 }}
-            aria-hidden="true"
-          >
-            {icon}
-          </span>
-        )}
-        <span id={titleId} className="win-strip-title flex-1 min-w-0">{title}</span>
+        {/* Left: title */}
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className={`text-xs font-medium truncate ${isActive ? "text-white/80" : "text-white/50"}`}>{title}</span>
+        </div>
 
-        {/*
-          Controls. Capture-phase focus: StripButton stops mousedown/touchstart
-          in the bubble phase so a press never starts a drag, which would also
-          stop the root's onMouseDown focus — clicking Maximize on an INACTIVE
-          window would then maximise it BEHIND the active one. Capture handlers
-          on this wrapper run before the button's stopPropagation. The
-          onDoubleClick stop keeps a fast double-click on Maximize/Restore from
-          also firing the strip's maximise.
-        */}
-        <div
-          className="flex items-center gap-2 shrink-0"
-          onMouseDownCapture={() => { if (!isActive) onFocus(); }}
-          onTouchStartCapture={() => { if (!isActive) onFocus(); }}
-          onDoubleClick={(e) => e.stopPropagation()}
-        >
-          <StripButton label={t("window.minimize")} onClick={handleMinimize}>{StripIcon.minimize}</StripButton>
-          <StripButton label={maximized ? t("window.restore") : t("window.maximize")} onClick={handleMaximize}>
-            {maximized ? StripIcon.restore : StripIcon.maximize}
-          </StripButton>
-          <StripButton label={t("window.close")} onClick={handleClose}>{StripIcon.close}</StripButton>
+        {/* Right: window controls — ChromeOS circular buttons */}
+        <div className="flex items-center gap-1.5 ml-2">
+          {/* Minimize */}
+          <button
+            onClick={handleMinimize}
+            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
+            title={t("window.minimize")}
+            aria-label={t("window.minimize")}
+          >
+            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>minimize</span>
+          </button>
+
+          {/* Maximize */}
+          <button
+            onClick={handleMaximize}
+            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-white/10 active:bg-white/20 transition-colors cursor-pointer"
+            title={maximized ? t("window.restore") : t("window.maximize")}
+            aria-label={maximized ? t("window.restore") : t("window.maximize")}
+          >
+            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 16 }}>{maximized ? "filter_none" : "crop_square"}</span>
+          </button>
+
+          {/* Close */}
+          <button
+            onClick={handleClose}
+            className="w-6 h-6 flex items-center justify-center rounded-full hover:bg-red-500/80 active:bg-red-600 transition-colors cursor-pointer group"
+            title={t("window.close")}
+            aria-label={t("window.close")}
+          >
+            <span className="material-symbols-rounded text-white/60 group-hover:text-white" style={{ fontSize: 16 }}>close</span>
+          </button>
         </div>
       </div>
 
-      {/* Content — on the window ground, so app padding, loading states and iframe gaps show the family colour */}
-      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 min-h-0 overflow-hidden bg-[var(--win-ground)]">{children}</div>
+      {/* Content */}
+      <div ref={contentRef} data-chrome-window-content="true" className="flex-1 overflow-hidden bg-[#181c22]">{children}</div>
 
       {/* Resize handles — hidden when maximized/snapped */}
       {!maximized && !snapped && (
@@ -540,9 +526,9 @@ function SnapPreviewOverlay({ zone, rightInset = 0 }: { zone: SnapZone; rightIns
         top: rect.y,
         width: rect.width,
         height: rect.height,
-        background: "rgba(249,115,22,0.10)",
-        border: "2px solid rgba(249,115,22,0.45)",
-        borderRadius: win.radius,
+        background: "rgba(59, 130, 246, 0.15)",
+        border: "2px solid rgba(59, 130, 246, 0.5)",
+        borderRadius: 8,
         zIndex: 99999,
         pointerEvents: "none",
         transition: "all 0.15s ease-out",

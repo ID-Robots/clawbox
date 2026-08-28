@@ -155,7 +155,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-[var(--win-ground)] text-white/70 gap-4">
+      <div className="flex flex-col items-center justify-center h-full bg-[#0f1219] text-white/70 gap-4">
         <div className="w-8 h-8 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: BRAND_ORANGE }} />
         <p className="text-sm">{t("browser.checkingStatus")}</p>
       </div>
@@ -175,7 +175,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const canRunBrowser = isEnabled && chromiumInstalled;
 
   return (
-    <div className="h-full flex flex-col bg-[var(--win-ground)] text-white overflow-y-auto">
+    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto">
       {/* Header */}
       <div className="shrink-0 px-6 pt-6 pb-4 border-b border-white/10">
         <div className="flex items-center gap-3 mb-1">
