@@ -58,21 +58,6 @@ async function allowedRoots(request: Request): Promise<{ roots: string[]; refusa
 }
 
 /**
- * The path to read, re-derived under the root it was found in, or null. The
- * `startsWith(root + sep)` guard is the containment check itself — written
- * this way, on the re-joined path, so the file that is opened is provably
- * under a root chosen by the server, whatever the caller typed.
- */
-function containedPath(real: string, roots: string[]): string | null {
-  for (const root of roots) {
-    if (real === root) return null; // a root is a folder, never an image
-    const target = path.join(root, path.relative(root, real));
-    if (target.startsWith(root + path.sep) && !path.relative(root, real).startsWith("..")) return target;
-  }
-  return null;
-}
-
-/**
  * POST { path, prompt? } → { description, error } — a written description of a
  * local image file, through the box's vision model.
  *
@@ -101,11 +86,28 @@ export async function POST(request: Request) {
     ? body.prompt.trim().slice(0, MAX_PROMPT_CHARS)
     : undefined;
 
+  // Two containment checks, both as `startsWith(root + sep)` on a normalised
+  // path, written out here rather than behind a helper so the guard sits
+  // right before the filesystem call it protects. The first is on the path
+  // as typed, before anything touches the disk; the second is on the real
+  // file after symlinks are resolved, so a link planted under a root cannot
+  // lead out of it. A root itself is a folder, never an image.
+  const { roots, refusal } = await allowedRoots(request);
+  const resolved = path.resolve(given);
+  let typed: string | null = null;
+  for (const root of roots) {
+    if (resolved.startsWith(root + path.sep)) {
+      typed = resolved;
+      break;
+    }
+  }
+  if (typed === null) return NextResponse.json({ error: refusal }, { status: 403 });
+
   // realpath before the extension check: the type must belong to the file
   // actually read, never to a symlink's name.
   let real: string;
   try {
-    real = await fs.realpath(given);
+    real = await fs.realpath(typed);
   } catch {
     return NextResponse.json({ error: "There is no file at that path." }, { status: 404 });
   }
@@ -114,9 +116,14 @@ export async function POST(request: Request) {
   if (isProtectedFilePath(real)) {
     return NextResponse.json({ error: "There is no file at that path." }, { status: 404 });
   }
-  const { roots, refusal } = await allowedRoots(request);
-  const target = containedPath(real, roots);
-  if (!target) return NextResponse.json({ error: refusal }, { status: 403 });
+  let target: string | null = null;
+  for (const root of roots) {
+    if (real.startsWith(root + path.sep)) {
+      target = real;
+      break;
+    }
+  }
+  if (target === null) return NextResponse.json({ error: refusal }, { status: 403 });
 
   const mime = MIME_FOR[path.extname(target).toLowerCase()];
   if (!mime) {
