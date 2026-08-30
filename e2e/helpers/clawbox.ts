@@ -1430,7 +1430,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
-    // Settings -> Coding Agent. The switch is not optimistic — the panel
+    // Coding Agent app -> Settings. The switch is not optimistic — the panel
     // renders whatever the route answers — so `enable` has to answer the
     // whole re-read status, exactly as the real route does.
     if (path === "/setup-api/coding-agent/status") {
@@ -1447,6 +1447,16 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       if (typeof payload.maxTurns === "number") codingAgent.maxTurns = payload.maxTurns;
       if (payload.tokenLimit !== undefined) codingAgent.tokenLimit = payload.tokenLimit;
       await fulfillJson(route, buildCodingAgentStatus());
+      return;
+    }
+
+    // The Coding Agent app's home: no runs, no projects on this box.
+    if (path === "/setup-api/coding-agent/runs") {
+      await fulfillJson(route, { runs: [] });
+      return;
+    }
+    if (path === "/setup-api/coding-agent/projects") {
+      await fulfillJson(route, { projects: [] });
       return;
     }
 

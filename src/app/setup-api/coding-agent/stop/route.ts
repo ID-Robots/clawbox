@@ -1,56 +1,16 @@
 import { NextResponse } from "next/server";
-import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, getRun, stopRun } from "@/lib/coding-agent";
+import { stopRun } from "@/lib/coding-agent";
+import { runLifecycleRoute } from "@/lib/coding-agent-route";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { runId } → ask a running coding run to stop; answers the run record.
- * Idempotent: a run that already finished is returned as it is. `id` is
- * accepted as an alias — the shape this route launched with — so nothing
- * already calling it breaks; `runId` is the documented name, matching the
- * run route's `resumeRunId`.
- *
- * Agent-callable with the in-handler gate every state-changing route carries:
- * the agent started its runs, the agent may end them. A run the OWNER started
- * from Settings is the owner's, though — the agent's bearer gets a 403 for
- * it, so a prompt-injected "stop that" cannot cut short work the person at
- * the desk asked for. An owner's cookie passes both checks.
+ * Idempotent: a run that already finished is returned as it is. The session
+ * check, the `id` alias, the 404 and the owner gate are the factory's — see
+ * coding-agent-route.ts for why the agent's bearer gets a 403 on an owner's run.
  */
-export async function POST(request: Request) {
-  const unauthorized = await requireSession(request);
-  if (unauthorized) return unauthorized;
-
-  let body: { runId?: unknown; id?: unknown };
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
-  }
-  const raw = typeof body?.runId === "string" ? body.runId : typeof body?.id === "string" ? body.id : "";
-  const id = raw.trim();
-  if (!id) return NextResponse.json({ error: "A run id is required." }, { status: 400 });
-
-  try {
-    const run = getRun(id);
-    if (!run) {
-      return NextResponse.json({ error: "There is no coding run with that id.", kind: "not_found" }, { status: 404 });
-    }
-    if (run.source === "owner" && run.status === "running" && !(await hasOwnerSession(request))) {
-      return NextResponse.json(
-        { error: "That run was started by the owner; only they can stop it.", kind: "owner_only" },
-        { status: 403 },
-      );
-    }
-    return NextResponse.json({ run: stopRun(id) });
-  } catch (err) {
-    if (err instanceof CodingAgentError && err.kind === "not_found") {
-      return NextResponse.json({ error: err.message, kind: "not_found" }, { status: 404 });
-    }
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Could not stop the coding run" },
-      { status: 500 },
-    );
-  }
-}
+export const POST = runLifecycleRoute({
+  verb: "stop",
+  act: (id) => NextResponse.json({ run: stopRun(id) }),
+});

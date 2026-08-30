@@ -421,7 +421,7 @@ export default function CodingAgentSettingsPanel({
   /** The terminal fallback — the flow this card ran before it grew its own. */
   const connectGithubTerminal = () => {
     cancelGithubLogin();
-    const cmd = github?.loginCommand ?? "gh auth login --hostname github.com --git-protocol https";
+    const cmd = github?.loginCommand ?? "gh auth login --hostname github.com";
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command: cmd } }));
   };
 

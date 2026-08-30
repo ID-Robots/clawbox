@@ -86,8 +86,10 @@ Handles two concerns:
 - **`email-approval-prompts.ts`** — the outstanding questions (`data/email-approval-prompts.json`, 0600, capped, 24h): handle → draft id + fingerprint, claimed read-and-remove so one handle answers once.
 - **`coding-harness.ts`** — the one name for the `claude-ds` wrapper (Claude Code on the box's ClawBox AI plan) and where install.sh puts it.
 - **`coding-agent.ts`** — the coding agent runner: spawns `claude-ds -p` with an explicit environment, `acceptEdits`, a Bash allow/deny-list and file deny rules, parses the `stream-json` output into a persisted run record, enforces the owner's switch, readiness, one-run-at-a-time and the working-folder rules, settles runs lost to a restart. Wires the clawbox MCP server into each run (`--strict-mcp-config`, browser-only profile, no secret in argv) so a run can drive the device's Chromium to verify its work.
+- **`coding-agent-status.ts`** — the run status machine, the ONE list the server, the client and the MCP server derive from (`RUN_STATUSES`, `isLive`, `isHeld`, `isSettled`); a status missing from the persisted allow-list once made a restart silently delete paused runs and drafts.
+- **`coding-agent-route.ts`** — the shared run-lifecycle route factory behind `stop`/`pause`/`resume`/`start`/`draft`: session → run id (`runId` or `id`) → 404 → the owner gate (an owner-sourced run answers 403 `owner_only` to the MCP bearer in ANY state) → the action → `CodingAgentError` mapped through `httpStatusForCodingError`.
 - **`coding-agent-artifacts.ts`** — the run evidence store: per-run folder under `data/coding-agent-artifacts/`, listing/serving-path validation (traversal- and symlink-proof), removal when a run record is dropped.
-- **`vision-describe.ts`** — text eyes for image-blind run models: describes a screenshot through the box's resolved vision model, answering `{ text, error }` instead of throwing.
+- **`vision-describe.ts`** — text eyes for image-blind run models: describes a screenshot through the box's resolved vision model, answering `{ text, error }` instead of throwing; retries once on a transient proxy failure, never after a timeout. `POST /setup-api/vision/describe { path, prompt? }` is its route: a protected path answers 404 like a missing one, and every caller is fenced to a server-chosen root (403 outside): the MCP bearer to the active run's working and evidence folders, a session cookie to the tree the Files app browses; the file is read through one open handle, never stat-then-read.
 - **`provider-enablement.ts`** — the per-provider switch (`ai_disabled_providers` in the config store): read by `provider-status.ts`, the chat model options, `providers/default` and the fallback writer; refuses to switch off the current default.
 - **`stt-preference.ts`** / **`stt-local.ts`** — speech-input ordering (`stt_primary`, the `tools.media.audio.models[]` shapes the boot script recognises as ours) and the on-box Whisper client (temp file, `stt-client.py`, never throws).
 - **`coding-agent-notify.ts`** — the finish notice: desktop toast plus a template-only Telegram message to approved senders. Never the task or the summary.
@@ -129,10 +131,10 @@ Handles two concerns:
 - **`VNCApp.tsx`** — NoVNC remote desktop viewer
 - **`VSCodeApp.tsx`** — VS Code server integration
 - **`AppStore.tsx`** — discover and install apps from clawbox.com
-- **`SettingsApp.tsx`** — Providers, Local AI, Coding Agent (`CodingAgentSettingsPanel.tsx`), Channels (Telegram, Discord, Email), Voice, Network, Remote Control, Appearance, System, About
+- **`SettingsApp.tsx`** — Providers, Local AI, Channels (Telegram, Discord, Email), Voice, Network, Remote Control, Appearance, System, About (Coding Agent settings live in the Coding Agent app itself)
 - **`OllamaModelPanel.tsx`** — local model pull, search, delete
-- **`CodingAgentApp.tsx`** — the Coding Agent desktop app: harness readiness, the Test-harness button, the owner's projects (git-initialised folders and code projects), recent runs (this icon used to open an interactive `claude-ds` terminal) with summaries, and a "New app" wizard that composes one message and hands it to the mascot chat (`CHAT_MESSAGE_EVENT`) — the assistant carries on from there. Its settings live in Settings → Coding Agent; the app only links there.
-- **`CodingAgentSettingsPanel.tsx`** — Settings → Coding Agent: the owner's switch for delegated Claude Code runs, the default project folder, effort, the per-run ceilings and the GitHub card (device-flow login, sign-out, terminal fallback). Emits `CODING_AGENT_CHANGED_EVENT` after every saved change so an open Coding Agent window refreshes.
+- **`CodingAgentApp.tsx`** — the Coding Agent desktop app: harness readiness, the Test-harness button, the owner's projects (git-initialised folders and code projects), recent runs (this icon used to open an interactive `claude-ds` terminal) with summaries, and a "New app" wizard that composes one message and hands it to the mascot chat (`CHAT_MESSAGE_EVENT`) — the assistant carries on from there. Its Settings button opens the settings page embedded in the app itself; the home page leads with a Create New Project wizard (handed to the chat), and each project expands into its own page with a git block (branch, commits, origin — GET /setup-api/coding-agent/git?projectId=) plus that project's runs; runs with no project stay on home.
+- **`CodingAgentSettingsPanel.tsx`** — the Coding Agent app's embedded Settings page: the owner's switch for delegated Claude Code runs, the default project folder, effort, the per-run ceilings and the GitHub card (device-flow login, sign-out, terminal fallback). Emits `CODING_AGENT_CHANGED_EVENT` after every saved change so an open Coding Agent window refreshes.
 - **`MemoryShardApp.tsx`** — the Memory Shard desktop app (`memory-shard`, OpenClaw only): the memory index card that used to sit inside ClawKeep — index now, schedule, status. ClawKeep keeps a one-line pointer card to it; the shared card/stat/dialog helpers live in `clawkeep-ui.tsx`.
 - **`ToastHost.tsx`** — the desktop's toast surface; the only listener for the `clawbox:toast` event every server-side owner notice ends in
 - **`OpenClawApp.tsx`** — OpenClaw gateway Control UI wrapper
@@ -165,6 +167,7 @@ of them kept failing.
     `preferences_get`, `preferences_set`, `ui_open_app`, `ui_list_apps`,
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`,
+    `describe_image`,
     `coding_agent_run/status/stop` (registered only while the owner's switch is on
     and the `claude-ds` harness is ready — probed at startup like `email_list`)
   - **Hermes only**: `skill_search`, `skill_list`, `skill_info`, `skill_install`,

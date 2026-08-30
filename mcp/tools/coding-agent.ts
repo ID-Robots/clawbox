@@ -25,6 +25,9 @@ import { ApiError, redact, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { zInt, zOptText, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
+// Pure TypeScript, no Node imports — the one status union every consumer
+// derives from, so this payload cannot fall behind the server's record.
+import type { CodingRunStatus } from "../../src/lib/coding-agent-status";
 
 const MAX_TASK_CHARS = 4_000;
 const MAX_WAIT_SECONDS = 120;
@@ -120,7 +123,7 @@ interface RunPayload {
   directory: string;
   projectId: string | null;
   source: string;
-  status: "running" | "completed" | "failed" | "stopped";
+  status: CodingRunStatus;
   startedAt: number;
   completedAt: number | null;
   sessionId: string | null;
@@ -128,7 +131,6 @@ interface RunPayload {
   summary: string | null;
   error: string | null;
   numTurns: number;
-  costUsd: number | null;
   filesTouched: string[];
   commandsRun: number;
   permissionDenials: number;

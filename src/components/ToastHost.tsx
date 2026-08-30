@@ -62,7 +62,7 @@ export default function ToastHost() {
           key={toast.id}
           role="status"
           aria-live="polite"
-          className="pointer-events-auto flex items-start gap-3 rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl px-4 py-3 animate-in slide-in-from-bottom-2 fade-in duration-300"
+          className="pointer-events-auto flex items-start gap-3 rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl px-4 py-3 animate-in slide-in-from-bottom-2 fade-in duration-300"
         >
           <span className="material-symbols-rounded text-[var(--coral-bright)] shrink-0" style={{ fontSize: 20 }} aria-hidden="true">
             notifications

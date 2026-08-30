@@ -10,6 +10,7 @@ import type { OpenClawConfig } from "@/lib/openclaw-config";
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
 import { findClawboxBrowserPids, terminateClawboxBrowser, terminateForeignCdpBrowser } from "@/lib/process-match";
+import { findPlaywrightChromium } from "@/lib/cdp-probe";
 
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
@@ -52,33 +53,6 @@ function integrationIsAlwaysOn(): boolean {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-async function findPlaywrightChromium(): Promise<string | null> {
-  try {
-    const entries = await fs.readdir(PLAYWRIGHT_BROWSERS_DIR, { withFileTypes: true });
-    const candidates: string[] = [];
-
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-
-      // Playwright 1.50+ ships Chrome-for-Testing under chrome-linux64/ on
-      // amd64 and chrome-linux-arm64/ on arm64; older builds used
-      // chrome-linux/. Probe all three.
-      for (const relativePath of ["chrome-linux/chrome", "chrome-linux64/chrome", "chrome-linux-arm64/chrome"]) {
-        const candidate = path.join(PLAYWRIGHT_BROWSERS_DIR, entry.name, relativePath);
-        try {
-          await fs.access(candidate, fsConstants.X_OK);
-          candidates.push(candidate);
-          break;
-        } catch {}
-      }
-    }
-
-    return candidates.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })).at(-1) ?? null;
-  } catch {
-    return null;
-  }
-}
-
 async function installPlaywrightChromium(): Promise<void> {
   const playwrightBin = path.join(process.cwd(), "node_modules", ".bin", "playwright");
   await fs.access(playwrightBin, fsConstants.X_OK);
@@ -93,7 +67,9 @@ async function installPlaywrightChromium(): Promise<void> {
 }
 
 async function checkChromium(): Promise<{ installed: boolean; path?: string; version?: string }> {
-  const playwrightChromium = await findPlaywrightChromium();
+  // Full chrome only: this is the browser the owner will see in a window,
+  // and a headless shell cannot open one.
+  const playwrightChromium = findPlaywrightChromium(PLAYWRIGHT_BROWSERS_DIR, { preferHeadless: false });
   if (playwrightChromium) {
     try {
       const { stdout: ver } = await exec(playwrightChromium, ["--version"], { timeout: 5000 });

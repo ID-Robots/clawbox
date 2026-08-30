@@ -3,7 +3,6 @@
   "tier": "M",
   "title": "8-file static site from scratch",
   "timeoutMinutes": 20,
-  "expectedCostUsd": 1.0,
   "nightly": true,
   "manual": false
 }

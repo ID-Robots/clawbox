@@ -7,7 +7,7 @@
 //   node bench/runner.mjs                      # every non-manual task, once
 //   node bench/runner.mjs --nightly            # only tasks marked nightly
 //   node bench/runner.mjs --tasks s-01-single-edit,m-03-failing-tests
-//   node bench/runner.mjs --tier S,M --repeat 5 --budget 2.50
+//   node bench/runner.mjs --tier S,M --repeat 5
 //   node bench/runner.mjs --effort low --label effort-low
 //   node bench/runner.mjs --dry-run
 //
@@ -15,7 +15,6 @@
 //
 // Rules carried over from the design doc:
 //  - a failing run is a FINDING, not a retry: capture it, move on
-//  - the budget is a ceiling on NEW runs, not a kill switch for a running one
 //  - one runner at a time: a busy box aborts the suite rather than queueing
 import fs from "node:fs";
 import os from "node:os";
@@ -38,7 +37,6 @@ function parseArgs(argv) {
     else if (a === "--nightly") args.nightly = true;
     else if (a === "--manual") args.manual = true;
     else if (a === "--repeat") args.repeat = Math.max(1, Number(next()) || 1);
-    else if (a === "--budget") args.budget = Number(next());
     else if (a === "--effort") args.effort = next();
     else if (a === "--max-turns") args.maxTurns = Number(next());
     else if (a === "--token-limit") args.tokenLimit = Number(next());
@@ -104,9 +102,8 @@ async function main() {
   if (!args.manual) tasks = tasks.filter((t) => !t.manual);
 
   const plan = tasks.flatMap((t) => Array.from({ length: args.repeat }, (_, i) => ({ task: t, rep: i + 1 })));
-  const expected = tasks.reduce((s, t) => s + (t.expectedCostUsd ?? 0) * args.repeat, 0);
-  console.log(`suite v${suite.suiteVersion} → ${plan.length} run(s) on ${baseUrl()}; expected cost ≈ $${expected.toFixed(2)}${args.budget ? `, budget $${args.budget.toFixed(2)}` : ""}`);
-  for (const { task, rep } of plan) console.log(`  ${task.id} (${task.tier}${task.manual ? ", MANUAL" : ""}) rep ${rep}/${args.repeat} — ~$${(task.expectedCostUsd ?? 0).toFixed(2)}, ≤${task.timeoutMinutes}min`);
+  console.log(`suite v${suite.suiteVersion} → ${plan.length} run(s) on ${baseUrl()}`);
+  for (const { task, rep } of plan) console.log(`  ${task.id} (${task.tier}${task.manual ? ", MANUAL" : ""}) rep ${rep}/${args.repeat} — ≤${task.timeoutMinutes}min`);
   if (args.dryRun) return;
 
   // The switch and the run settings are enable-time config, not per-run: the
@@ -123,17 +120,8 @@ async function main() {
   }
 
   const workroot = args.workroot ?? path.join(os.homedir(), "bench-work");
-  let spent = 0;
   const summary = [];
   for (const { task, rep } of plan) {
-    if (args.budget != null) {
-      const projected = spent + (task.expectedCostUsd ?? 0);
-      if (projected > args.budget) {
-        console.log(`SKIP ${task.id} rep ${rep}: $${spent.toFixed(2)} spent + ~$${(task.expectedCostUsd ?? 0).toFixed(2)} expected exceeds the $${args.budget.toFixed(2)} budget`);
-        summary.push({ task: task.id, rep, outcome: "skipped-budget" });
-        continue;
-      }
-    }
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const runRoot = path.join(workroot, `${stamp}-${task.id}-r${rep}`);
     const workdir = seedWorkdir(task, runRoot);
@@ -192,15 +180,14 @@ async function main() {
       resultsRoot: RESULTS_DIR, suiteVersion: suite.suiteVersion,
       score, outcome, wallMs, commitLagMs: settled.commitLagMs, label: args.label ?? null,
     });
-    spent += run.costUsd ?? 0;
-    console.log(`  ${outcome} in ${Math.round(wallMs / 1000)}s — score ${score ? `${score.score}/100` : "n/a"}, ${run.costUsd == null ? "cost unreported" : `$${run.costUsd.toFixed(2)}`}, ${run.tokensUsed} tok, ${line.filesTouched} files, ${run.retries} retries`);
+    console.log(`  ${outcome} in ${Math.round(wallMs / 1000)}s — score ${score ? `${score.score}/100` : "n/a"}, ${run.tokensUsed} tok, ${line.filesTouched} files, ${run.retries} retries`);
     if (score) for (const c of score.checks.filter((x) => !x.pass)) console.log(`    ✗ ${c.name}${c.detail ? ` — ${c.detail.slice(0, 90)}` : ""}`);
-    summary.push({ task: task.id, rep, outcome, score: score?.score ?? null, costUsd: run.costUsd ?? null, wallMs });
+    summary.push({ task: task.id, rep, outcome, score: score?.score ?? null, wallMs });
   }
 
-  console.log(`\n== suite done: $${spent.toFixed(2)} recorded spend ==`);
+  console.log(`\n== suite done: ${summary.length} run(s) ==`);
   for (const s of summary) {
-    console.log(`  ${s.task} rep ${s.rep}: ${s.outcome}${s.score != null ? ` score ${s.score}` : ""}${s.costUsd != null ? ` $${s.costUsd.toFixed(2)}` : ""}`);
+    console.log(`  ${s.task} rep ${s.rep}: ${s.outcome}${s.score != null ? ` score ${s.score}` : ""}`);
   }
   const failed = summary.filter((s) => !["completed"].includes(s.outcome));
   process.exitCode = failed.length > 0 ? 1 : 0;

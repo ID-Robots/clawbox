@@ -46,6 +46,19 @@ const mockBrowser = vi.hoisted(() => ({
 
 const connectOverCDP = vi.hoisted(() => vi.fn().mockResolvedValue(mockBrowser));
 
+// The Chromium the route launches for ITSELF when the desktop port is held
+// by somebody else's browser. A separate handle from mockBrowser so the test
+// can tell "closed ours" from "closed the desktop's".
+const mockOwnedBrowser = vi.hoisted(() => ({
+  contexts: vi.fn(() => [mockContext]),
+  close: vi.fn().mockResolvedValue(undefined),
+  isConnected: vi.fn(() => true),
+  on: vi.fn(),
+}));
+const launchChromium = vi.hoisted(() => vi.fn().mockResolvedValue(mockOwnedBrowser));
+// A probe verdict a test forces, ahead of what the fetch stub would imply.
+const probeVerdict = vi.hoisted(() => ({ value: null as "ours" | "foreign" | "down" | null }));
+
 vi.mock("child_process", () => ({
   execFile: execFileMock,
 }));
@@ -53,7 +66,27 @@ vi.mock("child_process", () => ({
 vi.mock("playwright", () => ({
   chromium: {
     connectOverCDP,
+    launch: launchChromium,
   },
+}));
+
+// The route's readiness probe (src/lib/cdp-probe.ts) is a real WebSocket
+// upgrade against the address /json/version names, which the fetch stub
+// below cannot answer. Reduce it to that fetch, so setDesktopBrowserReady
+// keeps its "n failures, then ready" meaning; the probe itself is unit-tested
+// against a fake Chromium in src/tests/unit/cdp-probe.test.ts.
+vi.mock("@/lib/cdp-probe", () => ({
+  probeCdp: async (endpoint: string) => {
+    if (probeVerdict.value) return probeVerdict.value;
+    try {
+      const res = await fetch(`${endpoint}/json/version`);
+      return res.ok ? "ours" : "down";
+    } catch {
+      return "down";
+    }
+  },
+  describePortOwner: async () => "",
+  findPlaywrightChromium: () => null,
 }));
 
 function cdpVersionResponse() {
@@ -132,6 +165,11 @@ describe("/setup-api/browser", () => {
     mockBrowser.close.mockResolvedValue(undefined);
     mockBrowser.isConnected.mockReturnValue(true);
     connectOverCDP.mockResolvedValue(mockBrowser);
+    mockOwnedBrowser.contexts.mockReturnValue([mockContext]);
+    mockOwnedBrowser.close.mockResolvedValue(undefined);
+    mockOwnedBrowser.isConnected.mockReturnValue(true);
+    launchChromium.mockResolvedValue(mockOwnedBrowser);
+    probeVerdict.value = null;
     execFileMock.mockImplementation((file: string, args?: unknown, options?: unknown, callback?: unknown) => {
       const cb = [args, options, callback].find((value) => typeof value === "function") as ((err: Error | null, stdout: string, stderr: string) => void) | undefined;
       cb?.(null, "", "");
@@ -205,6 +243,36 @@ describe("/setup-api/browser", () => {
     expect(body.ok).toBe(true);
     expect(mockPage.close).toHaveBeenCalled();
     expect(mockBrowser.close).not.toHaveBeenCalled();
+  });
+
+  it("closes a headless Chromium of its own once its last session is gone — never the desktop's", async () => {
+    // The desktop port is somebody else's browser: the route launches its own.
+    probeVerdict.value = "foreign";
+    const { body } = await launchSession();
+    expect(launchChromium).toHaveBeenCalledTimes(1);
+    expect(connectOverCDP).not.toHaveBeenCalled();
+    expect(body.sessionId).toBeDefined();
+
+    await sendAction("close", body.sessionId);
+    expect(mockPage.close).toHaveBeenCalled();
+    expect(mockOwnedBrowser.close).toHaveBeenCalledTimes(1);
+    expect(mockBrowser.close).not.toHaveBeenCalled();
+
+    // Nothing stale is reused: the next launch starts a fresh one.
+    await launchSession();
+    expect(launchChromium).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps its own Chromium while another session still uses it", async () => {
+    probeVerdict.value = "foreign";
+    const first = (await launchSession()).body.sessionId as string;
+    const second = (await launchSession()).body.sessionId as string;
+    expect(launchChromium).toHaveBeenCalledTimes(1);
+
+    await sendAction("close", first);
+    expect(mockOwnedBrowser.close).not.toHaveBeenCalled();
+    await sendAction("close", second);
+    expect(mockOwnedBrowser.close).toHaveBeenCalledTimes(1);
   });
 
   it("reuses the shared CDP connection across launches", async () => {

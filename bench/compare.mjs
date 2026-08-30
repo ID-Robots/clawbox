@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadPricing, priceUsage } from "./lib/transcript.mjs";
+import {} from "./lib/transcript.mjs";
 
 const BENCH_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RESULTS_DIR = path.join(BENCH_DIR, "results");
@@ -41,7 +41,6 @@ function latestSuite() {
 }
 
 const fmt = {
-  usd: (v) => (v == null ? "—" : `$${v.toFixed(2)}`),
   secs: (ms) => (ms == null ? "—" : ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`),
   tok: (n) => (n == null ? "—" : n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)),
   num: (v, d = 2) => (v == null ? "—" : v.toFixed(d)),
@@ -70,7 +69,6 @@ function summarizeTask(rows) {
   const done = rows.filter((r) => r.outcome === "completed");
   const scores = rows.map((r) => r.score).filter((s) => s != null);
   const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
-  const cost = avg(rows.map((r) => r.costUsd).filter((c) => c != null));
   const score = avg(scores);
   const files = avg(rows.map((r) => r.filesTouched));
   return {
@@ -78,14 +76,11 @@ function summarizeTask(rows) {
     completed: done.length,
     flakeRate: rows.length > 1 ? 1 - done.length / rows.length : null,
     score,
-    cost,
     wallMs: avg(rows.map((r) => r.wallMs).filter((w) => w != null)),
     tokens: avg(rows.map((r) => r.tokensUsed)),
     retries: rows.reduce((s, r) => s + (r.retries ?? 0), 0),
     denials: rows.reduce((s, r) => s + (r.permissionDenials ?? 0), 0),
     subagents: avg(rows.map((r) => r.subagentsTotal)),
-    costPerFile: cost != null && files ? cost / files : null,
-    costPerPoint: cost != null && score ? cost / score : null,
   };
 }
 
@@ -93,24 +88,21 @@ function printSet(rows, title) {
   console.log(`\n## ${title} — ${rows.length} run(s)\n`);
   const byTask = groupBy(rows, (r) => r.task);
   table(
-    ["task", "runs", "ok", "flake", "score", "cost", "wall", "tokens", "sub-ag", "retries", "denials", "$/file", "$/point"],
+    ["task", "runs", "ok", "flake", "score", "wall", "tokens", "sub-ag", "retries", "denials"],
     [...byTask.entries()].map(([task, list]) => {
       const s = summarizeTask(list);
       return [
         task, s.runs, s.completed,
         s.flakeRate == null ? "—" : `${Math.round(s.flakeRate * 100)}%`,
-        fmt.num(s.score, 0), fmt.usd(s.cost), fmt.secs(s.wallMs), fmt.tok(s.tokens),
+        fmt.num(s.score, 0), fmt.secs(s.wallMs), fmt.tok(s.tokens),
         fmt.num(s.subagents, 1), s.retries, s.denials,
-        s.costPerFile == null ? "—" : `$${s.costPerFile.toFixed(3)}`,
-        s.costPerPoint == null ? "—" : `$${s.costPerPoint.toFixed(4)}`,
       ];
     }),
   );
 
   // Orchestrator vs sub-agent: the shipped sub-agents all run on flash while
   // the main loop runs on the tier model, so the per-model transcript sums
-  // ARE the split. Priced only if bench/pricing.json carries numbers.
-  const pricing = loadPricing();
+  // ARE the split.
   const models = new Map();
   for (const r of rows) {
     for (const [model, u] of Object.entries(r.usageByModel ?? {})) {
@@ -122,10 +114,9 @@ function printSet(rows, title) {
   if (models.size > 0) {
     console.log("\n### Token split by model (from transcripts)\n");
     table(
-      ["model", "msgs", "input", "output", "cache-r", "cache-w", "est-cost"],
+      ["model", "msgs", "input", "output", "cache-r", "cache-w"],
       [...models.entries()].map(([model, u]) => [
         model, u.messages, fmt.tok(u.input), fmt.tok(u.output), fmt.tok(u.cacheRead), fmt.tok(u.cacheWrite),
-        (() => { const p = priceUsage(model, u, pricing); return p == null ? "— (no rates in bench/pricing.json)" : fmt.usd(p); })(),
       ]),
     );
   }
@@ -134,8 +125,8 @@ function printSet(rows, title) {
   if (failures.length) {
     console.log("\n### Non-completed runs — findings, per the triage rule\n");
     table(
-      ["task", "run", "outcome", "status", "retries", "cost", "tokens", "error"],
-      failures.map((r) => [r.task, r.runId, r.outcome, r.status, r.retries, fmt.usd(r.costUsd), fmt.tok(r.tokensUsed), (r.error ?? "").slice(0, 60)]),
+      ["task", "run", "outcome", "status", "retries", "tokens", "error"],
+      failures.map((r) => [r.task, r.runId, r.outcome, r.status, r.retries, fmt.tok(r.tokensUsed), (r.error ?? "").slice(0, 60)]),
     );
   }
   const badChecks = rows.filter((r) => (r.checksFailed ?? []).length > 0);
@@ -157,7 +148,7 @@ function main() {
   if (args.baseline) {
     const base = readIndex(args.baseline);
     printSet(base, `baseline (${args.baseline})`);
-    console.log("\n## Delta vs baseline (task: score, cost)\n");
+    console.log("\n## Delta vs baseline (task: score)\n");
     const cur = groupBy(rows, (r) => r.task);
     const prev = groupBy(base, (r) => r.task);
     for (const [task, list] of cur) {
@@ -165,8 +156,7 @@ function main() {
       const b = prev.has(task) ? summarizeTask(prev.get(task)) : null;
       if (!b) { console.log(`- ${task}: new task, no baseline`); continue; }
       const dScore = a.score != null && b.score != null ? a.score - b.score : null;
-      const dCost = a.cost != null && b.cost != null ? a.cost - b.cost : null;
-      console.log(`- ${task}: score ${fmt.num(b.score, 0)} → ${fmt.num(a.score, 0)} (${dScore == null ? "—" : (dScore >= 0 ? "+" : "") + dScore.toFixed(0)}), cost ${fmt.usd(b.cost)} → ${fmt.usd(a.cost)} (${dCost == null ? "—" : (dCost >= 0 ? "+" : "") + dCost.toFixed(2)})`);
+      console.log(`- ${task}: score ${fmt.num(b.score, 0)} → ${fmt.num(a.score, 0)} (${dScore == null ? "—" : (dScore >= 0 ? "+" : "") + dScore.toFixed(0)})`);
     }
   }
 }

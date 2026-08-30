@@ -3,7 +3,6 @@
   "tier": "M",
   "title": "Test-driven fix: seeded failing tests must go green",
   "timeoutMinutes": 15,
-  "expectedCostUsd": 0.5,
   "nightly": true,
   "manual": false
 }

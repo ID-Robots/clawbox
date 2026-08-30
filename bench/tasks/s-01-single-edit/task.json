@@ -3,7 +3,6 @@
   "tier": "S",
   "title": "One-file edit, no build",
   "timeoutMinutes": 5,
-  "expectedCostUsd": 0.1,
   "nightly": true,
   "manual": false
 }

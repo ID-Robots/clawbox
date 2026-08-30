@@ -35,6 +35,8 @@ let restore: () => void;
 const argvFile = () => path.join(base, "argv.txt");
 const envFile = () => path.join(base, "env.txt");
 const stdinFile = () => path.join(base, "stdin.txt");
+/** One line per spawn — argv.txt is overwritten by each and cannot tell one from two. */
+const spawnsFile = () => path.join(base, "spawns.txt");
 const runsFile = () => path.join(root, "data", "coding-agent-runs.json");
 
 function writeConfig(cfg: Record<string, unknown>): void {
@@ -107,6 +109,19 @@ const HAPPY_BODY = [
   `echo '${RESULT}'`,
   "exit 0",
 ].join("\n");
+
+/** HAPPY_BODY, counting the spawn first. */
+const countingBody = () => [`echo spawned >> "${spawnsFile()}"`, HAPPY_BODY].join("\n");
+
+/**
+ * HAPPY_BODY with a real change on disk, distinct per spawn, so the commit
+ * that follows EVERY run of it has something to record — and says so in the
+ * progress, which is what a test waits on to know the attempt is over.
+ */
+const TOUCHING_BODY = ['date +%s%N > "$PWD/touched-$$.txt"', HAPPY_BODY].join("\n");
+
+/** What recordRunWork writes when the commit attempt is over — either way. */
+const COMMIT_LINE = /Committed as|Not committed/;
 
 function makeProject(id: string): string {
   const dir = path.join(root, "data", "code-projects", id);
@@ -272,6 +287,26 @@ describe("where a run may work", () => {
     expect(lib.denyRulesCover(rules, path.join(root, "data", "cloudflared", "cert.pem"))).toBe(true);
   });
 
+  it("denies the checkout's own top-level entries — the brief's promise, made true", () => {
+    // Everything directly under the checkout except data/, whose entries the
+    // pass above already covers one by one: src/, mcp/, scripts/ and
+    // package.json were open to Read while the brief told the run they were
+    // refused.
+    fs.mkdirSync(path.join(root, "src", "lib"), { recursive: true });
+    fs.mkdirSync(path.join(root, "data", "code-projects"), { recursive: true });
+    fs.writeFileSync(path.join(root, "package.json"), "{}");
+    const rules = lib.fileDenyRules();
+    expect(rules).toContain(`Read(/${path.join(root, "src")}/**)`);
+    expect(rules).toContain(`Edit(/${path.join(root, "package.json")})`);
+    expect(rules).toContain(`Write(/${path.join(root, ".env")})`);
+    expect(lib.denyRulesCover(rules, path.join(root, "src", "lib", "auth.ts"))).toBe(true);
+    // data/ itself is never denied as a tree — the working folder lives under it.
+    expect(rules).not.toContain(`Read(/${path.join(root, "data")}/**)`);
+    expect(lib.denyRulesCover(rules, path.join(root, "data", "code-projects", "site"))).toBe(false);
+    // A folder outside the checkout is untouched.
+    expect(lib.denyRulesCover(rules, path.join(home, "Projects", "my-app"))).toBe(false);
+  });
+
   it("allows an ordinary folder in the home", async () => {
     const dir = path.join(home, "projects", "site");
     fs.mkdirSync(dir, { recursive: true });
@@ -356,7 +391,6 @@ describe("a run", () => {
     expect(run.model).toBe("deepseek-v4-flash");
     expect(run.summary).toMatch(/Changed index.html/);
     expect(run.numTurns).toBe(3);
-    expect(run.costUsd).toBe(0.12);
     expect(run.permissionDenials).toBe(1);
     expect(run.commandsRun).toBe(1);
     expect(run.filesTouched).toEqual(["index.html", "style.css"]);
@@ -465,6 +499,283 @@ describe("a run", () => {
     await finished((await lib.startRun({ task: "finish it", resumeRunId: first.id, source: "agent" })).id);
     const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
     expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
+  });
+
+  it("does not report a run finished on a result event alone — the process must exit", async () => {
+    // A resumed session on a real box (run-qqj1io65) emitted a result-shaped
+    // event and then kept working for three minutes; the record said
+    // "completed" while files were still being written.
+    const flag = path.join(base, "let-the-wrapper-exit");
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      `echo '${RESULT}'`,
+      `while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const started = await lib.startRun({ task: "t", projectId: "site", source: "agent" });
+    // Wait until the result event has been parsed (its summary lands): the
+    // process is still alive, so the run must still say running.
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.summary).toMatch(/Changed/); }, { timeout: 5000 });
+    expect(lib.getRun(started.id)?.status).toBe("running");
+    fs.writeFileSync(flag, "");
+    const run = await finished(started.id);
+    expect(run.status).toBe("completed");
+    expect(run.numTurns).toBe(3);
+  });
+
+  it("tells a resumed session its NEW evidence folder, on stdin with the task", async () => {
+    installFakeWrapper(`echo '${INIT}'\necho '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":60,"session_id":"sess-abc-123"}'\nexit 0`);
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
+    const firstStdin = fs.readFileSync(stdinFile(), "utf-8");
+    expect(firstStdin).not.toContain("evidence folder"); // a fresh run gets the bare task
+
+    installFakeWrapper(HAPPY_BODY);
+    const resumed = await finished((await lib.startRun({ task: "finish it", resumeRunId: first.id, source: "agent" })).id);
+    const stdin = fs.readFileSync(stdinFile(), "utf-8");
+    expect(stdin).toContain("finish it");
+    expect(stdin).toContain(resumed.id); // the NEW run's folder…
+    expect(stdin).not.toContain(first.id); // …not the previous run's
+  });
+
+  it("resumes a COMPLETED run's session — a finished conversation is safe to continue", async () => {
+    installFakeWrapper(HAPPY_BODY);
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+    expect(first.status).toBe("completed");
+
+    const followUp = await finished((await lib.startRun({ task: "polish it", resumeRunId: first.id, source: "agent" })).id);
+    const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+    expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
+    expect(followUp.directory).toBe(first.directory);
+  });
+
+  describe("the automatic review pass", () => {
+    const allRuns = () => JSON.parse(fs.readFileSync(runsFile(), "utf-8")) as { id: string; reviewOf: string | null }[];
+
+    it("follows a completed run with ONE review pass in the same session — and never a second", async () => {
+      installFakeClaude();
+      installFakeWrapper(TOUCHING_BODY);
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      makeProject("site");
+      const first = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      expect(first.status).toBe("completed");
+
+      // The pass starts only after the commit attempt has finished either way.
+      await vi.waitFor(() => { expect(allRuns().length).toBe(2); }, { timeout: 10_000 });
+      const review = await finished(allRuns()[0].id);
+      expect(review.reviewOf).toBe(first.id);
+      expect(review.status).toBe("completed");
+      expect(review.progress.join("\n")).toContain(`Automatic review pass of ${first.id}`);
+      const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+      expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
+      expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("Automatic review pass");
+
+      // The review pass itself completed and touched files — and must NOT
+      // chain: once ITS commit attempt is over (the moment a follow-up would
+      // start), there is still no third run.
+      await vi.waitFor(() => { expect(lib.getRun(review.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
+      expect(allRuns().length).toBe(2);
+    });
+
+    it("does not start after the owner pressed Stop, even when the run settles completed", async () => {
+      // The final result event is applied ahead of the stop so a stop that
+      // raced the finish keeps the work — but the owner's gesture still means
+      // "no more of this": no automatic follow-up may start.
+      installFakeClaude();
+      const flag = path.join(base, "reviewed-stop-flag");
+      installFakeWrapper([
+        `echo '${INIT}'`,
+        `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`,
+        `echo '${TOOL_RESULTS}'`,
+        `echo '${RESULT}'`,
+        `while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+        "exit 0",
+      ].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      makeProject("site");
+      const started = await lib.startRun({ task: "build", projectId: "site", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.summary).toMatch(/Changed/); }, { timeout: 5000 });
+      await lib.stopRun(started.id);
+      const run = await finished(started.id);
+      expect(run.status).toBe("completed"); // the raced stop keeps the work…
+      // …but no review pass follows a Stop: once the commit attempt is over
+      // (the moment a follow-up would start), the run is still alone.
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
+      expect(allRuns().length).toBe(1);
+    });
+
+    it("does nothing while the owner's review switch is off", async () => {
+      readyDevice();
+      makeProject("site");
+      const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      await vi.waitFor(() => { expect(lib.getRun(done.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
+      expect(allRuns().length).toBe(1);
+    });
+  });
+
+  describe("the token limit", () => {
+    it("settles as stopped, not completed, when the result event beat the kill", async () => {
+      installFakeClaude();
+      // One turn that alone exceeds the limit, with the result event right
+      // behind it in the same write: the process has said "success" before
+      // the device's kill lands. The device's verdict must stand — a record
+      // that read "completed" beside "Stopped at the token limit" was both.
+      const spent = JSON.stringify({
+        type: "assistant",
+        message: { usage: { input_tokens: 20_000, output_tokens: 10 }, content: [{ type: "text", text: "Done" }] },
+      });
+      installFakeWrapper([`printf '%s\\n' '${INIT}' '${spent}' '${RESULT}'`, "exit 0"].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
+      makeProject("site");
+      const run = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      expect(run.status).toBe("stopped");
+      expect(run.error).toMatch(/Stopped at the token limit/);
+      expect(run.resumable).toBe(true);
+      expect(run.progress.join("\n")).toContain("Token limit reached");
+    });
+  });
+
+  describe("pause, resume, and drafts", () => {
+    it("pauses a live run, keeps its session, and resumes it in place", async () => {
+      installFakeClaude();
+      const flag = path.join(base, "pause-flag");
+      installFakeWrapper([
+        `echo '${INIT}'`,
+        `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`,
+        `echo '${TOOL_RESULTS}'`,
+        `while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+        `echo '${RESULT}'`,
+        "exit 0",
+      ].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      makeProject("site");
+      const started = await lib.startRun({ task: "build", projectId: "site", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.commandsRun).toBeGreaterThan(0); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      const paused = await finished(started.id);
+      expect(paused.status).toBe("paused");
+      expect(paused.resumable).toBe(true);
+      expect(paused.error).toBeNull();
+      expect(paused.progress.join("\n")).toContain("Paused — resume to continue");
+      // A pause is the owner's own gesture, not a finish worth a notice.
+      expect(announce).not.toHaveBeenCalled();
+
+      installFakeWrapper(HAPPY_BODY);
+      const resumed = await lib.resumeRun(started.id);
+      expect(resumed.status).toBe("running");
+      const done = await finished(started.id);
+      expect(done.status).toBe("completed");
+      const argv = fs.readFileSync(argvFile(), "utf-8").split("\n");
+      expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
+      // The session already holds the task; the resume says what happened instead.
+      expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("resumed in the same session");
+    });
+
+    it("resumes a paused run exactly once when two resumes arrive together", async () => {
+      installFakeClaude();
+      const flag = path.join(base, "pause-flag-parallel");
+      installFakeWrapper([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      makeProject("site");
+      const started = await lib.startRun({ task: "build", projectId: "site", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      expect((await finished(started.id)).status).toBe("paused");
+
+      // Both saw "paused"; only one may spawn — the other rides on its transition.
+      installFakeWrapper(countingBody());
+      const [a, b] = await Promise.all([lib.resumeRun(started.id), lib.resumeRun(started.id)]);
+      expect(a.status).toBe("running");
+      expect(b.status).toBe("running");
+      expect((await finished(started.id)).status).toBe("completed");
+      expect(fs.readFileSync(spawnsFile(), "utf-8").trim().split("\n")).toHaveLength(1);
+    });
+
+    it("stopping a paused run closes it out without a process", async () => {
+      installFakeClaude();
+      const flag = path.join(base, "pause-flag-2");
+      installFakeWrapper([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      makeProject("site");
+      const started = await lib.startRun({ task: "build", projectId: "site", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      await finished(started.id);
+      const stopped = lib.stopRun(started.id);
+      expect(stopped.status).toBe("stopped");
+    });
+
+    it("drafts a run, starts it later, and never auto-starts it", async () => {
+      readyDevice();
+      makeProject("site");
+      const draft = await lib.createDraftRun({ task: "later please", projectId: "site", source: "owner" });
+      expect(draft.status).toBe("draft");
+      expect(lib.getRun(draft.id)?.status).toBe("draft");
+      // Drafting spawned nothing: the wrapper never recorded an argv.
+      expect(fs.existsSync(argvFile())).toBe(false);
+
+      const started = await lib.startDraftRun(draft.id);
+      expect(started.status).toBe("running");
+      const done = await finished(draft.id);
+      expect(done.status).toBe("completed");
+      expect(done.progress.join("\n")).toContain("Started from a draft");
+      expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("later please");
+    });
+
+    it("starts a draft exactly once when two starts arrive together", async () => {
+      readyDevice();
+      installFakeWrapper(countingBody());
+      makeProject("site");
+      const draft = await lib.createDraftRun({ task: "once only", projectId: "site", source: "owner" });
+      const [a, b] = await Promise.all([lib.startDraftRun(draft.id), lib.startDraftRun(draft.id)]);
+      expect(a.status).toBe("running");
+      expect(b.status).toBe("running");
+      expect((await finished(draft.id)).status).toBe("completed");
+      expect(fs.readFileSync(spawnsFile(), "utf-8").trim().split("\n")).toHaveLength(1);
+      expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))).toHaveLength(1);
+    });
+
+    it("keeps paused runs and drafts across a restart — the validator knows every status it writes", async () => {
+      readyDevice();
+      makeProject("site");
+      const draft = await lib.createDraftRun({ task: "survive restarts", projectId: "site", source: "owner" });
+      const flag = path.join(base, "roundtrip-flag");
+      installFakeWrapper([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+      const started = await lib.startRun({ task: "t", projectId: "site", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      await finished(started.id);
+
+      // A restart: forget memory, re-read the file. Both records must survive
+      // (they vanished here once — RUN_STATUSES had not been widened).
+      lib._resetCodingAgentStateForTests();
+      expect(lib.getRun(draft.id)?.status).toBe("draft");
+      expect(lib.getRun(started.id)?.status).toBe("paused");
+      expect(lib.getRun(started.id)?.resumable).toBe(true);
+    });
+
+    it("clear-history keeps paused runs and drafts", async () => {
+      readyDevice();
+      makeProject("site");
+      const draft = await lib.createDraftRun({ task: "keep me", projectId: "site", source: "owner" });
+      const done = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+      expect(lib.clearFinishedRuns()).toBe(1);
+      expect(lib.getRun(draft.id)?.status).toBe("draft");
+      expect(lib.getRun(done.id)).toBeNull();
+    });
+
+    it("deletes only drafts — finished runs are history", async () => {
+      readyDevice();
+      makeProject("site");
+      const draft = await lib.createDraftRun({ task: "discard me", projectId: "site", source: "owner" });
+      lib.deleteDraftRun(draft.id);
+      expect(lib.getRun(draft.id)).toBeNull();
+
+      const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+      expect(() => lib.deleteDraftRun(run.id)).toThrow(/Only a draft/);
+    });
   });
 
   it("surfaces the wrapper's own refusal, minus its banner", async () => {
@@ -654,10 +965,26 @@ describe("retrying a transient upstream failure", () => {
     expect(run.commandsRun).toBeGreaterThan(0);
   });
 
+  it("DOES retry a run that only ran convergent setup — the npm install failure seen on the box", async () => {
+    // run-bfghfhyl: a transient proxy failure right after `npm install three
+    // esbuild ws` killed the run, because the guard read the install as work
+    // it must not repeat. An install converges; the retry is safe.
+    const INSTALLED = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "b3", name: "Bash", input: { command: "npm install three esbuild ws" } }] },
+    });
+    flakyWrapper(`echo '${INSTALLED}'`);
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.retries).toBe(1);
+  });
+
   it("does NOT retry after a command that could have left something behind", async () => {
     const BUILT = JSON.stringify({
       type: "assistant",
-      message: { content: [{ type: "tool_use", id: "b2", name: "Bash", input: { command: "npm install" } }] },
+      message: { content: [{ type: "tool_use", id: "b2", name: "Bash", input: { command: "npm run build" } }] },
     });
     flakyWrapper(`echo '${BUILT}'`);
     makeProject("site");
@@ -975,7 +1302,6 @@ describe("after a restart", () => {
       summary: null,
       error: null,
       numTurns: 2,
-      costUsd: null,
       filesTouched: [],
       commandsRun: 0,
       permissionDenials: 0,

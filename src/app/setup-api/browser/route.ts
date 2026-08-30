@@ -2,17 +2,27 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { execFile } from "child_process";
+import path from "path";
 import { promisify } from "util";
+import { describePortOwner, findPlaywrightChromium, probeCdp } from "@/lib/cdp-probe";
 import net from "net";
 import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { lookup as dnsLookup } from "dns/promises";
-import { activeRunDirectory, isInside } from "@/lib/coding-agent";
+import { activeRunDirectory, activeRunId } from "@/lib/coding-agent";
+import { isInside } from "@/lib/file-guard";
+import { ensureArtifactsDir } from "@/lib/coding-agent-artifacts";
 import { describeImage } from "@/lib/vision-describe";
 
 const exec = promisify(execFile);
 const CDP_PORT = 18800;
 const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
+// Every screenshot is bounded: Playwright's default is 30 s, and a renderer
+// wedged on a heavy page (a WebGL scene mid-compile) would otherwise hold the
+// whole request — and the coding run waiting on it — for that long on each
+// call. 15 s is well above a healthy capture and short enough that the caller
+// gets its "could not capture the page" and moves on.
+const SCREENSHOT_TIMEOUT_MS = 15_000;
 
 // SEC-4: the automation browser must not be steerable to `file://` (local-file
 // exfil — the JSON response hands back a screenshot of whatever it renders) or
@@ -233,25 +243,57 @@ setInterval(() => {
       console.log(`[Browser] Cleaned up stale session: ${id}`);
     }
   }
+  closeOwnedBrowserIfIdle();
 }, 60_000);
 
 // Shared Playwright Browser handle, reused across sessions. Recreated on
 // next access if the underlying Chromium disconnects (e.g. service restart).
 let cachedBrowser: import("playwright").Browser | null = null;
 let cachedBrowserPromise: Promise<import("playwright").Browser> | null = null;
+// Whether cachedBrowser is a Chromium WE launched — the fallback for a
+// foreign CDP port — rather than the desktop's, which is only attached to
+// and must never be closed from here. Ours is headless and invisible, so
+// with only pages ever closed it stayed resident for the life of the web
+// server; it is closed once the last session is gone instead, and the next
+// launch starts a fresh one.
+let ownedBrowser = false;
 
-async function isDesktopBrowserReady(): Promise<boolean> {
-  try {
-    // 3 s rides out a Jetson load spike without dragging out a legit failure.
-    const res = await fetch(`${CDP_ENDPOINT}/json/version`, { signal: AbortSignal.timeout(3000) });
-    return res.ok;
-  } catch {
-    return false;
-  }
+/** Close the Chromium of our own once no session refers to it. Never the desktop's. */
+function closeOwnedBrowserIfIdle(): void {
+  if (!ownedBrowser || sessions.size > 0 || !cachedBrowser) return;
+  const browser = cachedBrowser;
+  ownedBrowser = false;
+  cachedBrowser = null;
+  browser.close().catch(() => {});
+  console.log("[Browser] Closed the headless Chromium of our own: no session left");
 }
 
-async function ensureDesktopBrowserRunning(): Promise<void> {
-  if (await isDesktopBrowserReady()) return;
+/**
+ * Ready means OURS: /json/version answering is not enough, because another
+ * program's Chromium on this port answers it too and then rejects our
+ * Origin on the upgrade (seen live: the OpenClaw gateway's own browser sat
+ * on 18800 for hours while this said "ready"). See src/lib/cdp-probe.ts.
+ */
+async function isDesktopBrowserReady(): Promise<boolean> {
+  return (await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT)) === "ours";
+}
+
+/**
+ * Resolves "desktop" when ClawBox's own Chromium is up, "foreign" when the
+ * port is held by somebody else's — our service cannot bind it, so starting
+ * it would only fail — and throws when nothing can be brought up.
+ */
+async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign"> {
+  const state = await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT);
+  if (state === "ours") return "desktop";
+  if (state === "foreign") {
+    // Naming the squatter is ss plus two ps calls — a note for the log, not a
+    // step the launch waits on. It never rejects, so nothing is left dangling.
+    void describePortOwner(CDP_PORT).then((owner) => {
+      console.warn(`[Browser] CDP port ${CDP_PORT} is held by another program's Chromium${owner}; using a headless Chromium of our own instead`);
+    });
+    return "foreign";
+  }
 
   try {
     await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "start", "clawbox-browser.service"], { timeout: 5000 });
@@ -264,7 +306,7 @@ async function ensureDesktopBrowserRunning(): Promise<void> {
   // it's not up in 6 s it's wedged.
   for (let i = 0; i < 6; i++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (await isDesktopBrowserReady()) return;
+    if (await isDesktopBrowserReady()) return "desktop";
   }
 
   throw new Error(`Desktop Chromium is not available on CDP port ${CDP_PORT}`);
@@ -284,8 +326,29 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
 
   cachedBrowserPromise = (async () => {
     const pw = await getPlaywright();
-    await ensureDesktopBrowserRunning();
+    const where = await ensureDesktopBrowserRunning();
     try {
+      if (where === "foreign") {
+        // The desktop port is somebody else's browser. Rather than fail
+        // every screenshot until it exits, drive a headless Chromium of our
+        // own: coding runs verify their pages exactly as before; only the
+        // visible desktop window is not involved, and the warning above
+        // says so. It is closed on disconnect like the shared handle.
+        // Explicit executable: Playwright's own lookup has answered "" inside
+        // the standalone server, while the runtime sits in ~/.cache/ms-playwright.
+        const executablePath = findPlaywrightChromium() ?? undefined;
+        const browser = await pw.chromium.launch({ headless: true, args: ["--no-sandbox"], ...(executablePath ? { executablePath } : {}) });
+        browser.on("disconnected", () => {
+          if (cachedBrowser === browser) {
+            cachedBrowser = null;
+            ownedBrowser = false;
+          }
+          cachedBrowserPromise = null;
+        });
+        cachedBrowser = browser;
+        ownedBrowser = true;
+        return browser;
+      }
       // 30 s matches Playwright's own default — previously 10 s to fail fast
       // against the Bun-WS hang, which is no longer relevant now that we
       // run under Node.
@@ -306,6 +369,7 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
         console.log("[Browser] Shared CDP connection disconnected; will reconnect on next launch");
       });
       cachedBrowser = browser;
+      ownedBrowser = false;
       return browser;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -319,6 +383,37 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
   return cachedBrowserPromise;
 }
 
+interface DownloadablePage {
+  on?: (event: "download", handler: (d: { suggestedFilename(): string; saveAs(path: string): Promise<void> }) => void) => void;
+}
+const downloadHooked = new WeakSet<object>();
+let downloadCounter = 0;
+
+/**
+ * A file the page downloads lands in the ACTIVE run's evidence folder.
+ *
+ * Seen on run-q76516xd: the app's "Download CSV" worked, but the file never
+ * reached disk — the verification browser has nowhere to put a download and
+ * no prompt a page-driving tool can answer, so the run could only assert the
+ * CSV's content from unit tests. Saving it beside the screenshots makes the
+ * export something the run (and the owner) can open. No run active: the
+ * download is left to the browser as before.
+ */
+function installDownloadCapture(page: DownloadablePage): void {
+  if (typeof page.on !== "function" || downloadHooked.has(page)) return;
+  downloadHooked.add(page);
+  page.on("download", (download) => {
+    const runId = activeRunId();
+    if (!runId) return;
+    const safe = download.suggestedFilename().replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "download";
+    downloadCounter += 1;
+    const target = path.join(ensureArtifactsDir(runId), `download-${String(downloadCounter).padStart(3, "0")}-${safe}`);
+    download.saveAs(target)
+      .then(() => console.log(`[Browser] download saved for ${runId}: ${target}`))
+      .catch((err: unknown) => console.warn("[Browser] download not saved:", err instanceof Error ? err.message : err));
+  });
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json();
@@ -326,13 +421,14 @@ export async function POST(req: Request) {
 
     if (action === "launch") {
       const browser = await getSharedBrowser();
-      const context = browser.contexts()[0];
+      const context = browser.contexts()[0] ?? await browser.newContext();
       if (!context) {
         throw new Error("Desktop Chromium did not expose a browser context");
       }
 
       const page = context.pages().at(-1) ?? await context.newPage();
       await installNavGuard(page as unknown as GuardablePage);
+      installDownloadCapture(page as unknown as DownloadablePage);
       await page.bringToFront().catch(() => {});
 
       const { url } = body;
@@ -345,7 +441,7 @@ export async function POST(req: Request) {
       const id = `browser-${++sessionCounter}`;
       sessions.set(id, { page, lastActivity: Date.now() });
 
-      const screenshot = await page.screenshot({ type: "png" }).catch(() => null);
+      const screenshot = await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
 
       return NextResponse.json({
         sessionId: id,
@@ -365,7 +461,7 @@ export async function POST(req: Request) {
     const { page } = session;
 
     const respond = async (skipScreenshot = false) => {
-      const screenshot = skipScreenshot ? null : await page.screenshot({ type: "png" }).catch(() => null);
+      const screenshot = skipScreenshot ? null : await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       return {
         url: page.url(),
         title: await page.title().catch(() => ""),
@@ -374,15 +470,23 @@ export async function POST(req: Request) {
       };
     };
 
-    // The screenshot's written description, produced from the frame respond()
-    // just captured — for callers whose model cannot see images (coding-agent
-    // runs pass describe:true). One capture serves both; a failed description
+    // The screenshot's written description, for callers whose model cannot
+    // see images (coding-agent runs pass describe:true). The description is
+    // produced from its own JPEG capture a moment after the PNG, so on an
+    // animating page the two frames can differ slightly; a failed description
     // is an answer, not an error, and the caller degrades to the title.
     const describeReply = async (reply: Awaited<ReturnType<typeof respond>>) => {
       if (!reply.screenshot) {
         return { ...reply, description: null, descriptionError: "could not capture the page" };
       }
-      const described = await describeImage(reply.screenshot);
+      // Described from a q60 JPEG re-capture, not the PNG: the vision round
+      // trip scales with upload size (measured on this box: a full PNG frame
+      // ~10-30 s, the same frame as a small JPEG ~3 s), while the PNG in
+      // `reply` stays what the caller archives into the evidence folder.
+      const jpeg = await page.screenshot({ type: "jpeg", quality: 60, timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
+      const described = jpeg
+        ? await describeImage(jpeg.toString("base64"), undefined, "image/jpeg")
+        : await describeImage(reply.screenshot);
       return { ...reply, description: described.text, descriptionError: described.error };
     };
     const finish = async () => {
@@ -465,6 +569,26 @@ export async function POST(req: Request) {
         return NextResponse.json(await respond());
       }
 
+      case "fill": {
+        // One call per field: focus, clear, set — instead of a click, a
+        // select-all and a keystroke-by-keystroke type. A coding run spent
+        // its whole step budget on Tab/keypress navigation (run-9xy2j8qk).
+        const { selector, text } = body;
+        if (typeof selector !== "string" || !selector.trim()) {
+          return NextResponse.json({ error: "Selector required" }, { status: 400 });
+        }
+        if (typeof text !== "string") return NextResponse.json({ error: "Text required" }, { status: 400 });
+        try {
+          await page.fill(selector, text, { timeout: 5000 });
+        } catch (err) {
+          return NextResponse.json(
+            { error: `Could not fill "${selector.slice(0, 80)}": ${err instanceof Error ? err.message.split("\n")[0] : String(err)}` },
+            { status: 404 },
+          );
+        }
+        return NextResponse.json(await respond());
+      }
+
       case "back":
         await page.goBack({ waitUntil: "domcontentloaded", timeout: 10000 }).catch(() => {});
         return NextResponse.json(await respond());
@@ -488,8 +612,10 @@ export async function POST(req: Request) {
       case "close":
         // Close the session's page, not the shared Browser — leaving CDP
         // attached means the next tool call skips the 5-10 s reconnect.
+        // A Chromium of our OWN is the exception: nobody else sees it.
         await session.page.close().catch(() => {});
         sessions.delete(sessionId);
+        closeOwnedBrowserIfIdle();
         return NextResponse.json({ ok: true });
 
       default:

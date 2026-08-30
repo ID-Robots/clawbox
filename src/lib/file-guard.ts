@@ -198,3 +198,14 @@ export function isProtectedFilePath(abs: string): boolean {
     }
   }
 }
+
+/**
+ * Path containment: is `child` at or under `parent`? (`parent` itself counts.)
+ * The one fence every run-scoped file check uses — the runner's working-folder
+ * rule, the browser route's file:// scope, the vision route's evidence scope —
+ * so they cannot disagree on an edge case.
+ */
+export function isInside(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}

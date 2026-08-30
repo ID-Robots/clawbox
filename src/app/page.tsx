@@ -52,6 +52,8 @@ interface AppDef {
   color: string;
   type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat";
   url?: string;
+  // Webapps only: how the desktop opens it (InstalledMeta.launch).
+  launch?: "window";
   pinned: boolean;
   defaultWidth?: number;
   defaultHeight?: number;
@@ -1068,6 +1070,7 @@ function ChromeDesktopInner() {
           color: meta.color,
           type: isWebapp ? "webapp" : "installed",
           url: isWebapp ? meta.webappUrl : undefined,
+          launch: isWebapp ? meta.launch : undefined,
           pinned: false,
           defaultWidth: isWebapp ? 800 : 600,
           defaultHeight: isWebapp ? 600 : 400,
@@ -1113,6 +1116,22 @@ function ChromeDesktopInner() {
         : app.url;
       window.open(url, "_blank", "noopener,noreferrer");
       return;
+    }
+
+    if (app.type === "webapp" && app.url && app.launch === "window") {
+      // The app's meta asks for a real top-level browser document (e.g.
+      // pointer lock for an FPS), which the sandboxed desktop iframe blocks —
+      // open in a new browser window instead. Same rule as the iframe branch
+      // below: http(s) or a same-origin path only, so a `javascript:` URL in
+      // an installed app's meta cannot run in the desktop's top-level window.
+      // Anything else falls through to the sandboxed iframe.
+      try {
+        const u = new URL(app.url, window.location.origin);
+        if (["http:", "https:"].includes(u.protocol)) {
+          window.open(u.href, "_blank", "noopener,noreferrer");
+          return;
+        }
+      } catch {}
     }
 
     if (app.type === "chat") {
@@ -1768,7 +1787,7 @@ function ChromeDesktopInner() {
   }, [uploadFileWithProgress]);
 
   if (!setupChecked || setupRequired) {
-    return <div className="bg-[#0a0f1a]" style={{ height: '100dvh' }} />;
+    return <div className="bg-[var(--bg-deep)]" style={{ height: '100dvh' }} />;
   }
 
   return (
@@ -1799,7 +1818,7 @@ function ChromeDesktopInner() {
       )}
       {/* Upload status toast */}
       {uploadStatus && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] min-w-[220px] rounded-lg bg-[#1e2030] border border-white/10 text-sm text-white shadow-lg overflow-hidden">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99998] min-w-[220px] rounded-lg bg-[var(--bg-elevated)] border border-white/10 text-sm text-white shadow-lg overflow-hidden">
           <div className="px-4 py-2">{uploadStatus}</div>
           {uploadProgress < 100 && (
             <div className="h-1 bg-white/5">
@@ -1822,7 +1841,7 @@ function ChromeDesktopInner() {
             const ocNeeds = oc?.updateAvailable ?? (!!oc?.target && oc.target !== oc.current);
             return (
               <div
-                className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
               >
@@ -1874,7 +1893,7 @@ function ChromeDesktopInner() {
 
           {showClawAiOfferNotification && (
             <div
-              className="rounded-xl bg-[#1e2030] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+              className="rounded-xl bg-[var(--bg-elevated)] border border-green-400/20 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
               role="status"
               aria-live="polite"
             >
@@ -1942,7 +1961,7 @@ function ChromeDesktopInner() {
             return (
               <div
                 key={notice.runId}
-                className="rounded-xl bg-[#1e2030] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="rounded-xl bg-[var(--bg-elevated)] border border-white/10 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
                 data-testid="coding-agent-notice"
@@ -1985,7 +2004,7 @@ function ChromeDesktopInner() {
             return (
               <div
                 key={code || req.id}
-                className="rounded-xl bg-[#1e2030] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
+                className="rounded-xl bg-[var(--bg-elevated)] border border-[#229ED9]/30 shadow-2xl overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300"
                 role="status"
                 aria-live="polite"
               >
@@ -2630,7 +2649,7 @@ function ChromeDesktopInner() {
         const appName = meta?.name || uninstallConfirm;
         return (
           <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setUninstallConfirm(null)}>
-            <div className="bg-[#1e2030] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
               <div className="flex flex-col items-center text-center">
                 <div className="w-14 h-14 rounded-xl flex items-center justify-center mb-4" style={{ backgroundColor: meta?.color || "#6b7280" }}>
                   <InstalledAppIcon appId={uninstallConfirm} iconUrl={meta?.iconUrl} name={appName} size="w-7 h-7" />

@@ -102,7 +102,24 @@ export function dispatchChatMessage(text: string): void {
 }
 
 /** The starter a new app is scaffolded from — initProject's two templates. */
-export type NewAppTemplate = "app" | "blank";
+/** The wizard's starters, in the order the select shows them; "nextjs" is the default. */
+export type NewAppTemplate = "nextjs" | "react" | "app" | "blank";
+export const NEW_APP_TEMPLATES: readonly NewAppTemplate[] = ["nextjs", "react", "app", "blank"];
+export const DEFAULT_NEW_APP_TEMPLATE: NewAppTemplate = "nextjs";
+
+/**
+ * What "scaffold it" means per starter. The two static ones are code projects
+ * (initProject's templates, built into one HTML file on the desktop). The two
+ * framework starters are real git folders under the owner's project folder,
+ * served from a port — the desktop registers them as web apps pointing at
+ * that address, since a Next.js or Vite build cannot be inlined into one file.
+ */
+const SCAFFOLD_SENTENCE: Record<NewAppTemplate, string> = {
+  nextjs: "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address.",
+  react: "Scaffold it as a React app (Vite, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, serve its production build on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address.",
+  app: 'Scaffold it as a code project from the "app" template, build it with the coding agent, verify it in the browser, and put it on my desktop.',
+  blank: 'Scaffold it as a code project from the "blank" template, build it with the coding agent, verify it in the browser, and put it on my desktop.',
+};
 
 export interface NewAppRequest {
   name: string;
@@ -126,7 +143,7 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
   const what = req.description.trim().replace(/[.\s]+$/u, "");
   return [
     `Create a new ClawBox app called "${name}": ${what}.`,
-    `Scaffold it as a code project from the "${req.template}" template, build it with the coding agent, verify it in the browser, and put it on my desktop.`,
+    SCAFFOLD_SENTENCE[req.template],
   ].join("\n");
 }
 

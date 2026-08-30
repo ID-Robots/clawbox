@@ -12,7 +12,7 @@
     "dev:privileged": "next dev --port 80 --hostname 0.0.0.0",
     "prebuild": "rm -rf .next/standalone/.next/cache/images 2>/dev/null || true",
     "build": "next build",
-    "postbuild": "node scripts/write-build-info.mjs; SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); if [ -n \"$SRVJS\" ]; then SDIR=$(dirname \"$SRVJS\"); rm -rf \"$SDIR/.next/static\" \"$SDIR/public\"; cp -r .next/static \"$SDIR/.next/static\"; cp -r public \"$SDIR/public\"; cp .next/build-info.json \"$SDIR/.next/build-info.json\"; if [ \"$SRVJS\" != \".next/standalone/server.js\" ]; then ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js; fi; fi",
+    "postbuild": "node scripts/write-build-info.mjs; SRVJS=$(find .next/standalone -maxdepth 3 -name server.js -print -quit); if [ -n \"$SRVJS\" ]; then SDIR=$(dirname \"$SRVJS\"); rm -rf \"$SDIR/.next/static\" \"$SDIR/public\"; cp -r .next/static \"$SDIR/.next/static\"; cp -r public \"$SDIR/public\"; cp .next/build-info.json \"$SDIR/.next/build-info.json\"; for pwp in playwright playwright-core; do if [ -d \"node_modules/$pwp\" ]; then rm -rf \"$SDIR/node_modules/$pwp\"; cp -r \"node_modules/$pwp\" \"$SDIR/node_modules/$pwp\"; fi; done; if [ \"$SRVJS\" != \".next/standalone/server.js\" ]; then ln -sf \"$(pwd)/$SRVJS\" .next/standalone/server.js; fi; fi",
     "start": "PORT=80 HOSTNAME=0.0.0.0 node production-server.js",
     "lint": "eslint",
     "test": "vitest run --config vitest.config.ts",
@@ -25,7 +25,7 @@
     "test:e2e:coverage": "rm -f coverage/e2e-summary.json coverage/e2e-bundles.json && playwright test && node scripts/e2e-coverage-report.mjs",
     "test:e2e:ui": "playwright test --ui",
     "verify:build-identity": "bash scripts/verify-build-identity.sh",
-  "check:sudoers": "bash scripts/check-sudoers-coverage.sh"
+    "check:sudoers": "bash scripts/check-sudoers-coverage.sh"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

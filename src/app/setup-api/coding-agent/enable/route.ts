@@ -4,11 +4,13 @@ import { hasOwnerSession } from "@/lib/owner-session";
 import {
   CodingAgentError,
   getCodingAgentStatus,
+  httpStatusForCodingError,
   MAX_DIRECTORY_CHARS,
   setCodingAgentEnabled,
   setDefaultDirectory,
   setEffort,
   setMaxTurns,
+  setReviewPass,
   setTokenLimit,
 } from "@/lib/coding-agent";
 
@@ -78,8 +80,10 @@ export async function POST(request: Request) {
     effort?: unknown;
     maxTurns?: unknown;
     tokenLimit?: unknown;
+    reviewPass?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
+  const hasReviewPass = typeof fields.reviewPass === "boolean";
   const hasEffort = typeof fields.effort === "string";
   const hasTurns = typeof fields.maxTurns === "number";
   // null is meaningful — it CLEARS the ceiling — so presence decides.
@@ -89,13 +93,13 @@ export async function POST(request: Request) {
   // decides whether this request is about the folder, not truthiness.
   const hasDirectory = "defaultDirectory" in fields
     && (typeof fields.defaultDirectory === "string" || fields.defaultDirectory === null);
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens) {
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasTurns && !hasTokens && !hasReviewPass) {
     return NextResponse.json(
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string }, { maxTurns: number } "
-          + "or { tokenLimit: number | null }.",
+          + "{ effort: string }, { maxTurns: number }, "
+          + "{ tokenLimit: number | null } or { reviewPass: boolean }.",
       },
       { status: 400 },
     );
@@ -130,6 +134,10 @@ export async function POST(request: Request) {
       const saved = await setMaxTurns(fields.maxTurns);
       console.error(`[coding-agent] step limit set to ${saved} by the owner`);
     }
+    if (hasReviewPass) {
+      const saved = await setReviewPass(fields.reviewPass);
+      console.error(`[coding-agent] review pass switched ${saved ? "on" : "off"} by the owner`);
+    }
     if (hasTokens) {
       const saved = await setTokenLimit(fields.tokenLimit as number | null);
       console.error(`[coding-agent] token limit ${saved === null ? "cleared" : `set to ${saved}`} by the owner`);
@@ -157,9 +165,10 @@ export async function POST(request: Request) {
   } catch (err) {
     // The folder rules answer in the owner's words ("that folder holds
     // credentials…"); pass them through as a 400 rather than a 500, because
-    // the request was understood and refused, not broken.
+    // the request was understood and refused, not broken. (The setters throw
+    // only invalid/not_found, so the shared table answers 400/404 here.)
     if (err instanceof CodingAgentError) {
-      return NextResponse.json({ error: err.message, kind: err.kind }, { status: err.kind === "not_found" ? 404 : 400 });
+      return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Failed to change the coding agent setting" },

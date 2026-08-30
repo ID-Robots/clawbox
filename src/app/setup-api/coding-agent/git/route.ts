@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { BACKUP_MESSAGE, backupToGitHub, disconnectGitHub, githubStatus } from "@/lib/coding-github";
-import { CodingAgentError, resolveWorkingDirectory } from "@/lib/coding-agent";
+import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
+import { gitInfo } from "@/lib/coding-git";
+import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +29,30 @@ export const dynamic = "force-dynamic";
  * No token is ever handled here. gh holds the credential and lends it to git;
  * this route only asks gh whether it has one.
  */
-export async function GET() {
+export async function GET(request: Request) {
+  // With ?projectId= or ?directory=: the FOLDER's git block for the project
+  // page — branch, commit count, origin, newest commit — through the same
+  // resolver a run uses, so this cannot describe a folder a run could not
+  // reach. Session-gated: it names remotes and commit subjects.
+  const url = new URL(request.url);
+  const projectId = url.searchParams.get("projectId");
+  const directory = url.searchParams.get("directory");
+  if (projectId || directory) {
+    const unauthorized = await requireSession(request);
+    if (unauthorized) return unauthorized;
+    try {
+      const resolved = await resolveWorkingDirectory({ projectId, directory });
+      return NextResponse.json({ git: await gitInfo(resolved.directory) });
+    } catch (err) {
+      if (err instanceof CodingAgentError) {
+        return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+      }
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : "Could not read the project's git state" },
+        { status: 500 },
+      );
+    }
+  }
   try {
     return NextResponse.json(await githubStatus());
   } catch (err) {
@@ -109,7 +134,8 @@ export async function POST(request: Request) {
     return NextResponse.json(outcome);
   } catch (err) {
     if (err instanceof CodingAgentError) {
-      return NextResponse.json({ error: err.message, kind: err.kind }, { status: err.kind === "not_found" ? 404 : 400 });
+      // The resolver throws only invalid/not_found, so the table answers 400/404 here.
+      return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
     }
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Could not back up to GitHub" },

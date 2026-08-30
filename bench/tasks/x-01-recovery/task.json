@@ -3,7 +3,6 @@
   "tier": "M",
   "title": "Recovery: kill the network mid-run; the failure must be legible and the record honest",
   "timeoutMinutes": 20,
-  "expectedCostUsd": 0.5,
   "nightly": false,
   "manual": true,
   "manualProcedure": "Start via runner. When the runner prints the run id and the first progress entry appears, cut upstream connectivity on the box (e.g. pull the WAN uplink, or block the AI endpoint's host in /etc/hosts) for at least 2 minutes, then restore it. The scorer only inspects the run record: it must settle to a failed state with a legible error, honest cost/token accounting, and no stuck 'running' status."

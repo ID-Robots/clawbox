@@ -18,10 +18,13 @@ import osMod from "os";
 import pathMod from "path";
 
 const configGet = vi.hoisted(() => vi.fn());
+const configGetAll = vi.hoisted(() => vi.fn());
 const configSet = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/config-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/config-store")>()),
   get: configGet,
+  // The status reads the whole file once rather than one key at a time.
+  getAll: configGetAll,
   set: configSet,
 }));
 
@@ -37,6 +40,7 @@ import {
 
 beforeEach(() => {
   configGet.mockReset().mockResolvedValue(undefined);
+  configGetAll.mockReset().mockResolvedValue({});
   configSet.mockReset().mockResolvedValue(undefined);
 });
 
@@ -191,8 +195,7 @@ describe("the effort picker", () => {
   it("still shows a stored level the picker no longer offers", async () => {
     // A box that chose "high" before the narrowing must not render a row with
     // nothing selected — the owner could not then tell what was in force.
-    configGet.mockImplementation(async (k: string) =>
-      k === "coding_agent_effort" ? "high" : undefined);
+    configGetAll.mockResolvedValue({ coding_agent_effort: "high" });
     const lib = await import("@/lib/coding-agent");
     const status = await lib.getCodingAgentStatus();
     expect(status.effort).toBe("high");
@@ -206,7 +209,7 @@ describe("sub-agent definitions", () => {
     // Every run on this box reported subagentsTotal 0: the tool existed and
     // there was nothing on the other end of it.
     const lib = await import("@/lib/coding-agent");
-    const args = lib.buildRunArgs({ resumeSessionId: null, subagents: true });
+    const args = lib.buildRunArgs({ resumeSessionId: null });
     const i = args.indexOf("--agents");
     expect(i).toBeGreaterThan(-1);
     const defs = JSON.parse(args[i + 1]);

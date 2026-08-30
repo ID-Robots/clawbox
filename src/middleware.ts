@@ -22,6 +22,19 @@ interface ConfigSnapshot {
   setupComplete: boolean;
   passwordConfigured: boolean;
   sessionGen: number;
+  // Webapp ids whose InstalledMeta says `public: true` — served read-only
+  // over GET /setup-api/webapps without a session (see step 5 below).
+  publicWebapps: ReadonlySet<string>;
+}
+
+const NO_PUBLIC_WEBAPPS: ReadonlySet<string> = new Set();
+
+function publicWebappIds(installedMeta: unknown): ReadonlySet<string> {
+  if (typeof installedMeta !== "object" || installedMeta === null) return NO_PUBLIC_WEBAPPS;
+  const ids = Object.entries(installedMeta as Record<string, unknown>)
+    .filter(([, meta]) => typeof meta === "object" && meta !== null && (meta as { public?: unknown }).public === true)
+    .map(([id]) => id);
+  return ids.length ? new Set(ids) : NO_PUBLIC_WEBAPPS;
 }
 
 let configCache: ConfigSnapshot | null = null;
@@ -35,6 +48,7 @@ function readConfigCached(): ConfigSnapshot {
       setup_complete?: unknown;
       password_configured?: unknown;
       session_generation?: unknown;
+      "pref:installed_meta"?: unknown;
     };
     const sessionGen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -44,6 +58,7 @@ function readConfigCached(): ConfigSnapshot {
       setupComplete: parsed.setup_complete === true,
       passwordConfigured: parsed.password_configured === true,
       sessionGen,
+      publicWebapps: publicWebappIds(parsed["pref:installed_meta"]),
     };
     return configCache;
   } catch (err) {
@@ -62,6 +77,7 @@ function readConfigCached(): ConfigSnapshot {
       setupComplete: !missing,
       passwordConfigured: !missing,
       sessionGen: 0,
+      publicWebapps: NO_PUBLIC_WEBAPPS,
     };
     return configCache;
   }
@@ -380,6 +396,19 @@ export async function middleware(request: NextRequest) {
   const sessionCookie = request.cookies.get("clawbox_session")?.value;
   if (sessionCookie && await verifySessionCookie(sessionCookie, currentSessionGeneration())) {
     return NextResponse.next();
+  }
+
+  // 4b. No session — but a webapp the owner marked public (InstalledMeta
+  // `public: true`) is served read-only so it can be shared over the tunnel.
+  // GET on this one path only, judged per app id from the cached config read:
+  // it never opens another app, the POST create/update surface, or anything
+  // else. Sits after the session checks so authenticated traffic never pays
+  // for it, and after the setup gate so a pre-setup box shares nothing.
+  if (request.method === "GET" && pathname === "/setup-api/webapps") {
+    const app = request.nextUrl.searchParams.get("app");
+    if (app && readConfigCached().publicWebapps.has(app)) {
+      return NextResponse.next();
+    }
   }
 
   // 5. Auth failed — choose a JSON 401 or an HTML login redirect.

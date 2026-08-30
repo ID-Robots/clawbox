@@ -54,9 +54,12 @@ describe("the browser profile", () => {
     expect(browser).not.toContain("email_send");
     expect(browser).not.toContain("browser_impostor");
     expect(browser).toContain("family_member");
-    // And every real browser_* tool declares it — the ride-along is the only
-    // name in the profile that is not one.
-    expect(browser.filter((n) => n !== "family_member").every((n) => n.startsWith("browser_"))).toBe(true);
+    // And every real browser_* tool declares it. Two names in the profile are
+    // deliberately not browser_*: the test's own ride-along, and
+    // describe_image — text eyes for a local image file, registered in this
+    // family so a coding-agent run gets it (see mcp/README.md).
+    expect(browser).toContain("describe_image");
+    expect(browser.filter((n) => n !== "family_member" && n !== "describe_image").every((n) => n.startsWith("browser_"))).toBe(true);
     const full = names("full");
     for (const name of ["email_send", "browser_impostor", "family_member", "browser_open"]) expect(full).toContain(name);
   });

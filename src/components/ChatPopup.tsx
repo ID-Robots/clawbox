@@ -568,6 +568,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         completed: t("codingAgent.chatFinished"),
         failed: t("codingAgent.chatFailed"),
         stopped: t("codingAgent.chatStopped"),
+        paused: t("codingAgent.chatPaused"),
+        draft: t("codingAgent.chatDraft"),
+        timeLeft: t("codingAgent.timeLeft"),
         // A template, not a sentence: the card fills in the count.
         agents: t("codingAgent.chatAgents"),
         tokensWord: t("codingAgent.tokensWord"),

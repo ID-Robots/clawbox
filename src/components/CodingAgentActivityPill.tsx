@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { artifactUrl, type CodingAgentActivity, type CodingTodo } from "@/lib/use-coding-agent-activity";
-import { describeProgressLine, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
+import type { CodingRunStatus } from "@/lib/coding-agent-status";
+import { describeProgressLine, estimateRunProgress, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
+import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 
 /**
  * One delegated coding run, as a card in the chat.
@@ -62,13 +64,6 @@ import { describeProgressLine, type ProgressDescription, type ProgressLabelKey }
  * the classes, so a finished card is as still as its outcome.
  */
 
-const TONE = {
-  running: { color: "#fcd34d", glyph: "🤖" },
-  completed: { color: "#86efac", glyph: "✓" },
-  failed: { color: "#fca5a5", glyph: "!" },
-  stopped: { color: "#cbd5e1", glyph: "◼" },
-} as const;
-
 /** How each kind of step reads at a glance: tools blue, files green, commands mono. */
 const CHIP_TONE: Record<ProgressDescription["kind"], React.CSSProperties> = {
   tool: { background: "rgba(96,165,250,0.14)", color: "#bfdbfe" },
@@ -77,12 +72,12 @@ const CHIP_TONE: Record<ProgressDescription["kind"], React.CSSProperties> = {
   text: { background: "transparent", color: "rgba(255,255,255,0.45)", paddingLeft: 0 },
 };
 
-export interface CodingAgentCardLabels {
-  running: string;
+/** One word per status — every status, so a new one cannot ship unlabelled. */
+export interface CodingAgentCardLabels extends Record<CodingRunStatus, string> {
+  /** The owner-started variant of "running". */
   runningOwner: string;
-  completed: string;
-  failed: string;
-  stopped: string;
+  /** Follows "≈ 12 min" under the progress bar. */
+  timeLeft: string;
   /** A "{n} agents" template. */
   agents?: string;
   /** Follows a count: "46k tokens". */
@@ -230,7 +225,7 @@ export default function CodingAgentActivityPill(
   const [expanded, setExpanded] = useState(false);
   const toggle = () => setExpanded((v) => !v);
 
-  const tone = TONE[run.status];
+  const tone = RUN_TONE[run.status];
   // A run the OWNER started says so, so the assistant is not credited with
   // work the person at the desk kicked off.
   const label = live && run.source === "owner" ? labels.runningOwner : labels[run.status];
@@ -246,6 +241,8 @@ export default function CodingAgentActivityPill(
   const progress = run.progress ?? [];
   const screenshots = run.screenshots ?? [];
   const todos = run.todos ?? [];
+  // How far along, honestly — off the run's own plan, or not at all.
+  const est = estimateRunProgress({ status: run.status, startedAt: run.startedAt, todos }, now);
   const todosDone = todos.filter((t) => t.status === "completed").length;
   const activeTodo = todos.find((t) => t.status === "in_progress") ?? null;
   // What the run says it is doing, in its own present tense.
@@ -407,6 +404,7 @@ export default function CodingAgentActivityPill(
           </button>
         ) : null}
       </div>
+      {live && <RunProgressBar estimate={est} color={tone.color} timeLeft={labels.timeLeft} testId="coding-agent-progressbar" />}
       <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", columnGap: 6, rowGap: 2, color: "rgba(255,255,255,0.5)", fontSize: 11.5 }}>
         {meta.map((part, i) => (
           <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>

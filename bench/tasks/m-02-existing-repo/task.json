@@ -3,7 +3,6 @@
   "tier": "M",
   "title": "Change to an existing codebase: read before writing",
   "timeoutMinutes": 20,
-  "expectedCostUsd": 1.0,
   "nightly": true,
   "manual": false
 }

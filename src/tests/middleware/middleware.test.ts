@@ -217,6 +217,55 @@ describe("middleware", () => {
     });
   });
 
+  describe("public webapps (InstalledMeta.public)", () => {
+    // The owner marks one webapp public in its meta; that app's files are
+    // served read-only without a session. Nothing else opens: another app,
+    // POST, or a pre-setup box.
+    function writeConfig(extra: Record<string, unknown>) {
+      const dataDir = path.join(tmpRoot, "data");
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "config.json"), JSON.stringify({ setup_complete: true, ...extra }));
+    }
+    const meta = {
+      "pref:installed_meta": {
+        "shared-game": { name: "Game", color: "#000", iconUrl: "", webappUrl: "/setup-api/webapps?app=shared-game", public: true },
+        "private-app": { name: "Private", color: "#000", iconUrl: "", webappUrl: "/setup-api/webapps?app=private-app" },
+      },
+    };
+
+    async function load() {
+      process.env.SESSION_SECRET = "test-secret";
+      vi.resetModules();
+      return (await import("@/middleware")).middleware;
+    }
+
+    it("serves a public webapp and its files to anyone, GET only", async () => {
+      writeConfig(meta);
+      const mw = await load();
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(200);
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game&file=app.js"))).status).toBe(200);
+      const post = new NextRequest(new URL("http://localhost/setup-api/webapps?app=shared-game"), { method: "POST" });
+      expect((await mw(post)).status).toBe(401);
+    });
+
+    it("keeps every other webapp, and the path without an app, behind the session", async () => {
+      writeConfig(meta);
+      const mw = await load();
+      expect((await mw(createRequest("/setup-api/webapps?app=private-app"))).status).toBe(401);
+      expect((await mw(createRequest("/setup-api/webapps"))).status).toBe(401);
+    });
+
+    it("shares nothing when no meta says public, and picks up a flag flipped later", async () => {
+      writeConfig({});
+      const mw = await load();
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(401);
+      // The snapshot is keyed on the file's mtime; force a distinct one.
+      await new Promise((r) => setTimeout(r, 15));
+      writeConfig(meta);
+      expect((await mw(createRequest("/setup-api/webapps?app=shared-game"))).status).toBe(200);
+    });
+  });
+
   describe("authentication", () => {
     it("allows public paths without auth", async () => {
       process.env.SESSION_SECRET = "test-secret";

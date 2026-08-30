@@ -768,7 +768,7 @@ export default function VNCApp() {
             aria-modal="true"
             aria-labelledby="vnc-paste-dialog-title"
             aria-describedby="vnc-paste-dialog-desc"
-            className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-5 shadow-xl"
+            className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] p-5 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 id="vnc-paste-dialog-title" className="text-sm font-semibold text-white mb-1">{t("vnc.pasteToRemote")}</h3>

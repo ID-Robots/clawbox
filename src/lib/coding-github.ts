@@ -46,7 +46,22 @@ const PUSH_TIMEOUT_MS = 180_000;
 
 /** The command the owner runs to connect. Shown in the UI and typed into the
  *  Terminal app, so both say the same thing. */
-export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https";
+// No --git-protocol: the gh Ubuntu ships (2.4.0, 2022) has no such flag on
+// `auth login` and refuses the whole command — seen live, the device-flow
+// token was minted and then thrown away with "unknown flag". The interactive
+// login asks for the protocol itself; the token path sets it below.
+export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com";
+
+/**
+ * The git-side half of a login. `gh auth login --with-token` stores the
+ * credential for gh alone, on every gh version: only the INTERACTIVE login
+ * offers to configure git, and `gh auth setup-git` — which does the same —
+ * arrived after 2.4.0. Without this, a connected box still fails every push
+ * with "could not read Username" (GIT_TERMINAL_PROMPT=0, so it fails instead
+ * of hanging). `gh auth git-credential` is the helper protocol every gh since
+ * 1.x implements; scoping it to github.com leaves other remotes alone.
+ */
+export const GIT_CREDENTIAL_HELPER = "!gh auth git-credential";
 
 // ── Device-flow login ────────────────────────────────────────────────────────
 
@@ -171,13 +186,35 @@ export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
     };
   }
   pendingLogin = null;
-  const stored = await run("gh", ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"], {
+  const stored = await run("gh", ["auth", "login", "--hostname", "github.com", "--with-token"], {
     input: data.access_token,
   });
   if (stored.code !== 0) {
     return { status: "failed", detail: `gh would not store the credential: ${(stored.stderr || stored.stdout).slice(0, 200)}` };
   }
-  return { status: "connected", login: (await githubStatus()).login };
+  // gh holds the token now; make git ask gh for it. Three idempotent settings,
+  // so a repeat login simply re-asserts them:
+  //  - the account name under the host. gh 2.4.0's --with-token stores only
+  //    the token, and its `gh auth git-credential` answers nothing (exit 1,
+  //    silent) until `user:` sits beside it — measured on the box; newer gh
+  //    writes it itself, and warns harmlessly that the key is unknown to it.
+  //  - https as the git protocol (the flag the login command cannot carry).
+  //  - git's credential helper for github.com, which no --with-token sets.
+  const account = (await githubStatus()).login;
+  const steps: Array<[string, string[]]> = [];
+  if (account) steps.push(["gh", ["config", "set", "-h", "github.com", "user", account]]);
+  steps.push(["gh", ["config", "set", "git_protocol", "https"]]);
+  steps.push(["git", ["config", "--global", "credential.https://github.com.helper", GIT_CREDENTIAL_HELPER]]);
+  for (const [bin, args] of steps) {
+    const step = await run(bin, args);
+    if (step.code !== 0) {
+      return {
+        status: "failed",
+        detail: `Signed in, but git could not be pointed at the credential: ${(step.stderr || step.stdout).slice(0, 200)}`,
+      };
+    }
+  }
+  return { status: "connected", login: account };
 }
 
 /** Forget the login in flight; the code on github.com simply goes unused. */

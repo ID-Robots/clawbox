@@ -161,3 +161,32 @@ describe("the commit message", () => {
     expect(msg.split("\n")[0].length).toBeLessThanOrEqual(90);
   });
 });
+
+describe("the project page's git block", () => {
+  it("answers nothing-yet for a fresh init, never an error", async () => {
+    const dir = path.join(root, "fresh");
+    makeRepo(dir);
+    const { gitInfo } = await import("@/lib/coding-git");
+    expect(await gitInfo(dir)).toEqual({ branch: null, commits: 0, remote: null, lastCommit: null });
+  });
+
+  it("reads the branch and the newest commit off ONE git log", async () => {
+    const dir = path.join(root, "app");
+    makeRepo(dir);
+    fs.writeFileSync(path.join(dir, "index.html"), "<p>hi</p>\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "--quiet", "-m", "first, with a comma");
+    git(dir, "remote", "add", "origin", "https://github.com/owner/app.git");
+    const { gitInfo, lastCommit } = await import("@/lib/coding-git");
+    const info = await gitInfo(dir);
+    expect(info.branch).toBe(git(dir, "rev-parse", "--abbrev-ref", "HEAD"));
+    expect(info.commits).toBe(1);
+    expect(info.remote).toBe("https://github.com/owner/app.git");
+    expect(info.lastCommit?.subject).toBe("first, with a comma");
+    expect(info.lastCommit).toEqual(await lastCommit(dir));
+
+    // Detached: what `rev-parse --abbrev-ref HEAD` always answered for it.
+    git(dir, "checkout", "--quiet", "--detach");
+    expect((await gitInfo(dir)).branch).toBe("HEAD");
+  });
+});

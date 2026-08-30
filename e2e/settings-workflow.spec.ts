@@ -3,7 +3,8 @@ import { installClawboxMocks } from "./helpers/clawbox";
 
 // One walk through the desktop's Settings window, section by section, in the
 // order the sidebar lists them today: Providers (where the window opens), Local
-// AI, Coding Agent, Channels, Voice, Network, Appearance, System, About.
+// AI, Channels, Voice, Network, Appearance, System, About — then the Coding
+// Agent's own Settings page, which lives in that app rather than here.
 //
 // The AI Provider panel itself (the embedded AIModelsStep) is only mounted
 // here, not driven — its inline sign-in forms belong in a focused spec — but
@@ -103,19 +104,6 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await expect(whisperRow.getByRole("switch")).toHaveCount(0);
   await expect(whisperRow.getByRole("button")).toHaveCount(0);
   await expect(whisperRow.getByTestId("local-model-role-whisper")).toHaveCount(0);
-
-  // ── Coding Agent: the owner's switch, rendered from the route's answer.
-  await section(/Coding Agent/).click();
-  const codingAgent = settingsWindow.getByTestId("coding-agent-settings-panel");
-  const agentSwitch = codingAgent.getByRole("switch", { name: "Let the assistant delegate coding work" });
-  await expect(agentSwitch).toHaveAttribute("aria-checked", "false");
-  await expect(section(/Coding Agent/)).toContainText("Off");
-  await expect(codingAgent.getByTestId("coding-agent-folder")).toHaveValue("/home/clawbox/projects");
-  await expect(codingAgent.getByTestId("coding-agent-effort-max")).toBeVisible();
-  await agentSwitch.click();
-  await expect(agentSwitch).toHaveAttribute("aria-checked", "true");
-  // The sidebar reads the same status the panel just published.
-  await expect(section(/Coding Agent/)).toContainText("On · Max");
 
   // ── Channels: a hub row per channel; Telegram is configured inside it.
   await section(/Channels/).click();
@@ -219,6 +207,24 @@ test("settings covers providers, local AI, coding agent, channels, voice, networ
   await section(/About/).click();
   await expect(settingsWindow.getByText("Documentation")).toBeVisible();
   await expect(settingsWindow.getByText("Discord Community")).toBeVisible();
+
+  // ── Coding Agent: its settings live in the Coding Agent app now, behind
+  // its own Settings button — not in this window's sidebar. The switch is
+  // not optimistic: the panel renders whatever the route answers.
+  await page.getByTestId("shelf-app-coding").click();
+  const codingWindow = page.getByTestId("chrome-window-coding");
+  await expect(codingWindow).toBeVisible();
+  await expect(codingWindow.getByTestId("coding-agent-state")).toContainText("Off");
+  await codingWindow.getByTestId("coding-agent-open-settings").click();
+  const codingAgent = codingWindow.getByTestId("coding-agent-settings-panel");
+  const agentSwitch = codingAgent.getByRole("switch", { name: "Let the assistant delegate coding work" });
+  await expect(agentSwitch).toHaveAttribute("aria-checked", "false");
+  await expect(codingAgent.getByTestId("coding-agent-folder")).toHaveValue("/home/clawbox/projects");
+  await expect(codingAgent.getByTestId("coding-agent-effort-max")).toBeVisible();
+  await agentSwitch.click();
+  await expect(agentSwitch).toHaveAttribute("aria-checked", "true");
+  // The app's header reads the same status the panel just published.
+  await expect(codingWindow.getByTestId("coding-agent-state")).toContainText("On");
 });
 
 // The other half of the Voice tab's contract: a cloud voice this box cannot

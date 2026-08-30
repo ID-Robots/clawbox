@@ -8,6 +8,7 @@
  * survives, whatever the tool.
  */
 import { describe, expect, it } from "vitest";
+import { estimateRunProgress, formatEta } from "@/lib/coding-agent-progress";
 import { describeProgressLine } from "@/lib/coding-agent-progress";
 
 describe("describeProgressLine", () => {
@@ -146,5 +147,50 @@ describe("the run's plan", () => {
 
   it("a plan line in any other shape is the run's own sentence, not a plan chip", () => {
     expect(describeProgressLine("Plan: rewrite the loop first")).toMatchObject({ kind: "text", icon: "notes" });
+  });
+});
+
+describe("estimateRunProgress", () => {
+
+  const base = { status: "running", startedAt: 0 };
+
+  it("reads the run's own plan: done over planned, a live item counting half", () => {
+    const todos = [
+      { status: "completed" }, { status: "completed" },
+      { status: "in_progress" }, { status: "pending" },
+    ];
+    const est = estimateRunProgress({ ...base, todos }, 10 * 60_000);
+    expect(est.fraction).toBeCloseTo(0.625, 3);
+    // elapsed 10min at 62.5% → ~6min left
+    expect(est.etaMs).toBe(Math.round((10 * 60_000 * 0.375) / 0.625));
+  });
+
+  it("draws nothing without a plan — step counts were measured misleading and withdrawn", () => {
+    // 291 stream events vs the CLI's 38 turns on a real run: no event
+    // arithmetic reproduces the CLI's definition, so no bar without todos.
+    expect(estimateRunProgress(base, 60_000).fraction).toBeNull();
+    const many = Array.from({ length: 10 }, () => ({ status: "completed" }));
+    expect(estimateRunProgress({ ...base, todos: many }, 60_000).fraction).toBe(0.97); // capped while alive
+  });
+
+  it("suppresses the ETA while extrapolation is noise", () => {
+    // Early fraction and early clock both gate it.
+    const early = Array.from({ length: 20 }, (_, i) => ({ status: i === 0 ? "completed" : "pending" }));
+    expect(estimateRunProgress({ ...base, todos: early }, 10 * 60_000).etaMs).toBeNull(); // 5%
+    const todos = [{ status: "completed" }, { status: "pending" }];
+    expect(estimateRunProgress({ ...base, todos }, 10_000).etaMs).toBeNull(); // < 30s elapsed
+  });
+
+  it("draws a full bar only for a completed run, nothing for the rest", () => {
+    expect(estimateRunProgress({ ...base, status: "completed" }, 1).fraction).toBe(1);
+    expect(estimateRunProgress({ ...base, status: "failed" }, 1).fraction).toBeNull();
+    expect(estimateRunProgress({ ...base, status: "draft" }, 1).fraction).toBeNull();
+    expect(estimateRunProgress({ ...base, todos: [] }, 1).fraction).toBeNull();
+  });
+
+  it("says minutes and hours, never seconds", () => {
+    expect(formatEta(90_000)).toBe("2 min");
+    expect(formatEta(30_000)).toBe("1 min");
+    expect(formatEta(3_900_000)).toBe("1 h 5 min");
   });
 });

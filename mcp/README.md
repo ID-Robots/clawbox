@@ -263,9 +263,23 @@ to stop.
 
 ### Browser
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
-(both editions) · `browser_click` · `browser_type` · `browser_keypress` ·
+(both editions) · `browser_click` · `browser_type` · `browser_fill` · `browser_keypress` ·
 `browser_scroll` (OpenClaw only) · `browser_view_local` (only inside a
-coding-agent run — see below)
+coding-agent run — see below) · `describe_image` (both editions)
+
+`describe_image` is not a browser tool but lives in the same family so a
+coding-agent run gets it: a written description of a local image file
+(.png/.jpg/.jpeg/.webp), through the box's vision model — how an image-blind
+run looks at a frame it saved without driving the browser at it. The fence is
+the ROUTE's (`/setup-api/vision/describe`), not this tool's: a credential
+store answers like a missing file for every caller, and the MCP bearer may
+only look inside the active run's working and evidence folders while a run
+is live (the home folder otherwise) — the tool's own check merely turns a
+mistyped path into a clear message first. One call per tool call: the
+backend retries a transient flap of the vision proxy once inside its own
+60 s budget (`src/lib/vision-describe.ts`), and this tool waits longer than
+that budget rather than re-firing. It answers a clean error when ClawBox AI
+is not linked.
 
 `browser_type` reports a character count, never the text — it is the tool that
 types passwords.
