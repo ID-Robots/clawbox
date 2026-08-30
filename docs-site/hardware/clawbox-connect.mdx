@@ -6,11 +6,11 @@ summary: "Hardware specifications for ClawBox Connect — the always-on AI assis
 
 The entry-tier ClawBox: a compact, low-power, always-on AI assistant for your desk.
 
-<Card title="Get ClawBox Connect — €549" href="https://clawbox.com" icon="cart-shopping" horizontal>
+<Card title="Get ClawBox Connect — €579" href="https://clawbox.com" icon="cart-shopping" horizontal>
   Pre-configured with OpenClaw. Ships ready to use.
 </Card>
 
-<Card title="Prefer Hermes Agent? — €549" href="https://clawbox.com/hermes" icon="cart-shopping" horizontal>
+<Card title="Prefer Hermes Agent? — €579" href="https://clawbox.com/hermes" icon="cart-shopping" horizontal>
   ClawBox Hermes Edition is the same hardware, shipped running Hermes Agent by Nous
   Research instead of OpenClaw. Every specification on this page applies to both.
 </Card>
@@ -34,9 +34,40 @@ The entry-tier ClawBox: a compact, low-power, always-on AI assistant for your de
 
 - A **24/7 personal assistant** you message from Telegram or the web, with additional OpenClaw channels available for advanced setups when supported.
 - **Browser automation** and everyday agent tasks.
-- Running with **cloud AI providers** (ClawBox AI, Claude, GPT, Gemini) or smaller local models.
+- Running the **preinstalled on-device model** offline, or **cloud AI providers** (ClawBox AI, Claude, GPT, Gemini) when you want heavier reasoning.
 
-## Local model performance
+## The local model it ships with
+
+ClawBox arrives with a local model already installed and running, so it works
+offline out of the box with nothing to download. It is **Google Gemma 4 E2B**
+(the QAT Q4_0 build) served by **llama.cpp**, and it appears in the provider and
+chat pickers as **Gemma 4 (on-device)**. No API key, no account, no internet.
+
+| Gemma 4 E2B (shipped default) | |
+|---|---|
+| Generation | ~29 tok/s |
+| Download / resident | ~3.1 GB / ~3.3 GB |
+| Agentic tool use | 92.3% |
+| Strict JSON | 100% |
+
+Measured on a Jetson Orin Nano 8GB against llama-server, the runtime the device
+actually ships.
+
+**Why this build, and not a faster one.** Four candidates from the same model
+family were benchmarked on the device. Three were faster — one reached 34.7
+tok/s — and all four scored 100% on strict JSON. This one ships because it is the
+only one that reliably completes a two-step tool chain: look up the contact, then
+send the mail. The others stop halfway and ask you for the address they were sent
+to find. The larger E4B variant was rejected on the same grounds: 18.3 tok/s and
+1.8 GB more memory for no gain in accuracy.
+
+<Note>
+Installing Gemma 4 E2B from **Ollama** instead gives you a Q8_0 artifact of about
+8.1 GB, which does not fit in 8 GB. The 3.1 GB above is the Q4_0 GGUF this device
+ships with.
+</Note>
+
+## Bring your own local model (Ollama)
 
 | Model | Speed | Quality |
 |---|---|---|
