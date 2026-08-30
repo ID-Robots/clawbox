@@ -44,9 +44,9 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 
 ## Hardware
 
-- [ClawBox Connect](https://docs.clawbox.com/hardware/clawbox-connect): Jetson Orin Nano model
+- [ClawBox Connect](https://docs.clawbox.com/hardware/clawbox-connect): Jetson Orin Nano model; ships with Google Gemma 4 E2B (QAT Q4_0) preinstalled on llama.cpp, ~29 tok/s, ~3.3 GB resident, offline with no API key
 - [ClawBox Workstation](https://docs.clawbox.com/hardware/clawbox-workstation): DGX Spark model
-- [Requirements](https://docs.clawbox.com/hardware/requirements)
+- [Requirements](https://docs.clawbox.com/hardware/requirements): the shipped on-device model and its measured numbers, plus the Ollama bring-your-own table
 
 ## Using ClawBox
 
