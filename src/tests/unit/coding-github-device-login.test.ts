@@ -156,6 +156,7 @@ describe("polling", () => {
     const calls = runChild.mock.calls.map(([bin, args]) => [bin, ...(args as string[])].join(" "));
     const login = calls.find((c) => c.includes("--with-token"))!;
     expect(login).toBe("gh auth login --hostname github.com --with-token");
+    expect(calls).toContain("gh config set -h github.com user yalexx");
     expect(calls).toContain("gh config set git_protocol https");
     expect(calls).toContain(`git config --global credential.https://github.com.helper ${lib.GIT_CREDENTIAL_HELPER}`);
     expect(lib.GIT_CREDENTIAL_HELPER).toBe("!gh auth git-credential");
@@ -167,6 +168,8 @@ describe("polling", () => {
     const ok = { code: 0, stdout: "", stderr: "", signal: null, timedOut: false, startFailed: false, startError: null };
     runChild
       .mockResolvedValueOnce(ok) // gh auth login --with-token
+      .mockResolvedValueOnce({ ...ok, stderr: "Logged in to github.com as octocat" }) // gh auth status (the login name)
+      .mockResolvedValueOnce(ok) // gh config set -h github.com user
       .mockResolvedValueOnce(ok) // gh config set git_protocol
       .mockResolvedValueOnce({ ...ok, code: 1, stderr: "could not lock config file" }); // git config --global
     const out = await lib.pollDeviceLogin();

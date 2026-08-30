@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "path";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { filesBrowseRoot, isInside, isProtectedFilePath } from "@/lib/file-guard";
+import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 import { activeRunDirectory, activeRunId } from "@/lib/coding-agent";
 import { artifactsDir, INLINE_IMAGE_MIME } from "@/lib/coding-agent-artifacts";
 import { describeImage, isVisionImageMime, type VisionImageMime } from "@/lib/vision-describe";
@@ -23,40 +23,53 @@ const MIME_FOR: Record<string, VisionImageMime> = Object.fromEntries(
 );
 const ACCEPTED_EXTENSIONS = Object.keys(MIME_FOR).join(", ").replace(/, ([^,]+)$/, " and $1");
 
-/** `real` sits under `root` after both are resolved; a root that does not exist grants nothing. */
-async function isInsideReal(real: string, root: string): Promise<boolean> {
-  try {
-    return isInside(real, await fs.realpath(root));
-  } catch {
-    return false;
+/**
+ * The folders the caller may read from — decided HERE, not in the MCP tool
+ * that calls this. The tool's own check is a courtesy for a mistyped path,
+ * and a courtesy is not a boundary: the bearer it holds is also the
+ * credential a prompt-injected run holds.
+ *
+ * A person at the desktop (session cookie) may describe any image under the
+ * tree the Files app browses. The bearer — the agent's, and the run's — gets
+ * the fence browser_view_local lives behind: while a run is live, its working
+ * folder and its evidence folder, the two places its own pictures are; with
+ * no run live, the same Files tree. Credential stores are refused for
+ * everyone before this is asked. Roots are resolved through realpath so a
+ * symlinked root grants exactly what it points at; one that does not exist
+ * grants nothing.
+ */
+async function allowedRoots(request: Request): Promise<{ roots: string[]; refusal: string }> {
+  const owner = await hasOwnerSession(request);
+  const runId = owner ? null : activeRunId();
+  const runDir = owner ? null : activeRunDirectory();
+  const wanted = runId && runDir ? [runDir, artifactsDir(runId)] : [filesBrowseRoot()];
+  const roots: string[] = [];
+  for (const root of wanted) {
+    try {
+      roots.push(await fs.realpath(root));
+    } catch {
+      // a root that does not exist grants nothing
+    }
   }
+  const refusal = runId && runDir
+    ? "That file is outside the active coding run's working and evidence folders."
+    : "That file is outside the home folder.";
+  return { roots, refusal };
 }
 
 /**
- * How far the caller may look — decided HERE, not in the MCP tool that calls
- * this. The tool's own check is a courtesy for a mistyped path, and a
- * courtesy is not a boundary: the bearer it holds is also the credential a
- * prompt-injected run holds.
- *
- * A person at the desktop (session cookie) keeps the wide contract: any image
- * the box can read. The bearer — the agent's, and the run's — gets the fence
- * browser_view_local lives behind: while a run is live, its working folder
- * and its evidence folder, the two places its own pictures are; with no run
- * live, the tree the Files app browses. Credential stores are refused for
- * everyone before this is asked. Returns the refusal, or null.
+ * The path to read, re-derived under the root it was found in, or null. The
+ * `startsWith(root + sep)` guard is the containment check itself — written
+ * this way, on the re-joined path, so the file that is opened is provably
+ * under a root chosen by the server, whatever the caller typed.
  */
-async function bearerFence(request: Request, real: string): Promise<string | null> {
-  if (await hasOwnerSession(request)) return null;
-  const runId = activeRunId();
-  const runDir = activeRunDirectory();
-  if (runId && runDir) {
-    for (const root of [runDir, artifactsDir(runId)]) {
-      if (await isInsideReal(real, root)) return null;
-    }
-    return "That file is outside the active coding run's working and evidence folders.";
+function containedPath(real: string, roots: string[]): string | null {
+  for (const root of roots) {
+    if (real === root) return null; // a root is a folder, never an image
+    const target = path.join(root, path.relative(root, real));
+    if (target.startsWith(root + path.sep) && !path.relative(root, real).startsWith("..")) return target;
   }
-  if (await isInsideReal(real, filesBrowseRoot())) return null;
-  return "That file is outside the home folder.";
+  return null;
 }
 
 /**
@@ -101,24 +114,32 @@ export async function POST(request: Request) {
   if (isProtectedFilePath(real)) {
     return NextResponse.json({ error: "There is no file at that path." }, { status: 404 });
   }
-  const fence = await bearerFence(request, real);
-  if (fence) return NextResponse.json({ error: fence }, { status: 403 });
+  const { roots, refusal } = await allowedRoots(request);
+  const target = containedPath(real, roots);
+  if (!target) return NextResponse.json({ error: refusal }, { status: 403 });
 
-  const mime = MIME_FOR[path.extname(real).toLowerCase()];
+  const mime = MIME_FOR[path.extname(target).toLowerCase()];
   if (!mime) {
     return NextResponse.json({ error: `Only ${ACCEPTED_EXTENSIONS} files can be described.` }, { status: 400 });
   }
+  // One open handle for the size check and the read: a file swapped between
+  // a stat and a readFile would be read as whatever it became.
   let data: Buffer;
   try {
-    const stat = await fs.stat(real);
-    if (!stat.isFile()) return NextResponse.json({ error: "That path is not a file." }, { status: 400 });
-    if (stat.size > MAX_IMAGE_BYTES) {
-      return NextResponse.json(
-        { error: `The image is too large: at most ${MAX_IMAGE_BYTES / (1024 * 1024)} MB.` },
-        { status: 413 },
-      );
+    const handle = await fs.open(target, "r");
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) return NextResponse.json({ error: "That path is not a file." }, { status: 400 });
+      if (stat.size > MAX_IMAGE_BYTES) {
+        return NextResponse.json(
+          { error: `The image is too large: at most ${MAX_IMAGE_BYTES / (1024 * 1024)} MB.` },
+          { status: 413 },
+        );
+      }
+      data = await handle.readFile();
+    } finally {
+      await handle.close();
     }
-    data = await fs.readFile(real);
   } catch {
     return NextResponse.json({ error: "The file could not be read." }, { status: 400 });
   }

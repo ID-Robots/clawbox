@@ -630,12 +630,9 @@ export default function CodingAgentApp() {
               </span>
             )}
           </div>
-          {/* On the desktop this opens the Settings window on our section.
-              On /app/coding — the page a phone lands on from "Open in new
-              tab" — there is no desktop listening, so it is a real link to
-              the standalone Settings page instead; a button that dispatched
-              into silence would leave the owner with no way to the switch. */}
-          {/* The settings live IN this app now — one button, both contexts. */}
+          {/* The settings live IN this app: one button, on the desktop and on
+              /app/coding alike, so a phone that landed here from "Open in new
+              tab" reaches the switch without a desktop listening. */}
           <button
             type="button"
             onClick={() => { setPage(view.face === "settings" ? "home" : "settings"); }}

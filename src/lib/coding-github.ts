@@ -192,18 +192,29 @@ export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
   if (stored.code !== 0) {
     return { status: "failed", detail: `gh would not store the credential: ${(stored.stderr || stored.stdout).slice(0, 200)}` };
   }
-  // gh holds the token now; make git ask gh for it. Both settings are
-  // idempotent, so a repeat login simply re-asserts them.
-  const protocol = await run("gh", ["config", "set", "git_protocol", "https"]);
-  const helper = await run("git", ["config", "--global", "credential.https://github.com.helper", GIT_CREDENTIAL_HELPER]);
-  const failed = protocol.code !== 0 ? protocol : helper.code !== 0 ? helper : null;
-  if (failed) {
-    return {
-      status: "failed",
-      detail: `Signed in, but git could not be pointed at the credential: ${(failed.stderr || failed.stdout).slice(0, 200)}`,
-    };
+  // gh holds the token now; make git ask gh for it. Three idempotent settings,
+  // so a repeat login simply re-asserts them:
+  //  - the account name under the host. gh 2.4.0's --with-token stores only
+  //    the token, and its `gh auth git-credential` answers nothing (exit 1,
+  //    silent) until `user:` sits beside it — measured on the box; newer gh
+  //    writes it itself, and warns harmlessly that the key is unknown to it.
+  //  - https as the git protocol (the flag the login command cannot carry).
+  //  - git's credential helper for github.com, which no --with-token sets.
+  const account = (await githubStatus()).login;
+  const steps: Array<[string, string[]]> = [];
+  if (account) steps.push(["gh", ["config", "set", "-h", "github.com", "user", account]]);
+  steps.push(["gh", ["config", "set", "git_protocol", "https"]]);
+  steps.push(["git", ["config", "--global", "credential.https://github.com.helper", GIT_CREDENTIAL_HELPER]]);
+  for (const [bin, args] of steps) {
+    const step = await run(bin, args);
+    if (step.code !== 0) {
+      return {
+        status: "failed",
+        detail: `Signed in, but git could not be pointed at the credential: ${(step.stderr || step.stdout).slice(0, 200)}`,
+      };
+    }
   }
-  return { status: "connected", login: (await githubStatus()).login };
+  return { status: "connected", login: account };
 }
 
 /** Forget the login in flight; the code on github.com simply goes unused. */

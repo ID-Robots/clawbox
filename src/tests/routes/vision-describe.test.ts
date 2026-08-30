@@ -62,6 +62,8 @@ function png(...parts: string[]): string {
 beforeEach(async () => {
   restoreEnv = saveEnv("FILES_ROOT");
   base = fs.mkdtempSync(path.join(os.tmpdir(), "vision-route-"));
+  // Every caller reads under the Files root; the tests' files live in `base`.
+  process.env.FILES_ROOT = base;
   mocks.describeImage.mockClear();
   mocks.describeImage.mockResolvedValue({ text: "a red square", error: null });
   mocks.hasOwnerSession.mockResolvedValue(true);
@@ -119,6 +121,19 @@ describe("describing a local image", () => {
 });
 
 describe("the fence", () => {
+  it("keeps a person at the desktop inside the Files root too", async () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "vision-outside-"));
+    try {
+      const img = path.join(outside, "shot.png");
+      fs.writeFileSync(img, Buffer.from([0x89]));
+      const res = await POST(req({ path: img }));
+      expect(res.status).toBe(403);
+      expect(mocks.describeImage).not.toHaveBeenCalled();
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it("answers a credential store exactly like a missing file, whoever asks", async () => {
     const key = png(".ssh", "key.png");
     const res = await POST(req({ path: key }));
