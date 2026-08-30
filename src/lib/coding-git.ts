@@ -280,11 +280,61 @@ export interface LastCommit {
  * formatted date so the app can say "3h ago" itself, the way it already does
  * for a run's last activity.
  */
-export async function lastCommit(dir: string): Promise<LastCommit | null> {
-  const r = await git(path.resolve(dir), ["log", "-1", "--format=%s%n%ct"]);
-  if (r.code !== 0 || !r.stdout) return null;
-  const [subject = "", seconds = ""] = r.stdout.split("\n");
+export interface GitInfo {
+  branch: string | null;
+  commits: number;
+  /** origin's URL, or null when the project has never been pushed anywhere. */
+  remote: string | null;
+  lastCommit: LastCommit | null;
+}
+
+/**
+ * The project page's git block: branch, commit count, origin, newest commit.
+ * Absent pieces are answers, never errors — a fresh init has no HEAD yet and
+ * most local projects have no origin until their first GitHub backup.
+ *
+ * Three git processes, not four: the branch rides on the same `git log -1`
+ * that answers the newest commit (`%D` is HEAD's decoration — "HEAD -> main,
+ * origin/main"), because the app asks this on every project page and each
+ * spawn on a Jetson is felt. A detached HEAD decorates as plain "HEAD", which
+ * is also what `rev-parse --abbrev-ref` used to answer for it.
+ */
+export async function gitInfo(dir: string): Promise<GitInfo> {
+  const d = path.resolve(dir);
+  const [head, count, remote] = await Promise.all([
+    git(d, ["log", "-1", `--format=${LAST_COMMIT_FORMAT}%n%D`]),
+    git(d, ["rev-list", "--count", "HEAD"]),
+    git(d, ["remote", "get-url", "origin"]),
+  ]);
+  const [subject = "", seconds = "", decoration = ""] = head.code === 0 ? head.stdout.split("\n") : [];
+  return {
+    branch: branchFromDecoration(decoration),
+    commits: count.code === 0 ? Number(count.stdout.trim()) || 0 : 0,
+    remote: remote.code === 0 && remote.stdout.trim() ? remote.stdout.trim() : null,
+    lastCommit: parseLastCommit(subject, seconds),
+  };
+}
+
+/** Subject, then the commit time in Unix seconds — what parseLastCommit reads. */
+const LAST_COMMIT_FORMAT = "%s%n%ct";
+
+function parseLastCommit(subject: string, seconds: string): LastCommit | null {
   const ts = Number(seconds.trim());
   if (!Number.isFinite(ts) || ts <= 0) return null;
   return { subject: subject.trim(), date: ts * 1000 };
+}
+
+/** The branch HEAD is on, from `%D`; "HEAD" when detached; null when there is no HEAD. */
+function branchFromDecoration(decoration: string): string | null {
+  const refs = decoration.split(",").map((r) => r.trim()).filter(Boolean);
+  const onBranch = refs.find((r) => r.startsWith("HEAD -> "));
+  if (onBranch) return onBranch.slice("HEAD -> ".length) || null;
+  return refs.includes("HEAD") ? "HEAD" : null;
+}
+
+export async function lastCommit(dir: string): Promise<LastCommit | null> {
+  const r = await git(path.resolve(dir), ["log", "-1", `--format=${LAST_COMMIT_FORMAT}`]);
+  if (r.code !== 0 || !r.stdout) return null;
+  const [subject = "", seconds = ""] = r.stdout.split("\n");
+  return parseLastCommit(subject, seconds);
 }

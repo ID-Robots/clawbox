@@ -70,7 +70,7 @@ export default function CodingAgentReportPreview({
         aria-labelledby={titleId}
         data-testid="coding-agent-report"
         onClick={(e) => e.stopPropagation()}
-        className="bg-[#1a1e2e] border border-white/10 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl min-w-0"
+        className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl min-w-0"
       >
         <div className="flex items-center gap-2 px-4 py-3 border-b border-white/[0.08]">
           <span className="material-symbols-rounded text-sky-300 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">

@@ -136,7 +136,15 @@ afterEach(() => {
 
 /** The runs list is behind a button now — open it the way a person would. */
 /** The runs list is OPEN by default now — this only waits for it. */
+/** A code project the RUN fixture belongs to — runs live on project pages now. */
+const SITE_PROJECT = { ...PROJECT, kind: "codeProject" };
+
 async function openRuns() {
+  // Runs moved off home onto the project's page: enter it first (once).
+  if (!screen.queryByTestId("coding-agent-project-page")) {
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+  }
   await screen.findByTestId("coding-agent-runs-toggle");
 }
 
@@ -157,56 +165,69 @@ describe("CodingAgentApp", () => {
     expect(screen.queryByTestId("coding-agent-effort")).not.toBeInTheDocument();
   });
 
-  it("opens Settings on the Coding Agent section from its one Settings link", async () => {
+  it("opens its own embedded settings page from the Settings button, and comes back", async () => {
+    // The settings moved INTO this app (the owner asked for them back): the
+    // button flips to an in-app page hosting the full settings panel — no
+    // desktop event, no navigation — and Back returns to the home list.
     stubFetch({ enabled: true, readiness: READY });
     const sections: string[] = [];
-    const apps: string[] = [];
     const onSection = (e: Event) => sections.push((e as CustomEvent<{ section: string }>).detail.section);
-    const onApp = (e: Event) => apps.push((e as CustomEvent<{ appId: string }>).detail.appId);
     window.addEventListener("clawbox:open-settings-section", onSection);
-    window.addEventListener("clawbox:open-app", onApp);
     try {
       render(<CodingAgentApp />);
       expect((await screen.findByTestId("coding-agent-state")).textContent).toBe(translations.en["codingAgent.stateOn"]);
       fireEvent.click(screen.getByTestId("coding-agent-open-settings"));
-      expect(sections).toEqual(["codingAgent"]);
-      expect(apps).toEqual(["settings"]);
-      // The cold-open handoff Settings reads on mount, so the link works
-      // before the Settings window exists.
-      expect((window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection).toBe("codingAgent");
+      expect(await screen.findByTestId("coding-agent-embedded-settings")).toBeInTheDocument();
+      // Nothing was dispatched at the desktop — the page is ours now.
+      expect(sections).toEqual([]);
+      fireEvent.click(screen.getByTestId("coding-agent-settings-back"));
+      expect(screen.queryByTestId("coding-agent-embedded-settings")).toBeNull();
     } finally {
       window.removeEventListener("clawbox:open-settings-section", onSection);
-      window.removeEventListener("clawbox:open-app", onApp);
-      delete (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection;
     }
   });
 
-  it("is a real link to the standalone Settings page on /app/coding, where no desktop is listening", async () => {
-    // "Open in new tab" lands a phone on /app/coding. That page hosts one app
-    // and registers no listener for the open-app or open-section events, so
-    // a button that only dispatched them would do nothing — and the switch
-    // no longer lives on that page. The link has to navigate instead.
+  it("uses the same embedded settings on /app/coding — no navigation needed anymore", async () => {
+    // Before the move this had to be a real link to /app/settings, because
+    // the standalone page had no desktop listening. The panel ships inside
+    // the app now, so the phone gets the same button and the same page.
     stubFetch({ enabled: true, readiness: READY });
-    const sections: string[] = [];
-    const onSection = (e: Event) => sections.push((e as CustomEvent<{ section: string }>).detail.section);
-    window.addEventListener("clawbox:open-settings-section", onSection);
     window.history.pushState({}, "", "/app/coding");
     try {
       render(<CodingAgentApp />);
-      const link = await screen.findByTestId("coding-agent-open-settings");
-      expect(link.tagName).toBe("A");
-      expect(link).toHaveAttribute("href", "/app/settings?section=codingAgent");
-      expect(link.textContent).toContain(translations.en["codingAgent.openSettings"]);
-      // jsdom cannot navigate; what matters is that the click reaches the
-      // browser as a plain navigation and not as a desktop event.
-      link.addEventListener("click", (e) => e.preventDefault(), { once: true });
-      fireEvent.click(link);
-      expect(sections).toEqual([]);
-      expect((window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection).toBeUndefined();
+      const button = await screen.findByTestId("coding-agent-open-settings");
+      expect(button.tagName).toBe("BUTTON");
+      fireEvent.click(button);
+      expect(await screen.findByTestId("coding-agent-embedded-settings")).toBeInTheDocument();
     } finally {
-      window.removeEventListener("clawbox:open-settings-section", onSection);
       window.history.pushState({}, "", "/");
     }
+  });
+
+  it("expands a project into its own page: project data, git block, and only its runs", async () => {
+    // The home list stays clean: a project's history lives on the project's
+    // page, and runs that belong to no listed project stay on home.
+    const project = { ...PROJECT, kind: "codeProject", directory: "/home/clawbox/clawbox/data/code-projects/site" };
+    const inRun = { ...RUN, id: "run-inproj1", task: "inside the project" };
+    const outRun = { ...RUN, id: "run-outside1", task: "somewhere else", projectId: null, directory: "/tmp/elsewhere" };
+    stubFetch({ enabled: true, readiness: READY }, [inRun, outRun], { projects: [project] });
+    render(<CodingAgentApp />);
+
+    // Home lists projects only — no runs at all (the owner asked them off).
+    await screen.findByTestId("coding-agent-project-site");
+    expect(screen.queryByText("somewhere else")).toBeNull();
+    expect(screen.queryByText("inside the project")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("coding-agent-project-site"));
+    expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
+    expect(screen.getByTestId("coding-agent-git-info")).toBeInTheDocument();
+    // The project page lists the project's runs and not the stranger.
+    expect(await screen.findByText("inside the project")).toBeInTheDocument();
+    expect(screen.queryByText("somewhere else")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+    expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
+    expect(screen.queryByText("inside the project")).toBeNull();
   });
 
   it("re-reads the device when Settings says it saved something", async () => {
@@ -256,8 +277,9 @@ describe("CodingAgentApp", () => {
     it("shows the runs straight away, and can still be collapsed", async () => {
       // Reversed deliberately: the history is why the window gets opened once
       // the switch is already on.
-      stubFetch({ enabled: true, readiness: READY }, [RUN]);
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
+      await openRuns();
       const toggle = await screen.findByTestId("coding-agent-runs-toggle");
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
@@ -269,8 +291,9 @@ describe("CodingAgentApp", () => {
 
     it("pages the list rather than showing an unbounded history", async () => {
       const many = Array.from({ length: 23 }, (_, i) => ({ ...RUN, id: `run-${String(i).padStart(8, "0")}`, task: `task number ${i}` }));
-      stubFetch({ enabled: true, readiness: READY }, many);
+      stubFetch({ enabled: true, readiness: READY }, many, { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
+      await openRuns();
       await screen.findByTestId("coding-agent-runs");
       expect(screen.getByText("task number 0")).toBeInTheDocument();
       expect(screen.queryByText("task number 10")).not.toBeInTheDocument();
@@ -283,7 +306,7 @@ describe("CodingAgentApp", () => {
     });
 
     it("opens on the button, with the outcome and the summary on demand", async () => {
-      stubFetch({ enabled: true, readiness: READY }, [RUN]);
+      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
       expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
@@ -296,14 +319,15 @@ describe("CodingAgentApp", () => {
     });
 
     it("says a run is in flight on the button itself, without being opened", async () => {
-      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null, summary: null }]);
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null, summary: null }], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
+      await openRuns();
       const toggle = await screen.findByTestId("coding-agent-runs-toggle");
       await waitFor(() => expect(toggle.textContent).toContain(translations.en["codingAgent.statusRunning"]));
     });
 
     it("offers Stop only for a running run and posts its id", async () => {
-      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null, summary: null }]);
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null, summary: null }], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
       const stop = await screen.findByRole("button", { name: translations.en["codingAgent.stop"] });
@@ -311,10 +335,10 @@ describe("CodingAgentApp", () => {
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { runId: "run-k3x9q2ab" } }));
     });
 
-    it("clears the history, but only after a second click", async () => {
+    it("clears the history from the settings page, but only after a second click", async () => {
       stubFetch({ enabled: true, readiness: READY }, [RUN]);
       render(<CodingAgentApp />);
-      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
       const clear = await screen.findByTestId("coding-agent-clear");
       expect(clear.textContent).toBe(translations.en["codingAgent.clearRuns"]);
 
@@ -326,31 +350,18 @@ describe("CodingAgentApp", () => {
 
       fireEvent.click(clear);
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/runs", body: "DELETE" }));
-      await waitFor(() => expect(screen.getByText(translations.en["codingAgent.noRuns"])).toBeInTheDocument());
-    });
-
-    it("takes the offer back when the list is collapsed", async () => {
-      stubFetch({ enabled: true, readiness: READY }, [RUN]);
-      render(<CodingAgentApp />);
-      await openRuns();
-      fireEvent.click(await screen.findByTestId("coding-agent-clear"));
-      expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearConfirm"]);
-
-      await toggleRuns(); // collapse
-      await toggleRuns(); // and open again
-      expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearRuns"]);
-      expect(posts).toEqual([]);
     });
 
     it("offers nothing to clear when there is no history", async () => {
       stubFetch({ enabled: true, readiness: READY }, []);
       render(<CodingAgentApp />);
-      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+      await screen.findByTestId("coding-agent-embedded-settings");
       expect(screen.queryByTestId("coding-agent-clear")).not.toBeInTheDocument();
     });
 
     it("says when there is nothing to show yet", async () => {
-      stubFetch({ enabled: true, readiness: READY }, []);
+      stubFetch({ enabled: true, readiness: READY }, [], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       await openRuns();
       expect(await screen.findByText(translations.en["codingAgent.noRuns"])).toBeInTheDocument();
@@ -369,7 +380,7 @@ describe("the harness self-test", () => {
     window.addEventListener("clawbox:open-terminal", onTerminal);
     try {
       render(<CodingAgentApp />);
-      await openRuns();
+      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
       fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
       await waitFor(() => {
         expect(posts.some((p) => p.url === "/setup-api/code"
@@ -392,7 +403,7 @@ describe("the harness self-test", () => {
   it("is not offered while a run is already in flight — one run at a time is the runner's rule", async () => {
     stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, status: "running", completedAt: null }]);
     render(<CodingAgentApp />);
-    await openRuns();
+    fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
     expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
   });
 });
@@ -424,7 +435,7 @@ describe("the summary and the report", () => {
   }
 
   it("draws the summary as markdown, not as hashes", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: "## What I built\n\n**index.html** with a toggle." }]);
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: "## What I built\n\n**index.html** with a toggle." }], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     await openDetails();
     const summary = await screen.findByTestId("coding-agent-summary");
@@ -435,7 +446,7 @@ describe("the summary and the report", () => {
   });
 
   it("keeps agent-written HTML as text, and sends links to a new tab", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: REPORT }]);
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, summary: REPORT }], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     await openDetails();
     const summary = await screen.findByTestId("coding-agent-summary");
@@ -454,7 +465,7 @@ describe("the summary and the report", () => {
     stubFetch(
       { enabled: true, readiness: READY },
       [{ ...RUN, artifacts: [REPORT_ARTIFACT, TEXT_ARTIFACT] }],
-      { artifacts: { "report.md": REPORT } },
+      { artifacts: { "report.md": REPORT }, projects: [SITE_PROJECT] },
     );
     render(<CodingAgentApp />);
     await openDetails();
@@ -484,7 +495,7 @@ describe("the summary and the report", () => {
   });
 
   it("says in words when the report cannot be loaded", async () => {
-    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, artifacts: [REPORT_ARTIFACT] }]);
+    stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, artifacts: [REPORT_ARTIFACT] }], { projects: [SITE_PROJECT] });
     render(<CodingAgentApp />);
     await openDetails();
     fireEvent.click(screen.getByRole("button", { name: "report.md" }));
@@ -509,9 +520,9 @@ describe("projects", () => {
     window.addEventListener("clawbox:open-app", onApp);
     try {
       render(<CodingAgentApp />);
-      const list = await screen.findByTestId("coding-agent-projects");
-      // The section sits above the runs.
-      expect(list.compareDocumentPosition(screen.getByTestId("coding-agent-runs-toggle")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      await screen.findByTestId("coding-agent-projects");
+      // Runs are no longer on home at all — they live on each project's page.
+      expect(screen.queryByTestId("coding-agent-runs-toggle")).not.toBeInTheDocument();
 
       const site = screen.getByTestId("coding-agent-project-site");
       expect(site.textContent).toContain("My Site");
@@ -655,6 +666,21 @@ describe("the New app wizard", () => {
     expect(posts).toEqual([]);
     expect(screen.queryByTestId("coding-agent-new-card")).not.toBeInTheDocument();
     expect(screen.getByTestId("coding-agent-new-handed").textContent).toBe(translations.en["codingAgent.newHanded"]);
+  });
+
+  it("starts from the Next.js full-stack starter by default, and offers React", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    await openWizard();
+    const select = screen.getByTestId("coding-agent-new-template") as HTMLSelectElement;
+    expect(select.value).toBe("nextjs");
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["nextjs", "react", "app", "blank"]);
+    fireEvent.change(screen.getByTestId("coding-agent-new-name"), { target: { value: "Bookings" } });
+    fireEvent.change(screen.getByTestId("coding-agent-new-what"), { target: { value: "A booking page for my salon" } });
+    fireEvent.click(screen.getByTestId("coding-agent-new-create"));
+    expect(messages[0]).toBe(
+      'Create a new ClawBox app called "Bookings": A booking page for my salon.\n'
+      + "Scaffold it as a Next.js full-stack app (App Router, TypeScript, Bun) in a new git folder under my project folder, build it with the coding agent, run it on a free local port, verify it in the browser, and register it on my desktop as a web app pointing at that address.",
+    );
   });
 
   it("is not offered on the standalone page, which mounts no chat to hand the message to", async () => {

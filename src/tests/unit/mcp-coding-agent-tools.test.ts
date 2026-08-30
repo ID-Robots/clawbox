@@ -64,7 +64,6 @@ const RUN = {
   summary: "Added the toggle. The token was abcdef0123456789abcdef0123456789abcdef01.",
   error: null,
   numTurns: 4,
-  costUsd: 0.1,
   filesTouched: ["index.html"],
   commandsRun: 1,
   permissionDenials: 2,

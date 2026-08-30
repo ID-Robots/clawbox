@@ -1,20 +1,24 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { estimateRunProgress } from "@/lib/coding-agent-progress";
+import { isLive, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentReportPreview from "./CodingAgentReportPreview";
+import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
+import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 import { formatBytes } from "@/lib/format-bytes";
 import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
 import {
   buildNewAppPrompt,
+  DEFAULT_NEW_APP_TEMPLATE,
+  NEW_APP_TEMPLATES,
   dispatchChatMessage,
   dispatchOpenApp,
-  dispatchOpenSettingsSection,
   onCodingAgentChanged,
   onStandaloneAppPage,
-  standaloneSettingsHref,
   type NewAppTemplate,
 } from "@/lib/ui-events";
 import { copyToClipboard } from "@/lib/clipboard";
@@ -50,12 +54,13 @@ interface Run {
   directory: string;
   projectId: string | null;
   source: "agent" | "owner";
-  status: "running" | "completed" | "failed" | "stopped";
+  status: CodingRunStatus;
   startedAt: number;
   completedAt: number | null;
   summary: string | null;
   error: string | null;
   numTurns: number;
+  todos?: { status?: string }[];
   filesTouched: string[];
   permissionDenials: number;
   /** What was refused, in the owner's words. */
@@ -111,8 +116,13 @@ interface Project {
  * component cannot import the library constant, which pulls in fs.
  */
 export const NEW_APP_NAME_MAX = 60;
-/** Order and default of the "start from" select — initProject's templates. */
-const NEW_APP_TEMPLATES: readonly NewAppTemplate[] = ["app", "blank"];
+/** The select's option label per starter — the order and default live in ui-events. */
+const NEW_APP_TEMPLATE_LABEL: Record<NewAppTemplate, string> = {
+  nextjs: "codingAgent.newTemplateNextjs",
+  react: "codingAgent.newTemplateReact",
+  app: "codingAgent.newTemplateApp",
+  blank: "codingAgent.newTemplateBlank",
+};
 
 /**
  * The desktop's id for a deployed web app. page.tsx builds every installed
@@ -190,11 +200,59 @@ const HARNESS_TEST_TASK =
 const OPEN_SETTINGS_CLASS =
   "flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0 no-underline";
 
-const STATUS_CLASS: Record<Run["status"], string> = {
-  running: "text-amber-400 border-amber-400/40",
-  completed: "text-emerald-400 border-emerald-400/40",
-  failed: "text-red-400 border-red-400/40",
-  stopped: "text-[var(--text-muted)] border-white/20",
+/** A run belongs to the project whose folder it worked in — or, for a code
+ *  project, the one it was pointed at by id (its folder is under the checkout). */
+function runBelongsTo(r: Run, pr: Project): boolean {
+  return r.directory === pr.directory || (pr.kind === "codeProject" && r.projectId === pr.folder);
+}
+
+interface GitInfo {
+  branch: string | null;
+  commits: number;
+  remote: string | null;
+  lastCommit: { subject: string; date: number } | null;
+}
+
+/**
+ * The open project's git block: branch, commits, origin. Fetched when the
+ * page opens; origin is the "is this on GitHub yet" answer the store plan
+ * needs, so the page shows it plainly. Keyed by folder so a stale fetch
+ * never shows one project's remote on another's page — and no
+ * reset-in-effect.
+ */
+function useProjectGit(project: Project | null): GitInfo | null {
+  const [git, setGit] = useState<{ dir: string; info: GitInfo } | null>(null);
+  const dir = project?.directory ?? null;
+  const query = !project
+    ? null
+    : project.kind === "codeProject"
+      ? `projectId=${encodeURIComponent(project.folder)}`
+      : `directory=${encodeURIComponent(project.directory)}`;
+  useEffect(() => {
+    if (!dir || !query) return;
+    let gone = false;
+    fetch(`/setup-api/coding-agent/git?${query}`, { cache: "no-store" })
+      .then(async (res) => (res.ok ? res.json() : null))
+      .then((data) => { if (!gone && data?.git) setGit({ dir, info: data.git }); })
+      .catch(() => { /* the page simply shows no git block */ });
+    return () => { gone = true; };
+  }, [dir, query]);
+  return git && git.dir === dir ? git.info : null;
+}
+
+/** Every run button's shape; the action's own colour is added per row. */
+const RUN_BUTTON = "text-xs px-2.5 py-1 rounded-lg border disabled:opacity-50";
+
+/**
+ * What a held run offers first, by status: pause it, resume it, start it.
+ * A settled run offers nothing here. The route is also the button's test id
+ * (`coding-agent-<route>-<runId>`) and the key of the message shown when it
+ * is refused.
+ */
+const RUN_ACTION: Partial<Record<CodingRunStatus, { route: "pause" | "resume" | "start"; label: string; failed: string; className: string }>> = {
+  running: { route: "pause", label: "codingAgent.pause", failed: "codingAgent.pauseFailed", className: "border-white/10 text-[var(--text-primary)] hover:bg-white/5" },
+  paused: { route: "resume", label: "codingAgent.resume", failed: "codingAgent.resumeFailed", className: "border-sky-300/40 text-sky-300 hover:bg-sky-300/10" },
+  draft: { route: "start", label: "codingAgent.startDraft", failed: "codingAgent.startFailed", className: "border-violet-300/40 text-violet-300 hover:bg-violet-300/10" },
 };
 
 export default function CodingAgentApp() {
@@ -232,12 +290,16 @@ export default function CodingAgentApp() {
   const [showNew, setShowNew] = useState(false);
   const [newName, setNewName] = useState("");
   const [newWhat, setNewWhat] = useState("");
-  const [newTemplate, setNewTemplate] = useState<NewAppTemplate>(NEW_APP_TEMPLATES[0]);
+  const [newTemplate, setNewTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
   const [newError, setNewError] = useState<string | null>(null);
   const [handed, setHanded] = useState(false);
   // Clearing is two clicks, not a browser confirm(): the second click is the
   // confirmation, and collapsing the list takes the offer back.
   const [confirmClear, setConfirmClear] = useState(false);
+  // Which face the window shows — see `view` below. The settings page sits
+  // over whichever project was open, so Back returns there.
+  const [page, setPage] = useState<"home" | "settings">("home");
+  const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
 
   // `load` must not re-run because a translation function was re-created: a
   // refetch on every render would restart the live poll and overwrite the
@@ -306,7 +368,7 @@ export default function CodingAgentApp() {
   }, []);
 
   // A running run changes every few seconds; nothing else here does.
-  const anyRunning = runs.some((r) => r.status === "running");
+  const anyRunning = runs.some((r) => isLive(r.status));
   useEffect(() => {
     if (!anyRunning) return;
     const id = setInterval(() => { void load(); }, POLL_MS);
@@ -393,14 +455,14 @@ export default function CodingAgentApp() {
   }, [runs]);
 
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
-  const backup = async (run: Run) => {
-    setBusy(`backup-${run.id}`);
+  const backup = async (target: { projectId: string | null; directory: string }, key: string) => {
+    setBusy(`backup-${key}`);
     setError(null);
     try {
       const res = await fetch("/setup-api/coding-agent/git", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(run.projectId ? { projectId: run.projectId } : { directory: run.directory }),
+        body: JSON.stringify(target.projectId ? { projectId: target.projectId } : { directory: target.directory }),
       });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.backupFailed")));
       const out = await res.json() as { repo?: string; created?: boolean };
@@ -435,19 +497,32 @@ export default function CodingAgentApp() {
     }
   };
 
-  const stop = async (id: string) => {
+  /**
+   * One of the run lifecycle routes, then reload the list. A POST carries
+   * the run id in its body — pause, resume, start and stop all take that
+   * shape; the draft's DELETE names the run in the query instead, as the
+   * route reads it.
+   */
+  const runAction = async (
+    id: string,
+    action: "pause" | "resume" | "start" | "stop" | "draft",
+    failText: string,
+    opts: { method?: "POST" | "DELETE" } = {},
+  ) => {
     setBusy(id);
     setError(null);
     try {
-      const res = await fetch("/setup-api/coding-agent/stop", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ runId: id }),
-      });
-      if (!res.ok) throw new Error(await readError(res, t("codingAgent.stopFailed")));
+      const res = opts.method === "DELETE"
+        ? await fetch(`/setup-api/coding-agent/${action}?runId=${encodeURIComponent(id)}`, { method: "DELETE" })
+        : await fetch(`/setup-api/coding-agent/${action}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ runId: id }),
+        });
+      if (!res.ok) throw new Error(await readError(res, failText));
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.stopFailed"));
+      setError(err instanceof Error ? err.message : failText);
     } finally {
       setBusy(null);
     }
@@ -493,9 +568,32 @@ export default function CodingAgentApp() {
     setHanded(true);
   };
 
+  const openProject = useMemo(
+    () => (openProjectDir ? projects.find((pr) => pr.directory === openProjectDir) ?? null : null),
+    [projects, openProjectDir],
+  );
+  const git = useProjectGit(openProject);
+  /** The runs a face lists: the open project's own, or — on home — only
+   *  those that match no listed project. */
+  const visibleRuns = useMemo(() => (
+    openProject
+      ? runs.filter((r) => runBelongsTo(r, openProject))
+      : runs.filter((r) => !projects.some((pr) => runBelongsTo(r, pr)))
+  ), [runs, projects, openProject]);
+  /**
+   * Which face the window shows. Three, exclusive: the settings page sits
+   * over whichever project was open, and the project face carries its
+   * project so the markup below never re-finds it.
+   */
+  const view = page === "settings"
+    ? { face: "settings" as const }
+    : openProject
+      ? { face: "project" as const, project: openProject }
+      : { face: "home" as const };
+
   // A window, not a card: keep the app's own background on screen while the
   // first fetch lands, rather than flashing whatever is behind it.
-  if (loading) return <div className="h-full bg-[#0f1219]" data-testid="coding-agent-panel" />;
+  if (loading) return <div className="h-full bg-[var(--bg-deep)]" data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
   const checks: { label: string; ok: boolean; okText: string; badText: string }[] = readiness
@@ -511,7 +609,7 @@ export default function CodingAgentApp() {
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
     // a desktop window the owner can resize independently of the screen.
-    <div className="h-full flex flex-col bg-[#0f1219] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
+    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white overflow-y-auto @container" data-testid="coding-agent-panel">
       <div className="mx-auto w-full max-w-2xl px-5 py-4">
 
         {/* One row: what this is, whether it is on, and where to change that.
@@ -537,33 +635,68 @@ export default function CodingAgentApp() {
               tab" — there is no desktop listening, so it is a real link to
               the standalone Settings page instead; a button that dispatched
               into silence would leave the owner with no way to the switch. */}
-          {standalone ? (
-            <a
-              href={standaloneSettingsHref("codingAgent")}
-              data-testid="coding-agent-open-settings"
-              className={OPEN_SETTINGS_CLASS}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
-              {t("codingAgent.openSettings")}
-            </a>
-          ) : (
-            <button
-              type="button"
-              onClick={() => dispatchOpenSettingsSection("codingAgent")}
-              data-testid="coding-agent-open-settings"
-              className={OPEN_SETTINGS_CLASS}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
-              {t("codingAgent.openSettings")}
-            </button>
-          )}
+          {/* The settings live IN this app now — one button, both contexts. */}
+          <button
+            type="button"
+            onClick={() => { setPage(view.face === "settings" ? "home" : "settings"); }}
+            data-testid="coding-agent-open-settings"
+            aria-expanded={view.face === "settings"}
+            className={OPEN_SETTINGS_CLASS}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">settings</span>
+            {t("codingAgent.openSettings")}
+          </button>
         </div>
 
+        {view.face === "settings" && (
+          <div className="mt-3" data-testid="coding-agent-embedded-settings">
+            <button
+              type="button"
+              onClick={() => setPage("home")}
+              data-testid="coding-agent-settings-back"
+              className="mb-2 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
+              {t("codingAgent.back")}
+            </button>
+            <CodingAgentSettingsPanel />
+            {/* Owner tools that used to sit on the runs list: the canned
+                smoke run and the history sweep live with the settings now. */}
+            <div className="flex items-center justify-between mt-3">
+              <button
+                type="button"
+                onClick={() => void testHarness()}
+                disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
+                data-testid="coding-agent-harness-test"
+                className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
+              >
+                {t("codingAgent.harnessTest")}
+              </button>
+              {runs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
+                  disabled={busy === "clear"}
+                  data-testid="coding-agent-clear"
+                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
+                    confirmClear
+                      ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
+                      : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+                  }`}
+                >
+                  {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {view.face === "home" && (<>
         {/* Nothing at all when the harness is fine. A row that always says
             "Ready" is a row that never tells the owner anything; the checklist
             appears only when something is actually missing. */}
         {readiness && !readiness.ready && (
-          <div className="mt-3 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+          <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
             {readiness.ready ? null : (
               <>
                 <ul className="space-y-1">
@@ -585,6 +718,21 @@ export default function CodingAgentApp() {
           </div>
         )}
 
+        {/* The front door: one button, straight into the wizard whose handoff
+            lands in the OpenClaw chat as a run task. Sized like a control, not
+            a banner — the owner asked for it smaller. */}
+        {!standalone && !showNew && (
+          <button
+            type="button"
+            onClick={openNew}
+            data-testid="coding-agent-new"
+            className="mt-4 inline-flex items-center gap-2 btn-gradient text-white rounded-lg font-semibold text-sm px-4 py-2 shadow-md shadow-[rgba(249,115,22,0.2)] transition hover:brightness-110"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">add_circle</span>
+            {t("codingAgent.createNewProject")}
+          </button>
+        )}
+
         {/* The projects, and the way to start one. */}
         <div className="mt-4" data-testid="coding-agent-projects-section">
           <div className="flex items-center justify-between gap-2 px-1">
@@ -593,18 +741,7 @@ export default function CodingAgentApp() {
               {t("codingAgent.projectsTitle")}
               {projects.length > 0 && <span className="text-[var(--text-muted)]">({projects.length})</span>}
             </h2>
-            {!standalone && (
-              <button
-                type="button"
-                onClick={openNew}
-                disabled={showNew}
-                data-testid="coding-agent-new"
-                className="flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-[var(--coral-bright)]/40 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/10 disabled:opacity-50"
-              >
-                <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">add</span>
-                {t("codingAgent.newApp")}
-              </button>
-            )}
+
           </div>
 
           {standalone && (
@@ -655,7 +792,7 @@ export default function CodingAgentApp() {
                 >
                   {NEW_APP_TEMPLATES.map((tpl) => (
                     <option key={tpl} value={tpl}>
-                      {tpl === "app" ? t("codingAgent.newTemplateApp") : t("codingAgent.newTemplateBlank")}
+                      {t(NEW_APP_TEMPLATE_LABEL[tpl])}
                     </option>
                   ))}
                 </select>
@@ -703,7 +840,8 @@ export default function CodingAgentApp() {
                     // owner's can share a name.
                     key={project.directory}
                     data-testid={`coding-agent-project-${project.folder}`}
-                    className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 flex items-start justify-between gap-3"
+                    onClick={() => setOpenProjectDir(project.directory)}
+                    className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -735,7 +873,7 @@ export default function CodingAgentApp() {
                           owner types into a chat, so it is one tap to copy. */}
                       <button
                         type="button"
-                        onClick={() => void copyFolder(project.folder)}
+                        onClick={(e) => { e.stopPropagation(); void copyFolder(project.folder); }}
                         title={t("codingAgent.copyFolder")}
                         aria-label={t("codingAgent.copyFolder")}
                         data-testid={`coding-agent-copy-${project.folder}`}
@@ -755,7 +893,7 @@ export default function CodingAgentApp() {
                         // `installed-<folder>` (page.tsx, getAllApps); the
                         // bare folder name matches no app there, and the
                         // click did nothing at all.
-                        onClick={() => dispatchOpenApp(installedAppId(project.folder))}
+                        onClick={(e) => { e.stopPropagation(); dispatchOpenApp(installedAppId(project.folder)); }}
                         data-testid={`coding-agent-open-${project.folder}`}
                         className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
                       >
@@ -768,21 +906,101 @@ export default function CodingAgentApp() {
             </ul>
           )}
         </div>
+        </>)}
 
-        {/* The runs: open by default, since the history is why the window
-            gets opened once the switch is on, and collapsible. */}
+        {/* One project, expanded: its data, its git state, its runs. */}
+        {view.face === "project" && (<>
+          <div className="mt-4" data-testid="coding-agent-project-page">
+            <button
+              type="button"
+              onClick={() => setOpenProjectDir(null)}
+              data-testid="coding-agent-project-back"
+              className="mb-2 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
+              {t("codingAgent.back")}
+            </button>
+            <div className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-semibold text-[var(--text-primary)] break-words">{view.project.name}</span>
+                {view.project.kind === "codeProject" && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
+                    {t("codingAgent.codeProject")}
+                  </span>
+                )}
+                {view.project.onDesktop && (
+                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
+                    {t("codingAgent.onDesktop")}
+                  </span>
+                )}
+                {view.project.onDesktop && (
+                  <button
+                    type="button"
+                    onClick={() => dispatchOpenApp(installedAppId(view.project.folder))}
+                    className="ml-auto text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0"
+                  >
+                    {t("codingAgent.open")}
+                  </button>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => void copyFolder(view.project.folder)}
+                className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
+              >
+                {view.project.directory}
+                <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
+                  {copiedFolder === view.project.folder ? "check" : "content_copy"}
+                </span>
+              </button>
+              {/* The git block: where the project stands, and whether it has
+                  reached GitHub yet — the store road starts there. */}
+              <div className="mt-2 rounded-lg bg-black/20 border border-[var(--border-subtle)] px-2.5 py-2 text-[11px]" data-testid="coding-agent-git-info">
+                <p className="flex items-center gap-2 text-[var(--text-primary)]">
+                  <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
+                  {t("codingAgent.gitTitle")}
+                  {git?.branch && <span className="font-mono text-[var(--text-muted)]">{git.branch}</span>}
+                  {git && <span className="text-[var(--text-muted)]">· {t("codingAgent.gitCommits", { n: git.commits })}</span>}
+                </p>
+                <p className="mt-1 text-[var(--text-muted)] break-all">
+                  {git?.lastCommit
+                    ? <>{firstLine(git.lastCommit.subject, 90)} · {since(git.lastCommit.date)}</>
+                    : (view.project.lastCommit ? <>{firstLine(view.project.lastCommit.subject, 90)} · {since(view.project.lastCommit.date)}</> : t("codingAgent.noCommits"))}
+                </p>
+                <p className="mt-1 break-all">
+                  {git?.remote
+                    ? <span className="font-mono text-emerald-400/90">{git.remote}</span>
+                    : <span className="text-[var(--text-muted)]">{t("codingAgent.gitNoRemote")}</span>}
+                </p>
+                {github?.connected && (git?.lastCommit || view.project.lastCommit) && (
+                  <button
+                    type="button"
+                    onClick={() => void backup({ projectId: view.project.kind === "codeProject" ? view.project.folder : null, directory: view.project.directory }, `project-${view.project.folder}`)}
+                    disabled={busy === `backup-project-${view.project.folder}`}
+                    data-testid="coding-agent-project-backup"
+                    className="mt-2 text-xs px-2.5 py-1 rounded-lg border border-emerald-400/40 text-emerald-400 hover:bg-emerald-400/10 disabled:opacity-50"
+                  >
+                    {busy === `backup-project-${view.project.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+
+        {/* The runs: on the project's own page — home stays a clean list of
+            projects, as the owner asked. */}
         <div className="mt-4">
           <button
             type="button"
             onClick={() => { setShowRuns((v) => !v); setConfirmClear(false); setRunsShown(RUNS_PAGE); }}
             aria-expanded={showRuns}
             data-testid="coding-agent-runs-toggle"
-            className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
+            className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
           >
             <span className="flex items-center gap-2">
               <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
-              {t("codingAgent.recentRuns")}
-              {runs.length > 0 && <span className="text-[var(--text-muted)]">({runs.length})</span>}
+              {t("codingAgent.projectRuns")}
+              {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
               {anyRunning && (
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
                   {t("codingAgent.statusRunning")}
@@ -795,52 +1013,22 @@ export default function CodingAgentApp() {
           </button>
 
           {showRuns && (
-            <div className="flex items-center justify-between mt-2">
-              {/* One tap dispatches the canned smoke run and opens its live
-                  view. Off while anything is running — one run at a time is
-                  the runner's rule, not just this button's. */}
-              <button
-                type="button"
-                onClick={() => void testHarness()}
-                disabled={busy === "harness-test" || anyRunning || !status?.enabled || !status?.ready}
-                data-testid="coding-agent-harness-test"
-                className="text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
-              >
-                {t("codingAgent.harnessTest")}
-              </button>
-              {runs.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
-                  disabled={busy === "clear"}
-                  data-testid="coding-agent-clear"
-                  className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
-                    confirmClear
-                      ? "border-red-400/40 text-red-300 hover:bg-red-400/10"
-                      : "border-white/10 text-[var(--text-muted)] hover:bg-white/5"
-                  }`}
-                >
-                  {confirmClear ? t("codingAgent.clearConfirm") : t("codingAgent.clearRuns")}
-                </button>
-              )}
-            </div>
-          )}
-
-          {showRuns && (
-            runs.length === 0 ? (
+            visibleRuns.length === 0 ? (
               <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
             ) : (
               <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
-                {runs.slice(0, runsShown).map((run) => {
+                {visibleRuns.slice(0, runsShown).map((run) => {
                   const details = [run.error, run.summary].filter(Boolean).join("\n\n");
                   const artifacts = run.artifacts ?? [];
                   const open = expanded === run.id;
+                  const tone = RUN_TONE[run.status];
+                  const action = RUN_ACTION[run.status];
                   return (
-                    <li key={run.id} className="rounded-xl bg-white/[0.03] border border-white/[0.06] px-3 py-2">
+                    <li key={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_CLASS[run.status]}`}>
+                            <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${tone.chip}`}>
                               {statusLabel(run.status)}
                             </span>
                             {/* Only while they are actually out: a count that
@@ -896,6 +1084,15 @@ export default function CodingAgentApp() {
                               <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
                             )}
                           </p>
+                          {isLive(run.status) && (
+                            <RunProgressBar
+                              estimate={estimateRunProgress(run, Date.now())}
+                              color={tone.color}
+                              timeLeft={t("codingAgent.timeLeft")}
+                              testId={`coding-agent-progress-${run.id}`}
+                              className="mt-1"
+                            />
+                          )}
                           {/* Which models did the work, and how fresh this is. */}
                           {((run.modelsUsed?.length ?? 0) > 0 || run.lastActivityAt) && (
                             <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
@@ -906,22 +1103,48 @@ export default function CodingAgentApp() {
                           )}
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
-                          {run.status === "running" && (
-                            <button
-                              type="button"
-                              onClick={() => stop(run.id)}
-                              disabled={busy === run.id}
-                              className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-primary)] hover:bg-white/5 disabled:opacity-50"
-                            >
-                              {t("codingAgent.stop")}
-                            </button>
+                          {/* A held run: its first action, then the way out
+                              of it — a draft is discarded, anything with a
+                              process or a session behind it is stopped. */}
+                          {action && (
+                            <div className="flex gap-1">
+                              <button
+                                type="button"
+                                onClick={() => runAction(run.id, action.route, t(action.failed))}
+                                disabled={busy === run.id}
+                                data-testid={`coding-agent-${action.route}-${run.id}`}
+                                className={`${RUN_BUTTON} ${action.className}`}
+                              >
+                                {t(action.label)}
+                              </button>
+                              {run.status === "draft" ? (
+                                <button
+                                  type="button"
+                                  onClick={() => runAction(run.id, "draft", t("codingAgent.discardFailed"), { method: "DELETE" })}
+                                  disabled={busy === run.id}
+                                  data-testid={`coding-agent-discard-${run.id}`}
+                                  className={`${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5`}
+                                >
+                                  {t("codingAgent.discardDraft")}
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => runAction(run.id, "stop", t("codingAgent.stopFailed"))}
+                                  disabled={busy === run.id}
+                                  className={`${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5`}
+                                >
+                                  {t("codingAgent.stop")}
+                                </button>
+                              )}
+                            </div>
                           )}
                           {/* Straight into the session: a live tail while it
                               works, or --resume once it has finished. */}
                           {github?.connected && run.commit && (
                             <button
                               type="button"
-                              onClick={() => void backup(run)}
+                              onClick={() => void backup({ projectId: run.projectId, directory: run.directory }, run.id)}
                               disabled={busy === `backup-${run.id}`}
                               data-testid={`coding-agent-backup-${run.id}`}
                               className="text-xs px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50"
@@ -929,6 +1152,7 @@ export default function CodingAgentApp() {
                               {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
                             </button>
                           )}
+                          {run.status !== "draft" && (
                           <button
                             type="button"
                             onClick={() => openInTerminal(run)}
@@ -938,6 +1162,7 @@ export default function CodingAgentApp() {
                           >
                             {run.status === "running" ? t("codingAgent.openLive") : t("codingAgent.openResume")}
                           </button>
+                          )}
                           {(details || artifacts.length > 0) && (
                             <button
                               type="button"
@@ -1084,17 +1309,18 @@ export default function CodingAgentApp() {
               </ul>
             )
           )}
-          {showRuns && runs.length > runsShown && (
+          {showRuns && visibleRuns.length > runsShown && (
             <button
               type="button"
               onClick={() => setRunsShown((n) => n + RUNS_PAGE)}
               data-testid="coding-agent-runs-more"
               className="w-full mt-2 px-3 py-1.5 rounded-lg border border-white/[0.08] text-[11px] text-[var(--text-muted)] hover:bg-white/5"
             >
-              {t("codingAgent.more")} ({runs.length - runsShown})
+              {t("codingAgent.more")} ({visibleRuns.length - runsShown})
             </button>
           )}
         </div>
+        </>)}
 
         {error && <div className="mt-3"><StatusMessage type="error" message={error} /></div>}
       </div>

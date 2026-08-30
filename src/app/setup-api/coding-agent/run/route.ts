@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, MAX_TASK_CHARS, startRun } from "@/lib/coding-agent";
+import { CodingAgentError, MAX_TASK_CHARS, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
@@ -17,18 +17,9 @@ export const dynamic = "force-dynamic";
  * Agent-callable (bearer or cookie), but re-checked in-handler: starting a
  * process that edits files is a state change, and TASK-443's rule is that
  * every such route carries its own gate. The owner's consent is the switch
- * this route enforces — when it is off the answer is 409, which the MCP layer
- * maps to CONFLICT / do-not-retry (403 would read as "the device needs a
- * restart", 500 as "try again").
+ * this route enforces — when it is off the answer is 409 (see
+ * httpStatusForCodingError for the mapping, and why 409).
  */
-const STATUS_FOR: Record<CodingAgentError["kind"], number> = {
-  disabled: 409,
-  not_ready: 409,
-  busy: 409,
-  invalid: 400,
-  not_found: 404,
-};
-
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
   if (unauthorized) return unauthorized;
@@ -68,7 +59,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ started: true, run }, { status: 202 });
   } catch (err) {
     if (err instanceof CodingAgentError) {
-      return NextResponse.json({ error: err.message, kind: err.kind }, { status: STATUS_FOR[err.kind] });
+      return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
     }
     console.error("[coding-agent/run] failed to start:", err instanceof Error ? err.message : err);
     return NextResponse.json(

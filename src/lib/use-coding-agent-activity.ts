@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -39,7 +40,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * asked once per chat open and then left alone.
  */
 
-export type CodingRunStatus = "running" | "completed" | "failed" | "stopped";
+export type { CodingRunStatus };
 export type CodingTodoStatus = "pending" | "in_progress" | "completed";
 
 /** One item of the run's own plan — see CodingRun.todos in coding-agent.ts. */
@@ -70,7 +71,7 @@ export interface CodingAgentActivity {
   /** Reasoning tokens so far; 0 on a record from before the runner counted them. */
   thinkingTokens: number;
   filesTouched: number;
-  /** Agent turns — arrives with the final result, so 0 while the run is live. */
+  /** Agent turns — counted live, then pinned by the final result event. */
   numTurns: number;
   /**
    * The run's newest progress lines, oldest first, at most PROGRESS_SHOWN:
@@ -158,8 +159,6 @@ const MAX_BADGES = 6;
  */
 const RECENT_MS = 120_000;
 
-const STATUSES: CodingRunStatus[] = ["running", "completed", "failed", "stopped"];
-
 function toActivity(r: RunPayload): CodingAgentActivity {
   return {
     id: r.id,
@@ -167,7 +166,7 @@ function toActivity(r: RunPayload): CodingAgentActivity {
     task: r.task,
     startedAt: r.startedAt,
     completedAt: typeof r.completedAt === "number" ? r.completedAt : null,
-    status: (STATUSES as string[]).includes(r.status) ? r.status as CodingRunStatus : "completed",
+    status: isCodingRunStatus(r.status) ? r.status : "completed",
     source: r.source === "owner" ? "owner" : "agent",
     subagentsTotal: typeof r.subagentsTotal === "number" ? r.subagentsTotal : 0,
     subagentsActive: typeof r.subagentsActive === "number" ? r.subagentsActive : 0,

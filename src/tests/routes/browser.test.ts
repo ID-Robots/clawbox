@@ -56,6 +56,24 @@ vi.mock("playwright", () => ({
   },
 }));
 
+// The route's readiness probe (src/lib/cdp-probe.ts) is a real WebSocket
+// upgrade against the address /json/version names, which the fetch stub
+// below cannot answer. Reduce it to that fetch, so setDesktopBrowserReady
+// keeps its "n failures, then ready" meaning; the probe itself is unit-tested
+// against a fake Chromium in src/tests/unit/cdp-probe.test.ts.
+vi.mock("@/lib/cdp-probe", () => ({
+  probeCdp: async (endpoint: string) => {
+    try {
+      const res = await fetch(`${endpoint}/json/version`);
+      return res.ok ? "ours" : "down";
+    } catch {
+      return "down";
+    }
+  },
+  describePortOwner: async () => "",
+  findPlaywrightChromium: () => null,
+}));
+
 function cdpVersionResponse() {
   return {
     ok: true,

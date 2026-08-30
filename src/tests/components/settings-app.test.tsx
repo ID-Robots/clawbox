@@ -681,63 +681,16 @@ describe("SettingsApp providers and Local AI pages", () => {
     expect(labels.findIndex((l) => l.includes("settings.localAi"))).toBe(labels.findIndex((l) => l.includes("settings.providers")) + 1);
   });
 
-  it("carries Coding Agent directly beneath Local AI, and opens its settings panel there", async () => {
-    // The coding agent's switch, folder, effort and GitHub account moved out
-    // of the desktop app into Settings; the app links here by section id.
+  it("carries no Coding Agent section — its settings live in the Coding Agent app now", async () => {
+    // The switch, folder, effort and GitHub card moved back into the app at
+    // the owner's request; the sidebar must not offer a dead entry, and the
+    // old section id must not open a panel here.
     const { container } = render(<SettingsApp ui={defaultUi} />);
     const labels = navButtons(container).map((b) => b.textContent ?? "");
-    expect(labels.findIndex((l) => l.includes("settings.codingAgent"))).toBe(labels.findIndex((l) => l.includes("settings.localAi")) + 1);
+    expect(labels.some((l) => l.includes("settings.codingAgent"))).toBe(false);
 
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "codingAgent" } }));
-    expect(await screen.findByTestId("coding-agent-settings-panel")).toBeInTheDocument();
-    expect(await screen.findByTestId("coding-agent-switch")).toBeInTheDocument();
-    const entry = navButtons(container).find((b) => (b.textContent ?? "").includes("settings.codingAgent"))!;
-    expect(entry.className).toContain("coral-bright");
-  });
-
-  it("keeps the coding agent's last known state in the sidebar when the status read fails", async () => {
-    // A 500 has no `enabled` field, and reading one off its error body
-    // turned every failure into "Off" — the sidebar said the switch was off
-    // while the panel beside it said it could not read the box.
-    let statusAnswer: () => Promise<unknown> = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: "boom" }) });
-    vi.stubGlobal("fetch", vi.fn((input: string | URL) => {
-      const url = input.toString();
-      if (url === "/setup-api/system/stats") return jsonResponse(statsResponse);
-      if (url.startsWith("/setup-api/providers/status")) {
-        return jsonResponse({ harness: "openclaw", providers: [], defaultProvider: null, degraded: false });
-      }
-      if (url.startsWith("/setup-api/coding-agent/status")) return statusAnswer();
-      if (url.startsWith("/setup-api/coding-agent/git")) {
-        return jsonResponse({ installed: false, connected: false, login: null, loginCommand: "gh auth login", reason: "not_installed" });
-      }
-      return jsonResponse({});
-    }));
-    const { container } = render(<SettingsApp ui={defaultUi} />);
-    const entry = () => navButtons(container).find((b) => (b.textContent ?? "").includes("settings.codingAgent"))!;
-    const openCodingAgent = async () => {
-      window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section: "codingAgent" } }));
-      await screen.findByTestId("coding-agent-settings-panel");
-    };
-
-    // A failed first read: no state, not "Off".
-    await openCodingAgent();
-    expect(await screen.findByText("codingAgent.loadFailed")).toBeInTheDocument();
-    expect(entry().textContent).not.toContain("codingAgent.stateOff");
-    expect(entry().textContent).not.toContain("codingAgent.stateOn");
-
-    // The box answers: the sidebar says On.
-    statusAnswer = () => jsonResponse({ enabled: true, effort: "max", readiness: { ready: true, problems: [] }, effortLevels: ["max"] });
-    fireEvent.click(navButtons(container).find((b) => (b.textContent ?? "").includes("settings.providers"))!);
-    await openCodingAgent();
-    await waitFor(() => expect(entry().textContent).toContain("codingAgent.stateOn"));
-
-    // The next read fails: the sidebar keeps On rather than flipping to Off.
-    statusAnswer = () => Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ error: "boom" }) });
-    fireEvent.click(navButtons(container).find((b) => (b.textContent ?? "").includes("settings.providers"))!);
-    await openCodingAgent();
-    expect(await screen.findByText("codingAgent.loadFailed")).toBeInTheDocument();
-    expect(entry().textContent).toContain("codingAgent.stateOn");
-    expect(entry().textContent).not.toContain("codingAgent.stateOff");
+    expect(screen.queryByTestId("coding-agent-settings-panel")).toBeNull();
   });
 
   it("opens on Providers with the provider list, and Local AI shows the grouped on-device page", async () => {

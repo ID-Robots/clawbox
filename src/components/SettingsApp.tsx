@@ -16,7 +16,6 @@ import AIModelsStep from "./AIModelsStep";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
 import LocalAiPanel from "./LocalAiPanel";
-import CodingAgentSettingsPanel, { type AgentStatus as CodingAgentStatus } from "./CodingAgentSettingsPanel";
 import VoiceOutputPanel from "./VoiceOutputPanel";
 import SystemProfilePanel from "./SystemProfilePanel";
 import FreeTierUpgradeCard from "./FreeTierUpgradeCard";
@@ -174,7 +173,9 @@ interface SystemStats {
 }
 
 
-const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "codingAgent", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
+// codingAgent is gone from this list on purpose: its settings moved into the
+// Coding Agent app itself (the owner asked for them back there).
+const SECTIONS = ["appearance", "wifi", "ai", "localAi", "localModels", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "system", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -268,7 +269,6 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   // account — moved here from the Coding Agent app, which keeps the runs.
   // Next to the AI pages because it is the other thing the assistant does
   // with a model.
-  { id: "codingAgent", icon: "code", labelKey: "settings.codingAgent" },
   // One entry for every messaging channel; the four panes live behind it
   // (CHANNEL_ITEMS) rather than each claiming a sidebar row of its own.
   { id: "channels", icon: "forum", labelKey: "settings.channels" },
@@ -1364,26 +1364,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // where the subtitle is visible from the list), then let the panel hand
   // over every status the route answers with — the switch changes through
   // actions on that panel, not on its own.
-  const [codingAgentStatus, setCodingAgentStatus] = useState<Pick<CodingAgentStatus, "enabled" | "effort"> | null>(null);
-  const codingAgentTabOpen = section === "codingAgent";
-  useEffect(() => {
-    if (!codingAgentTabOpen && !isMobile) return;
-    let alive = true;
-    fetch("/setup-api/coding-agent/status", { cache: "no-store" })
-      // A 500 has no `enabled` field, and reading one off its error body
-      // turned every failure into "Off" — the sidebar said the switch was
-      // off while the panel beside it said it could not read the box.
-      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then(data => {
-        if (!alive) return;
-        setCodingAgentStatus({ enabled: !!data.enabled, effort: typeof data.effort === "string" ? data.effort : "max" });
-      })
-      .catch(() => {
-        // Keep whatever the sidebar last knew: a failed read is not a state
-        // of the switch, and the panel reports the failure in words.
-      });
-    return () => { alive = false; };
-  }, [codingAgentTabOpen, isMobile]);
 
 
   /* ── Telegram ── */
@@ -3058,7 +3038,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                   </span>
                 </button>
                 {langOpen && (
-                  <div className="absolute z-50 mt-1 w-full bg-[#1a1f2e] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
+                  <div className="absolute z-50 mt-1 w-full bg-[var(--bg-elevated)] border border-white/10 rounded-lg shadow-xl max-h-60 overflow-y-auto">
                     {LANGUAGES.map(lang => (
                       <button
                         key={lang.code}
@@ -3515,10 +3495,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           <LocalAiPanel active={localTabOpen} edition={edition} />
         )}
 
-        {/* ─── Coding Agent: the switch and everything a run is told ─── */}
-        {activeSection === "codingAgent" && (
-          <CodingAgentSettingsPanel onStatus={setCodingAgentStatus} />
-        )}
 
         {/* ─── Voice ─── */}
         {activeSection === "voice" && (
@@ -5593,13 +5569,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         if (localAiStatus === null) return { subtitle: null };
         if (!localAiStatus.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
         return { subtitle: localAiStatus.model || localAiStatus.provider };
-      }
-      case "codingAgent": {
-        if (codingAgentStatus === null) return { subtitle: null };
-        if (!codingAgentStatus.enabled) return { subtitle: t("codingAgent.stateOff") };
-        // "On · Max" — the effort is the one setting worth a glance from the
-        // list, because it is the one that changes how much a run costs.
-        return { subtitle: `${t("codingAgent.stateOn")} · ${t(`codingAgent.effort.${codingAgentStatus.effort}`)}` };
       }
       case "telegram": {
         if (tgConfigured === null) return { subtitle: null };

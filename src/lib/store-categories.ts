@@ -34,4 +34,13 @@ export interface InstalledMeta {
   // have no ClawHub page at all — InstalledAppSettings resolves the gap from
   // the store rather than linking somewhere that does not exist.
   developer?: string;
+  // How the desktop opens a webapp. "window" opens a real top-level browser
+  // window instead of the sandboxed desktop iframe — for apps that need what
+  // the iframe blocks (pointer lock for a first-person game, fullscreen).
+  // Undefined means the iframe, as for every app before this existed.
+  launch?: "window";
+  // Served without a session over GET /setup-api/webapps?app=<id> so it can be
+  // shared over the tunnel. Read-only serving of that one app's files only;
+  // the middleware consults it and nothing else is opened by it.
+  public?: boolean;
 }

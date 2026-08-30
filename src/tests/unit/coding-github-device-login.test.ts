@@ -147,6 +147,34 @@ describe("polling", () => {
     expect(opts.input).toBe("gho_secret_token_value");
   });
 
+  it("uses only the flags the box's gh (2.4.0) knows, then points git at gh's credential", async () => {
+    // Seen live: `--git-protocol` is unknown to gh 2.4.0, which refused the
+    // whole login after GitHub had already approved it. And --with-token never
+    // configures git on any version — without the helper, every push fails.
+    githubAnswers({ access_token: "gho_secret_token_value" });
+    expect((await lib.pollDeviceLogin()).status).toBe("connected");
+    const calls = runChild.mock.calls.map(([bin, args]) => [bin, ...(args as string[])].join(" "));
+    const login = calls.find((c) => c.includes("--with-token"))!;
+    expect(login).toBe("gh auth login --hostname github.com --with-token");
+    expect(calls).toContain("gh config set git_protocol https");
+    expect(calls).toContain(`git config --global credential.https://github.com.helper ${lib.GIT_CREDENTIAL_HELPER}`);
+    expect(lib.GIT_CREDENTIAL_HELPER).toBe("!gh auth git-credential");
+    expect(lib.GH_LOGIN_COMMAND).not.toContain("--git-protocol");
+  });
+
+  it("calls a login whose git half failed a failure, not a connection", async () => {
+    githubAnswers({ access_token: "gho_secret_token_value" });
+    const ok = { code: 0, stdout: "", stderr: "", signal: null, timedOut: false, startFailed: false, startError: null };
+    runChild
+      .mockResolvedValueOnce(ok) // gh auth login --with-token
+      .mockResolvedValueOnce(ok) // gh config set git_protocol
+      .mockResolvedValueOnce({ ...ok, code: 1, stderr: "could not lock config file" }); // git config --global
+    const out = await lib.pollDeviceLogin();
+    expect(out).toMatchObject({ status: "failed" });
+    expect((out as { detail: string }).detail).toContain("could not lock config file");
+    expect((out as { detail: string }).detail).toContain("git");
+  });
+
   it("reports gh refusing the token as a failure with gh's words", async () => {
     githubAnswers({ access_token: "gho_secret_token_value" });
     runChild.mockResolvedValueOnce({ code: 1, stdout: "", stderr: "bad scopes", signal: null, timedOut: false, startFailed: false, startError: null });

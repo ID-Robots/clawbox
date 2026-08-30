@@ -13,6 +13,7 @@
 import fs from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
+import { isInside } from "../../src/lib/file-guard";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
@@ -135,14 +136,54 @@ const LAUNCH_RULES: ErrorRule[] = [
   },
 ];
 
+// The describe route's own refusals are argument problems, not an outage:
+// mapping them keeps a small model from retrying the same path forever.
+const DESCRIBE_RULES: ErrorRule[] = [
+  {
+    status: 403,
+    code: "BLOCKED_PATH",
+    message: "That file is outside the folders this caller may look in.",
+    next: "Inside a run, pass a file in the working folder or the evidence folder; do not retry that path.",
+  },
+  {
+    status: 404,
+    code: "NOT_FOUND",
+    message: "There is no image file at that path.",
+    next: "Check the path and pass an existing .png, .jpg, .jpeg or .webp file.",
+  },
+  {
+    status: 400,
+    code: "BAD_ARGUMENT",
+    message: "The device refused that file.",
+    next: "Pass an existing .png, .jpg, .jpeg or .webp image under 8 MB, by absolute path.",
+  },
+];
+
 let sessionId: string | null = null;
+
+/** A plain browser action: the route's 15 s page load plus the capture, with room. */
+const ACTION_TIMEOUT_MS = 45_000;
+
+/**
+ * A call that asks the backend to DESCRIBE what it captured waits on the
+ * vision model on top of that: src/lib/vision-describe.ts gives the round
+ * trip DESCRIBE_TIMEOUT_MS (60 s, its one retry included). This must sit
+ * ABOVE the sum — a client that gives up before the backend does pays for an
+ * answer it discards and then asks the same question again, which is the
+ * double-fire describe_image had at apiPost's 8 s default. The backend's
+ * constant cannot be imported here (that module's import graph carries the
+ * "@/" alias this stdio process must not load — see mcp/lib/guard.ts), so
+ * src/tests/unit/mcp-browser-describe.test.ts pins the two in step instead.
+ */
+export const DESCRIBE_CALL_TIMEOUT_MS = 90_000;
 
 async function browserCall(
   action: string,
   params: Record<string, unknown> = {},
   rules?: ErrorRule[],
 ): Promise<BrowserReply> {
-  return apiPost<BrowserReply>("/setup-api/browser", { action, ...params }, { timeoutMs: 45_000, rules });
+  const timeoutMs = params.describe === true ? DESCRIBE_CALL_TIMEOUT_MS : ACTION_TIMEOUT_MS;
+  return apiPost<BrowserReply>("/setup-api/browser", { action, ...params }, { timeoutMs, rules });
 }
 
 /** Attach to the live window, reusing the session when it is still alive. */
@@ -204,8 +245,9 @@ function briefResult(message: string, reply: BrowserReply): ToolResult {
 /**
  * The reply of the capturing tools. Outside a run: text + inline image, as
  * always. Inside a run the call already asked the backend to describe the
- * frame it captured (describe: true) — archive that same frame, relay the
- * words, no image.
+ * page (describe: true) — archive the PNG it captured, relay the words, no
+ * image. The description comes from the backend's own smaller JPEG capture a
+ * moment after the PNG, so on an animating page the two can differ slightly.
  */
 function pageResult(message: string, reply: BrowserReply): ToolResult {
   if (!runContext()) return withScreenshot(message, reply);
@@ -263,6 +305,50 @@ export function registerBrowserTools(reg: Registrar): void {
       },
     );
   }
+
+  // Registered in BOTH contexts: inside a run it is how an image-blind model
+  // looks at a file it saved (run-d8816d78 built a viewer.html and drove the
+  // device browser at it just to see its own frames); on the assistant's own
+  // server it reads a screenshot or photo on disk the same way. The backend
+  // answers a clean error when ClawBox AI is not linked, so this never trips
+  // the circuit breaker for a healthy box.
+  reg.tool(
+    "describe_image",
+    "Look at a local image file (.png, .jpg, .jpeg, .webp) and get a written description of what it shows, through the device's vision model. Use it to check a screenshot or picture you saved without opening a browser.",
+    {
+      path: zText(512, "Image file to describe. Relative paths resolve against the working folder."),
+      prompt: zText(600, "What to look for, in one sentence. Omit for a general description.").optional(),
+    },
+    { editions: ["openclaw", "hermes"], family: "browser", readOnly: true },
+    async ({ path: given, prompt }: { path: string; prompt?: string }) => {
+      const ctx = runContext();
+      const abs = path.isAbsolute(given) ? given : path.join(ctx ? ctx.workingDir : process.cwd(), given);
+      if (ctx && !isInside(abs, ctx.workingDir) && !isInside(abs, ctx.artifactsDir)) {
+        // The route enforces this fence (realpath'd, against the ACTIVE run);
+        // this early copy only turns a typo'd path into a helpful message
+        // instead of a confusing backend refusal.
+        throw new ToolError(
+          "BLOCKED_PATH",
+          "That file is outside this run's folders.",
+          "Pass a path inside the working folder or the evidence folder.",
+        );
+      }
+      // ONE call: the backend already retries a flap of the vision proxy
+      // inside its own budget (src/lib/vision-describe.ts), so a client-side
+      // retry on top would only re-pay for an answer that was on its way.
+      const reply = await apiPost<{ description?: string | null; error?: string | null }>(
+        "/setup-api/vision/describe",
+        prompt ? { path: abs, prompt } : { path: abs },
+        { timeoutMs: DESCRIBE_CALL_TIMEOUT_MS, rules: DESCRIBE_RULES },
+      );
+      if (typeof reply.description === "string" && reply.description) return text(reply.description);
+      throw new ToolError(
+        "ENDPOINT_DOWN",
+        reply.error || "The vision model did not answer.",
+        "The image exists but could not be described right now. Try again, or report what you can without it.",
+      );
+    },
+  );
 
   reg.tool(
     "browser_open",
@@ -348,6 +434,20 @@ export function registerBrowserTools(reg: Registrar): void {
       // Deliberately reports a COUNT, not the text: echoing it put passwords
       // and one-time codes into the model's context and the session transcript.
       return briefResult(`Typed ${value.length} characters into the page.`, reply);
+    },
+  );
+
+  reg.tool(
+    "browser_fill",
+    "Set the value of a form field you can name by CSS selector — focus, clear and type in one call. Use this instead of clicking a field and typing, and instead of Tab-by-Tab navigation: it costs one step per field. The text itself is never echoed back.",
+    {
+      selector: zText(300, "CSS selector of the input, textarea or contenteditable, e.g. #name or input[name=phone]."),
+      text: zText(2_000, "The value to set."),
+    },
+    { editions: ["openclaw"], family: "browser", readOnly: false },
+    async ({ selector, text: value }: { selector: string; text: string }) => {
+      const reply = await act("fill", { selector, text: value });
+      return briefResult(`Filled ${selector.slice(0, 60)} with ${value.length} characters.`, reply);
     },
   );
 

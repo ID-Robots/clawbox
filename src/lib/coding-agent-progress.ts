@@ -156,3 +156,57 @@ export function describeProgressLine(raw: string): ProgressDescription {
 
   return { kind: "text", label: line, icon: "notes" };
 }
+
+// ── How far along a run is, honestly ─────────────────────────────────────────
+
+export interface RunProgressEstimate {
+  /** 0..1, or null when there is nothing honest to draw. */
+  fraction: number | null;
+  /** Milliseconds the run likely still needs, or null when unknowable. */
+  etaMs: number | null;
+}
+
+/**
+ * A fraction and a remaining-time guess for a run card's progress bar.
+ *
+ * One basis: the run's own TodoWrite plan. The agent said what it intends to
+ * do, and done-over-planned is real progress. A steps-over-ceiling fallback
+ * was tried and withdrawn: the live event count measured ~7x the CLI's own
+ * turn number (291 events vs 38 turns, run-5vt51ppv), so a bar drawn from it
+ * lied. No plan, no bar.
+ *
+ * The ETA extrapolates elapsed time through the fraction and is suppressed
+ * early (fraction < 0.1) where extrapolation is mostly noise. Pure: the
+ * caller passes `now`, so a card can tick and a test can pin values.
+ */
+export function estimateRunProgress(
+  run: {
+    status: string;
+    startedAt: number;
+    todos?: { status?: string }[];
+  },
+  now: number,
+): RunProgressEstimate {
+  if (run.status !== "running") {
+    return { fraction: run.status === "completed" ? 1 : null, etaMs: null };
+  }
+  const todos = run.todos ?? [];
+  if (todos.length < 2) return { fraction: null, etaMs: null };
+  const done = todos.filter((t) => t.status === "completed").length;
+  const active = todos.filter((t) => t.status === "in_progress").length;
+  // Visible but never finished-looking while alive.
+  const fraction = Math.min(0.97, Math.max(0.02, (done + active * 0.5) / todos.length));
+  const elapsed = Math.max(0, now - run.startedAt);
+  const etaMs = fraction >= 0.1 && elapsed > 30_000
+    ? Math.round((elapsed * (1 - fraction)) / fraction)
+    : null;
+  return { fraction, etaMs };
+}
+
+/** "≈ 12 min left" material: a compact minutes/hours word, never seconds-precise. */
+export function formatEta(etaMs: number): string {
+  const min = Math.max(1, Math.round(etaMs / 60_000));
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60);
+  return `${h} h ${min % 60} min`;
+}

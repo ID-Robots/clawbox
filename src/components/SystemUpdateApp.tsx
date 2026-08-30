@@ -17,7 +17,7 @@ interface BranchInfo {
   branch: string | null;
 }
 
-const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-5";
+const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
 
 function compareSemver(a: string | null | undefined, b: string | null | undefined): number {
   if (!a || !b) return 0;
@@ -368,7 +368,7 @@ export default function SystemUpdateApp() {
 
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="min-h-full w-full flex items-start justify-center p-6 pt-10">
+      <div className="min-h-full w-full flex items-start justify-center p-6 pt-10 bg-[var(--bg-deep)]">
         <div className="w-full max-w-2xl space-y-4">
           {/* HERO */}
           <div className={`${CARD} relative overflow-hidden flex flex-col items-center text-center px-6 pt-10 pb-8 bg-gradient-to-br ${heroBgClass} to-transparent`}>
@@ -386,7 +386,7 @@ export default function SystemUpdateApp() {
                   />
                 </>
               )}
-              <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-white/10">
+              <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-[var(--border-subtle)]">
                 <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600" }}>
                   {hero.icon}
                 </span>
@@ -413,7 +413,7 @@ export default function SystemUpdateApp() {
                     type="button"
                     onClick={() => void fetchVersions(true)}
                     disabled={refreshing}
-                    className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
+                    className="px-6 py-2.5 rounded-full border border-[var(--border-subtle)] bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] disabled:opacity-50 cursor-pointer"
                   >
                     {refreshing ? "Checking…" : "Check for updates"}
                   </button>
@@ -506,7 +506,7 @@ export default function SystemUpdateApp() {
                         Beta channel
                       </div>
                       <p className="mt-1 text-xs text-[var(--text-muted)]">
-                        Pulls updates from <code className="bg-black/30 px-1 rounded">beta</code> instead of <code className="bg-black/30 px-1 rounded">main</code>. Pre-release features land here first; expect rough edges.
+                        Pulls updates from <code className="bg-[var(--bg-elevated)] px-1 rounded">beta</code> instead of <code className="bg-[var(--bg-elevated)] px-1 rounded">main</code>. Pre-release features land here first; expect rough edges.
                       </p>
                     </div>
                     <BetaToggle
@@ -518,7 +518,7 @@ export default function SystemUpdateApp() {
                   </div>
 
                   {/* Branch override */}
-                  <div className="border-t border-white/5 pt-4">
+                  <div className="border-t border-[var(--border-subtle)] pt-4">
                     <div className="text-sm text-gray-100">Branch override</div>
                     <p className="mt-1 text-xs text-[var(--text-muted)]">
                       Pin updates to a specific git branch (e.g. for QA). Leave blank to follow the configured channel.
@@ -530,7 +530,7 @@ export default function SystemUpdateApp() {
                         onChange={(e) => setBranchInput(e.target.value)}
                         placeholder="main / beta / clawkeep"
                         spellCheck={false}
-                        className="flex-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                        className="flex-1 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm font-mono text-gray-200 focus:outline-none focus:border-emerald-500/50"
                       />
                       <button
                         type="button"
@@ -552,7 +552,7 @@ export default function SystemUpdateApp() {
                       (the recovery scenario) so it can't fire during loading or a
                       failed version fetch. */}
                   {status === "up-to-date" && (
-                    <div className="border-t border-white/5 pt-4">
+                    <div className="border-t border-[var(--border-subtle)] pt-4">
                       <div className="text-sm text-gray-100 inline-flex items-center gap-2">
                         <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 18 }} aria-hidden="true">restart_alt</span>
                         Force full update
@@ -650,7 +650,7 @@ function ConfirmModal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 px-5 pt-5">
@@ -662,11 +662,11 @@ function ConfirmModal({
         <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
           {children}
         </div>
-        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-[var(--border-subtle)]">
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
           >
             Cancel
           </button>
@@ -705,7 +705,7 @@ function ComponentCard({
           <div className="text-base font-semibold text-gray-100">{name}</div>
           <p className="text-xs text-[var(--text-muted)] mt-0.5">{description}</p>
         </div>
-        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${available ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-[var(--text-muted)] border-white/10"}`}>
+        <span className={`shrink-0 px-2 py-0.5 rounded-full border text-[10px] font-semibold tracking-wider ${available ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" : "bg-white/5 text-[var(--text-muted)] border-[var(--border-subtle)]"}`}>
           {available ? "UPDATE" : "CURRENT"}
         </span>
       </div>
@@ -787,7 +787,7 @@ function UpdateProgressCard({
           <button
             type="button"
             onClick={onDismiss}
-            className="px-3 py-1 rounded-md text-xs font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+            className="px-3 py-1 rounded-md text-xs font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
           >
             Dismiss
           </button>

@@ -12,7 +12,7 @@
  * that already touched files, would be worse than the failure it fixes.
  */
 import { describe, expect, it } from "vitest";
-import { isReadOnlyInspectionCommand, isTransientFailure } from "@/lib/coding-agent";
+import { isReadOnlyInspectionCommand, isRetrySafeSetupCommand, isTransientFailure } from "@/lib/coding-agent";
 
 describe("what counts as transient", () => {
   it("catches the failure actually seen on the box", () => {
@@ -30,6 +30,8 @@ describe("what counts as transient", () => {
       "getaddrinfo ENOTFOUND clawbox.com",
       "socket hang up",
       "TypeError: fetch failed",
+      // Seen live: the proxy refused a model it had served minutes before.
+      '[claude-code:unrecognized_model] {"model":"deepseek-v4-pro[1m]","query_source":"sdk"}',
     ]) {
       expect(isTransientFailure(err), err).toBe(true);
     }
@@ -45,7 +47,7 @@ describe("what counts as transient", () => {
       "Stopped before it finished.",
       "Claude Code exited with code 1 before reporting a result.",
       "The task refers to a file that does not exist.",
-      "invalid model name",
+
       null,
       "",
     ]) {
@@ -74,6 +76,31 @@ describe("what is safe to repeat", () => {
       "git commit -am fix", "mkdir output", "cp a b", "find . -delete", "",
     ]) {
       expect(isReadOnlyInspectionCommand(command), command).toBe(false);
+    }
+  });
+});
+
+describe("what setup work a retry may repeat", () => {
+  it("allows convergent package-manager setup, including the command from the real failure", () => {
+    for (const command of [
+      "npm install three esbuild ws", "npm ci", "npm ping", "bun install",
+      "pnpm install", "yarn add ws", "npm --version", "node --version", "  npm install  ",
+    ]) {
+      expect(isRetrySafeSetupCommand(command), command).toBe(true);
+    }
+  });
+
+  it("rejects scripts, arbitrary execution, composition, and other managers", () => {
+    for (const command of [
+      "npm run build", "npx create-react-app x", "npm uninstall three", "npm exec cowsay",
+      "npm install && npm run build", "npm install; touch changed", "npm install > log",
+      "pip install requests", "node -e \"process.exit()\"", "node --version extra",
+      // yarn/pnpm/bun execute the package.json SCRIPT of that name for a
+      // subcommand they do not recognise — these are npm-only builtins.
+      "bun ping", "yarn ci", "yarn ping", "pnpm ci", "pnpm ping",
+      "npm", "", 42, null, undefined,
+    ]) {
+      expect(isRetrySafeSetupCommand(command), String(command)).toBe(false);
     }
   });
 });

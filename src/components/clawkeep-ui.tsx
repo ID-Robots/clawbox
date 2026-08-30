@@ -15,7 +15,7 @@ import { useModalDialog } from "@/hooks/useModalDialog";
 // than exported off ClawKeepApp so that opening Memory Shard does not mean
 // importing the whole backup app.
 
-export const CARD = "rounded-xl border border-white/10 bg-[var(--bg-deep)]/70 p-4";
+export const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-4";
 
 export type Translator = (key: string, params?: Record<string, string | number>) => string;
 
@@ -129,7 +129,7 @@ export function ConfirmDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="clawkeep-confirm-title"
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
+        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 px-5 pt-5">
@@ -150,11 +150,11 @@ export function ConfirmDialog({
         <div className="px-5 pt-3 pb-4 text-sm leading-relaxed text-[var(--text-secondary)]">
           {body}
         </div>
-        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-white/5">
+        <div className="flex justify-end gap-2 px-5 pb-5 pt-2 border-t border-[var(--border-subtle)]">
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-white/10 text-gray-200 hover:bg-white/5 cursor-pointer"
+            className="px-4 py-2 rounded-lg text-sm font-medium border border-[var(--border-subtle)] text-gray-200 hover:bg-white/5 cursor-pointer"
           >
             {t("clawkeep.cancel")}
           </button>

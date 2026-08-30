@@ -68,10 +68,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { randomBytes } from "crypto";
-import { CONFIG_ROOT, DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet } from "@/lib/config-store";
 import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, removeArtifacts, writeRunReport } from "@/lib/coding-agent-artifacts";
+import { type CodingRunStatus, isCodingRunStatus, isHeld, isLive } from "@/lib/coding-agent-status";
 import { CODING_HARNESS_COMMAND, CODING_HARNESS_WRAPPER_PATH } from "@/lib/coding-harness";
-import { DATA_DIR_PUBLIC_SUBTREES, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
+import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, WEBAPPS_DIR } from "@/lib/code-projects";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import { commitRunWork, lastCommit, type LastCommit } from "@/lib/coding-git";
@@ -144,8 +145,6 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
  * files — not a switch.
  */
 
-/** Wall-clock ceiling for one run. Claude Code's own retries can stall for
- *  minutes against an unreachable ClawBox AI, so this is the real backstop. */
 /**
  * How long a run may go with NO sign of life before the device calls it stuck.
  *
@@ -163,9 +162,8 @@ export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
 export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 /** How often the idle check runs. */
 const IDLE_CHECK_MS = 60_000;
-/** Agent turns before Claude Code stops on its own (`error_max_turns`). */
-/** Default agent turns before Claude Code stops itself. The owner can change
- *  it; a long project needs more than a short one. */
+/** Default agent turns before Claude Code stops itself (`error_max_turns`).
+ *  The owner can change it; a long project needs more than a short one. */
 export const DEFAULT_MAX_TURNS = 150;
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
@@ -183,6 +181,17 @@ export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
  * are cheaper than fresh input but are not free, so they count too.
  */
 export const CODING_AGENT_TOKENS_CONFIG_KEY = "coding_agent_token_limit";
+
+/**
+ * The owner's switch for the automatic review pass: when on, a run that
+ * completed AND changed files is followed by ONE more run that resumes the
+ * same session and adversarially reviews what was just delivered. Measured
+ * on this box: an external judges-then-fix round lifted a delivered project
+ * from 6.5 to 9, and a run's own reviewer sub-agent caught a shipped bug —
+ * the review pass packages that as a switch. Off by default: it spends the
+ * owner's plan on every completed run.
+ */
+export const CODING_AGENT_REVIEW_CONFIG_KEY = "coding_agent_review_pass";
 export const MIN_TOKEN_LIMIT = 10_000;
 export const MAX_TASK_CHARS = 4_000;
 export const MAX_DIRECTORY_CHARS = 512;
@@ -349,7 +358,10 @@ const DENIED_HOME_SUBTREES: readonly string[] = [...PROTECTED_HOME_DIRS, ".claud
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-export type CodingRunStatus = "running" | "completed" | "failed" | "stopped";
+// The status machine is owned by coding-agent-status.ts (the client and the
+// MCP server read it too); re-exported here for the modules that always
+// imported it from the runner.
+export type { CodingRunStatus };
 export type CodingRunSource = "agent" | "owner";
 
 export interface CodingRun {
@@ -371,9 +383,10 @@ export interface CodingRun {
   summary: string | null;
   error: string | null;
   numTurns: number;
-  costUsd: number | null;
   filesTouched: string[];
   commandsRun: number;
+  /** Set on an automatic review pass: the id of the run it reviews. */
+  reviewOf: string | null;
   /** Things Claude Code wanted to do and was not allowed to. */
   permissionDenials: number;
   /**
@@ -423,7 +436,8 @@ export interface CodingRun {
   lastActivityAt: number;
   /**
    * Automatic restarts after a transient upstream failure. At most one, and
-   * only for a run that had done no work — see TRANSIENT_FAILURE_RE.
+   * only for a run that had left nothing behind but inspection output and
+   * convergent package-manager setup — see TRANSIENT_FAILURE_RE.
    */
   retries: number;
   /**
@@ -497,6 +511,8 @@ export interface CodingAgentStatus {
   ready: boolean;
   readiness: CodingHarnessReadiness;
   running: number;
+  /** The owner's switch for the automatic review pass after a completed run. */
+  reviewPass: boolean;
   harnessCommand: string;
   maxTaskChars: number;
   /** How hard a run thinks per turn. */
@@ -523,6 +539,8 @@ export interface StartRunInput {
   directory?: string | null;
   resumeRunId?: string | null;
   source: CodingRunSource;
+  /** Internal: set only by the automatic review pass, naming the run under review. */
+  reviewOf?: string | null;
 }
 
 export type CodingAgentErrorKind = "disabled" | "not_ready" | "busy" | "invalid" | "not_found";
@@ -535,10 +553,48 @@ export class CodingAgentError extends Error {
   }
 }
 
+/**
+ * The HTTP status a route answers a CodingAgentError with — ONE table, so the
+ * five routes that catch one cannot disagree. The three refusals are 409:
+ * "the request cannot be satisfied as things stand" — the switch is off, the
+ * harness is not ready, the slot is taken — which the MCP layer reads as
+ * CONFLICT / do-not-retry (403 would read as "the device token was rejected",
+ * 500 as "try again").
+ */
+export function httpStatusForCodingError(kind: CodingAgentErrorKind): number {
+  switch (kind) {
+    case "invalid": return 400;
+    case "not_found": return 404;
+    default: return 409;
+  }
+}
+
 // ─── The owner's switch ──────────────────────────────────────────────────────
 
 export async function isCodingAgentEnabled(): Promise<boolean> {
   return (await configGet(CODING_AGENT_CONFIG_KEY)) === true;
+}
+
+// Each setting is derived from its raw config value by a pure function, so a
+// single read of config.json can answer the whole status (getCodingAgentStatus
+// used to open the file eight times per poll) while the one-key getters below
+// keep their names.
+
+function defaultDirectoryFrom(raw: unknown): string | null {
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
+function effortFrom(raw: unknown): CodingEffort {
+  return isEffort(raw) ? raw : DEFAULT_EFFORT;
+}
+
+function maxTurnsFrom(raw: unknown): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_TURNS;
+  return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
+}
+
+function tokenLimitFrom(raw: unknown): number | null {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
 }
 
 export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
@@ -547,8 +603,7 @@ export async function setCodingAgentEnabled(enabled: boolean): Promise<void> {
 
 /** The owner's default working folder, or null when they have not set one. */
 export async function getDefaultDirectory(): Promise<string | null> {
-  const raw = await configGet(CODING_AGENT_DIR_CONFIG_KEY);
-  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+  return defaultDirectoryFrom(await configGet(CODING_AGENT_DIR_CONFIG_KEY));
 }
 
 /**
@@ -591,8 +646,7 @@ export function transcriptPath(run: Pick<CodingRun, "sessionId" | "directory">):
 
 /** The owner's effort level. Anything unrecognised reads as the default. */
 export async function getEffort(): Promise<CodingEffort> {
-  const raw = await configGet(CODING_AGENT_EFFORT_CONFIG_KEY);
-  return isEffort(raw) ? raw : DEFAULT_EFFORT;
+  return effortFrom(await configGet(CODING_AGENT_EFFORT_CONFIG_KEY));
 }
 
 export async function setEffort(effort: string): Promise<CodingEffort> {
@@ -603,12 +657,20 @@ export async function setEffort(effort: string): Promise<CodingEffort> {
   return effort;
 }
 
+/** The owner's switch for the automatic review pass. Absent means OFF. */
+export async function getReviewPass(): Promise<boolean> {
+  return (await configGet(CODING_AGENT_REVIEW_CONFIG_KEY)) === true;
+}
+
+export async function setReviewPass(on: unknown): Promise<boolean> {
+  if (typeof on !== "boolean") throw new CodingAgentError("invalid", "The review pass switch must be true or false.");
+  await configSet(CODING_AGENT_REVIEW_CONFIG_KEY, on);
+  return on;
+}
 
 /** The owner's turn ceiling, clamped to something the CLI will accept. */
 export async function getMaxTurns(): Promise<number> {
-  const raw = await configGet(CODING_AGENT_TURNS_CONFIG_KEY);
-  if (typeof raw !== "number" || !Number.isFinite(raw)) return DEFAULT_MAX_TURNS;
-  return Math.min(MAX_MAX_TURNS, Math.max(MIN_MAX_TURNS, Math.round(raw)));
+  return maxTurnsFrom(await configGet(CODING_AGENT_TURNS_CONFIG_KEY));
 }
 
 export async function setMaxTurns(turns: unknown): Promise<number> {
@@ -625,8 +687,7 @@ export async function setMaxTurns(turns: unknown): Promise<number> {
 
 /** The owner's token ceiling, or null when they have not set one. */
 export async function getTokenLimit(): Promise<number | null> {
-  const raw = await configGet(CODING_AGENT_TOKENS_CONFIG_KEY);
-  return typeof raw === "number" && Number.isFinite(raw) && raw >= MIN_TOKEN_LIMIT ? Math.round(raw) : null;
+  return tokenLimitFrom(await configGet(CODING_AGENT_TOKENS_CONFIG_KEY));
 }
 
 export async function setTokenLimit(limit: number | null): Promise<number | null> {
@@ -946,11 +1007,15 @@ export async function findExecutableOnPath(binary: string, pathValue: string = r
 }
 
 export async function checkReadiness(): Promise<CodingHarnessReadiness> {
-  const [wrapperInstalled, claudePath, setprivPath, token] = await Promise.all([
+  return readinessWith(await configGet("clawai_token"));
+}
+
+/** The readiness probe proper, given the ClawBox AI token the caller already read. */
+async function readinessWith(token: unknown): Promise<CodingHarnessReadiness> {
+  const [wrapperInstalled, claudePath, setprivPath] = await Promise.all([
     isExecutableFile(wrapperPath()),
     findExecutableOnPath("claude"),
     findExecutableOnPath(CAPABILITY_DROP_COMMAND),
-    configGet("clawai_token"),
   ]);
   const claudeInstalled = claudePath !== null;
   const capabilityDropAvailable = setprivPath !== null;
@@ -979,14 +1044,15 @@ export async function checkReadiness(): Promise<CodingHarnessReadiness> {
 }
 
 export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
-  const [enabled, readiness, defaultDirectory, effort, maxTurns, tokenLimit, projectFolders] = await Promise.all([
-    isCodingAgentEnabled(),
-    checkReadiness(),
-    getDefaultDirectory(),
-    getEffort(),
-    getMaxTurns(),
-    getTokenLimit(),
-    listProjectFolders(),
+  // One read of config.json for every setting the status carries — the app
+  // polls this, and each getter above opens and parses the file on its own.
+  const config = await configGetAll();
+  const enabled = config[CODING_AGENT_CONFIG_KEY] === true;
+  const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
+  const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
+  const [readiness, projectFolders] = await Promise.all([
+    readinessWith(config.clawai_token),
+    defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
   ]);
   return {
     enabled,
@@ -994,6 +1060,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     ready: enabled && readiness.ready,
     readiness,
     running: runningCount(),
+    reviewPass: config[CODING_AGENT_REVIEW_CONFIG_KEY] === true,
     harnessCommand: CODING_HARNESS_COMMAND,
     maxTaskChars: MAX_TASK_CHARS,
     effort,
@@ -1004,10 +1071,10 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
       ? OFFERED_EFFORT_LEVELS
       : (EFFORT_LEVELS.filter((l) => OFFERED_EFFORT_LEVELS.includes(l) || l === effort) as readonly CodingEffort[]),
     projectFolders,
-    maxTurns,
+    maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
     minMaxTurns: MIN_MAX_TURNS,
     maxMaxTurns: MAX_MAX_TURNS,
-    tokenLimit,
+    tokenLimit: tokenLimitFrom(config[CODING_AGENT_TOKENS_CONFIG_KEY]),
     minTokenLimit: MIN_TOKEN_LIMIT,
     runIdleTimeoutMs: RUN_IDLE_TIMEOUT_MS,
   };
@@ -1021,8 +1088,11 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
 // progress events from one run would lose each other's updates.
 
 const RUNS_PATH = path.join(DATA_DIR, "coding-agent-runs.json");
-const RUN_STATUSES: readonly CodingRunStatus[] = ["running", "completed", "failed", "stopped"];
 
+// isCodingRun gates readAll, so the status check must know EVERY status
+// persist() can write — a status it did not know made a restart silently
+// DELETE the record (paused runs and drafts vanished, found the hard way).
+// That is why the list lives in coding-agent-status.ts and nowhere else.
 function isCodingRun(value: unknown): value is CodingRun {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -1030,8 +1100,7 @@ function isCodingRun(value: unknown): value is CodingRun {
     typeof v.id === "string"
     && typeof v.task === "string"
     && typeof v.directory === "string"
-    && typeof v.status === "string"
-    && RUN_STATUSES.includes(v.status as CodingRunStatus)
+    && isCodingRunStatus(v.status)
     && typeof v.startedAt === "number"
   );
 }
@@ -1052,7 +1121,6 @@ function normalizeRun(raw: CodingRun): CodingRun {
     summary: typeof raw.summary === "string" ? raw.summary : null,
     error: typeof raw.error === "string" ? raw.error : null,
     numTurns: typeof raw.numTurns === "number" ? raw.numTurns : 0,
-    costUsd: typeof raw.costUsd === "number" ? raw.costUsd : null,
     filesTouched: Array.isArray(raw.filesTouched) ? raw.filesTouched.filter((f) => typeof f === "string") : [],
     commandsRun: typeof raw.commandsRun === "number" ? raw.commandsRun : 0,
     deniedActions: Array.isArray(raw.deniedActions)
@@ -1078,6 +1146,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     retries: typeof raw.retries === "number" ? raw.retries : 0,
     permissionDenials: typeof raw.permissionDenials === "number" ? raw.permissionDenials : 0,
     resumable: raw.resumable === true,
+    reviewOf: typeof raw.reviewOf === "string" ? raw.reviewOf : null,
     progress: Array.isArray(raw.progress) ? raw.progress.filter((p) => typeof p === "string") : [],
     todos: parseTodos(raw.todos) ?? [],
     exitCode: typeof raw.exitCode === "number" ? raw.exitCode : null,
@@ -1113,7 +1182,13 @@ interface LiveRun {
   /** Rolling idle check — see RUN_IDLE_TIMEOUT_MS. */
   timeout: NodeJS.Timeout;
   killTimer: NodeJS.Timeout | null;
-  stopRequested: boolean;
+  /**
+   * What the owner (or the token ceiling) asked this run to do: end for good,
+   * or settle as paused with its session intact for resumeRun(). One field,
+   * not two flags, because the two gestures are exclusive and the later
+   * Stop overrides an earlier Pause — see requestEnd.
+   */
+  endRequested: "stop" | "pause" | null;
   timedOut: boolean;
   sawResult: boolean;
   /** Whether "Thinking…" has already been said once. */
@@ -1148,8 +1223,18 @@ interface LiveRun {
   setprivPath: string;
   /** What this run was spawned with — a retry must match, not re-read. */
   settings: { effort: CodingEffort; maxTurns: number };
-  /** A shell command ran whose effects cannot be proven read-only. */
+  /** A shell command ran whose effects can be proven neither read-only nor safe to repeat. */
   commandMayHaveSideEffects: boolean;
+  /**
+   * The final result event's verdict, applied only when the process exits.
+   *
+   * A result event is USUALLY the stream's last word, but a resumed session
+   * has been seen to emit a result-shaped event while the process kept
+   * working (run-qqj1io65 showed "completed" mid-run, then worked three more
+   * minutes). The process being gone is the only proof the run is over, so
+   * finishRun applies this rather than the stream handler.
+   */
+  outcome: { status: "completed" | "failed"; error: string | null; resumable: boolean } | null;
 }
 
 /** Newest first. `null` until first use. */
@@ -1269,11 +1354,13 @@ export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
  */
 export function clearFinishedRuns(): number {
   const list = loadRuns();
-  const keep = list.filter((r) => r.status === "running");
+  // Paused runs hold a resumable session and drafts never ran — neither is
+  // "finished", so the owner's clear-history sweep leaves them alone.
+  const keep = list.filter((r) => isHeld(r.status));
   const removed = list.length - keep.length;
   if (removed === 0) return 0;
   for (const r of list) {
-    if (r.status !== "running") removeArtifacts(r.id);
+    if (!isHeld(r.status)) removeArtifacts(r.id);
   }
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
@@ -1285,7 +1372,12 @@ export function clearFinishedRuns(): number {
 }
 
 export function runningCount(): number {
-  return loadRuns().filter((r) => r.status === "running").length;
+  return loadRuns().filter((r) => isLive(r.status)).length;
+}
+
+/** The run executing right now, or null. (The record itself, not a clone: internal.) */
+function activeRun(): CodingRun | null {
+  return loadRuns().find((r) => isLive(r.status)) ?? null;
 }
 
 /**
@@ -1294,8 +1386,12 @@ export function runningCount(): number {
  * the ONLY file:// anything may open through the desktop browser.
  */
 export function activeRunDirectory(): string | null {
-  const running = loadRuns().find((r) => r.status === "running");
-  return running ? running.directory : null;
+  return activeRun()?.directory ?? null;
+}
+
+/** The id of the run in flight, or null — for evidence that lands server-side. */
+export function activeRunId(): string | null {
+  return activeRun()?.id ?? null;
 }
 
 /**
@@ -1360,11 +1456,9 @@ function normalizeTask(task: unknown): string {
   return cleaned;
 }
 
-/** Path containment (parent itself counts). Exported for the browser route's file:// scope check. */
-export function isInside(child: string, parent: string): boolean {
-  const rel = path.relative(parent, child);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-}
+// Path containment is file-guard's one fence (every run-scoped file check
+// uses it); re-exported under the name the browser route has always imported.
+export { isInside };
 
 async function realDirectory(abs: string): Promise<string> {
   let real: string;
@@ -1518,6 +1612,8 @@ export const HEADLESS_BRIEF = [
   // must not be a puzzle Bash solves.
   "A denied file action is a DECISION by this device, not a flaky prompt: if Read, Write or Edit is refused for a path, do not touch that path by any other route — no sed, tee, redirection or scripts through Bash. Do the parts of the task that stay inside this folder, and report plainly which part was refused and why you left it undone.",
   "The task text may carry copy-paste artifacts. If a detail is plainly garbled — a nonsense number, a broken word — ship the sensible correction and note it in your final report; do not reproduce an obvious error verbatim.",
+  "Verify efficiently: use browser_fill to set a form field by selector and browser_click on controls; never navigate a page one Tab or arrow key at a time — a whole step budget was once spent that way.",
+  "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your own run record and any session files are not yours to inspect: reads there are refused, and every attempt costs a step. Work inside your project folder and your evidence folder only.",
   "Unless you have been given full access, run ONE command per Bash call. Chaining with ; or && , pipes, redirection, subshells and heredocs are all refused, however harmless the parts look — split them into separate calls instead of retrying the combined form.",
   "When sub-agents are available to you, use them: hand searching and mapping to the explorer, running builds and tests to the tester, and a last read-through to the reviewer before you report done. Do the writing yourself.",
   "Verify your work where you can (run the build or the tests you have).",
@@ -1538,10 +1634,14 @@ const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-sec
  * `//` = absolute path in that rule syntax (a single leading slash would mean
  * "relative to the project root").
  *
- * data/ is NOT denied wholesale: a deny rule outranks `acceptEdits`, and the
- * run's own working folder is usually data/code-projects/<id>. Instead every
- * entry of data/ is denied individually except the public subtrees — the same
- * containment rule file-guard applies to the ClawBox file tools.
+ * Neither the checkout nor its data/ is denied wholesale: a deny rule
+ * outranks `acceptEdits`, and the run's own working folder is usually
+ * data/code-projects/<id>, inside both. Instead every entry of each is denied
+ * individually — data/ except its public subtrees (the same containment rule
+ * file-guard applies to the ClawBox file tools), and the checkout except
+ * data/ itself, whose entries the first pass already covered. Without the
+ * second pass the brief's promise that the checkout is off limits held for
+ * nothing but data/ and .env: src/, mcp/ and scripts/ were open to Read.
  */
 export function fileDenyRules(): string[] {
   const home = homeDir();
@@ -1552,27 +1652,30 @@ export function fileDenyRules(): string[] {
   const denyFile = (file: string) => {
     for (const tool of FILE_TOOLS) rules.push(`${tool}(/${file})`);
   };
-  for (const sub of DENIED_HOME_SUBTREES) denyTree(path.join(home, sub));
-
-  const dataEntries = new Set<string>(DATA_SECRET_FILES);
-  try {
-    for (const entry of fs.readdirSync(DATA_DIR)) dataEntries.add(entry);
-  } catch {
-    // no data dir yet — the fixed list above still applies
-  }
-  for (const entry of [...dataEntries].sort()) {
-    if (DATA_DIR_PUBLIC_SUBTREES.has(entry)) continue;
-    const abs = path.join(DATA_DIR, entry);
-    let isDir = false;
+  /** Every entry of `dir` except those `keep` names, each by what it is now. */
+  const denyEntries = (dir: string, fixed: readonly string[], keep: (entry: string) => boolean) => {
+    const entries = new Set<string>(fixed);
     try {
-      isDir = fs.statSync(abs).isDirectory();
+      for (const entry of fs.readdirSync(dir)) entries.add(entry);
     } catch {
-      // listed but absent: treat as a file
+      // no such folder yet — the fixed list still applies
     }
-    if (isDir) denyTree(abs);
-    else denyFile(abs);
-  }
-  denyFile(path.join(CONFIG_ROOT, ".env"));
+    for (const entry of [...entries].sort()) {
+      if (keep(entry)) continue;
+      const abs = path.join(dir, entry);
+      let isDir = false;
+      try {
+        isDir = fs.statSync(abs).isDirectory();
+      } catch {
+        // listed but absent: treat as a file
+      }
+      if (isDir) denyTree(abs);
+      else denyFile(abs);
+    }
+  };
+  for (const sub of DENIED_HOME_SUBTREES) denyTree(path.join(home, sub));
+  denyEntries(DATA_DIR, DATA_SECRET_FILES, (entry) => DATA_DIR_PUBLIC_SUBTREES.has(entry));
+  denyEntries(CONFIG_ROOT, [".env"], (entry) => path.join(CONFIG_ROOT, entry) === DATA_DIR);
   return rules;
 }
 
@@ -1601,8 +1704,12 @@ export const MCP_BROWSER_TOOLS = [
   "mcp__clawbox__browser_close",
   "mcp__clawbox__browser_click",
   "mcp__clawbox__browser_type",
+  "mcp__clawbox__browser_fill",
   "mcp__clawbox__browser_keypress",
   "mcp__clawbox__browser_scroll",
+  // Not a browser tool, but registered in the same run profile: the written
+  // description of a local image file, for models that cannot see pixels.
+  "mcp__clawbox__describe_image",
 ] as const;
 
 /**
@@ -1715,6 +1822,14 @@ function killTree(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+/** SIGTERM now, SIGKILL after the grace period if the tree is still there. */
+function endProcess(state: LiveRun): void {
+  killTree(state.child, "SIGTERM");
+  if (state.killTimer) clearTimeout(state.killTimer);
+  state.killTimer = setTimeout(() => killTree(state.child, "SIGKILL"), STOP_GRACE_MS);
+  state.killTimer.unref();
+}
+
 function pushProgress(run: CodingRun, line: string): void {
   const cleaned = line.replace(/\s+/g, " ").trim();
   if (!cleaned) return;
@@ -1751,6 +1866,31 @@ export function isReadOnlyInspectionCommand(command: unknown): boolean {
     || /^git\s+(?:status|diff|log)(?:\s|$)/.test(trimmed);
 }
 
+/**
+ * Setup commands a retry may safely repeat.
+ *
+ * Seen on a real box: a run died to a transient proxy failure seconds after
+ * `npm install three esbuild ws`, and the side-effect guard turned that one
+ * upstream blink into a dead run. A package install converges — a fresh
+ * attempt re-runs it into the same node_modules and lockfile — so its
+ * leftovers cannot mislead a second attempt the way a half-finished edit
+ * can. Deliberately narrow, and per manager: yarn, pnpm and bun run the
+ * package.json SCRIPT of that name for a subcommand they do not recognise
+ * (verified on this box: bun 1.4.0 executed `"scripts": {"ping": ...}` for
+ * `bun ping`), so each manager is granted only its own builtins. `npm run`,
+ * `npx`, `uninstall` and everything else stay side-effecting, because
+ * convergence cannot be proven from those strings.
+ */
+export function isRetrySafeSetupCommand(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const trimmed = command.trim();
+  if (!trimmed || /[;&|<>`\n\r]|\$\(/.test(trimmed)) return false;
+  return /^npm\s+(?:install|ci|add|ping)(?:\s|$)/.test(trimmed)
+    || /^bun\s+(?:install|ci|add)(?:\s|$)/.test(trimmed)
+    || /^(?:pnpm|yarn)\s+(?:install|add)(?:\s|$)/.test(trimmed)
+    || /^(?:node|npm|pnpm|yarn|bun)\s+(?:--version|-v)\s*$/.test(trimmed);
+}
+
 interface StreamEvent {
   type?: string;
   subtype?: string;
@@ -1758,12 +1898,13 @@ interface StreamEvent {
   estimated_tokens?: number;
   /** `user` events carry tool_result blocks; that is how a sub-agent reports back. */
   session_id?: string;
+  /** Set on events a SUB-AGENT produced; the main loop's events carry none. */
+  parent_tool_use_id?: string;
   model?: string;
   message?: { content?: unknown; usage?: unknown };
   result?: unknown;
   is_error?: boolean;
   num_turns?: number;
-  total_cost_usd?: number;
   permission_denials?: unknown;
   /** result event: per-model token breakdown, keyed by model name. */
   modelUsage?: unknown;
@@ -1862,21 +2003,24 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
       run.tokensUsed += n("input_tokens") + n("output_tokens")
         + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
-      if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && !state.stopRequested) {
+      if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
         // The CLI has no flag for this, so the device stops the run itself.
         // Marked resumable: the work is real, it simply ran out of room —
         // the same shape as a step ceiling.
-        state.stopRequested = true;
+        state.endRequested = "stop";
         run.resumable = true;
         run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
         pushProgress(run, "Token limit reached");
         console.error(`[coding-agent] ${run.id} hit its token limit at ${run.tokensUsed}`);
-        killTree(state.child, "SIGTERM");
-        state.killTimer = setTimeout(() => killTree(state.child, "SIGKILL"), STOP_GRACE_MS);
-        state.killTimer.unref();
+        endProcess(state);
         return;
       }
     }
+    // numTurns stays the CLI's own number from the final result event.
+    // A live per-event count was tried and measured 291 events against the
+    // CLI's 38 turns on run-5vt51ppv — no event arithmetic reproduces the
+    // CLI's definition, and a number that snaps from 272 to 38 at the finish
+    // is worse than none. Progress bars use the run's TodoWrite plan instead.
     const raw = event.message?.content;
     const content = Array.isArray(raw) ? (raw as Record<string, unknown>[]) : [];
     for (const block of content) {
@@ -1887,7 +2031,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         switch (block.name) {
           case "Bash":
             run.commandsRun += 1;
-            if (!isReadOnlyInspectionCommand(input.command)) state.commandMayHaveSideEffects = true;
+            if (!isReadOnlyInspectionCommand(input.command) && !isRetrySafeSetupCommand(input.command)) state.commandMayHaveSideEffects = true;
             pushProgress(run, `$ ${typeof input.command === "string" ? input.command : ""}`);
             break;
           case "Write":
@@ -1976,7 +2120,6 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   if (event.type === "result") {
     state.sawResult = true;
     if (typeof event.num_turns === "number") run.numTurns = event.num_turns;
-    if (typeof event.total_cost_usd === "number") run.costUsd = event.total_cost_usd;
     // Which models actually did work — the main run and every sub-agent.
     if (event.modelUsage && typeof event.modelUsage === "object") {
       run.modelsUsed = Object.keys(event.modelUsage as Record<string, unknown>).sort();
@@ -1989,25 +2132,35 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     if (text) run.summary = text.slice(0, MAX_SUMMARY_CHARS);
     switch (event.subtype) {
       case "success":
-        run.status = event.is_error ? "failed" : "completed";
-        if (event.is_error && !run.error) run.error = (text || "Claude Code reported an error.").slice(0, MAX_ERROR_CHARS);
+        state.outcome = {
+          status: event.is_error ? "failed" : "completed",
+          error: event.is_error && !run.error ? (text || "Claude Code reported an error.").slice(0, MAX_ERROR_CHARS) : null,
+          resumable: false,
+        };
         break;
       // The two ceilings are the ONLY failures a resume can help with: the
       // session did real work and simply ran out of room.
       case "error_max_turns":
-        run.status = "failed";
-        run.resumable = true;
-        run.error = `Stopped after ${run.numTurns || run.maxTurns} steps without finishing. Resume it with a narrower task, raise the step limit, or split the work.`;
+        state.outcome = {
+          status: "failed",
+          resumable: true,
+          error: `Stopped after ${run.numTurns || run.maxTurns} steps without finishing. Resume it with a narrower task, raise the step limit, or split the work.`,
+        };
         break;
       case "error_max_budget_usd":
-        run.status = "failed";
-        run.resumable = true;
-        run.error = "Stopped at the cost ceiling for one run. Resume it with a narrower task, or split the work.";
+        state.outcome = {
+          status: "failed",
+          resumable: true,
+          error: "Stopped at the cost ceiling for one run. Resume it with a narrower task, or split the work.",
+        };
         break;
       default: {
-        run.status = "failed";
         const errors = Array.isArray(event.errors) ? event.errors.filter((e) => typeof e === "string").join("; ") : "";
-        run.error = (errors || text || "Claude Code stopped with an error.").slice(0, MAX_ERROR_CHARS);
+        state.outcome = {
+          status: "failed",
+          resumable: false,
+          error: (errors || text || "Claude Code stopped with an error.").slice(0, MAX_ERROR_CHARS),
+        };
       }
     }
   }
@@ -2032,8 +2185,12 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
  * Deliberately narrow: an auth/transport shape, and nothing that could be a
  * real refusal of the work.
  */
+// unrecognized_model is in the transient set on evidence, not on its name:
+// run-ssodhkys died to it minutes after run-5vt51ppv finished a whole build on
+// the SAME model string via the same proxy — an entitlement flap upstream,
+// the very shape this retry exists for.
 const TRANSIENT_FAILURE_RE =
-  /failed to authenticate|attention required|cloudflare|502 bad gateway|503|504|gateway time-?out|econnreset|etimedout|enotfound|socket hang up|fetch failed/i;
+  /failed to authenticate|attention required|cloudflare|502 bad gateway|503|504|gateway time-?out|econnreset|etimedout|enotfound|socket hang up|fetch failed|unrecognized_model/i;
 
 export function isTransientFailure(error: string | null): boolean {
   return typeof error === "string" && TRANSIENT_FAILURE_RE.test(error);
@@ -2042,32 +2199,89 @@ export function isTransientFailure(error: string | null): boolean {
 /**
  * Commit what the run changed, in its own folder.
  *
- * Fire-and-forget and never allowed to throw: a run that did its work is
- * finished whether or not the history was recorded, and the owner is told
- * either way.
+ * Never throws: a run that did its work is finished whether or not the
+ * history was recorded, and the owner is told either way. Resolves once the
+ * attempt is over, so what must follow the commit can wait for it.
  */
-function recordRunWork(run: CodingRun): void {
+async function recordRunWork(run: CodingRun): Promise<void> {
   if (run.filesTouched.length === 0) return;
-  void commitRunWork({
-    directory: run.directory,
-    runId: run.id,
-    task: run.task,
-    summary: run.summary,
-  })
-    .then((outcome) => {
-      if (outcome.committed) {
-        run.commit = outcome.sha;
-        pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
-        console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
-      } else if (outcome.reason !== "no_changes") {
-        pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
-        console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
-      }
-      persist(true);
-    })
-    .catch((err: unknown) => {
-      console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
+  try {
+    const outcome = await commitRunWork({
+      directory: run.directory,
+      runId: run.id,
+      task: run.task,
+      summary: run.summary,
     });
+    if (outcome.committed) {
+      run.commit = outcome.sha;
+      pushProgress(run, `Committed as ${outcome.sha}${outcome.initialized ? " (new repository)" : ""}`);
+      console.error(`[coding-agent] ${run.id} committed ${outcome.sha}`);
+    } else if (outcome.reason !== "no_changes") {
+      pushProgress(run, `Not committed: ${outcome.detail ?? outcome.reason}`);
+      console.error(`[coding-agent] ${run.id} not committed: ${outcome.reason}`);
+    }
+    persist(true);
+  } catch (err) {
+    console.error("[coding-agent] commit failed:", err instanceof Error ? err.message : err);
+  }
+}
+
+/**
+ * What follows a settled run, in this order: its work is committed, and only
+ * then the review pass — it reads the delivered work as a diff, and starting
+ * it before the commit landed would show it the PREVIOUS run's commit as
+ * "what you just did".
+ *
+ * Never after the owner's own Stop or Pause. A run the owner asked to stop
+ * can still settle "completed" — the final result event is applied ahead of
+ * the stop so a stop that raced the finish keeps the work (see
+ * LiveRun.outcome) — but the gesture still means "no more of this", and an
+ * automatic follow-up seconds after they pressed Stop would be the box
+ * overruling them.
+ */
+async function recordAndReview(run: CodingRun, ownerEnded: boolean): Promise<void> {
+  await recordRunWork(run);
+  if (!ownerEnded) await maybeStartReviewPass(run);
+}
+
+/**
+ * What the automatic review pass is asked to do. Fixed text, not the owner's:
+ * the task is the same every time, and what varies — the work — is already in
+ * the resumed session and the folder.
+ */
+const REVIEW_PASS_TASK =
+  "Automatic review pass. Adversarially review the work you just delivered in this folder: read the diff of your"
+  + " last commit (git show HEAD; if there is no commit, review the working tree), and hunt for real defects —"
+  + " logic errors, broken edge cases, unsafe handling, anything your verification did not actually prove."
+  + " For each defect you CONFIRM: fix it, re-run the relevant verification, and note it in your report."
+  + " Do not restyle or refactor working code, and do not invent work: if nothing real is found, say so in one"
+  + " line and finish. Update report.md in your evidence folder with what you checked, found, and fixed.";
+
+/**
+ * One automatic follow-up run when the owner has switched the review pass on.
+ *
+ * The guards make it a pass and never a loop: only after a run that COMPLETED
+ * and touched files, and never after a run that is itself a review pass
+ * (reviewOf set). startRun re-checks the owner's switch, readiness and the
+ * one-run-at-a-time slot, so this can refuse for the same reasons any start
+ * can — and a refusal is a logged line, never an error the settled run feels.
+ */
+async function maybeStartReviewPass(finished: CodingRun): Promise<void> {
+  try {
+    if (finished.status !== "completed") return;
+    if (finished.reviewOf !== null) return;
+    if (finished.filesTouched.length === 0) return;
+    if (!(await getReviewPass())) return;
+    const review = await startRun({
+      task: REVIEW_PASS_TASK,
+      resumeRunId: finished.id,
+      source: finished.source,
+      reviewOf: finished.id,
+    });
+    console.error(`[coding-agent] ${review.id} started as the automatic review pass of ${finished.id}`);
+  } catch (err) {
+    console.error(`[coding-agent] review pass of ${finished.id} not started:`, err instanceof Error ? err.message : err);
+  }
 }
 
 /** The wrapper's own diagnostics, minus its start-up banner. */
@@ -2086,7 +2300,20 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   run.subagentsActive = 0;
   run.activeSubagents = [];
   if (run.status === "running") {
-    if (state.stopRequested) {
+    if (state.outcome) {
+      // The result event's verdict, now that the process is actually gone.
+      // Ahead of the stop branch so a stop that raced the final message
+      // keeps "completed", as it always has.
+      run.status = state.outcome.status;
+      if (state.outcome.resumable) run.resumable = true;
+      if (state.outcome.error && !run.error) run.error = state.outcome.error;
+    } else if (state.endRequested === "pause") {
+      // Paused, not stopped: the session is intact and Resume respawns into
+      // it. completedAt freezes the elapsed clock; resume clears it.
+      run.status = "paused";
+      run.resumable = true;
+      run.error = null;
+    } else if (state.endRequested === "stop") {
       run.status = "stopped";
       run.error = run.error ?? "Stopped before it finished.";
     } else if (state.timedOut) {
@@ -2111,8 +2338,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // transient shape, only a run the owner did not stop, and only one that
   // changed NOTHING — no files and no command that may have side effects. A
   // read-only inspection such as `ls -la` is safe and must not suppress the
-  // recovery. A run that may have edited something must never be silently
-  // repeated, because the second attempt starts from the first one's leftovers.
+  // recovery, and neither is a convergent setup step such as `npm install`:
+  // a fresh attempt re-creates its leftovers rather than tripping over them.
+  // A run that may have edited something must never be silently repeated,
+  // because the second attempt starts from the first one's leftovers.
   //
   // A FRESH session, never a resume: Claude Code persists the failure in the
   // session and replays it, which is how one bad run became two identical
@@ -2120,7 +2349,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   if (
     run.status === "failed"
     && run.retries === 0
-    && !state.stopRequested
+    && state.endRequested === null
     && !state.timedOut
     && isTransientFailure(run.error)
     && run.filesTouched.length === 0
@@ -2164,14 +2393,15 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // attempt's words; never throwing, so the record settles regardless.
   if (run.summary) writeRunReport(run.id, run.summary);
 
-  pushProgress(run, `Finished: ${run.status}`);
+  pushProgress(run, run.status === "paused" ? "Paused — resume to continue" : `Finished: ${run.status}`);
   persist(true);
   wakeWaiters(run.id);
   console.error(`[coding-agent] ${run.id} ${run.status} after ${Math.round((run.completedAt - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
   // History first, then the notice: by the time the owner is told a run
   // finished, its work is already recoverable.
-  void recordRunWork(run);
-  void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
+  void recordAndReview(run, state.endRequested !== null);
+  // A pause is the owner's own gesture — no finish notice for it.
+  if (run.status !== "paused") void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
 }
@@ -2198,6 +2428,7 @@ function spawnRun(
   resumeSessionId: string | null,
   setprivPath: string,
   settings: { effort: CodingEffort; maxTurns: number },
+  stdinText?: string,
 ): void {
   const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, run: { id: run.id, directory: run.directory } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
@@ -2234,14 +2465,13 @@ function spawnRun(
       const idleFor = Date.now() - run.lastActivityAt;
       if (idleFor < RUN_IDLE_TIMEOUT_MS) return;
       state.timedOut = true;
-      killTree(child, "SIGTERM");
-      state.killTimer = setTimeout(() => killTree(child, "SIGKILL"), STOP_GRACE_MS);
-      state.killTimer.unref();
+      endProcess(state);
     }, IDLE_CHECK_MS),
     killTimer: null,
-    stopRequested: false,
+    endRequested: null,
     timedOut: false,
     sawResult: false,
+    outcome: null,
     stderr: "",
   };
   state.timeout.unref();
@@ -2297,7 +2527,13 @@ function spawnRun(
     child.stdin?.on("error", () => {
       // EPIPE when the wrapper dies before reading the task; `exit` reports it.
     });
-    child.stdin?.end(run.task);
+    // A resumed conversation remembers the PREVIOUS run's evidence folder and
+    // was seen writing there (run-qqj1io65: screenshots filed under the old
+    // run, Write into its own folder refused). The env and --add-dir already
+    // name the new folder; the session's memory needs telling too.
+    child.stdin?.end(stdinText ?? (resumeSessionId
+      ? `${run.task}\n\n[ClawBox harness: this continuation is a NEW run. Its evidence folder is ${artifactsDir(run.id)} — save screenshots and report.md there, not in any previous run's folder.]`
+      : run.task));
   } catch {
     // reported through the exit path
   }
@@ -2307,24 +2543,8 @@ function spawnRun(
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task);
-
-  if (!(await isCodingAgentEnabled())) {
-    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
-  }
-  const readiness = await checkReadiness();
-  if (!readiness.ready) {
-    throw new CodingAgentError("not_ready", readiness.problems.join(" "));
-  }
-  // Resolved again rather than carried out of checkReadiness: this path is what
-  // strips the web server's network capabilities off the run, and a run must
-  // never start without it — not even if the binary vanished a moment ago.
-  const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
-  if (!setprivPath) {
-    throw new CodingAgentError(
-      "not_ready",
-      `${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`,
-    );
-  }
+  await assertCanSpawn();
+  const setprivPath = await requireSetpriv();
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -2352,106 +2572,152 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // conversation, which was worthless anyway — it contains one failed
     // request. Refusing outright would be worse: it would leave the owner
     // with a project that can never be resumed.
-    resumeSessionId = previous.resumable ? previous.sessionId : null;
+    // A COMPLETED session is also safe to continue — it is not poisoned, it
+    // simply finished — and continuing it is what carries the built-up context
+    // into a follow-up ("fix these review findings", the automatic review
+    // pass). A stopped run, or a failure that is not a ceiling, starts fresh.
+    resumeSessionId = previous.resumable || previous.status === "completed" ? previous.sessionId : null;
   } else {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
 
-  const list = loadRuns();
-  const active = list.filter((r) => r.status === "running");
-  if (active.length >= MAX_CONCURRENT_RUNS) {
-    throw new CodingAgentError("busy", `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`);
-  }
-
   // Read once, here: a run keeps the settings it started with even if the
   // owner changes them while it works.
-  const [effort, maxTurns, tokenLimit] = await Promise.all([
-    getEffort(), getMaxTurns(), getTokenLimit(),
-  ]);
-
-  const run: CodingRun = {
-    id: newRunId(),
+  const settings = await readRunSettings();
+  const run = newRunRecord({
     task,
     directory,
     projectId,
-    source: input.source === "owner" ? "owner" : "agent",
+    source: input.source,
     status: "running",
-    startedAt: Date.now(),
+    settings,
+    reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
+  });
+  if (run.reviewOf) pushProgress(run, `Automatic review pass of ${run.reviewOf}`);
+  else if (resumeSessionId) pushProgress(run, "Resuming the previous session");
+  else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
+
+  insertRun(loadRuns(), run);
+  persist(true);
+  console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
+  spawnOrSettle(run, resumeSessionId, setprivPath, settings);
+  return cloneRun(run);
+}
+
+/** The settings a run is spawned with, and the ceiling the device enforces itself. */
+interface RunSettings {
+  effort: CodingEffort;
+  maxTurns: number;
+  tokenLimit: number | null;
+}
+
+async function readRunSettings(): Promise<RunSettings> {
+  const [effort, maxTurns, tokenLimit] = await Promise.all([getEffort(), getMaxTurns(), getTokenLimit()]);
+  return { effort, maxTurns, tokenLimit };
+}
+
+/** A fresh run record: every counter at zero, nothing seen yet. */
+function newRunRecord(fields: {
+  task: string;
+  directory: string;
+  projectId: string | null;
+  source: CodingRunSource;
+  status: "running" | "draft";
+  settings: RunSettings;
+  reviewOf?: string | null;
+}): CodingRun {
+  const now = Date.now();
+  return {
+    id: newRunId(),
+    task: fields.task,
+    directory: fields.directory,
+    projectId: fields.projectId,
+    source: fields.source === "owner" ? "owner" : "agent",
+    status: fields.status,
+    startedAt: now,
     completedAt: null,
     sessionId: null,
     model: null,
     summary: null,
     error: null,
     numTurns: 0,
-    costUsd: null,
     filesTouched: [],
     commandsRun: 0,
     permissionDenials: 0,
     deniedActions: [],
-    effort,
+    effort: fields.settings.effort,
     subagentsActive: 0,
     activeSubagents: [],
     subagentsTotal: 0,
     subagentsByType: {},
     modelsUsed: [],
     commit: null,
-    maxTurns,
+    maxTurns: fields.settings.maxTurns,
     tokensUsed: 0,
-    tokenLimit,
+    tokenLimit: fields.settings.tokenLimit,
     thinkingTokens: 0,
-    lastActivityAt: Date.now(),
+    lastActivityAt: now,
     retries: 0,
     resumable: false,
+    reviewOf: fields.reviewOf ?? null,
     progress: [],
     todos: [],
     exitCode: null,
   };
-  if (resumeSessionId) pushProgress(run, "Resuming the previous session");
-  else if (resumeRunId) pushProgress(run, `Starting fresh: ${resumeRunId} did not fail in a way a resume can fix`);
+}
 
+/**
+ * Put a new record at the head of the list, newest first, and make room.
+ * Never drops a held run (live, paused, drafted); trims the oldest finished
+ * ones. A dropped record takes its evidence folder with it — unreachable
+ * artifacts would sit on the flash forever.
+ */
+function insertRun(list: CodingRun[], run: CodingRun): void {
   list.unshift(run);
-  // Never drop a running run; trim the oldest finished ones. A dropped
-  // record takes its evidence folder with it — unreachable artifacts would
-  // sit on the flash forever.
   while (list.length > MAX_RUNS_KEPT) {
     const idx = findLastFinished(list);
     if (idx < 0) break;
     removeArtifacts(list[idx].id);
     list.splice(idx, 1);
   }
-  persist(true);
-  console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
-  try {
-    spawnRun(run, resumeSessionId, setprivPath, { effort, maxTurns });
-  } catch (err) {
-    // The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
-    // — a cwd that vanished between the check and here, a setpriv that is not
-    // executable — nothing would ever settle it: `live` has no entry, so the
-    // boot sweep is the only thing that would, and until the next restart the
-    // one-run-at-a-time rule answers every later run with "busy". Settle it
-    // here, then report the failure to the caller.
-    run.status = "failed";
-    run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
-    run.completedAt = Date.now();
-    persist(true);
-    wakeWaiters(run.id);
-    console.error(`[coding-agent] ${run.id} failed to spawn:`, err instanceof Error ? err.message : err);
-    throw new CodingAgentError("not_ready", run.error);
-  }
-  return cloneRun(run);
 }
 
+/** The oldest run that is history — see isHeld for what is not. */
 function findLastFinished(list: CodingRun[]): number {
   for (let i = list.length - 1; i >= 0; i -= 1) {
-    if (list[i].status !== "running") return i;
+    if (!isHeld(list[i].status)) return i;
   }
   return -1;
+}
+
+/**
+ * Ask a live run to end: `stop` for good, `pause` to settle with its session
+ * intact. A Stop after a Pause overrides it — the later gesture is the
+ * decision — while a Pause after a Stop changes nothing, and neither is
+ * signalled twice.
+ */
+function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): void {
+  if (state.endRequested === kind || (kind === "pause" && state.endRequested !== null)) return;
+  state.endRequested = kind;
+  pushProgress(run, kind === "stop" ? "Stop requested" : "Pause requested");
+  endProcess(state);
+  persist();
 }
 
 /** Idempotent: stopping a finished run just returns it. */
 export function stopRun(id: string): CodingRun {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status === "paused") {
+    // No process to signal — the pause already ended it. Stopping a paused
+    // run is the owner closing the book on it.
+    run.status = "stopped";
+    run.error = "Stopped.";
+    run.completedAt = run.completedAt ?? Date.now();
+    persist(true);
+    wakeWaiters(id);
+    return cloneRun(run);
+  }
   if (run.status !== "running") return cloneRun(run);
   const state = live.get(id);
   if (!state) {
@@ -2464,15 +2730,189 @@ export function stopRun(id: string): CodingRun {
     wakeWaiters(id);
     return cloneRun(run);
   }
-  if (!state.stopRequested) {
-    state.stopRequested = true;
-    pushProgress(run, "Stop requested");
-    killTree(state.child, "SIGTERM");
-    state.killTimer = setTimeout(() => killTree(state.child, "SIGKILL"), STOP_GRACE_MS);
-    state.killTimer.unref();
-    persist();
-  }
+  requestEnd(run, state, "stop");
   return cloneRun(run);
+}
+
+/**
+ * Ask a running run to PAUSE: the process ends gracefully, the record settles
+ * as "paused" with its session intact, and resumeRun() respawns into it.
+ * Idempotent the way stopRun is: pausing anything not running returns it.
+ */
+export function pauseRun(id: string): CodingRun {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status !== "running") return cloneRun(run);
+  const state = live.get(id);
+  if (!state) {
+    // On disk as running but not ours — settle it as paused only if it has a
+    // session to come back to; otherwise it is simply lost.
+    run.status = run.sessionId ? "paused" : "failed";
+    run.resumable = run.sessionId !== null;
+    if (!run.sessionId) run.error = "The run was lost before it could be paused.";
+    run.completedAt = Date.now();
+    persist(true);
+    wakeWaiters(id);
+    return cloneRun(run);
+  }
+  requestEnd(run, state, "pause");
+  return cloneRun(run);
+}
+
+/**
+ * Resume a PAUSED run in place: the same record, the same session, picked up
+ * where the transcript left off. Runs through the same gates a start does —
+ * the owner's switch, readiness, the capability drop, one run at a time.
+ */
+export async function resumeRun(id: string): Promise<CodingRun> {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status === "running") return cloneRun(run);
+  if (run.status !== "paused") {
+    throw new CodingAgentError("invalid", "Only a paused run can be resumed in place. Start a new run instead.");
+  }
+  await assertCanSpawn();
+  const setprivPath = await requireSetpriv();
+  // The pause gap is not working time: shift the start forward by it, so the
+  // elapsed clock and the ETA speak of effort, not of the night in between.
+  if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
+  run.status = "running";
+  run.completedAt = null;
+  run.error = null;
+  run.exitCode = null;
+  run.lastActivityAt = Date.now();
+  pushProgress(run, "Resumed by the owner");
+  persist(true);
+  console.error(`[coding-agent] ${run.id} resumed from pause`);
+  // The session already holds the task; replaying it verbatim would read as
+  // "start over". Say what actually happened instead.
+  const continuation = run.sessionId
+    ? `You were paused by the owner and are now resumed in the same session. Continue the task where the transcript leaves off; do not start over. Your evidence folder is ${artifactsDir(run.id)}.`
+    : undefined;
+  spawnOrSettle(run, run.sessionId, setprivPath, { effort: run.effort, maxTurns: run.maxTurns }, continuation);
+  return cloneRun(run);
+}
+
+/** Drafts the list will hold; beyond this, start or discard one first. */
+export const MAX_DRAFT_RUNS = 10;
+
+/**
+ * Create a run the owner will start LATER: the full record, validated the way
+ * a start is (task, folder), but no process. It sits in the list as "draft"
+ * until startDraftRun spawns it or deleteDraftRun discards it.
+ */
+export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
+  const task = normalizeTask(input.task);
+  if (loadRuns().filter((r) => r.status === "draft").length >= MAX_DRAFT_RUNS) {
+    throw new CodingAgentError("invalid", `There are already ${MAX_DRAFT_RUNS} drafted runs. Start or discard one first.`);
+  }
+  const { directory, projectId } = await resolveWorkingDirectory(input);
+  // Snapshot of today's settings for the card; re-read at start, because the
+  // run keeps the settings it STARTS with, not the ones it was drafted under.
+  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "draft", settings: await readRunSettings() });
+  pushProgress(run, "Drafted — start it when ready");
+  insertRun(loadRuns(), run);
+  persist(true);
+  console.error(`[coding-agent] ${run.id} drafted by ${run.source} for ${run.directory}`);
+  return cloneRun(run);
+}
+
+/** Start a drafted run now. The same gates and the same freshness rules as startRun. */
+export async function startDraftRun(id: string): Promise<CodingRun> {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status === "running") return cloneRun(run);
+  if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  await assertCanSpawn();
+  const setprivPath = await requireSetpriv();
+  // The folder must still be there — it was only checked when drafted.
+  run.directory = await realDirectory(run.directory);
+  // Settings are read at START: a run keeps what it starts with.
+  const settings = await readRunSettings();
+  run.effort = settings.effort;
+  run.maxTurns = settings.maxTurns;
+  run.tokenLimit = settings.tokenLimit;
+  run.status = "running";
+  run.startedAt = Date.now();
+  run.lastActivityAt = Date.now();
+  pushProgress(run, "Started from a draft");
+  persist(true);
+  console.error(`[coding-agent] ${run.id} started from draft by ${run.source} in ${run.directory}`);
+  spawnOrSettle(run, null, setprivPath, settings);
+  return cloneRun(run);
+}
+
+/** Discard a draft. Only drafts: everything else is history and history stays. */
+export function deleteDraftRun(id: string): void {
+  const list = loadRuns();
+  const idx = list.findIndex((r) => r.id === id);
+  if (idx < 0) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (list[idx].status !== "draft") {
+    throw new CodingAgentError("invalid", "Only a draft can be deleted; finished runs are history.");
+  }
+  removeArtifacts(id);
+  list.splice(idx, 1);
+  persist(true);
+}
+
+/** The gates every spawn passes: the owner's switch, readiness, the slot. */
+async function assertCanSpawn(): Promise<void> {
+  if (!(await isCodingAgentEnabled())) {
+    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
+  }
+  const readiness = await checkReadiness();
+  if (!readiness.ready) throw new CodingAgentError("not_ready", readiness.problems.join(" "));
+  const active = loadRuns().filter((r) => isLive(r.status));
+  if (active.length >= MAX_CONCURRENT_RUNS) {
+    throw new CodingAgentError("busy", `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`);
+  }
+}
+
+/**
+ * setpriv, resolved fresh rather than carried out of checkReadiness: this
+ * path is what strips the web server's network capabilities off the run, and
+ * a run must never start without it — not even if the binary vanished a
+ * moment ago.
+ */
+async function requireSetpriv(): Promise<string> {
+  const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
+  if (!setprivPath) {
+    throw new CodingAgentError(
+      "not_ready",
+      `${CAPABILITY_DROP_COMMAND} (part of util-linux) is missing, and without it a run would inherit the web server's network capabilities. Install util-linux.`,
+    );
+  }
+  return setprivPath;
+}
+
+/**
+ * spawnRun, with a synchronous throw settling the record.
+ *
+ * The record is already on disk as "running". If spawn throws SYNCHRONOUSLY
+ * — a cwd that vanished between the check and here, a setpriv that is not
+ * executable — nothing would ever settle it: `live` has no entry, so the
+ * boot sweep is the only thing that would, and until the next restart the
+ * one-run-at-a-time rule answers every later run with "busy". Settle it
+ * here, then report the failure to the caller.
+ */
+function spawnOrSettle(
+  run: CodingRun,
+  resumeSessionId: string | null,
+  setprivPath: string,
+  settings: { effort: CodingEffort; maxTurns: number },
+  stdinText?: string,
+): void {
+  try {
+    spawnRun(run, resumeSessionId, setprivPath, settings, stdinText);
+  } catch (err) {
+    run.status = "failed";
+    run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+    run.completedAt = Date.now();
+    persist(true);
+    wakeWaiters(run.id);
+    console.error(`[coding-agent] ${run.id} failed to spawn:`, err instanceof Error ? err.message : err);
+    throw new CodingAgentError("not_ready", run.error);
+  }
 }
 
 /** Test hook: forget in-memory state so the next call re-reads the file. */

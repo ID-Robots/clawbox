@@ -177,7 +177,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
     health === "healthy" ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
     : health === "degraded" ? "text-amber-200 border-amber-500/40 bg-amber-500/10"
     : health === "unavailable" ? "text-red-300 border-red-500/40 bg-red-500/10"
-    : "text-[var(--text-secondary)] border-white/10 bg-white/5";
+    : "text-[var(--text-secondary)] border-[var(--border-subtle)] bg-white/5";
   const runLine =
     status.run.status === "running" ? t("clawkeep.memory.runRunning")
     : status.run.status === "succeeded" ? t("clawkeep.memory.runSucceeded", { when: timeAgo(status.run.finishedAtMs, t) })
@@ -203,7 +203,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
               ? "text-emerald-300 border-emerald-500/40 bg-emerald-500/10"
               : status.location === "cloud"
               ? "text-sky-300 border-sky-500/40 bg-sky-500/10"
-              : "text-[var(--text-secondary)] border-white/10 bg-white/5"
+              : "text-[var(--text-secondary)] border-[var(--border-subtle)] bg-white/5"
           }`}>
             {status.location === "local" ? t("clawkeep.memory.onDevice")
               : status.location === "cloud" ? t("clawkeep.memory.cloud")
@@ -231,7 +231,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         <Stat label={t("clawkeep.memory.indexSize")} value={status.indexBytes ? formatBytes(status.indexBytes) : "—"} />
       </div>
 
-      <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-muted)] border-t border-white/5 pt-3">
+      <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-muted)] border-t border-[var(--border-subtle)] pt-3">
         <span>{t("clawkeep.memory.lastRun")}: <span className={status.run.status === "failed" ? "text-red-300" : "text-gray-200"}>{runLine}</span></span>
         {/* The fingerprint is what makes "this index belongs to this model"
             checkable without printing a path or a key. */}
@@ -255,13 +255,13 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
           type="button"
           disabled={busy !== null || running}
           onClick={() => setConfirmFull(true)}
-          className="flex-1 px-3 py-2 rounded-md border border-white/10 bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          className="flex-1 px-3 py-2 rounded-md border border-[var(--border-subtle)] bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
         >
           {t("clawkeep.memory.fullReindex")}
         </button>
       </div>
 
-      <div className="space-y-3 border-t border-white/5 pt-3">
+      <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
         <div className="flex items-center justify-between">
           <div>
             <h4 className="text-xs font-semibold text-gray-100">{t("clawkeep.memory.schedule")}</h4>
@@ -297,7 +297,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                   className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 ${
                     schedule.frequency === freq
                       ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                      : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                      : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                   }`}
                 >
                   {freq === "daily" ? t("clawkeep.schedule.daily") : t("clawkeep.schedule.weekly")}
@@ -323,7 +323,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                     void saveSchedule({ ...schedule, timeOfDay: next });
                   }
                 }}
-                className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
               />
               <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
             </div>
@@ -343,7 +343,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                       className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer disabled:opacity-50 ${
                         schedule.weekday === idx
                           ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                          : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                          : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                       }`}
                     >
                       {t(labelKey)}
@@ -381,7 +381,7 @@ export default function MemoryShardApp() {
   const [error, setError] = useState<string | null>(null);
   return (
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200" data-testid="memory-shard-app">
-      <div className="min-h-full w-full flex items-center justify-center p-6">
+      <div className="min-h-full w-full flex items-center justify-center p-6 bg-[var(--bg-deep)]">
         <div className="w-full max-w-2xl space-y-4">
           {error && (
             <div role="alert" className="flex items-start justify-between gap-3 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">

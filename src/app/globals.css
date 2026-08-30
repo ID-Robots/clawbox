@@ -48,6 +48,10 @@
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
   --border-subtle: rgba(54, 65, 83, 0.6);
+  /* The hover step of an outer border. White alpha, not a heavier steel: at
+     full alpha the steel is barely a step up from --border-subtle on
+     --bg-deep, and white/20 is what the ports drew by hand before the sweep. */
+  --border-strong: rgba(255, 255, 255, 0.2);
   --border-accent: rgba(249, 115, 22, 0.3);
   --surface-card: rgba(23, 32, 48, 0.75);
   --surface-card-strong: rgba(23, 32, 48, 0.9);

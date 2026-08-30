@@ -7,6 +7,8 @@ interface InstalledMeta {
   color: string;
   iconUrl: string;
   webappUrl: string;
+  launch?: "window";
+  public?: boolean;
 }
 
 /**
@@ -43,6 +45,10 @@ export async function registerWebappInPreferences(
     "pref:installed_meta": {
       ...installedMeta,
       [appId]: {
+        // A rebuild re-registers the app; the owner's launch/public flags on
+        // the previous entry survive it, everything else is the fresh build's.
+        ...(installedMeta[appId]?.launch ? { launch: installedMeta[appId].launch } : {}),
+        ...(installedMeta[appId]?.public ? { public: true } : {}),
         name: boundPreferenceText(name, appId),
         color: opts.color || "#f97316",
         iconUrl: opts.iconUrl || "",

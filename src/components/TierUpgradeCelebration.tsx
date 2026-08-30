@@ -255,7 +255,7 @@ function CelebrationShell({ tone, badge, headline, body, primary, onClose }: She
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl text-center"
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] p-6 shadow-2xl text-center"
       >
         <div className="flex flex-col items-center gap-4 mb-5">
           <img

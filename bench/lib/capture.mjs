@@ -145,7 +145,6 @@ export function captureRun({ run, task, workdir, resultsRoot, suiteVersion, scor
     retries: run.retries ?? 0,
     resumable: run.resumable ?? false,
     numTurns: run.numTurns ?? 0,
-    costUsd: run.costUsd ?? null,
     tokensUsed: run.tokensUsed ?? 0,
     thinkingTokens: run.thinkingTokens ?? 0,
     commandsRun: run.commandsRun ?? 0,

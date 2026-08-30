@@ -460,7 +460,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       <div
         ref={confirmPanelRef}
         role="dialog" aria-modal="true" aria-labelledby={confirmTitleId}
-        className="bg-[#1a1e2e] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+        className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl p-6 max-w-sm mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ backgroundColor: BRAND_ORANGE }}>
             <span className="material-symbols-rounded text-white" style={{ fontSize: 22 }} aria-hidden="true">download</span>
@@ -511,7 +511,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     const hubUrl = clawhubSkillUrl(selectedApp.id, selectedApp.developer) || selectedApp.url;
 
     return (
-      <div className="h-full flex flex-col bg-[#0f1219] text-white" data-testid="app-store">
+      <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white" data-testid="app-store">
         {confirmModal}
         {/* Back header */}
         <div className="shrink-0 px-4 py-3 border-b border-white/10 flex items-center gap-3">
@@ -630,7 +630,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   return (
     // @container on the root so the header can size itself to the WINDOW, not
     // the viewport — this is a desktop window the owner can resize freely.
-    <div className="h-full flex flex-col bg-[#0f1219] text-white @container" data-testid="app-store">
+    <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white @container" data-testid="app-store">
       {confirmModal}
       {/* Header */}
       <div className="shrink-0 px-4 py-3 border-b border-white/10">
@@ -666,9 +666,9 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             aria-label={t("store.sort")}
             className="h-9 px-2 shrink-0 bg-white/5 border border-white/10 rounded-lg text-xs text-white/80 focus:outline-none cursor-pointer"
           >
-            <option value="rating" className="bg-[#1a1e2e]">{t("store.sortRating")}</option>
-            <option value="popular" className="bg-[#1a1e2e]">{t("store.sortPopular")}</option>
-            <option value="name" className="bg-[#1a1e2e]">{t("store.sortName")}</option>
+            <option value="rating" className="bg-[var(--bg-elevated)]">{t("store.sortRating")}</option>
+            <option value="popular" className="bg-[var(--bg-elevated)]">{t("store.sortPopular")}</option>
+            <option value="name" className="bg-[var(--bg-elevated)]">{t("store.sortName")}</option>
           </select>
         </div>
 

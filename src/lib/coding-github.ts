@@ -46,7 +46,22 @@ const PUSH_TIMEOUT_MS = 180_000;
 
 /** The command the owner runs to connect. Shown in the UI and typed into the
  *  Terminal app, so both say the same thing. */
-export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https";
+// No --git-protocol: the gh Ubuntu ships (2.4.0, 2022) has no such flag on
+// `auth login` and refuses the whole command — seen live, the device-flow
+// token was minted and then thrown away with "unknown flag". The interactive
+// login asks for the protocol itself; the token path sets it below.
+export const GH_LOGIN_COMMAND = "gh auth login --hostname github.com";
+
+/**
+ * The git-side half of a login. `gh auth login --with-token` stores the
+ * credential for gh alone, on every gh version: only the INTERACTIVE login
+ * offers to configure git, and `gh auth setup-git` — which does the same —
+ * arrived after 2.4.0. Without this, a connected box still fails every push
+ * with "could not read Username" (GIT_TERMINAL_PROMPT=0, so it fails instead
+ * of hanging). `gh auth git-credential` is the helper protocol every gh since
+ * 1.x implements; scoping it to github.com leaves other remotes alone.
+ */
+export const GIT_CREDENTIAL_HELPER = "!gh auth git-credential";
 
 // ── Device-flow login ────────────────────────────────────────────────────────
 
@@ -171,11 +186,22 @@ export async function pollDeviceLogin(): Promise<DeviceLoginPoll> {
     };
   }
   pendingLogin = null;
-  const stored = await run("gh", ["auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"], {
+  const stored = await run("gh", ["auth", "login", "--hostname", "github.com", "--with-token"], {
     input: data.access_token,
   });
   if (stored.code !== 0) {
     return { status: "failed", detail: `gh would not store the credential: ${(stored.stderr || stored.stdout).slice(0, 200)}` };
+  }
+  // gh holds the token now; make git ask gh for it. Both settings are
+  // idempotent, so a repeat login simply re-asserts them.
+  const protocol = await run("gh", ["config", "set", "git_protocol", "https"]);
+  const helper = await run("git", ["config", "--global", "credential.https://github.com.helper", GIT_CREDENTIAL_HELPER]);
+  const failed = protocol.code !== 0 ? protocol : helper.code !== 0 ? helper : null;
+  if (failed) {
+    return {
+      status: "failed",
+      detail: `Signed in, but git could not be pointed at the credential: ${(failed.stderr || failed.stdout).slice(0, 200)}`,
+    };
   }
   return { status: "connected", login: (await githubStatus()).login };
 }

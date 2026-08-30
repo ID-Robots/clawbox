@@ -100,56 +100,6 @@ async function guardDenialsRecorded() {
 
 // ------------------------------------------------------------------ live ---
 
-/** Defect pin: a stopped run that consumed tokens must not report $0.00. */
-async function guardStopCost() {
-  const en = await enable({ enabled: true });
-  if (!en.ok || !en.json?.ready) return report("record-cost-on-stopped", "INCONCLUSIVE", "coding agent not ready");
-  const workdir = fs.mkdtempSync(path.join(os.homedir(), "bench-guard-"));
-  try {
-    const started = await startRun({
-      task: "Write a file called numbers.txt in this folder containing the numbers 1 to 200, one per line. Then write a second file called words.txt spelling each of those numbers out in English, one per line.",
-      directory: workdir,
-    });
-    if (started.status !== 202) return report("record-cost-on-stopped", "INCONCLUSIVE", `run refused: ${started.status}`);
-    const id = started.json.run.id;
-    // Wait for real token consumption, then stop mid-flight.
-    let tokens = 0;
-    for (let i = 0; i < 120 && tokens === 0; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      const res = await getRun(id);
-      tokens = res.json?.run?.tokensUsed ?? 0;
-      if (res.json?.run?.status !== "running" && tokens === 0) break;
-    }
-    if (tokens === 0) return report("record-cost-on-stopped", "INCONCLUSIVE", "run never reported tokens before finishing");
-    await stopRun(id);
-    let run = null;
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      run = (await getRun(id)).json?.run;
-      if (run && run.status !== "running") break;
-    }
-    if (!run || run.status === "running") return report("record-cost-on-stopped", "INCONCLUSIVE", "run did not settle after stop");
-    if (run.status === "completed") return report("record-cost-on-stopped", "INCONCLUSIVE", "run finished before the stop landed — task too small for this box");
-    // null = honestly unreported (no result event ever priced it); what the
-    // guard forbids is the dishonest hard zero next to real tokens.
-    if ((run.tokensUsed ?? 0) > 0 && run.costUsd === 0) {
-      report("record-cost-on-stopped", "FAIL", `stopped with tokensUsed=${run.tokensUsed} but costUsd=0 — "free" is a lie; null would be honest`);
-    } else {
-      report("record-cost-on-stopped", "PASS", `costUsd=${run.costUsd} for ${run.tokensUsed} tokens`);
-    }
-  } finally {
-    // Only sweep a folder no run is using: a stop that never settled leaves
-    // the run alive in that directory, and deleting it out from under the
-    // process is exactly the kind of mess a guard must not make.
-    const last = (await getRun((await listRuns(1)).json?.runs?.[0]?.id ?? "")).json?.run;
-    if (!last || last.directory !== workdir || last.status !== "running") {
-      fs.rmSync(workdir, { recursive: true, force: true });
-    } else {
-      console.error(`  left ${workdir} in place: run ${last.id} is still using it`);
-    }
-  }
-}
-
 // ------------------------------------------------------------------ slow ---
 
 /** Longest non-streamed answer that came back as valid JSON, across probes. */
@@ -245,7 +195,6 @@ async function main() {
   guardStopParamShape();
   await guardCommitPopulated();
   await guardDenialsRecorded();
-  if (args.has("--live")) await guardStopCost(); else report("record-cost-on-stopped", "SKIP", "--live to run (~$0.05)");
   if (args.has("--slow")) {
     await guardStreamTerminates();
     // Sized from a measured ~110 output tokens/s on flash: the generation has

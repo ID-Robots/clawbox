@@ -60,7 +60,7 @@ export default function ClawBoxLoginModal({ open, onClose, feature = "generic" }
         aria-modal="true"
         aria-labelledby="clawbox-login-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+        className="w-full max-w-md rounded-2xl border border-white/10 bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <div className="flex items-start gap-4 mb-4">
           <img

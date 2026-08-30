@@ -34,11 +34,20 @@ vi.mock("@/lib/sqlite-store", () => ({
   sqliteSet: vi.fn(),
 }));
 
+// The Playwright runtime lookup is the shared finder in src/lib/cdp-probe.ts
+// (unit-tested there against a real directory); here it reads the real
+// ~/.cache/ms-playwright, so it must be stubbed or the box's own install
+// leaks into "not installed".
+vi.mock("@/lib/cdp-probe", () => ({
+  findPlaywrightChromium: vi.fn().mockReturnValue(null),
+}));
+
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
+import { findPlaywrightChromium } from "@/lib/cdp-probe";
 import fs from "fs/promises";
 import { promisify } from "util";
 
@@ -60,6 +69,7 @@ describe("/setup-api/browser/manage", () => {
     vi.mocked(fs.readdir).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.mkdir).mockResolvedValue(undefined as never);
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
+    vi.mocked(findPlaywrightChromium).mockReturnValue(null);
     mockFetch.mockRejectedValue(new Error("connection refused"));
     mockExec = vi.fn();
     vi.mocked(promisify).mockReturnValue(mockExec as never);
@@ -113,13 +123,8 @@ describe("/setup-api/browser/manage", () => {
     });
 
     it("detects the Playwright Chromium runtime when it is installed", async () => {
-      vi.mocked(fs.readdir).mockResolvedValue([
-        { name: "chromium-1180", isDirectory: () => true },
-      ] as never);
-      vi.mocked(fs.access).mockImplementation((async (target: unknown) => {
-        if (String(target).includes("chrome-linux/chrome")) return undefined as never;
-        throw new Error("ENOENT");
-      }) as typeof fs.access);
+      const chrome = "/home/clawbox/.cache/ms-playwright/chromium-1180/chrome-linux/chrome";
+      vi.mocked(findPlaywrightChromium).mockReturnValue(chrome);
       mockExec.mockImplementation(async (...args: unknown[]) => {
         const [command, commandArgs] = args as [string, string[]];
         if (String(command).includes("chrome-linux/chrome") && commandArgs[0] === "--version") {
@@ -133,6 +138,9 @@ describe("/setup-api/browser/manage", () => {
 
       expect(body.chromium.installed).toBe(true);
       expect(body.chromium.path).toContain("chrome-linux/chrome");
+      expect(body.chromium.version).toBe("Chromium 146.0.0");
+      // The desktop window needs a full chrome: a headless shell is no answer here.
+      expect(findPlaywrightChromium).toHaveBeenCalledWith(expect.stringContaining("ms-playwright"), { preferHeadless: false });
     });
 
     it("returns the persisted enabled state from sqlite when present", async () => {

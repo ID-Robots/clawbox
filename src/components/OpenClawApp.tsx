@@ -47,7 +47,7 @@ export default function OpenClawApp() {
 
   if (status === "checking") {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-3 bg-[#0a0f1a]">
+      <div className="h-full flex flex-col items-center justify-center gap-3 bg-[var(--bg-deep)]">
         <div className="w-8 h-8 rounded-full border-2 border-[var(--coral-bright)] border-t-transparent animate-spin" />
         <span className="text-sm text-white/50">{t("openclaw.connecting")}</span>
       </div>
@@ -56,7 +56,7 @@ export default function OpenClawApp() {
 
   if (status === "not-running") {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-6 p-8 bg-[#0a0f1a]">
+      <div className="h-full flex flex-col items-center justify-center gap-6 p-8 bg-[var(--bg-deep)]">
         <h2 className="text-xl font-semibold text-white">{t("openclaw.offline")}</h2>
         <p className="text-white/50 text-sm">{t("openclaw.notRunning")}</p>
         <button

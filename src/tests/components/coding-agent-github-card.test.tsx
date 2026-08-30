@@ -48,7 +48,7 @@ function stubFetch(github: Record<string, unknown>) {
   }));
 }
 
-const LOGIN_COMMAND = "gh auth login --hostname github.com --git-protocol https";
+const LOGIN_COMMAND = "gh auth login --hostname github.com";
 
 beforeEach(() => {
   vi.unstubAllGlobals();

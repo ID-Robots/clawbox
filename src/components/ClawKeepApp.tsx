@@ -499,7 +499,7 @@ export default function ClawKeepApp() {
 
   if (!status && !error) {
     return (
-      <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)]">
+      <div className="h-full w-full flex items-center justify-center text-[var(--text-muted)] bg-[var(--bg-deep)]">
         {t("clawkeep.loading")}
       </div>
     );
@@ -507,7 +507,7 @@ export default function ClawKeepApp() {
 
   if (!status) {
     return (
-      <div className="h-full w-full flex items-center justify-center p-6">
+      <div className="h-full w-full flex items-center justify-center p-6 bg-[var(--bg-deep)]">
         <div className={`${CARD} max-w-md text-sm`}>
           <p className="text-red-300">⚠️ {t("clawkeep.loadFailed")}</p>
           {error && <p className="mt-2 text-xs text-[var(--text-muted)]">{error}</p>}
@@ -526,7 +526,7 @@ export default function ClawKeepApp() {
   return (
     <AgentLabelContext.Provider value={agent}>
     <div className="relative h-full w-full overflow-y-auto bg-[var(--bg-app)] text-gray-200">
-      <div className="min-h-full w-full flex items-center justify-center p-6">
+      <div className="min-h-full w-full flex items-center justify-center p-6 bg-[var(--bg-deep)]">
         <div className="w-full max-w-2xl space-y-4">
           {error && (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
@@ -575,7 +575,7 @@ export default function ClawKeepApp() {
                   href={`${status.server}/portal/clawkeep`}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-white/10 bg-white/[0.03] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-white/20 transition-colors cursor-pointer"
+                  className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-xl border border-[var(--border-subtle)] bg-white/[0.03] text-sm text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-[var(--border-strong)] transition-colors cursor-pointer"
                   title={t("clawkeep.portalTitle")}
                 >
                   <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">dashboard</span>
@@ -767,7 +767,7 @@ function ScheduleCard({
                 className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                   draft.frequency === freq
                     ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                    : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                    : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                 }`}
               >
                 {freq === "daily" ? t("clawkeep.schedule.daily") : t("clawkeep.schedule.weekly")}
@@ -781,7 +781,7 @@ function ScheduleCard({
               type="time"
               value={draft.timeOfDay}
               onChange={(e) => setDraft((d) => ({ ...d, timeOfDay: e.target.value }))}
-              className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+              className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
             />
             <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
           </div>
@@ -798,7 +798,7 @@ function ScheduleCard({
                     className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer ${
                       draft.weekday === idx
                         ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
-                        : "border-white/10 text-[var(--text-secondary)] hover:bg-white/5"
+                        : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
                     }`}
                   >
                     {t(labelKey)}
@@ -812,7 +812,7 @@ function ScheduleCard({
 
       {/* Retention applies to every backup (manual or scheduled), so it lives
           outside the enabled-only block. */}
-      <div className="space-y-1.5 pt-1 border-t border-white/5">
+      <div className="space-y-1.5 pt-1 border-t border-[var(--border-subtle)]">
         <div className="flex items-center gap-3 flex-wrap">
           <label htmlFor="clawkeep-keep-last" className="text-xs text-[var(--text-muted)]">
             {t("clawkeep.schedule.keepLast")}
@@ -827,7 +827,7 @@ function ScheduleCard({
               const n = Math.max(0, Math.floor(Number(e.target.value)));
               setDraft((d) => ({ ...d, retentionKeepLast: Number.isFinite(n) ? n : 0 }));
             }}
-            className="w-20 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+            className="w-20 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
           />
           <span className="text-xs text-[var(--text-muted)]">
             {t("clawkeep.schedule.keepLastUnit")}
@@ -875,7 +875,7 @@ function MemoryShardCard() {
       <button
         type="button"
         onClick={() => dispatchOpenApp("memory-shard")}
-        className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-white/10 bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-white/20 transition-colors cursor-pointer"
+        className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-[var(--border-subtle)] bg-white/[0.03] text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-white/[0.06] hover:border-[var(--border-strong)] transition-colors cursor-pointer"
       >
         <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">memory</span>
         {t("clawkeep.memory.openShard", { app: t("app.memoryShard") })}
@@ -1381,7 +1381,7 @@ function DashboardCard({
             maxLength={120}
             onChange={(e) => setBackupName(e.target.value)}
             placeholder={t("clawkeep.backup.namePlaceholder")}
-            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-emerald-500/50"
+            className="w-full px-3 py-2 rounded-lg bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-emerald-500/50"
           />
         </div>
       )}
@@ -1400,7 +1400,7 @@ function DashboardCard({
           <button
             type="button"
             onClick={onOpenRestore}
-            className="px-6 py-2.5 rounded-full border border-white/15 bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] hover:border-white/25 transition-colors cursor-pointer flex items-center gap-1.5"
+            className="px-6 py-2.5 rounded-full border border-[var(--border-subtle)] bg-white/[0.04] text-sm font-semibold text-gray-200 hover:bg-white/[0.08] hover:border-[var(--border-strong)] transition-colors cursor-pointer flex items-center gap-1.5"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">
               cloud_download
@@ -1466,18 +1466,18 @@ function SystemCard({ status }: { status: ClawKeepStatus }) {
             their SKU and fixes nothing. */}
         {status.agent !== "hermes" && !status.openclawInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">openclaw</code>{" "}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">openclaw</code>{" "}
             {t("clawkeep.system.notOnPath")}{" "}
-            <code className="bg-black/30 px-1 rounded">npm install -g openclaw</code>.
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">npm install -g openclaw</code>.
           </li>
         )}
         {!status.daemonInstalled && (
           <li>
-            <code className="bg-black/30 px-1 rounded">clawkeepd</code>{" "}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">clawkeepd</code>{" "}
             {t("clawkeep.system.notOnPathFrom")}{" "}
-            <code className="bg-black/30 px-1 rounded">clawbox/clawkeep</code>{" "}
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">clawbox/clawkeep</code>{" "}
             {t("clawkeep.system.run")}{" "}
-            <code className="bg-black/30 px-1 rounded">pip install --user .</code>.
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">pip install --user .</code>.
           </li>
         )}
       </ul>
@@ -1499,7 +1499,7 @@ function BackupResultCard({ result }: { result: BackupResponse }) {
           ? t("clawkeep.result.backupOk")
           : t("clawkeep.result.backupFailed", { code: result.exitCode })}
       </h2>
-      <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-black/30 p-2 rounded">
+      <pre className="mt-2 text-[11px] font-mono text-gray-200/90 whitespace-pre-wrap max-h-48 overflow-auto bg-[var(--bg-elevated)] p-2 rounded">
         {tail}
       </pre>
     </div>
@@ -1522,7 +1522,7 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
       <h2 className="font-semibold">{t("clawkeep.result.restoreOk")}</h2>
       <p className="text-sm text-[var(--text-muted)]">
         {t("clawkeep.result.restoredPrefix")}{" "}
-        <code className="bg-black/30 px-1 rounded">{result.archive}</code>{" "}
+        <code className="bg-[var(--bg-elevated)] px-1 rounded">{result.archive}</code>{" "}
         ({formatBytes(result.archiveBytes)}).
       </p>
       <ul className="text-xs space-y-1">
@@ -1545,7 +1545,7 @@ function RestoreResultCard({ result }: { result: RestoreResponse }) {
               per-edition — `clawbox-gateway` does not exist on Hermes, so
               printing it there told the owner to run a command that cannot
               work. Naming the unit that actually failed cannot drift. */}
-          <code className="bg-black/30 px-1 rounded">
+          <code className="bg-[var(--bg-elevated)] px-1 rounded">
             sudo systemctl restart {restartUnit(result.restartErrors)}
           </code>{" "}
           {t("clawkeep.result.manually")}
@@ -1705,11 +1705,11 @@ function RestoreModal({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl rounded-2xl border border-white/10 bg-[#0d1117] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <header className="relative px-6 pt-6 pb-4 border-b border-white/5">
+        <header className="relative px-6 pt-6 pb-4 border-b border-[var(--border-subtle)]">
           <div
             aria-hidden="true"
             className="pointer-events-none absolute -top-16 -right-16 w-56 h-56 bg-[radial-gradient(circle,rgba(16,185,129,0.18),transparent_70%)] blur-2xl"
@@ -1751,7 +1751,7 @@ function RestoreModal({
             <div className="py-12 flex flex-col items-center gap-3 text-sm text-[var(--text-muted)]">
               <div
                 aria-hidden="true"
-                className="w-8 h-8 rounded-full border-2 border-white/10 border-t-emerald-400 animate-spin"
+                className="w-8 h-8 rounded-full border-2 border-[var(--border-subtle)] border-t-emerald-400 animate-spin"
               />
               <span>{t("clawkeep.restoreModal.fetching")}</span>
             </div>
@@ -1785,10 +1785,10 @@ function RestoreModal({
                 return (
                   <li
                     key={s.name}
-                    className="rounded-xl border border-white/10 bg-white/[0.02] px-4 py-3"
+                    className="rounded-xl border border-[var(--border-subtle)] bg-white/[0.02] px-4 py-3"
                   >
                     <div className="flex items-center gap-3">
-                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] border border-white/5 flex items-center justify-center">
+                      <div className="shrink-0 w-10 h-10 rounded-lg bg-white/[0.04] border border-[var(--border-subtle)] flex items-center justify-center">
                         <span
                           className={`material-symbols-rounded ${locked ? "text-amber-300" : "text-[var(--text-muted)]"}`}
                           style={{ fontSize: 20, fontVariationSettings: "'FILL' 1" }}
@@ -1811,7 +1811,7 @@ function RestoreModal({
                                 if (e.key === "Escape") setEditing(null);
                               }}
                               placeholder={t("clawkeep.snapshot.renamePlaceholder")}
-                              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-white/10 text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                              className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
                             />
                             <button
                               type="button"
@@ -1824,7 +1824,7 @@ function RestoreModal({
                             <button
                               type="button"
                               onClick={() => setEditing(null)}
-                              className="shrink-0 px-2.5 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
+                              className="shrink-0 px-2.5 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
                             >
                               {t("clawkeep.cancel")}
                             </button>
@@ -1885,7 +1885,7 @@ function RestoreModal({
                           onClick={() =>
                             setEditing({ name: s.name, text: s.label && s.label.trim() ? s.label : "" })
                           }
-                          className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                          className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
                         >
                           {t("clawkeep.snapshot.rename")}
                         </button>
@@ -1893,7 +1893,7 @@ function RestoreModal({
                           type="button"
                           disabled={rowBusy}
                           onClick={() => void doToggleLock(s)}
-                          className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                          className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50 cursor-pointer"
                         >
                           {locked ? t("clawkeep.snapshot.unlock") : t("clawkeep.snapshot.lock")}
                         </button>
@@ -1910,7 +1910,7 @@ function RestoreModal({
                             <button
                               type="button"
                               onClick={() => setConfirmDelete(null)}
-                              className="px-3 py-1.5 rounded-md border border-white/10 text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
+                              className="px-3 py-1.5 rounded-md border border-[var(--border-subtle)] text-xs text-[var(--text-secondary)] hover:bg-white/5 cursor-pointer"
                             >
                               {t("clawkeep.cancel")}
                             </button>
@@ -1935,7 +1935,7 @@ function RestoreModal({
           )}
         </div>
 
-        <footer className="px-6 py-3 border-t border-white/5 bg-white/[0.02] text-[11px] text-[var(--text-muted)] flex items-center gap-2">
+        <footer className="px-6 py-3 border-t border-[var(--border-subtle)] bg-white/[0.02] text-[11px] text-[var(--text-muted)] flex items-center gap-2">
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">
             info
           </span>
@@ -1945,7 +1945,7 @@ function RestoreModal({
                 one line a customer reads if a restore goes wrong. */}
             {/* One expression, not `{...}/*...`: a `/*` sitting in JSX children
                 right after a closing brace opens a comment. */}
-            <code className="bg-black/40 px-1 rounded">
+            <code className="bg-[var(--bg-elevated)] px-1 rounded">
               {`${backupSourceFor(agent).stateDir}/*.bak-restore-*`}
             </code>.
           </span>
@@ -2031,7 +2031,7 @@ function SetPassphraseModal({
     <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <form
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.setTitle")}
@@ -2065,7 +2065,7 @@ function SetPassphraseModal({
           autoFocus
           autoComplete="new-password"
           aria-describedby="clawkeep-passphrase-hint"
-          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
           placeholder={t("clawkeep.encryption.passphrasePlaceholder")}
         />
         {/* Live "min length" feedback. Mirrors the canSubmit gate so the
@@ -2095,7 +2095,7 @@ function SetPassphraseModal({
           value={confirm}
           onChange={(e) => setConfirm(e.target.value)}
           autoComplete="new-password"
-          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
           placeholder={t("clawkeep.encryption.confirmPlaceholder")}
         />
         {confirm.length > 0 && pw !== confirm && (
@@ -2201,7 +2201,7 @@ function RestorePassphraseModal({
     <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <form
         onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-white/10 bg-[#0f1219] p-6 shadow-2xl"
+        className="w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.enterTitle")}
@@ -2216,7 +2216,7 @@ function RestorePassphraseModal({
           onChange={(e) => setPw(e.target.value)}
           autoFocus
           autoComplete="off"
-          className="w-full rounded-md border border-white/10 bg-black/30 px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
+          className="w-full rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-sm text-white placeholder:text-white/30 focus:border-orange-500/60 focus:outline-none"
           placeholder={t("clawkeep.encryption.passphraseLabel")}
         />
         {err && <p className="mt-2 text-xs text-red-300">{err}</p>}
