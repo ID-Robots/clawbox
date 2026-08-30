@@ -35,6 +35,8 @@ let restore: () => void;
 const argvFile = () => path.join(base, "argv.txt");
 const envFile = () => path.join(base, "env.txt");
 const stdinFile = () => path.join(base, "stdin.txt");
+/** One line per spawn — argv.txt is overwritten by each and cannot tell one from two. */
+const spawnsFile = () => path.join(base, "spawns.txt");
 const runsFile = () => path.join(root, "data", "coding-agent-runs.json");
 
 function writeConfig(cfg: Record<string, unknown>): void {
@@ -107,6 +109,19 @@ const HAPPY_BODY = [
   `echo '${RESULT}'`,
   "exit 0",
 ].join("\n");
+
+/** HAPPY_BODY, counting the spawn first. */
+const countingBody = () => [`echo spawned >> "${spawnsFile()}"`, HAPPY_BODY].join("\n");
+
+/**
+ * HAPPY_BODY with a real change on disk, distinct per spawn, so the commit
+ * that follows EVERY run of it has something to record — and says so in the
+ * progress, which is what a test waits on to know the attempt is over.
+ */
+const TOUCHING_BODY = ['date +%s%N > "$PWD/touched-$$.txt"', HAPPY_BODY].join("\n");
+
+/** What recordRunWork writes when the commit attempt is over — either way. */
+const COMMIT_LINE = /Committed as|Not committed/;
 
 function makeProject(id: string): string {
   const dir = path.join(root, "data", "code-projects", id);
@@ -541,7 +556,7 @@ describe("a run", () => {
 
     it("follows a completed run with ONE review pass in the same session — and never a second", async () => {
       installFakeClaude();
-      installFakeWrapper(HAPPY_BODY);
+      installFakeWrapper(TOUCHING_BODY);
       writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
       makeProject("site");
       const first = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
@@ -557,8 +572,10 @@ describe("a run", () => {
       expect(argv[argv.indexOf("--resume") + 1]).toBe("sess-abc-123");
       expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("Automatic review pass");
 
-      // The review pass itself completed and touched files — and must NOT chain.
-      await new Promise((r) => setTimeout(r, 300));
+      // The review pass itself completed and touched files — and must NOT
+      // chain: once ITS commit attempt is over (the moment a follow-up would
+      // start), there is still no third run.
+      await vi.waitFor(() => { expect(lib.getRun(review.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
       expect(allRuns().length).toBe(2);
     });
 
@@ -583,16 +600,40 @@ describe("a run", () => {
       await lib.stopRun(started.id);
       const run = await finished(started.id);
       expect(run.status).toBe("completed"); // the raced stop keeps the work…
-      await new Promise((r) => setTimeout(r, 400));
-      expect(allRuns().length).toBe(1); // …but no review pass follows a Stop
+      // …but no review pass follows a Stop: once the commit attempt is over
+      // (the moment a follow-up would start), the run is still alone.
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
+      expect(allRuns().length).toBe(1);
     });
 
     it("does nothing while the owner's review switch is off", async () => {
       readyDevice();
       makeProject("site");
-      await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
-      await new Promise((r) => setTimeout(r, 300));
+      const done = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      await vi.waitFor(() => { expect(lib.getRun(done.id)?.progress.join("\n")).toMatch(COMMIT_LINE); }, { timeout: 10_000 });
       expect(allRuns().length).toBe(1);
+    });
+  });
+
+  describe("the token limit", () => {
+    it("settles as stopped, not completed, when the result event beat the kill", async () => {
+      installFakeClaude();
+      // One turn that alone exceeds the limit, with the result event right
+      // behind it in the same write: the process has said "success" before
+      // the device's kill lands. The device's verdict must stand — a record
+      // that read "completed" beside "Stopped at the token limit" was both.
+      const spent = JSON.stringify({
+        type: "assistant",
+        message: { usage: { input_tokens: 20_000, output_tokens: 10 }, content: [{ type: "text", text: "Done" }] },
+      });
+      installFakeWrapper([`printf '%s\\n' '${INIT}' '${spent}' '${RESULT}'`, "exit 0"].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_token_limit: 10_000 });
+      makeProject("site");
+      const run = await finished((await lib.startRun({ task: "build", projectId: "site", source: "agent" })).id);
+      expect(run.status).toBe("stopped");
+      expect(run.error).toMatch(/Stopped at the token limit/);
+      expect(run.resumable).toBe(true);
+      expect(run.progress.join("\n")).toContain("Token limit reached");
     });
   });
 
@@ -632,6 +673,26 @@ describe("a run", () => {
       expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("resumed in the same session");
     });
 
+    it("resumes a paused run exactly once when two resumes arrive together", async () => {
+      installFakeClaude();
+      const flag = path.join(base, "pause-flag-parallel");
+      installFakeWrapper([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`, "exit 0"].join("\n"));
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true });
+      makeProject("site");
+      const started = await lib.startRun({ task: "build", projectId: "site", source: "agent" });
+      await vi.waitFor(() => { expect(lib.getRun(started.id)?.sessionId).toBe("sess-abc-123"); }, { timeout: 5000 });
+      lib.pauseRun(started.id);
+      expect((await finished(started.id)).status).toBe("paused");
+
+      // Both saw "paused"; only one may spawn — the other rides on its transition.
+      installFakeWrapper(countingBody());
+      const [a, b] = await Promise.all([lib.resumeRun(started.id), lib.resumeRun(started.id)]);
+      expect(a.status).toBe("running");
+      expect(b.status).toBe("running");
+      expect((await finished(started.id)).status).toBe("completed");
+      expect(fs.readFileSync(spawnsFile(), "utf-8").trim().split("\n")).toHaveLength(1);
+    });
+
     it("stopping a paused run closes it out without a process", async () => {
       installFakeClaude();
       const flag = path.join(base, "pause-flag-2");
@@ -661,6 +722,19 @@ describe("a run", () => {
       expect(done.status).toBe("completed");
       expect(done.progress.join("\n")).toContain("Started from a draft");
       expect(fs.readFileSync(stdinFile(), "utf-8")).toContain("later please");
+    });
+
+    it("starts a draft exactly once when two starts arrive together", async () => {
+      readyDevice();
+      installFakeWrapper(countingBody());
+      makeProject("site");
+      const draft = await lib.createDraftRun({ task: "once only", projectId: "site", source: "owner" });
+      const [a, b] = await Promise.all([lib.startDraftRun(draft.id), lib.startDraftRun(draft.id)]);
+      expect(a.status).toBe("running");
+      expect(b.status).toBe("running");
+      expect((await finished(draft.id)).status).toBe("completed");
+      expect(fs.readFileSync(spawnsFile(), "utf-8").trim().split("\n")).toHaveLength(1);
+      expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))).toHaveLength(1);
     });
 
     it("keeps paused runs and drafts across a restart — the validator knows every status it writes", async () => {

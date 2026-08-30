@@ -2300,10 +2300,17 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   run.subagentsActive = 0;
   run.activeSubagents = [];
   if (run.status === "running") {
-    if (state.outcome) {
+    // The device's own stop — the token limit — has already written why on
+    // the record. A result event that slipped out before the kill landed
+    // must not turn that into "completed" with a "Stopped at the token
+    // limit" error beside it: both at once, and the resume the error offers
+    // hidden behind a status that says the work is done.
+    const deviceStopped = state.endRequested === "stop" && run.error !== null;
+    if (state.outcome && !deviceStopped) {
       // The result event's verdict, now that the process is actually gone.
       // Ahead of the stop branch so a stop that raced the final message
-      // keeps "completed", as it always has.
+      // keeps "completed", as it always has — the OWNER's stop records no
+      // error, so it is the one this reaches.
       run.status = state.outcome.status;
       if (state.outcome.resumable) run.resumable = true;
       if (state.outcome.error && !run.error) run.error = state.outcome.error;
@@ -2760,11 +2767,36 @@ export function pauseRun(id: string): CodingRun {
 }
 
 /**
+ * Starts and resumes under way, by run id.
+ *
+ * Both read the record's status synchronously and then AWAIT their gates —
+ * the switch, readiness, setpriv, the folder — before flipping it to
+ * "running" and spawning. Two POSTs for the same run arriving together both
+ * saw "draft" (or "paused"), both passed, and both spawned: two processes
+ * on one record. The first caller's transition is THE transition; a second
+ * ask for the same run while it is under way gets the same promise, exactly
+ * as a start of a run already running gets the running record back.
+ */
+const transitions = new Map<string, Promise<CodingRun>>();
+
+function singleFlight(id: string, transition: () => Promise<CodingRun>): Promise<CodingRun> {
+  const inFlight = transitions.get(id);
+  if (inFlight) return inFlight;
+  const pending = transition().finally(() => transitions.delete(id));
+  transitions.set(id, pending);
+  return pending;
+}
+
+/**
  * Resume a PAUSED run in place: the same record, the same session, picked up
  * where the transcript left off. Runs through the same gates a start does —
  * the owner's switch, readiness, the capability drop, one run at a time.
  */
-export async function resumeRun(id: string): Promise<CodingRun> {
+export function resumeRun(id: string): Promise<CodingRun> {
+  return singleFlight(id, () => resumeRunOnce(id));
+}
+
+async function resumeRunOnce(id: string): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
@@ -2818,7 +2850,11 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
 }
 
 /** Start a drafted run now. The same gates and the same freshness rules as startRun. */
-export async function startDraftRun(id: string): Promise<CodingRun> {
+export function startDraftRun(id: string): Promise<CodingRun> {
+  return singleFlight(id, () => startDraftRunOnce(id));
+}
+
+async function startDraftRunOnce(id: string): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
@@ -2924,6 +2960,7 @@ export function _resetCodingAgentStateForTests(): void {
   }
   live.clear();
   waiters.clear();
+  transitions.clear();
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;

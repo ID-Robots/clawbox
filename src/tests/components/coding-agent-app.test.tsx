@@ -64,15 +64,21 @@ function json(body: unknown, status = 200) {
 }
 
 let posts: { url: string; body: unknown }[];
+/** Every git-block read, query string included — which project it asked about. */
+let gitReads: string[];
 
 /** The device, as far as this component can tell. */
 function stubFetch(
   status: { enabled: boolean; readiness: typeof READY | typeof NOT_READY },
   runsArg: unknown[] = [],
-  opts: { artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string } = {},
+  opts: {
+    artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string;
+    git?: { branch: string | null; commits: number; remote: string | null; lastCommit: { subject: string; date: number } | null };
+  } = {},
 ) {
   let runs = runsArg;
   posts = [];
+  gitReads = [];
   const projects = {
     directory: opts.projectsDir === undefined ? "/home/clawbox/Projects" : opts.projectsDir,
     projects: opts.projects ?? [],
@@ -98,6 +104,11 @@ function stubFetch(
     }
     if (url.startsWith("/setup-api/coding-agent/runs")) return json({ runs });
     if (url.startsWith("/setup-api/coding-agent/projects")) return json(projects);
+    if (url.startsWith("/setup-api/coding-agent/git?")) {
+      // The route answers `{ git }` for the one project the query names.
+      gitReads.push(url);
+      return json({ git: opts.git ?? { branch: null, commits: 0, remote: null, lastCommit: null } });
+    }
     if (url.startsWith("/setup-api/coding-agent/artifacts")) {
       // The route serves every non-image as text/plain, whatever it holds.
       const file = new URL(url, "http://box").searchParams.get("file") ?? "";
@@ -128,6 +139,7 @@ function stubFetch(
 
 beforeEach(() => {
   posts = [];
+  gitReads = [];
 });
 
 afterEach(() => {
@@ -146,11 +158,6 @@ async function openRuns() {
     await screen.findByTestId("coding-agent-project-page");
   }
   await screen.findByTestId("coding-agent-runs-toggle");
-}
-
-/** Click the toggle, which now COLLAPSES a list that starts open. */
-async function toggleRuns() {
-  fireEvent.click(await screen.findByTestId("coding-agent-runs-toggle"));
 }
 
 describe("CodingAgentApp", () => {
@@ -210,7 +217,11 @@ describe("CodingAgentApp", () => {
     const project = { ...PROJECT, kind: "codeProject", directory: "/home/clawbox/clawbox/data/code-projects/site" };
     const inRun = { ...RUN, id: "run-inproj1", task: "inside the project" };
     const outRun = { ...RUN, id: "run-outside1", task: "somewhere else", projectId: null, directory: "/tmp/elsewhere" };
-    stubFetch({ enabled: true, readiness: READY }, [inRun, outRun], { projects: [project] });
+    const git = {
+      branch: "main", commits: 7, remote: "git@github.com:owner/site.git",
+      lastCommit: { subject: "Coding agent: add a dark mode toggle", date: Date.now() - 3600_000 },
+    };
+    stubFetch({ enabled: true, readiness: READY }, [inRun, outRun], { projects: [project], git });
     render(<CodingAgentApp />);
 
     // Home lists projects only — no runs at all (the owner asked them off).
@@ -220,7 +231,14 @@ describe("CodingAgentApp", () => {
 
     fireEvent.click(screen.getByTestId("coding-agent-project-site"));
     expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
-    expect(screen.getByTestId("coding-agent-git-info")).toBeInTheDocument();
+    // The git block shows what the route answered — branch, commit count,
+    // origin — and a code project is asked about by its id, not its folder.
+    const gitInfo = screen.getByTestId("coding-agent-git-info");
+    await waitFor(() => expect(gitInfo.textContent).toContain("main"));
+    expect(gitInfo.textContent).toContain(t("codingAgent.gitCommits", { n: 7 }));
+    expect(gitInfo.textContent).toContain("git@github.com:owner/site.git");
+    expect(gitInfo.textContent).not.toContain(translations.en["codingAgent.gitNoRemote"]);
+    expect(gitReads).toEqual(["/setup-api/coding-agent/git?projectId=site"]);
     // The project page lists the project's runs and not the stranger.
     expect(await screen.findByText("inside the project")).toBeInTheDocument();
     expect(screen.queryByText("somewhere else")).toBeNull();
@@ -579,6 +597,64 @@ describe("projects", () => {
     } finally {
       Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
     }
+  });
+
+  it("opens a project row from the keyboard — Enter or Space, the way a click does", async () => {
+    // The row holds buttons of its own, so it is not a <button>; it is a
+    // keyboard stop with the button role instead.
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT] });
+    render(<CodingAgentApp />);
+    const row = await screen.findByTestId("coding-agent-project-site");
+    expect(row).toHaveAttribute("role", "button");
+    expect(row).toHaveAttribute("tabindex", "0");
+
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+    expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
+
+    fireEvent.keyDown(screen.getByTestId("coding-agent-project-site"), { key: " " });
+    expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
+  });
+
+  it("the project page copies the directory it shows, and names the button for a screen reader", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: [PROJECT] });
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    try {
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+      await screen.findByTestId("coding-agent-project-page");
+      const copy = screen.getByTestId("coding-agent-project-copy");
+      expect(copy.textContent).toContain(PROJECT.directory);
+      expect(copy).toHaveAttribute("aria-label", translations.en["codingAgent.copyFolder"]);
+      expect(copy).toHaveAttribute("title", translations.en["codingAgent.copyFolder"]);
+      fireEvent.click(copy);
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith(PROJECT.directory));
+      expect(copy.textContent).toContain(translations.en["codingAgent.copied"]);
+    } finally {
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+    }
+  });
+
+  it("files a run pointed at a code project under that project only, never under the folder holding it", async () => {
+    // The run worked in the owner's folder AND carries the code project's
+    // id: by directory it is the folder's, by id the code project's. It
+    // belongs to one page, and the id is the stronger claim.
+    const run = { ...RUN, directory: PROJECT.directory };
+    const codeProject = { ...PROJECT, kind: "codeProject", directory: "/home/clawbox/clawbox/data/code-projects/site", name: "Pomodoro timer" };
+    stubFetch({ enabled: true, readiness: READY }, [run], { projects: [PROJECT, codeProject] });
+    render(<CodingAgentApp />);
+    const rows = await screen.findAllByTestId("coding-agent-project-site");
+
+    fireEvent.click(rows[0]);
+    await screen.findByTestId("coding-agent-project-page");
+    expect(screen.queryByText(RUN.task)).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-agent-project-back"));
+
+    fireEvent.click(screen.getAllByTestId("coding-agent-project-site")[1]);
+    await screen.findByTestId("coding-agent-project-page");
+    expect(await screen.findByText(RUN.task)).toBeInTheDocument();
   });
 
   it("says in words when there are none, naming the folder it looked in", async () => {

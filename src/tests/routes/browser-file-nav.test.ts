@@ -36,7 +36,7 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => ({
 
 // Readiness is not this test's subject: the probe would otherwise call the
 // stubbed fetch's empty body "down" and wait six seconds for a service.
-vi.mock("@/lib/cdp-probe", () => ({ probeCdp: async () => "ours", describePortOwner: async () => "" }));
+vi.mock("@/lib/cdp-probe", () => ({ probeCdp: async () => "ours", describePortOwner: async () => "", findPlaywrightChromium: () => null }));
 vi.mock("child_process", () => ({
   execFile: vi.fn((_file: unknown, _args: unknown, _opts: unknown, cb?: (err: null, out: string, errOut: string) => void) => {
     cb?.(null, "", "");

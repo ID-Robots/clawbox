@@ -553,7 +553,7 @@ export const ja: Record<string, string> = {
   "codingAgent.projectRuns": "実行",
   "codingAgent.otherRuns": "その他の実行",
   "codingAgent.gitTitle": "Git リポジトリ",
-  "codingAgent.gitCommits": "{n} コミット",
+  "codingAgent.gitCommits": "コミット数: {n}",
   "codingAgent.gitNoRemote": "まだGitHubにありません",
   "codingAgent.pause": "一時停止",
   "codingAgent.resume": "再開",

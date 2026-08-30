@@ -547,7 +547,7 @@ export const sv: Record<string, string> = {
   "codingAgent.projectRuns": "Körningar",
   "codingAgent.otherRuns": "Övriga körningar",
   "codingAgent.gitTitle": "Git-arkiv",
-  "codingAgent.gitCommits": "{n} incheckningar",
+  "codingAgent.gitCommits": "Antal commits: {n}",
   "codingAgent.gitNoRemote": "Inte på GitHub ännu",
   "codingAgent.pause": "Pausa",
   "codingAgent.resume": "Återuppta",

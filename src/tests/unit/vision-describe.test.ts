@@ -20,7 +20,7 @@ vi.mock("@/lib/clawbox-ai-vision", () => ({
   resolveVisionModelId: mocks.resolveVisionModelId,
 }));
 
-import { describeImage } from "@/lib/vision-describe";
+import { DESCRIBE_TIMEOUT_MS, MIN_RETRY_MS, RETRY_DELAY_MS, describeImage } from "@/lib/vision-describe";
 
 const fetchMock = vi.fn<(input: unknown, init?: RequestInit) => Promise<Response>>();
 
@@ -63,6 +63,30 @@ describe("what is retried", () => {
   it("asks once more, never twice more: the second failure is the answer", async () => {
     fetchMock.mockResolvedValueOnce(status(502)).mockResolvedValueOnce(status(502));
     expect(await describeNow()).toEqual({ text: null, error: "the vision model answered 502" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("the remaining budget", () => {
+  /** A first attempt that took `elapsedMs` before answering: the clock moves, then the reply lands. */
+  const slowFirst = (elapsedMs: number, reply: () => Response) => async () => {
+    vi.setSystemTime(Date.now() + elapsedMs);
+    return reply();
+  };
+
+  it("does not retry when less than MIN_RETRY_MS would be left after the pause", async () => {
+    fetchMock
+      .mockImplementationOnce(slowFirst(DESCRIBE_TIMEOUT_MS - RETRY_DELAY_MS - MIN_RETRY_MS + 1, () => status(503)))
+      .mockResolvedValueOnce(answer("too late to be asked"));
+    expect(await describeNow()).toEqual({ text: null, error: "the vision model answered 503" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries while exactly MIN_RETRY_MS would be left", async () => {
+    fetchMock
+      .mockImplementationOnce(slowFirst(DESCRIBE_TIMEOUT_MS - RETRY_DELAY_MS - MIN_RETRY_MS, () => status(503)))
+      .mockResolvedValueOnce(answer("just in time"));
+    expect(await describeNow()).toEqual({ text: "just in time", error: null });
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

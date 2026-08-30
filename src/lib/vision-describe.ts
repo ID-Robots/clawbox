@@ -47,9 +47,9 @@ const MAX_DESCRIPTION_TOKENS = 6_000;
  * unlinked account, a 400 for a model the proxy does not serve, an empty
  * description — which a second identical question would only repeat.
  */
-const RETRY_DELAY_MS = 2_500;
+export const RETRY_DELAY_MS = 2_500;
 /** No retry with less than this of the budget left: a question that cannot finish is only a second bill. */
-const MIN_RETRY_MS = 10_000;
+export const MIN_RETRY_MS = 10_000;
 // The proxy's known flap bodies, on any status: the same shapes
 // coding-agent.ts's isTransientFailure() restarts a run for — an auth or
 // entitlement hiccup upstream that the next identical request sails through

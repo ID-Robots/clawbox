@@ -171,7 +171,7 @@ export default function StandaloneAppPage() {
   // at the customer while the desktop showed sentences.
   return (
     <I18nProvider>
-      <div className="h-dvh w-full bg-[var(--bg-deep)] text-white flex flex-col">
+      <div className="h-dvh w-full bg-[var(--ground)] text-white flex flex-col">
         {/* Minimal title bar */}
         <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />

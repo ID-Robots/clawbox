@@ -562,7 +562,7 @@ export const it: Record<string, string> = {
   "codingAgent.projectRuns": "Esecuzioni",
   "codingAgent.otherRuns": "Altre esecuzioni",
   "codingAgent.gitTitle": "Repository Git",
-  "codingAgent.gitCommits": "{n} commit",
+  "codingAgent.gitCommits": "Commit: {n}",
   "codingAgent.gitNoRemote": "Non ancora su GitHub",
   "codingAgent.pause": "Pausa",
   "codingAgent.resume": "Riprendi",

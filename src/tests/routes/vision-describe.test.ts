@@ -14,6 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "fs";
+import fsp from "fs/promises";
 import os from "os";
 import path from "path";
 import { saveEnv } from "../helpers/env";
@@ -112,6 +113,27 @@ describe("describing a local image", () => {
     expect(mocks.describeImage).not.toHaveBeenCalled();
   });
 
+  it("refuses an image over the byte cap before uploading anything", async () => {
+    const big = path.join(base, "huge.png");
+    fs.writeFileSync(big, "");
+    // Sparse, so the test costs no disk: what the route judges is the size.
+    // 8 MiB is the route's MAX_IMAGE_BYTES.
+    fs.truncateSync(big, 8 * 1024 * 1024 + 1);
+    const res = await POST(req({ path: big }));
+    expect(res.status).toBe(413);
+    expect((await res.json()).error).toMatch(/too large/);
+    expect(mocks.describeImage).not.toHaveBeenCalled();
+  });
+
+  it("refuses a folder wearing an image name", async () => {
+    const dir = path.join(base, "shots.png");
+    fs.mkdirSync(dir);
+    const res = await POST(req({ path: dir }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "That path is not a file." });
+    expect(mocks.describeImage).not.toHaveBeenCalled();
+  });
+
   it("relays the backend's failure as an answer, not a 500", async () => {
     mocks.describeImage.mockResolvedValueOnce({ text: null, error: "ClawBox AI is not connected on this device" });
     const res = await POST(req({ path: png("shot.png") }));
@@ -121,6 +143,28 @@ describe("describing a local image", () => {
 });
 
 describe("the fence", () => {
+  it("does not follow a symlink planted at the resolved path after the check", async () => {
+    // The route resolves symlinks first, so a link at the target path can only
+    // be one that appeared after the check — the open must refuse to follow it.
+    const secret = path.join(base, "config.json");
+    fs.writeFileSync(secret, "{}");
+    const link = path.join(base, "late.png");
+    fs.symlinkSync(secret, link);
+    const realpath = fsp.realpath;
+    // Only the target's own resolution is faked; the roots resolve for real.
+    const spy = vi.spyOn(fsp, "realpath").mockImplementation((async (p: string) =>
+      p === link ? link : realpath.call(fsp, p)) as typeof fsp.realpath);
+    try {
+      const res = await POST(req({ path: link }));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "The file could not be read." });
+      expect(mocks.describeImage).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      expect(fsp.realpath).toBe(realpath);
+    }
+  });
+
   it("keeps a person at the desktop inside the Files root too", async () => {
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), "vision-outside-"));
     try {

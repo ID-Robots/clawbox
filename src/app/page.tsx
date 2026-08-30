@@ -1121,9 +1121,17 @@ function ChromeDesktopInner() {
     if (app.type === "webapp" && app.url && app.launch === "window") {
       // The app's meta asks for a real top-level browser document (e.g.
       // pointer lock for an FPS), which the sandboxed desktop iframe blocks —
-      // open in a new browser window instead.
-      window.open(app.url, "_blank", "noopener,noreferrer");
-      return;
+      // open in a new browser window instead. Same rule as the iframe branch
+      // below: http(s) or a same-origin path only, so a `javascript:` URL in
+      // an installed app's meta cannot run in the desktop's top-level window.
+      // Anything else falls through to the sandboxed iframe.
+      try {
+        const u = new URL(app.url, window.location.origin);
+        if (["http:", "https:"].includes(u.protocol)) {
+          window.open(u.href, "_blank", "noopener,noreferrer");
+          return;
+        }
+      } catch {}
     }
 
     if (app.type === "chat") {

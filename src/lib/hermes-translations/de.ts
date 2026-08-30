@@ -550,7 +550,7 @@ export const de: Record<string, string> = {
   "codingAgent.projectRuns": "Läufe",
   "codingAgent.otherRuns": "Andere Läufe",
   "codingAgent.gitTitle": "Git-Repository",
-  "codingAgent.gitCommits": "{n} Commits",
+  "codingAgent.gitCommits": "Anzahl Commits: {n}",
   "codingAgent.gitNoRemote": "Noch nicht auf GitHub",
   "codingAgent.pause": "Pausieren",
   "codingAgent.resume": "Fortsetzen",

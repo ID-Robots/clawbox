@@ -17,6 +17,12 @@ import { describeImage } from "@/lib/vision-describe";
 const exec = promisify(execFile);
 const CDP_PORT = 18800;
 const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
+// Every screenshot is bounded: Playwright's default is 30 s, and a renderer
+// wedged on a heavy page (a WebGL scene mid-compile) would otherwise hold the
+// whole request — and the coding run waiting on it — for that long on each
+// call. 15 s is well above a healthy capture and short enough that the caller
+// gets its "could not capture the page" and moves on.
+const SCREENSHOT_TIMEOUT_MS = 15_000;
 
 // SEC-4: the automation browser must not be steerable to `file://` (local-file
 // exfil — the JSON response hands back a screenshot of whatever it renders) or
@@ -237,12 +243,30 @@ setInterval(() => {
       console.log(`[Browser] Cleaned up stale session: ${id}`);
     }
   }
+  closeOwnedBrowserIfIdle();
 }, 60_000);
 
 // Shared Playwright Browser handle, reused across sessions. Recreated on
 // next access if the underlying Chromium disconnects (e.g. service restart).
 let cachedBrowser: import("playwright").Browser | null = null;
 let cachedBrowserPromise: Promise<import("playwright").Browser> | null = null;
+// Whether cachedBrowser is a Chromium WE launched — the fallback for a
+// foreign CDP port — rather than the desktop's, which is only attached to
+// and must never be closed from here. Ours is headless and invisible, so
+// with only pages ever closed it stayed resident for the life of the web
+// server; it is closed once the last session is gone instead, and the next
+// launch starts a fresh one.
+let ownedBrowser = false;
+
+/** Close the Chromium of our own once no session refers to it. Never the desktop's. */
+function closeOwnedBrowserIfIdle(): void {
+  if (!ownedBrowser || sessions.size > 0 || !cachedBrowser) return;
+  const browser = cachedBrowser;
+  ownedBrowser = false;
+  cachedBrowser = null;
+  browser.close().catch(() => {});
+  console.log("[Browser] Closed the headless Chromium of our own: no session left");
+}
 
 /**
  * Ready means OURS: /json/version answering is not enough, because another
@@ -315,10 +339,14 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
         const executablePath = findPlaywrightChromium() ?? undefined;
         const browser = await pw.chromium.launch({ headless: true, args: ["--no-sandbox"], ...(executablePath ? { executablePath } : {}) });
         browser.on("disconnected", () => {
-          if (cachedBrowser === browser) cachedBrowser = null;
+          if (cachedBrowser === browser) {
+            cachedBrowser = null;
+            ownedBrowser = false;
+          }
           cachedBrowserPromise = null;
         });
         cachedBrowser = browser;
+        ownedBrowser = true;
         return browser;
       }
       // 30 s matches Playwright's own default — previously 10 s to fail fast
@@ -341,6 +369,7 @@ async function getSharedBrowser(): Promise<import("playwright").Browser> {
         console.log("[Browser] Shared CDP connection disconnected; will reconnect on next launch");
       });
       cachedBrowser = browser;
+      ownedBrowser = false;
       return browser;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -412,7 +441,7 @@ export async function POST(req: Request) {
       const id = `browser-${++sessionCounter}`;
       sessions.set(id, { page, lastActivity: Date.now() });
 
-      const screenshot = await page.screenshot({ type: "png" }).catch(() => null);
+      const screenshot = await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
 
       return NextResponse.json({
         sessionId: id,
@@ -432,7 +461,7 @@ export async function POST(req: Request) {
     const { page } = session;
 
     const respond = async (skipScreenshot = false) => {
-      const screenshot = skipScreenshot ? null : await page.screenshot({ type: "png" }).catch(() => null);
+      const screenshot = skipScreenshot ? null : await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       return {
         url: page.url(),
         title: await page.title().catch(() => ""),
@@ -454,7 +483,7 @@ export async function POST(req: Request) {
       // trip scales with upload size (measured on this box: a full PNG frame
       // ~10-30 s, the same frame as a small JPEG ~3 s), while the PNG in
       // `reply` stays what the caller archives into the evidence folder.
-      const jpeg = await page.screenshot({ type: "jpeg", quality: 60 }).catch(() => null);
+      const jpeg = await page.screenshot({ type: "jpeg", quality: 60, timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       const described = jpeg
         ? await describeImage(jpeg.toString("base64"), undefined, "image/jpeg")
         : await describeImage(reply.screenshot);
@@ -583,8 +612,10 @@ export async function POST(req: Request) {
       case "close":
         // Close the session's page, not the shared Browser — leaving CDP
         // attached means the next tool call skips the 5-10 s reconnect.
+        // A Chromium of our OWN is the exception: nobody else sees it.
         await session.page.close().catch(() => {});
         sessions.delete(sessionId);
+        closeOwnedBrowserIfIdle();
         return NextResponse.json({ ok: true });
 
       default:

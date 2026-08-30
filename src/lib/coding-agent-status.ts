@@ -12,10 +12,15 @@
  * MCP process can both import it.
  */
 
-export type CodingRunStatus = "running" | "completed" | "failed" | "stopped" | "paused" | "draft";
+/**
+ * EVERY status a run record can carry. Gates what is read back from disk.
+ * The type is DERIVED from this list, not written beside it: a status added
+ * to one and not the other used to compile, and the mismatch was found at
+ * the restart that dropped the record.
+ */
+export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft"] as const;
 
-/** EVERY status a run record can carry. Gates what is read back from disk. */
-export const RUN_STATUSES: readonly CodingRunStatus[] = ["running", "completed", "failed", "stopped", "paused", "draft"];
+export type CodingRunStatus = (typeof RUN_STATUSES)[number];
 
 export function isCodingRunStatus(value: unknown): value is CodingRunStatus {
   return typeof value === "string" && (RUN_STATUSES as readonly string[]).includes(value);

@@ -562,7 +562,7 @@ export const zh: Record<string, string> = {
   "codingAgent.projectRuns": "运行记录",
   "codingAgent.otherRuns": "其他运行",
   "codingAgent.gitTitle": "Git 仓库",
-  "codingAgent.gitCommits": "{n} 次提交",
+  "codingAgent.gitCommits": "提交数：{n}",
   "codingAgent.gitNoRemote": "尚未推送到 GitHub",
   "codingAgent.pause": "暂停",
   "codingAgent.resume": "继续",

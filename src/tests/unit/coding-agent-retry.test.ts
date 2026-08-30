@@ -98,6 +98,9 @@ describe("what setup work a retry may repeat", () => {
       // yarn/pnpm/bun execute the package.json SCRIPT of that name for a
       // subcommand they do not recognise — these are npm-only builtins.
       "bun ping", "yarn ci", "yarn ping", "pnpm ci", "pnpm ping",
+      // A builtin's name as a PREFIX of something else is not the builtin:
+      // the match must end at a word boundary, never slip through on it.
+      "npm installer", "bun installx", "yarn addendum", "pnpm adds", "npm ci-extra",
       "npm", "", 42, null, undefined,
     ]) {
       expect(isRetrySafeSetupCommand(command), String(command)).toBe(false);

@@ -98,7 +98,7 @@ export async function POST(request: Request) {
       {
         error:
           "Invalid body. Expected { enabled: boolean }, { defaultDirectory: string | null }, "
-          + "{ effort: string }, { maxTurns: number } "
+          + "{ effort: string }, { maxTurns: number }, "
           + "{ tokenLimit: number | null } or { reviewPass: boolean }.",
       },
       { status: 400 },

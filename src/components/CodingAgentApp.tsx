@@ -200,10 +200,13 @@ const HARNESS_TEST_TASK =
 const OPEN_SETTINGS_CLASS =
   "flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 shrink-0 no-underline";
 
-/** A run belongs to the project whose folder it worked in — or, for a code
- *  project, the one it was pointed at by id (its folder is under the checkout). */
+/** A run pointed at a code project by id belongs to that project and no
+ *  other — its folder is under the checkout, so matching it by directory as
+ *  well would also list it under the folder project that holds the checkout.
+ *  A run with no id belongs to the project whose folder it worked in. */
 function runBelongsTo(r: Run, pr: Project): boolean {
-  return r.directory === pr.directory || (pr.kind === "codeProject" && r.projectId === pr.folder);
+  if (r.projectId) return pr.kind === "codeProject" && r.projectId === pr.folder;
+  return r.directory === pr.directory;
 }
 
 interface GitInfo {
@@ -374,6 +377,16 @@ export default function CodingAgentApp() {
     const id = setInterval(() => { void load(); }, POLL_MS);
     return () => clearInterval(id);
   }, [anyRunning, load]);
+  // The clock the progress estimate reads. Held in state, ticking once a
+  // second while a run is live (as the activity pill does), so the bar
+  // moves between polls and render stays pure — a Date.now() in render
+  // would freeze the bar for five seconds at a time.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [anyRunning]);
 
   const readError = async (res: Response, fallback: string) => {
     try {
@@ -837,8 +850,21 @@ export default function CodingAgentApp() {
                     // owner's can share a name.
                     key={project.directory}
                     data-testid={`coding-agent-project-${project.folder}`}
+                    // The row opens the project, and it holds buttons of its
+                    // own (copy, Open), so it cannot be a <button> itself:
+                    // role and tabIndex make it a keyboard stop, and Enter
+                    // or Space opens it the way a click does.
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setOpenProjectDir(project.directory)}
-                    className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors"
+                    onKeyDown={(e) => {
+                      if (e.target !== e.currentTarget) return;
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setOpenProjectDir(project.directory);
+                      }
+                    }}
+                    className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 flex items-start justify-between gap-3 cursor-pointer hover:bg-white/[0.06] transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-sky-400/60"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
@@ -940,15 +966,21 @@ export default function CodingAgentApp() {
                   </button>
                 )}
               </div>
+              {/* Shows the absolute directory, so that is what it copies —
+                  the home row copies the bare folder name it shows. */}
               <button
                 type="button"
-                onClick={() => void copyFolder(view.project.folder)}
+                onClick={() => void copyFolder(view.project.directory)}
+                title={t("codingAgent.copyFolder")}
+                aria-label={t("codingAgent.copyFolder")}
+                data-testid="coding-agent-project-copy"
                 className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
               >
                 {view.project.directory}
                 <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                  {copiedFolder === view.project.folder ? "check" : "content_copy"}
+                  {copiedFolder === view.project.directory ? "check" : "content_copy"}
                 </span>
+                {copiedFolder === view.project.directory && <span className="font-sans">{t("codingAgent.copied")}</span>}
               </button>
               {/* The git block: where the project stands, and whether it has
                   reached GitHub yet — the store road starts there. */}
@@ -1083,7 +1115,7 @@ export default function CodingAgentApp() {
                           </p>
                           {isLive(run.status) && (
                             <RunProgressBar
-                              estimate={estimateRunProgress(run, Date.now())}
+                              estimate={estimateRunProgress(run, now)}
                               color={tone.color}
                               timeLeft={t("codingAgent.timeLeft")}
                               testId={`coding-agent-progress-${run.id}`}

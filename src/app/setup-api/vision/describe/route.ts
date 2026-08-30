@@ -130,10 +130,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: `Only ${ACCEPTED_EXTENSIONS} files can be described.` }, { status: 400 });
   }
   // One open handle for the size check and the read: a file swapped between
-  // a stat and a readFile would be read as whatever it became.
+  // a stat and a readFile would be read as whatever it became. O_NOFOLLOW:
+  // `target` is the resolved path, so its last component is a real file at
+  // this moment — a symlink planted there between the realpath and the open
+  // would lead anywhere, and the open must fail rather than follow it. The
+  // descriptor is then judged on its own (a regular file, under the cap)
+  // before a byte is read.
   let data: Buffer;
   try {
-    const handle = await fs.open(target, "r");
+    const handle = await fs.open(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) return NextResponse.json({ error: "That path is not a file." }, { status: 400 });

@@ -538,7 +538,7 @@ export const bg: Record<string, string> = {
   "codingAgent.projectRuns": "Изпълнения",
   "codingAgent.otherRuns": "Други изпълнения",
   "codingAgent.gitTitle": "Git хранилище",
-  "codingAgent.gitCommits": "{n} комита",
+  "codingAgent.gitCommits": "Къмити: {n}",
   "codingAgent.gitNoRemote": "Още не е в GitHub",
   "codingAgent.pause": "Пауза",
   "codingAgent.resume": "Продължи",

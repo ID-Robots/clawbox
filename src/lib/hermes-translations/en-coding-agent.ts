@@ -138,7 +138,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.projectRuns": "Runs",
   "codingAgent.otherRuns": "Other runs",
   "codingAgent.gitTitle": "Git repository",
-  "codingAgent.gitCommits": "{n} commits",
+  // Count-neutral on purpose: "1 commits" would be wrong and the catalogue
+  // has no plural mechanism.
+  "codingAgent.gitCommits": "Commits: {n}",
   "codingAgent.gitNoRemote": "Not on GitHub yet",
   "codingAgent.pause": "Pause",
   "codingAgent.resume": "Resume",
