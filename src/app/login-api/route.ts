@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { get, set } from "@/lib/config-store";
 import { verifyPassword, createSessionCookie, getSessionSigningSecret, getSessionGeneration } from "@/lib/auth";
+import { hasOwnerPassword } from "@/lib/system-password";
 import {
   checkLockout,
   recordFailure,
@@ -85,6 +86,28 @@ export async function POST(request: Request) {
     const setupComplete = await get("setup_complete");
     if (setupComplete) {
       // Auto-migrate: user completed setup before auth was added
+      await set("password_configured", true);
+      await set("password_configured_at", new Date().toISOString());
+    } else if ((await hasOwnerPassword()) === true) {
+      // /etc/shadow is the authority, the flag is only a cache — the same
+      // argument system/credentials already makes (TASK-444a). When the two
+      // disagree in this direction the box is otherwise UNCLAIMABLE:
+      //
+      //   this route          — flag says "no password"  → 400 "Complete setup first"
+      //   system/credentials  — shadow says "owned"      → 401 "Authentication required"
+      //
+      // Neither gate can be satisfied, so the wizard cannot claim the box and
+      // the owner cannot log in. Nothing in the UI recovers it. That state is
+      // reachable without anything exotic: a box imaged by a rig that pre-sets
+      // the account password, a restore that brings back the OS account but not
+      // data/config.json, or an installer who just ran `passwd` over SSH before
+      // opening the wizard.
+      //
+      // Trusting shadow here does NOT weaken the gate. hasOwnerPassword() is
+      // false for both "no password" and the published factory default, so an
+      // as-flashed box still gets the 400 and still cannot be logged into with
+      // the default everyone knows — only a password somebody deliberately set
+      // opens this path, and the caller must still prove it below.
       await set("password_configured", true);
       await set("password_configured_at", new Date().toISOString());
     } else {
