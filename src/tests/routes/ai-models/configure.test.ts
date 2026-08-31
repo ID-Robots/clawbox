@@ -88,6 +88,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  runOpenclawDoctorFix: vi.fn().mockResolvedValue(undefined),
   spawnOpenclawCli: vi.fn().mockResolvedValue(""),
   writeConfig: vi.fn().mockResolvedValue(undefined),
   runOpenclawConfigSetBatch: vi.fn(),
@@ -144,6 +145,7 @@ import { getAll, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   writeConfig,
+  runOpenclawDoctorFix,
 } from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
@@ -1739,6 +1741,15 @@ describe("POST /setup-api/ai-models/configure", () => {
         agents?: { defaults?: { model?: { primary?: string } } };
       };
       expect(written?.agents?.defaults?.model?.primary).toBe(primaryOp?.[1]);
+    });
+
+    it("runs doctor --fix after writing an auth profile, so OpenClaw 2 hydrates it", async () => {
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+      expect(res.status).toBe(200);
+      expect(vi.mocked(runOpenclawDoctorFix)).toHaveBeenCalled();
     });
 
     it("still writes every key the old sequence wrote", async () => {

@@ -1580,6 +1580,28 @@ export function gatewayIsAbsent(): boolean {
   return readEdition() === "hermes";
 }
 
+/**
+ * OpenClaw 2 keeps auth profiles in `state/openclaw.sqlite` and refuses to
+ * hydrate plaintext credentials found in openclaw.json — the gateway exits
+ * with AuthProfileMigrationRequiredError until `doctor --fix` migrates them.
+ * Every `config set auth.profiles.*` recreates that condition, so the
+ * configure route runs this right before its gateway restart, mirroring
+ * install.sh: gateway stopped first (doctor migrates the store the gateway
+ * holds open), safe migrations only, and the caller's restart starts it
+ * again. On OpenClaw 1 there is nothing to migrate and doctor answers fast.
+ */
+export async function runOpenclawDoctorFix(): Promise<void> {
+  if (gatewayIsAbsent()) return;
+  try {
+    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      timeout: 30000,
+    });
+  } catch {
+    /* older sudoers or already stopped — doctor itself reports real trouble */
+  }
+  await spawnOpenclaw(["doctor", "--fix", "--non-interactive"], { timeoutMs: 180_000 });
+}
+
 export async function restartGateway(): Promise<void> {
   if (gatewayIsAbsent()) return;
   // Best effort, before the restart: a unit that crash-looped through its

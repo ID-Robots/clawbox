@@ -8,6 +8,7 @@ import { getAll, setMany } from "@/lib/config-store";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
+  runOpenclawDoctorFix,
   findOpenclawBin,
   runOpenclawConfigSet,
   runOpenclawConfigSetBatch,
@@ -2338,6 +2339,24 @@ export async function POST(request: Request) {
       await fs
         .rm(path.join(CLAWBOX_HOME_DIR, ".codex", "auth.json"), { force: true })
         .catch(() => {});
+    }
+
+    // 8b. OpenClaw 2 refuses to hydrate the plaintext credentials the batch
+    // above just wrote into openclaw.json: the gateway exits with
+    // AuthProfileMigrationRequiredError until `doctor --fix` migrates them
+    // into its sqlite auth store (this is what killed the gateway after every
+    // provider save, and the e2e-install container reproduced it). Mirror
+    // install.sh: stop, migrate, and let the restart below start it again.
+    // Best effort — a doctor refusal leaves the restart to tell the truth.
+    if (baseOps.some((op) => op[0].startsWith("auth.profiles."))) {
+      try {
+        await runOpenclawDoctorFix();
+      } catch (err) {
+        console.warn(
+          "[configure] openclaw doctor --fix did not complete:",
+          err instanceof Error ? logSafe(err.message) : err,
+        );
+      }
     }
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model

@@ -230,7 +230,10 @@ describe("Voice panel", () => {
     // The sample fetch is held the way the tts POST is.
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
       if (init?.method === "POST" && input.toString() === "/setup-api/tts/sample") {
-        await new Promise<void>((resolve) => setTimeout(resolve, 1200));
+        // Held long enough that "Speaking… 1s" survives a loaded CI runner:
+        // the 1s tick renders at ~1000ms and the label moves on when the
+        // sample resolves, so a short hold left a ~200ms observation window.
+        await new Promise<void>((resolve) => setTimeout(resolve, 3500));
         return new Response(new Uint8Array(2048), { status: 200, headers: { "content-type": "audio/wav" } });
       }
       return new Response(JSON.stringify(status()), { status: 200, headers: { "content-type": "application/json" } });
@@ -239,7 +242,7 @@ describe("Voice panel", () => {
     const play = await screen.findByTestId("voice-play");
     fireEvent.click(play);
     expect(await screen.findByText("Speaking… 0s")).toBeInTheDocument();
-    expect(await screen.findByText("Speaking… 1s", {}, { timeout: 2000 })).toBeInTheDocument();
+    expect(await screen.findByText("Speaking… 1s", {}, { timeout: 6000 })).toBeInTheDocument();
     await screen.findByTestId("voice-sample-audio");
     release();
   });
