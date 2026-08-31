@@ -117,7 +117,68 @@ describe("POST /setup-api/tts/sample — this box", () => {
     const { POST } = await route();
     const res = await POST(post({ text: "Hi", engine: "local" }));
     expect(res.status).toBe(502);
-    expect((await res.json()).error).toMatch(/could not speak/i);
+    const body = await res.json();
+    expect(body.error).toMatch(/could not speak/i);
+    expect(body.code).toBe("local_failed");
+  });
+
+  it("names the memory guard as the reason, with the numbers, instead of blaming the text", async () => {
+    // The script's own refusal on an 8 GB board with a model loaded. The old
+    // answer was the generic "could not speak that", which read as a problem
+    // with the sentence; the owner's next step is to wait, and the numbers say
+    // how far off the box is.
+    runChildMock.mockImplementation(async () => ({
+      code: 1, stdout: "", signal: null, timedOut: false, notStarted: false,
+      stderr: [
+        "clawbox-tts: Kokoro could not speak this text (voice 'af_heart') — no on-device fallback, the gateway's cloud voice takes over.",
+        "  - kokoro: skipped, 2412MB available and the CUDA path peaks at ~2.6GB (need >=3000MB)",
+        "  Check the Kokoro install with: sudo bash /home/clawbox/clawbox/install.sh --step openclaw_tts",
+      ].join("\n"),
+    }));
+    const { POST } = await route();
+    const res = await POST(post({ text: "Hi", engine: "local" }));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("local_memory");
+    expect(body).toMatchObject({ available: "2.4", needed: "3" });
+    expect(body.error).toMatch(/short of memory/);
+    expect(body.error).toContain("2.4 GB free, needs 3 GB");
+    expect(body.error).not.toContain("/home");
+  });
+
+  it("passes the script's stated reason through, and never the install hint's path", async () => {
+    runChildMock.mockImplementation(async () => ({
+      code: 1, stdout: "", signal: null, timedOut: false, notStarted: false,
+      stderr: [
+        "clawbox-tts: Kokoro could not speak this text (voice 'af_heart') — no on-device fallback, the gateway's cloud voice takes over.",
+        "  - kokoro: 'kokoro' failed (CUDA unavailable, allocation refused, or model missing)",
+        "  Check the Kokoro install with: sudo bash /home/clawbox/clawbox/install.sh --step openclaw_tts",
+      ].join("\n"),
+    }));
+    const { POST } = await route();
+    const body = await (await POST(post({ text: "Hi", engine: "local" }))).json();
+    expect(body.code).toBe("local_failed");
+    expect(body.reason).toBe("kokoro: 'kokoro' failed (CUDA unavailable, allocation refused, or model missing)");
+    expect(body.error).toMatch(/could not speak that\. \(kokoro: 'kokoro' failed/);
+    expect(JSON.stringify(body)).not.toContain("install.sh");
+  });
+
+  it("keeps a reason that names a path off the owner's screen", async () => {
+    runChildMock.mockImplementation(async () => ({
+      code: 1, stdout: "", signal: null, timedOut: false, notStarted: false,
+      stderr: "  - kokoro: persistent server at /tmp/kokoro-server.sock refused the request\n",
+    }));
+    const { POST } = await route();
+    const body = await (await POST(post({ text: "Hi", engine: "local" }))).json();
+    expect(body).toEqual({ error: "The voice on this box could not speak that.", code: "local_failed" });
+  });
+
+  it("says a timeout is a timeout", async () => {
+    runChildMock.mockImplementation(async () => ({ code: null, stdout: "", stderr: "", signal: "SIGKILL", timedOut: true, notStarted: false }));
+    const { POST } = await route();
+    const body = await (await POST(post({ text: "Hi", engine: "local" }))).json();
+    expect(body.code).toBe("local_timeout");
+    expect(body.error).toMatch(/too long/);
   });
 
   it("refuses when no local voice is wired in", async () => {

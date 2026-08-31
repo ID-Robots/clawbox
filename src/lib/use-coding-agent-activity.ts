@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { onCodingRunStarted } from "@/lib/ui-events";
 
 /**
  * The coding runs this conversation has seen, and what became of them.
@@ -36,8 +37,13 @@ import { isCodingRunStatus, type CodingRunStatus } from "@/lib/coding-agent-stat
  *
  * No steady-state timer. It probes once when the chat opens, again whenever
  * `nudge()` is called (which the chat does the moment a coding-agent tool call
- * goes past), and polls only while a run is actually in flight. An idle box is
- * asked once per chat open and then left alone.
+ * goes past, and this hook does itself when the desktop says a run started or
+ * the tab comes back into view), and polls only while a run is actually in
+ * flight — plus ONE round after the last live run settled, because the runner
+ * persists the settled record before it commits the work and starts the
+ * automatic review pass, so the poll that saw the finish cannot yet have seen
+ * the run that follows it. An idle box is asked once per chat open and then
+ * left alone.
  */
 
 export type { CodingRunStatus };
@@ -208,6 +214,22 @@ export function useCodingAgentActivity(active: boolean): {
 
   const nudge = useCallback(() => setProbe((n) => n + 1), []);
 
+  // The two probe sources the chat itself cannot see: a run started from the
+  // Coding Agent app (or finished, as the desktop's notice reports) while the
+  // chat sat open, and a tab that was hidden while a run came and went. Both
+  // are one re-ask, not a timer — and neither is listened for while the chat
+  // is closed, which is when this hook asks nothing at all.
+  useEffect(() => {
+    if (!active) return;
+    const onVisible = () => { if (document.visibilityState === "visible") nudge(); };
+    const off = onCodingRunStarted(nudge);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      off();
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [active, nudge]);
+
   useEffect(() => {
     if (!active) {
       setRuns([]);
@@ -218,6 +240,9 @@ export function useCodingAgentActivity(active: boolean): {
 
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // Whether a poll of THIS probe has seen a run in flight — the one round
+    // that follows its settling is owed only then.
+    let sawLive = false;
 
     const read = async () => {
       try {
@@ -252,8 +277,15 @@ export function useCodingAgentActivity(active: boolean): {
           return next.slice(-MAX_BADGES);
         });
 
-        // Keep asking only while there is something to ask about.
+        // Keep asking only while there is something to ask about — and once
+        // more after a run this probe watched settle: the record is written
+        // as settled BEFORE the commit and the review pass that follow it,
+        // so the poll that saw the finish could not have seen either.
         if (fetched.some((r) => r.status === "running")) {
+          sawLive = true;
+          timer = setTimeout(() => { void read(); }, POLL_MS);
+        } else if (sawLive) {
+          sawLive = false;
           timer = setTimeout(() => { void read(); }, POLL_MS);
         }
       } catch {

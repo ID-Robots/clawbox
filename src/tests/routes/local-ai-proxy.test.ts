@@ -19,8 +19,9 @@ vi.mock("@/lib/local-ai-token", () => ({
     if (!header) return false;
     const m = header.match(/^Bearer\s+(.+)$/i);
     if (!m) return false;
-    const t = m[1].trim();
-    return t === VALID_TOKEN || t === "llamacpp-local" || t === "ollama-local";
+    // Only the per-install token. The legacy sentinels are exercised against
+    // the real verifier in src/tests/unit/local-ai-token.test.ts.
+    return m[1].trim() === VALID_TOKEN;
   }),
 }));
 
@@ -122,30 +123,11 @@ describe("local AI proxy routes", () => {
     expect(mockBeginLocalAiUse).not.toHaveBeenCalled();
   });
 
-  it("accepts the legacy llamacpp-local sentinel for backward compat", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(new Response("{}", {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
-    vi.stubGlobal("fetch", mockFetch);
-
-    const mod = await import("@/app/setup-api/local-ai/llamacpp/v1/[...path]/route");
-    const response = await mod.GET(
-      new Request("http://localhost/setup-api/local-ai/llamacpp/v1/models", {
-        headers: { Authorization: "Bearer llamacpp-local" },
-      }),
-      { params: Promise.resolve({ path: ["models"] }) },
-    );
-
-    expect(response.status).toBe(200);
-    expect(mockFetch).toHaveBeenCalled();
-  });
-
-  it("accepts the legacy ollama-local sentinel for backward compat", async () => {
-    const mockFetch = vi.fn().mockResolvedValue(new Response("{}", {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    }));
+  it("refuses a public legacy sentinel the verifier does not vouch for", async () => {
+    // The proxy is session-exempt in middleware and reachable on 0.0.0.0:80,
+    // so the bearer check is the ONLY gate: a string anyone can read in the
+    // source must never pass it on its own.
+    const mockFetch = vi.fn();
     vi.stubGlobal("fetch", mockFetch);
 
     const mod = await import("@/app/setup-api/local-ai/ollama/[...path]/route");
@@ -156,8 +138,9 @@ describe("local AI proxy routes", () => {
       { params: Promise.resolve({ path: ["api", "tags"] }) },
     );
 
-    expect(response.status).toBe(200);
-    expect(mockFetch).toHaveBeenCalled();
+    expect(response.status).toBe(401);
+    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockEnsureLocalAiReady).not.toHaveBeenCalled();
   });
 });
 

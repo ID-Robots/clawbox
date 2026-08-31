@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { kvGet, kvSet, kvDelete, kvGetAll, kvSetMany } from "@/lib/kv-store";
+import { pushPendingAction } from "@/lib/pending-actions";
 
 export const dynamic = "force-dynamic";
 
 const SAFE_KEY = /^[\w.:-]{1,256}$/;
+// The MCP tools and `clawbox notify` post the desktop's pending action under
+// the old single-slot key; it is folded into the owner-notice ring
+// (src/lib/pending-actions.ts) so every open desktop sees it and the slot
+// itself is never stored.
+const LEGACY_PENDING_ACTION_KEY = "ui:pending-action";
 // Reserved/dunder names slip through SAFE_KEY (all `\w`) but corrupt the plain
 // object backing the store — e.g. `data["__proto__"] = "x"` is a silent no-op
 // that reports success yet stores nothing, and a read returns Object.prototype.
@@ -65,6 +71,19 @@ export async function POST(req: Request) {
       if (!isValidKey(body.key)) return NextResponse.json({ error: "Invalid key" }, { status: 400 });
       if (!isValidValue(body.value)) {
         return NextResponse.json({ error: `Value too large (max ${MAX_VALUE_BYTES} bytes)` }, { status: 413 });
+      }
+      if (body.key === LEGACY_PENDING_ACTION_KEY) {
+        let action: unknown;
+        try {
+          action = JSON.parse(body.value);
+        } catch {
+          return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
+        }
+        if (!action || typeof action !== "object" || Array.isArray(action)) {
+          return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+        }
+        await pushPendingAction(action as Record<string, unknown>);
+        return NextResponse.json({ ok: true });
       }
       kvSet(body.key, body.value);
       return NextResponse.json({ ok: true });

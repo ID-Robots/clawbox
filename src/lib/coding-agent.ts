@@ -94,16 +94,24 @@ export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
 export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
 
 /**
- * How hard Claude Code thinks per turn (`--effort`, via the wrapper's
- * CLAUDE_DS_EFFORT). These are the levels the installed CLI accepts — it
- * warns and falls back to its default on anything else, so the set is
- * validated here rather than passed through.
+ * How hard Claude Code thinks per turn. The first five are the levels the
+ * installed CLI accepts for `--effort` and the wrapper pins through
+ * CLAUDE_DS_EFFORT — it warns and falls back to its default on anything
+ * else, so the set is validated here rather than passed through.
  *
- * Higher is slower and costs more; on a Jetson the difference is felt. "max"
- * stays the default because a delegated run is unattended: the owner is not
- * watching to notice it gave up early.
+ * Higher is slower and costs more; on a Jetson the difference is felt.
+ *
+ * "ultracode" is not a thinking level but Claude Code's own mode on top of
+ * one: xhigh effort plus a standing opt-in to orchestrate the work with its
+ * Workflow tool (fan-out, adversarial verification). It is the default
+ * because a delegated run is unattended — the owner is not watching to notice
+ * it gave up early — and it is the most thorough setting the harness has.
+ * The wrapper requests it with `--effort ultracode` instead of the env pin
+ * the fixed levels use, because a pinned CLAUDE_CODE_EFFORT_LEVEL blocks the
+ * mode ("clear it and ultracode takes over"). Checked on this box: a -p run
+ * under the flag reports "Ultracode is on" and carries the Workflow tool.
  */
-export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
 /**
  * The levels the app offers, as opposed to the ones the CLI accepts.
  *
@@ -113,14 +121,16 @@ export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
  *
  * The effort does reach the model — the request carries
  * output_config {"effort": "..."} and it changes with the flag — but low,
- * medium and high land within noise of each other. Offering five buttons
+ * medium and high land within noise of each other. Offering six buttons
  * where three do the same thing teaches a false model of the machine, so the
- * picker shows the three that measurably differ. All five stay valid for
- * anyone setting the config key directly.
+ * picker shows the three that measurably differ, plus ultracode. All six stay
+ * valid for anyone setting the config key directly.
  */
-export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max"];
+export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max", "ultracode"];
 export type CodingEffort = (typeof EFFORT_LEVELS)[number];
-export const DEFAULT_EFFORT: CodingEffort = "max";
+export const DEFAULT_EFFORT: CodingEffort = "ultracode";
+/** The one level the wrapper cannot pin through the environment — see EFFORT_LEVELS. */
+export const ULTRACODE_EFFORT: CodingEffort = "ultracode";
 export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
 
 
@@ -619,6 +629,15 @@ export async function setDefaultDirectory(directory: string | null): Promise<str
     await configSet(CODING_AGENT_DIR_CONFIG_KEY, undefined);
     return null;
   }
+  // An absolute path, and only that. The resolver reads a bare name as a
+  // folder INSIDE the current default — right when the assistant names a
+  // run's folder, wrong for the setting that says where "inside" is: a name
+  // typed here was looked for under the previous default and answered "does
+  // not exist", and one that happened to exist there quietly moved the
+  // default a level down.
+  if (!path.isAbsolute(directory.trim())) {
+    throw new CodingAgentError("invalid", `Give an absolute path, e.g. ${path.join(homeDir(), "Projects")}.`);
+  }
   const { directory: resolved } = await resolveWorkingDirectory({ directory });
   await configSet(CODING_AGENT_DIR_CONFIG_KEY, resolved);
   return resolved;
@@ -778,6 +797,13 @@ export interface CodingProject {
   latestRun: Pick<CodingRun, "id" | "status" | "task" | "startedAt" | "completedAt"> | null;
 }
 
+/**
+ * The code project the Coding Agent app's Test-harness button runs its smoke
+ * task in. The app keeps the same literal (HARNESS_TEST_PROJECT in
+ * CodingAgentApp.tsx); the projects test holds the two together.
+ */
+export const HARNESS_TEST_PROJECT_ID = "harness-test";
+
 /** A folder that may be a project, before describeProject has looked. */
 interface ProjectCandidate {
   base: string;
@@ -806,6 +832,11 @@ interface ProjectCandidate {
  * `directory` stays the owner's folder alone: it is what the empty state
  * names as the place to build in.
  *
+ * Not the Test-harness button's scratch project: the app inits it for its
+ * own smoke run, and a permanent "Harness Test" row beside the owner's real
+ * projects read as one of them. The smoke run itself still shows, on the
+ * app's home face with every run that belongs to no listed project.
+ *
  * One `git log -1` per project, a few at a time: the app asks on its poll,
  * and a hundred concurrent spawns on a Jetson is a stall, not a listing.
  */
@@ -814,7 +845,10 @@ export async function listProjects(): Promise<{ directory: string | null; projec
   const candidates: ProjectCandidate[] = folders
     ? folders.names.map((folder) => ({ base: folders.base, folder, kind: "folder" as const }))
     : [];
-  for (const folder of codeProjects) candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
+  for (const folder of codeProjects) {
+    if (folder === HARNESS_TEST_PROJECT_ID) continue;
+    candidates.push({ base: CODE_PROJECTS_DIR, folder, kind: "codeProject" });
+  }
   const described = await mapLimit(candidates, 4, describeProject);
 
   // Once per real folder. config.json is a file the owner can edit, so the
@@ -1737,7 +1771,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string }): strin
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; run?: { id: string; directory: string } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; run?: { id: string; directory: string } }): string[] {
   const args = [
     "-p",
     "--verbose",
@@ -1747,6 +1781,11 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
     "--append-system-prompt", HEADLESS_BRIEF,
   ];
+  // Ultracode travels as a flag, the fixed levels through the wrapper's env
+  // pin (see EFFORT_LEVELS). The wrapper would add the flag itself from the
+  // owner's stored setting, but a run records the effort it STARTED with, and
+  // a resume after the owner changed the setting must keep it.
+  if (opts.effort === ULTRACODE_EFFORT) args.push("--effort", ULTRACODE_EFFORT);
   if (opts.resumeSessionId) args.push("--resume", opts.resumeSessionId);
   if (opts.run) {
     // Exactly one MCP server — ours, in its browser-only profile. Strict, so
@@ -1846,6 +1885,15 @@ function relativeToRun(run: CodingRun, file: unknown): string | null {
 function noteFile(run: CodingRun, file: string | null): void {
   if (!file || run.filesTouched.includes(file)) return;
   run.filesTouched.push(file);
+}
+
+/**
+ * A path in the run's own evidence folder. relativeToRun leaves it absolute,
+ * because that folder is never inside a working folder — resolveWorkingDirectory
+ * keeps every run out of data/ except the code projects.
+ */
+function isEvidencePath(run: CodingRun, file: string): boolean {
+  return path.isAbsolute(file) && isInside(file, artifactsDir(run.id));
 }
 
 /**
@@ -2040,7 +2088,14 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
             const file = relativeToRun(run, input.file_path ?? input.notebook_path);
             // Asked for, not yet done — confirmed when its tool_result lands.
             state.sawWriteAttempt = true;
-            if (file && typeof block.id === "string" && block.id) state.pendingFiles.set(block.id, file);
+            // A write into the run's own evidence folder — report.md, a test
+            // log, the brief asks for both — is not project work: the folder
+            // is listed with the run already, and counting it here made a
+            // review pass that changed nothing say "1 file changed" and armed
+            // a review pass of no work. It still shows in the feed below.
+            if (file && !isEvidencePath(run, file) && typeof block.id === "string" && block.id) {
+              state.pendingFiles.set(block.id, file);
+            }
             pushProgress(run, `${block.name} ${file ?? ""}`);
             break;
           }
@@ -2284,6 +2339,13 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<void> {
   }
 }
 
+/**
+ * What the CLI prints when `--effort ultracode` cannot be honoured — the two
+ * messages the installed binary carries for it (dynamic workflows disabled;
+ * xhigh restricted by the organisation).
+ */
+const ULTRACODE_REFUSED = /Ultracode needs dynamic workflows|Ultracode runs at xhigh effort, which is restricted/i;
+
 /** The wrapper's own diagnostics, minus its start-up banner. */
 function stderrTail(stderr: string): string {
   const lines = stderr
@@ -2329,7 +2391,13 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     } else {
       run.status = "failed";
       const tail = stderrTail(state.stderr);
-      run.error = tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
+      run.error = ULTRACODE_REFUSED.test(state.stderr)
+        // The CLI refuses the flag before the first turn when dynamic
+        // workflows are off for this install or the plan does not allow
+        // xhigh. Name the way out rather than echo its /config advice, which
+        // the owner cannot follow from the app.
+        ? `Claude Code refused ultracode on this box (${tail}). Pick Max effort in the Coding Agent settings and start the run again.`
+        : tail || `Claude Code exited with code ${exitCode ?? "unknown"} before reporting a result.`;
     }
   }
   // A stop that raced the final message keeps "completed": the work is done.
@@ -2437,7 +2505,7 @@ function spawnRun(
   settings: { effort: CodingEffort; maxTurns: number },
   stdinText?: string,
 ): void {
-  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, run: { id: run.id, directory: run.directory } }));
+  const { bin, argv } = buildSpawnArgv(setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, run: { id: run.id, directory: run.directory } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.

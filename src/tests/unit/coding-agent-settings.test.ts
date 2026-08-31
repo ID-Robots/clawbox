@@ -29,6 +29,7 @@ vi.mock("@/lib/config-store", async (importOriginal) => ({
 }));
 
 import {
+  buildRunArgs,
   buildRunEnv,
   CODING_AGENT_EFFORT_CONFIG_KEY,
   DEFAULT_EFFORT,
@@ -46,17 +47,18 @@ beforeEach(() => {
 
 describe("effort", () => {
   it("offers exactly the levels the installed CLI accepts", () => {
-    // `claude --effort bogus` names these five and ignores anything else.
-    expect([...EFFORT_LEVELS]).toEqual(["low", "medium", "high", "xhigh", "max"]);
-    expect(DEFAULT_EFFORT).toBe("max");
+    // `claude --effort bogus` names these five and ignores anything else;
+    // ultracode is the CLI's xhigh-plus-workflows mode on top of them.
+    expect([...EFFORT_LEVELS]).toEqual(["low", "medium", "high", "xhigh", "max", "ultracode"]);
+    expect(DEFAULT_EFFORT).toBe("ultracode");
   });
 
-  it("defaults to max when unset, and when the stored value is junk", async () => {
-    expect(await getEffort()).toBe("max");
-    configGet.mockResolvedValue("ultracode");
-    expect(await getEffort()).toBe("max");
+  it("defaults to ultracode when unset, and when the stored value is junk", async () => {
+    expect(await getEffort()).toBe("ultracode");
+    configGet.mockResolvedValue("turbo");
+    expect(await getEffort()).toBe("ultracode");
     configGet.mockResolvedValue(7);
-    expect(await getEffort()).toBe("max");
+    expect(await getEffort()).toBe("ultracode");
   });
 
   it("stores a level the CLI knows", async () => {
@@ -67,9 +69,20 @@ describe("effort", () => {
   it("refuses a level the CLI would silently ignore", async () => {
     // Passing this through would leave the owner believing they had changed
     // something: the CLI warns on stderr and uses its default.
-    await expect(setEffort("ultracode")).rejects.toBeInstanceOf(CodingAgentError);
+    await expect(setEffort("turbo")).rejects.toBeInstanceOf(CodingAgentError);
     await expect(setEffort("MAX")).rejects.toBeInstanceOf(CodingAgentError);
     expect(configSet).not.toHaveBeenCalled();
+  });
+
+  it("asks for ultracode with the flag, never through the env pin", () => {
+    // A pinned CLAUDE_CODE_EFFORT_LEVEL blocks the mode ("clear it and
+    // ultracode takes over"), so the wrapper leaves the pin unset for it and
+    // the run passes the flag itself — a resume must keep the effort the run
+    // started with even after the owner changed the setting.
+    const args = buildRunArgs({ effort: "ultracode" });
+    expect(args.slice(args.indexOf("--effort"), args.indexOf("--effort") + 2)).toEqual(["--effort", "ultracode"]);
+    expect(buildRunArgs({ effort: "max" })).not.toContain("--effort");
+    expect(buildRunEnv({ effort: "ultracode" }).CLAUDE_DS_EFFORT).toBe("ultracode");
   });
 
   it("reaches the wrapper, and the owner's choice outranks an inherited one", () => {
@@ -185,7 +198,7 @@ describe("the effort picker", () => {
     // low 82 / medium 94 / high 102 / xhigh 139 / max 414 reasoning tokens,
     // measured on the box: the first three are within noise of each other.
     const lib = await import("@/lib/coding-agent");
-    expect([...lib.OFFERED_EFFORT_LEVELS]).toEqual(["low", "xhigh", "max"]);
+    expect([...lib.OFFERED_EFFORT_LEVELS]).toEqual(["low", "xhigh", "max", "ultracode"]);
     // ...while every level the CLI accepts stays valid to store.
     for (const level of lib.EFFORT_LEVELS) {
       await expect(lib.setEffort(level)).resolves.toBe(level);
@@ -311,6 +324,23 @@ describe("working in a folder the owner already has", () => {
     const lib = await import("@/lib/coding-agent");
     await expect(lib.resolveWorkingDirectory({ directory: "some-folder" }))
       .rejects.toThrow(/absolute path, or a folder name/i);
+  });
+
+  it("takes only an absolute path for the default folder itself", async () => {
+    // A bare name is a folder INSIDE the default; the setting that says where
+    // "inside" is cannot be relative to itself. Typed into the Project folder
+    // field, "qa" was looked for under the previous default and answered
+    // "That folder does not exist" — and a name that did exist there quietly
+    // moved the default a level down.
+    configGet.mockImplementation(async (k: string) =>
+      k === "coding_agent_default_directory" ? base : undefined);
+    const lib = await import("@/lib/coding-agent");
+    await expect(lib.setDefaultDirectory("my-existing-app")).rejects.toMatchObject({
+      kind: "invalid",
+      message: expect.stringMatching(/absolute path/i),
+    });
+    expect(configSet).not.toHaveBeenCalled();
+    expect(await lib.setDefaultDirectory(sub)).toBe(fsSync.realpathSync(sub));
   });
 });
 

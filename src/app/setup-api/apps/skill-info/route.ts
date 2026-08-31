@@ -1,66 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
-import { execFile } from "child_process";
-import { promisify } from "util";
-import path from "path";
-import { findOpenclawBin } from "@/lib/openclaw-config";
+import { readSkillEnabled } from "@/lib/openclaw-config";
+import { findSkill, listSkills, SkillListUnavailableError } from "@/lib/openclaw-skill-info";
 
 export const dynamic = "force-dynamic";
-
-const execFileAsync = promisify(execFile);
-const HOME = process.env.HOME || "/home/clawbox";
-const OPENCLAW_BIN = findOpenclawBin();
-
-interface SkillInfo {
-  name: string;
-  description: string;
-  emoji: string | null;
-  eligible: boolean;
-  primaryEnv: string | null;
-  requiredEnv: string[];
-  requiredBins: string[];
-  requiredConfig: string[];
-  source: string;
-}
-
-let cachedSkills: SkillInfo[] | null = null;
-let cacheTime = 0;
-let inFlightLoad: Promise<SkillInfo[]> | null = null;
-const CACHE_TTL = 30_000;
-
-async function loadSkills(): Promise<SkillInfo[]> {
-  if (cachedSkills && Date.now() - cacheTime < CACHE_TTL) return cachedSkills;
-  if (inFlightLoad) return inFlightLoad;
-  inFlightLoad = doLoadSkills().finally(() => { inFlightLoad = null; });
-  return inFlightLoad;
-}
-
-async function doLoadSkills(): Promise<SkillInfo[]> {
-  try {
-    const { stdout } = await execFileAsync(OPENCLAW_BIN, ["skills", "list", "--json"], {
-      timeout: 15_000,
-      env: { ...process.env, PATH: `${path.dirname(OPENCLAW_BIN)}:${process.env.PATH}` },
-    });
-    const data = JSON.parse(stdout);
-    const skills = (data.skills || []) as Record<string, unknown>[];
-    cachedSkills = skills.map((s) => ({
-      name: (s.name as string) || "",
-      description: (s.description as string) || "",
-      emoji: (s.emoji as string) || null,
-      eligible: !!(s.eligible),
-      primaryEnv: (s.primaryEnv as string) || null,
-      requiredEnv: ((s.missing as Record<string, unknown>)?.env as string[]) || [],
-      requiredBins: ((s.missing as Record<string, unknown>)?.bins as string[]) || [],
-      requiredConfig: ((s.missing as Record<string, unknown>)?.config as string[]) || [],
-      source: (s.source as string) || "",
-    }));
-    cacheTime = Date.now();
-    return cachedSkills;
-  } catch (err) {
-    console.warn("[skill-info] Failed to load skills:", err instanceof Error ? err.message : err);
-    return cachedSkills || [];
-  }
-}
 
 export async function GET(request: NextRequest) {
   // The App Store is OpenClaw-only; refuse on a Hermes device (the UI hides
@@ -69,13 +12,34 @@ export async function GET(request: NextRequest) {
   if (blocked) return blocked;
 
   const appId = request.nextUrl.searchParams.get("appId");
-  const skills = await loadSkills();
-
-  if (appId) {
-    const skill = skills.find((s) => s.name === appId);
-    if (!skill) return NextResponse.json({ error: "Skill not found" }, { status: 404 });
-    return NextResponse.json(skill);
+  try {
+    if (appId) {
+      // Same shape rule as the settings and install routes: findSkill stats a
+      // path built from appId, so "../.." would probe directories outside the
+      // skills tree (and any id that stats as a directory forces a fresh
+      // multi-second rescan). Answered like a skill that does not exist.
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(appId)) {
+        return NextResponse.json({ error: "Skill not found", code: "not_installed" }, { status: 404 });
+      }
+      const skill = await findSkill(appId);
+      // `code` is what lets the installed-app window tell a skill that is gone
+      // from the box apart from the Hermes guard's 404 (`not_openclaw`) and
+      // from the 503 below — it used to show all three as "works out of the
+      // box".
+      if (!skill) return NextResponse.json({ error: "Skill not found", code: "not_installed" }, { status: 404 });
+      // `enabled` is read from openclaw.json, not from the scan's `disabled`:
+      // the scan can be a refresh old, and the switch just wrote the file.
+      return NextResponse.json({ ...skill, enabled: await readSkillEnabled(appId) });
+    }
+    return NextResponse.json(await listSkills());
+  } catch (err) {
+    // Not an empty list: with nothing cached, an empty list would turn every
+    // installed app into "Skill not found" while the CLI was the thing that
+    // failed.
+    if (err instanceof SkillListUnavailableError) {
+      return NextResponse.json({ error: "Skill list unavailable", code: "skills_unavailable" }, { status: 503 });
+    }
+    console.error("[skill-info] Failed:", err instanceof Error ? err.message : err);
+    return NextResponse.json({ error: "Failed to load skill info" }, { status: 500 });
   }
-
-  return NextResponse.json(skills);
 }

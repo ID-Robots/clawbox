@@ -64,15 +64,19 @@ function readableList(values: string[]): string {
 }
 
 /**
- * Build the privacy notice shown in ClawBox chat from OpenClaw's live
- * `tts.status` response.
- *
- * The status call already filters fallbackProviders to providers that are
- * configured. We deliberately do not infer from static ClawBox config: the
- * warning must follow the gateway's current runtime chain after upgrades and
- * plugin-registry refreshes.
+ * The fact behind the privacy notice, before it is worded: whether the cloud
+ * speaks first or only when the local voice cannot, and which cloud providers
+ * are in the chain (by label). The Voice tab translates this itself; the chat
+ * banner renders the English sentence `buildCloudTtsWarning` makes of it.
  */
-export function buildCloudTtsWarning(rawPayload: unknown): string | null {
+export interface CloudTtsDisclosure {
+  kind: 'uses-cloud' | 'may-use-cloud'
+  providers: string[]
+  /** Whether the primary the owner selected is a local engine. */
+  primaryIsLocal: boolean
+}
+
+export function cloudTtsDisclosure(rawPayload: unknown): CloudTtsDisclosure | null {
   if (!rawPayload || typeof rawPayload !== 'object' || Array.isArray(rawPayload)) return null
   const payload = rawPayload as TtsStatusPayload
   if (payload.enabled !== true) return null
@@ -98,14 +102,33 @@ export function buildCloudTtsWarning(rawPayload: unknown): string | null {
 
   if (remoteProviders.length === 0) return null
 
-  const providerNames = readableList(remoteProviders.map(id => index.labels.get(id) ?? id))
   const primaryIsRemote = effectivePrimary ? remoteProviders.includes(effectivePrimary) : false
+  return {
+    kind: primaryIsRemote ? 'uses-cloud' : 'may-use-cloud',
+    providers: remoteProviders.map(id => index.labels.get(id) ?? id),
+    primaryIsLocal: Boolean(primary && isLocalProvider(primary)),
+  }
+}
 
-  if (primaryIsRemote) {
+/**
+ * Build the privacy notice shown in ClawBox chat from OpenClaw's live
+ * `tts.status` response.
+ *
+ * The status call already filters fallbackProviders to providers that are
+ * configured. We deliberately do not infer from static ClawBox config: the
+ * warning must follow the gateway's current runtime chain after upgrades and
+ * plugin-registry refreshes.
+ */
+export function buildCloudTtsWarning(rawPayload: unknown): string | null {
+  const disclosure = cloudTtsDisclosure(rawPayload)
+  if (!disclosure) return null
+
+  const providerNames = readableList(disclosure.providers)
+  if (disclosure.kind === 'uses-cloud') {
     return `Privacy notice: Voice uses ${providerNames} cloud TTS. Text sent for speech leaves this ClawBox.`
   }
 
-  const unavailableProvider = primary && isLocalProvider(primary)
+  const unavailableProvider = disclosure.primaryIsLocal
     ? 'local speech'
     : 'the selected voice provider'
   return `Privacy notice: If ${unavailableProvider} is unavailable, voice may use ${providerNames} cloud TTS. Text sent for speech may leave this ClawBox.`

@@ -3,9 +3,10 @@
  *
  * Two legs, both best-effort and one-way, both authored by ClawBox:
  *
- *   1. The desktop: the same `ui:pending-action` slot `notifyOwner()` in
- *      src/lib/email-notify.ts and the MCP `ui_notify` tool write. The desktop
- *      polls it and shows a toast.
+ *   1. The desktop: the owner-notice ring (src/lib/pending-actions.ts) that
+ *      `notifyOwner()` in src/lib/email-notify.ts and the MCP `ui_notify`
+ *      tool write too. Every open desktop polls it and shows a top-right
+ *      card with a button into the Coding Agent app.
  *   2. Telegram, when a bot is connected: a short message to the people the
  *      owner has approved to talk to the bot. On Hermes that goes through
  *      `hermes send` (src/lib/hermes-telegram.ts); on OpenClaw the web server
@@ -24,14 +25,13 @@
  * never turn a finished run into a failed one.
  */
 
-import { kvSet } from "@/lib/kv-store";
+import { pushPendingAction } from "@/lib/pending-actions";
 import { get as configGet } from "@/lib/config-store";
 import { getActiveHarness } from "@/lib/harness";
 import { notifyHermesTelegramUser, readHermesApprovedUsers } from "@/lib/hermes-telegram";
 import { readTelegramAllowFrom } from "@/lib/openclaw-config";
 import type { CodingRun } from "@/lib/coding-agent";
 
-const UI_ACTION_KEY = "ui:pending-action";
 const MAX_TOAST_CHARS = 280;
 /** Telegram's own limit is 4096; the template never gets near it. */
 const MAX_TELEGRAM_CHARS = 1_000;
@@ -87,19 +87,21 @@ export function buildAnnouncement(run: CodingRun): string {
  * ended, which project). Still no task and no summary: those are model-authored
  * and the rule in this file's header applies to a card exactly as it does to a
  * toast.
+ *
+ * The entry is named after the run, so a desktop that sees it twice (two
+ * polls, a reload) shows one card.
  */
-function notifyDesktop(run: CodingRun, message: string): void {
+async function notifyDesktop(run: CodingRun, message: string): Promise<void> {
   try {
-    kvSet(
-      UI_ACTION_KEY,
-      JSON.stringify({
+    await pushPendingAction(
+      {
         type: "coding_agent",
         message: message.slice(0, MAX_TOAST_CHARS),
         runId: run.id,
         status: run.status,
         projectId: run.projectId,
-        ts: Date.now(),
-      }),
+      },
+      `coding:${run.id}`,
     );
   } catch (err) {
     console.error("[coding-agent] desktop notice failed:", err instanceof Error ? err.message : err);
@@ -167,7 +169,7 @@ async function notifyTelegram(message: string): Promise<void> {
  */
 export async function announceCodingAgent(run: CodingRun): Promise<void> {
   const message = buildAnnouncement(run);
-  notifyDesktop(run, message);
+  await notifyDesktop(run, message);
   try {
     await notifyTelegram(message);
   } catch (err) {

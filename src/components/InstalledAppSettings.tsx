@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { StoreApp } from "./AppStore";
 import * as kv from "@/lib/client-kv";
+import { useT } from "@/lib/i18n";
 import { clawhubSkillUrl } from "@/lib/clawhub-url";
 
 interface AppSetting {
@@ -22,14 +23,19 @@ interface SkillInfo {
   requiredEnv: string[];
   requiredBins: string[];
   requiredConfig: string[];
+  /** From openclaw.json via skill-info; absent (older server) means enabled. */
+  enabled?: boolean;
 }
 
-// Hand-crafted overrides for skills that need special treatment
+// Hand-crafted overrides for skills that need special treatment. Only fields
+// the skill's config writer actually persists belong here — a "webhook_enabled"
+// toggle used to sit alongside these, stored to KV and dropped by the writer,
+// so it claimed a setting the skill never saw. HA's inbound webhooks are
+// configured on the Home Assistant side; the note under the form says so.
 const CUSTOM_SETTINGS: Record<string, AppSetting[]> = {
   "home-assistant": [
     { key: "ha_url", label: "Home Assistant URL", type: "url", placeholder: "http://homeassistant.local:8123" },
     { key: "ha_token", label: "Long-Lived Access Token", type: "password", placeholder: "Enter HA access token" },
-    { key: "webhook_enabled", label: "Enable Webhooks", type: "toggle" },
   ],
 };
 
@@ -78,40 +84,71 @@ interface InstalledAppSettingsProps {
 }
 
 export default function InstalledAppSettings({ appId, storeApp, icon, onUninstall }: InstalledAppSettingsProps) {
+  const { t } = useT();
   const SETTINGS_KEY = `clawbox-app-settings-${appId}`;
   const [settings, setSettings] = useState<Record<string, string | boolean>>({});
   const [saving, setSaving] = useState(false);
-  // "connected" = backend actually wrote the skill's config; "saved" = values
-  // stored but the skill has no on-device config writer yet (so it can't use
-  // them). Distinguishing the two keeps us from claiming a false "Connected!".
+  // "connected" = backend actually wrote the skill's config (the button then
+  // says "Saved to skill config" — that is a file write, never a probed
+  // connection); "saved" = values stored but the skill has no on-device config
+  // writer yet (so it can't use them). Distinguishing the two keeps us from
+  // claiming a wiring that never happened.
   const [saveResult, setSaveResult] = useState<"idle" | "connected" | "saved">("idle");
   const [skillInfo, setSkillInfo] = useState<SkillInfo | null>(null);
   const [loadingSkill, setLoadingSkill] = useState(true);
   const [skillError, setSkillError] = useState(false);
+  // A skill-info 404: the preference entry survived but the skill is gone from
+  // the box (removed out-of-band). Distinct from skillError — this window used
+  // to show both as a healthy "works out of the box".
+  const [skillMissing, setSkillMissing] = useState(false);
   const [enabled, setEnabled] = useState(true);
   const [toggling, setToggling] = useState(false);
 
-  // Installs made before the publisher was recorded in meta have none, and the
-  // slug alone cannot address a ClawHub page. Ask the store rather than linking
-  // somewhere that does not resolve; an unanswered lookup leaves this undefined
-  // and the link is simply not rendered.
+  // Who publishes this skill. The recorded `developer` is a display label that
+  // is sometimes another publisher's name entirely, so the store detail is
+  // always asked — it carries `ownerHandle`, the publisher ClawHub itself
+  // names. `null` here is the store's explicit "ClawHub could not name one":
+  // the developer guess must not resurrect the dead link the server removed.
+  // An unanswered lookup (or an old server with no ownerHandle field) leaves
+  // it undefined and the link falls back through `developer`.
   const [resolvedDeveloper, setResolvedDeveloper] = useState<string | undefined>(storeApp.developer);
+  const [resolvedOwner, setResolvedOwner] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
     setResolvedDeveloper(storeApp.developer);
-    if (storeApp.developer) return;
+    setResolvedOwner(undefined);
     const controller = new AbortController();
     fetch(`/setup-api/apps/store?slug=${encodeURIComponent(appId)}`, { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : null))
-      .then((data) => { if (typeof data?.developer === "string") setResolvedDeveloper(data.developer); })
-      .catch(() => { /* offline, or a skill the store does not list — no link. */ });
+      .then((data) => {
+        if (data && typeof data === "object" && "ownerHandle" in data) {
+          setResolvedOwner(typeof data.ownerHandle === "string" && data.ownerHandle ? data.ownerHandle : null);
+        }
+        if (typeof data?.developer === "string") setResolvedDeveloper((prev) => prev ?? data.developer);
+      })
+      .catch(() => { /* offline, or a skill the store does not list — the link falls back. */ });
     return () => controller.abort();
   }, [appId, storeApp.developer]);
 
   useEffect(() => {
     fetch(`/setup-api/apps/skill-info?appId=${encodeURIComponent(appId)}`)
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => setSkillInfo(data))
+      .then(async (r) => {
+        const data = await r.json().catch(() => null);
+        if (r.ok && data) {
+          setSkillInfo(data as SkillInfo);
+          // `enabled` is read back from openclaw.json; a server that predates
+          // the field omits it, and an absent field means enabled.
+          if ((data as SkillInfo).enabled === false) setEnabled(false);
+          return;
+        }
+        // 404 `not_installed` (and the bare 404 an older server sends) is a
+        // skill that is gone from the box. Anything else — the 503
+        // `skills_unavailable`, the Hermes guard — is the skill CLI failing,
+        // which is what the red error panel was written for.
+        const code = (data as { code?: string } | null)?.code;
+        if (r.status === 404 && (!code || code === "not_installed")) setSkillMissing(true);
+        else setSkillError(true);
+      })
       .catch((err) => { console.warn("[settings] Failed to load skill info:", err); setSkillError(true); })
       .finally(() => setLoadingSkill(false));
   }, [appId]);
@@ -120,14 +157,18 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
     kv.init().then(() => {
       const stored = kv.getJSON<Record<string, string | boolean>>(SETTINGS_KEY);
       if (stored) setSettings(stored);
-      // Load enabled state (default true)
-      const enabledState = kv.get(`clawbox-skill-enabled-${appId}`);
-      if (enabledState === "0") setEnabled(false);
     });
-  }, [SETTINGS_KEY, appId]);
+  }, [SETTINGS_KEY]);
 
   const appSettings = buildSettings(appId, skillInfo);
-  const hubUrl = clawhubSkillUrl(appId, resolvedDeveloper) || storeApp.url;
+  // The publisher namespace is what makes a ClawHub URL real; when the store
+  // explicitly answered ownerHandle: null the developer guess is skipped, and
+  // the store's own page is the honest fallback — labelled as the store page,
+  // not as ClawHub.
+  const hubUrl = clawhubSkillUrl(appId, resolvedOwner || undefined)
+    || (resolvedOwner === null ? undefined : clawhubSkillUrl(appId, resolvedDeveloper))
+    || storeApp.url;
+  const hubIsClawhub = !!hubUrl && hubUrl.startsWith("https://clawhub.ai/");
 
   const updateSetting = useCallback((key: string, value: string | boolean) => {
     setSettings(prev => {
@@ -138,12 +179,12 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
     setSaveResult("idle");
   }, [SETTINGS_KEY]);
 
-  const [toggleError, setToggleError] = useState<string | null>(null);
+  const [toggleError, setToggleError] = useState(false);
 
   const handleToggleEnabled = useCallback(async () => {
     const newEnabled = !enabled;
     setToggling(true);
-    setToggleError(null);
+    setToggleError(false);
     try {
       const res = await fetch("/setup-api/apps/settings", {
         method: "POST",
@@ -151,12 +192,13 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
         body: JSON.stringify({ appId, settings: { _setEnabled: newEnabled } }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // No local record: skill-info reads the value back from openclaw.json,
+      // which the write above just changed — a KV mirror only ever disagreed.
       setEnabled(newEnabled);
-      kv.set(`clawbox-skill-enabled-${appId}`, newEnabled ? "1" : "0");
       window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: newEnabled ? 'enable' : 'disable', id: appId } }));
     } catch (err) {
       console.warn("[settings] Failed to toggle skill:", err);
-      setToggleError("Failed to toggle skill");
+      setToggleError(true);
     }
     setToggling(false);
   }, [appId, enabled]);
@@ -198,18 +240,24 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
         </div>
         <h2 className="text-xl font-semibold mb-1">{storeApp.name}</h2>
         <div className="flex items-center gap-2 mb-2">
-          <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
-            enabled ? "bg-green-500/20 text-green-400" : "bg-white/10 text-white/40"
-          }`}>
-            {enabled ? "Active" : "Disabled"}
-          </span>
+          {skillMissing ? (
+            <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-white/10 text-white/40">
+              {t("installed.notInstalledBadge")}
+            </span>
+          ) : (
+            <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
+              enabled ? "bg-green-500/20 text-green-400" : "bg-white/10 text-white/40"
+            }`}>
+              {enabled ? t("installed.active") : t("installed.disabled")}
+            </span>
+          )}
           {skillInfo && enabled && (
             <span className={`px-2 py-0.5 text-xs font-medium rounded-full ${
               skillInfo.eligible
                 ? "bg-green-500/10 text-green-400/70"
                 : "bg-yellow-500/10 text-yellow-400/70"
             }`}>
-              {skillInfo.eligible ? "Ready" : "Needs Setup"}
+              {skillInfo.eligible ? t("installed.ready") : t("installed.needsSetup")}
             </span>
           )}
           {storeApp.rating > 0 && (
@@ -222,57 +270,74 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
         <p className="text-xs text-white/40 text-center max-w-sm">{storeApp.description}</p>
       </div>
 
-      {/* Enable/Disable toggle */}
+      {/* Enable/Disable toggle. Not offered for a skill that is gone from the
+          box — the switch would write config for nothing. */}
+      {!skillMissing && (
       <div className="px-6 py-4 border-b border-white/10">
         <label className="flex items-center justify-between cursor-pointer">
           <div>
-            <span className="text-sm text-white/80 font-medium">Skill Enabled</span>
+            <span className="text-sm text-white/80 font-medium">{t("installed.skillEnabled")}</span>
             <p className="text-xs text-white/30 mt-0.5">
-              {toggleError ? <span className="text-red-400">{toggleError}</span> : enabled ? "Agent can use this skill" : "Skill is installed but inactive"}
+              {toggleError
+                ? <span className="text-red-400">{t("installed.toggleFailed")}</span>
+                : toggling ? t("installed.saving")
+                : enabled ? t("installed.agentCanUse") : t("installed.inactive")}
             </p>
           </div>
-          <button
-            onClick={handleToggleEnabled}
-            disabled={toggling}
-            role="switch"
-            aria-checked={enabled}
-            aria-label="Enable skill"
-            className={`w-11 h-6 rounded-full transition-colors relative ${
-              enabled ? "bg-green-500" : "bg-white/20"
-            } ${toggling ? "opacity-50" : ""}`}
-          >
-            <div
-              className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
-                enabled ? "translate-x-5" : "translate-x-0.5"
-              }`}
-            />
-          </button>
+          <div className="flex items-center gap-2">
+            {toggling && (
+              <div className="w-4 h-4 border-2 border-white/20 rounded-full animate-spin" style={{ borderTopColor: "rgba(255,255,255,0.7)" }} />
+            )}
+            <button
+              onClick={handleToggleEnabled}
+              disabled={toggling}
+              role="switch"
+              aria-checked={enabled}
+              aria-label={t("installed.enableSkillAria")}
+              className={`w-11 h-6 rounded-full transition-colors relative ${
+                enabled ? "bg-green-500" : "bg-white/20"
+              } ${toggling ? "opacity-50" : ""}`}
+            >
+              <div
+                className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                  enabled ? "translate-x-5" : "translate-x-0.5"
+                }`}
+              />
+            </button>
+          </div>
         </label>
       </div>
+      )}
 
       {/* Settings */}
       <div className="flex-1 px-6 py-4">
         {loadingSkill ? (
-          <div className="text-sm text-white/30 text-center py-8">Loading skill info...</div>
+          <div className="text-sm text-white/30 text-center py-8">{t("installed.loading")}</div>
+        ) : skillMissing ? (
+          <div className="text-center py-8">
+            <span className="material-symbols-rounded text-yellow-400/60 mb-2" style={{ fontSize: 40 }}>help</span>
+            <p className="text-sm text-white/50 mt-2">{t("installed.notInstalled")}</p>
+            <p className="text-xs text-white/30 mt-1">{t("installed.notInstalledHint")}</p>
+          </div>
         ) : skillError ? (
           <div className="text-center py-8">
             <span className="material-symbols-rounded text-red-400/60 mb-2" style={{ fontSize: 40 }}>error</span>
-            <p className="text-sm text-white/50 mt-2">Could not load skill info</p>
-            <p className="text-xs text-white/30 mt-1">The skill CLI may not be available.</p>
+            <p className="text-sm text-white/50 mt-2">{t("installed.loadFailed")}</p>
+            <p className="text-xs text-white/30 mt-1">{t("installed.cliUnavailable")}</p>
           </div>
         ) : !hasConfigFields ? (
           <div className="text-center py-8">
             <span className="material-symbols-rounded text-green-400/60 mb-2" style={{ fontSize: 40 }}>check_circle</span>
-            <p className="text-sm text-white/50 mt-2">No configuration needed</p>
-            <p className="text-xs text-white/30 mt-1">This skill works out of the box.</p>
+            <p className="text-sm text-white/50 mt-2">{t("installed.noConfig")}</p>
+            <p className="text-xs text-white/30 mt-1">{t("installed.worksOutOfBox")}</p>
           </div>
         ) : (
           <>
-            <h3 className="text-sm font-medium text-white/70 mb-4">Settings</h3>
+            <h3 className="text-sm font-medium text-white/70 mb-4">{t("installed.settings")}</h3>
             {skillInfo && skillInfo.requiredBins.length > 0 && (
               <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 mb-4">
                 <p className="text-xs text-yellow-200/70">
-                  Missing tools: <strong>{skillInfo.requiredBins.join(", ")}</strong>
+                  {t("installed.missingTools")} <strong>{skillInfo.requiredBins.join(", ")}</strong>
                 </p>
               </div>
             )}
@@ -326,11 +391,14 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
                 </div>
               ))}
             </div>
+            {appId === "home-assistant" && (
+              <p className="text-xs text-white/30 mt-3 leading-relaxed">
+                {t("installed.haWebhookNote")}
+              </p>
+            )}
             {saveResult === "saved" && (
               <p className="text-xs text-amber-300/70 mt-3 leading-relaxed">
-                Keys saved on-device, but this skill doesn’t have a config writer yet,
-                so it can’t use them until its setup is wired. Your input stays on the
-                device — it is never sent to the agent.
+                {t("installed.savedNotWired")}
               </p>
             )}
           </>
@@ -348,7 +416,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
               className="inline-flex items-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors"
             >
               <span className="material-symbols-rounded" style={{ fontSize: 14 }}>open_in_new</span>
-              ClawHub
+              {hubIsClawhub ? t("store.viewOnHub") : t("store.viewInStore")}
             </a>
           )}
           <button
@@ -356,10 +424,10 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer"
           >
             <span className="material-symbols-rounded" style={{ fontSize: 14 }}>delete</span>
-            Uninstall
+            {t("store.uninstall")}
           </button>
         </div>
-        {hasConfigFields && (
+        {hasConfigFields && !skillMissing && (
           <button
             onClick={handleSave}
             disabled={saving}
@@ -371,7 +439,7 @@ export default function InstalledAppSettings({ appId, storeApp, icon, onUninstal
                 : "bg-white/10 hover:bg-white/15 text-white"
             } disabled:opacity-50`}
           >
-            {saving ? "Connecting..." : saveResult === "connected" ? "Connected!" : saveResult === "saved" ? "Saved" : "Connect"}
+            {saving ? t("installed.connecting") : saveResult === "connected" ? t("installed.savedToConfig") : saveResult === "saved" ? t("installed.saved") : t("installed.connect")}
           </button>
         )}
       </div>

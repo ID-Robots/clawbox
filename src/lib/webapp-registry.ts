@@ -13,15 +13,16 @@ interface InstalledMeta {
 
 /**
  * Durably register a webapp on the desktop by writing the same preference keys
- * the live desktop writes when it consumes a `register_webapp` ui:pending-action
- * (see src/app/page.tsx). That handoff only lands if the desktop happens to be
+ * the live desktop writes when it consumes a `register_webapp` entry from the
+ * owner-notice ring (`ui:pending-actions`, src/lib/pending-actions.ts — see
+ * src/app/page.tsx). That handoff only lands if the desktop happens to be
  * open and polling — so a webapp created while the desktop is closed gets its
  * HTML saved but never reaches the app grid. Persisting here closes that gap:
  * the desktop reads `installed_apps` / `installed_meta` from
  * /setup-api/preferences on mount, so the app shows up on its next load.
  *
  * Idempotent (add-if-missing); also un-hides the app, mirroring the live
- * handler. The ui:pending-action emit stays in place for instant updates on an
+ * handler. The ring push stays in place for instant updates on an
  * already-open desktop — this is the durability backstop.
  */
 export async function registerWebappInPreferences(

@@ -59,6 +59,20 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "launcher.pinToShelf": "Pin to shelf",
     "launcher.addToDesktop": "Add to desktop",
 
+    // === Desktop icon context menu + uninstall confirmation (page.tsx) ===
+    // Open / New Window / Open in new tab / pin / Uninstall reuse the shelf.*
+    // and store.uninstall keys; only the desktop-specific rows live here.
+    "desktop.ctx.itemsSelected": "{count} items selected",
+    "desktop.ctx.openAll": "Open all",
+    "desktop.ctx.resetPositions": "Reset positions",
+    "desktop.ctx.removeAllFromDesktop": "Remove all from desktop",
+    "desktop.ctx.resetPosition": "Reset position",
+    "desktop.ctx.removeFromDesktop": "Remove from desktop",
+    "desktop.ctx.arrangeIcons": "Arrange icons",
+    "desktop.ctx.refresh": "Refresh",
+    "uninstall.title": "Uninstall {name}?",
+    "uninstall.message": "This will remove the app from your desktop and launcher. You can reinstall it from the App Store.",
+
     // === ChromeWindow ===
     "window.minimize": "Minimize",
     "window.maximize": "Maximize",
@@ -342,6 +356,39 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "store.featured": "Featured",
     "store.updated": "Updated {date}",
     "store.runsCode": "Runs code",
+    "store.loadError": "Couldn't reach the ClawBox Store. Check the internet connection and try again.",
+    "store.poweredByNoCount": "Powered by ClawHub",
+    "store.viewInStore": "View in ClawBox Store",
+    "store.noInstalledApps": "You haven't installed any apps yet — browse the store to add one.",
+    "store.choosePublisher": "Several publishers offer this skill — pick one:",
+
+    // === Installed-app window ===
+    "installed.active": "Active",
+    "installed.disabled": "Disabled",
+    "installed.notInstalledBadge": "Not installed",
+    "installed.ready": "Ready",
+    "installed.needsSetup": "Needs Setup",
+    "installed.skillEnabled": "Skill Enabled",
+    "installed.agentCanUse": "Agent can use this skill",
+    "installed.inactive": "Skill is installed but inactive",
+    "installed.saving": "Saving...",
+    "installed.toggleFailed": "Failed to toggle skill",
+    "installed.enableSkillAria": "Enable skill",
+    "installed.loading": "Loading skill info...",
+    "installed.loadFailed": "Could not load skill info",
+    "installed.cliUnavailable": "The skill CLI may not be available.",
+    "installed.notInstalled": "This skill is no longer installed on the box.",
+    "installed.notInstalledHint": "Remove this icon with Uninstall below, or reinstall the skill from the Store.",
+    "installed.noConfig": "No configuration needed",
+    "installed.worksOutOfBox": "This skill works out of the box.",
+    "installed.settings": "Settings",
+    "installed.missingTools": "Missing tools:",
+    "installed.savedNotWired": "Keys saved on-device, but this skill doesn't have a config writer yet, so it can't use them until its setup is wired. Your input stays on the device — it is never sent to the agent.",
+    "installed.connect": "Connect",
+    "installed.connecting": "Connecting...",
+    "installed.savedToConfig": "Saved to skill config",
+    "installed.saved": "Saved",
+    "installed.haWebhookNote": "Inbound webhooks are set up in Home Assistant itself — see the skill's store page for the guide.",
 
     // === SettingsApp ===
     "settings.appearance": "Appearance",
@@ -500,11 +547,12 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "ollama.use": "Use",
     "ollama.saving": "Saving...",
     "ollama.downloadModel": "Download a model",
-    "ollama.searchLabel": "Or search for more models (filtered for 8GB RAM)",
+    // {max} is the size cap the search route answers with (OLLAMA_MAX_MODEL_PARAM_B).
+    "ollama.searchLabel": "Or search for more models (sizes up to {max}B fit this box)",
     "ollama.searchPlaceholder": "Search Ollama models...",
     "ollama.select": "Select",
     "ollama.selected": "Selected:",
-    "ollama.noModelsFound": "No models found matching \"{query}\" for 8GB devices",
+    "ollama.noModelsFound": "No models found matching \"{query}\" at {max}B or smaller",
     "ollama.useAnyway": "Use \"{model}\" anyway",
     "ollama.downloading": "Downloading...",
     "ollama.configuring": "Configuring...",
@@ -516,10 +564,6 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "openclaw.notRunning": "The gateway service is not running.",
     "openclaw.retry": "Retry",
     "openclaw.iframeTitle": "OpenClaw Control",
-
-    // === AppDrawer ===
-    "drawer.searchApps": "Search apps",
-    "drawer.noAppsFound": "No apps found for \"{query}\"",
 
     // === Login ===
     "login.subtitle": "Enter your password to continue",

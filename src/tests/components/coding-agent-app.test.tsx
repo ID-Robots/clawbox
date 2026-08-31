@@ -9,11 +9,11 @@
  * app only links there.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import CodingAgentApp, { installedAppId, NEW_APP_NAME_MAX } from "@/components/CodingAgentApp";
 import { MAX_PROJECT_NAME_LENGTH } from "@/lib/code-projects";
-import { buildNewAppPrompt, CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT } from "@/lib/ui-events";
+import { buildNewAppPrompt, CHAT_MESSAGE_EVENT, CODING_AGENT_CHANGED_EVENT, CODING_RUN_STARTED_EVENT } from "@/lib/ui-events";
 
 // One stable `t`, as the real hook provides (it is memoised on the locale
 // table) — a fresh function per render would be a different contract.
@@ -74,6 +74,8 @@ function stubFetch(
   opts: {
     artifacts?: Record<string, string>; projects?: unknown[]; projectsDir?: string | null; transcriptPath?: string;
     git?: { branch: string | null; commits: number; remote: string | null; lastCommit: { subject: string; date: number } | null };
+    /** The GitHub account, as GET /setup-api/coding-agent/git answers without a query. */
+    github?: Record<string, unknown>;
   } = {},
 ) {
   let runs = runsArg;
@@ -108,6 +110,23 @@ function stubFetch(
       // The route answers `{ git }` for the one project the query names.
       gitReads.push(url);
       return json({ git: opts.git ?? { branch: null, commits: 0, remote: null, lastCommit: null } });
+    }
+    if (url === "/setup-api/coding-agent/git" && init?.method === "POST") {
+      // A backup: the folder is pushed, private, to a repo named after it.
+      posts.push({ url, body: JSON.parse(String(init.body)) });
+      return json({ repo: "owner/site", created: true });
+    }
+    if (url === "/setup-api/coding-agent/git") {
+      return json(opts.github ?? { installed: false, connected: false, login: null, loginCommand: "gh auth login" });
+    }
+    if (url === "/setup-api/coding-agent/start" && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as { runId?: string };
+      posts.push({ url, body });
+      runs = runs.map((r) => {
+        const run = r as { id?: string };
+        return run.id === body.runId ? { ...run, status: "running", completedAt: null } : r;
+      });
+      return json({ started: true, run: runs.find((r) => (r as { id?: string }).id === body.runId) }, 202);
     }
     if (url.startsWith("/setup-api/coding-agent/artifacts")) {
       // The route serves every non-image as text/plain, whatever it holds.
@@ -378,6 +397,143 @@ describe("CodingAgentApp", () => {
       expect(screen.queryByTestId("coding-agent-clear")).not.toBeInTheDocument();
     });
 
+    it("offers nothing to clear when only drafts and paused runs are left — the route keeps every one of them", async () => {
+      // Before this the button stayed up over a list of held runs, and the
+      // confirmed second tap cleared nothing at all, with nothing said.
+      stubFetch({ enabled: true, readiness: READY }, [
+        { ...RUN, id: "run-draft001", status: "draft", completedAt: null, summary: null },
+        { ...RUN, id: "run-paused01", status: "paused", completedAt: null, summary: null },
+      ]);
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+      await screen.findByTestId("coding-agent-embedded-settings");
+      expect(screen.queryByTestId("coding-agent-clear")).not.toBeInTheDocument();
+    });
+
+    it("takes the armed Clear back after a few seconds, and whenever the settings page is left", async () => {
+      vi.useFakeTimers();
+      try {
+        stubFetch({ enabled: true, readiness: READY }, [RUN]);
+        render(<CodingAgentApp />);
+        await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+        fireEvent.click(screen.getByTestId("coding-agent-open-settings"));
+        const clear = screen.getByTestId("coding-agent-clear");
+        fireEvent.click(clear);
+        expect(clear.textContent).toBe(translations.en["codingAgent.clearConfirm"]);
+
+        // The offer does not wait around for a stray tap minutes later.
+        await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+        expect(clear.textContent).toBe(translations.en["codingAgent.clearRuns"]);
+        fireEvent.click(clear);
+        expect(clear.textContent).toBe(translations.en["codingAgent.clearConfirm"]);
+        expect(posts).toEqual([]);
+
+        // Leaving the page and coming back finds it disarmed too — the
+        // state lives in the app, not the page, so it used to survive Back.
+        fireEvent.click(screen.getByTestId("coding-agent-settings-back"));
+        fireEvent.click(screen.getByTestId("coding-agent-open-settings"));
+        expect(screen.getByTestId("coding-agent-clear").textContent).toBe(translations.en["codingAgent.clearRuns"]);
+        expect(posts).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("shows no duration on a draft — its clock has not started", async () => {
+      // A draft's startedAt is when it was drafted (the runner overwrites it
+      // at start), so "0 turns · 0 files changed · 52m" read as a run that
+      // had been going for an hour. The "updated" line already says its age.
+      const draft = {
+        ...RUN, id: "run-draft001", status: "draft", completedAt: null, summary: null,
+        // All zero, as the server drafts them: nothing has run yet.
+        numTurns: 0, filesTouched: [], permissionDenials: 0,
+        effort: "max", lastActivityAt: Date.now() - 3600_000,
+      };
+      stubFetch({ enabled: true, readiness: READY }, [draft], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      expect(await screen.findByText(translations.en["codingAgent.statusDraft"])).toBeInTheDocument();
+      expect(screen.queryByText(/0 turns/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/files changed/)).not.toBeInTheDocument();
+      // Nor the effort it was drafted at: settings are read when it starts.
+      expect(screen.getByText(translations.en["codingAgent.startedByAgent"]).textContent)
+        .toBe(translations.en["codingAgent.startedByAgent"]);
+      expect(screen.getByTestId("coding-agent-run-stats").textContent)
+        .toContain(`${translations.en["codingAgent.updated"]} ${t("clawkeep.hoursAgo", { count: 1 })}`);
+    });
+
+    it("offers the terminal only once the run has a session — one paused before Claude Code announced it has nothing to resume", async () => {
+      const noSession = { ...RUN, id: "run-paused01", status: "paused", completedAt: null, summary: null, sessionId: null };
+      const session = "61400ab6-0da9-4feb-8ad5-b547239c1367";
+      const withSession = { ...RUN, id: "run-paused02", status: "paused", completedAt: null, summary: null, sessionId: session };
+      stubFetch({ enabled: true, readiness: READY }, [noSession, withSession], { projects: [SITE_PROJECT] });
+      const opened: string[] = [];
+      const onTerminal = (e: Event) => opened.push((e as CustomEvent<{ command: string }>).detail.command);
+      window.addEventListener("clawbox:open-terminal", onTerminal);
+      try {
+        render(<CodingAgentApp />);
+        await openRuns();
+        const terminal = await screen.findByTestId("coding-agent-terminal-run-paused02");
+        // The session-less row offered a button that only ran `cd`.
+        expect(screen.queryByTestId("coding-agent-terminal-run-paused01")).not.toBeInTheDocument();
+        fireEvent.click(terminal);
+        expect(opened).toEqual([`cd '${RUN.directory}' && claude-ds --resume ${session}`]);
+      } finally {
+        window.removeEventListener("clawbox:open-terminal", onTerminal);
+      }
+    });
+
+    it("labels a review pass with the run it reviewed, and a tap jumps there", async () => {
+      // The record carries reviewOf but the row used to read as an ordinary
+      // run whose task was a wall of the fixed review text.
+      const reviewed = { ...RUN, id: "run-reviewed1" };
+      const review = {
+        ...RUN, id: "run-review001", reviewOf: "run-reviewed1", summary: "Nothing real was found.",
+        task: "Automatic review pass. Adversarially review the work you just delivered in this folder: read the diff of your last commit",
+      };
+      stubFetch({ enabled: true, readiness: READY }, [review, reviewed], { projects: [SITE_PROJECT] });
+      // jsdom has no scrollIntoView; record which row the app asked for.
+      const scrolled: string[] = [];
+      const proto = Element.prototype as { scrollIntoView?: unknown };
+      const original = proto.scrollIntoView;
+      proto.scrollIntoView = function (this: HTMLElement) { scrolled.push(this.dataset.runId ?? ""); };
+      try {
+        render(<CodingAgentApp />);
+        await openRuns();
+        const chip = await screen.findByTestId("coding-agent-review-of");
+        expect(chip.textContent).toBe(t("codingAgent.reviewOf", { id: "run-reviewed1" }));
+        expect(chip.tagName).toBe("BUTTON");
+        expect(screen.getByText(t("codingAgent.reviewPassTitle", { id: "run-reviewed1" }))).toBeInTheDocument();
+        expect(screen.queryByText(/Adversarially review/)).not.toBeInTheDocument();
+        // The reviewed run says who reviewed it.
+        expect(screen.getByTestId("coding-agent-reviewed-by").textContent).toBe(t("codingAgent.reviewedBy", { id: "run-review001" }));
+
+        expect(screen.queryByText(/Added the toggle/)).not.toBeInTheDocument();
+        fireEvent.click(chip);
+        expect(await screen.findByText(/Added the toggle/)).toBeInTheDocument();
+        expect(scrolled).toEqual(["run-reviewed1"]);
+      } finally {
+        proto.scrollIntoView = original;
+      }
+    });
+
+    it("tells the desktop when it starts a drafted run, so an open chat looks for it", async () => {
+      const draft = { ...RUN, id: "run-draft001", status: "draft", completedAt: null, summary: null };
+      stubFetch({ enabled: true, readiness: READY }, [draft], { projects: [SITE_PROJECT] });
+      let heard = 0;
+      const onStarted = () => { heard += 1; };
+      window.addEventListener(CODING_RUN_STARTED_EVENT, onStarted);
+      try {
+        render(<CodingAgentApp />);
+        await openRuns();
+        fireEvent.click(await screen.findByTestId("coding-agent-start-run-draft001"));
+        await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/start", body: { runId: "run-draft001" } }));
+        await waitFor(() => expect(heard).toBe(1));
+      } finally {
+        window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
+      }
+    });
+
     it("says when there is nothing to show yet", async () => {
       stubFetch({ enabled: true, readiness: READY }, [], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
@@ -423,6 +579,24 @@ describe("the harness self-test", () => {
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
     expect(await screen.findByTestId("coding-agent-harness-test")).toBeDisabled();
+  });
+
+  it("tells the desktop a run started, once the route has said so", async () => {
+    // The chat's run card only probes the box when told; a run started from
+    // here while the chat sat open was never adopted.
+    stubFetch({ enabled: true, readiness: READY }, []);
+    let heard = 0;
+    const onStarted = () => { heard += 1; };
+    window.addEventListener(CODING_RUN_STARTED_EVENT, onStarted);
+    try {
+      render(<CodingAgentApp />);
+      fireEvent.click(await screen.findByTestId("coding-agent-open-settings"));
+      fireEvent.click(await screen.findByTestId("coding-agent-harness-test"));
+      await waitFor(() => expect(posts.some((p) => p.url === "/setup-api/coding-agent/run")).toBe(true));
+      await waitFor(() => expect(heard).toBe(1));
+    } finally {
+      window.removeEventListener(CODING_RUN_STARTED_EVENT, onStarted);
+    }
   });
 });
 
@@ -655,6 +829,52 @@ describe("projects", () => {
     fireEvent.click(screen.getAllByTestId("coding-agent-project-site")[1]);
     await screen.findByTestId("coding-agent-project-page");
     expect(await screen.findByText(RUN.task)).toBeInTheDocument();
+  });
+
+  it("re-reads the git block when the project's last commit changes, and not otherwise", async () => {
+    // The block was read once when the page opened, so after a run committed
+    // it kept the old count while the run row below said "Committed as …".
+    // The projects poll already surfaces the new commit; the block follows it.
+    const project = { ...PROJECT, kind: "codeProject", directory: "/home/clawbox/clawbox/data/code-projects/site" };
+    const git = { branch: "main", commits: 1, remote: null, lastCommit: { subject: "first", date: Date.now() - 3600_000 } };
+    stubFetch({ enabled: true, readiness: READY }, [], { projects: [project], git });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    await screen.findByTestId("coding-agent-project-page");
+    await waitFor(() => expect(gitReads).toHaveLength(1));
+
+    // A re-read of the box with nothing new is not a git read.
+    window.dispatchEvent(new Event(CODING_AGENT_CHANGED_EVENT));
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(gitReads).toHaveLength(1);
+
+    project.lastCommit = { subject: "Coding agent: add a footer", date: Date.now() };
+    git.commits = 2;
+    git.lastCommit = project.lastCommit;
+    window.dispatchEvent(new Event(CODING_AGENT_CHANGED_EVENT));
+    await waitFor(() => expect(gitReads).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-git-info").textContent).toContain(t("codingAgent.gitCommits", { n: 2 })));
+  });
+
+  it("re-reads the git block after a backup, so the remote line follows the push", async () => {
+    const git: { branch: string | null; commits: number; remote: string | null; lastCommit: { subject: string; date: number } | null } = {
+      branch: "main", commits: 1, remote: null, lastCommit: { subject: "first", date: Date.now() - 3600_000 },
+    };
+    stubFetch({ enabled: true, readiness: READY }, [], {
+      projects: [PROJECT], git,
+      github: { installed: true, connected: true, login: "yalexx", loginCommand: "gh auth login" },
+    });
+    render(<CodingAgentApp />);
+    fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
+    const backup = await screen.findByTestId("coding-agent-project-backup");
+    await waitFor(() => expect(gitReads).toHaveLength(1));
+    expect(screen.getByTestId("coding-agent-git-info").textContent).toContain(translations.en["codingAgent.gitNoRemote"]);
+
+    git.remote = "git@github.com:yalexx/site.git";
+    fireEvent.click(backup);
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/git", body: { directory: PROJECT.directory } }));
+    await waitFor(() => expect(gitReads).toHaveLength(2));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-git-info").textContent).toContain("git@github.com:yalexx/site.git"));
   });
 
   it("says in words when there are none, naming the folder it looked in", async () => {

@@ -11,6 +11,7 @@ import path from "path";
 import { DATA_DIR } from "./config-store";
 import { registerWebappInPreferences } from "./webapp-registry";
 import { ensureWebappIcon, htmlHint, safeAppId } from "./webapp-icon";
+import { WEBAPP_KV_CLIENT_SNIPPET } from "./webapp-sandbox";
 
 // ── Paths ──
 
@@ -182,6 +183,10 @@ export async function initProject(
 
   const template = opts?.template || "app";
 
+  // Both scaffolds carry the KV bridge (src/lib/webapp-sandbox.ts): the built
+  // app runs in a sandboxed frame with no ClawBox session, so this is the one
+  // way it can persist anything, and the field guide tells the agent to call
+  // window.clawboxKv as if it were already there.
   if (template === "blank") {
     await fs.writeFile(
       path.join(dir, "index.html"),
@@ -191,6 +196,7 @@ export async function initProject(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(projectName)}</title>
+  ${WEBAPP_KV_CLIENT_SNIPPET}
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
@@ -212,6 +218,7 @@ export async function initProject(
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(projectName)}</title>
+  ${WEBAPP_KV_CLIENT_SNIPPET}
   <link rel="stylesheet" href="style.css">
 </head>
 <body>

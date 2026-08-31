@@ -23,13 +23,14 @@ import path from "path";
 const mocks = vi.hoisted(() => ({
   generate: vi.fn(),
   hasToken: vi.fn(),
+  kvGet: vi.fn(),
   kvSet: vi.fn(),
   register: vi.fn(),
 }));
 
 vi.mock("@/lib/harness/clawai-images", () => ({ generateClawaiImage: mocks.generate }));
 vi.mock("@/lib/harness/credentials", () => ({ hasClawaiToken: mocks.hasToken }));
-vi.mock("@/lib/kv-store", () => ({ kvSet: mocks.kvSet }));
+vi.mock("@/lib/kv-store", () => ({ kvGet: mocks.kvGet, kvSet: mocks.kvSet }));
 // deployWebapp's durable registration is config-store IO covered elsewhere.
 vi.mock("@/lib/webapp-registry", () => ({ registerWebappInPreferences: mocks.register }));
 
@@ -100,6 +101,7 @@ beforeEach(async () => {
   originalRoot = process.env.CLAWBOX_ROOT;
   process.env.CLAWBOX_ROOT = tmpRoot;
   mocks.hasToken.mockResolvedValue(true);
+  mocks.kvGet.mockReturnValue(null);
   mocks.register.mockResolvedValue(undefined);
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   mod = await import("@/lib/webapp-icon");
@@ -136,11 +138,14 @@ describe("ensureWebappIcon", () => {
     expect(fs.readdirSync(path.dirname(iconPath("todo-list")))).toEqual(["todo-list.png"]);
 
     // The desktop is told through the same action the MCP tool pushes, with a
-    // NEW iconUrl so the icon component's props actually change.
+    // NEW iconUrl so the icon component's props actually change — appended to
+    // the owner-notice ring, so every open desktop gets it.
     expect(mocks.kvSet).toHaveBeenCalledTimes(1);
     const [key, value] = mocks.kvSet.mock.calls[0] as [string, string];
-    expect(key).toBe("ui:pending-action");
-    const action = JSON.parse(value);
+    expect(key).toBe("ui:pending-actions");
+    const ring = JSON.parse(value) as Record<string, unknown>[];
+    expect(ring).toHaveLength(1);
+    const action = ring[0];
     expect(action).toMatchObject({
       type: "register_webapp",
       appId: "todo-list",

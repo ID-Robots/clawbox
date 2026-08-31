@@ -233,6 +233,37 @@ describe("coding_agent_status", () => {
     );
   });
 
+  it("describes a draft as not started, never with a duration", async () => {
+    // elapsed() on a draft would measure time since drafting — "draft after
+    // 17h 45m" told the assistant a run had been going for hours.
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "draft", completedAt: undefined } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Run run-k3x9q2ab: draft \(not started\)/);
+    expect(out.text).not.toMatch(/draft after/);
+  });
+
+  it("names the run an automatic review pass belongs to, in the description and the listing", async () => {
+    // A review pass's task text is the harness's fixed brief, so without this
+    // line the assistant could not tell which run it reviewed once the
+    // progress tail had cut the only other mention.
+    const review = { ...RUN, id: "run-review01", task: "Automatic review pass. Adversarially review…", reviewOf: RUN.id };
+    apiGet.mockResolvedValue({ run: review });
+    const one = await harness().call("coding_agent_status", { run_id: "run-review01" });
+    expect(one.isError).toBe(false);
+    if (one.isError) return;
+    expect(one.text).toContain(`Automatic review pass of ${RUN.id}`);
+
+    apiGet.mockResolvedValue({ runs: [review, RUN] });
+    const list = await harness().call("coding_agent_status", {});
+    expect(list.isError).toBe(false);
+    if (list.isError) return;
+    const rows = JSON.parse(list.text) as { run_id: string; review_of?: string }[];
+    expect(rows[0].review_of).toBe(RUN.id);
+    expect(rows[1].review_of).toBeUndefined();
+  });
+
   it("keeps the summary when the output cap bites — the activity log is what gets cut", async () => {
     // A real worst case, not a token one: the runner keeps 60 progress lines
     // of up to MAX_PROGRESS_LINE_CHARS (160) and caps a summary at 6 000, so a

@@ -22,17 +22,30 @@ process.env.CLAWBOX_ROOT = ROOT;
 
 const SKILLS_ROOT = path.join(ROOT, "openclaw-workspace");
 
+// Inline implementations, not chained .mockResolvedValue: the config's
+// `mockReset: true` wipes chained values before every test while a vi.fn(impl)
+// keeps its implementation, and this factory only runs once per file.
 vi.mock("@/lib/openclaw-config", () => ({
   getSkillsDir: vi.fn(() => SKILLS_ROOT),
+  clearSkillEntry: vi.fn(async () => false),
+}));
+
+// The rescan behind an uninstall would spawn the real openclaw CLI here.
+vi.mock("@/lib/openclaw-skill-info", () => ({
+  refreshSkillsCache: vi.fn(),
+}));
+
+vi.mock("@/lib/kv-store", () => ({
+  kvDelete: vi.fn(),
 }));
 
 vi.mock("@/lib/preference-store", () => ({
-  setPreferences: vi.fn().mockResolvedValue(undefined),
+  setPreferences: vi.fn(async () => undefined),
 }));
 
 vi.mock("@/lib/config-store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/config-store")>();
-  return { ...actual, getAll: vi.fn().mockResolvedValue({}) };
+  return { ...actual, getAll: vi.fn(async () => ({})) };
 });
 
 const WEBAPPS = path.join(ROOT, "data", "webapps");

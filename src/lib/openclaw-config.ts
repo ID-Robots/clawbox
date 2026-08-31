@@ -900,6 +900,48 @@ async function writeConfig(config: OpenClawConfig): Promise<void> {
 }
 
 /**
+ * `skills.entries.<id>.enabled` — the switch the installed-app window flips.
+ *
+ * Written directly rather than through `openclaw config set`: that CLI costs
+ * 10–17 s per call on the Jetson (the App Store's toggle used to spend a 10 s
+ * budget on it and answer 500 after the value had already landed), while the
+ * gateway hot-reloads exactly this key from the file, so a JSON write is the
+ * same change without the wait. Absent means enabled, which is OpenClaw's
+ * default too.
+ */
+export async function readSkillEnabled(skillId: string): Promise<boolean> {
+  const config = await readConfig();
+  const skills = config.skills;
+  const entries = isPlainObject(skills) ? skills.entries : undefined;
+  const entry = isPlainObject(entries) ? entries[skillId] : undefined;
+  return !(isPlainObject(entry) && entry.enabled === false);
+}
+
+export async function setSkillEnabled(skillId: string, enabled: boolean): Promise<void> {
+  const config = await readConfigStrict();
+  const skills = ensurePlainObject(asBag(config), "skills");
+  const entries = ensurePlainObject(skills, "entries");
+  const entry = ensurePlainObject(entries, skillId);
+  entry.enabled = enabled;
+  await writeConfig(config);
+}
+
+/**
+ * Drop `skills.entries.<id>` when an app is uninstalled, so a later install
+ * under the same id does not inherit a stale `enabled: false`. Answers whether
+ * anything was written; a config with no such entry is left untouched.
+ */
+export async function clearSkillEntry(skillId: string): Promise<boolean> {
+  const config = await readConfigStrict();
+  const skills = config.skills;
+  const entries = isPlainObject(skills) ? skills.entries : undefined;
+  if (!isPlainObject(entries) || !Object.prototype.hasOwnProperty.call(entries, skillId)) return false;
+  delete entries[skillId];
+  await writeConfig(config);
+  return true;
+}
+
+/**
  * Keep Microsoft's bundled Edge TTS out of the speech chain.
  *
  * OpenClaw's fallback order is every registered speech provider sorted by a

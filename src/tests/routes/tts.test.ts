@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * TASK-434 — /setup-api/tts.
@@ -13,15 +13,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const readConfigMock = vi.fn();
 const configSetMock = vi.fn();
 const ttsInventoryMock = vi.fn();
-const spawnMock = vi.fn();
 const accessMock = vi.fn();
 const readStateMock = vi.fn();
 const writeStateMock = vi.fn();
+const preferenceMock = vi.fn();
 
 vi.mock("@/lib/openclaw-config", () => ({
   readConfig: (...a: unknown[]) => readConfigMock(...a),
   runOpenclawConfigSet: (...a: unknown[]) => configSetMock(...a),
-  findOpenclawBin: () => "/usr/local/bin/openclaw",
   openclawIsAbsent: () => false,
 }));
 
@@ -37,16 +36,15 @@ vi.mock("@/lib/voice-output-store", () => ({
   writeLocalVoice: vi.fn(async () => {}),
 }));
 
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
-  return { ...actual, spawn: (...a: unknown[]) => spawnMock(...a) };
-});
+vi.mock("@/lib/config-store", () => ({
+  get: (...a: unknown[]) => preferenceMock(...a),
+}));
 
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
   return {
     ...actual,
-    promises: { ...actual.promises, access: (...a: unknown[]) => accessMock(...a), unlink: async () => {} },
+    promises: { ...actual.promises, access: (...a: unknown[]) => accessMock(...a) },
   };
 });
 
@@ -66,25 +64,6 @@ const piperInstalled = [{
   control: "none", detail: "Speaks on demand.",
 }];
 
-/** A fake `openclaw capability tts convert --json` that prints `stdout` and exits `code`. */
-function cliEmits(stdout: string, code = 0) {
-  return () => {
-    const handlers: Record<string, ((arg: unknown) => void)[]> = {};
-    const stream = (chunk: string) => ({
-      on: (_e: string, cb: (b: Buffer) => void) => { if (chunk) setTimeout(() => cb(Buffer.from(chunk)), 0); },
-    });
-    setTimeout(() => (handlers.close ?? []).forEach(cb => cb(code)), 5);
-    return {
-      stdout: stream(stdout),
-      stderr: stream(""),
-      kill: () => {},
-      on: (event: string, cb: (arg: unknown) => void) => {
-        (handlers[event] ??= []).push(cb);
-      },
-    };
-  };
-}
-
 async function route() {
   return await import("@/app/setup-api/tts/route");
 }
@@ -102,17 +81,10 @@ beforeEach(() => {
   readConfigMock.mockReset().mockResolvedValue(config());
   configSetMock.mockReset().mockResolvedValue(undefined);
   ttsInventoryMock.mockReset().mockResolvedValue(piperInstalled);
-  spawnMock.mockReset();
   accessMock.mockReset().mockResolvedValue(undefined);
-  readStateMock.mockReset().mockResolvedValue({ choice: "auto", engineChecks: {}, lastCheck: null });
+  readStateMock.mockReset().mockResolvedValue({ choice: "auto" });
   writeStateMock.mockReset().mockResolvedValue(undefined);
-});
-
-// Fake timers installed by one test must not survive a failing assertion: the
-// tests after it drive `cliEmits`, whose close event is a setTimeout, and would
-// hang and report a second, misleading failure.
-afterEach(() => {
-  vi.useRealTimers();
+  preferenceMock.mockReset().mockResolvedValue(undefined);
 });
 
 describe("GET /setup-api/tts", () => {
@@ -125,19 +97,39 @@ describe("GET /setup-api/tts", () => {
     expect(body.activeProviderId).toBe(LOCAL);
   });
 
-  it("never spawns the openclaw CLI just to render the panel", async () => {
+  it("never runs the openclaw CLI just to render the panel", async () => {
     const { GET } = await route();
     await GET();
     // The CLI costs 8-12s of cold start on an Orin. A panel that pays it on
     // open reads as a broken box.
-    expect(spawnMock).not.toHaveBeenCalled();
+    expect(configSetMock).not.toHaveBeenCalled();
   });
 
-  it("calls the local voice unusable when its command is gone, however healthy the voices look", async () => {
+  it("calls the local voice unavailable when its command is gone, however healthy the voices look", async () => {
     accessMock.mockRejectedValue(new Error("ENOENT"));
     const { GET } = await route();
     const body = await (await GET()).json();
-    expect(body.engines.find((e: { id: string }) => e.id === "local").usable).toBe(false);
+    expect(body.engines.find((e: { id: string }) => e.id === "local").configured).toBe(false);
+  });
+
+  it("shows the sample in the desktop's language until the owner picks one", async () => {
+    // A German owner opening the tab should read a German sample, not set the
+    // language twice — and the UI language is read, never written into the
+    // voice state, so changing it later still moves the sample along.
+    preferenceMock.mockResolvedValue("de");
+    const { GET } = await route();
+    expect((await (await GET()).json()).language).toBe("de");
+    expect(preferenceMock).toHaveBeenCalledWith("pref:ui_language");
+    expect(writeStateMock).not.toHaveBeenCalled();
+
+    readStateMock.mockResolvedValue({ choice: "auto", language: "fr" });
+    expect((await (await GET()).json()).language).toBe("fr");
+  });
+
+  it("falls back to English when the desktop's language is not one the sample comes in", async () => {
+    preferenceMock.mockResolvedValue("tlh");
+    const { GET } = await route();
+    expect((await (await GET()).json()).language).toBe("en");
   });
 });
 
@@ -150,14 +142,16 @@ describe("POST /setup-api/tts — select", () => {
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(200);
     expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", LOCAL]);
-    expect(writeStateMock.mock.calls[0][0].choice).toBe("local");
+    // The choice, and nothing the owner did not pick: no backfilled language.
+    expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
   });
 
   it("refuses a cloud voice the box cannot use, and changes nothing", async () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "cloud" }));
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "That voice is not available on this box." });
+    // The sentence for whoever reads the JSON, the code for the panel to translate.
+    expect(await res.json()).toEqual({ error: "That voice is not available on this box.", code: "not_available" });
     expect(configSetMock).not.toHaveBeenCalled();
     expect(writeStateMock).not.toHaveBeenCalled();
   });
@@ -190,166 +184,36 @@ describe("POST /setup-api/tts — select", () => {
     expect(writeStateMock).not.toHaveBeenCalled();
   });
 
-  it("rejects an invented choice", async () => {
-    const { POST } = await route();
-    expect((await POST(post({ action: "select", choice: "cheapest" }))).status).toBe(400);
-    expect((await POST(post({ action: "teleport" }))).status).toBe(400);
-  });
-});
-
-describe("POST /setup-api/tts — check", () => {
-  it("records which voice actually spoke", async () => {
-    spawnMock.mockImplementation(cliEmits(JSON.stringify({
-      ok: true,
-      provider: LOCAL,
-      attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 14893 }],
-    })));
-    const { POST } = await route();
-    const body = await (await POST(post({ action: "check" }))).json();
-    // The answer carries the run that just happened, rather than a status
-    // re-read from disk that would cost the box a third probe.
-    expect(body.lastCheck.servedEngine).toBe("local");
-    expect(body.engines.find((e: { id: string }) => e.id === "local").proven).toBe(true);
-    const saved = writeStateMock.mock.calls[0][0];
-    expect(saved.lastCheck.ok).toBe(true);
-    expect(saved.lastCheck.servedEngine).toBe("local");
-    expect(saved.engineChecks.local.ok).toBe(true);
-  });
-
-  it("records the failed cloud attempt and the local voice that spoke after it", async () => {
-    spawnMock.mockImplementation(cliEmits(JSON.stringify({
-      ok: true,
-      provider: LOCAL,
-      attempts: [
-        { provider: "openai", outcome: "error", error: "rejected by the voice service" },
-        { provider: LOCAL, outcome: "success", latencyMs: 1200 },
-      ],
-    })));
-    const { POST } = await route();
-    await POST(post({ action: "check" }));
-    const saved = writeStateMock.mock.calls[0][0];
-    expect(saved.engineChecks.cloud.ok).toBe(false);
-    expect(saved.engineChecks.local.ok).toBe(true);
-  });
-
-  it("records a failure when the CLI produced no usable output at all", async () => {
-    spawnMock.mockImplementation(cliEmits("Error: TTS conversion failed", 1));
-    const { POST } = await route();
-    const res = await POST(post({ action: "check" }));
-    expect(res.status).toBe(200);
-    expect(writeStateMock.mock.calls[0][0].lastCheck.ok).toBe(false);
-  });
-
-
-  it("records a failure when the openclaw binary cannot be started at all", async () => {
-    spawnMock.mockImplementation(() => {
-      const handlers: Record<string, ((arg: unknown) => void)[]> = {};
-      setTimeout(() => (handlers.error ?? []).forEach(cb => cb(new Error("spawn ENOENT"))), 0);
-      return {
-        stdout: { on: () => {} },
-        stderr: { on: () => {} },
-        kill: () => {},
-        on: (event: string, cb: (arg: unknown) => void) => { (handlers[event] ??= []).push(cb); },
-      };
-    });
-    const { POST } = await route();
-    const res = await POST(post({ action: "check" }));
-    // A box with no CLI must record "no voice could speak", not throw a 500 out
-    // of the handler and leave the panel with the previous success on screen.
-    expect(res.status).toBe(200);
-    expect(writeStateMock.mock.calls[0][0].lastCheck.ok).toBe(false);
-  });
-
-  it("kills a conversion that never finishes and records that", async () => {
-    vi.useFakeTimers();
-    let killed = false;
-    spawnMock.mockImplementation(() => ({
-      stdout: { on: () => {} },
-      stderr: { on: () => {} },
-      kill: () => { killed = true; },
-      on: () => {},                       // never closes, never errors
-    }));
-    const { POST } = await route();
-    const pending = POST(post({ action: "check" }));
-    await vi.advanceTimersByTimeAsync(121_000);
-    const res = await pending;
-    expect(killed).toBe(true);
-    expect(res.status).toBe(200);
-    const saved = writeStateMock.mock.calls[0][0].lastCheck;
-    expect(saved.ok).toBe(false);
-    expect(saved.message).toContain("took too long");
-  });
-
-  it("joins a check already in flight instead of starting a second synthesis", async () => {
-    // Two of these at once means two engines competing for the same GPU on an
-    // 8 GB board, and the client-side busy flag cannot stop a second tab.
-    spawnMock.mockImplementation(cliEmits(JSON.stringify({
-      ok: true, provider: LOCAL, attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 900 }],
-    })));
-    const { POST } = await route();
-    const [a, b] = await Promise.all([POST(post({ action: "check" })), POST(post({ action: "check" }))]);
-    expect(a.status).toBe(200);
-    expect(b.status).toBe(200);
-    expect(spawnMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("reads the state after the run, so a choice made during it survives", async () => {
-    // The handler must not hold a snapshot across its own 90 seconds: a
-    // customer who picks a different voice while the check runs would
-    // otherwise have that choice written back over by the stale copy.
-    const order: string[] = [];
-    spawnMock.mockImplementation((...args: unknown[]) => {
-      order.push("spawn");
-      return cliEmits(JSON.stringify({
-        ok: true, provider: LOCAL, attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 900 }],
-      }))(...(args as []));
-    });
-    readStateMock.mockImplementation(async () => {
-      order.push("read");
-      // What the customer picked mid-run.
-      return { choice: "local", engineChecks: {}, lastCheck: null };
-    });
-    const { POST } = await route();
-    await POST(post({ action: "check" }));
-    expect(order.indexOf("spawn")).toBeLessThan(order.indexOf("read"));
-    expect(writeStateMock.mock.calls[0][0].choice).toBe("local");
-  });
-
-  it("does not lose a language picked while the check was writing its record", async () => {
-    // Both are read-modify-writes of the same state file. Unserialised, the
-    // check reads the state before the language write lands and then writes
-    // its stale copy over it: the owner's language is gone, or the check's
-    // record is, depending on who finished last.
-    let stored: Record<string, unknown> = { choice: "auto", engineChecks: {}, lastCheck: null };
+  it("does not lose a language picked while the selection's CLI write was running", async () => {
+    // Both are read-modify-writes of the same state file. The selection reads
+    // the state before its 8-12 s CLI call; unserialised, it would write that
+    // stale copy back over the language that landed in the meantime.
+    let stored: Record<string, unknown> = { choice: "auto" };
     readStateMock.mockImplementation(async () => ({ ...stored }));
     writeStateMock.mockImplementation(async (next: Record<string, unknown>) => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       stored = next;
     });
-    spawnMock.mockImplementation(cliEmits(JSON.stringify({
-      ok: true, provider: LOCAL, attempts: [{ provider: LOCAL, outcome: "success", latencyMs: 900 }],
-    })));
+    readConfigMock.mockResolvedValue(config({
+      messages: { tts: { provider: "openai", providers: { [LOCAL]: { command: "/opt/clawbox-tts.sh" } } } },
+    }));
+    configSetMock.mockImplementation(() => new Promise((resolve) => setTimeout(resolve, 30)));
     const { POST } = await route();
-    const [check, language] = await Promise.all([
-      POST(post({ action: "check" })),
+    const [select, language] = await Promise.all([
+      POST(post({ action: "select", choice: "local" })),
       POST(post({ action: "language", language: "de" })),
     ]);
-    expect(check.status).toBe(200);
+    expect(select.status).toBe(200);
     expect(language.status).toBe(200);
-    expect(stored.language).toBe("de");
-    expect((stored.lastCheck as { ok: boolean }).ok).toBe(true);
+    expect(stored).toEqual({ choice: "local", language: "de" });
   });
 
-  it("asks the CLI for the real chain rather than pinning one provider", async () => {
-    spawnMock.mockImplementation(cliEmits(JSON.stringify({ ok: true, attempts: [{ provider: LOCAL, outcome: "success" }] })));
+  it("rejects an invented choice", async () => {
     const { POST } = await route();
-    await POST(post({ action: "check" }));
-    const args = spawnMock.mock.calls[0][1] as string[];
-    expect(args.slice(0, 3)).toEqual(["capability", "tts", "convert"]);
-    // No --model: the question is what happens when THIS box speaks, and the
-    // answer includes the fallback.
-    expect(args).not.toContain("--model");
-    expect(args).toContain("--json");
+    expect((await POST(post({ action: "select", choice: "cheapest" }))).status).toBe(400);
+    expect((await POST(post({ action: "teleport" }))).status).toBe(400);
+    // The Check button is gone from the panel, and so is the action behind it.
+    expect((await POST(post({ action: "check" }))).status).toBe(400);
   });
 });
 
@@ -362,24 +226,7 @@ describe("POST /setup-api/tts — failure boundary", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: "Could not change the voice on this box." });
-  });
-
-  it("lets the customer ask again for an engine whose last check failed", async () => {
-    readConfigMock.mockResolvedValue(config({
-      models: { providers: { openai: { apiKey: "sk-live-abc" } } },
-    }));
-    readStateMock.mockResolvedValue({
-      choice: "auto",
-      engineChecks: { cloud: { providerId: "openai", engine: "cloud", ok: false, message: "rejected", latencyMs: null, at: 1 } },
-      lastCheck: null,
-    });
-    const { POST } = await route();
-    const res = await POST(post({ action: "select", choice: "cloud" }));
-    expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", "openai"]);
-    // And the box stops reporting the old failure about a choice just re-made.
-    expect(writeStateMock.mock.calls[0][0].engineChecks.cloud).toBeUndefined();
+    expect(await res.json()).toEqual({ error: "Could not change the voice on this box.", code: "cannot_change" });
   });
 });
 
@@ -431,7 +278,7 @@ describe("POST /setup-api/tts — voice and language", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "language", language: "de" }));
     expect(res.status).toBe(200);
-    expect(writeStateMock).toHaveBeenCalledWith(expect.objectContaining({ language: "de" }));
+    expect(writeStateMock).toHaveBeenCalledWith({ choice: "auto", language: "de" });
     expect((await POST(post({ action: "language", language: "tlh" }))).status).toBe(400);
   });
 

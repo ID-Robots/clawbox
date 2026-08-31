@@ -68,6 +68,9 @@ const BRAND_ONLY = new Set([
   "Pro", "Max", "Free", "ClawBox AI", "Hermes CLI", "macOS", "Windows", "Linux",
   "Linux/macOS", "SKILL.md", "Disk", "Memory",
   "Claude Code", "claude-ds",
+  // Claude Code's own name for its xhigh-plus-workflows mode (`--effort
+  // ultracode`); the label matches what the terminal prints.
+  "Ultracode",
   // A loanword that is genuinely identical in several languages.
   "tokens",
   // A filesystem path shown as a placeholder. Translating it would invent a
@@ -81,6 +84,9 @@ function untranslated(locale: Exclude<Locale, "en">, keys: string[]): string[] {
     const value = table[key];
     if (value === undefined) return false; // reported by the completeness test
     if (value !== hermesEn[key]) return false;
+    // A value that is nothing but placeholders ("{model}") has no words to
+    // translate, so it is identical in every locale by construction.
+    if (/^(\s*\{\w+\}\s*)+$/.test(value)) return false;
     return !BRAND_ONLY.has(value.trim());
   });
 }

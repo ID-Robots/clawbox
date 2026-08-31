@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  applyCheck,
   buildVoiceDisclosure,
   buildVoiceOutputStatus,
   cloudCredentialIsUnusable,
@@ -8,13 +7,10 @@ import {
   configuredTtsProviderId,
   DEFAULT_VOICE_STATE,
   engineForProviderId,
-  failedVoiceCheck,
   isVoiceChoice,
   LOCAL_TTS_PROVIDER_ID,
   localCommandPath,
-  parseVoiceCheck,
   providerIdForChoice,
-  forgetEngineCheck,
   resolvePreferredEngine,
   selectionError,
   type LocalVoiceProbe,
@@ -56,7 +52,6 @@ const healthyLocal: LocalVoiceProbe = {
 
 const state = (over: Partial<VoiceOutputState> = {}): VoiceOutputState => ({
   ...DEFAULT_VOICE_STATE,
-  engineChecks: {},
   ...over,
 });
 
@@ -64,8 +59,6 @@ const engine = (over: Partial<VoiceEngine> & Pick<VoiceEngine, "id">): VoiceEngi
   providerId: over.id === "local" ? LOCAL_TTS_PROVIDER_ID : "openai",
   label: over.id === "local" ? "On this box" : "ClawBox cloud",
   configured: true,
-  proven: false,
-  usable: true,
   detail: "",
   ...over,
 });
@@ -128,7 +121,7 @@ describe("status", () => {
   it("shows the cloud voice as unavailable on a stock box, with a reason a customer can act on", () => {
     const status = buildVoiceOutputStatus(config(), healthyLocal, state());
     const cloud = status.engines.find(e => e.id === "cloud")!;
-    expect(cloud.usable).toBe(false);
+    expect(cloud.configured).toBe(false);
     // The old copy said ClawBox AI "does not serve the voice yet". It does, on
     // Max, since 2026-08-22 — so what a box landing here has to be told is that
     // ITS key does not open one, not that the product has none (TASK-490).
@@ -152,7 +145,7 @@ describe("status", () => {
     const cloud = status.engines.find(e => e.id === "cloud")!;
     const local = status.engines.find(e => e.id === "local")!;
 
-    expect(local.usable).toBe(false);
+    expect(local.configured).toBe(false);
     expect(status.preferredEngine).toBe(null);
     expect(cloud.detail).not.toMatch(/own voice|speaks on the box|this box speaks/i);
   });
@@ -172,34 +165,17 @@ describe("status", () => {
     expect(status.drifted).toBe(true);
   });
 
-  it("marks the local voice unusable when no on-device engine is installed", () => {
+  it("marks the local voice unavailable when no on-device engine is installed", () => {
     const status = buildVoiceOutputStatus(config(), { ...healthyLocal, engineInstalled: false }, state());
     const local = status.engines.find(e => e.id === "local")!;
-    expect(local.usable).toBe(false);
+    expect(local.configured).toBe(false);
     expect(local.detail).toContain("cannot speak by itself");
     expect(status.preferredEngine).toBeNull();
   });
 
-  it("marks an engine unusable after a real check through it failed, and says so", () => {
-    const failed = state({
-      engineChecks: {
-        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: false, message: "no voice model", latencyMs: 12, at: 5 },
-      },
-    });
-    const local = buildVoiceOutputStatus(config(), healthyLocal, failed).engines.find(e => e.id === "local")!;
-    expect(local.usable).toBe(false);
-    expect(local.detail).toContain("no voice model");
-  });
-
-  it("marks an engine proven once a real check through it succeeded", () => {
-    const proven = state({
-      engineChecks: {
-        local: { providerId: LOCAL_TTS_PROVIDER_ID, engine: "local", ok: true, message: null, latencyMs: 900, at: 5 },
-      },
-    });
-    const local = buildVoiceOutputStatus(config(), healthyLocal, proven).engines.find(e => e.id === "local")!;
-    expect(local.proven).toBe(true);
-    expect(local.usable).toBe(true);
+  it("shows English until the owner picks a sample language, and their pick afterwards", () => {
+    expect(buildVoiceOutputStatus(config(), healthyLocal, state()).language).toBe("en");
+    expect(buildVoiceOutputStatus(config(), healthyLocal, state({ language: "de" })).language).toBe("de");
   });
 });
 
@@ -215,16 +191,16 @@ describe("choice resolution", () => {
     expect(resolvePreferredEngine("auto", both)).toBe("cloud");
   });
 
-  it("steps aside rather than pinning an engine the box cannot use", () => {
-    const noCloud = [engine({ id: "local" }), engine({ id: "cloud", usable: false })];
+  it("steps aside rather than pinning an engine the box does not have", () => {
+    const noCloud = [engine({ id: "local" }), engine({ id: "cloud", configured: false })];
     expect(resolvePreferredEngine("auto", noCloud)).toBe("local");
     expect(resolvePreferredEngine("cloud", noCloud)).toBe("local");
   });
 
   it("resolves to nothing when neither engine can speak", () => {
     const none = [
-      engine({ id: "local", usable: false, configured: false }),
-      engine({ id: "cloud", usable: false, configured: false }),
+      engine({ id: "local", configured: false }),
+      engine({ id: "cloud", configured: false }),
     ];
     expect(resolvePreferredEngine("auto", none)).toBeNull();
     expect(providerIdForChoice("local", none)).toBeNull();
@@ -255,77 +231,22 @@ describe("the privacy notice is the chat one, not a second one", () => {
   });
 
   it("says nothing when the box has no cloud voice at all", () => {
-    const engines = [engine({ id: "local" }), engine({ id: "cloud", usable: false, configured: false })];
+    const engines = [engine({ id: "local" }), engine({ id: "cloud", configured: false })];
     expect(buildVoiceDisclosure(LOCAL_TTS_PROVIDER_ID, engines)).toBeNull();
   });
-});
 
-describe("reading a real check", () => {
-  it("records which provider actually spoke", () => {
-    const check = parseVoiceCheck({
-      ok: true,
-      provider: LOCAL_TTS_PROVIDER_ID,
-      attempts: [{ provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", reasonCode: "success", latencyMs: 14893 }],
-    }, 100);
-    expect(check.ok).toBe(true);
-    expect(check.servedEngine).toBe("local");
-    expect(check.attempts[0].latencyMs).toBe(14893);
-  });
-
-  it("keeps the failed cloud attempt AND the local one that spoke after it", () => {
-    const check = parseVoiceCheck({
-      ok: true,
-      provider: LOCAL_TTS_PROVIDER_ID,
-      attempts: [
-        { provider: "openai", outcome: "error", error: "OpenAI TTS API error (401)" },
-        { provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 1200 },
-      ],
-    }, 100);
-    expect(check.ok).toBe(true);
-    expect(check.servedEngine).toBe("local");
-    expect(check.attempts.map(a => a.engine)).toEqual(["cloud", "local"]);
-    expect(check.attempts[0].ok).toBe(false);
-  });
-
-  it("never lets a credential out of a provider's error text", () => {
-    const check = parseVoiceCheck({
-      ok: false,
-      attempts: [{
-        provider: "openai",
-        outcome: "error",
-        error: "Incorrect API key provided: claw_example_not_a_real_token0000000000000000000063c.",
-      }],
-    }, 100);
-    expect(check.ok).toBe(false);
-    expect(check.attempts[0].message).toBeNull();
-    expect(JSON.stringify(check)).not.toContain("claw_");
-  });
-
-  it("is not a success just because the CLI exited ok with nothing spoken", () => {
-    expect(parseVoiceCheck({ ok: true, attempts: [] }, 100).ok).toBe(false);
-    expect(parseVoiceCheck("not json at all", 100).ok).toBe(false);
-  });
-
-  it("records a run that never reached a provider", () => {
-    const check = failedVoiceCheck("The voice check took too long and was stopped.", 7);
-    expect(check.ok).toBe(false);
-    expect(check.message).toContain("took too long");
-    expect(check.attempts).toEqual([]);
-  });
-
-  it("folds every attempt into the per-engine memory the panel reads", () => {
-    const check = parseVoiceCheck({
-      ok: true,
-      attempts: [
-        { provider: "openai", outcome: "error", error: "rejected" },
-        { provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 },
-      ],
-    }, 42);
-    const next = applyCheck(state(), check);
-    expect(next.engineChecks.cloud?.ok).toBe(false);
-    expect(next.engineChecks.local?.ok).toBe(true);
-    expect(next.engineChecks.local?.at).toBe(42);
-    expect(next.lastCheck).toBe(check);
+  it("hands the Voice tab the same fact unworded, so it can be said in the owner's language", () => {
+    const real = config({
+      messages: { tts: { provider: LOCAL_TTS_PROVIDER_ID, providers: { [LOCAL_TTS_PROVIDER_ID]: { command: "/x/clawbox-tts.sh" } } } },
+      models: { providers: { openai: { apiKey: "sk-live-abc" } } },
+    });
+    const status = buildVoiceOutputStatus(real, healthyLocal, state({ choice: "local" }));
+    expect(status.disclosure).toEqual({ kind: "may-use-cloud", providers: ["ClawBox AI"], primaryIsLocal: true });
+    expect(status.warning).toContain("may use ClawBox AI cloud TTS");
+    // And no cloud voice means no fact to disclose, in either shape.
+    const stock = buildVoiceOutputStatus(config(), healthyLocal, state());
+    expect(stock.disclosure).toBeNull();
+    expect(stock.warning).toBeNull();
   });
 });
 
@@ -339,7 +260,7 @@ describe("refusing an explicit pick", () => {
   });
 
   it("refuses a named engine the box does not have instead of substituting the other", () => {
-    const noCloud = [engine({ id: "local" }), engine({ id: "cloud", usable: false, configured: false })];
+    const noCloud = [engine({ id: "local" }), engine({ id: "cloud", configured: false })];
     expect(selectionError("cloud", noCloud)).toContain("not available");
     // Auto is still fine — resolving to whatever works is what Auto means.
     expect(selectionError("auto", noCloud)).toBeNull();
@@ -347,102 +268,17 @@ describe("refusing an explicit pick", () => {
 
   it("refuses Auto only when the box has no voice at all", () => {
     const none = [
-      engine({ id: "local", usable: false, configured: false }),
-      engine({ id: "cloud", usable: false, configured: false }),
+      engine({ id: "local", configured: false }),
+      engine({ id: "cloud", configured: false }),
     ];
     expect(selectionError("auto", none)).toContain("no voice");
   });
 
-  it("still reports what will actually speak after a pick that later broke", () => {
-    // Chosen cloud, cloud failed, so the gateway falls back — the panel must
-    // say "On this box" rather than keep claiming the cloud voice.
-    const broken = [engine({ id: "local" }), engine({ id: "cloud", usable: false })];
-    expect(resolvePreferredEngine("cloud", broken)).toBe("local");
-  });
-});
-
-describe("a failure must not lock the customer out of retrying", () => {
-  const cloudKey = (key: string) => config({ models: { providers: { openai: { apiKey: key } } } });
-  const failedCloud = () => applyCheck(state(), parseVoiceCheck({
-    ok: false,
-    attempts: [{ provider: "openai", outcome: "error", error: "rejected" }],
-  }, 1));
-
-  it("keeps the record of an engine this check did not attempt", () => {
-    // Clearing it here would let a known-bad engine read as merely unproven
-    // every time the other one is checked, and Auto would keep choosing it.
-    const thenLocalOnly = applyCheck(failedCloud(), parseVoiceCheck({
-      ok: true,
-      attempts: [{ provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 }],
-    }, 2));
-    expect(thenLocalOnly.engineChecks.cloud?.ok).toBe(false);
-    expect(thenLocalOnly.engineChecks.local?.ok).toBe(true);
-  });
-
-  it("stops Auto choosing a failed engine but still lets the customer ask for it", () => {
-    // The trap this closes: if a failure also removed the ability to pick the
-    // engine, it would be permanent by construction — Auto stops choosing it,
-    // so no later check routes through it, so nothing can ever clear it.
-    const engines = buildVoiceOutputStatus(cloudKey("sk-live-abc"), healthyLocal, failedCloud()).engines;
-    expect(resolvePreferredEngine("auto", engines)).toBe("local");
-    expect(selectionError("cloud", engines)).toBeNull();
-    expect(providerIdForChoice("cloud", engines)).toBe("openai");
-  });
-
   it("still refuses an engine the box genuinely does not have", () => {
     // A stock ClawBox: the portal token is not a cloud voice key, so there is
-    // nothing to retry and the refusal stands.
+    // nothing to pick and the refusal stands.
     const engines = buildVoiceOutputStatus(config(), healthyLocal, state()).engines;
     expect(selectionError("cloud", engines)).toContain("not available");
     expect(providerIdForChoice("cloud", engines)).toBeNull();
-  });
-
-  it("forgets what it observed about an engine the customer picks again", () => {
-    const retried = forgetEngineCheck(failedCloud(), "cloud");
-    expect(retried.engineChecks.cloud).toBeUndefined();
-    const cloud = buildVoiceOutputStatus(cloudKey("sk-live-abc"), healthyLocal, retried)
-      .engines.find(e => e.id === "cloud")!;
-    expect(cloud.usable).toBe(true);
-    expect(cloud.detail).toContain("not proven on this box yet");
-  });
-
-  it("leaves the other engine's record alone when one is retried", () => {
-    const both = applyCheck(state(), parseVoiceCheck({
-      ok: true,
-      attempts: [
-        { provider: "openai", outcome: "error", error: "rejected" },
-        { provider: LOCAL_TTS_PROVIDER_ID, outcome: "success", latencyMs: 900 },
-      ],
-    }, 3));
-    const retried = forgetEngineCheck(both, "cloud");
-    expect(retried.engineChecks.cloud).toBeUndefined();
-    expect(retried.engineChecks.local?.ok).toBe(true);
-  });
-});
-
-describe("the privacy notice follows what the box will attempt", () => {
-  it("still warns when the cloud primary is failing, because the text is still sent to it", () => {
-    // Found on a real box: the gateway posts the text to the configured primary,
-    // that call fails, and only then does the on-device voice speak. Dropping
-    // the notice because the engine is "not usable" would tell the customer
-    // nothing left the box while every reply was still being sent to the cloud.
-    const engines = [
-      engine({ id: "local" }),
-      engine({ id: "cloud", usable: false, configured: true }),
-    ];
-    expect(buildVoiceDisclosure("openai", engines)).toContain("Voice uses ClawBox AI cloud TTS");
-  });
-
-  it("warns conditionally when a failing cloud engine is only the fallback", () => {
-    const engines = [
-      engine({ id: "local" }),
-      engine({ id: "cloud", usable: false, configured: true }),
-    ];
-    expect(buildVoiceDisclosure(LOCAL_TTS_PROVIDER_ID, engines)).toContain("may use ClawBox AI cloud TTS");
-  });
-
-  it("says nothing when the box does not have a cloud voice at all", () => {
-    const engines = [engine({ id: "local" }), engine({ id: "cloud", usable: false, configured: false })];
-    expect(buildVoiceDisclosure(LOCAL_TTS_PROVIDER_ID, engines)).toBeNull();
   });
 });

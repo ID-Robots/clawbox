@@ -10,7 +10,8 @@ import StatusMessage from "./StatusMessage";
  * Claude Code runs (src/lib/coding-agent.ts), in one place.
  *
  * The switch, the default project folder, how hard a run thinks, the two
- * ceilings a run stops at, and the GitHub account its work is backed up to.
+ * ceilings a run stops at, the automatic review pass, and the GitHub account
+ * its work is backed up to.
  * These used to sit at the top of the Coding Agent desktop app, above the
  * run history; the owner wanted the app to be about the runs and the
  * settings to live with the other settings. The app keeps the readiness
@@ -39,7 +40,7 @@ export interface Readiness {
   problems: string[];
 }
 
-export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
 
 export interface GitHubState {
   installed: boolean;
@@ -69,10 +70,26 @@ export interface AgentStatus {
   maxMaxTurns: number;
   tokenLimit: number | null;
   minTokenLimit: number;
+  /** The owner's switch for the automatic review pass: one more run, in the
+   *  same session, after every completed run that changed files. */
+  reviewPass: boolean;
 }
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
 const GITHUB_REPROBE_MS = 15_000;
+
+/** How long a two-tap confirmation stays armed before the offer is taken back. */
+const CONFIRM_MS = 5_000;
+
+/**
+ * Where a refusal is shown. The three typed fields carry theirs right under
+ * the input that was refused; every other setting's lands at the foot of the
+ * settings card, and GitHub's under the GitHub card. Before this the one
+ * message sat below the GitHub card, a screen away from a Steps field that
+ * still held the refused number.
+ */
+type ErrorSlot = "dir" | "turns" | "tokens" | "settings" | "github";
+const FIELD_SLOTS: ReadonlySet<string> = new Set(["dir", "turns", "tokens"]);
 
 /** The slowest cadence GitHub's device flow ever asks for, in seconds. */
 const DEVICE_POLL_FLOOR_S = 5;
@@ -95,13 +112,15 @@ const FIELD = "rounded-lg bg-white/[0.04] border border-white/[0.08] px-3 py-1.5
 const SMALL_BUTTON = "text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 disabled:opacity-50";
 
 function Switch({
-  checked, busy, disabled, label, onChange,
+  checked, busy, disabled, label, onChange, testId = "coding-agent-switch",
 }: {
   checked: boolean;
   busy: boolean;
   disabled: boolean;
   label: string;
   onChange: (next: boolean) => void;
+  /** The main switch keeps the id it always had; the review pass has its own. */
+  testId?: string;
 }) {
   return (
     <div className="flex items-center gap-2 shrink-0">
@@ -112,7 +131,7 @@ function Switch({
           className="material-symbols-rounded motion-safe:animate-spin text-[var(--text-muted)]"
           style={{ fontSize: 18 }}
           aria-hidden="true"
-          data-testid="coding-agent-switch-busy"
+          data-testid={`${testId}-busy`}
         >
           progress_activity
         </span>
@@ -125,7 +144,7 @@ function Switch({
         aria-busy={busy}
         disabled={disabled || busy}
         onClick={() => onChange(!checked)}
-        data-testid="coding-agent-switch"
+        data-testid={testId}
         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${
           checked ? "bg-[var(--coral-bright)]" : "bg-gray-600"
         }`}
@@ -157,8 +176,27 @@ export default function CodingAgentSettingsPanel({
   /** Setting writes queued or in flight. Every setting control is disabled
    *  while this is above zero, so no second write can be started by hand. */
   const [pendingWrites, setPendingWrites] = useState(0);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ slot: ErrorSlot; message: string } | null>(null);
+  // Sign-out is two taps, like clearing history. The offer is taken back on
+  // its own after CONFIRM_MS: an armed red button found minutes later is a
+  // mis-tap waiting to happen. A timer rather than blur alone, because iOS
+  // Safari does not focus a button on tap, so on a phone a blur never comes.
   const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const confirmSignOutTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmSignOut = () => {
+    if (confirmSignOutTimer.current) clearTimeout(confirmSignOutTimer.current);
+    confirmSignOutTimer.current = null;
+    setConfirmSignOut(false);
+  };
+  const armSignOut = () => {
+    if (confirmSignOutTimer.current) clearTimeout(confirmSignOutTimer.current);
+    confirmSignOutTimer.current = setTimeout(() => {
+      confirmSignOutTimer.current = null;
+      setConfirmSignOut(false);
+    }, CONFIRM_MS);
+    setConfirmSignOut(true);
+  };
+  useEffect(() => () => { if (confirmSignOutTimer.current) clearTimeout(confirmSignOutTimer.current); }, []);
   /** A device-flow login in flight: the code the card shows and how often to
    *  ask github.com whether it was entered. */
   const [deviceLogin, setDeviceLogin] = useState<{ userCode: string; verificationUri: string; interval: number } | null>(null);
@@ -198,7 +236,7 @@ export default function CodingAgentSettingsPanel({
       setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
       setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
     } catch {
-      setError(tRef.current("codingAgent.loadFailed"));
+      setError({ slot: "settings", message: tRef.current("codingAgent.loadFailed") });
     } finally {
       setLoading(false);
     }
@@ -290,7 +328,7 @@ export default function CodingAgentSettingsPanel({
           notifyCodingAgentChanged();
         } else if (out.status === "failed") {
           setDeviceLogin(null);
-          setError(out.detail || tRef.current("codingAgent.githubStartFailed"));
+          setError({ slot: "github", message: out.detail || tRef.current("codingAgent.githubStartFailed") });
         }
       } catch {
         // Transient; keep polling.
@@ -319,6 +357,9 @@ export default function CodingAgentSettingsPanel({
    * on screen (and, through `publish`, in the sidebar). The controls are
    * disabled while a write is pending, and a write that slips in anyway (a
    * blur and a click in the same tick) is queued, not raced.
+   *
+   * `key` names the control, for its spinner — and, for the three typed
+   * fields, the slot its refusal is shown in.
    */
   const saveSetting = (patch: Record<string, unknown>, key: string, failMsg: string): Promise<AgentStatus | null> => {
     setPendingWrites((n) => n + 1);
@@ -339,7 +380,8 @@ export default function CodingAgentSettingsPanel({
         notifyCodingAgentChanged();
         return next;
       } catch (err) {
-        setError(err instanceof Error ? err.message : failMsg);
+        const slot = FIELD_SLOTS.has(key) ? key as ErrorSlot : "settings";
+        setError({ slot, message: err instanceof Error ? err.message : failMsg });
         return null;
       } finally {
         setBusy(null);
@@ -362,19 +404,25 @@ export default function CodingAgentSettingsPanel({
     if (next) setDirDraft(next.defaultDirectory ?? "");
   };
 
+  // The two blur-saved fields go back to the stored value whenever what was
+  // typed is not saved — blank, or refused by the route. A draft left holding
+  // a refused number would re-post that refusal on every blur, and the
+  // message beside the field already says what was wrong with it. The folder
+  // field is different: it saves only on an explicit Save or Enter, so a
+  // mistyped path stays put to be corrected rather than retyped.
   const saveTurns = async () => {
+    const stored = String(status?.maxTurns ?? "");
     // A blank Steps field means nothing — unlike a blank token field, which
-    // is "no ceiling" — so it goes back to the stored value rather than
-    // being posted: Number("") is 0, which the route refuses, and a draft
-    // left blank would re-post that refusal on every blur.
+    // is "no ceiling" — so it is never posted: Number("") is 0, which the
+    // route refuses.
     if ((turnsDraft ?? "").trim() === "") {
-      setTurnsDraft(String(status?.maxTurns ?? ""));
+      setTurnsDraft(stored);
       return;
     }
     const n = Number(turnsDraft);
     if (!Number.isFinite(n) || n === status?.maxTurns) return;
     const next = await saveSetting({ maxTurns: n }, "turns", t("codingAgent.turnsFailed"));
-    if (next) setTurnsDraft(String(next.maxTurns));
+    setTurnsDraft(next ? String(next.maxTurns) : stored);
   };
 
   const saveTokens = async () => {
@@ -382,8 +430,9 @@ export default function CodingAgentSettingsPanel({
     const limit = raw === "" ? null : Number(raw);
     if (limit !== null && !Number.isFinite(limit)) return;
     if (limit === (status?.tokenLimit ?? null)) return;
+    const stored = status?.tokenLimit == null ? "" : String(status.tokenLimit);
     const next = await saveSetting({ tokenLimit: limit }, "tokens", t("codingAgent.tokensFailed"));
-    if (next) setTokensDraft(next.tokenLimit == null ? "" : String(next.tokenLimit));
+    setTokensDraft(next ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : stored);
   };
 
   /** The GitHub device flow, driven by this card so it works from a phone:
@@ -403,7 +452,7 @@ export default function CodingAgentSettingsPanel({
       const data = await res.json() as { userCode: string; verificationUri: string; interval?: unknown };
       setDeviceLogin({ userCode: data.userCode, verificationUri: data.verificationUri, interval: devicePollSeconds(data.interval) });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.githubStartFailed"));
+      setError({ slot: "github", message: err instanceof Error ? err.message : t("codingAgent.githubStartFailed") });
     } finally {
       setBusy(null);
     }
@@ -425,9 +474,9 @@ export default function CodingAgentSettingsPanel({
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command: cmd } }));
   };
 
-  /** Disconnect GitHub. Two clicks, like clearing history: it is not
-   *  destructive — pushed repositories stay — but it is not what anyone means
-   *  to do by brushing a button. */
+  /** Disconnect GitHub. Two taps, like clearing history (see `armSignOut`):
+   *  it is not destructive — pushed repositories stay — but it is not what
+   *  anyone means to do by brushing a button. */
   const disconnectGithub = async () => {
     setBusy("gh-out");
     setError(null);
@@ -435,10 +484,9 @@ export default function CodingAgentSettingsPanel({
       const res = await fetch("/setup-api/coding-agent/git", { method: "DELETE" });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.githubOutFailed")));
       setGithub(await res.json() as GitHubState);
-      setConfirmSignOut(false);
       notifyCodingAgentChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("codingAgent.githubOutFailed"));
+      setError({ slot: "github", message: err instanceof Error ? err.message : t("codingAgent.githubOutFailed") });
       // A logout that failed leaves the row showing whatever it showed
       // before, which may no longer be true.
       void loadGithub();
@@ -457,6 +505,10 @@ export default function CodingAgentSettingsPanel({
 
   const readiness = status?.readiness;
   const saving = pendingWrites > 0;
+  /** The refusal shown in one slot, if that is where it belongs. */
+  const errorIn = (slot: ErrorSlot) => (
+    error?.slot === slot ? <StatusMessage type="error" message={error.message} /> : null
+  );
 
   return (
     <div className="max-w-xl space-y-5" data-testid="coding-agent-settings-panel">
@@ -519,6 +571,7 @@ export default function CodingAgentSettingsPanel({
               {t("codingAgent.folderSave")}
             </button>
           </div>
+          {errorIn("dir")}
         </div>
 
         {/* How hard a run thinks — Claude Code's own --effort. */}
@@ -573,6 +626,7 @@ export default function CodingAgentSettingsPanel({
               data-testid="coding-agent-turns"
               className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
             />
+            {errorIn("turns")}
           </div>
           <div>
             <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
@@ -592,8 +646,32 @@ export default function CodingAgentSettingsPanel({
               data-testid="coding-agent-tokens"
               className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
             />
+            {errorIn("tokens")}
           </div>
         </div>
+
+        {/* The automatic review pass: one more run, in the same session, after
+            every completed run that changed files. It used to be reachable
+            only by POSTing the field — an owner could neither find it nor
+            see that it was on. Not optimistic, like the main switch. */}
+        <div className="flex items-start justify-between gap-4 mt-4">
+          <div className="min-w-0">
+            <label className="text-xs font-medium text-[var(--text-secondary)]">
+              {t("codingAgent.reviewPassLabel")}
+            </label>
+            <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">{t("codingAgent.reviewPassHint")}</p>
+          </div>
+          <Switch
+            checked={status?.reviewPass ?? false}
+            busy={busy === "review"}
+            disabled={!status || saving}
+            label={t("codingAgent.reviewPassLabel")}
+            testId="coding-agent-review-pass"
+            onChange={(next) => void saveSetting({ reviewPass: next }, "review", t("codingAgent.reviewPassFailed"))}
+          />
+        </div>
+
+        {errorIn("settings")}
       </div>
 
       {/* GitHub. gh keeps the token and lends it to git; ClawBox never
@@ -643,7 +721,8 @@ export default function CodingAgentSettingsPanel({
               {github.connected && (
                 <button
                   type="button"
-                  onClick={() => (confirmSignOut ? void disconnectGithub() : setConfirmSignOut(true))}
+                  onClick={() => { if (confirmSignOut) { disarmSignOut(); void disconnectGithub(); } else armSignOut(); }}
+                  onBlur={disarmSignOut}
                   disabled={busy === "gh-out"}
                   data-testid="coding-agent-github-signout"
                   className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
@@ -698,10 +777,9 @@ export default function CodingAgentSettingsPanel({
               </div>
             </div>
           )}
+          {errorIn("github")}
         </div>
       )}
-
-      {error && <StatusMessage type="error" message={error} />}
     </div>
   );
 }

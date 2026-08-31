@@ -1,25 +1,35 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
+import { OLLAMA_MAX_MODEL_PARAM_B } from "@/lib/resource-limits";
 
 /**
  * Search the Ollama model library and filter for models that can run
- * on a Jetson Orin Nano with 8 GB shared RAM.
+ * under the memory cap ollama.service has on this box.
  *
  * Strategy: fetch the Ollama website search page, extract model info
  * from the structured HTML, and filter by parameter size.
  */
 
-// Max parameter sizes that fit comfortably in 8 GB shared RAM
-// (quantized Q4 of 7-8B is ~4-5 GB, leaving room for OS + Ollama overhead)
-const MAX_PARAM_BILLIONS = 8;
+// The size class the box can actually serve. Not "what fits in 8 GB": the
+// cap is ollama.service's MemoryMax — see src/lib/resource-limits.ts and the
+// "Known and deliberate" paragraph in config/clawbox-resource-limits.env.
+const MAX_PARAM_BILLIONS = OLLAMA_MAX_MODEL_PARAM_B;
 
 interface SearchResult {
   name: string;
   description: string;
   pulls: string;
   tags: string[];       // capability tags like "vision", "tools"
-  sizes: string[];      // available parameter sizes like "3b", "7b"
+  sizes: string[];      // available parameter sizes like "3b", "7b", "360m"
+}
+
+/** "7b" → 7, "360m" → 0.36; NaN when it is not a size. */
+function sizeInBillions(size: string): number {
+  const m = /^(\d+(?:\.\d+)?)([bm])$/i.exec(size);
+  if (!m) return NaN;
+  const n = parseFloat(m[1]);
+  return m[2].toLowerCase() === "m" ? n / 1000 : n;
 }
 
 // WARNING: This function scrapes HTML from ollama.com. It is inherently fragile
@@ -29,13 +39,11 @@ interface SearchResult {
 function parseSearchResults(html: string): SearchResult[] {
   const results: SearchResult[] = [];
 
-  // Each model card is in an <li> element with an <a> linking to the model
-  // The structure has: model name, description, tags, sizes, pull count
-  // We'll extract using regex patterns on the HTML
-
-  // Match model entries - the search page has a list structure
-  // Model names appear as links: /library/<name>
-  const modelBlockRe = /<li[^>]*>[\s\S]*?<\/li>/gi;
+  // Each model card is an <li> whose first child links to /library/<name>.
+  // `<li\b` matters: `<li[^>]*>` also opened a block on every `<link …>` in
+  // <head>, so the first "card" ran from the favicon through the site nav to
+  // the first real </li> and its description became the nav text.
+  const modelBlockRe = /<li\b[^>]*>[\s\S]*?<\/li>/gi;
   const blocks = html.match(modelBlockRe) || [];
 
   for (const block of blocks) {
@@ -59,18 +67,25 @@ function parseSearchResults(html: string): SearchResult[] {
     } catch { /* keep default */ }
 
     try {
-      const pullMatch = block.match(/([\d.]+[KMB]?)\s*Pull/i);
+      // The count and the word sit in separate spans joined by &nbsp;
+      // (`<span>3.9M</span><span>&nbsp;Pulls</span>`), so match on the text.
+      const text = block.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ");
+      const pullMatch = text.match(/([\d.]+[KMB]?)\s+Pulls?\b/i);
       pulls = pullMatch ? pullMatch[1] : "";
     } catch { /* keep default */ }
 
     try {
-      const tagMatches = block.match(/(?:vision|tools|thinking|code|embedding)/gi) || [];
-      tags = [...new Set(tagMatches.map(t => t.toLowerCase()))];
+      // Capability chips only — the same words in a description are prose.
+      const tagMatches = block.matchAll(/<span[^>]*>\s*(vision|tools|thinking|code|embedding)\s*<\/span>/gi);
+      tags = [...new Set([...tagMatches].map(m => m[1].toLowerCase()))];
     } catch { /* keep default */ }
 
     try {
-      const sizeMatches = block.match(/\b(\d+(?:\.\d+)?b)\b/gi) || [];
-      sizes = [...new Set(sizeMatches.map(s => s.toLowerCase()))];
+      // "b" and "m": a family's sub-billion variants (smollm2 135m/360m) are
+      // exactly the ones this box runs best, and dropping them left only the
+      // largest size selectable. Case-sensitive: the pull count is "3.9M".
+      const sizeMatches = block.match(/\b(\d+(?:\.\d+)?[bm])\b/g) || [];
+      sizes = [...new Set(sizeMatches)];
     } catch { /* keep default */ }
 
     results.push({ name, description, pulls, tags, sizes });
@@ -82,9 +97,9 @@ function parseSearchResults(html: string): SearchResult[] {
 function filterForJetson(results: SearchResult[]): (SearchResult & { filteredSizes: string[] })[] {
   return results
     .map((r) => {
-      // Filter sizes to only those that fit in 8GB RAM
+      // Filter sizes to only those that fit under the memory cap
       const filteredSizes = r.sizes.filter((s) => {
-        const num = parseFloat(s.replace(/b$/i, ""));
+        const num = sizeInBillions(s);
         return !isNaN(num) && num <= MAX_PARAM_BILLIONS;
       });
       // If no sizes listed, include the model (it might be small)
@@ -99,19 +114,24 @@ function filterForJetson(results: SearchResult[]): (SearchResult & { filteredSiz
 const searchCache = new Map<string, { results: (SearchResult & { filteredSizes: string[] })[]; ts: number }>();
 const CACHE_TTL_MS = 45_000; // 45 seconds
 
+/** `maxParamBillions` rides along so the picker's copy cannot drift from the filter. */
+function answer(results: (SearchResult & { filteredSizes: string[] })[]) {
+  return NextResponse.json({ results, maxParamBillions: MAX_PARAM_BILLIONS });
+}
+
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const query = searchParams.get("q")?.trim();
 
   if (!query) {
-    return NextResponse.json({ results: [] });
+    return answer([]);
   }
 
   // Check cache first
   const cacheKey = query.toLowerCase();
   const cached = searchCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
-    return NextResponse.json({ results: cached.results });
+    return answer(cached.results);
   }
 
   try {
@@ -145,7 +165,7 @@ export async function GET(request: Request) {
     }
     searchCache.set(cacheKey, { results, ts: Date.now() });
 
-    return NextResponse.json({ results });
+    return answer(results);
   } catch (err) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : "Search failed" },

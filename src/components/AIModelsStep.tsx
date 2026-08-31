@@ -955,9 +955,11 @@ export default function AIModelsStep({
     ollamaPulling,
     ollamaPullProgress,
     ollamaSaving,
+    ollamaMaxParamBillions,
     checkOllamaStatus,
     handleOllamaSearchChange,
     pullOllamaModel,
+    cancelOllamaPull,
     saveOllamaConfig,
     deleteOllamaModel,
     formatOllamaBytes,
@@ -2140,6 +2142,8 @@ export default function AIModelsStep({
               handleOllamaSearchChange={handleOllamaSearchChange}
               clearSearch={clearSearch}
               pullOllamaModel={pullOllamaModel}
+              cancelOllamaPull={cancelOllamaPull}
+              maxParamBillions={ollamaMaxParamBillions}
               formatOllamaBytes={formatOllamaBytes}
               radioGroupName="ollama-model"
               buttonSpinner={ButtonSpinner}

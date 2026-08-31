@@ -130,6 +130,35 @@ describe("POST /setup-api/clawkeep/memory/index", () => {
     expect(body.status).toBeUndefined();
   });
 
+  it("declines an incremental request at once too, without asking the CLI anything", async () => {
+    // The incremental path used to resolve its mode — a status probe — BEFORE
+    // the single-flight check. With the cache dropped by the run in flight,
+    // that probe took as long as the run itself; by the time it answered the
+    // first run had finished and a second one started over its record.
+    const marker = path.join(TEST_ROOT, "probed");
+    const script = path.join(TEST_ROOT, "probing-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\ntouch ${JSON.stringify(marker)}\necho '[]'\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    try {
+      await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
+      await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({
+        status: "running", mode: "full", trigger: "manual",
+        startedAtMs: Date.now(), finishedAtMs: 0, durationMs: 0, error: "", childPid: process.pid,
+      }));
+      const started = performance.now();
+      const res = await indexPOST(new NextRequest("http://localhost/x", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mode: "incremental" }),
+      }));
+      expect(res.status).toBe(409);
+      expect(performance.now() - started).toBeLessThan(500);
+      expect((await res.json()).run.status).toBe("running");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await fs.stat(marker).then(() => true, () => false)).toBe(false);
+    } finally {
+      process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "false";
+    }
+  });
+
   it("never returns the pid it is running under", async () => {
     await fs.mkdir(path.join(DATA_DIR, "memory-index.lock"), { recursive: true });
     await fs.writeFile(path.join(DATA_DIR, "memory-index-state.json"), JSON.stringify({

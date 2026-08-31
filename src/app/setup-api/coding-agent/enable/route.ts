@@ -39,10 +39,16 @@ function forbidden() {
  *
  * POST { enabled: boolean } → flip the owner's switch.
  * POST { defaultDirectory: string | null } → set (or clear) the folder a run
- * works in when the assistant names neither a project nor a directory.
- * POST { effort: "low"|"medium"|"high"|"xhigh"|"max" } → how hard a run thinks.
+ * works in when the assistant names neither a project nor a directory. An
+ * absolute path; a bare name is answered 400, since it is only ever a
+ * shorthand for a folder INSIDE this one.
+ * POST { effort: "low"|"medium"|"high"|"xhigh"|"max"|"ultracode" } → how hard a run thinks.
  * POST { maxTurns: number } → how many steps a run gets.
  * POST { tokenLimit: number | null } → token ceiling, or null for none.
+ * POST { reviewPass: boolean } → the automatic review pass: one extra run in
+ * the same session after every completed run that changed project files
+ * (the status payload reports it as `reviewPass`; a review run carries
+ * `reviewOf: <run id>` in the runs listing).
  * Either way the answer is the same payload as GET
  * /setup-api/coding-agent/status, re-read after the change.
  *

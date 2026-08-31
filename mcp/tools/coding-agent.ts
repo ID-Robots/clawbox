@@ -134,6 +134,8 @@ interface RunPayload {
   filesTouched: string[];
   commandsRun: number;
   permissionDenials: number;
+  /** Set on the automatic review pass, naming the run it reviewed. */
+  reviewOf?: string | null;
   thinkingTokens?: number;
   lastActivityAt?: number;
   resumable: boolean;
@@ -165,7 +167,12 @@ async function listFolders(): Promise<string[]> {
 
 function describeRun(run: RunPayload, tail: number): string {
   const parts: string[] = [];
-  parts.push(`Run ${run.id}: ${run.status} after ${elapsed(run)}`);
+  // A draft has not started: elapsed() would measure time since drafting.
+  parts.push(run.status === "draft" ? `Run ${run.id}: draft (not started)` : `Run ${run.id}: ${run.status} after ${elapsed(run)}`);
+  // Said outright: the task text of a review pass is the harness's fixed
+  // brief, and the only other trace of which run it reviewed is a progress
+  // line the tail may have cut.
+  if (run.reviewOf) parts.push(`Automatic review pass of ${run.reviewOf}`);
   parts.push(`Task: ${firstLine(run.task)}`);
   parts.push(`Folder: ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}`);
   const facts = [
@@ -317,6 +324,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           started_by: r.source,
           elapsed: elapsed(r),
           files_changed: r.filesTouched.length,
+          ...(r.reviewOf ? { review_of: r.reviewOf } : {}),
         })));
       }
       const data = await apiGet<{ run?: RunPayload }>("/setup-api/coding-agent/runs", {

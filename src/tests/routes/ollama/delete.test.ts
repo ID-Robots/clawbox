@@ -84,6 +84,23 @@ describe("POST /setup-api/ollama/delete", () => {
     expect(body.error).toBe("model not found");
   });
 
+  it("unwraps Ollama's JSON error body instead of nesting it", async () => {
+    // Ollama's real refusal shape. Forwarded verbatim it reached the owner as
+    // {"error":"{\"error\":\"model 'x' not found\"}"}.
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: () => Promise.resolve(JSON.stringify({ error: "model 'nonexistent:7b' not found" })),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const res = await ollamaDeletePost(jsonRequest({ model: "nonexistent:7b" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(404);
+    expect(body.error).toBe("model 'nonexistent:7b' not found");
+  });
+
   it("returns default error when Ollama response has no body", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: false,

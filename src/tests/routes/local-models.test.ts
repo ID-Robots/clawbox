@@ -27,6 +27,7 @@ vi.mock("@/lib/llamacpp", () => ({
 }));
 vi.mock("@/lib/llamacpp-server", () => ({
   getLlamaCppProvisioningStatus: async () => ({ installed: false }),
+  resolveConfiguredLlamaCppAlias: async () => null,
 }));
 vi.mock("@/lib/local-ai-runtime", () => ({
   getOllamaBaseUrl: () => "http://127.0.0.1:11434",
@@ -80,11 +81,25 @@ describe("POST /setup-api/local-models", () => {
   });
 
   it("refuses an engine that has no service to toggle", async () => {
+    // llama.cpp is a real row, owned by Settings → Local AI: known, but no switch here.
+    const { POST } = await route();
+    const res = await POST(new Request("http://box/setup-api/local-models", {
+      method: "POST", body: JSON.stringify({ id: "llamacpp", enabled: false }),
+    }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/cannot be turned on or off/);
+    expect(setEnabled).not.toHaveBeenCalled();
+  });
+
+  it("tells an unknown id apart from a known engine without a switch", async () => {
+    // Piper is gone from the box. "Cannot be turned on or off here" implied it
+    // existed; nothing is built for the answer, the id is refused up front.
     const { POST } = await route();
     const res = await POST(new Request("http://box/setup-api/local-models", {
       method: "POST", body: JSON.stringify({ id: "piper", enabled: false }),
     }));
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
+    expect(inventory).not.toHaveBeenCalled();
     expect(setEnabled).not.toHaveBeenCalled();
   });
 

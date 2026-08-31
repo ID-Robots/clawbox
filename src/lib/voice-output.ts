@@ -1,5 +1,5 @@
 /**
- * Voice output: which engine speaks for this box, and which one actually did.
+ * Voice output: which engine speaks for this box.
  *
  * TASK-434 asked for a per-capability Local/ClawBox/Auto picker across the whole
  * multimodal stack. Yanko cut it to TTS on 2026-08-22 for a measured reason: of
@@ -13,9 +13,8 @@
  *  1. THE GATEWAY ALREADY OWNS THE FALLBACK. `messages.tts` has no
  *     `fallbackProviders` key; `resolveTtsProviderOrder()` builds the chain from
  *     the primary plus every other configured speech provider. So a selector's
- *     whole job is to set the primary honestly and then report what actually
- *     served — inventing a second chain here would just be a chain that can
- *     disagree with the one that runs.
+ *     whole job is to set the primary honestly — inventing a second chain here
+ *     would just be a chain that can disagree with the one that runs.
  *
  *  2. A CONFIGURED CLOUD VOICE IS NOT A WORKING ONE. The `openai` provider on a
  *     ClawBox carries the ClawBox AI portal token (`claw_…`), and a speech call
@@ -32,15 +31,14 @@
  *     change, only the reason a box can fail it: an unentitled box, or one
  *     whose `openai` slot belongs to its owner, still has no endpoint.
  *
- * So availability here is a MEASUREMENT, in the same spirit as the Local Models
- * tab (TASK-435): an engine is usable when the box has what it needs AND the
- * last real attempt through it did not fail. `runVoiceCheck` is that attempt —
- * it synthesises a real phrase through the real chain and records which provider
- * produced the audio, which is what makes "chosen vs actually used" a fact
- * rather than a label.
+ * So availability here is read off the box — the local engine from the
+ * artefacts on its disk, the cloud one from a credential with an endpoint
+ * behind it. The per-engine "voice check" that used to record which engine
+ * actually spoke went with the Check button (the Voice tab is three dropdowns
+ * and a sentence to hear); the gateway's own fall-through covers a failure at
+ * speech time, and `tts/sample` auditions ONE engine on demand.
  */
-import { sanitizeErrorMessage } from "@/lib/safe-error-text";
-import { buildCloudTtsWarning } from "@/lib/tts-cloud-warning";
+import { buildCloudTtsWarning, cloudTtsDisclosure, type CloudTtsDisclosure } from "@/lib/tts-cloud-warning";
 import {
   DEFAULT_CLOUD_VOICE,
   DEFAULT_LOCAL_VOICE,
@@ -99,35 +97,12 @@ export function isVoiceChoice(value: unknown): value is VoiceChoice {
   return typeof value === "string" && (VOICE_CHOICES as readonly string[]).includes(value);
 }
 
-export interface VoiceAttempt {
-  providerId: string;
-  engine: VoiceEngineId | null;
-  ok: boolean;
-  /** Customer-safe, or null when the raw reason could not be shown. */
-  message: string | null;
-  latencyMs: number | null;
-}
-
-export interface VoiceCheck {
-  at: number;
-  ok: boolean;
-  /** The provider that actually produced audio, when one did. */
-  servedByProviderId: string | null;
-  servedEngine: VoiceEngineId | null;
-  attempts: VoiceAttempt[];
-  message: string | null;
-}
-
 export interface VoiceEngine {
   id: VoiceEngineId;
   providerId: string | null;
   label: string;
   /** Everything this engine needs is present on the box. */
   configured: boolean;
-  /** A real conversion has gone through this engine on this box. */
-  proven: boolean;
-  /** The box can use it: configured, and the last real attempt did not fail. */
-  usable: boolean;
   /** One line the customer can act on. Never a path, a URL or a credential. */
   detail: string;
 }
@@ -138,18 +113,23 @@ export interface VoiceOutputStatus {
   activeProviderId: string | null;
   /** Which of our two engines that provider is, or null when it is neither. */
   activeEngine: VoiceEngineId | null;
-  /** What `choice` resolves to given today's measurements. */
+  /** What `choice` resolves to given what the box has. */
   preferredEngine: VoiceEngineId | null;
   /** The selection and the box disagree — Auto has somewhere to move to. */
   drifted: boolean;
   engines: VoiceEngine[];
-  lastCheck: VoiceCheck | null;
   /**
    * The TASK-409 privacy notice, built by the same function the chat banner
    * uses, so the two surfaces cannot word the same fact differently.
    */
   warning: string | null;
-  /** The language the sample sentence comes in; the owner's pick. */
+  /**
+   * The same fact as `warning`, unworded, so the Voice tab can say it in the
+   * owner's language: which cloud providers are in the chain and whether the
+   * cloud speaks first or only when the box's own voice cannot.
+   */
+  disclosure: CloudTtsDisclosure | null;
+  /** The language the sample sentence comes in: the owner's pick, or the UI language until they make one. */
   language: string;
   /** The voice each engine speaks with right now; the lists are in voice-catalog.ts. */
   voice: Record<VoiceEngineId, string>;
@@ -165,18 +145,16 @@ export interface VoiceOutputStatus {
 /** Persisted in the setup app's own data dir; see voice-output-store.ts. */
 export interface VoiceOutputState {
   choice: VoiceChoice;
-  /** The most recent real attempt through each engine, by engine id. */
-  engineChecks: Partial<Record<VoiceEngineId, VoiceAttempt & { at: number }>>;
-  lastCheck: VoiceCheck | null;
-  /** Sample-sentence language on the Voice tab; absent in files written before it existed. */
+  /**
+   * Sample-sentence language on the Voice tab. Absent until the owner picks
+   * one — the tts route then shows the UI language instead, so a German
+   * desktop opens the tab on a German sample without a second setting.
+   */
   language?: string;
 }
 
 export const DEFAULT_VOICE_STATE: VoiceOutputState = {
   choice: "auto",
-  engineChecks: {},
-  lastCheck: null,
-  language: DEFAULT_VOICE_LANGUAGE,
 };
 
 export function normalizeProviderId(value: unknown): string | null {
@@ -318,9 +296,8 @@ function cloudEndpointConfigured(config: VoiceConfigView, providerId: string): b
  * writes the endpoint for an entitled box (TASK-490). So this returning true no
  * longer means "the product has no cloud voice" — it means THIS box has not
  * been pointed at one, because its plan does not include it or because its
- * `openai` slot is the owner's own. Saying so before the customer spends a
- * check on it is the difference between a selector that reports the box and one
- * that repeats a registry.
+ * `openai` slot is the owner's own. Saying so is the difference between a
+ * selector that reports the box and one that repeats a registry.
  */
 export function cloudCredentialIsUnusable(config: VoiceConfigView, providerId: string): boolean {
   const key = credentialFor(config, providerId);
@@ -344,30 +321,17 @@ export function localCommandPath(config: VoiceConfigView): string | null {
   return typeof command === "string" && command.trim() ? command.trim() : null;
 }
 
-function lastFailure(state: VoiceOutputState, engine: VoiceEngineId): string | null {
-  const attempt = state.engineChecks[engine];
-  if (!attempt || attempt.ok) return null;
-  return attempt.message ?? "The last voice check through it did not produce audio.";
-}
-
-function localEngine(probe: LocalVoiceProbe, state: VoiceOutputState): VoiceEngine {
+function localEngine(probe: LocalVoiceProbe): VoiceEngine {
   const configured = probe.providerConfigured && probe.commandPresent && probe.engineInstalled;
-  const failure = lastFailure(state, "local");
-  const proven = state.engineChecks.local?.ok === true;
   const voices = probe.engineNames.join(", ");
   let detail: string;
   if (!probe.engineInstalled) {
     detail = "No on-device voice is installed, so this box cannot speak by itself yet.";
   } else if (!probe.providerConfigured || !probe.commandPresent) {
     detail = "A voice is installed but the box is not wired to use it. Re-running the update repairs this.";
-  } else if (failure) {
-    detail = `The last voice check failed: ${failure}`;
   } else {
-    // No "set up but unproven" line here, unlike the cloud engine, and that
-    // asymmetry is the point: the on-device voice is judged by artefacts read
-    // off this disk, so naming the installed voice IS the evidence. A cloud key
-    // can only be tested by using it, so until a check succeeds the honest
-    // thing to say about it is that nobody has tried.
+    // The on-device voice is judged by artefacts read off this disk, so naming
+    // the installed voice IS the evidence.
     detail = voices
       ? `Speaks on the box itself. Nothing leaves it. Installed: ${voices}.`
       : "Speaks on the box itself. Nothing leaves it.";
@@ -377,18 +341,14 @@ function localEngine(probe: LocalVoiceProbe, state: VoiceOutputState): VoiceEngi
     providerId: LOCAL_TTS_PROVIDER_ID,
     label: "On this box",
     configured,
-    proven,
-    usable: configured && !failure,
     detail,
   };
 }
 
-function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEngine {
+function cloudEngine(config: VoiceConfigView): VoiceEngine {
   const providerId = cloudProviderIdFor(config);
   const hasKey = providerId ? Boolean(credentialFor(config, providerId)) : false;
   const unusableKey = providerId ? cloudCredentialIsUnusable(config, providerId) : false;
-  const failure = lastFailure(state, "cloud");
-  const proven = state.engineChecks.cloud?.ok === true;
   const configured = Boolean(providerId) && hasKey && !unusableKey;
 
   let detail: string;
@@ -407,12 +367,8 @@ function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEng
     // class of confident wrong sentence this line replaced. The local row sits
     // directly above it in the panel and answers that question itself.
     detail = "The cloud voice comes with ClawBox AI Max, and this box is not set up to call one.";
-  } else if (failure) {
-    detail = `The last voice check failed: ${failure}`;
-  } else if (proven) {
-    detail = "Speaks in the cloud. The words to be spoken leave this box.";
   } else {
-    detail = "Set up but not proven on this box yet. Run a voice check to find out.";
+    detail = "Speaks in the cloud. The words to be spoken leave this box.";
   }
 
   return {
@@ -420,8 +376,6 @@ function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEng
     providerId,
     label: "ClawBox cloud",
     configured,
-    proven,
-    usable: configured && !failure,
     detail,
   };
 }
@@ -430,21 +384,21 @@ function cloudEngine(config: VoiceConfigView, state: VoiceOutputState): VoiceEng
  * What the selection resolves to right now.
  *
  * Auto follows the standing recommendation but will not pin an engine the box
- * cannot use; an explicit pick is honoured whenever it is usable, and only
- * steps aside when it is not, because a silent box is worse than a box that
- * says which engine it fell back to.
+ * does not have; an explicit pick is honoured whenever the box has it, and
+ * only steps aside when it does not, because a silent box is worse than a box
+ * that says which engine it fell back to.
  */
 export function resolvePreferredEngine(
   choice: VoiceChoice,
   engines: VoiceEngine[],
 ): VoiceEngineId | null {
-  const usable = (id: VoiceEngineId) => engines.find(e => e.id === id)?.usable === true;
+  const configured = (id: VoiceEngineId) => engines.find(e => e.id === id)?.configured === true;
   const order: VoiceEngineId[] = choice === "local"
     ? ["local", "cloud"]
     : choice === "cloud"
       ? ["cloud", "local"]
       : RECOMMENDED_ENGINE === "cloud" ? ["cloud", "local"] : ["local", "cloud"];
-  return order.find(usable) ?? null;
+  return order.find(configured) ?? null;
 }
 
 /**
@@ -455,21 +409,11 @@ export function resolvePreferredEngine(
  * other engine is a fallback when the box HAS it — which is exactly how the
  * gateway derives its own chain.
  *
- * `configured`, not `usable`, and that distinction is the whole point of a
- * privacy notice. A cloud voice whose last check failed is still in the chain:
- * the gateway sends it the text, it fails, and only then does the on-device
- * voice speak. The words left the box either way. Found on .177 with a failing
- * cloud primary, where filtering by `usable` silently dropped the notice while
- * every spoken reply was still being posted to the cloud first.
- *
  * `enabled` is passed as true because the question here is "who would speak",
  * not "is speech switched on": a customer choosing a cloud voice must see the
  * notice at the moment they choose it, not only once the box has spoken.
  */
-export function buildVoiceDisclosure(
-  activeProviderId: string | null,
-  engines: VoiceEngine[],
-): string | null {
+function disclosurePayload(activeProviderId: string | null, engines: VoiceEngine[]) {
   const providerStates = engines
     .filter(engine => engine.providerId)
     .map(engine => ({
@@ -480,12 +424,19 @@ export function buildVoiceDisclosure(
   const fallbackProviders = engines
     .filter(engine => engine.configured && engine.providerId && engine.providerId !== activeProviderId)
     .map(engine => engine.providerId as string);
-  return buildCloudTtsWarning({
+  return {
     enabled: true,
     provider: activeProviderId ?? undefined,
     fallbackProviders,
     providerStates,
-  });
+  };
+}
+
+export function buildVoiceDisclosure(
+  activeProviderId: string | null,
+  engines: VoiceEngine[],
+): string | null {
+  return buildCloudTtsWarning(disclosurePayload(activeProviderId, engines));
 }
 
 export function buildVoiceOutputStatus(
@@ -495,12 +446,13 @@ export function buildVoiceOutputStatus(
   /** The voice the local script is saved to speak with; its default when unset. */
   localVoice: string | null = null,
 ): VoiceOutputStatus {
-  const engines = [localEngine(probe, state), cloudEngine(config, state)];
+  const engines = [localEngine(probe), cloudEngine(config)];
   const activeProviderId = configuredTtsProviderId(config);
   const preferredEngine = resolvePreferredEngine(state.choice, engines);
   const preferredProviderId = preferredEngine
     ? engines.find(e => e.id === preferredEngine)?.providerId ?? null
     : null;
+  const payload = disclosurePayload(activeProviderId, engines);
   return {
     choice: state.choice,
     activeProviderId,
@@ -508,8 +460,8 @@ export function buildVoiceOutputStatus(
     preferredEngine,
     drifted: Boolean(preferredProviderId) && preferredProviderId !== activeProviderId,
     engines,
-    lastCheck: state.lastCheck,
-    warning: buildVoiceDisclosure(activeProviderId, engines),
+    warning: buildCloudTtsWarning(payload),
+    disclosure: cloudTtsDisclosure(payload),
     language: state.language ?? DEFAULT_VOICE_LANGUAGE,
     voice: {
       local: isLocalVoice(localVoice) ? localVoice : DEFAULT_LOCAL_VOICE,
@@ -522,18 +474,13 @@ export function buildVoiceOutputStatus(
 /**
  * Why an explicit pick cannot be honoured, or null when it can.
  *
- * The gate is CONFIGURED, not usable, and the difference is the whole point. An
- * engine the box does not have is refused out loud rather than quietly turned
- * into the other one — scope line 3 of this task says a choice that silently
- * becomes something else is the failure to avoid, and the mirror is just as
- * bad. But an engine that merely FAILED its last check is still offered: a
- * failure that also removed the customer's ability to retry would be permanent
- * by construction, since Auto stops choosing a failed engine, so no later check
- * would ever route through it and nothing could clear the record.
+ * An engine the box does not have is refused out loud rather than quietly
+ * turned into the other one — scope line 3 of this task says a choice that
+ * silently becomes something else is the failure to avoid, and the mirror is
+ * just as bad.
  *
  * This is about the moment of choosing. Once chosen, the gateway still falls
- * back if the picked engine fails mid-request — which is why the panel
- * separately reports the engine that actually spoke.
+ * back if the picked engine fails mid-request.
  */
 export function selectionError(choice: VoiceChoice, engines: VoiceEngine[]): string | null {
   if (choice === "auto") {
@@ -547,10 +494,9 @@ export function selectionError(choice: VoiceChoice, engines: VoiceEngine[]): str
 /**
  * The provider id a choice should write, or null when nothing can be written.
  *
- * An explicit pick writes THAT engine, even if its last check failed — the
- * customer asked for it, and the alternative is a selector that reads back
- * something the customer did not choose. Auto instead resolves to whatever can
- * actually speak.
+ * An explicit pick writes THAT engine — the customer asked for it, and the
+ * alternative is a selector that reads back something the customer did not
+ * choose. Auto instead resolves to whatever the box has.
  */
 export function providerIdForChoice(
   choice: VoiceChoice,
@@ -562,119 +508,4 @@ export function providerIdForChoice(
   }
   const preferred = resolvePreferredEngine("auto", engines);
   return preferred ? engines.find(e => e.id === preferred)?.providerId ?? null : null;
-}
-
-/**
- * Drop what this box observed about one engine.
- *
- * Called when the customer deliberately picks an engine again: they are asking
- * for a retry, and continuing to say "the last check failed" about a choice
- * they have just re-made would be reporting history as if it were the present.
- * The next check writes a fresh record either way.
- */
-export function forgetEngineCheck(state: VoiceOutputState, engine: VoiceEngineId): VoiceOutputState {
-  if (!state.engineChecks[engine]) return state;
-  // Rebuilt from the fixed list of engine ids rather than spread-and-delete.
-  // `engine` reaches here from a request body — validated, but the shape that
-  // makes that safe is not visible to a static analyser, and writing a key
-  // derived from a request is worth avoiding on principle rather than
-  // defending. Every key written below is a literal from a constant.
-  const engineChecks: VoiceOutputState["engineChecks"] = {};
-  for (const id of VOICE_ENGINE_IDS) {
-    if (id === engine) continue;
-    const entry = state.engineChecks[id];
-    if (entry) engineChecks[id] = entry;
-  }
-  return { ...state, engineChecks };
-}
-
-interface RawAttempt {
-  provider?: unknown;
-  outcome?: unknown;
-  reasonCode?: unknown;
-  error?: unknown;
-  message?: unknown;
-  latencyMs?: unknown;
-}
-
-function attemptMessage(raw: RawAttempt): string | null {
-  for (const candidate of [raw.error, raw.message, raw.reasonCode]) {
-    const safe = sanitizeErrorMessage(typeof candidate === "string" ? candidate : null);
-    if (safe && safe !== "success") return safe;
-  }
-  return null;
-}
-
-/**
- * Turn `openclaw capability tts convert --json` into the per-engine record.
- *
- * The CLI reports every provider it tried, in order, with an outcome each — so
- * a run where the cloud primary failed and the on-device voice spoke instead is
- * visible as two attempts, which is the fallback made observable rather than
- * asserted.
- */
-export function parseVoiceCheck(rawOutput: unknown, at: number): VoiceCheck {
-  const payload = (rawOutput && typeof rawOutput === "object" && !Array.isArray(rawOutput))
-    ? rawOutput as Record<string, unknown>
-    : {};
-  const rawAttempts = Array.isArray(payload.attempts) ? payload.attempts as RawAttempt[] : [];
-  const attempts: VoiceAttempt[] = [];
-  for (const raw of rawAttempts) {
-    const providerId = normalizeProviderId(raw?.provider);
-    if (!providerId) continue;
-    const ok = raw.outcome === "success";
-    const latency = typeof raw.latencyMs === "number" && Number.isFinite(raw.latencyMs)
-      ? raw.latencyMs
-      : null;
-    attempts.push({
-      providerId,
-      engine: engineForProviderId(providerId),
-      ok,
-      message: ok ? null : attemptMessage(raw),
-      latencyMs: latency,
-    });
-  }
-  const served = attempts.find(a => a.ok) ?? null;
-  const ok = payload.ok === true && served !== null;
-  return {
-    at,
-    ok,
-    servedByProviderId: served?.providerId ?? null,
-    servedEngine: served?.engine ?? null,
-    attempts,
-    message: ok ? null : (attempts.find(a => !a.ok)?.message ?? null),
-  };
-}
-
-/**
- * A failed run that never reached a provider still has to be recorded, or the
- * panel would show the previous success and read as though nothing happened.
- */
-export function failedVoiceCheck(rawMessage: unknown, at: number): VoiceCheck {
-  return {
-    at,
-    ok: false,
-    servedByProviderId: null,
-    servedEngine: null,
-    attempts: [],
-    message: sanitizeErrorMessage(rawMessage),
-  };
-}
-
-/**
- * Fold a check's attempts into the per-engine memory the status reads.
- *
- * An engine this check did not attempt keeps its previous record: clearing it
- * would let a known-bad engine read as merely unproven every time the other one
- * is checked, and Auto would keep choosing it. The record is cleared by
- * {@link forgetEngineCheck} instead, when the customer deliberately asks for
- * that engine again.
- */
-export function applyCheck(state: VoiceOutputState, check: VoiceCheck): VoiceOutputState {
-  const engineChecks = { ...state.engineChecks };
-  for (const attempt of check.attempts) {
-    if (!attempt.engine) continue;
-    engineChecks[attempt.engine] = { ...attempt, at: check.at };
-  }
-  return { ...state, engineChecks, lastCheck: check };
 }

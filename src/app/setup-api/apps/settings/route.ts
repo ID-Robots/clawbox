@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
 import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
-import { findOpenclawBin } from "@/lib/openclaw-config";
+import { setSkillEnabled } from "@/lib/openclaw-config";
 
 export const dynamic = "force-dynamic";
 
-const execFileAsync = promisify(execFile);
 const HOME = process.env.HOME || "/home/clawbox";
-const OPENCLAW_BIN = findOpenclawBin();
 
 /**
  * Maps app settings from the UI to the config files that skills actually read.
@@ -38,26 +34,26 @@ export async function POST(req: Request) {
     if (!appId || typeof appId !== "string" || !/^[A-Za-z0-9_-]+$/.test(appId)) {
       return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
     }
+    // "__proto__" passes the charset check but setSkillEnabled would resolve
+    // it to Object.prototype and write `enabled` onto every object in the
+    // process. Same guard the KV route's RESERVED_KEYS applies.
+    if (appId === "__proto__" || appId === "constructor" || appId === "prototype") {
+      return NextResponse.json({ error: "Invalid appId" }, { status: 400 });
+    }
     if (!settings || typeof settings !== "object") {
       return NextResponse.json({ error: "settings is required" }, { status: 400 });
     }
 
-    // Handle enable/disable via openclaw config
+    // Enable/disable is a direct write of `skills.entries.<id>.enabled` — see
+    // setSkillEnabled for why the CLI is not spawned for it. GET
+    // /setup-api/apps/skill-info?appId= reads the same key back.
     if ("_setEnabled" in settings) {
       const enabled = !!settings._setEnabled;
       try {
-        await execFileAsync(OPENCLAW_BIN, [
-          "config", "set",
-          `skills.entries.${appId}.enabled`,
-          enabled ? "true" : "false",
-          "--json",
-        ], {
-          timeout: 10_000,
-          env: { ...process.env, PATH: `${path.dirname(OPENCLAW_BIN)}:${process.env.PATH}` },
-        });
+        await setSkillEnabled(appId, enabled);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return NextResponse.json({ error: `Failed to toggle skill: ${msg}` }, { status: 500 });
+        console.error(`[apps/settings] Failed to toggle ${appId}:`, err instanceof Error ? err.message : err);
+        return NextResponse.json({ error: "Failed to toggle skill" }, { status: 500 });
       }
       return NextResponse.json({ ok: true, enabled });
     }

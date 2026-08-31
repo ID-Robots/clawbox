@@ -1,11 +1,29 @@
 import { describe, expect, it } from 'vitest'
-import { buildCloudTtsWarning } from '@/lib/tts-cloud-warning'
+import { buildCloudTtsWarning, cloudTtsDisclosure } from '@/lib/tts-cloud-warning'
 
 const states = [
   { id: 'tts-local-cli', label: 'Local CLI', configured: true },
   { id: 'microsoft', label: 'Microsoft', configured: true },
   { id: 'openai', label: 'OpenAI', configured: true },
 ]
+
+describe('cloudTtsDisclosure', () => {
+  it('states the fact the sentence is made of, so another surface can word it', () => {
+    expect(cloudTtsDisclosure({
+      enabled: true,
+      provider: 'tts-local-cli',
+      fallbackProviders: ['microsoft'],
+      providerStates: states,
+    })).toEqual({ kind: 'may-use-cloud', providers: ['Microsoft'], primaryIsLocal: true })
+    expect(cloudTtsDisclosure({
+      enabled: true,
+      provider: 'openai',
+      fallbackProviders: ['microsoft'],
+      providerStates: states,
+    })).toEqual({ kind: 'uses-cloud', providers: ['OpenAI', 'Microsoft'], primaryIsLocal: false })
+    expect(cloudTtsDisclosure({ enabled: false, provider: 'openai' })).toBeNull()
+  })
+})
 
 describe('buildCloudTtsWarning', () => {
   it('warns when local TTS can fall back to a configured cloud provider', () => {

@@ -2,7 +2,7 @@ import fsp from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
-import { kvSet } from "@/lib/kv-store";
+import { pushPendingAction } from "@/lib/pending-actions";
 import { hasClawaiToken } from "@/lib/harness/credentials";
 import { generateClawaiImage } from "@/lib/harness/clawai-images";
 
@@ -120,9 +120,6 @@ const MAX_DESCRIPTION_CHARS = 200;
 
 /** Icons are public assets served to every browser; 0644 is the right mode. */
 const ICON_FILE_MODE = 0o644;
-
-/** The slot the desktop polls; see `notifyOwner` in email-notify.ts for the precedent. */
-const UI_ACTION_KEY = "ui:pending-action";
 
 /**
  * How long a failure is remembered. Long enough that an agent iterating on an
@@ -367,7 +364,7 @@ async function ensureOnce(appId: string, hints: WebappIconHints): Promise<Webapp
       await fsp.unlink(target).catch(() => {});
       return "skipped";
     }
-    nudgeDesktop(appId, hints);
+    await nudgeDesktop(appId, hints);
     return "generated";
   });
 }
@@ -485,25 +482,21 @@ async function placeIcon(target: string, bytes: Buffer): Promise<"placed" | "exi
  * has cached under the bare URL for an app that once used this id.
  *
  * Best effort and one-way, like `notifyOwner`: the icon is on disk and the
- * next desktop load finds it whether or not this lands. The slot is
- * single-consumer, so a push can replace an action nobody has read yet — the
- * same property every other writer of this key already has.
+ * next desktop load finds it whether or not this lands. It goes onto the
+ * owner-notice ring (src/lib/pending-actions.ts), so every open desktop gets
+ * it and none can consume it away from the others.
  */
-function nudgeDesktop(appId: string, hints: WebappIconHints): void {
+async function nudgeDesktop(appId: string, hints: WebappIconHints): Promise<void> {
+  const color = hints.color && HEX_COLOR_RE.test(hints.color) ? hints.color : DEFAULT_COLOR;
   try {
-    const color = hints.color && HEX_COLOR_RE.test(hints.color) ? hints.color : DEFAULT_COLOR;
-    kvSet(
-      UI_ACTION_KEY,
-      JSON.stringify({
-        type: "register_webapp",
-        appId,
-        name: oneLine(hints.name, MAX_NAME_CHARS) || appId,
-        color,
-        url: `/setup-api/webapps?app=${appId}`,
-        iconUrl: `/setup-api/apps/icon/${appId}?v=${Date.now()}`,
-        ts: Date.now(),
-      }),
-    );
+    await pushPendingAction({
+      type: "register_webapp",
+      appId,
+      name: oneLine(hints.name, MAX_NAME_CHARS) || appId,
+      color,
+      url: `/setup-api/webapps?app=${appId}`,
+      iconUrl: `/setup-api/apps/icon/${appId}?v=${Date.now()}`,
+    });
   } catch {
     // A nudge that fails to land is a reload away from being moot.
   }

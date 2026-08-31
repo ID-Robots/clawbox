@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodingRun } from "@/lib/coding-agent";
 
 const kvSet = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/kv-store", () => ({ kvSet }));
+const kvGet = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/kv-store", () => ({ kvGet, kvSet }));
 
 const configGet = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/config-store", async (importOriginal) => ({
@@ -73,8 +74,19 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
   };
 }
 
+/** The one entry the notice appended to the owner-notice ring. */
+function ringEntry(): Record<string, unknown> {
+  expect(kvSet).toHaveBeenCalledTimes(1);
+  const [key, value] = kvSet.mock.calls[0] as [string, string];
+  expect(key).toBe("ui:pending-actions");
+  const ring = JSON.parse(value) as Record<string, unknown>[];
+  expect(ring).toHaveLength(1);
+  return ring[0];
+}
+
 beforeEach(() => {
   kvSet.mockReset();
+  kvGet.mockReset().mockReturnValue(null);
   configGet.mockReset().mockResolvedValue(undefined);
   getActiveHarness.mockReset().mockResolvedValue("openclaw");
   readHermesApprovedUsers.mockReset().mockResolvedValue([]);
@@ -115,10 +127,7 @@ describe("the text", () => {
 describe("the desktop leg", () => {
   it("raises a card the owner can act on, not a toast that slides away", async () => {
     await announceCodingAgent(run());
-    expect(kvSet).toHaveBeenCalledTimes(1);
-    const [key, value] = kvSet.mock.calls[0];
-    expect(key).toBe("ui:pending-action");
-    const payload = JSON.parse(value);
+    const payload = ringEntry();
     // Its own action type: the desktop renders this in the top-right stack
     // with a button into the app, where the summary is.
     expect(payload.type).toBe("coding_agent");
@@ -126,8 +135,20 @@ describe("the desktop leg", () => {
     expect(payload.status).toBe("completed");
     expect(payload.projectId).toBe("site");
     expect(payload.message).toBe(buildAnnouncement(run()));
-    expect(payload.message.length).toBeLessThanOrEqual(280);
+    expect(String(payload.message).length).toBeLessThanOrEqual(280);
     expect(typeof payload.ts).toBe("number");
+  });
+
+  it("goes onto the ring every desktop reads, named after the run, beside what is already there", async () => {
+    // The old single slot was deleted by the first desktop to poll it, so a
+    // phone and a laptop open together meant one of them never saw the card.
+    // The ring is appended to, never replaced, and the run id is the entry's
+    // identity so a desktop shows one card per run however often it polls.
+    kvGet.mockReturnValue(JSON.stringify([{ id: "earlier", ts: Date.now() - 1_000, type: "notify", message: "hi" }]));
+    await announceCodingAgent(run());
+    const [, value] = kvSet.mock.calls[0] as [string, string];
+    const ring = JSON.parse(value) as { id: string }[];
+    expect(ring.map((e) => e.id)).toEqual(["earlier", "coding:run-k3x9q2ab"]);
   });
 
   it("still carries no task and no summary — a card is not a licence to quote the model", async () => {

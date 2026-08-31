@@ -3,12 +3,13 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import {
   buildLocalModelInventory,
+  ENGINE_IDS,
   setEngineEnabled,
   unitForEngine,
   type InventoryProbes,
 } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl } from "@/lib/llamacpp";
-import { getLlamaCppProvisioningStatus } from "@/lib/llamacpp-server";
+import { getLlamaCppProvisioningStatus, resolveConfiguredLlamaCppAlias } from "@/lib/llamacpp-server";
 import { getOllamaBaseUrl } from "@/lib/local-ai-runtime";
 import { peekMemoryStatus } from "@/lib/clawkeep-memory";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
@@ -41,9 +42,12 @@ async function probes(): Promise<InventoryProbes> {
   // boot, and this route is polled every five seconds by a panel that must
   // open at once. A cold peek starts that probe and answers null.
   const memory = embeddingsSupported ? peekMemoryStatus() : null;
-  const [provisioning, servedModel] = await Promise.all([
+  const [provisioning, servedModel, configuredAlias] = await Promise.all([
     getLlamaCppProvisioningStatus(alias).catch(() => null),
     llamaCppRunning(llamaBase),
+    // The same resolution the wake path uses, so "starts when needed" is
+    // claimed exactly when the proxy would in fact start it.
+    resolveConfiguredLlamaCppAlias().catch(() => null),
   ]);
   return {
     ollamaBaseUrl: getOllamaBaseUrl(),
@@ -51,6 +55,7 @@ async function probes(): Promise<InventoryProbes> {
       installed: !!provisioning?.installed,
       running: servedModel !== null,
       model: servedModel || alias || null,
+      configured: configuredAlias !== null,
     },
     embeddings: {
       supported: embeddingsSupported,
@@ -81,6 +86,11 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Expected an engine id and an enabled flag." }, { status: 400 });
   }
 
+  // Two refusals, because they mean different things: an id the inventory has
+  // never heard of, and a real engine that simply has no switch here.
+  if (!ENGINE_IDS.has(id)) {
+    return NextResponse.json({ error: "Unknown model." }, { status: 404 });
+  }
   const target = unitForEngine(id);
   if (!target) {
     return NextResponse.json({ error: "That model cannot be turned on or off here." }, { status: 400 });

@@ -8,8 +8,14 @@ import Link from "next/link";
 import { fetchHarness } from "@/lib/client-harness";
 import { I18nProvider } from "@/lib/i18n";
 import { handoffSettingsSection, STANDALONE_SETTINGS_SECTION_PARAM } from "@/lib/ui-events";
+import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
+import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
+import type { InstalledMeta } from "@/lib/store-categories";
+import type { StoreApp } from "@/components/AppStore";
+import InstalledAppIcon from "@/components/InstalledAppIcon";
 
 const TerminalApp = dynamic(() => import("@/components/TerminalApp"), { ssr: false });
+const InstalledAppSettings = dynamic(() => import("@/components/InstalledAppSettings"), { ssr: false });
 const CodingAgentApp = dynamic(() => import("@/components/CodingAgentApp"), { ssr: false });
 const FilesApp = dynamic(() => import("@/components/FilesApp"), { ssr: false });
 const BrowserApp = dynamic(() => import("@/components/BrowserApp"), { ssr: false });
@@ -66,12 +72,86 @@ export default function StandaloneAppPage() {
     if (section) handoffSettingsSection(section);
   }, [id]);
 
+  // An installed app's id says nothing about what it is. The desktop decides
+  // from installed_meta (getAllApps in page.tsx): a webapp is framed, a store
+  // skill opens its settings window. This page reads the same key, so a
+  // bookmark or "Open in new tab" lands on what the desktop shows. It used to
+  // frame every `installed-*` id as a webapp, which for a skill painted a 404
+  // in an empty frame under its raw id.
+  const installedId = id?.startsWith("installed-") ? id.slice("installed-".length) : null;
+  const [installedMeta, setInstalledMeta] = useState<Record<string, InstalledMeta> | null>(null);
+  useEffect(() => {
+    if (!installedId) return;
+    let alive = true;
+    fetch("/setup-api/preferences?keys=installed_meta")
+      .then((r) => r.json())
+      .then((data: { installed_meta?: unknown }) => {
+        if (!alive) return;
+        const meta = data?.installed_meta;
+        setInstalledMeta(meta && typeof meta === "object" ? (meta as Record<string, InstalledMeta>) : {});
+      })
+      .catch(() => { if (alive) setInstalledMeta({}); });
+    return () => { alive = false; };
+  }, [installedId]);
+
+  // Answers the KV requests a framed webapp posts — see src/lib/webapp-kv-bridge.ts.
+  useEffect(() => attachWebappKvBridge(), []);
+
+  const loading = <div className="h-full flex items-center justify-center text-white/40 text-sm">Loading…</div>;
+  const notFound = (
+    <div className="h-full flex items-center justify-center text-white/50 text-sm">
+      App not found: {id}
+    </div>
+  );
+
+  const renderInstalledApp = (appId: string) => {
+    if (!installedMeta) return loading;
+    const meta = installedMeta[appId];
+    // Fail closed, like the harness gate below: a stale or unknown id shows
+    // the same "not found" as any other, never an empty frame.
+    if (!meta) return notFound;
+    if (meta.webappUrl) {
+      // http(s) or a same-origin path only — the desktop's rule, so a
+      // `javascript:` URL in an installed app's meta cannot run here either.
+      let src = "about:blank";
+      try {
+        const u = new URL(meta.webappUrl, window.location.origin);
+        if (["http:", "https:"].includes(u.protocol)) src = u.href;
+      } catch {}
+      return (
+        <iframe
+          src={src}
+          style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
+          // The one sandbox both pages use; never allow-same-origin — see
+          // src/lib/webapp-sandbox.ts for what the frame would otherwise reach.
+          sandbox={WEBAPP_IFRAME_SANDBOX}
+          data-webapp-id={appId}
+          title={meta.name}
+        />
+      );
+    }
+    // A store skill. Its window shells out to the openclaw binary, which a
+    // Hermes box does not have — the desktop's isInstalledAppVisible gate.
+    if (!harness) return loading;
+    if (harness === "hermes") return notFound;
+    const storeApp: StoreApp = { id: appId, name: meta.name, description: "", rating: 0, color: meta.color, category: "", iconUrl: meta.iconUrl, developer: meta.developer };
+    return (
+      <InstalledAppSettings
+        appId={appId}
+        storeApp={storeApp}
+        icon={<InstalledAppIcon appId={appId} iconUrl={meta.iconUrl} name={meta.name} size="w-12 h-12" />}
+        // The uninstall confirmation belongs to the desktop's window manager,
+        // which this page has none of — the same no-op the standalone store
+        // hands its install and uninstall.
+        onUninstall={() => {}}
+      />
+    );
+  };
+
   const renderApp = () => {
     const appId = id ?? "";
     if (OPENCLAW_ONLY_APP_IDS.includes(appId) || HERMES_ONLY_APP_IDS.includes(appId)) {
-      if (!harness) {
-        return <div className="h-full flex items-center justify-center text-white/40 text-sm">Loading…</div>;
-      }
+      if (!harness) return loading;
       // An unknown harness hides BOTH sets — fail closed.
       const hidden =
         harness === "hermes"
@@ -140,30 +220,14 @@ export default function StandaloneAppPage() {
           />
         );
       default:
-        // Try as webapp
-        if (id?.startsWith("installed-")) {
-          return (
-            <iframe
-              src={`/setup-api/webapps?app=${encodeURIComponent(id.replace("installed-", ""))}`}
-              style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-              // No allow-same-origin: webapps are served from the ClawBox origin,
-              // so allow-scripts + allow-same-origin together would give the
-              // framed app the REAL origin — letting a malicious/agent-built app
-              // fetch() the session-authenticated /setup-api routes and script
-              // the parent desktop. Dropping allow-same-origin forces an opaque
-              // origin; self-contained webapps still run fine.
-              sandbox="allow-scripts allow-forms allow-popups"
-              title={id}
-            />
-          );
-        }
-        return (
-          <div className="h-full flex items-center justify-center text-white/50 text-sm">
-            App not found: {id}
-          </div>
-        );
+        if (installedId) return renderInstalledApp(installedId);
+        return notFound;
     }
   };
+
+  const title = installedId
+    ? (installedMeta?.[installedId]?.name ?? installedId)
+    : (APP_TITLES[id ?? ""] ?? id);
 
   // Every app rendered here reads its copy through `t()`. Without a provider
   // `useT()` falls back to returning the KEY, so this route — the one behind
@@ -175,7 +239,7 @@ export default function StandaloneAppPage() {
         {/* Minimal title bar */}
         <div className="flex items-center gap-2 px-3 py-1.5 bg-[#111827] border-b border-white/10 shrink-0">
           <Image src="/clawbox-logo.png" alt="" width={20} height={20} className="w-5 h-5 rounded" />
-          <span className="text-xs font-medium text-white/70">{APP_TITLES[id ?? ""] ?? id}</span>
+          <span className="text-xs font-medium text-white/70">{title}</span>
           <Link href="/" className="ml-auto text-xs text-white/30 hover:text-white/60 no-underline">
             Back to Desktop
           </Link>

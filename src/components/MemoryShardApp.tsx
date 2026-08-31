@@ -6,6 +6,7 @@ import type {
   ClawKeepMemoryStatus,
   MemoryIndexMode,
   MemoryIndexSchedule,
+  MemoryRunState,
 } from "@/lib/clawkeep-memory";
 import {
   CARD,
@@ -13,6 +14,7 @@ import {
   Stat,
   WEEKDAY_LABEL_KEYS,
   formatBytes,
+  formatDuration,
   formatNextRun,
   jsonOrError,
   timeAgo,
@@ -61,9 +63,16 @@ function isMemoryStatus(body: unknown): body is ClawKeepMemoryStatus {
   const b = body as Partial<ClawKeepMemoryStatus>;
   return typeof b.health === "string"
     && typeof b.location === "string"
-    && !!b.run && typeof b.run === "object" && typeof b.run.status === "string"
+    && isRunState(b.run)
     && !!b.schedule && typeof b.schedule === "object" && typeof b.schedule.enabled === "boolean";
 }
+
+function isRunState(value: unknown): value is MemoryRunState {
+  return !!value && typeof value === "object" && typeof (value as Partial<MemoryRunState>).status === "string";
+}
+
+/** What the server accepts as a time; anything else is still being typed. */
+const TIME_OF_DAY = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   const { t } = useT();
@@ -72,12 +81,18 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
   const [confirmFull, setConfirmFull] = useState(false);
   const [draft, setDraft] = useState<MemoryIndexSchedule | null>(null);
   const [savingSchedule, setSavingSchedule] = useState(false);
+  // The time field's text while it is not a valid time yet. Kept OUT of the
+  // draft on purpose: every other control spreads the draft into its save,
+  // and a half-typed "" in there went to the server, which sanitised it to
+  // 03:00 — the saved time was lost to a click on "Daily".
+  const [timeText, setTimeText] = useState<string | null>(null);
 
   // Read through refs, not through the closure: `load` is called from an
   // interval, and a poll that started before the user touched the schedule
-  // would otherwise still be holding `savingSchedule === false` and would
-  // stamp the pre-edit value back over the control.
-  const savingScheduleRef = useRef(false);
+  // would otherwise still be seeing no save in flight and would stamp the
+  // pre-edit value back over the control.
+  const savesInFlightRef = useRef(0);
+  const saveSeqRef = useRef(0);
   const loadInFlightRef = useRef(false);
 
   const load = useCallback(async () => {
@@ -96,7 +111,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
       setStatus(body);
       // Only adopt the server's schedule while the user is not mid-edit, or a
       // poll landing between two clicks would throw their change away.
-      setDraft((prev) => (prev && savingScheduleRef.current ? prev : body.schedule));
+      setDraft((prev) => (prev && savesInFlightRef.current > 0 ? prev : body.schedule));
     } catch {
       // A failed poll is not worth a red banner: the panel keeps the last good
       // reading and the next tick corrects it.
@@ -130,7 +145,12 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         // button looking like it did nothing.
         onError(t("clawkeep.memory.alreadyRunning"));
       } else {
-        await jsonOrError<unknown>(res);
+        const { run } = await jsonOrError<{ run?: unknown }>(res);
+        // The route answers with the run it just started. Adopt it now, so
+        // the run line reads "running now" and the fast poll begins with the
+        // click — not once the first status read comes back, by which time a
+        // short pass has already finished.
+        if (isRunState(run)) setStatus((prev) => (prev ? { ...prev, run } : prev));
       }
       await load();
     } catch {
@@ -142,8 +162,18 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
 
   const saveSchedule = async (next: MemoryIndexSchedule) => {
     setDraft(next);
-    savingScheduleRef.current = true;
+    // Whatever is saved carries a real time, so the field shows that one.
+    setTimeText(null);
+    // Nothing is disabled while this is in flight — a control that goes
+    // disabled under the keyboard drops focus to <body>, and in the time
+    // field that ate the rest of what was being typed. Instead, only the
+    // NEWEST save gets to write its answer back: two quick changes can be
+    // answered in either order, and the older answer would put the draft
+    // back to a value the user had already moved on from.
+    const seq = ++saveSeqRef.current;
+    savesInFlightRef.current += 1;
     setSavingSchedule(true);
+    let failed = false;
     try {
       const body = await jsonOrError<{ schedule: MemoryIndexSchedule; nextRunAtMs: number }>(
         await fetch("/setup-api/clawkeep/memory/schedule", {
@@ -152,15 +182,18 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
           body: JSON.stringify(next),
         }),
       );
-      setDraft(body.schedule);
-      setStatus((prev) => prev ? { ...prev, schedule: body.schedule, nextRunAtMs: body.nextRunAtMs } : prev);
+      if (seq === saveSeqRef.current) {
+        setDraft(body.schedule);
+        setStatus((prev) => prev ? { ...prev, schedule: body.schedule, nextRunAtMs: body.nextRunAtMs } : prev);
+      }
     } catch {
+      failed = true;
       onError(t("clawkeep.memory.scheduleSaveFailed"));
-      await load();
     } finally {
-      savingScheduleRef.current = false;
-      setSavingSchedule(false);
+      savesInFlightRef.current -= 1;
+      if (savesInFlightRef.current === 0) setSavingSchedule(false);
     }
+    if (failed && seq === saveSeqRef.current) await load();
   };
 
   if (!status) {
@@ -178,11 +211,29 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
     : health === "degraded" ? "text-amber-200 border-amber-500/40 bg-amber-500/10"
     : health === "unavailable" ? "text-red-300 border-red-500/40 bg-red-500/10"
     : "text-[var(--text-secondary)] border-[var(--border-subtle)] bg-white/5";
+  const run = status.run;
   const runLine =
-    status.run.status === "running" ? t("clawkeep.memory.runRunning")
-    : status.run.status === "succeeded" ? t("clawkeep.memory.runSucceeded", { when: timeAgo(status.run.finishedAtMs, t) })
-    : status.run.status === "failed" ? (status.run.error || t("clawkeep.memory.runFailed"))
+    run.status === "running" ? t("clawkeep.memory.runRunning")
+    : run.status === "succeeded" ? t("clawkeep.memory.runSucceeded", { when: timeAgo(run.finishedAtMs, t) })
+    : run.status === "failed" ? (run.error || t("clawkeep.memory.runFailed"))
     : t("clawkeep.memory.runNever");
+  // Who started it, what it did and how long it took — the record carries all
+  // three, and without them a scheduled pass was indistinguishable from a
+  // click, and "Index now" on an empty index (which runs a full build, see
+  // resolveIndexMode) looked like the incremental pass it was not. Empty on
+  // an old state file, and skipped.
+  const runDetail = [
+    run.trigger === "schedule" ? t("clawkeep.memory.triggerSchedule")
+      : run.trigger === "manual" ? t("clawkeep.memory.triggerManual") : "",
+    run.mode === "full" ? t("clawkeep.memory.modeFull")
+      : run.mode === "incremental" ? t("clawkeep.memory.modeIncremental") : "",
+    run.finishedAtMs > 0 && run.durationMs > 0 ? formatDuration(run.durationMs) : "",
+  ].filter(Boolean).map((part) => ` · ${part}`).join("");
+  // A stock box: the scan found no memory file and the index holds nothing.
+  // The CLI says so in an issue that carries a path, which is why the bridge
+  // drops it; this is the same fact from the counts alone.
+  const nothingToIndex = status.available && health !== "unavailable"
+    && status.files === 0 && status.pendingFiles === 0 && status.chunks === 0 && !running;
 
   return (
     <div className={`${CARD} space-y-4`}>
@@ -231,12 +282,22 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         <Stat label={t("clawkeep.memory.indexSize")} value={status.indexBytes ? formatBytes(status.indexBytes) : "—"} />
       </div>
 
+      {nothingToIndex && (
+        <p className="text-[11px] text-[var(--text-muted)]">{t("clawkeep.memory.noFilesYet")}</p>
+      )}
+
       <div className="flex items-center justify-between gap-3 text-xs text-[var(--text-muted)] border-t border-[var(--border-subtle)] pt-3">
-        <span>{t("clawkeep.memory.lastRun")}: <span className={status.run.status === "failed" ? "text-red-300" : "text-gray-200"}>{runLine}</span></span>
+        <span className="min-w-0">
+          {t("clawkeep.memory.lastRun")}: <span
+            className={run.status === "failed" ? "text-red-300" : "text-gray-200"}
+            title={run.finishedAtMs ? new Date(run.finishedAtMs).toLocaleString() : undefined}
+          >{runLine}{runDetail}</span>
+        </span>
         {/* The fingerprint is what makes "this index belongs to this model"
-            checkable without printing a path or a key. */}
+            checkable without printing a path or a key. It stays on one line;
+            a long failure message wraps on the left instead. */}
         {status.fingerprint && (
-          <span className="font-mono tabular-nums" title={t("clawkeep.memory.fingerprintHelp")}>
+          <span className="font-mono tabular-nums shrink-0 whitespace-nowrap" title={t("clawkeep.memory.fingerprintHelp")}>
             {t("clawkeep.memory.fingerprint")} {status.fingerprint}
           </span>
         )}
@@ -249,7 +310,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
           onClick={() => void startIndex("incremental")}
           className="flex-1 px-3 py-2 rounded-md bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
         >
-          {running ? t("clawkeep.memory.indexing") : t("clawkeep.memory.indexNow")}
+          {busy !== null || running ? t("clawkeep.memory.indexing") : t("clawkeep.memory.indexNow")}
         </button>
         <button
           type="button"
@@ -261,7 +322,7 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
         </button>
       </div>
 
-      <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3">
+      <div className="space-y-3 border-t border-[var(--border-subtle)] pt-3" aria-busy={savingSchedule}>
         <div className="flex items-center justify-between">
           <div>
             <h4 className="text-xs font-semibold text-gray-100">{t("clawkeep.memory.schedule")}</h4>
@@ -277,10 +338,12 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
               className="sr-only peer"
               aria-label={t("clawkeep.memory.schedule")}
               checked={schedule.enabled}
-              disabled={savingSchedule}
               onChange={(e) => void saveSchedule({ ...schedule, enabled: e.target.checked })}
             />
-            <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors" />
+            {/* The checkbox itself is off-screen, so the track is what has to
+                show the keyboard focus — the desktop's coral, not the track's
+                own emerald, which would vanish on the switched-on state. */}
+            <span className="w-10 h-6 bg-white/10 rounded-full peer-checked:bg-emerald-500 transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-[var(--coral-bright)]" />
             <span className="absolute left-0.5 top-0.5 w-5 h-5 bg-white rounded-full transition-transform peer-checked:translate-x-4" />
           </label>
         </div>
@@ -292,9 +355,8 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                 <button
                   key={freq}
                   type="button"
-                  disabled={savingSchedule}
                   onClick={() => void saveSchedule({ ...schedule, frequency: freq })}
-                  className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer disabled:opacity-50 ${
+                  className={`flex-1 px-3 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
                     schedule.frequency === freq
                       ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
                       : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"
@@ -311,18 +373,18 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
               <input
                 id="clawkeep-memory-time"
                 type="time"
-                value={schedule.timeOfDay}
-                disabled={savingSchedule}
+                value={timeText ?? schedule.timeOfDay}
                 onChange={(e) => {
                   // A half-entered time arrives as "" (or out of range). Sent
                   // as-is, the server sanitises it to 03:00 and the field
                   // jumps to a time the customer never chose, mid-keystroke.
+                  // It stays in the field, and only in the field, until it
+                  // is a time.
                   const next = e.target.value;
-                  setDraft({ ...schedule, timeOfDay: next });
-                  if (/^([01]\d|2[0-3]):[0-5]\d$/.test(next)) {
-                    void saveSchedule({ ...schedule, timeOfDay: next });
-                  }
+                  if (TIME_OF_DAY.test(next)) void saveSchedule({ ...schedule, timeOfDay: next });
+                  else setTimeText(next);
                 }}
+                onBlur={() => setTimeText(null)}
                 className="px-2.5 py-1.5 rounded-md bg-[var(--bg-app)] border border-[var(--border-subtle)] text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
               />
               <span className="text-xs text-[var(--text-muted)]">{t("clawkeep.schedule.deviceLocal")}</span>
@@ -338,9 +400,8 @@ function MemoryIndexCard({ onError }: { onError: (msg: string) => void }) {
                       key={idx}
                       type="button"
                       aria-pressed={schedule.weekday === idx}
-                      disabled={savingSchedule}
                       onClick={() => void saveSchedule({ ...schedule, weekday: idx })}
-                      className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer disabled:opacity-50 ${
+                      className={`px-2.5 py-1 rounded-md text-xs border cursor-pointer ${
                         schedule.weekday === idx
                           ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-200"
                           : "border-[var(--border-subtle)] text-[var(--text-secondary)] hover:bg-white/5"

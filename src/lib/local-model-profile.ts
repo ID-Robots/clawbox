@@ -36,8 +36,9 @@
  *
  * 8 rather than 4: the mcp `core` profile was already written for "a 4-8B local
  * model" (mcp/README.md), and an 8 GB Jetson cannot host a bigger one at a
- * usable speed anyway — the shipped default is Gemma 4 E2B and the largest
- * thing that fits beside the desktop is ~8B at Q4.
+ * usable speed anyway — the shipped default is Gemma 4 E2B, and Ollama's own
+ * memory cap stops even a 7-8B pull (`OLLAMA_MAX_MODEL_PARAM_B` in
+ * resource-limits.ts), so everything this box can serve lands under this line.
  */
 export const SMALL_LOCAL_MODEL_MAX_PARAM_B = 8;
 

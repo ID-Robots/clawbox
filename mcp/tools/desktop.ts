@@ -7,14 +7,20 @@
 // STORE_EDITION_RULE below is what turns that 404 into "stop".
 
 import { apiGet, apiPost, CLAWBOX_ROOT } from "../lib/api";
-import { ToolError, type ErrorRule } from "../lib/errors";
+import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { zBool, zConfirm, zEnumOf, zInt, zOptText, zSlug, zText } from "../lib/schema";
 import { builtInApps, type McpContext } from "../lib/context";
 
 const UI_PICKUP_DELAY_MS = 2_500;
 
-/** The desktop picks pending actions up out of the KV store. */
+/**
+ * Hand the desktop an action. This process cannot append to the owner-notice
+ * ring itself (src/lib/pending-actions.ts — the web server's file, and one
+ * writer is what keeps it consistent), so it posts the action under the
+ * legacy single-slot key and /setup-api/kv folds it into the ring, where
+ * every open desktop picks it up.
+ */
 async function pushUiAction(action: Record<string, unknown>): Promise<void> {
   await apiPost(
     "/setup-api/kv",
@@ -189,14 +195,40 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
   reg.tool(
     "app_install",
     "Install an app from the ClawBox app store. Takes the exact id from app_search. Tell the user what it does before installing it.",
-    { app_id: zSlug("App id from app_search") },
+    {
+      app_id: zSlug("App id from app_search"),
+      owner: zOptText(64, "ClawHub publisher handle. Only needed when a previous call answered that more than one publisher uses this id."),
+    },
     { editions: ["openclaw"], readOnly: false },
-    async ({ app_id }: { app_id: string }) => {
-      await apiPost(
-        "/setup-api/apps/install",
-        { appId: app_id },
-        { timeoutMs: 120_000, rules: [STORE_EDITION_RULE] },
-      );
+    async ({ app_id, owner }: { app_id: string; owner?: string }) => {
+      try {
+        await apiPost(
+          "/setup-api/apps/install",
+          { appId: app_id, ...(owner ? { owner } : {}) },
+          { timeoutMs: 120_000, rules: [STORE_EDITION_RULE] },
+        );
+      } catch (err) {
+        // ClawHub namespaces skills by publisher, so a slug more than one
+        // publisher uses answers 409 `ambiguous` with the candidates. The
+        // generic CONFLICT mapping says "do not retry" — here the retry with
+        // an owner is exactly the fix, so name the handles.
+        if (err instanceof ApiError && err.status === 409 && /"code"\s*:\s*"ambiguous"/.test(err.body)) {
+          let handles = "";
+          try {
+            const parsed = JSON.parse(err.body) as { matches?: { ownerHandle?: unknown }[] };
+            handles = (parsed.matches ?? [])
+              .map((m) => (typeof m.ownerHandle === "string" ? m.ownerHandle : ""))
+              .filter(Boolean)
+              .join(", ");
+          } catch { /* the message below still stands without the list */ }
+          throw new ToolError(
+            "CONFLICT",
+            `More than one ClawHub publisher uses the id "${app_id}"${handles ? ` (publishers: ${handles})` : ""}.`,
+            "Ask the user which publisher they want, then call app_install again with that handle as `owner`.",
+          );
+        }
+        throw err;
+      }
       return text(`Installed "${app_id}". Open it with ui_open_app using "installed-${app_id}".`);
     },
   );

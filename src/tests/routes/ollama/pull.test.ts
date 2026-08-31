@@ -223,6 +223,47 @@ describe("POST /setup-api/ollama/pull", () => {
     expect(content).toContain("Insufficient disk space");
   });
 
+  it("unwraps Ollama's JSON refusal on a non-ok start", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      statusText: "Not Found",
+      text: () => Promise.resolve(JSON.stringify({ error: "pull model manifest: file does not exist" })),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const res = await ollamaPullPost(jsonRequest({ model: "nonexistent" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body.error).toBe("Ollama pull failed: pull model manifest: file does not exist");
+  });
+
+  it("ties the upstream pull to the client's request and releases it on cancel", async () => {
+    // Without this an aborted request kept downloading in the background with
+    // nothing in the UI showing it (verified with smollm2:135m on the box).
+    const upstreamCancel = vi.fn().mockResolvedValue(undefined);
+    const mockReader = {
+      read: vi.fn().mockImplementation(() => new Promise(() => { /* a pull in flight */ })),
+      cancel: upstreamCancel,
+    };
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      body: { getReader: () => mockReader },
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const req = jsonRequest({ model: "smollm2:135m" });
+    const res = await ollamaPullPost(req);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "http://127.0.0.1:11434/api/pull",
+      expect.objectContaining({ signal: req.signal }),
+    );
+
+    await res.body!.cancel("client went away");
+    expect(upstreamCancel).toHaveBeenCalled();
+  });
+
   it("handles null body from Ollama", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,

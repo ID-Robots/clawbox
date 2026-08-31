@@ -16,6 +16,11 @@ export const CATEGORY_COLORS: Record<string, string> = {
   "weather-travel": "#06b6d4",
   "writing": "#6366f1",
   "ai-automation": "#eab308",
+  // Upstream category ids the categories list omits but listings carry — the
+  // bulk of the catalogue ("ai" alone is thousands of apps); without an entry
+  // their tiles all fall to the grey default.
+  "ai": "#eab308",
+  "weather": "#06b6d4",
 };
 
 export const DEFAULT_CATEGORY_COLOR = "#6b7280";

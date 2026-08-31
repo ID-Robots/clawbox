@@ -143,5 +143,41 @@ describe("/setup-api/kv", () => {
       expect(body).toEqual({ ok: true });
       expect(mockKvSetMany).toHaveBeenCalledWith({ valid_key: "1" });
     });
+
+    // The MCP tools and `clawbox notify` still post the single-slot key; the
+    // route folds it into the owner-notice ring every open desktop polls, and
+    // the slot itself is never stored.
+    it("folds the legacy ui:pending-action slot into the owner-notice ring", async () => {
+      const store = new Map<string, string>();
+      mockKvSet.mockImplementation((k: string, v: string) => { store.set(k, v); });
+      mockKvGet.mockImplementation((k: string) => store.get(k) ?? null);
+
+      const post = await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({ key: "ui:pending-action", value: JSON.stringify({ type: "notify", message: "hi" }) }),
+      }));
+      expect(await post.json()).toEqual({ ok: true });
+
+      const ringRes = await GET(new Request("http://localhost/setup-api/kv?key=ui:pending-actions"));
+      const ring = JSON.parse((await ringRes.json()).value);
+      expect(ring).toHaveLength(1);
+      expect(ring[0]).toMatchObject({ type: "notify", message: "hi" });
+      expect(typeof ring[0].id).toBe("string");
+      expect(typeof ring[0].ts).toBe("number");
+
+      const slotRes = await GET(new Request("http://localhost/setup-api/kv?key=ui:pending-action"));
+      expect((await slotRes.json()).value).toBeNull();
+    });
+
+    it("refuses a legacy pending action that is not a JSON object", async () => {
+      for (const value of ["not json", JSON.stringify(["array"])]) {
+        const res = await POST(new Request("http://localhost/setup-api/kv", {
+          method: "POST",
+          body: JSON.stringify({ key: "ui:pending-action", value }),
+        }));
+        expect(res.status).toBe(400);
+      }
+      expect(mockKvSet).not.toHaveBeenCalled();
+    });
   });
 });

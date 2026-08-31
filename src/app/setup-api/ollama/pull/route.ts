@@ -37,24 +37,36 @@ export async function POST(request: Request) {
   try {
     await ensureLocalAiReady("ollama");
 
+    // Tied to the client's request: when the owner cancels (or the tab goes
+    // away) the upstream connection is dropped too, and Ollama stops the
+    // download instead of finishing it in the background with nothing in
+    // the UI showing it. Ollama keeps the partial blobs, so a retry resumes.
     const ollamaRes = await fetch(`${OLLAMA_BASE}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name: model, stream: true }),
+      signal: request.signal,
     });
 
     if (!ollamaRes.ok) {
       const errText = await ollamaRes.text().catch(() => "");
+      // Ollama's refusal is a JSON `{error}` body; nest it and the owner
+      // reads escaped JSON.
+      let message = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        if (parsed && typeof parsed.error === "string") message = parsed.error;
+      } catch { /* plain text is its own message */ }
       return NextResponse.json(
-        { error: `Ollama pull failed: ${errText || ollamaRes.statusText}` },
+        { error: `Ollama pull failed: ${message || ollamaRes.statusText}` },
         { status: 502 },
       );
     }
 
     // Stream the progress back to the client
+    const reader = ollamaRes.body?.getReader();
     const stream = new ReadableStream({
       async start(controller) {
-        const reader = ollamaRes.body?.getReader();
         if (!reader) {
           controller.close();
           return;
@@ -87,11 +99,23 @@ export async function POST(request: Request) {
             if (!hasError) controller.enqueue(value);
           }
         } catch (err) {
+          // A cancelled request rejects the read; nobody is listening for an
+          // error line then, and enqueueing on a cancelled controller throws.
+          if (request.signal.aborted) return;
           const msg = err instanceof Error ? err.message : "Stream error";
           controller.enqueue(new TextEncoder().encode(JSON.stringify({ error: msg }) + "\n"));
         } finally {
-          controller.close();
+          try {
+            controller.close();
+          } catch {
+            // already cancelled by the client
+          }
         }
+      },
+      cancel(reason) {
+        // Next cancels the response stream when the client disconnects; release
+        // the Ollama socket rather than hold it until the pull ends.
+        reader?.cancel?.(reason)?.catch(() => {});
       },
     });
 

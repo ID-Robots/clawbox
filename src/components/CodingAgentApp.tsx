@@ -2,12 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { estimateRunProgress } from "@/lib/coding-agent-progress";
-import { isLive, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentReportPreview from "./CodingAgentReportPreview";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
+// The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
+// keys, translated in every locale, rather than a second English-only one.
+import { timeAgo } from "./clawkeep-ui";
 import { formatBytes } from "@/lib/format-bytes";
 import { renderText } from "@/lib/chat-markdown";
 import { artifactUrl } from "@/lib/use-coding-agent-activity";
@@ -17,6 +20,7 @@ import {
   NEW_APP_TEMPLATES,
   dispatchChatMessage,
   dispatchOpenApp,
+  notifyCodingRunStarted,
   onCodingAgentChanged,
   onStandaloneAppPage,
   type NewAppTemplate,
@@ -81,6 +85,8 @@ interface Run {
   sessionId?: string | null;
   /** Where Claude Code keeps this run's transcript, for the live preview. */
   transcriptPath?: string | null;
+  /** The run this one is the automatic review pass of, when it is one. */
+  reviewOf?: string | null;
   /** The run's evidence folder — screenshots, test output and its report.md.
    *  `markdown` is the kind that opens rendered in the app; every other
    *  non-image opens as the plain text the route serves it as. */
@@ -141,6 +147,8 @@ const RUNS_PAGE = 10;
 /** Where the preview script lives on the device. */
 const CLAWBOX_ROOT = "/home/clawbox/clawbox";
 const POLL_MS = 5_000;
+/** How long a two-tap confirmation stays armed before the offer is taken back. */
+const CONFIRM_MS = 5_000;
 
 /** Elapsed time, readable at every scale a run can reach — seconds to days. */
 function duration(run: Run): string {
@@ -159,16 +167,6 @@ function tokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
   return String(n);
-}
-
-/** "just now" / "4m ago" / "2h ago" — how fresh the record is. */
-function since(ms: number | undefined): string | null {
-  if (!ms) return null;
-  const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-  if (s < 45) return "just now";
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-  return `${Math.round(s / 86400)}d ago`;
 }
 
 function firstLine(text: string, max = 100): string {
@@ -222,8 +220,15 @@ interface GitInfo {
  * needs, so the page shows it plainly. Keyed by folder so a stale fetch
  * never shows one project's remote on another's page — and no
  * reset-in-effect.
+ *
+ * Read again when the project's last commit changes — the projects poll
+ * already surfaces a run's commit, so the block follows it for free — and
+ * when `version` is bumped, which a successful backup does so the remote
+ * line stops saying "not on GitHub yet" about a folder that just got there.
+ * Never on every poll: each read is three git spawns, and on a Jetson each
+ * spawn is felt.
  */
-function useProjectGit(project: Project | null): GitInfo | null {
+function useProjectGit(project: Project | null, version: number): GitInfo | null {
   const [git, setGit] = useState<{ dir: string; info: GitInfo } | null>(null);
   const dir = project?.directory ?? null;
   const query = !project
@@ -231,6 +236,7 @@ function useProjectGit(project: Project | null): GitInfo | null {
     : project.kind === "codeProject"
       ? `projectId=${encodeURIComponent(project.folder)}`
       : `directory=${encodeURIComponent(project.directory)}`;
+  const committedAt = project?.lastCommit?.date ?? null;
   useEffect(() => {
     if (!dir || !query) return;
     let gone = false;
@@ -239,8 +245,16 @@ function useProjectGit(project: Project | null): GitInfo | null {
       .then((data) => { if (!gone && data?.git) setGit({ dir, info: data.git }); })
       .catch(() => { /* the page simply shows no git block */ });
     return () => { gone = true; };
-  }, [dir, query]);
+  }, [dir, query, committedAt, version]);
   return git && git.dir === dir ? git.info : null;
+}
+
+/** The rendered row of one run in the list, if it is on the page. Matched
+ *  by attribute value rather than a selector string, so a run id never has
+ *  to be escaped into one. */
+function rowFor(list: HTMLUListElement | null, id: string): HTMLElement | null {
+  return Array.from(list?.querySelectorAll<HTMLElement>("[data-run-id]") ?? [])
+    .find((el) => el.dataset.runId === id) ?? null;
 }
 
 /** Every run button's shape; the action's own colour is added per row. */
@@ -296,13 +310,35 @@ export default function CodingAgentApp() {
   const [newTemplate, setNewTemplate] = useState<NewAppTemplate>(DEFAULT_NEW_APP_TEMPLATE);
   const [newError, setNewError] = useState<string | null>(null);
   const [handed, setHanded] = useState(false);
-  // Clearing is two clicks, not a browser confirm(): the second click is the
-  // confirmation, and collapsing the list takes the offer back.
+  // Clearing is two taps, not a browser confirm(): the second tap is the
+  // confirmation. The offer is taken back on its own after CONFIRM_MS, and
+  // whenever the settings page is left or entered — an armed red button
+  // found minutes later is a mis-tap waiting to happen. A timer rather than
+  // blur alone: iOS Safari does not focus a button on tap, so on the phone
+  // this app is made for a blur would never come.
   const [confirmClear, setConfirmClear] = useState(false);
+  const confirmClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disarmClear = () => {
+    if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current);
+    confirmClearTimer.current = null;
+    setConfirmClear(false);
+  };
+  const armClear = () => {
+    if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current);
+    confirmClearTimer.current = setTimeout(() => {
+      confirmClearTimer.current = null;
+      setConfirmClear(false);
+    }, CONFIRM_MS);
+    setConfirmClear(true);
+  };
+  useEffect(() => () => { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); }, []);
   // Which face the window shows — see `view` below. The settings page sits
   // over whichever project was open, so Back returns there.
   const [page, setPage] = useState<"home" | "settings">("home");
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
+  /** Bumped when this window changed the open project's git state itself
+   *  (a backup), so the git block re-reads without a new commit. */
+  const [gitVersion, setGitVersion] = useState(0);
 
   // `load` must not re-run because a translation function was re-created: a
   // refetch on every render would restart the live poll and overwrite the
@@ -370,12 +406,23 @@ export default function CodingAgentApp() {
     }
   }, []);
 
-  // A running run changes every few seconds; nothing else here does.
+  // A running run changes every few seconds; nothing else here does. One
+  // more read after the last live run settles: the runner writes the settled
+  // record BEFORE it commits the work and starts the automatic review pass,
+  // so the poll that saw the finish saw a folder with no new commit and no
+  // follow-up run — and would otherwise have been the last.
   const anyRunning = runs.some((r) => isLive(r.status));
+  const sawRunning = useRef(false);
   useEffect(() => {
-    if (!anyRunning) return;
-    const id = setInterval(() => { void load(); }, POLL_MS);
-    return () => clearInterval(id);
+    if (anyRunning) {
+      sawRunning.current = true;
+      const id = setInterval(() => { void load(); }, POLL_MS);
+      return () => clearInterval(id);
+    }
+    if (!sawRunning.current) return;
+    sawRunning.current = false;
+    const id = setTimeout(() => { void load(); }, POLL_MS);
+    return () => clearTimeout(id);
   }, [anyRunning, load]);
   // The clock the progress estimate reads. Held in state, ticking once a
   // second while a run is live (as the activity pill does), so the bar
@@ -403,6 +450,11 @@ export default function CodingAgentApp() {
    * A run that is still working gets a live, readable tail of its transcript —
    * the file grows while it works. A finished one gets `claude-ds --resume`,
    * which drops the owner into that exact session to carry on by hand.
+   *
+   * Nothing at all for a run with neither: the button is not offered
+   * without a session (a run paused or failed before Claude Code announced
+   * one has nothing to resume, and the runner refuses to resume it too), so
+   * a bare `cd` into the folder is not a thing this can open any more.
    */
   const openInTerminal = (run: Run) => {
     let command: string;
@@ -411,7 +463,7 @@ export default function CodingAgentApp() {
     } else if (run.sessionId) {
       command = `cd ${quoted(run.directory)} && claude-ds --resume ${run.sessionId}`;
     } else {
-      command = `cd ${quoted(run.directory)}`;
+      return;
     }
     window.dispatchEvent(new CustomEvent("clawbox:open-terminal", { detail: { command } }));
   };
@@ -442,6 +494,9 @@ export default function CodingAgentApp() {
       const data = await res.json() as { run?: { id?: string } };
       setShowRuns(true);
       pendingLiveOpen.current = data.run?.id ?? null;
+      // The chat's run card only probes when told: an open chat would
+      // otherwise miss a run started from here.
+      notifyCodingRunStarted();
       void load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.harnessTestFailed"));
@@ -467,6 +522,21 @@ export default function CodingAgentApp() {
     }
   }, [runs]);
 
+  /** The row a review chip pointed at, once it is rendered: it may have been
+   *  beyond the page until the click widened it, so the scroll waits for the
+   *  render that brings it in — same shape as `pendingLiveOpen`. */
+  const runsList = useRef<HTMLUListElement>(null);
+  const pendingJump = useRef<string | null>(null);
+  useEffect(() => {
+    const id = pendingJump.current;
+    if (!id) return;
+    const row = rowFor(runsList.current, id);
+    if (!row) return;
+    pendingJump.current = null;
+    // jsdom has no scrollIntoView; every browser does.
+    row.scrollIntoView?.({ block: "nearest" });
+  }, [runsShown, expanded]);
+
   /** Push a run's folder to GitHub, private, creating the repo if needed. */
   const backup = async (target: { projectId: string | null; directory: string }, key: string) => {
     setBusy(`backup-${key}`);
@@ -483,6 +553,9 @@ export default function CodingAgentApp() {
       window.dispatchEvent(new CustomEvent("clawbox:toast", {
         detail: { message: t("codingAgent.backupDone", { repo: out.repo ?? "GitHub" }) },
       }));
+      // The project page's git block has a remote now; a push changes no
+      // commit, so nothing else would make it look again.
+      setGitVersion((v) => v + 1);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.backupFailed"));
@@ -500,7 +573,6 @@ export default function CodingAgentApp() {
     try {
       const res = await fetch("/setup-api/coding-agent/runs", { method: "DELETE" });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
-      setConfirmClear(false);
       setExpanded(null);
       await load();
     } catch (err) {
@@ -533,6 +605,8 @@ export default function CodingAgentApp() {
           body: JSON.stringify({ runId: id }),
         });
       if (!res.ok) throw new Error(await readError(res, failText));
+      // A run is on its way; the chat's run card only probes when told.
+      if (action === "start" || action === "resume") notifyCodingRunStarted();
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : failText);
@@ -585,7 +659,7 @@ export default function CodingAgentApp() {
     () => (openProjectDir ? projects.find((pr) => pr.directory === openProjectDir) ?? null : null),
     [projects, openProjectDir],
   );
-  const git = useProjectGit(openProject);
+  const git = useProjectGit(openProject, gitVersion);
   /** The runs a face lists: the open project's own, or — on home — only
    *  those that match no listed project. */
   const visibleRuns = useMemo(() => (
@@ -609,15 +683,38 @@ export default function CodingAgentApp() {
   if (loading) return <div className="h-full bg-[var(--bg-deep)]" data-testid="coding-agent-panel" />;
 
   const readiness = status?.readiness;
-  const checks: { label: string; ok: boolean; okText: string; badText: string }[] = readiness
+  // Only what is missing is ever listed, so a check carries only the words
+  // for that.
+  const checks: { label: string; ok: boolean; badText: string }[] = readiness
     ? [
-      { label: t("codingAgent.claudeCode"), ok: readiness.claudeInstalled, okText: t("codingAgent.installed"), badText: t("codingAgent.missing") },
-      { label: t("codingAgent.wrapper"), ok: readiness.wrapperInstalled, okText: t("codingAgent.installed"), badText: t("codingAgent.missing") },
-      { label: t("codingAgent.clawai"), ok: readiness.clawaiConnected, okText: t("codingAgent.connected"), badText: t("codingAgent.notConnected") },
+      { label: t("codingAgent.claudeCode"), ok: readiness.claudeInstalled, badText: t("codingAgent.missing") },
+      { label: t("codingAgent.wrapper"), ok: readiness.wrapperInstalled, badText: t("codingAgent.missing") },
+      { label: t("codingAgent.clawai"), ok: readiness.clawaiConnected, badText: t("codingAgent.notConnected") },
     ]
     : [];
 
   const statusLabel = (s: Run["status"]) => t(`codingAgent.status${s.charAt(0).toUpperCase()}${s.slice(1)}`);
+
+  /** Open and scroll to another run on this page — the one a review chip
+   *  names. Widens the page first when the row is beyond it. */
+  const jumpToRun = (id: string) => {
+    const index = visibleRuns.findIndex((r) => r.id === id);
+    if (index < 0) return;
+    setExpanded(id);
+    if (index >= runsShown) setRunsShown(index + 1);
+    const row = rowFor(runsList.current, id);
+    if (row) row.scrollIntoView?.({ block: "nearest" });
+    else pendingJump.current = id;
+  };
+
+  /** A chip naming another run: a button when that run is on this page, plain
+   *  text when it was cleared or is filed elsewhere. */
+  const runChip = (id: string, label: string, testId: string) => {
+    const className = "text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40";
+    return visibleRuns.some((r) => r.id === id)
+      ? <button type="button" onClick={() => jumpToRun(id)} data-testid={testId} className={`${className} hover:bg-violet-400/10`}>{label}</button>
+      : <span data-testid={testId} className={className}>{label}</span>;
+  };
 
   return (
     // @container so the panel sizes to its WINDOW, not the viewport — this is
@@ -648,7 +745,7 @@ export default function CodingAgentApp() {
               tab" reaches the switch without a desktop listening. */}
           <button
             type="button"
-            onClick={() => { setPage(view.face === "settings" ? "home" : "settings"); }}
+            onClick={() => { disarmClear(); setPage(view.face === "settings" ? "home" : "settings"); }}
             data-testid="coding-agent-open-settings"
             aria-expanded={view.face === "settings"}
             className={OPEN_SETTINGS_CLASS}
@@ -662,7 +759,7 @@ export default function CodingAgentApp() {
           <div className="mt-3" data-testid="coding-agent-embedded-settings">
             <button
               type="button"
-              onClick={() => setPage("home")}
+              onClick={() => { disarmClear(); setPage("home"); }}
               data-testid="coding-agent-settings-back"
               className="mb-2 flex items-center gap-1 text-[11px] px-2.5 py-1 rounded-lg border border-white/10 text-[var(--text-muted)] hover:bg-white/5"
             >
@@ -682,10 +779,14 @@ export default function CodingAgentApp() {
               >
                 {t("codingAgent.harnessTest")}
               </button>
-              {runs.length > 0 && (
+              {/* Only with something to clear: the route keeps every held
+                  run — live, paused, drafted — so a list of those alone
+                  would answer a confirmed tap with nothing at all. */}
+              {runs.some((r) => isSettled(r.status)) && (
                 <button
                   type="button"
-                  onClick={() => (confirmClear ? void clearRuns() : setConfirmClear(true))}
+                  onClick={() => { if (confirmClear) { disarmClear(); void clearRuns(); } else armClear(); }}
+                  onBlur={disarmClear}
                   disabled={busy === "clear"}
                   data-testid="coding-agent-clear"
                   className={`text-[11px] px-2.5 py-1 rounded-lg border transition-colors disabled:opacity-50 ${
@@ -707,23 +808,19 @@ export default function CodingAgentApp() {
             appears only when something is actually missing. */}
         {readiness && !readiness.ready && (
           <div className="mt-3 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
-            {readiness.ready ? null : (
-              <>
-                <ul className="space-y-1">
-                  {checks.filter((c) => !c.ok).map((c) => (
-                    <li key={c.label} className="flex items-center gap-2 text-xs">
-                      <span className="material-symbols-rounded text-red-400" style={{ fontSize: 16 }} aria-hidden="true">cancel</span>
-                      <span className="text-[var(--text-primary)]">{c.label}</span>
-                      <span className="text-[var(--text-muted)]">· {c.badText}</span>
-                    </li>
-                  ))}
-                </ul>
-                {readiness.problems.length > 0 && (
-                  <p className="text-[11px] text-amber-400 mt-1.5 leading-relaxed" role="alert">
-                    {readiness.problems.join(" ")}
-                  </p>
-                )}
-              </>
+            <ul className="space-y-1">
+              {checks.filter((c) => !c.ok).map((c) => (
+                <li key={c.label} className="flex items-center gap-2 text-xs">
+                  <span className="material-symbols-rounded text-red-400" style={{ fontSize: 16 }} aria-hidden="true">cancel</span>
+                  <span className="text-[var(--text-primary)]">{c.label}</span>
+                  <span className="text-[var(--text-muted)]">· {c.badText}</span>
+                </li>
+              ))}
+            </ul>
+            {readiness.problems.length > 0 && (
+              <p className="text-[11px] text-amber-400 mt-1.5 leading-relaxed" role="alert">
+                {readiness.problems.join(" ")}
+              </p>
             )}
           </div>
         )}
@@ -889,7 +986,7 @@ export default function CodingAgentApp() {
                       </div>
                       <p className="text-[11px] text-[var(--text-muted)] mt-0.5 break-words">
                         {project.lastCommit
-                          ? <>{firstLine(project.lastCommit.subject, 80)} · {since(project.lastCommit.date)}</>
+                          ? <>{firstLine(project.lastCommit.subject, 80)} · {timeAgo(project.lastCommit.date, t)}</>
                           : t("codingAgent.noCommits")}
                       </p>
                       {/* The folder name is what a run is given and what the
@@ -993,8 +1090,8 @@ export default function CodingAgentApp() {
                 </p>
                 <p className="mt-1 text-[var(--text-muted)] break-all">
                   {git?.lastCommit
-                    ? <>{firstLine(git.lastCommit.subject, 90)} · {since(git.lastCommit.date)}</>
-                    : (view.project.lastCommit ? <>{firstLine(view.project.lastCommit.subject, 90)} · {since(view.project.lastCommit.date)}</> : t("codingAgent.noCommits"))}
+                    ? <>{firstLine(git.lastCommit.subject, 90)} · {timeAgo(git.lastCommit.date, t)}</>
+                    : (view.project.lastCommit ? <>{firstLine(view.project.lastCommit.subject, 90)} · {timeAgo(view.project.lastCommit.date, t)}</> : t("codingAgent.noCommits"))}
                 </p>
                 <p className="mt-1 break-all">
                   {git?.remote
@@ -1021,7 +1118,7 @@ export default function CodingAgentApp() {
         <div className="mt-4">
           <button
             type="button"
-            onClick={() => { setShowRuns((v) => !v); setConfirmClear(false); setRunsShown(RUNS_PAGE); }}
+            onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
             aria-expanded={showRuns}
             data-testid="coding-agent-runs-toggle"
             className="w-full flex items-center justify-between gap-2 rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors"
@@ -1045,15 +1142,21 @@ export default function CodingAgentApp() {
             visibleRuns.length === 0 ? (
               <p className="text-xs text-[var(--text-muted)] mt-2 px-1">{t("codingAgent.noRuns")}</p>
             ) : (
-              <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs">
+              <ul className="space-y-1.5 mt-2" data-testid="coding-agent-runs" ref={runsList}>
                 {visibleRuns.slice(0, runsShown).map((run) => {
                   const details = [run.error, run.summary].filter(Boolean).join("\n\n");
                   const artifacts = run.artifacts ?? [];
                   const open = expanded === run.id;
                   const tone = RUN_TONE[run.status];
                   const action = RUN_ACTION[run.status];
+                  // A draft has not run: its startedAt is when it was drafted
+                  // (the runner overwrites it at start), so a duration would
+                  // be time-since-drafting, which the "updated" line already
+                  // says — and the effort it will run with is read at start.
+                  const started = run.status !== "draft";
+                  const reviewedBy = runs.find((r) => r.reviewOf === run.id);
                   return (
-                    <li key={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
+                    <li key={run.id} data-run-id={run.id} className="rounded-xl bg-white/[0.03] border border-[var(--border-subtle)] px-3 py-2">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap">
@@ -1097,15 +1200,24 @@ export default function CodingAgentApp() {
                                 </span>
                               </span>
                             )}
+                            {/* A review pass names the run it reviewed, and
+                                that run names its reviewer: the fixed review
+                                task reads like any other run otherwise, and
+                                with several runs on a page the pair could
+                                not be told apart. */}
+                            {run.reviewOf && runChip(run.reviewOf, t("codingAgent.reviewOf", { id: run.reviewOf }), "coding-agent-review-of")}
+                            {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
                             {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
                             <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
                           </div>
-                          <p className="text-xs text-[var(--text-primary)] mt-1 break-words">{firstLine(run.task, 80)}</p>
+                          <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
+                            {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
+                          </p>
                           <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-                            {t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
-                            {" · "}
+                            {started && t("codingAgent.runMeta", { turns: run.numTurns, files: run.filesTouched.length, duration: duration(run) })}
+                            {started && " · "}
                             {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
-                            {run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
+                            {started && run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
                             {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
                             {(run.subagentsTotal ?? 0) > 0
                               && ` · ${Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}`}
@@ -1127,7 +1239,7 @@ export default function CodingAgentApp() {
                             <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
                               {(run.modelsUsed?.length ?? 0) > 0 && run.modelsUsed?.join(" + ")}
                               {(run.modelsUsed?.length ?? 0) > 0 && run.lastActivityAt ? " · " : ""}
-                              {run.lastActivityAt && `${t("codingAgent.updated")} ${since(run.lastActivityAt)}`}
+                              {run.lastActivityAt && `${t("codingAgent.updated")} ${timeAgo(run.lastActivityAt, t)}`}
                             </p>
                           )}
                         </div>
@@ -1181,7 +1293,10 @@ export default function CodingAgentApp() {
                               {busy === `backup-${run.id}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}
                             </button>
                           )}
-                          {run.status !== "draft" && (
+                          {/* Only once there is a session to open — see
+                              openInTerminal. A fresh run gets its button a
+                              poll or two after spawn. */}
+                          {run.sessionId && (
                           <button
                             type="button"
                             onClick={() => openInTerminal(run)}

@@ -1128,6 +1128,50 @@ describe("what a run reports as changed", () => {
     const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
     expect(run.filesTouched).toEqual([]);
   });
+
+  /** A Write into the run's evidence folder — the path the wrapper is handed in its env. */
+  const EVIDENCE_WRITE = (id: string) =>
+    `echo '${WRITE(id, "__EVIDENCE__/report.md")}' | sed "s|__EVIDENCE__|$CLAWBOX_RUN_ARTIFACTS_DIR|"`;
+
+  it("does not count a write into its own evidence folder as project work", async () => {
+    // The brief asks every run to save report.md and its test output there.
+    // A review pass that found nothing wrote only its report — and was shown
+    // as "1 files changed", the wording used for real edits.
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      EVIDENCE_WRITE("w1"),
+      `echo '${RESULT("w1", false)}'`,
+      `echo '${WRITE("w2", "index.html")}'`,
+      `echo '${RESULT("w2", false)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":2,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+
+    expect(run.filesTouched).toEqual(["index.html"]);
+    // The owner still sees the write happen in the feed.
+    expect(run.progress.join("\n")).toContain(`Write ${path.join(root, "data", "coding-agent-artifacts", run.id, "report.md")}`);
+  });
+
+  it("does not arm the review pass over a report alone", async () => {
+    writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+    installFakeWrapper([
+      `echo '${INIT}'`,
+      EVIDENCE_WRITE("w1"),
+      `echo '${RESULT("w1", false)}'`,
+      `echo '{"type":"result","subtype":"success","num_turns":1,"result":"done"}'`,
+      "exit 0",
+    ].join("\n"));
+    makeProject("site");
+    const run = await finished((await lib.startRun({ task: "t", projectId: "site", source: "agent" })).id);
+    expect(run.filesTouched).toEqual([]);
+    // Nothing observable follows a run with no changed files — no commit line
+    // and, the point here, no second run — so the follow-up decision is given
+    // time to happen before the run is checked to still be alone.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(JSON.parse(fs.readFileSync(runsFile(), "utf-8"))).toHaveLength(1);
+  });
 });
 
 describe("showing that a quiet run is alive", () => {

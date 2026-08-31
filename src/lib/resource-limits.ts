@@ -32,6 +32,16 @@ export const RESOURCE_LIMITS: ResourceLimits = {
   ollamaContextLength: 4096,
 };
 
+/**
+ * The largest Ollama model, in billions of parameters, the search offers to
+ * pull. Derived from the cap above, not from the box's 8 GB: the env file
+ * records that a 7-8B Q4 model (~5,400 MiB projected, plus KV cache for
+ * `ollamaNumParallel` slots) does NOT fit under `ollama.memoryMax`, so
+ * offering one only turns into a pull that is OOM-killed on first load. The
+ * next size class down (3-4B) does fit with room for the desktop.
+ */
+export const OLLAMA_MAX_MODEL_PARAM_B = 4;
+
 /** The env-file key each mirrored value is pinned to. */
 export const RESOURCE_LIMIT_KEYS: Record<string, string | number> = {
   CLAWBOX_MEM_TOTAL_MIB: RESOURCE_LIMITS.memTotalMiB,
