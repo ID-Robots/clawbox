@@ -1655,7 +1655,13 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
   # turn 401s while the UI still shows the provider as connected. Migrate
   # first, so the mirror below reads a populated store.
   AUTH_PROFILE_MIGRATION="$CLAWBOX_ROOT/scripts/migrate-auth-profiles.js"
-  if [ -f "$AUTH_PROFILE_MIGRATION" ]; then
+  # v1 only: the script copies legacy auth-profiles.json entries into the
+  # auth_profile_store table of openclaw-agent.sqlite — a table OpenClaw 2
+  # retired (state/openclaw.sqlite's config_machine_state records
+  # auth.sharedStore = state-db, and migration_sources shows the move).
+  # Writing it on a gen-2 box recreates exactly the legacy state doctor
+  # migrates away from; core owns its own store there.
+  if [ "$CLAWBOX_OPENCLAW_V2" != "1" ] && [ -f "$AUTH_PROFILE_MIGRATION" ]; then
     node "$AUTH_PROFILE_MIGRATION" "$OPENCLAW_HOME_DIR" || true
   fi
 

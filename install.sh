@@ -2536,8 +2536,18 @@ step_openclaw_config() {
   if [ -n "$CLAWBOX_AI_KEY" ]; then
     local CLAWBOX_AI_PROVIDER_JSON
     CLAWBOX_AI_PROVIDER_JSON=$(node -e 'const key=process.argv[1]; process.stdout.write(JSON.stringify({baseUrl:"https://api.deepseek.com",api:"openai-completions",apiKey:key,models:[{id:"deepseek-chat",name:"ClawBox AI",reasoning:false,input:["text"],cost:{input:0,output:0,cacheRead:0,cacheWrite:0},contextWindow:65536,maxTokens:8192}]}));' "$CLAWBOX_AI_KEY")
-    mkdir -p "$(dirname "$AUTH_PROFILES")"
-    CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    if openclaw_is_v2; then
+      # OpenClaw 2 keeps credentials in its sqlite auth store, and recreating
+      # the legacy auth-profiles.json poisons it (the gateway refuses with
+      # AuthProfileMigrationRequiredError until doctor runs — the exact defect
+      # PR #565 chased through the configure route). The CLI owns the store's
+      # schema on every generation; the key rides stdin, never argv.
+      printf '%s\n' "$CLAWBOX_AI_KEY" | as_clawbox -H "$OPENCLAW_BIN" models auth paste-api-key --provider deepseek --profile-id deepseek:default \
+        || echo "  WARN: models auth paste-api-key failed; ClawBox AI fallback credential not stored"
+    else
+      mkdir -p "$(dirname "$AUTH_PROFILES")"
+      CLAWBOX_AI_KEY="$CLAWBOX_AI_KEY" AUTH_PROFILES="$AUTH_PROFILES" node -e 'const fs=require("fs"); const p=process.env.AUTH_PROFILES; let data={version:1,profiles:{}}; try{data=JSON.parse(fs.readFileSync(p,"utf8"));}catch{} data.profiles["deepseek:default"]={type:"api_key",provider:"deepseek",key:process.env.CLAWBOX_AI_KEY}; fs.writeFileSync(p, JSON.stringify(data,null,2), { mode: 0o600 });'
+    fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
     oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
     oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"

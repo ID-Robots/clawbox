@@ -1318,6 +1318,15 @@ export async function POST(request: Request) {
     }
 
     const { provider, apiKey, authMode = "token", idToken, refreshToken, expiresIn, projectId, scope = "primary", model: bodyModel } = body;
+    // The storage mode is the documented client contract (api-key vs OAuth
+    // bundle) — but only these four spellings exist ("local" is what the
+    // Ollama hook and the llama.cpp installer send; the route treats it as
+    // key mode), and everything below branches on the value, so an unknown
+    // one is refused before any write (CodeQL js/user-controlled-bypass
+    // wants the guard value constrained).
+    if (authMode !== "token" && authMode !== "api_key" && authMode !== "subscription" && authMode !== "local") {
+      return NextResponse.json({ error: "Unsupported authMode" }, { status: 400 });
+    }
     requestProvider = provider;
     requestScope = scope;
     const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
@@ -1891,6 +1900,32 @@ export async function POST(request: Request) {
         };
       }
       await writeAuthProfiles(authProfiles);
+      // OpenClaw 2 refuses to hydrate this LEGACY file: run the doctor
+      // migration IMMEDIATELY, before the config-set batch, catalog refresh
+      // and session sweep execute against a poisoned shared auth store (it
+      // also backs the CLI itself, so those calls would start failing too).
+      // Fail closed on a migrated box: archiving the file we just wrote and
+      // answering 502 beats "success" with a dead agent — but only when a
+      // .migrated-* sibling proves this store went sqlite; a v1 box keeps
+      // its legitimate legacy file and the old best-effort behavior.
+      try {
+        await runOpenclawDoctorFix();
+      } catch (doctorErr) {
+        const siblings = await fs.readdir(path.dirname(AUTH_PROFILES_PATH)).catch(() => [] as string[]);
+        const migratedStore = siblings.some((name) => name.startsWith("auth-profiles.json.migrated-"));
+        console.error(
+          "[configure] doctor --fix failed after the OAuth store write:",
+          doctorErr instanceof Error ? JSON.stringify(logSafe(doctorErr.message)) : doctorErr,
+        );
+        if (migratedStore) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+          await fs.rename(AUTH_PROFILES_PATH, `${AUTH_PROFILES_PATH}.failed-${stamp}`).catch(() => {});
+          return NextResponse.json(
+            { error: "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal." },
+            { status: 502 },
+          );
+        }
+      }
     }
 
     // 2. Validate profileKey before interpolating into config path
@@ -1977,7 +2012,7 @@ export async function POST(request: Request) {
         } catch (pluginErr) {
           console.warn(
             "[AI Config] deepseek provider plugin install did not complete:",
-            pluginErr instanceof Error ? logSafe(pluginErr.message) : pluginErr,
+            pluginErr instanceof Error ? JSON.stringify(logSafe(pluginErr.message)) : pluginErr,
           );
         }
       }
@@ -2006,7 +2041,12 @@ export async function POST(request: Request) {
       // gateway tolerates an unresolvable primary at rest; the model is
       // proven the first time it speaks, exactly as before OpenClaw 2.
       const primaryModel = String(baseOps[primaryIdx][1]);
-      const parsed = ((await readOpenClawConfig()) ?? {}) as OpenClawConfig;
+      // STRICT read: readOpenClawConfig answers {} for an unreadable or
+      // malformed file, and writing that back with only model.primary would
+      // replace the whole config (providers, profiles, gateway auth) with a
+      // fragment. Strict throws on anything but ENOENT, which lands in the
+      // route's generic catch as an honest 500 instead of a silent wipe.
+      const parsed = await readOpenClawConfigStrict();
       const agents = (parsed.agents ??= {});
       const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
       const model = (defaults.model ??= {}) as Record<string, unknown>;
@@ -2014,7 +2054,8 @@ export async function POST(request: Request) {
       await writeOpenClawConfig(parsed);
       console.warn(
         "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
-        logSafe(message),
+        // JSON-quoted: the modeled sanitizer for js/log-injection (see 3ef684a1).
+        JSON.stringify(logSafe(message)),
       );
     }
 
@@ -2346,23 +2387,9 @@ export async function POST(request: Request) {
         .catch(() => {});
     }
 
-    // 8b. The one credential still written to the LEGACY auth-profiles.json is
-    // the OAuth bundle (access+refresh+id — `paste-api-key` cannot carry it),
-    // and OpenClaw 2 refuses to hydrate that file until `doctor --fix`
-    // migrates it into the sqlite auth store. Mirror install.sh: stop,
-    // migrate, and let the restart below start it again. API-key saves go
-    // through the CLI's own store write and never get here. Best effort — a
-    // doctor refusal leaves the restart to tell the truth.
-    if (authMode === "subscription") {
-      try {
-        await runOpenclawDoctorFix();
-      } catch (err) {
-        console.warn(
-          "[configure] openclaw doctor --fix did not complete:",
-          err instanceof Error ? logSafe(err.message) : err,
-        );
-      }
-    }
+    // (The OAuth doctor migration runs right after the store write in step 1
+    // — see the subscription branch — so nothing here executes against an
+    // un-migrated auth store.)
 
     // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
     try {

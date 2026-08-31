@@ -351,6 +351,26 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain("config set agents.defaults.model.primary openai/gpt-5");
   });
 
+  it("refuses an unknown authMode before any write", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "anthropic",
+      apiKey: "sk-test",
+      authMode: "yolo",
+    }));
+    expect(res.status).toBe(400);
+    expect(vi.mocked(spawnOpenclawCli)).not.toHaveBeenCalled();
+    expect(mockFs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("accepts authMode 'local' (the Ollama hook's spelling)", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "ollama",
+      apiKey: "mistral:7b",
+      authMode: "local",
+    }));
+    expect(res.status).toBe(200);
+  });
+
   it("returns 400 for ClawBox AI when no token is provided or stored", async () => {
     const res = await configurePost(jsonRequest({
       provider: "clawai",
@@ -1710,7 +1730,7 @@ describe("POST /setup-api/ai-models/configure", () => {
           'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
         ),
       );
-      vi.mocked(readConfig).mockResolvedValueOnce({});
+      vi.mocked(readConfigStrict).mockResolvedValueOnce({});
 
       const res = await configurePost(jsonRequest({
         provider: "clawai",
@@ -1748,6 +1768,24 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(paste?.[0]).not.toContain("claw_token_abc");
       expect((paste?.[1] as { stdinData?: string })?.stdinData).toContain("claw_token_abc");
       expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
+    });
+
+    it("refuses to rebuild the config from a fragment when the direct-write read fails", async () => {
+      // readConfigStrict throws on a malformed openclaw.json (only ENOENT is
+      // {}); the fallback must NOT write model.primary into an empty object —
+      // that would replace the whole config with a fragment (CodeRabbit #565).
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error('Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog'),
+      );
+      vi.mocked(readConfigStrict).mockRejectedValueOnce(new Error("openclaw.json does not contain a configuration object"));
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(500);
+      expect(vi.mocked(writeConfig)).not.toHaveBeenCalled();
     });
 
     it("still writes every key the old sequence wrote", async () => {

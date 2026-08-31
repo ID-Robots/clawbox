@@ -142,6 +142,13 @@ export function listAgentIds(agentsDir: string = AGENTS_DIR_DEFAULT): string[] {
   }
 }
 
+/**
+ * The newest agent-store schema this sweep has been verified against —
+ * OpenClaw 2026.8.1 stamps PRAGMA user_version 19 and its own maintenance
+ * code hard-refuses anything newer, so ours does too.
+ */
+const KNOWN_SESSION_SCHEMA_VERSION = 19;
+
 export interface SessionEntrySweepResult {
   /** Entries the mutator changed and that were written back. */
   updated: number;
@@ -173,6 +180,19 @@ export function sweepSessionEntries(
     return { updated: 0, ok: false };
   }
   try {
+    // OpenClaw's own store code refuses schemas newer than it knows
+    // (createNewerSqliteSchemaVersionError, user_version > its build's cap);
+    // this sweep must be no braver — a newer core may have moved or re-keyed
+    // entry_json, and a blind UPDATE would corrupt what it no longer
+    // understands. 2026.8.1 stamps user_version 19.
+    const versionRow = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
+    const schemaVersion = typeof versionRow?.user_version === "number" ? versionRow.user_version : 0;
+    if (schemaVersion > KNOWN_SESSION_SCHEMA_VERSION) {
+      console.error(
+        `[session-store] ${dbPath} carries schema v${schemaVersion}, newer than the v${KNOWN_SESSION_SCHEMA_VERSION} this sweep knows; refusing to write`,
+      );
+      return { updated: 0, ok: false };
+    }
     db.exec("BEGIN IMMEDIATE");
     let updated = 0;
     try {
