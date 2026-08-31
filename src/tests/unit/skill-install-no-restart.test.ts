@@ -32,9 +32,10 @@ describe("skill install does not restart the gateway", () => {
   it("never signals the gateway from the skill library", () => {
     // restartGateway() still exists and is still correct — it goes through
     // `systemctl restart`, which systemd completes. Only the signal is banned,
-    // so match the signalling code rather than the word in the comment above it.
+    // so match the signalling argument rather than every `process.kill` call:
+    // config-lock recovery legitimately probes owner liveness with signal 0.
     expect(OPENCLAW_CONFIG).not.toContain('"SIGUSR1"');
-    expect(OPENCLAW_CONFIG).not.toContain("process.kill");
+    expect(OPENCLAW_CONFIG).not.toMatch(/process\.kill\([^;\n]*SIGUSR1/);
   });
 
   it("installs and uninstalls skills without reloading anything", () => {
