@@ -245,6 +245,7 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
+import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
@@ -1359,7 +1360,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     let connectSent = false
     let ws: WebSocket
 
-    const sendConnect = () => {
+    const sendConnect = (challenge?: Record<string, unknown>) => {
       if (connectSent || !ws || ws.readyState !== WebSocket.OPEN) return
       connectSent = true
 
@@ -1456,6 +1457,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           setErrorMsg(err.message || 'Auth failed')
         },
       })
+      // OpenClaw 2 requires a device identity from webchat clients; the
+      // challenge's nonce+ts are what it signs. Built as null against an
+      // older gateway (no ts in the challenge) and the field is simply
+      // omitted — the exact pre-2026.8 frame. Every signed value must match
+      // this frame byte for byte, so the shared literals live in consts.
+      const clientPlatform = navigator.platform || 'web'
+      const scopes = ['operator.admin', 'operator.approvals', 'operator.pairing']
+      const device = buildDeviceConnectParams({
+        nonce: challenge?.nonce,
+        ts: challenge?.ts,
+        token,
+        role: 'operator',
+        scopes,
+        clientId: 'openclaw-control-ui',
+        clientMode: 'webchat',
+        platform: clientPlatform,
+      })
       ws.send(JSON.stringify({
         type: 'req', id, method: 'connect',
         params: {
@@ -1464,16 +1482,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           client: {
             id: 'openclaw-control-ui',
             version: 'clawbox-chat',
-            platform: navigator.platform || 'web',
+            platform: clientPlatform,
             mode: 'webchat',
             instanceId: uuid(),
           },
           role: 'operator',
-          scopes: ['operator.admin', 'operator.approvals', 'operator.pairing'],
+          scopes,
           caps: ['tool-events'],
           auth: { token },
           userAgent: navigator.userAgent,
           locale: navigator.language,
+          ...(device ? { device } : {}),
         },
       }))
     }
@@ -1503,7 +1522,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         const eventName = data.event as string
 
         if (eventName === 'connect.challenge') {
-          sendConnect()
+          sendConnect(data.payload as Record<string, unknown> | undefined)
           return
         }
 

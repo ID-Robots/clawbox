@@ -437,7 +437,7 @@ harness_has_no_gpu() {
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.7.1-2"
+OPENCLAW_VERSION="2026.8.1"
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
 # NousResearch/hermes-agent had on `main` the second a box was flashed.
@@ -664,7 +664,7 @@ ensure_openclaw_node_engine() {
 
   local got
   got=$(node --version 2>/dev/null || echo "missing")
-  echo "  Node.js $got does not satisfy OpenClaw 2026.7.1 engine requirements; upgrading Node.js 22..."
+  echo "  Node.js $got does not satisfy OpenClaw 2026.8.1 engine requirements; upgrading Node.js 22..."
   wait_for_apt
   curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   wait_for_apt
@@ -673,7 +673,7 @@ ensure_openclaw_node_engine() {
   if ! node_satisfies_openclaw_engine; then
     got=$(node --version 2>/dev/null || echo "missing")
     echo "Error: Node.js upgrade did not reach an OpenClaw-compatible version — got $got." >&2
-    echo "       OpenClaw 2026.7.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
+    echo "       OpenClaw 2026.8.1 requires Node >=22.22.3 <23, >=24.15.0 <25, or >=25.9.0." >&2
     exit 1
   fi
 
@@ -982,7 +982,7 @@ step_apt_update() {
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables iw python3 python3-pip python-is-python3 gh build-essential cmake ninja-build pkg-config
-  # Node.js for production server and OpenClaw. OpenClaw 2026.7.1 tightened
+  # Node.js for production server and OpenClaw. OpenClaw 2026.8.1 tightened
   # its engines to >=22.22.3; older ClawBox images may have v22.22.2, which
   # looks like "Node 22" but crashes the OpenClaw CLI after npm install.
   if node_satisfies_openclaw_engine; then
