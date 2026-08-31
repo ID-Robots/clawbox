@@ -25,6 +25,17 @@ vi.mock("next/image", () => ({
   default: () => null,
 }));
 
+// Settings owns the timeout consequences; the overlay's own readiness state
+// machine has a dedicated component suite. This button exposes that one
+// callback while keeping the full Settings form and request lifecycle real.
+vi.mock("@/components/TelegramConfiguringOverlay", () => ({
+  default: ({ onTimeout }: { onTimeout: () => void }) => (
+    <button type="button" data-testid="telegram-force-timeout" onClick={onTimeout}>
+      Force Telegram timeout
+    </button>
+  ),
+}));
+
 const defaultUi: UISettings = {
   wallpaperId: "default",
   wpFit: "fill",
@@ -242,19 +253,67 @@ describe("SettingsApp factory reset overlay", () => {
     render(<SettingsApp ui={defaultUi} />);
 
     fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
-    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
-    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+    const trigger = await screen.findByRole("button", { name: /factoryReset/ });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const password = document.getElementById("factory-reset-password")!;
+    const cancel = screen.getByRole("button", { name: "cancel" });
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    expect(password).toHaveFocus();
+    fireEvent.keyDown(password, { key: "Tab", shiftKey: true });
+    expect(cancel).toHaveFocus();
+    fireEvent.keyDown(cancel, { key: "Tab" });
+    expect(password).toHaveFocus();
+
+    fireEvent.change(password, { target: { value: "hunter2" } });
+
+    fireEvent.keyDown(password, { key: "Escape" });
 
     await waitFor(() => {
       expect(document.getElementById("factory-reset-confirm")).not.toBeInTheDocument();
     });
+    expect(trigger).toHaveFocus();
 
     // Reopening must not hand the next caller the last password typed.
     fireEvent.click(screen.getByRole("button", { name: /factoryReset/ }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(document.getElementById("factory-reset-password")).toHaveValue("");
+  });
+
+  it("aborts an active Telegram configure request on readiness timeout and enables retry", async () => {
+    let configureSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/telegram/configure") {
+        configureSignal = init?.signal as AbortSignal | undefined;
+        return new Promise((_resolve, reject) => {
+          configureSignal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          }, { once: true });
+        });
+      }
+      return defaultFetch(input, init);
+    }));
+
+    const { container } = render(<SettingsApp ui={defaultUi} />);
+    const nav = container.querySelector("nav");
+    if (!nav) throw new Error("desktop sidebar nav did not render");
+    const channels = [...nav.querySelectorAll(":scope > button")]
+      .find((button) => (button.textContent ?? "").includes("settings.channels"));
+    if (!channels) throw new Error("Messaging Channels nav entry did not render");
+    fireEvent.click(channels);
+    fireEvent.click(await screen.findByTestId("settings-channel-telegram"));
+
+    const token = await screen.findByLabelText("settings.botToken");
+    fireEvent.change(token, { target: { value: "123456789:test-token" } });
+    fireEvent.click(screen.getByRole("button", { name: /settings\.connect$/ }));
+
+    await waitFor(() => expect(configureSignal).toBeDefined());
+    fireEvent.click(await screen.findByTestId("telegram-force-timeout"));
+
+    await waitFor(() => expect(configureSignal?.aborted).toBe(true));
+    const retry = await screen.findByRole("button", { name: /settings\.connect$/ });
+    expect(retry).toBeEnabled();
+    expect(await screen.findByText("settings.connectionFailed")).toBeInTheDocument();
   });
 
   it("kicks off the ClawBox AI device-auth handshake when the desktop deep-link event is fired", async () => {

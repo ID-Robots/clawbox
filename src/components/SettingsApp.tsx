@@ -2544,35 +2544,23 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetReconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const factoryResetCancelRef = useRef<HTMLButtonElement | null>(null);
-
-  const closeResetConfirm = () => {
+  /** Clear every owner-entered value when the reset confirmation is dismissed. */
+  const clearResetConfirm = useCallback(() => {
     setResetConfirm(false);
     setResetPassword("");
     setResetTyped("");
     setResetError(null);
-  };
-
-  // Same treatment the password-change dialog already gets: land on Cancel,
-  // leave on Escape, hand focus back where it came from. It matters more here —
-  // this dialog is the one standing in front of the wipe.
-  useEffect(() => {
-    if (!resetConfirm || resetting) return;
-    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
-    factoryResetCancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || resetSubmitting) return;
-      setResetConfirm(false);
-      setResetPassword("");
-      setResetTyped("");
-      setResetError(null);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      previouslyFocused?.focus?.();
-    };
-  }, [resetConfirm, resetting, resetSubmitting]);
+  }, []);
+  const closeResetConfirm = useCallback(() => {
+    // The request has crossed the destructive boundary. Neither Escape nor a
+    // stray click may dismiss its progress context until the route answers.
+    if (resetSubmitting) return;
+    clearResetConfirm();
+  }, [clearResetConfirm, resetSubmitting]);
+  const factoryResetPanelRef = useModalDialog<HTMLDivElement>({
+    open: resetConfirm && !resetting,
+    onClose: closeResetConfirm,
+  });
 
   const resetSetup = async () => {
     if (resetSubmitting) return;
@@ -2608,7 +2596,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     if (!accepted) return;
 
     setResetting(true);
-    closeResetConfirm();
+    clearResetConfirm();
     setResetPhase("waiting");
     setResetDots(0);
 
@@ -2773,6 +2761,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const factoryResetDialog = resetConfirm && !resetting && (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
       <div
+        ref={factoryResetPanelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="factory-reset-title"
@@ -2813,7 +2802,6 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
         <div className="flex gap-3 mt-5">
           <button
-            ref={factoryResetCancelRef}
             onClick={closeResetConfirm}
             disabled={resetSubmitting}
             className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-40"
@@ -3875,6 +3863,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                       refreshTelegramStatus();
                     }}
                     onTimeout={() => {
+                      tgSaveControllerRef.current?.abort();
+                      tgSaveControllerRef.current = null;
+                      setTgSaving(false);
                       setTgConfiguring(false);
                       setTgConfigurePromise(undefined);
                       setTgStatus({ type: "error", message: t("settings.connectionFailed") });

@@ -194,6 +194,28 @@ describe("openclaw-config", () => {
         delete process.env.OPENCLAW_HOME;
       }
     });
+
+    it("falls back to /home/clawbox when HOME is present but empty", async () => {
+      const savedHome = process.env.HOME;
+      const savedOpenclawHome = process.env.OPENCLAW_HOME;
+      const savedClawboxOpenclawHome = process.env.CLAWBOX_OPENCLAW_HOME;
+      vi.resetModules();
+      process.env.HOME = "";
+      delete process.env.OPENCLAW_HOME;
+      delete process.env.CLAWBOX_OPENCLAW_HOME;
+      try {
+        const mod = await import("@/lib/openclaw-config");
+        expect(mod.OPENCLAW_HOME).toBe("/home/clawbox/.openclaw");
+        expect(mod.CONFIG_PATH).toBe("/home/clawbox/.openclaw/openclaw.json");
+      } finally {
+        if (savedHome === undefined) delete process.env.HOME;
+        else process.env.HOME = savedHome;
+        if (savedOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+        else process.env.OPENCLAW_HOME = savedOpenclawHome;
+        if (savedClawboxOpenclawHome === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
+        else process.env.CLAWBOX_OPENCLAW_HOME = savedClawboxOpenclawHome;
+      }
+    });
   });
 
   describe("readConfig", () => {

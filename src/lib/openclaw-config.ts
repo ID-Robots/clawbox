@@ -430,7 +430,7 @@ export async function runOpenclawConfigUnset(
 
 export const OPENCLAW_HOME = process.env.CLAWBOX_OPENCLAW_HOME
   || process.env.OPENCLAW_HOME
-  || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
+  || path.join(process.env.HOME || "/home/clawbox", ".openclaw");
 const AGENTS_DIR = process.env.OPENCLAW_AGENTS_DIR || path.join(OPENCLAW_HOME, "agents");
 export const CONFIG_PATH = path.join(OPENCLAW_HOME, "openclaw.json");
 export const DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR = 24000;
@@ -1062,9 +1062,84 @@ async function lockIsStale(snapshot: LockSnapshot): Promise<boolean> {
     // shouldRemoveDeadOwnerOrExpiredLock policy does.
     return pidIsDefinitelyDead(pid);
   }
-  if (typeof payload?.createdAt !== "string") return false;
-  const createdAt = Date.parse(payload.createdAt);
-  return !Number.isFinite(createdAt) || Date.now() - createdAt > OPENCLAW_CONFIG_LOCK_STALE_MS;
+  const createdAt = typeof payload?.createdAt === "string" ? Date.parse(payload.createdAt) : Number.NaN;
+  // A crash can leave the exclusively-created sidecar empty, before its owner
+  // payload is written. Missing/malformed owner data ages by the file itself;
+  // otherwise that zero-byte lock can never be reclaimed.
+  const ownerTimestamp = Number.isFinite(createdAt) ? createdAt : snapshot.stat.mtimeMs;
+  return Number.isFinite(ownerTimestamp) && Date.now() - ownerTimestamp > OPENCLAW_CONFIG_LOCK_STALE_MS;
+}
+
+type ReclaimGuardState = "missing" | "active" | "reclaimed";
+
+/**
+ * Inspect OpenClaw's reclaim guard through a pinned directory descriptor.
+ * A recent guard is live and retained. An abandoned guard ages out after the
+ * same 30 s as its lock. Reclamation first atomically renames the path to an
+ * unpredictable quarantine: a successor created at the canonical path is
+ * never removed, and the moved directory is deleted only when its descriptor
+ * identity is the stale directory we observed.
+ */
+async function inspectReclaimGuard(guardPath: string): Promise<ReclaimGuardState> {
+  const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsSync.constants.O_NONBLOCK === "number" ? fsSync.constants.O_NONBLOCK : 0;
+  const directory = typeof fsSync.constants.O_DIRECTORY === "number" ? fsSync.constants.O_DIRECTORY : 0;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(guardPath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
+    const opened = await handle.stat() as FileStat;
+    if (!opened.isDirectory()) return "active";
+    if (!Number.isFinite(opened.mtimeMs) || Date.now() - opened.mtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
+      return "active";
+    }
+    const quarantinePath = `${guardPath}.quarantine-${randomUUID()}`;
+    try {
+      await fs.rename(guardPath, quarantinePath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return "missing";
+      if (code === "EEXIST" || code === "ENOTEMPTY") return "active";
+      throw err;
+    }
+
+    let movedHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      movedHandle = await fs.open(quarantinePath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
+      const moved = await movedHandle.stat() as FileStat;
+      if (!moved.isDirectory() || !sameFileIdentity(opened, moved)) {
+        // The canonical path was replaced between open and rename. Retain the
+        // moved successor under quarantine and restore guard *presence* with
+        // an exclusive mkdir; never rename over a newer live guard.
+        await fs.mkdir(guardPath).catch((err) => {
+          if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        });
+        return "active";
+      }
+      try {
+        await fs.rmdir(quarantinePath);
+        return "reclaimed";
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === "ENOENT") return "reclaimed";
+        if (code === "EEXIST" || code === "ENOTEMPTY") {
+          await fs.mkdir(guardPath).catch((mkdirErr) => {
+            if ((mkdirErr as NodeJS.ErrnoException).code !== "EEXIST") throw mkdirErr;
+          });
+          return "active";
+        }
+        throw err;
+      }
+    } finally {
+      await movedHandle?.close().catch(() => {});
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return "missing";
+    if (code === "ELOOP" || code === "ENOTDIR") return "active";
+    throw err;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 /** Remove only the exact inode and bytes represented by `snapshot`. */
@@ -1143,12 +1218,11 @@ async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promi
 
   while (true) {
     try {
-      try {
-        await fs.lstat(reclaimGuardPath);
+      const guardState = await inspectReclaimGuard(reclaimGuardPath);
+      if (guardState === "active") {
         throw Object.assign(new Error(`config lock reclamation is active: ${reclaimGuardPath}`), { code: "EEXIST" });
-      } catch (guardErr) {
-        if ((guardErr as NodeJS.ErrnoException).code !== "ENOENT") throw guardErr;
       }
+      if (guardState === "reclaimed") continue;
       lockHandle = await fs.open(lockPath, "wx", 0o600);
       let acquisitionError: unknown = null;
       try {
