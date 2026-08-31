@@ -87,7 +87,15 @@ export async function POST(req: Request) {
         entries[k] = v;
       }
       if (Object.keys(entries).length > 0) kvSetMany(entries);
-      if (legacyAction) await pushPendingAction(legacyAction);
+      if (legacyAction) {
+        // The other entries are already on disk; a failed append is the
+        // store's fault, not the request's, and must not read as bad JSON.
+        try {
+          await pushPendingAction(legacyAction);
+        } catch {
+          return NextResponse.json({ error: "Could not record the notice" }, { status: 500 });
+        }
+      }
       return NextResponse.json({ ok: true });
     }
     if (typeof body.key === "string" && typeof body.value === "string") {
@@ -98,7 +106,11 @@ export async function POST(req: Request) {
       if (body.key === LEGACY_PENDING_ACTION_KEY) {
         const action = parseLegacyAction(body.value);
         if (!action) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
-        await pushPendingAction(action);
+        try {
+          await pushPendingAction(action);
+        } catch {
+          return NextResponse.json({ error: "Could not record the notice" }, { status: 500 });
+        }
         return NextResponse.json({ ok: true });
       }
       kvSet(body.key, body.value);

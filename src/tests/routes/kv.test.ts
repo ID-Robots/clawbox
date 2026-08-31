@@ -178,6 +178,31 @@ describe("/setup-api/kv", () => {
       expect((await slotRes.json()).value).toBeNull();
     });
 
+    // A failed ring append is the store's fault, not the request's: it must
+    // answer 500, never fall into the outer catch's "Invalid JSON" 400.
+    it("answers 500 when the ring append itself fails", async () => {
+      mockKvSet.mockImplementation(() => { throw new Error("disk full"); });
+
+      const single = await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({ key: "ui:pending-action", value: JSON.stringify({ type: "notify", message: "hi" }) }),
+      }));
+      expect(single.status).toBe(500);
+      expect((await single.json()).error).toBe("Could not record the notice");
+
+      // The batched form: the other entries are already persisted before the
+      // append runs, and the response says what actually failed.
+      const batched = await POST(new Request("http://localhost/setup-api/kv", {
+        method: "POST",
+        body: JSON.stringify({ entries: {
+          valid_key: "1",
+          "ui:pending-action": JSON.stringify({ type: "notify", message: "hi" }),
+        } }),
+      }));
+      expect(batched.status).toBe(500);
+      expect(mockKvSetMany).toHaveBeenCalledWith({ valid_key: "1" });
+    });
+
     // The batched form must not become a side door for the retired slot:
     // `{entries}` used to persist it through kvSetMany, where no desktop
     // would ever see it.
