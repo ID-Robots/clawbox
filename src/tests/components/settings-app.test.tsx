@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 import { resetHarnessCache } from "@/lib/client-harness";
 
@@ -184,9 +184,17 @@ describe("SettingsApp factory reset overlay", () => {
     });
 
     const overlay = await screen.findByRole("status");
+    const progressDialog = screen.getByRole("dialog", { name: /settings\.resetting/ });
     expect(overlay).toBeInTheDocument();
+    expect(overlay).toHaveAttribute("aria-live", "polite");
+    expect(progressDialog).toHaveFocus();
     expect(document.body).toContainElement(overlay);
     expect(container).not.toContainElement(overlay);
+    expect(root).toHaveAttribute("inert");
+    expect(root).toHaveAttribute("aria-hidden", "true");
+    fireEvent.keyDown(progressDialog, { key: "Escape" });
+    expect(progressDialog).toBeInTheDocument();
+    expect(progressDialog).toHaveFocus();
     expect(within(overlay).getAllByText("settings.erasingSettings")).toHaveLength(2);
     expect(within(overlay).getByText("settings.waitingOnline")).toBeInTheDocument();
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
@@ -247,6 +255,68 @@ describe("SettingsApp factory reset overlay", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("settings.connectionFailed");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
+  });
+
+  it("hard timeout aborts and invalidates a late successful reset-status response", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let acceptedAt = 0;
+    let lateResolve: ((response: Response) => void) | null = null;
+    let lateSignal: AbortSignal | undefined;
+    try {
+      vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url === "/setup-api/setup/reset") {
+          acceptedAt = Date.now();
+          return jsonResponse({ success: true });
+        }
+        if (url === "/setup-api/setup/status" && acceptedAt > 0) {
+          // Polls normally answer "not back yet". The final poll starts one
+          // second before the five-minute hard deadline and deliberately
+          // ignores abort, like a cache/transport that has already received
+          // the response bytes but has not resolved its promise yet.
+          if (Date.now() - acceptedAt >= 299_000) {
+            lateSignal = init?.signal as AbortSignal | undefined;
+            return new Promise<Response>((resolve) => { lateResolve = resolve; });
+          }
+          return Promise.resolve(new Response("{}", { status: 503 }));
+        }
+        return defaultFetch(input, init);
+      }));
+
+      render(<SettingsApp ui={defaultUi} />);
+      fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+      fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+      fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+      fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+      fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+      await screen.findByRole("status");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(Math.max(0, acceptedAt + 299_100 - Date.now()));
+      });
+      await waitFor(() => expect(lateResolve).not.toBeNull());
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(Math.max(0, acceptedAt + 300_100 - Date.now()));
+      });
+      expect(lateSignal?.aborted).toBe(true);
+      expect(await screen.findByRole("dialog", { name: "settings.factoryResetTitle" })).toBeInTheDocument();
+      expect(screen.queryByRole("status")).toBeNull();
+
+      const timersBeforeLateSuccess = vi.getTimerCount();
+      await act(async () => {
+        lateResolve?.(new Response("{}", { status: 200 }));
+        await Promise.resolve();
+      });
+
+      // The stale success neither re-enters the progress UI nor schedules the
+      // 1.5 s redirect; settling its own request timeout removes one timer.
+      expect(screen.getByRole("dialog", { name: "settings.factoryResetTitle" })).toBeInTheDocument();
+      expect(screen.queryByRole("status")).toBeNull();
+      expect(vi.getTimerCount()).toBeLessThan(timersBeforeLateSuccess);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("closes the reset dialog on Escape and clears what was typed", async () => {

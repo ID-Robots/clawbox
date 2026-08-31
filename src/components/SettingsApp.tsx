@@ -2543,6 +2543,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetReconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resetPollControllerRef = useRef<AbortController | null>(null);
+  // Every reset attempt owns one generation. A hard timeout increments it so
+  // even a fetch implementation that ignores AbortSignal cannot publish a
+  // late success and schedule the /setup redirect.
+  const resetPollGenerationRef = useRef(0);
 
   /** Clear every owner-entered value when the reset confirmation is dismissed. */
   const clearResetConfirm = useCallback(() => {
@@ -2560,6 +2565,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const factoryResetPanelRef = useModalDialog<HTMLDivElement>({
     open: resetConfirm && !resetting,
     onClose: closeResetConfirm,
+  });
+  const keepResetProgressOpen = useCallback(() => {
+    // Once the wipe was accepted there is no safe dismiss action. Escape is
+    // still captured by useModalDialog so it cannot reach the desktop behind.
+  }, []);
+  const factoryResetProgressPanelRef = useModalDialog<HTMLDivElement>({
+    open: resetting && resetPhase !== null,
+    onClose: keepResetProgressOpen,
   });
 
   const resetSetup = async () => {
@@ -2599,12 +2612,20 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     clearResetConfirm();
     setResetPhase("waiting");
     setResetDots(0);
+    resetPollControllerRef.current?.abort();
+    resetPollControllerRef.current = null;
+    const pollGeneration = ++resetPollGenerationRef.current;
 
     // Animate dots
     resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
     resetReconnectTimeoutRef.current = setTimeout(() => {
+      if (resetPollGenerationRef.current !== pollGeneration) return;
+      resetReconnectTimeoutRef.current = null;
+      resetPollGenerationRef.current += 1;
       if (resetPollRef.current) clearInterval(resetPollRef.current);
       if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+      resetPollControllerRef.current?.abort();
+      resetPollControllerRef.current = null;
       resetPollRef.current = null;
       resetDotsRef.current = null;
       setResetting(false);
@@ -2615,19 +2636,41 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
     // Wait for device to go down, then poll for reconnect
     setTimeout(() => {
+      if (resetPollGenerationRef.current !== pollGeneration) return;
       setResetPhase("reconnecting");
-      resetPollRef.current = setInterval(async () => {
-        try {
-          const res = await fetch("/setup-api/setup/status", { signal: AbortSignal.timeout(3000) });
-          if (res.ok) {
-            if (resetPollRef.current) clearInterval(resetPollRef.current);
-            if (resetDotsRef.current) clearInterval(resetDotsRef.current);
-            if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
-            resetReconnectTimeoutRef.current = null;
-            setResetPhase("done");
-            setTimeout(() => { window.location.replace("/setup"); }, 1500);
+      resetPollRef.current = setInterval(() => {
+        if (resetPollGenerationRef.current !== pollGeneration || resetPollControllerRef.current) return;
+        const controller = new AbortController();
+        resetPollControllerRef.current = controller;
+        const requestTimeout = setTimeout(() => controller.abort(), 3000);
+        void (async () => {
+          try {
+            const res = await fetch("/setup-api/setup/status", { signal: controller.signal });
+            if (
+              res.ok
+              && !controller.signal.aborted
+              && resetPollGenerationRef.current === pollGeneration
+            ) {
+              if (resetPollRef.current) clearInterval(resetPollRef.current);
+              if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+              if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
+              resetReconnectTimeoutRef.current = null;
+              setResetPhase("done");
+              setTimeout(() => {
+                if (resetPollGenerationRef.current === pollGeneration) {
+                  window.location.replace("/setup");
+                }
+              }, 1500);
+            }
+          } catch {
+            /* still offline */
+          } finally {
+            clearTimeout(requestTimeout);
+            if (resetPollControllerRef.current === controller) {
+              resetPollControllerRef.current = null;
+            }
           }
-        } catch { /* still offline */ }
+        })();
       }, 3000);
     }, 5000);
   };
@@ -2635,9 +2678,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      resetPollGenerationRef.current += 1;
       if (resetPollRef.current) clearInterval(resetPollRef.current);
       if (resetDotsRef.current) clearInterval(resetDotsRef.current);
       if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
+      resetPollControllerRef.current?.abort();
+      resetPollControllerRef.current = null;
     };
   }, []);
 
@@ -2688,10 +2734,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const resetOverlay = resetting && resetPhase && typeof document !== "undefined"
     ? createPortal(
         <div
+          ref={factoryResetProgressPanelRef}
           className="fixed inset-0 flex items-center justify-center"
           style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
-          role="status"
-          aria-live="polite"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="factory-reset-progress-title"
         >
           <style>{`
             @keyframes factory-reset-pulse {
@@ -2699,7 +2747,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
               50% { opacity: 0.1; transform: scale(1.18); }
             }
           `}</style>
-          <div className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6">
+          <div
+            className="flex flex-col items-center gap-8 max-w-md w-full text-center px-6"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
             {resetPhase === "done" ? (
               <div className="relative w-28 h-28 flex items-center justify-center">
                 <div className="absolute inset-0 rounded-full border-2 border-emerald-500/20" />
@@ -2722,7 +2775,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
             )}
 
             <div>
-              <h2 className="text-2xl font-bold text-white mb-2">{resetOverlayTitle}</h2>
+              <h2 id="factory-reset-progress-title" className="text-2xl font-bold text-white mb-2">{resetOverlayTitle}</h2>
               <p className="text-sm text-white/45">{resetOverlayDescription}</p>
             </div>
 

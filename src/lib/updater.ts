@@ -1181,7 +1181,7 @@ async function getPinnedBranchTarget(projectDir: string): Promise<{
 } | null> {
   let branch: string;
   try {
-    branch = (await readFile(UPDATE_BRANCH_FILE, "utf-8")).trim();
+    branch = (await readFile(path.join(projectDir, ".update-branch"), "utf-8")).trim();
   } catch {
     return null;
   }

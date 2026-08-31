@@ -214,6 +214,7 @@ describe("openclaw-config", () => {
         else process.env.OPENCLAW_HOME = savedOpenclawHome;
         if (savedClawboxOpenclawHome === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
         else process.env.CLAWBOX_OPENCLAW_HOME = savedClawboxOpenclawHome;
+        vi.resetModules();
       }
     });
   });
