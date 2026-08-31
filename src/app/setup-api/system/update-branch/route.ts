@@ -5,7 +5,7 @@ import { isSafeBranch } from "@/lib/update-branch";
 
 export const dynamic = "force-dynamic";
 
-const PROJECT_DIR = "/home/clawbox/clawbox";
+const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 
 function isEnoent(err: unknown): boolean {

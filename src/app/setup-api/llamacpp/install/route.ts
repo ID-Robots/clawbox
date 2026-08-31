@@ -22,6 +22,7 @@ import {
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
 const encoder = new TextEncoder();
 const execFile = promisify(execFileCb);
+const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 const LLAMACPP_INSTALL_SERVICE = "clawbox-root-update@llamacpp_install.service";
 // Must stay >= TimeoutStartSec in config/clawbox-root-update@.service so
 // systemd, not us, owns the kill. A cold box builds llama.cpp from source with
@@ -194,10 +195,10 @@ function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: st
       `${spec.contextWindow}`,
     ],
     {
-      cwd: "/home/clawbox",
+      cwd: CLAWBOX_HOME_DIR,
       detached: true,
       stdio: "ignore",
-      env: { ...process.env, HOME: "/home/clawbox" },
+      env: { HOME: CLAWBOX_HOME_DIR, ...process.env },
     }
   );
 }

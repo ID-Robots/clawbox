@@ -20,9 +20,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-OPENCLAW_BIN="/home/clawbox/.npm-global/bin/openclaw"
-OPENCLAW_CONFIG="/home/clawbox/.openclaw/openclaw.json"
-HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
+CLAWBOX_HOME_DIR="${CLAWBOX_HOME_DIR:-${HOME:-/home/clawbox}}"
+CLAWBOX_ROOT="${CLAWBOX_ROOT:-$CLAWBOX_HOME_DIR/clawbox}"
+CLAWBOX_PORT="${CLAWBOX_PORT:-80}"
+OPENCLAW_BIN="${OPENCLAW_BIN:-$CLAWBOX_HOME_DIR/.npm-global/bin/openclaw}"
+OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}/openclaw.json}"
+HOSTNAME_ENV="${HOSTNAME_ENV:-$CLAWBOX_ROOT/data/hostname.env}"
 
 # Pinned OpenClaw target — external plugins (e.g. @openclaw/codex) must stay
 # locked to the same version as the core, or they drift ahead via @latest and
@@ -30,7 +33,7 @@ HOSTNAME_ENV="/home/clawbox/clawbox/data/hostname.env"
 # source install.sh and updater.ts use. Empty = pin unknown, fall back to the
 # unpinned alias (preserves old behaviour rather than risk skipping a repair).
 OPENCLAW_TARGET=""
-OPENCLAW_PIN_FILE="/home/clawbox/clawbox/config/openclaw-target.txt"
+OPENCLAW_PIN_FILE="${OPENCLAW_PIN_FILE:-$CLAWBOX_ROOT/config/openclaw-target.txt}"
 if [ -n "${OPENCLAW_PIN_VERSION:-}" ]; then
   OPENCLAW_TARGET="${OPENCLAW_PIN_VERSION}"
 elif [ -f "$OPENCLAW_PIN_FILE" ]; then
@@ -107,6 +110,7 @@ fi
 # already matches the target state. The CLI calls below (gateway
 # restart + MCP server) are guarded by their own idempotency checks.
 export CLAWBOX_HOSTNAME="$CONFIGURED_HOSTNAME"
+export CLAWBOX_PORT
 # Serialize the LAN_IPS bash array into an env var Python can parse —
 # newline-separated is bash-safe (IPv4s contain no newlines).
 if [ ${#LAN_IPS[@]} -gt 0 ]; then
@@ -167,7 +171,7 @@ export CLAWBOX_EXTRA_ORIGINS
 # The cloud-voice migration below needs the portal-confirmed plan stamp that
 # lives there, and only there. Exported rather than passed as a second argv so
 # the block keeps the single-argument shape every other python heredoc here has.
-export CLAWBOX_DEVICE_STORE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/config.json"
+export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile, secrets
@@ -217,6 +221,14 @@ allowed_origins = [
     "http://10.43.0.1",
     *lan_ips,
 ]
+port = os.environ.get("CLAWBOX_PORT", "80").strip()
+if port and port != "80":
+    allowed_origins.extend([
+        f"http://{hostname}.local:{port}",
+        f"http://localhost:{port}",
+        f"http://127.0.0.1:{port}",
+        *(f"{origin}:{port}" for origin in lan_ips),
+    ])
 # Merge already-validated extra origins (scripts/gateway_origins.py) into the
 # generated defaults, deterministically and before the set comparison below —
 # defaults first, extras appended in file order, de-duplicated.
@@ -236,12 +248,32 @@ except json.JSONDecodeError:
 
 changed = False
 
+# OpenClaw 2 moved/retired these v1 state and tuning fields. Doctor normally
+# removes them, but plugin-verification failures can make doctor exit before
+# it writes the repaired config, leaving the gateway in a permanent loop.
+meta = cfg.get("meta")
+if isinstance(meta, dict) and "lastTouchedAt" in meta:
+    del meta["lastTouchedAt"]
+    changed = True
+commands = cfg.get("commands")
+if isinstance(commands, dict) and "ownerDisplay" in commands:
+    del commands["ownerDisplay"]
+    changed = True
+tailscale = (cfg.get("gateway") or {}).get("tailscale") if isinstance(cfg.get("gateway"), dict) else None
+if isinstance(tailscale, dict) and "resetOnExit" in tailscale:
+    del tailscale["resetOnExit"]
+    changed = True
+
 # Strip invalid agent keys that prevent gateway from starting.
 agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})
 for k in ("tools", "systemPromptSuffix"):
     if k in agents_defaults:
         del agents_defaults[k]
         changed = True
+compaction = agents_defaults.get("compaction")
+if isinstance(compaction, dict) and "reserveTokensFloor" in compaction:
+    del compaction["reserveTokensFloor"]
+    changed = True
 
 # Model migration: some early ClawBox images/configs can leave the active
 # primary on Anthropic's retired May 2025 Sonnet id. New OpenClaw builds no
@@ -418,6 +450,26 @@ if isinstance(channels, dict):
         # chats; owner DMs still work) is the safe choice.
         if _channel.get("groupPolicy") not in (None, "open", "disabled", "allowlist"):
             _channel["groupPolicy"] = "disabled"
+            changed = True
+
+# OpenClaw 2 split some formerly bundled channels into consent-gated external
+# plugins. A legacy config can retain plugins.entries.<channel>.enabled=true
+# even when that channel is explicitly disabled; core then tries to repair the
+# absent plugin, blocks on capability consent, and refuses gateway readiness.
+# Remove only that contradictory stale enablement. An enabled channel, or a
+# plugin entry the owner explicitly disabled, is preserved.
+plugin_entries = (cfg.get("plugins") or {}).get("entries") if isinstance(cfg.get("plugins"), dict) else None
+if isinstance(plugin_entries, dict) and isinstance(channels, dict):
+    for _channel_name in ("slack",):
+        _entry = plugin_entries.get(_channel_name)
+        _channel = channels.get(_channel_name)
+        if (
+            isinstance(_entry, dict)
+            and _entry.get("enabled") is True
+            and isinstance(_channel, dict)
+            and _channel.get("enabled") is False
+        ):
+            del plugin_entries[_channel_name]
             changed = True
 
 # Migration: devices that configured OpenRouter before the provider-def
@@ -1323,6 +1375,24 @@ else:
     print("  Gateway config already correct, skipping write")
 PY
 
+# OpenClaw 2 refuses to start while any legacy auth-profiles.json remains,
+# even when the credentials were already copied into SQLite. Provider setup
+# normally runs doctor before restarting, but an interrupted configure or a
+# late writer from an older x64 install can recreate the file after that pass.
+# Repair only when the sentinel file exists, so normal boots pay no CLI cost.
+LEGACY_AUTH_PROFILE="$(find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null || true)"
+if [ -n "$LEGACY_AUTH_PROFILE" ]; then
+  echo "  Migrating legacy auth profiles into OpenClaw 2 SQLite state..."
+  if ! timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+    echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2
+    exit 1
+  fi
+  if find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null | grep -q .; then
+    echo "  ERROR: OpenClaw doctor left a legacy auth-profiles.json in place" >&2
+    exit 1
+  fi
+fi
+
 # Patch the installed openclaw deepseek plugin JSON to declare that the
 # DeepSeek V4 models accept `off` and `xhigh` reasoning efforts. The shipped plugin
 # only sets `supportsReasoningEffort: true`, but `catalogSupportsXHigh()`
@@ -1584,12 +1654,12 @@ if [ "$NEEDS_CODEX_PLUGIN" = "1" ]; then
   # attaches no profile (`profile=-` in the log), sends no bearer, and every
   # turn 401s while the UI still shows the provider as connected. Migrate
   # first, so the mirror below reads a populated store.
-  AUTH_PROFILE_MIGRATION="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/migrate-auth-profiles.js"
+  AUTH_PROFILE_MIGRATION="$CLAWBOX_ROOT/scripts/migrate-auth-profiles.js"
   if [ -f "$AUTH_PROFILE_MIGRATION" ]; then
     node "$AUTH_PROFILE_MIGRATION" "$OPENCLAW_HOME_DIR" || true
   fi
 
-  CODEX_AUTH_MIRROR="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/scripts/codex-auth-mirror.js"
+  CODEX_AUTH_MIRROR="$CLAWBOX_ROOT/scripts/codex-auth-mirror.js"
   if [ -f "$CODEX_AUTH_MIRROR" ]; then
     node "$CODEX_AUTH_MIRROR" "$OPENCLAW_HOME_DIR" "$HOME/.codex/auth.json" || true
   else
@@ -1611,7 +1681,7 @@ fi
 # a ~600MB download. The script takes its own lock, so overlapping restarts do
 # not stack up pulls.
 LOCAL_EMBEDDINGS="$SCRIPT_DIR/ensure-local-embeddings.sh"
-LOCAL_EMBEDDINGS_LOG="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/local-embeddings.log"
+LOCAL_EMBEDDINGS_LOG="$CLAWBOX_ROOT/data/local-embeddings.log"
 if [ -x "$LOCAL_EMBEDDINGS" ]; then
   mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
   setsid nohup "$LOCAL_EMBEDDINGS" >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
@@ -1630,7 +1700,7 @@ fi
 # verifier. production-server.js also seeds this file at Next.js boot;
 # we mirror that here so the gateway can register the MCP server even
 # if it comes up before clawbox-setup on a fresh boot.
-MCP_TOKEN_FILE="${CLAWBOX_ROOT:-/home/clawbox/clawbox}/data/.mcp-token"
+MCP_TOKEN_FILE="$CLAWBOX_ROOT/data/.mcp-token"
 if [ ! -s "$MCP_TOKEN_FILE" ] || [ "$(wc -c < "$MCP_TOKEN_FILE" 2>/dev/null || echo 0)" -lt 32 ]; then
   mkdir -p "$(dirname "$MCP_TOKEN_FILE")"
   if command -v openssl >/dev/null 2>&1; then
@@ -1669,6 +1739,9 @@ if [ -z "$CLAWBOX_MCP_TOKEN_VAL" ]; then
   exit 1
 fi
 export CLAWBOX_MCP_TOKEN_VAL
+export CLAWBOX_BUN_BIN="${CLAWBOX_BUN_BIN:-$CLAWBOX_HOME_DIR/.bun/bin/bun}"
+export CLAWBOX_MCP_ENTRY="${CLAWBOX_MCP_ENTRY:-$CLAWBOX_ROOT/mcp/clawbox-mcp.ts}"
+export CLAWBOX_API_BASE="${CLAWBOX_API_BASE:-http://127.0.0.1:$CLAWBOX_PORT}"
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
@@ -1683,10 +1756,10 @@ except (FileNotFoundError, json.JSONDecodeError):
     sys.exit(0)
 
 desired = {
-    "command": "/home/clawbox/.bun/bin/bun",
-    "args": ["run", "/home/clawbox/clawbox/mcp/clawbox-mcp.ts"],
+    "command": os.environ["CLAWBOX_BUN_BIN"],
+    "args": ["run", os.environ["CLAWBOX_MCP_ENTRY"]],
     "env": {
-        "CLAWBOX_API_BASE": "http://127.0.0.1:80",
+        "CLAWBOX_API_BASE": os.environ["CLAWBOX_API_BASE"],
         "CLAWBOX_MCP_TOKEN": token,
     },
 }
@@ -1786,7 +1859,7 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
 
-CLAWBOX_GUIDE_SRC="/home/clawbox/clawbox/config/clawbox-workspace-guide.md"
+CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 if [ -d "$CLAWBOX_WORKSPACE" ] && [ -f "$CLAWBOX_GUIDE_SRC" ]; then
   # Seed-if-missing rather than overwrite-on-diff. The agent and the

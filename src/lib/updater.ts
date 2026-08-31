@@ -17,7 +17,7 @@ import { parseHermesVersion } from "./version-utils";
 import { isSafeBranch } from "./update-branch";
 import { collectBuildIdentity } from "./build-identity";
 
-const PROJECT_DIR = "/home/clawbox/clawbox";
+const PROJECT_DIR = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const UPDATE_BRANCH_FILE = path.join(PROJECT_DIR, ".update-branch");
 // Pinned OpenClaw version — single source of truth shared with install.sh
 // so the in-UI "Latest" column reflects the ClawBox-approved release, not
@@ -30,7 +30,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // would actually deploy. Without this both sides diverged: the UI returned
 // null and reported "no update", while install.sh would still install
 // 2026.5.3-1 — confusing.
-const OPENCLAW_VERSION_FALLBACK = "2026.7.1-2";
+const OPENCLAW_VERSION_FALLBACK = "2026.8.1";
 
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);

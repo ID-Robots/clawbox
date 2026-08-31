@@ -212,12 +212,12 @@ async function bootLlamaCppServer(requestedAlias?: string): Promise<LlamaCppStar
       `${spec.contextWindow}`,
     ],
     {
-      cwd: '/home/clawbox',
+      cwd: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
       detached: false,
       stdio: 'ignore',
       env: {
         ...process.env,
-        HOME: '/home/clawbox',
+        HOME: process.env.CLAWBOX_HOME_DIR || process.env.HOME || '/home/clawbox',
         LLAMACPP_PID_PATH: spec.pidPath,
       },
     },

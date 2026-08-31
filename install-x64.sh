@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# ClawBox x64 Desktop Installer — safe version that skips Jetson/network steps
-# Installs OpenClaw + ClawBox UI for x64 desktop use.
-# Does NOT modify: hostname, WiFi, DNS, systemd services, NVIDIA drivers
+# ClawBox x64 Desktop Installer — Ubuntu desktop/server installer.
+# Installs OpenClaw + the ClawBox UI as persistent systemd services.
+# Does NOT modify: hostname, WiFi, DNS, NVIDIA drivers, or Jetson settings.
 #
 # Usage:
 #   sudo bash install-x64.sh              — full install
@@ -11,6 +11,8 @@
 #   CLAWBOX_BRANCH       — git branch to clone/checkout (default: main)
 #   CLAWBOX_USER         — user to install as (default: current user)
 #   CLAWBOX_PORT         — port for ClawBox UI (default: 3005)
+#   CLAWBOX_DIR          — checkout to install (default: ~/clawbox)
+#   OPENCLAW_PIN_VERSION — QA override for config/openclaw-target.txt
 set -euo pipefail
 
 # ── Require root ─────────────────────────────────────────────────────────────
@@ -24,7 +26,17 @@ fi
 
 REPO_URL="https://github.com/ID-Robots/clawbox.git"
 REPO_BRANCH="${CLAWBOX_BRANCH:-main}"
-CLAWBOX_USER="${CLAWBOX_USER:-$(logname 2>/dev/null || echo $SUDO_USER)}"
+if [ "$(uname -m)" != "x86_64" ]; then
+  echo "Error: install-x64.sh only supports x86_64 hosts (found $(uname -m))." >&2
+  exit 1
+fi
+
+# `logname` fails in containers and remote shells, while SUDO_USER is unset
+# when root invokes the installer directly. Resolve without tripping `set -u`.
+DEFAULT_USER="$(logname 2>/dev/null || true)"
+[ -n "$DEFAULT_USER" ] || DEFAULT_USER="${SUDO_USER:-}"
+[ -n "$DEFAULT_USER" ] || DEFAULT_USER="$(id -un)"
+CLAWBOX_USER="${CLAWBOX_USER:-$DEFAULT_USER}"
 # Look up the user's home from passwd instead of `eval echo ~$CLAWBOX_USER`,
 # which would expand shell metacharacters in CLAWBOX_USER.
 CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
@@ -44,20 +56,111 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.2.14"
+OPENCLAW_VERSION="2026.8.1"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
+OPENCLAW_HOME="$CLAWBOX_HOME/.openclaw"
+UI_SERVICE="clawbox-setup.service"
+GATEWAY_SERVICE="clawbox-gateway.service"
+NODE_DIST_VERSION="24.15.0"
+NODE_DIST_ROOT="/opt/clawbox/node"
+export PATH="$NODE_DIST_ROOT/bin:$PATH"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 as_user() { sudo -u "$CLAWBOX_USER" "$@"; }
 
+as_user_runtime() {
+  sudo -u "$CLAWBOX_USER" -H env \
+    HOME="$CLAWBOX_HOME" \
+    CLAWBOX_ROOT="$PROJECT_DIR" \
+    PATH="$NODE_DIST_ROOT/bin:$NPM_PREFIX/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+    "$@"
+}
+
 # Run a command as the user with login environment.
 # Pass the entire command as a single argument (don't $* expand) so callers
 # control quoting and shell metacharacters in their command can't break out.
 as_user_login() {
-  sudo -iu "$CLAWBOX_USER" bash -lc "export PATH=\"$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $1"
+  sudo -iu "$CLAWBOX_USER" bash -lc "export HOME=\"$CLAWBOX_HOME\" CLAWBOX_ROOT=\"$PROJECT_DIR\" PATH=\"$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.npm-global/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\" && $1"
+}
+
+node_satisfies_openclaw_engine() {
+  local version major
+  version=$(node -p 'process.versions.node' 2>/dev/null || echo "")
+  [ -n "$version" ] || return 1
+  major="${version%%.*}"
+  case "$major" in
+    22) dpkg --compare-versions "$version" ge "22.22.3" ;;
+    24) dpkg --compare-versions "$version" ge "24.15.0" ;;
+    25) dpkg --compare-versions "$version" ge "25.9.0" ;;
+    2[6-9]|[3-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+activate_node_runtime() {
+  local node_real node_root
+  node_real=$(readlink -f "$(command -v node)")
+  node_root=$(dirname "$(dirname "$node_real")")
+  mkdir -p /opt/clawbox
+  if [ "$node_root" != "$(readlink -f "$NODE_DIST_ROOT" 2>/dev/null || true)" ]; then
+    ln -sfn "$node_root" "$NODE_DIST_ROOT"
+  fi
+  hash -r
+}
+
+ensure_openclaw_node_engine() {
+  if node_satisfies_openclaw_engine; then
+    activate_node_runtime
+    echo "  Node.js $(node --version) satisfies OpenClaw engine requirements"
+    return 0
+  fi
+  echo "  Installing/upgrading Node.js 22 for OpenClaw $OPENCLAW_VERSION..."
+  wait_for_apt
+  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  wait_for_apt
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
+  if node_satisfies_openclaw_engine; then
+    activate_node_runtime
+    return 0
+  fi
+
+  # Some Ubuntu desktops pin the distro nodejs package above NodeSource, and
+  # /usr/local/bin may hold an unrelated older manual install. Keep ClawBox's
+  # runtime isolated instead of replacing either machine-wide installation.
+  echo "  APT still exposes $(node --version 2>/dev/null || echo no-node); installing verified Node $NODE_DIST_VERSION x64 under /opt/clawbox..."
+  local archive="node-v${NODE_DIST_VERSION}-linux-x64.tar.xz"
+  local tmp_dir
+  tmp_dir=$(mktemp -d)
+  curl -fsSLO --output-dir "$tmp_dir" "https://nodejs.org/dist/v${NODE_DIST_VERSION}/$archive"
+  curl -fsSLo "$tmp_dir/SHASUMS256.txt" "https://nodejs.org/dist/v${NODE_DIST_VERSION}/SHASUMS256.txt"
+  (cd "$tmp_dir" && grep "  $archive\$" SHASUMS256.txt | sha256sum -c -)
+  mkdir -p /opt/clawbox
+  rm -rf "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64"
+  tar -xJf "$tmp_dir/$archive" -C /opt/clawbox
+  ln -sfn "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64" "$NODE_DIST_ROOT"
+  rm -rf "$tmp_dir"
+  hash -r
+  if ! node_satisfies_openclaw_engine; then
+    echo "Error: isolated Node install failed; found $(node --version 2>/dev/null || echo missing)." >&2
+    exit 1
+  fi
+  echo "  Node.js $(node --version) installed at $NODE_DIST_ROOT"
+}
+
+openclaw_version_is_v2() {
+  [ -n "${1:-}" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
+}
+
+openclaw_is_v2() {
+  local version=""
+  if [ -x "$OPENCLAW_BIN" ]; then
+    version=$("$OPENCLAW_BIN" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+  fi
+  [ -n "$version" ] || version="${OPENCLAW_TARGET:-$OPENCLAW_VERSION}"
+  openclaw_version_is_v2 "$version"
 }
 
 ensure_env_setting() {
@@ -178,7 +281,11 @@ prune_superseded_llamacpp_model() {
 }
 
 has_playwright_chromium() {
-  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \( -path "*/chrome-linux/chrome" -o -path "*/chrome-linux-arm64/chrome" \) -print -quit 2>/dev/null | grep -q .
+  find "$CLAWBOX_HOME/.cache/ms-playwright" -type f \
+    \( -path "*/chrome-linux/chrome" \
+       -o -path "*/chrome-linux64/chrome" \
+       -o -path "*/chrome-linux-arm64/chrome" \) \
+    -print -quit 2>/dev/null | grep -q .
 }
 
 ensure_playwright_chromium() {
@@ -225,16 +332,10 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
-  apt-get install -y -qq git curl python3-pip pipx build-essential cmake ninja-build
-  # Node.js 22 (required for production server — bun doesn't fire upgrade events)
-  if node --version 2>/dev/null | grep -qE '^v(2[2-9]|[3-9][0-9])\.'; then
-    echo "  Node.js $(node --version) already installed"
-  else
-    echo "  Installing Node.js 22..."
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-    apt-get install -y -qq nodejs
-    echo "  Node.js $(node --version) installed"
-  fi
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    git curl python3 python3-pip pipx build-essential cmake ninja-build \
+    pkg-config openssl ffmpeg ca-certificates sudo
+  ensure_openclaw_node_engine
 }
 
 step_install_bun() {
@@ -269,8 +370,21 @@ step_git_pull() {
         fi
       fi
     fi
-    git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" || echo "  Warning: merge failed (local changes?), continuing with current code"
+    if git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+      git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" merge --ff-only "origin/$TARGET_BRANCH" \
+        || echo "  Warning: merge failed (local changes?), continuing with current code"
+    else
+      echo "  Branch '$TARGET_BRANCH' has no origin ref yet; installing the local checkout"
+    fi
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
+  fi
+
+  local INSTALLED_BRANCH
+  INSTALLED_BRANCH=$(git -c safe.directory="$PROJECT_DIR" -C "$PROJECT_DIR" branch --show-current)
+  if [ -n "$INSTALLED_BRANCH" ]; then
+    printf '%s\n' "$INSTALLED_BRANCH" > "$PROJECT_DIR/.update-branch"
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.update-branch"
+    echo "  Update branch pinned to '$INSTALLED_BRANCH'"
   fi
 }
 
@@ -279,7 +393,7 @@ step_build() {
   as_user_login "cd $PROJECT_DIR && $BUN install"
   if ! as_user_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
     echo "  Rebuilding native modules (node-pty)..."
-    as_user_login "cd $PROJECT_DIR && npm rebuild node-pty"
+    as_user_login "cd $PROJECT_DIR && npm_config_python=/usr/bin/python3 npm rebuild node-pty --foreground-scripts"
   fi
   as_user_login "cd $PROJECT_DIR && $BUN run build"
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
@@ -296,9 +410,16 @@ step_openclaw_setup() {
 }
 
 step_openclaw_install() {
-  local LATEST
-  LATEST=$("$BUN" pm view openclaw version 2>/dev/null || npm view openclaw version --registry https://registry.npmjs.org 2>/dev/null || echo "")
-  local TARGET="${LATEST:-$OPENCLAW_VERSION}"
+  local PIN_FILE="$PROJECT_DIR/config/openclaw-target.txt"
+  local TARGET="${OPENCLAW_PIN_VERSION:-}"
+  if [ -z "$TARGET" ] && [ -f "$PIN_FILE" ]; then
+    TARGET=$(head -1 "$PIN_FILE" | awk '{print $1}')
+  fi
+  TARGET="${TARGET:-$OPENCLAW_VERSION}"
+  OPENCLAW_TARGET="$TARGET"
+  export OPENCLAW_TARGET
+  echo "  Pinned OpenClaw target: $TARGET"
+  ensure_openclaw_node_engine
   if [ -x "$OPENCLAW_BIN" ]; then
     local INSTALLED INSTALLED_VER
     # `openclaw --version` prints "OpenClaw X.Y.Z (hash)"; extract field 2 so
@@ -308,27 +429,42 @@ step_openclaw_install() {
     INSTALLED_VER=$(echo "$INSTALLED" | awk '{print $2}')
     echo "  Installed: $INSTALLED, Target: $TARGET"
     if [ "$INSTALLED_VER" = "$TARGET" ]; then
-      echo "  OpenClaw is already up to date"
-      return 0
+      echo "  OpenClaw core is already up to date"
+    else
+      as_user_runtime "$NODE_DIST_ROOT/bin/npm" install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
     fi
+  else
+    mkdir -p "$NPM_PREFIX"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
+    as_user_runtime "$NODE_DIST_ROOT/bin/npm" install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
   fi
-  mkdir -p "$NPM_PREFIX"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$NPM_PREFIX"
-  chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$CLAWBOX_HOME/.npm" 2>/dev/null || true
-  as_user -H npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX" 2>/dev/null || as_user npm install -g "openclaw@$TARGET" --prefix "$NPM_PREFIX"
   if [ ! -x "$OPENCLAW_BIN" ]; then
-    echo "  Warning: OpenClaw install failed — continuing without it"
-    return
+    echo "Error: OpenClaw installation failed — $OPENCLAW_BIN not found" >&2
+    exit 1
   fi
   # Ensure ~/.npm-global/bin is in PATH for interactive shells
   local BASHRC="$CLAWBOX_HOME/.bashrc"
-  if ! grep -q 'npm-global/bin' "$BASHRC" 2>/dev/null; then
+  if ! grep -q 'ClawBox x64 runtime' "$BASHRC" 2>/dev/null; then
     cat >> "$BASHRC" <<'PATHEOF'
 
-# npm global binaries (openclaw)
-export PATH="$HOME/.npm-global/bin:$PATH"
+# ClawBox x64 runtime (OpenClaw + its pinned Node engine)
+export PATH="/opt/clawbox/node/bin:$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
 PATHEOF
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$BASHRC"
+  fi
+  if openclaw_version_is_v2 "$TARGET"; then
+    echo "  Running OpenClaw 2 migrations..."
+    local GATEWAY_WAS_ACTIVE=0
+    if systemctl is-active --quiet "$GATEWAY_SERVICE" 2>/dev/null; then
+      GATEWAY_WAS_ACTIVE=1
+      systemctl stop "$GATEWAY_SERVICE"
+    fi
+    as_user_runtime "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
+      || echo "  Warning: doctor could not complete before initial configuration"
+    if [ "$GATEWAY_WAS_ACTIVE" -eq 1 ]; then
+      systemctl start "$GATEWAY_SERVICE"
+    fi
   fi
   echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
 }
@@ -339,8 +475,13 @@ step_openclaw_patch() {
     return
   fi
 
-  as_user "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
-  echo "  allowInsecureAuth enabled"
+  if openclaw_is_v2; then
+    echo "  Gateway patches: not needed on OpenClaw 2 (device identity is client-side)"
+    return 0
+  fi
+
+  as_user_runtime "$OPENCLAW_BIN" config set gateway.controlUi.allowInsecureAuth true --json
+  echo "  allowInsecureAuth enabled (OpenClaw 1 compatibility)"
 
   local PATCHED_MARKER='isControlUi && allowControlUiBypass'
 
@@ -409,6 +550,81 @@ step_openclaw_config() {
   if [ ! -x "$OPENCLAW_BIN" ]; then
     echo "  Skipping — OpenClaw not installed"
     return
+  fi
+
+  # OpenClaw 2 removed the two insecure-Control-UI switches and rejects a
+  # config that still carries them. Seed only the local gateway envelope;
+  # the setup UI writes the selected provider/model after the owner connects.
+  if openclaw_is_v2; then
+    mkdir -p "$OPENCLAW_HOME"
+    chown "$CLAWBOX_USER:$CLAWBOX_USER" "$OPENCLAW_HOME"
+    local OPENCLAW_CONFIG="$OPENCLAW_HOME/openclaw.json"
+    as_user env OPENCLAW_CONFIG="$OPENCLAW_CONFIG" CLAWBOX_PORT="$PORT" python3 - <<'PY'
+import json, os, secrets, tempfile
+
+path = os.environ["OPENCLAW_CONFIG"]
+try:
+    with open(path) as fh:
+        cfg = json.load(fh)
+except FileNotFoundError:
+    cfg = {}
+
+gateway = cfg.setdefault("gateway", {})
+gateway.setdefault("mode", "local")
+gateway.setdefault("bind", "loopback")
+auth = gateway.setdefault("auth", {})
+auth["mode"] = "token"
+token = auth.get("token")
+if not (isinstance(token, str) and token != "clawbox" and len(token) >= 32):
+    auth["token"] = secrets.token_hex(32)
+control = gateway.setdefault("controlUi", {})
+control.pop("allowInsecureAuth", None)
+control.pop("dangerouslyDisableDeviceAuth", None)
+meta = cfg.get("meta")
+if isinstance(meta, dict):
+    meta.pop("lastTouchedAt", None)
+commands = cfg.get("commands")
+if isinstance(commands, dict):
+    commands.pop("ownerDisplay", None)
+tailscale = gateway.get("tailscale")
+if isinstance(tailscale, dict):
+    tailscale.pop("resetOnExit", None)
+defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})
+compaction = defaults.get("compaction")
+if isinstance(compaction, dict):
+    compaction.pop("reserveTokensFloor", None)
+port = os.environ["CLAWBOX_PORT"]
+if not control.get("allowedOrigins"):
+    control["allowedOrigins"] = [
+        f"http://localhost:{port}",
+        f"http://127.0.0.1:{port}",
+        "http://localhost",
+        "http://127.0.0.1",
+    ]
+
+tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".openclaw.", suffix=".tmp")
+try:
+    with os.fdopen(tmp_fd, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
+except Exception:
+    try:
+        os.unlink(tmp_path)
+    except OSError:
+        pass
+    raise
+PY
+    chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$OPENCLAW_HOME"
+    echo "  OpenClaw 2 local gateway configuration seeded"
+
+    local CLAWHUB_BIN="$NPM_PREFIX/bin/clawhub"
+    if [ ! -x "$CLAWHUB_BIN" ]; then
+      as_user_runtime "$NODE_DIST_ROOT/bin/npm" install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null \
+        || echo "  Warning: ClawHub CLI install failed; App Store installs are unavailable"
+    fi
+    return 0
   fi
 
   as_user "$OPENCLAW_BIN" config set gateway.auth.mode token 2>/dev/null || true
@@ -499,7 +715,7 @@ NODE
   # Install ClawHub CLI (skill installer)
   local CLAWHUB_BIN="$NPM_PREFIX/bin/clawhub"
   if [ ! -x "$CLAWHUB_BIN" ]; then
-    as_user npm install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null || true
+    as_user_runtime "$NODE_DIST_ROOT/bin/npm" install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null || true
     if [ -x "$CLAWHUB_BIN" ]; then
       echo "  ClawHub CLI installed"
     else
@@ -691,7 +907,9 @@ step_ai_tools_install() {
 }
 
 step_vnc_install() {
-  apt-get install -y -qq x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+    x11vnc xvfb websockify dbus-x11 openbox xterm x11-xserver-utils \
+    autocutsel xclip
 
   chmod +x "$PROJECT_DIR/scripts/start-vnc.sh"
   chown "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/scripts/start-vnc.sh"
@@ -713,20 +931,191 @@ step_fix_git_perms() {
   echo "  Fixed .git ownership"
 }
 
+step_systemd_services() {
+  local gateway_unit="/etc/systemd/system/$GATEWAY_SERVICE"
+  local ui_unit="/etc/systemd/system/$UI_SERVICE"
+  local vnc_unit="/etc/systemd/system/clawbox-vnc.service"
+  local websockify_unit="/etc/systemd/system/clawbox-websockify.service"
+  local browser_unit="/etc/systemd/system/clawbox-browser.service"
+
+  cat > "$gateway_unit" <<EOF
+[Unit]
+Description=ClawBox x64 OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+WorkingDirectory=$CLAWBOX_HOME
+Environment=HOME=$CLAWBOX_HOME
+Environment=USER=$CLAWBOX_USER
+Environment=CLAWBOX_HOME_DIR=$CLAWBOX_HOME
+Environment=CLAWBOX_ROOT=$PROJECT_DIR
+Environment=CLAWBOX_PORT=$PORT
+Environment=NODE_ENV=production
+Environment=PATH=$NPM_PREFIX/bin:$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=$PROJECT_DIR/scripts/gateway-pre-start.sh
+ExecStart=$OPENCLAW_BIN gateway --allow-unconfigured --bind loopback
+Restart=always
+RestartSec=5
+RestartPreventExitStatus=78
+SuccessExitStatus=0 143
+TimeoutStartSec=600
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "$vnc_unit" <<EOF
+[Unit]
+Description=ClawBox x64 virtual desktop
+After=network.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+Environment=HOME=$CLAWBOX_HOME
+Environment=CLAWBOX_VNC_MODE=virtual
+ExecStart=$PROJECT_DIR/scripts/start-vnc.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "$websockify_unit" <<EOF
+[Unit]
+Description=ClawBox x64 WebSocket VNC proxy
+After=clawbox-vnc.service
+Requires=clawbox-vnc.service
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+ExecStart=/usr/bin/websockify 127.0.0.1:6080 localhost:5900
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "$browser_unit" <<EOF
+[Unit]
+Description=ClawBox x64 browser (Chromium with CDP)
+Requires=clawbox-vnc.service
+After=clawbox-vnc.service
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+Group=$CLAWBOX_USER
+WorkingDirectory=$PROJECT_DIR
+Environment=DISPLAY=:99
+Environment=CDP_PORT=18800
+Environment=HOME=$CLAWBOX_HOME
+Environment=XDG_CONFIG_HOME=$CLAWBOX_HOME/.config
+Environment=XDG_CACHE_HOME=$CLAWBOX_HOME/.cache
+EnvironmentFile=-$PROJECT_DIR/.env
+ExecStart=$PROJECT_DIR/scripts/launch-browser.sh
+Restart=no
+TimeoutStartSec=45
+StandardOutput=append:/tmp/clawbox-browser.log
+StandardError=append:/tmp/clawbox-browser.log
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "$ui_unit" <<EOF
+[Unit]
+Description=ClawBox x64 UI
+After=network-online.target $GATEWAY_SERVICE
+Wants=network-online.target $GATEWAY_SERVICE
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+WorkingDirectory=$PROJECT_DIR
+Environment=HOME=$CLAWBOX_HOME
+Environment=USER=$CLAWBOX_USER
+Environment=CLAWBOX_HOME_DIR=$CLAWBOX_HOME
+Environment=CLAWBOX_ROOT=$PROJECT_DIR
+Environment=CLAWBOX_OPENCLAW_HOME=$OPENCLAW_HOME
+Environment=NODE_ENV=production
+Environment=BUN_ENV=production
+Environment=PORT=$PORT
+Environment=HOSTNAME=0.0.0.0
+Environment=PATH=$NPM_PREFIX/bin:$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-$PROJECT_DIR/.env
+ExecStart=$NODE_DIST_ROOT/bin/node $PROJECT_DIR/production-server.js
+Restart=always
+RestartSec=3
+SuccessExitStatus=143 SIGTERM
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Provider configuration restarts the system gateway from the unprivileged
+  # web process. Grant only the three service operations that route uses.
+  local sudoers_tmp
+  sudoers_tmp=$(mktemp)
+  cat > "$sudoers_tmp" <<EOF
+$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop $GATEWAY_SERVICE, /usr/bin/systemctl reset-failed $GATEWAY_SERVICE, /usr/bin/systemctl restart $GATEWAY_SERVICE, /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service, /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service
+EOF
+  chmod 440 "$sudoers_tmp"
+  if ! visudo -cf "$sudoers_tmp" >/dev/null; then
+    rm -f "$sudoers_tmp"
+    echo "Error: generated x64 sudoers rule is invalid" >&2
+    exit 1
+  fi
+  install -o root -g root -m 440 "$sudoers_tmp" /etc/sudoers.d/clawbox-x64
+  rm -f "$sudoers_tmp"
+
+  systemctl daemon-reload
+  systemctl enable "$GATEWAY_SERVICE" "$UI_SERVICE" clawbox-vnc.service clawbox-websockify.service
+  systemctl restart clawbox-vnc.service clawbox-websockify.service
+  echo "  Persistent x64 services installed"
+}
+
+wait_for_http() {
+  local url="$1" label="$2" log_unit="$3" attempt
+  for attempt in $(seq 1 60); do
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+      local ready_pid
+      ready_pid=$(systemctl show "$log_unit" -p MainPID --value)
+      # OpenClaw can open its HTTP listener before plugin verification ends,
+      # then exit several seconds later. Require one stable 20-second window
+      # with the same service process before certifying the install.
+      sleep 20
+      if systemctl is-active --quiet "$log_unit" \
+         && [ "$ready_pid" != "0" ] \
+         && [ "$ready_pid" = "$(systemctl show "$log_unit" -p MainPID --value)" ]; then
+        echo "  $label is ready and stable"
+        return 0
+      fi
+      echo "  $label opened its port but restarted; continuing readiness checks..."
+    fi
+    sleep 1
+  done
+  echo "Error: $label did not become ready at $url" >&2
+  systemctl status "$log_unit" --no-pager -n 30 >&2 || true
+  journalctl -u "$log_unit" --no-pager -n 50 >&2 || true
+  return 1
+}
+
 step_start_gateway() {
   if [ ! -x "$OPENCLAW_BIN" ]; then
-    echo "  Skipping — OpenClaw not installed"
-    return
+    echo "Error: OpenClaw is not installed at $OPENCLAW_BIN" >&2
+    return 1
   fi
-  fuser -k 18789/tcp 2>/dev/null || true
-  sleep 1
-  as_user bash -c "PATH=$NPM_PREFIX/bin:\$PATH $OPENCLAW_BIN gateway --allow-unconfigured --bind loopback > /tmp/openclaw-gateway.log 2>&1 &"
-  sleep 3
-  if curl -s "http://localhost:18789" > /dev/null 2>&1; then
-    echo "  OpenClaw gateway running on port 18789"
-  else
-    echo "  Warning: Gateway may still be starting, check /tmp/openclaw-gateway.log"
-  fi
+  systemctl restart "$GATEWAY_SERVICE"
+  wait_for_http "http://127.0.0.1:18789" "OpenClaw gateway" "$GATEWAY_SERVICE"
 }
 
 step_clawkeep_install() {
@@ -762,16 +1151,8 @@ step_clawkeep_install() {
 }
 
 step_start_ui() {
-  fuser -k "$PORT/tcp" 2>/dev/null || true
-  sleep 1
-  # Run under Node (not Bun) — see config/clawbox-setup.service for why.
-  as_user bash -c "cd $PROJECT_DIR && CLAWBOX_ROOT=$PROJECT_DIR PORT=$PORT HOSTNAME=0.0.0.0 /usr/bin/node production-server.js > /tmp/clawbox-ui.log 2>&1 &"
-  sleep 3
-  if curl -s "http://localhost:$PORT" > /dev/null 2>&1; then
-    echo "  ClawBox UI running on port $PORT"
-  else
-    echo "  Warning: UI may still be starting, check /tmp/clawbox-ui.log"
-  fi
+  systemctl restart "$UI_SERVICE"
+  wait_for_http "http://127.0.0.1:$PORT" "ClawBox UI" "$UI_SERVICE"
 }
 
 # ── Single-step mode ────────────────────────────────────────────────────────
@@ -782,7 +1163,7 @@ DISPATCH_STEPS=(
   directories_permissions
   ollama_install llamacpp_install chromium_install ai_tools_install
   vnc_install ffmpeg_install fix_git_perms clawkeep_install
-  start_gateway start_ui
+  systemd_services start_gateway start_ui
 )
 
 if [ "${1:-}" = "--step" ]; then
@@ -805,7 +1186,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=17
+TOTAL_STEPS=16
 step=0
 log() {
   step=$((step + 1))
@@ -817,7 +1198,7 @@ echo "=== ClawBox x64 Desktop Installer ==="
 echo "  User: $CLAWBOX_USER"
 echo "  Project: $PROJECT_DIR"
 echo "  Port: $PORT"
-echo "  Skipping: hostname, WiFi AP, JetPack, performance mode, jtop, systemd services"
+echo "  Skipping: hostname, WiFi AP, JetPack, performance mode, jtop"
 echo ""
 
 log "Installing system packages..."
@@ -859,6 +1240,9 @@ step_ffmpeg_install
 log "Installing ClawKeep CLI..."
 step_clawkeep_install
 
+log "Installing persistent x64 services..."
+step_systemd_services
+
 log "Starting OpenClaw gateway..."
 step_start_gateway
 
@@ -873,9 +1257,9 @@ echo "=== ClawBox x64 Setup Complete ==="
 echo ""
 echo "  Dashboard:    http://${LOCAL_IP}:${PORT}"
 echo "  OpenClaw:     http://${LOCAL_IP}:18789"
-echo "  UI Logs:      /tmp/clawbox-ui.log"
-echo "  Gateway Logs: /tmp/openclaw-gateway.log"
+echo "  UI Logs:      journalctl -u $UI_SERVICE"
+echo "  Gateway Logs: journalctl -u $GATEWAY_SERVICE"
 echo ""
-echo "  To stop:    fuser -k ${PORT}/tcp"
-echo "  To restart: cd $PROJECT_DIR && PORT=$PORT HOSTNAME=0.0.0.0 node production-server.js"
+echo "  To stop:      sudo systemctl stop $UI_SERVICE $GATEWAY_SERVICE"
+echo "  To restart:   sudo systemctl restart $GATEWAY_SERVICE $UI_SERVICE"
 echo ""

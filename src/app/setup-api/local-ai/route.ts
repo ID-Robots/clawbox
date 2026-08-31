@@ -11,11 +11,12 @@ import { removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 
 const execFile = promisify(execFileCb);
 const OPENCLAW_BIN = findOpenclawBin();
+const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/home/clawbox";
 
 async function runCommand(cmd: string, args: string[]) {
   return await execFile(cmd, args, {
-    cwd: "/home/clawbox",
-    env: { ...process.env, HOME: "/home/clawbox" },
+    cwd: CLAWBOX_HOME_DIR,
+    env: { HOME: CLAWBOX_HOME_DIR, ...process.env },
     timeout: 30_000,
   });
 }

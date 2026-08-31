@@ -43,7 +43,9 @@ const requireNodeSqlite = (() => {
   };
 })();
 
-export const OPENCLAW_HOME_DEFAULT = process.env.OPENCLAW_HOME || "/home/clawbox/.openclaw";
+export const OPENCLAW_HOME_DEFAULT = process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 export const AGENTS_DIR_DEFAULT = path.join(OPENCLAW_HOME_DEFAULT, "agents");
 
 /** The per-agent SQLite store, or null when this agent is not migrated. */

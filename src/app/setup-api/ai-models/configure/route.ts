@@ -89,7 +89,9 @@ import { logSafe } from "@/lib/log-safe";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
-  process.env.OPENCLAW_HOME || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
 const CLAWBOX_HOME_DIR = process.env.HOME ?? "/home/clawbox";
 const AUTH_PROFILES_PATH = path.join(
   OPENCLAW_HOME_DIR,
