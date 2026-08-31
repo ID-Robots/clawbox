@@ -245,6 +245,7 @@ import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { isClawboxAiProModel, CLAWBOX_AI_MODEL_BY_TIER } from '@/lib/clawbox-ai-models'
 import { PORTAL_DASHBOARD_URL } from '@/lib/max-subscription'
 import { HeaderDropdown } from '@/components/HeaderDropdown'
+import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS } from '@/components/NewAppWizardCard'
 import { CloudTtsWarning } from '@/components/CloudTtsWarning'
 import VoiceTunnelDialog from '@/components/VoiceTunnelDialog'
 import { shortModelPillLabel, REASONING_PILL_ICON } from '@/lib/chat-header-pills'
@@ -428,8 +429,94 @@ const PREVIEW_BUTTON_STYLE: React.CSSProperties = {
 // squeezed out of it (see src/lib/chat-header-pills.ts). 20px is the whole
 // remaining gap; measured in the device's own Chromium, every provider/model
 // default in the catalog renders un-truncated at 420 and several did not at 400.
-const DEFAULT_SIZE = { w: 420, h: 500 }
-const DEFAULT_PANEL_WIDTH = DEFAULT_SIZE.w
+// 520×680, up from 420×500: with the model pills under the composer and a
+// real header bar the popup reads as a small window, and the owner asked for
+// one they can actually work in. The viewport still caps it (maxHeight below,
+// and readStoredSize clamps a remembered size to the screen it is opened on).
+const DEFAULT_SIZE = { w: 520, h: 680 }
+const MIN_CHAT_HEIGHT = 250
+// The docked panel keeps the old default width: it sits beside the desktop,
+// where every extra pixel comes out of the windows next to it.
+const DEFAULT_PANEL_WIDTH = 420
+// The floating popup's size survives a refresh and a close. Position does
+// not: it is re-anchored to the mascot on every open, which is where the
+// owner looks for it. The docked panel's width is the desktop's preference
+// (initialPanelWidth), persisted by page.tsx, so it is not repeated here.
+const SIZE_STORAGE_KEY = 'clawbox-chat-size'
+
+// ── Chat tabs (OpenClaw) ──
+// Every tab is its own gateway session under the same agent — a separate
+// conversation with the SAME assistant, not another agent. The main tab is the
+// gateway's main session (the one Telegram, the desktop and every other
+// surface share); the others are sessions this popup minted. The list and
+// which one is open survive a refresh; the transcripts live on the gateway.
+interface ChatTab {
+  /** The full gateway session key, `agent:<agentId>:clawbox-<id>`. */
+  key: string
+  label: string
+  createdAt: number
+  /** Still carrying its "Chat N" placeholder: the first thing the owner
+   *  types becomes the label, once. */
+  autoLabel?: boolean
+  /** The N its placeholder was minted with; the next tab takes max+1, so
+   *  closing "Chat 2" while "Chat 3" lives can never mint a second "Chat 3". */
+  seq?: number
+}
+const TABS_STORAGE_KEY = 'clawbox-chat-tabs'
+const TAB_LABEL_MAX = 24
+
+function readStoredTabs(): { tabs: ChatTab[]; active: string | null } {
+  if (typeof window === 'undefined') return { tabs: [], active: null }
+  try {
+    const raw = window.localStorage?.getItem(TABS_STORAGE_KEY)
+    if (!raw) return { tabs: [], active: null }
+    const parsed = JSON.parse(raw) as { tabs?: unknown; active?: unknown }
+    const tabs = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
+      .filter((t): t is ChatTab =>
+        !!t && typeof t === 'object'
+        && typeof (t as ChatTab).key === 'string' && (t as ChatTab).key.startsWith('agent:')
+        && typeof (t as ChatTab).label === 'string')
+      .map(t => ({ key: t.key, label: t.label, createdAt: typeof t.createdAt === 'number' ? t.createdAt : 0, autoLabel: t.autoLabel === true, seq: typeof t.seq === 'number' ? t.seq : undefined }))
+    const active = typeof parsed.active === 'string' && tabs.some(t => t.key === parsed.active) ? parsed.active : null
+    return { tabs, active }
+  } catch {
+    return { tabs: [], active: null }
+  }
+}
+
+/**
+ * A fresh session key beside the main one. Fully qualified on purpose: the
+ * gateway files a bare key under whichever agent is the default at the time,
+ * so `agent:<agentId>:…` is the only form that names the same session for
+ * ever. Lowercase letters and digits only — the gateway lowercases keys and
+ * treats colons as structure (`cron:`, `dashboard:` and friends are reserved
+ * shapes). The session itself is created by the first chat.send; chat.history
+ * on a key the gateway has never seen answers an empty transcript, not an
+ * error, so a new tab needs no round trip before it can be shown.
+ */
+function buildTabSessionKey(mainSessionKey: string): string {
+  const parts = mainSessionKey.split(':')
+  const agentId = parts[0] === 'agent' && parts[1] ? parts[1] : 'main'
+  return `agent:${agentId}:clawbox-${uuid().replace(/-/g, '').slice(0, 12).toLowerCase()}`
+}
+
+function readStoredSize(): { w: number; h: number } {
+  if (typeof window === 'undefined') return DEFAULT_SIZE
+  try {
+    const raw = window.localStorage?.getItem(SIZE_STORAGE_KEY)
+    if (!raw) return DEFAULT_SIZE
+    const parsed = JSON.parse(raw) as { w?: unknown; h?: unknown }
+    const w = typeof parsed.w === 'number' && Number.isFinite(parsed.w) ? parsed.w : DEFAULT_SIZE.w
+    const h = typeof parsed.h === 'number' && Number.isFinite(parsed.h) ? parsed.h : DEFAULT_SIZE.h
+    // A size saved on a big screen must not land the popup off a small one.
+    return {
+      w: Math.round(Math.max(MIN_CHAT_WIDTH, Math.min(w, window.innerWidth - 16))),
+      h: Math.round(Math.max(MIN_CHAT_HEIGHT, Math.min(h, window.innerHeight - 16))),
+    }
+  } catch {
+    return DEFAULT_SIZE
+  }
+}
 // Floor for the chat window width. Below this the header selector pills would
 // squeeze past a readable size, so the resize handles (floating + docked panel)
 // and the rendered width all clamp here — the chat simply stops getting
@@ -702,16 +789,50 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const drawingRef = useRef(false)
   const drawingAbortRef = useRef<AbortController | null>(null)
 
+  // ── The Create button's wizard ──
+  // The same card the Coding Agent app opens: name, what it should do, which
+  // starter. Create hands ONE message to this very chat (through the window
+  // event the popup already listens for), so the request lands as the owner's
+  // turn and the assistant takes it from there. `maxTaskChars` is read from
+  // the run route once, when the card opens; until it answers the card uses
+  // the route's own default, and the route still refuses anything longer.
+  const [showNewApp, setShowNewApp] = useState(false)
+  const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
+  const toggleNewApp = useCallback(() => {
+    setShowNewApp(open => {
+      if (!open && newAppMaxChars === null) {
+        void fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
+          .then(res => res.ok ? res.json() as Promise<{ maxTaskChars?: unknown }> : null)
+          .then(data => {
+            const n = data?.maxTaskChars
+            if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
+          })
+          .catch(() => { /* the card keeps the default ceiling */ })
+      }
+      return !open
+    })
+  }, [newAppMaxChars])
+
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
   const [size, setSize] = useState<{ w: number; h: number }>(DEFAULT_SIZE)
   const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null)
   const popupRef = useRef<HTMLDivElement>(null)
 
-  // Reset position and size when reopened
+  // Remembered size: read once on mount; written by the resize handler when
+  // the pointer goes up (see handleResizeStart). Not by an effect on `size` —
+  // that ran in the same commit as this restore, saw the default the state
+  // still held, and wrote it over the remembered value; with StrictMode's
+  // double-run of effects the second restore then read the default back.
   useEffect(() => {
-    if (isOpen) { setPos(null); setSize(DEFAULT_SIZE); setPreview(null) }
-    else setGeneratingImage(false)
+    setSize(readStoredSize())
+  }, [])
+
+  // Re-anchor to the mascot when reopened. The size is deliberately kept: the
+  // owner resized it once and expects it to stay that way.
+  useEffect(() => {
+    if (isOpen) { setPos(null); setPreview(null) }
+    else { setGeneratingImage(false); setShowNewApp(false) }
   }, [isOpen])
 
   // Provider id for the header model dropdown. Memoised on the active
@@ -945,7 +1066,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       onPanelModeChange?.(DEFAULT_PANEL_WIDTH)
     }
     setPos(null)
-    setSize(DEFAULT_SIZE)
   }, [panelMode, onPanelModeChange])
 
   const handlePanelResizeStart = useCallback((e: React.MouseEvent | React.TouchEvent) => {
@@ -1014,17 +1134,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const dy = cy - start.y
       let newW = start.w, newH = start.h, newX = start.left, newY = start.top
       if (edge.includes('r')) newW = Math.max(MIN_CHAT_WIDTH, start.w + dx)
-      if (edge.includes('b')) newH = Math.max(250, start.h + dy)
+      if (edge.includes('b')) newH = Math.max(MIN_CHAT_HEIGHT, start.h + dy)
       if (edge.includes('l')) { newW = Math.max(MIN_CHAT_WIDTH, start.w - dx); newX = start.left + (start.w - newW) }
-      if (edge.includes('t')) { newH = Math.max(250, start.h - dy); newY = start.top + (start.h - newH) }
+      if (edge.includes('t')) { newH = Math.max(MIN_CHAT_HEIGHT, start.h - dy); newY = start.top + (start.h - newH) }
       setSize({ w: newW, h: newH })
       setPos({ x: newX, y: newY })
+      last = { w: newW, h: newH }
     }
+    let last: { w: number; h: number } | null = null
     const onUp = () => {
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
       window.removeEventListener('touchmove', onMove)
       window.removeEventListener('touchend', onUp)
+      // The size the owner let go at is the one to remember — once per
+      // resize, not once per pointer move.
+      if (last) {
+        try { window.localStorage?.setItem(SIZE_STORAGE_KEY, JSON.stringify(last)) } catch { /* localStorage unavailable */ }
+      }
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
@@ -1035,6 +1162,38 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const wsRef = useRef<WebSocket | null>(null)
   const pendingRef = useRef<Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>>(new Map())
   const sessionKeyRef = useRef<string>('')
+  // ── Tabs ──
+  // `activeTabKeyRef` is what the hello handler binds the socket to on every
+  // (re)connect — a gateway bounce or a provider switch must bring the owner
+  // back to the tab they were on, not to main. null = the main session.
+  const storedTabs = useRef(readStoredTabs()).current
+  const [tabs, setTabs] = useState<ChatTab[]>(storedTabs.tabs)
+  const [activeTabKey, setActiveTabKey] = useState<string | null>(storedTabs.active)
+  const activeTabKeyRef = useRef<string | null>(storedTabs.active)
+  const [mainSessionKey, setMainSessionKey] = useState('')
+  const mainSessionKeyRef = useRef('')
+  // Sessions whose turn is still running while another tab is shown. The
+  // popup keeps ONE set of in-flight state, so leaving a tab mid-turn puts
+  // that state down and remembers the session here; the `chat` handler
+  // clears the entry when the terminal event for that key arrives, and marks
+  // the tab unread so the owner knows there is something to read.
+  const busyKeysRef = useRef<Set<string>>(new Set())
+  const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set())
+  const [unreadKeys, setUnreadKeys] = useState<Set<string>>(() => new Set())
+  // The composer a tab was left with: its draft and the turns queued behind
+  // its running one. Restored when the tab is shown again, so text typed for
+  // one conversation is never sent into another.
+  const tabStashRef = useRef<Map<string, { input: string; queuedSends: { id: string; text: string; attachments: ChatAttachment[] }[]; attachments: ChatAttachment[] }>>(new Map())
+  // A run that died in a background tab leaves NOTHING in the transcript to
+  // explain itself — the error line is client-side only. It is kept here when
+  // the terminal event goes by and handed over when the tab is next shown.
+  const tabErrorsRef = useRef<Map<string, string>>(new Map())
+  // Bumped on every tab switch so the sticky reasoning level is pushed to the
+  // session that is now bound (the effect below cannot see a ref change).
+  const [sessionEpoch, setSessionEpoch] = useState(0)
+  useEffect(() => {
+    try { window.localStorage?.setItem(TABS_STORAGE_KEY, JSON.stringify({ tabs, active: activeTabKey })) } catch { /* localStorage unavailable */ }
+  }, [tabs, activeTabKey])
   const runIdRef = useRef<string | null>(null)
   /**
    * `dispatchTurn`, reachable from `loadHistory` above it.
@@ -1237,7 +1396,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         variant: 'error',
       }])
     })
-  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps])
+  // `sessionEpoch` is bumped by switchSession so a new tab's session gets the level too.
+  }, [status, headerProvider, headerModel, thinkingLevel, adapter, caps, sessionEpoch])
 
   // Snap thinkingLevel to the active provider's persisted choice (or its
   // default) whenever the active provider changes. Without this the
@@ -1279,10 +1439,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [headerProvider, headerModel])
 
   // Connect to gateway
-  const gatewayTokenRef = useRef('')
-  // The gateway's own chat UI is opened from the strip with these two (see
-  // openInOpenclaw); OpenClawApp builds the same URL for its iframe.
-  const gatewayWsUrlRef = useRef('')
   const retryCountRef = useRef(0)
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -1332,8 +1488,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const config = await res.json()
       token = config.token
       wsUrl = config.wsUrl
-      gatewayTokenRef.current = token
-      gatewayWsUrlRef.current = wsUrl
     } catch {
       // Auto-retry if gateway config not ready yet. Extend the budget
       // during skill-install windows so the chat silently recovers once
@@ -1374,14 +1528,35 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const snapshot = h.snapshot as Record<string, unknown> | undefined
           const sessionDefaults = snapshot?.sessionDefaults as Record<string, unknown> | undefined
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
-          sessionKeyRef.current = mainSessionKey
+          mainSessionKeyRef.current = mainSessionKey
+          setMainSessionKey(mainSessionKey)
+          // The tab the owner is on survives the reconnect. Before tabs this
+          // line bound every hello to main, so a gateway bounce mid-conversation
+          // in another tab would have reloaded main's transcript over it.
+          const boundKey = activeTabKeyRef.current ?? mainSessionKey
+          sessionKeyRef.current = boundKey
+          // A reconnect: whatever a background tab was waiting on either died
+          // with the gateway or finished while the socket was down — its
+          // terminal event is gone, so a busy mark kept here could never be
+          // cleared again and the tab would pulse (and wedge its composer)
+          // forever. Point the owner at the tab instead; its history has the
+          // truth. The bound tab is about to be reloaded, so it needs no dot.
+          if (busyKeysRef.current.size > 0) {
+            setUnreadKeys(prev => {
+              const next = new Set(prev)
+              for (const k of busyKeysRef.current) { if (k !== boundKey) next.add(k) }
+              return next
+            })
+            busyKeysRef.current.clear()
+            setBusyKeys(new Set())
+          }
           // Ask the gateway to push every append to this session's transcript.
           // A generated picture is produced by a SEPARATE background run whose
           // reply reaches the `chat` stream with its MEDIA: directive stripped,
           // so that stream alone can never show it — this event is how we learn
           // the transcript gained something the live turn could not render.
           // Same projection `chat.history` uses, so the directive is intact.
-          void wsRequest('sessions.messages.subscribe', { key: mainSessionKey })
+          void wsRequest('sessions.messages.subscribe', { key: boundKey })
             .catch(() => {
               // A gateway without the RPC just means we fall back to the
               // backstop reconcile below; the chat still works.
@@ -1418,7 +1593,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 pendingModelSwitchResetRef.current = null
                 if (pendingModelSwitch) {
                   try {
-                    await resetSessionRef.current()
+                    // The fresh chat belongs to MAIN — the pre-tabs contract,
+                    // and the session every other surface shares. With a side
+                    // tab bound, resetting "the current session" would wipe
+                    // the conversation under the owner's cursor and leave
+                    // main carrying the old model's transcript — the exact
+                    // leak the banner below claims was prevented.
+                    if (sessionKeyRef.current === mainSessionKeyRef.current) {
+                      await resetSessionRef.current()
+                    } else {
+                      await wsRequest('sessions.reset', { key: mainSessionKeyRef.current, reason: 'new' })
+                    }
                   } catch (err) {
                     setMessages(prev => [...prev, {
                       role: 'system',
@@ -1619,9 +1804,22 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
           const sk = payload.sessionKey as string
+          const state = payload.state as string
+          // A run the owner left behind in another tab has ended: the tab is
+          // no longer busy and has something new to read. Checked BEFORE the
+          // session filter, which is what would otherwise drop the event.
+          if ((state === 'final' || state === 'aborted' || state === 'error') && busyKeysRef.current.has(sk)) {
+            busyKeysRef.current.delete(sk)
+            setBusyKeys(new Set(busyKeysRef.current))
+            if (sk !== sessionKeyRef.current) {
+              setUnreadKeys(prev => new Set(prev).add(sk))
+              // The error branch below never runs for a background session,
+              // and a history reload cannot recreate what was never stored.
+              if (state === 'error') tabErrorsRef.current.set(sk, describeChatFailure(payload.errorMessage))
+            }
+          }
           if (sk !== sessionKeyRef.current) return
 
-          const state = payload.state as string
           const msg = payload.message
 
           if (state === 'delta') {
@@ -1857,6 +2055,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // tracked separately from `sending` so the stop button, sendMessage's
     // re-entry guard, and onThinkingChange aren't tripped before any
     // generation actually starts.
+    const keyAtCall = sessionKeyRef.current
     const mightAutoGreet = !greetedRef.current
     if (mightAutoGreet) {
       setIsBootstrappingHistory(true)
@@ -1872,6 +2071,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         limit: 50,
         imageWaitFrom: generatingImageRef.current ? imageWaitFromRef.current : null,
       })
+      // The owner switched tabs while this read was in flight (the request
+      // key was captured at call time): the answer belongs to the tab that
+      // was left. Painting it would put one conversation inside another —
+      // and the auto-label effect would then name the new tab after it.
+      // The new tab runs a read of its own.
+      if (sessionKeyRef.current !== keyAtCall) {
+        if (mightAutoGreet) setIsBootstrappingHistory(false)
+        return
+      }
       if (imageGenerationFailed) imageFailedRef.current = true
       // Preserve any optimistic user turns appended after this load was
       // dispatched but before chat.history responded — they haven't reached
@@ -1889,8 +2097,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         return sameTranscript(prev, next) ? prev : next
       })
 
-      // Auto-send a greeting if no history exists (first conversation)
-      if (chatMsgs.length === 0 && !greetedRef.current) {
+      // Auto-send a greeting if no history exists (first conversation).
+      // Main only: a restored side tab the owner never typed in is ALSO an
+      // empty transcript, and on a desktop reload the hello binds straight to
+      // it — greeting there would spend a model turn nobody asked for and
+      // resurrect a session the gateway may have deleted. (On Hermes both
+      // keys are '' and the greet keeps working as before.)
+      if (chatMsgs.length === 0 && !greetedRef.current && sessionKeyRef.current === mainSessionKeyRef.current) {
         greetedRef.current = true
         setIsBootstrappingHistory(false)
         sendingRef.current = true
@@ -1994,22 +2207,167 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   }, [resetSession])
 
   /**
-   * The "+" in the strip opens the gateway's OWN chat UI in a new browser tab —
-   * the same page OpenClawApp iframes, with the gateway URL and token in the
-   * URL so the SPA needs no sessionStorage of its own. It used to reset this
-   * popup's session in place; the owner asked for a fresh OpenClaw session in
-   * a new tab instead, which this is. The URL is built synchronously from what
-   * the connect step cached, because a window.open that follows an await is
-   * what popup blockers refuse.
+   * Show another tab's session in this popup.
+   *
+   * The popup has ONE set of conversation state, so a switch is: put down
+   * what belongs to the tab being left, repoint the session key, pick up what
+   * belongs to the tab being entered, read its transcript. A turn still
+   * running in the tab being left is NOT aborted — that is the point of a
+   * second tab — the session is marked busy instead, and the `chat` handler
+   * clears the mark when the run's terminal event arrives. Everything keyed
+   * to the old session that could otherwise fire against the new one is
+   * cancelled here: the two history-refetch timers, the picture wait, the
+   * queued turns (stashed with the tab, not dropped).
    */
-  const openInOpenclaw = useCallback(() => {
-    const wsUrl = gatewayWsUrlRef.current
-    const token = gatewayTokenRef.current
-    const url = wsUrl && token
-      ? `/chat?gatewayUrl=${encodeURIComponent(wsUrl)}#token=${encodeURIComponent(token)}`
-      : '/chat'
-    window.open(url, '_blank', 'noopener,noreferrer')
-  }, [])
+  const switchSession = useCallback(async (key: string) => {
+    if (!key || key === sessionKeyRef.current) return
+    const oldKey = sessionKeyRef.current
+    if (oldKey) tabStashRef.current.set(oldKey, { input, queuedSends, attachments })
+    if (sendingRef.current && oldKey) {
+      busyKeysRef.current.add(oldKey)
+      setBusyKeys(new Set(busyKeysRef.current))
+    }
+    sendingRef.current = false
+    setSending(false)
+    runIdRef.current = null
+    if (transcriptReconcileTimerRef.current !== null) {
+      window.clearTimeout(transcriptReconcileTimerRef.current)
+      transcriptReconcileTimerRef.current = null
+    }
+    if (ackOnlyHistoryTimerRef.current !== null) {
+      window.clearTimeout(ackOnlyHistoryTimerRef.current)
+      ackOnlyHistoryTimerRef.current = null
+    }
+    endImageWait()
+    imageWaitFromRef.current = 0
+    imageBaselineRef.current = 0
+    emailSendSeenRef.current = false
+    setExpandedLong(new Set())
+    setPreview(null)
+    setOpenEmailUid(null)
+    setIsBootstrappingHistory(false)
+    if (oldKey) void wsRequest('sessions.messages.unsubscribe', { key: oldKey }).catch(() => { /* best effort */ })
+    // The switch itself. From here the adapter, the three event filters and
+    // the sticky-reasoning guard all follow the new key.
+    sessionKeyRef.current = key
+    const nextActive = key === mainSessionKeyRef.current ? null : key
+    activeTabKeyRef.current = nextActive
+    setActiveTabKey(nextActive)
+    messagesRef.current = []
+    // Blanks the view and marks the greet done, so an empty new tab does not
+    // greet itself with an unasked-for "hi".
+    clearTranscript()
+    void wsRequest('sessions.messages.subscribe', { key }).catch(() => { /* best effort */ })
+    lastSentThinkingRef.current = undefined
+    setSessionEpoch(e => e + 1)
+    const stash = tabStashRef.current.get(key)
+    setInput(stash?.input ?? '')
+    setQueuedSends(stash?.queuedSends ?? [])
+    // The staged files too — a screenshot attached in one conversation must
+    // not ride into another and be sent with its next message.
+    setAttachments(stash?.attachments ?? [])
+    setAttachmentError(null)
+    // Its run is still going: Stop stays available and the composer queues,
+    // exactly as if the owner had never left.
+    if (busyKeysRef.current.has(key)) {
+      sendingRef.current = true
+      setSending(true)
+    }
+    setUnreadKeys(prev => {
+      if (!prev.has(key)) return prev
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+    await loadHistory()
+    const storedError = tabErrorsRef.current.get(key)
+    if (storedError) {
+      tabErrorsRef.current.delete(key)
+      setMessages(prev => [...prev, { role: 'system', text: storedError, timestamp: Date.now() }])
+    }
+  }, [input, queuedSends, attachments, clearTranscript, endImageWait, loadHistory, wsRequest])
+
+  /** The + : a new tab, bound to a fresh session under the same agent. */
+  const newTab = useCallback(() => {
+    const main = mainSessionKeyRef.current
+    if (!main) return
+    const key = buildTabSessionKey(main)
+    setTabs(prev => {
+      const nextSeq = prev.reduce((m, tb) => Math.max(m, tb.seq ?? 1), 1) + 1
+      return [...prev, {
+        key,
+        label: t('chat.tabUntitled', { n: nextSeq }),
+        createdAt: Date.now(),
+        autoLabel: true,
+        seq: nextSeq,
+      }]
+    })
+    void switchSession(key)
+  }, [switchSession, t])
+
+  /**
+   * Close a tab: the popup forgets it and the gateway deletes the session
+   * behind it — a closed tab cannot be reopened from here, so a session kept
+   * would only clutter the gateway. Main can never be closed. Both gateway
+   * calls are best effort: a session still holding a run refuses deletion and
+   * simply stays until the gateway's own cleanup.
+   */
+  const closeTab = useCallback((key: string) => {
+    const idx = tabs.findIndex(tb => tb.key === key)
+    if (idx < 0) return
+    // Is a run still on the session? One left behind earlier sits in the busy
+    // set — but the busy set is only written on the way OUT of a tab, so the
+    // common case, closing the tab you are watching while its reply streams,
+    // lives in sendingRef alone. Decide BEFORE switching away, which resets
+    // both.
+    const running = busyKeysRef.current.has(key) || (sessionKeyRef.current === key && sendingRef.current)
+    const remaining = tabs.filter(tb => tb.key !== key)
+    setTabs(remaining)
+    tabStashRef.current.delete(key)
+    tabErrorsRef.current.delete(key)
+    setUnreadKeys(prev => {
+      if (!prev.has(key)) return prev
+      const next = new Set(prev)
+      next.delete(key)
+      return next
+    })
+    const dispose = async () => {
+      // switchSession marks the key busy on the way out when its run is
+      // live; the tab is gone now, so the mark must go too.
+      if (busyKeysRef.current.delete(key)) setBusyKeys(new Set(busyKeysRef.current))
+      if (running) await wsRequest('chat.abort', { sessionKey: key }).catch(() => { /* best effort */ })
+      try {
+        await wsRequest('sessions.delete', { key, deleteTranscript: true })
+      } catch {
+        // A session whose run has not settled yet refuses deletion. One
+        // paced retry; a session that still refuses stays until the
+        // gateway's own cleanup.
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        await wsRequest('sessions.delete', { key, deleteTranscript: true }).catch(() => { /* best effort */ })
+      }
+    }
+    if (sessionKeyRef.current === key) {
+      // The neighbour on the left, else the one that slid into its place, else main.
+      const next = remaining[idx - 1]?.key ?? remaining[idx]?.key ?? mainSessionKeyRef.current
+      void switchSession(next).then(dispose)
+    } else {
+      void dispose()
+    }
+  }, [tabs, switchSession, wsRequest])
+
+  // A new tab is named after the first thing the owner says in it, once.
+  useEffect(() => {
+    const key = activeTabKey
+    if (!key) return
+    const tab = tabs.find(tb => tb.key === key)
+    if (!tab?.autoLabel) return
+    const first = messages.find(m => m.role === 'user' && m.text.trim())
+    if (!first) return
+    const text = first.text.replace(/^📎 .*$/gm, '').replace(/\s+/g, ' ').trim()
+    if (!text) return
+    const label = text.length > TAB_LABEL_MAX ? `${text.slice(0, TAB_LABEL_MAX).trimEnd()}…` : text
+    setTabs(prev => prev.map(tb => tb.key === key ? { ...tb, label, autoLabel: false } : tb))
+  }, [messages, activeTabKey, tabs])
 
   // While a picture is being generated, go and look for it. The background run
   // that produces it does not deliver renderable media over this socket, so a
@@ -3541,7 +3899,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   if (!isOpen) return null
 
   // Default position: above mascot (desktop only)
-  const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - 416))
+  const defaultLeft = Math.max(8, Math.min((mascotX ?? 15) / 100 * (typeof window !== 'undefined' ? window.innerWidth : 1000) - 200, (typeof window !== 'undefined' ? window.innerWidth : 1000) - size.w - 8))
   const posStyle: React.CSSProperties = panelMode
     ? { right: 0, top: 0, bottom: 56 }
     : mobile
@@ -3637,53 +3995,158 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       @keyframes clawImageGenPulse {
         0%, 100% { opacity: 0.45; transform: scale(0.92); }
         50%      { opacity: 1;    transform: scale(1.08); }
-      }`}</style>
-      {/* Header — drag handle (desktop) / simple bar (mobile) */}
+      }
+      @keyframes clawHeaderPulse {
+        0%, 100% { opacity: 1; }
+        50%      { opacity: 0.35; }
+      }
+      .claw-tab-hover-close { opacity: 0; transition: opacity 0.12s ease; }
+      [role="tab"]:hover .claw-tab-hover-close,
+      [role="tab"]:focus-within .claw-tab-hover-close { opacity: 1; }`}</style>
+      {/* Header — drag handle (desktop) / simple bar (mobile).
+          A real bar in the flow, not a strip floating over the transcript.
+          The floating version faded from the shell colour to transparent
+          over ~44px, and the first line of every reply scrolled up under it
+          half-visible behind the buttons — which read as a rendering glitch,
+          not as a design. At 40px this costs 4px more than the top padding
+          the strip needed, and buys the popup the title and the connection
+          state every other desktop window carries (ChromeWindow's title bar
+          is the same recipe: solid ground, one hairline). Same ground and
+          hairline as the composer below, so the two bars frame the
+          transcript symmetrically. Still no backdrop blur — a per-frame
+          filter on the Jetson iGPU is the frame drop the burst animation's
+          note warns about, and a solid bar needs none. */}
       <div
+        data-testid="chat-header"
         onPointerDown={mobile || panelMode ? undefined : onDragStart}
         style={{
-          // The controls FLOAT over the transcript instead of taking a row
-          // of it: once the model pills moved under the composer this bar
-          // carries only the status dot and three small buttons, and a
-          // whole row for those was the tallest thing between the owner and
-          // their messages. The strip is still the drag handle; the fade
-          // behind it keeps the buttons legible over a light bubble. The
-          // transcript pads its top by the strip's height so nothing hides
-          // under it at rest, and scrolls beneath it after that. No
-          // backdrop blur — a per-frame filter on the Jetson iGPU is the
-          // frame drop the burst animation's note warns about.
-          position: 'absolute',
-          top: 0, left: 0, right: 0,
-          zIndex: 5,
+          flexShrink: 0,
+          minHeight: 40,
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'flex-end',
           gap: 8,
-          // The strip is taller than its buttons and darker at the top, so
-          // a light bubble scrolling under it never swallows the controls;
-          // the fade runs out over ~44px, which is a gradient, not a blur —
-          // blur here would be recomposited on every scrolled frame.
-          padding: '4px 8px 16px',
-          background: 'linear-gradient(180deg, rgba(8,12,22,0.95) 0%, rgba(8,12,22,0.8) 40%, rgba(8,12,22,0.45) 70%, rgba(8,12,22,0) 100%)',
+          padding: '0 8px 0 14px',
+          background: 'rgba(0,0,0,0.2)',
+          borderBottom: '1px solid rgba(255,255,255,0.06)',
           userSelect: 'none',
           cursor: mobile || panelMode ? 'default' : 'grab',
           touchAction: 'none',
         }}>
-        {(status === 'connecting' || switchingModel) && (
-          <div style={{ width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-            <div style={{
-              width: 12, height: 12,
-              border: '2px solid rgba(249,115,22,0.3)',
-              borderTopColor: '#f97316',
-              borderRadius: '50%',
-              animation: 'spin 0.8s linear infinite',
-            }} />
-          </div>
-        )}
-        {/* No "connected" dot: connected is the normal state and the composer
-            already says when it is not (the placeholder reads "Connecting…"
-            and the input is gated). Only the in-flight spinner above earns a
-            place in the strip. */}
+        {/* The tabs. No status dot beside them (the owner asked for it gone):
+            the composer already gates itself and says "Connecting…" in words,
+            and connected is the normal state. The per-tab dots remain — they
+            carry per-conversation facts (busy / unread) the composer cannot. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+          {harnessId === 'hermes' ? (
+            // One thread per popup on this edition (its adapter keeps a single
+            // transcript), so the bar carries the name and nothing else.
+            <span style={{
+              fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
+              color: 'rgba(255,255,255,0.8)',
+              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+            }}>
+              ClawBox
+            </span>
+          ) : (
+            /* The tabs: main first, then the popup's own sessions, in the
+               order they were opened. Alone, main wears no plate — it reads as
+               the title it used to be. The row scrolls sideways past ~4 tabs
+               rather than wrapping into a second header row. */
+            <div
+              role="tablist"
+              aria-label="Chats"
+              data-testid="chat-tabs"
+              style={{ display: 'flex', alignItems: 'center', gap: 2, minWidth: 0, flex: 1, overflowX: 'auto', scrollbarWidth: 'none' }}
+            >
+              {[{ key: mainSessionKey, label: 'ClawBox', main: true }, ...tabs.map(tb => ({ key: tb.key, label: tb.label, main: false }))].map(tab => {
+                const active = tab.main ? activeTabKey === null : activeTabKey === tab.key
+                const busy = !!tab.key && busyKeys.has(tab.key)
+                const unread = !!tab.key && !active && unreadKeys.has(tab.key)
+                const switchable = status === 'connected' && !active && !!tab.key
+                const select = () => { if (switchable) void switchSession(tab.key) }
+                return (
+                  <div
+                    key={tab.main ? 'main' : tab.key}
+                    role="tab"
+                    tabIndex={0}
+                    aria-selected={active}
+                    data-testid="chat-tab"
+                    data-session-key={tab.key}
+                    title={tab.label}
+                    onPointerDown={stopHeaderDrag}
+                    onClick={select}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 6,
+                      padding: '4px 8px', borderRadius: 8, maxWidth: 150, flexShrink: 0,
+                      background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
+                      color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                      cursor: switchable ? 'pointer' : 'default',
+                      fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
+                      userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                    }}
+                    onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
+                    onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
+                  >
+                    {busy && (
+                      <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
+                    )}
+                    {!busy && unread && (
+                      <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
+                    )}
+                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{tab.label}</span>
+                    {/* Main cannot be closed — its ✕ starts a FRESH main
+                        conversation instead (the /new the owner asked for),
+                        and only shows itself on hover so the resting header
+                        stays a title. Rendered only while main is the bound
+                        session: startNewSession resets whatever is bound. */}
+                    {tab.main && active && (
+                      <button
+                        onPointerDown={stopHeaderDrag}
+                        onClick={(e) => { e.stopPropagation(); if (!startingSession) void startNewSession() }}
+                        aria-label={t('chat.tabRestart')}
+                        title={t('chat.tabRestart')}
+                        data-testid="chat-tab-restart"
+                        className="claw-tab-hover-close"
+                        style={{
+                          background: 'none', border: 'none', color: 'rgba(255,255,255,0.45)',
+                          cursor: 'pointer', padding: 0, width: 16, height: 16, borderRadius: 4,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                    {!tab.main && active && (
+                      <button
+                        onPointerDown={stopHeaderDrag}
+                        onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
+                        aria-label={t('chat.tabClose')}
+                        title={t('chat.tabClose')}
+                        data-testid="chat-tab-close"
+                        style={{
+                          background: 'none', border: 'none', color: 'rgba(255,255,255,0.45)',
+                          cursor: 'pointer', padding: 0, width: 16, height: 16, borderRadius: 4,
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
+                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' }}
+                      >
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                          <path d="M18 6L6 18M6 6l12 12" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </div>
         {onOpenFull && (
           <button
             onPointerDown={stopHeaderDrag}
@@ -3704,10 +4167,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         )}
         <button
           onPointerDown={stopHeaderDrag}
-          onClick={harnessId === 'hermes' ? () => { void startNewSession() } : openInOpenclaw}
-          disabled={harnessId === 'hermes' && startingSession}
-          title={harnessId === 'hermes' ? 'New chat' : 'Open in OpenClaw'}
-          aria-label={harnessId === 'hermes' ? 'New chat' : 'Open in OpenClaw'}
+          onClick={harnessId === 'hermes' ? () => { void startNewSession() } : newTab}
+          // Hermes: the one thread is reset in place (see startNewSession).
+          // OpenClaw: a new tab, which needs the main key the hello brings.
+          disabled={harnessId === 'hermes' ? startingSession : status !== 'connected'}
+          title={t('chat.tabNew')}
+          aria-label={t('chat.tabNew')}
+          data-testid="chat-new-tab"
           style={{
             background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
             cursor: 'pointer', padding: 4, borderRadius: 6,
@@ -3717,9 +4183,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.4)'; e.currentTarget.style.background = 'none' }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            {harnessId === 'hermes'
-              ? <path d="M12 5v14M5 12h14" />
-              : <path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1h5" />}
+            <path d="M12 5v14M5 12h14" />
           </svg>
         </button>
         {!mobile && (
@@ -3761,11 +4225,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </button>
       </div>
 
-      {/* Messages area — its top padding is the floating control strip's
-          height, so the first line is readable at rest and everything
-          scrolls under the strip after that. */}
+      {/* Messages area — sits under the header bar in the flow, so it needs
+          no clearance beyond its own breathing room. */}
       <div style={{
-        flex: 1, overflowY: 'auto', padding: '36px 14px 12px',
+        flex: 1, overflowY: 'auto', padding: '12px 14px 12px',
         display: 'flex', flexDirection: 'column', gap: 10,
         userSelect: 'text',
         scrollbarWidth: 'thin',
@@ -4325,13 +4788,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         </div>
       )}
 
+      {/* The New app card, over the composer. Same ground and hairline as the
+          composer so it reads as part of it, not as a dialog over the chat. */}
+      {showNewApp && (
+        <div data-testid="chat-new-app" style={{ padding: '10px 14px 0', background: 'rgba(0,0,0,0.2)', borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+          <NewAppWizardCard
+            maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
+            onClose={() => setShowNewApp(false)}
+          />
+        </div>
+      )}
+
       {/* Composer — the shape people know from Claude's own UI: the text
           box on top, full width, and one row under it with the attach,
           microphone and picture buttons on the left and, on the right, the
           provider / model / effort pills beside the send button. */}
       <div style={{
         padding: '10px 14px 10px',
-        borderTop: attachments.length > 0 ? 'none' : '1px solid rgba(255,255,255,0.06)',
+        borderTop: (attachments.length > 0 || showNewApp) ? 'none' : '1px solid rgba(255,255,255,0.06)',
         background: 'rgba(0,0,0,0.2)',
         display: 'flex', flexDirection: 'column', gap: 8,
       }}>
@@ -4438,6 +4912,28 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             </button>
           )
         )}
+        {/* Create: the Coding Agent's New app wizard, right here. The owner
+            asked for it beside the attach and microphone buttons — the chat is
+            where the handoff lands, so it is where the request should start. */}
+        <button
+          onClick={toggleNewApp}
+          title={t("codingAgent.createNewProject")}
+          aria-label={t("codingAgent.createNewProject")}
+          aria-pressed={showNewApp}
+          data-testid="chat-new-app-toggle"
+          style={{
+            width: 36, height: 36, borderRadius: 10, border: 'none',
+            background: showNewApp ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)',
+            color: showNewApp ? '#f97316' : 'rgba(255,255,255,0.4)',
+            cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            flexShrink: 0, transition: 'all 0.15s',
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.background = 'rgba(249,115,22,0.15)'; e.currentTarget.style.color = '#f97316' }}
+          onMouseLeave={(e) => { e.currentTarget.style.background = showNewApp ? 'rgba(249,115,22,0.2)' : 'rgba(255,255,255,0.06)'; e.currentTarget.style.color = showNewApp ? '#f97316' : 'rgba(255,255,255,0.4)' }}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 22 }}>add</span>
+        </button>
         {/* Making a picture, where the AGENT cannot.
             Shown on the trigger and not on `canGenerateImages`, because the two
             answer different questions: the flag says a picture can be made
