@@ -128,6 +128,26 @@ describe("openclaw-config", () => {
     });
   });
 
+  describe("setSkillEnabled", () => {
+    it("refuses prototype-chain skill ids before touching anything", async () => {
+      // The route guards these too, but the invariant lives here so a second
+      // caller (an MCP tool, a CLI path) cannot write `enabled` onto
+      // Object.prototype through ensurePlainObject.
+      for (const skillId of ["__proto__", "constructor", "prototype"]) {
+        await expect(openclawConfig.setSkillEnabled(skillId, true)).rejects.toThrow("Invalid skill id");
+      }
+      // The hazard the guard exists for: nothing landed on Object.prototype.
+      expect(({} as Record<string, unknown>).enabled).toBeUndefined();
+      expect(mockFs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it("writes skills.entries.<id>.enabled for a normal id", async () => {
+      await openclawConfig.setSkillEnabled("home-assistant", false);
+      const written = JSON.parse(String(mockFs.writeFile.mock.calls[0][1]));
+      expect(written.skills.entries["home-assistant"].enabled).toBe(false);
+    });
+  });
+
   describe("ensureCompactionReserveFloor", () => {
     it("writes the default reserve floor when compaction config is missing", async () => {
       mockFs.readFile.mockResolvedValueOnce(JSON.stringify({ agents: { defaults: {} } }) as never);

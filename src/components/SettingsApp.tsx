@@ -255,10 +255,12 @@ interface WhatsappPairSnapshot {
 
 /* ── Sidebar nav items ── */
 const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
-  // Ordered by how often an owner comes here, not by history: the brain and
-  // the ways to reach it first, the box's own machinery next, the cosmetics
-  // and the once-a-year pages last. The first entry is also where Settings
-  // opens.
+  // Appearance leads because it is the page a new owner reaches for first
+  // (wallpaper, mascot, language); Settings still opens on Providers — see
+  // DEFAULT_SECTION. After that, ordered by how often an owner comes here,
+  // not by history: the brain and the ways to reach it first, the box's own
+  // machinery next, the once-a-year pages last.
+  { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
   // Providers (cloud sign-ins) and Local AI (the on-device model and the
   // inventory of everything running on the box) are neighbours, each with its
   // own provider list on top. "localModels" stays a Section so its deep links
@@ -275,10 +277,30 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
-  { id: "appearance", icon: "palette", labelKey: "settings.appearance" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   { id: "about", icon: "info", labelKey: "settings.about" },
 ];
+
+// Where Settings opens when no deep link asks for a page: the providers, not
+// the first sidebar row, so putting Appearance on top did not move the
+// landing page.
+const DEFAULT_SECTION: Section = "ai";
+
+/** A deep-link value as a Section, or null. The old Local Models section is
+ *  part of Local AI now. */
+function toSection(value: unknown): Section | null {
+  if (typeof value !== "string" || !(SECTIONS as readonly string[]).includes(value)) return null;
+  return value === "localModels" ? "localAi" : (value as Section);
+}
+
+// The section a cold open was asked for, read BEFORE the first render so the
+// default pane never mounts — and starts its fetches — only to be swapped out
+// a tick later. A peek, not a take: the mount effect still deletes the slot,
+// because React may run a state initializer twice.
+function peekPendingSection(): Section | null {
+  if (typeof window === "undefined") return null;
+  return toSection((window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection);
+}
 
 /* ── Discord ── */
 // The four states GET /setup-api/discord/status can report, each with exactly
@@ -360,12 +382,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [langOpen, setLangOpen] = useState(false);
   const langRef = useRef<HTMLDivElement>(null);
   const currentLang = LANGUAGES.find(l => l.code === locale) ?? LANGUAGES[0];
-  const [section, setSection] = useState<Section>(NAV_ITEMS[0].id);
+  const [initialSection] = useState(peekPendingSection);
+  const [section, setSection] = useState<Section>(initialSection ?? DEFAULT_SECTION);
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
   // Mobile: null means show nav list, a section means show content with back button
-  const [mobileSection, setMobileSection] = useState<Section | null>(null);
+  const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
 
   // ClawBox account gate — Remote Control needs the user to be signed in to
   // the portal so the tunnel can be claimed. The hook polls /ai-models/status
@@ -439,12 +462,9 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // on `window` first, so a deep-link issued before this effect runs (cold
   // open of Settings) isn't lost to a listener-mount race.
   useEffect(() => {
-    const isSection = (s: unknown): s is Section =>
-      typeof s === "string" && (SECTIONS as readonly string[]).includes(s);
     const apply = (s: unknown) => {
-      if (!isSection(s)) return;
-      let next: Section = s;
-      if (next === "localModels") next = "localAi";
+      const next = toSection(s);
+      if (!next) return;
       setSection(next);
       setMobileSection(next);
     };

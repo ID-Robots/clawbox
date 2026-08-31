@@ -102,6 +102,11 @@ describe("AiProviderList", () => {
     const sw = await screen.findByTestId("ai-provider-switch-clawai");
     expect(sw).toBeDisabled();
     expect(sw).toHaveAttribute("title", "Make another provider the default first.");
+    // Visible on the row too, not only on hover — a phone has no hover — and
+    // the switch names it as its description.
+    expect(screen.getByTestId("ai-provider-locked-hint-clawai")).toHaveTextContent("Make another provider the default first.");
+    expect(sw).toHaveAccessibleDescription("Make another provider the default first.");
+    expect(screen.queryByTestId("ai-provider-locked-hint-openai")).not.toBeInTheDocument();
     fireEvent.click(sw);
     expect(posts).toEqual([]);
   });

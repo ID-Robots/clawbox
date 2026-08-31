@@ -1,9 +1,15 @@
 import { NextResponse } from "next/server";
 import { kvGet, kvSet, kvDelete, kvGetAll, kvSetMany } from "@/lib/kv-store";
+import { pushPendingAction } from "@/lib/pending-actions";
 
 export const dynamic = "force-dynamic";
 
 const SAFE_KEY = /^[\w.:-]{1,256}$/;
+// The MCP tools and `clawbox notify` post the desktop's pending action under
+// the old single-slot key; it is folded into the owner-notice ring
+// (src/lib/pending-actions.ts) so every open desktop sees it and the slot
+// itself is never stored.
+const LEGACY_PENDING_ACTION_KEY = "ui:pending-action";
 // Reserved/dunder names slip through SAFE_KEY (all `\w`) but corrupt the plain
 // object backing the store — e.g. `data["__proto__"] = "x"` is a silent no-op
 // that reports success yet stores nothing, and a read returns Object.prototype.
@@ -19,6 +25,18 @@ function isValidKey(key: string): boolean {
 
 function isValidValue(v: unknown): v is string {
   return typeof v === "string" && Buffer.byteLength(v, "utf8") <= MAX_VALUE_BYTES;
+}
+
+/** The legacy slot's value, when it is what the ring can hold: a JSON object. */
+function parseLegacyAction(value: string): Record<string, unknown> | null {
+  let action: unknown;
+  try {
+    action = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (!action || typeof action !== "object" || Array.isArray(action)) return null;
+  return action as Record<string, unknown>;
 }
 
 // GET /setup-api/kv?key=foo        → single key
@@ -55,16 +73,45 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: `Too many entries (max ${MAX_ENTRIES})` }, { status: 413 });
       }
       const entries: Record<string, string> = {};
+      let legacyAction: Record<string, unknown> | null = null;
       for (const [k, v] of Object.entries(body.entries)) {
-        if (isValidKey(k) && isValidValue(v)) entries[k] = v;
+        if (!isValidKey(k) || !isValidValue(v)) continue;
+        // The retired single-slot key is folded into the ring here too — it
+        // must never be persisted as a plain entry, where no desktop would
+        // see it. The batch stays as lenient as its other entries: a value
+        // that is not a JSON object is dropped like an invalid key.
+        if (k === LEGACY_PENDING_ACTION_KEY) {
+          legacyAction = parseLegacyAction(v);
+          continue;
+        }
+        entries[k] = v;
       }
       if (Object.keys(entries).length > 0) kvSetMany(entries);
+      if (legacyAction) {
+        // The other entries are already on disk; a failed append is the
+        // store's fault, not the request's, and must not read as bad JSON.
+        try {
+          await pushPendingAction(legacyAction);
+        } catch {
+          return NextResponse.json({ error: "Could not record the notice" }, { status: 500 });
+        }
+      }
       return NextResponse.json({ ok: true });
     }
     if (typeof body.key === "string" && typeof body.value === "string") {
       if (!isValidKey(body.key)) return NextResponse.json({ error: "Invalid key" }, { status: 400 });
       if (!isValidValue(body.value)) {
         return NextResponse.json({ error: `Value too large (max ${MAX_VALUE_BYTES} bytes)` }, { status: 413 });
+      }
+      if (body.key === LEGACY_PENDING_ACTION_KEY) {
+        const action = parseLegacyAction(body.value);
+        if (!action) return NextResponse.json({ error: "Invalid request" }, { status: 400 });
+        try {
+          await pushPendingAction(action);
+        } catch {
+          return NextResponse.json({ error: "Could not record the notice" }, { status: 500 });
+        }
+        return NextResponse.json({ ok: true });
       }
       kvSet(body.key, body.value);
       return NextResponse.json({ ok: true });

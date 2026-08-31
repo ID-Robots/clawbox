@@ -3,6 +3,7 @@
 import type { OllamaModel, OllamaSearchResult } from "@/hooks/useOllamaModels";
 import type { KeyboardEvent, ReactNode } from "react";
 import { useT } from "@/lib/i18n";
+import { OLLAMA_MAX_MODEL_PARAM_B } from "@/lib/resource-limits";
 
 const PRESET_MODELS = [
   { id: "llama3.2:3b", label: "Llama 3.2 3B" },
@@ -25,6 +26,14 @@ interface OllamaModelPanelProps {
   handleOllamaSearchChange: (value: string) => void;
   clearSearch: () => void;
   pullOllamaModel: (model: string) => void;
+  /** Stops the download in flight (the hook's cancelOllamaPull); Cancel is offered only when given. */
+  cancelOllamaPull?: () => void;
+  /**
+   * The size cap the search route filters by, in billions of parameters. The
+   * route echoes it in every answer so the copy cannot drift from the filter;
+   * until an answer has arrived, the constant the route reads is the truth.
+   */
+  maxParamBillions?: number;
   formatOllamaBytes: (bytes: number) => string;
   /** Unique name for the radio group to avoid conflicts when used in multiple places */
   radioGroupName?: string;
@@ -60,6 +69,8 @@ export default function OllamaModelPanel({
   handleOllamaSearchChange,
   clearSearch,
   pullOllamaModel,
+  cancelOllamaPull,
+  maxParamBillions = OLLAMA_MAX_MODEL_PARAM_B,
   formatOllamaBytes,
   radioGroupName = "ollama-model",
   inputClassName = DEFAULT_INPUT_CLASS,
@@ -167,7 +178,7 @@ export default function OllamaModelPanel({
         {/* Search for more models */}
         <div className="mt-3 pt-3 border-t border-gray-800">
           <p className="text-xs text-[var(--text-muted)] mb-1.5">
-            {t("ollama.searchLabel")}
+            {t("ollama.searchLabel", { max: maxParamBillions })}
           </p>
           <div className="relative">
             <input
@@ -243,7 +254,7 @@ export default function OllamaModelPanel({
           {ollamaSearch && !ollamaSearching && ollamaSearchResults.length === 0 && (
             <div className="mt-2">
               <p className="text-xs text-[var(--text-muted)] mb-1.5">
-                {t("ollama.noModelsFound", { query: ollamaSearch })}
+                {t("ollama.noModelsFound", { query: ollamaSearch, max: maxParamBillions })}
               </p>
               <button
                 type="button"
@@ -295,15 +306,30 @@ export default function OllamaModelPanel({
             )}
           </div>
         )}
-        <button
-          type="button"
-          onClick={() => pullOllamaModel(selectedOllamaModel)}
-          disabled={ollamaPulling || !!ollamaSaving}
-          className={buttonClassName}
-        >
-          {(ollamaPulling || !!ollamaSaving) && buttonSpinner}
-          {ollamaPulling ? t("ollama.downloading") : ollamaSaving ? t("ollama.configuring") : t("ollama.downloadAndConfigure")}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => pullOllamaModel(selectedOllamaModel)}
+            disabled={ollamaPulling || !!ollamaSaving}
+            className={buttonClassName}
+          >
+            {(ollamaPulling || !!ollamaSaving) && buttonSpinner}
+            {ollamaPulling ? t("ollama.downloading") : ollamaSaving ? t("ollama.configuring") : t("ollama.downloadAndConfigure")}
+          </button>
+          {/* A download is minutes long and the only way out used to be
+              leaving the page — which did not stop it either. Ollama keeps
+              the partial blobs, so a retry resumes where this left off. */}
+          {ollamaPulling && cancelOllamaPull && (
+            <button
+              type="button"
+              onClick={cancelOllamaPull}
+              data-testid="ollama-pull-cancel"
+              className="mt-3 px-4 py-3 bg-white/5 text-[var(--text-secondary)] rounded-lg text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors"
+            >
+              {t("cancel")}
+            </button>
+          )}
+        </div>
       </div>
     </>
   );

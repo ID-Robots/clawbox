@@ -54,6 +54,7 @@ function stubFetch(
     effort?: string;
     maxTurns?: number;
     tokenLimit?: number | null;
+    reviewPass?: boolean;
   },
   opts: {
     resolveTo?: string;
@@ -70,6 +71,7 @@ function stubFetch(
   let effort = status.effort ?? "max";
   let maxTurns = status.maxTurns ?? 150;
   let tokenLimit: number | null = status.tokenLimit ?? null;
+  let reviewPass = status.reviewPass ?? false;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -86,6 +88,7 @@ function stubFetch(
     maxMaxTurns: 2000,
     tokenLimit,
     minTokenLimit: 10_000,
+    reviewPass,
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -111,8 +114,15 @@ function stubFetch(
         stored = body.defaultDirectory === null ? null : (opts.resolveTo ?? body.defaultDirectory);
       }
       if (typeof body.effort === "string") effort = body.effort;
-      if (typeof body.maxTurns === "number") maxTurns = body.maxTurns;
+      if (typeof body.maxTurns === "number") {
+        // The route's own bounds, in its own words.
+        if (body.maxTurns < 10 || body.maxTurns > 2000) {
+          return json({ error: "Steps must be between 10 and 2000.", kind: "invalid" }, 400);
+        }
+        maxTurns = body.maxTurns;
+      }
       if ("tokenLimit" in body) tokenLimit = body.tokenLimit;
+      if (typeof body.reviewPass === "boolean") reviewPass = body.reviewPass;
       return json(payload());
     }
     return json({ error: "unexpected" }, 404);
@@ -301,6 +311,30 @@ describe("effort and the ceilings", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("puts the stored step limit back when the route refuses the typed one, and says so beside the field", async () => {
+    // The refused number used to stay in the field — re-posted on every
+    // later blur — with the message a card away, under GitHub.
+    stubFetch({ enabled: true, readiness: READY, maxTurns: 150 });
+    render(<CodingAgentSettingsPanel />);
+    const turns = await screen.findByTestId("coding-agent-turns");
+    await waitFor(() => expect(turns).toHaveValue(150));
+    const github = await screen.findByTestId("coding-agent-github-card");
+
+    fireEvent.change(turns, { target: { value: "5" } });
+    fireEvent.blur(turns);
+    const refusal = await screen.findByText(/between 10 and 2000/);
+    await waitFor(() => expect(turns).toHaveValue(150));
+    expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { maxTurns: 5 } }]);
+    // Under the Steps field, above the GitHub card.
+    expect(turns.parentElement).toContainElement(refusal);
+    expect(refusal.compareDocumentPosition(github) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    // Leaving the field again posts nothing: the refused number is gone.
+    fireEvent.blur(turns);
+    await flush();
+    expect(posts).toHaveLength(1);
+  });
+
   it("sets a token ceiling, and clears it with an empty field", async () => {
     stubFetch({ enabled: true, readiness: READY, tokenLimit: null });
     render(<CodingAgentSettingsPanel />);
@@ -317,6 +351,70 @@ describe("effort and the ceilings", () => {
     fireEvent.change(tokens, { target: { value: "" } });
     fireEvent.blur(tokens);
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { tokenLimit: null } }));
+  });
+});
+
+describe("the automatic review pass", () => {
+  const REVIEW = translations.en["codingAgent.reviewPassLabel"];
+
+  it("renders off and turns on only after the route says so, beside a main switch that keeps its own id", async () => {
+    // The field existed on the route and nowhere in the UI: an owner could
+    // neither find the review pass nor see that a curl had switched it on.
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    const toggle = await screen.findByRole("switch", { name: REVIEW });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toHaveAttribute("data-testid", "coding-agent-review-pass");
+    expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute("data-testid", "coding-agent-switch");
+    expect(screen.getByText(translations.en["codingAgent.reviewPassHint"])).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { reviewPass: true } }]));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    // The main switch is what it was.
+    expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("shows what the device has stored", async () => {
+    stubFetch({ enabled: true, readiness: READY, reviewPass: true });
+    render(<CodingAgentSettingsPanel />);
+    expect(await screen.findByRole("switch", { name: REVIEW })).toHaveAttribute("aria-checked", "true");
+  });
+});
+
+describe("the sign-out confirmation", () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  async function settle(ms = 50) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
+
+  it("takes the armed Sign out back after a few seconds, or when focus leaves it", async () => {
+    // It used to stay armed until the panel unmounted: a stray tap minutes
+    // later disconnected GitHub.
+    stubFetch({ enabled: true, readiness: READY }, {
+      github: { installed: true, connected: true, login: "yalexx", loginCommand: GH_OFF.loginCommand },
+    });
+    render(<CodingAgentSettingsPanel />);
+    await settle();
+    const signOut = screen.getByTestId("coding-agent-github-signout");
+    expect(signOut.textContent).toBe(translations.en["codingAgent.githubOut"]);
+
+    fireEvent.click(signOut);
+    expect(signOut.textContent).toBe(translations.en["codingAgent.githubOutConfirm"]);
+    await settle(5_100);
+    expect(signOut.textContent).toBe(translations.en["codingAgent.githubOut"]);
+
+    // A tap after the revert is a first tap again — nothing is signed out.
+    fireEvent.click(signOut);
+    await settle();
+    expect(signOut.textContent).toBe(translations.en["codingAgent.githubOutConfirm"]);
+    const deletes = vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === "DELETE");
+    expect(deletes).toEqual([]);
+
+    fireEvent.blur(signOut);
+    expect(signOut.textContent).toBe(translations.en["codingAgent.githubOut"]);
   });
 });
 

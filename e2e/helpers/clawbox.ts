@@ -494,32 +494,37 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     const gemmaInstalled = setupState.local_ai_configured && setupState.local_ai_provider === "llamacpp";
     return {
       models: [
+        // Each line rides with its code, as the real route sends it: the panel
+        // renders the code through the catalogue and the English is its fallback.
         {
-          id: "llamacpp", name: "Gemma 4", kind: "llm", runtime: "Answers on this box",
+          id: "llamacpp", name: "Gemma 4", kind: "llm", runtime: "Answers on this box", runtimeCode: "answersOnBox",
           installed: gemmaInstalled, enabled: null,
           running: gemmaInstalled ? "running" : "not-installed",
           diskBytes: null, memoryBytes: gemmaInstalled ? 2_147_483_648 : null,
           control: "none", managedBy: "localAi",
           detail: gemmaInstalled ? "Answering right now." : "Not installed.",
+          detailCode: gemmaInstalled ? "llamacppAnswering" : "llamacppNotInstalled",
         },
         {
-          id: "ollama", name: "Ollama", kind: "llm", runtime: "Runs extra models on this box",
+          id: "ollama", name: "Ollama", kind: "llm", runtime: "Runs extra models on this box", runtimeCode: "runsExtraModels",
           installed: true, enabled: ollamaEnabled, running: ollamaEnabled ? "running" : "idle",
           diskBytes: 639_000_000, memoryBytes: ollamaEnabled ? 1_073_741_824 : null,
           control: "system-unit",
           detail: ollamaEnabled ? "Serving Qwen3 Embedding." : "Off. Turn it on from the menu.",
+          detailCode: ollamaEnabled ? "ollamaServing" : "ollamaOff",
+          ...(ollamaEnabled ? { params: { names: "Qwen3 Embedding" } } : {}),
         },
         {
-          id: "kokoro", name: "Kokoro", kind: "tts", runtime: "Voice on this box",
+          id: "kokoro", name: "Kokoro", kind: "tts", runtime: "Voice on this box", runtimeCode: "voiceOnBox",
           installed: true, enabled: true, running: "running",
           diskBytes: null, memoryBytes: 412_000_000, control: "user-unit",
-          detail: "Speaking from this box.",
+          detail: "Speaking from this box.", detailCode: "kokoroSpeaking",
         },
         {
-          id: "whisper", name: "Whisper", kind: "stt", runtime: "Transcribes on this box",
+          id: "whisper", name: "Whisper", kind: "stt", runtime: "Transcribes on this box", runtimeCode: "transcribesOnBox",
           installed: false, enabled: null, running: "not-installed",
           diskBytes: null, memoryBytes: null, control: "none",
-          detail: "Not installed. Speech is transcribed in the cloud.",
+          detail: "Not installed. Speech is transcribed in the cloud.", detailCode: "whisperNotInstalled",
         },
       ],
       unavailable: [],
@@ -563,23 +568,17 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       engines: [
         {
           id: "cloud", providerId: "openai", label: "ClawBox cloud",
-          configured: cloudVoice, proven: cloudVoice, usable: cloudVoice,
+          configured: cloudVoice,
           detail: cloudVoice
             ? "Speaks in the cloud. The words to be spoken leave this box."
             : "No cloud voice is set up on this box.",
         },
         {
           id: "local", providerId: "tts-local-cli", label: "On this box",
-          configured: true, proven: true, usable: true,
+          configured: true,
           detail: "Speaks on the box itself. Nothing leaves it. Installed: Kokoro.",
         },
       ],
-      lastCheck: {
-        at: 1787000000000, ok: true,
-        servedByProviderId: providerId, servedEngine: engine,
-        attempts: [{ providerId, engine, ok: true, message: null, latencyMs: engine === "local" ? 14893 : 812 }],
-        message: null,
-      },
       warning: !cloudVoice
         ? null
         : engine === "cloud"
@@ -1354,7 +1353,18 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
     if (path === "/setup-api/local-models") {
       if (method === "POST") {
         const payload = await readRequestJson<{ id?: string; enabled?: boolean }>(route);
-        if (payload.id !== "ollama" || typeof payload.enabled !== "boolean") {
+        if (typeof payload.id !== "string" || typeof payload.enabled !== "boolean") {
+          await fulfillJson(route, { error: "Expected an engine id and an enabled flag." }, 400);
+          return;
+        }
+        // The real route's two refusals: an id the inventory has never heard
+        // of (404), and a real engine with no switch here (400). Only
+        // Ollama's switch is mocked.
+        if (!["llamacpp", "ollama", "kokoro", "whisper", "embeddings"].includes(payload.id)) {
+          await fulfillJson(route, { error: "Unknown model." }, 404);
+          return;
+        }
+        if (payload.id !== "ollama") {
           await fulfillJson(route, { error: "That model cannot be turned on or off here." }, 400);
           return;
         }

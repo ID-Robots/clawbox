@@ -49,19 +49,30 @@ export const dynamic = "force-dynamic";
 export { TRANSCRIBE_MODEL };
 
 // A minute of Opus at the bitrate MediaRecorder picks is well under a
-// megabyte, so this is generous for dictation while still bounding what one
+// megabyte, so 8 MB is half an hour of dictation while still bounding what one
 // request can push at the proxy. The check is on what actually arrives, not on
 // a header the caller controls.
-export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+//
+// Why not more: Next 16 cuts every request body this route can see at 10 MB
+// (`experimental.proxyClientMaxBodySize`, default 10mb, applied because
+// src/middleware.ts matches this path) and hands the handler the truncated
+// remainder. The contract used to say 25 MB, and every recording between 10
+// and 25 MB arrived cut off, failed to parse, and was reported as a bad
+// recording rather than a long one. The ceiling has to sit under the
+// platform's for the meters below to be the ones that answer — and the cloud
+// proxy refuses uploads of ~9 MB with its own 413 anyway, so nothing that
+// could have been transcribed is lost by saying 8.
+export const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
 
 // The cap above can only be applied to a part once the body has been parsed,
 // and parsing means the bytes are already in memory -- so the request as a
-// whole needs a second bound, applied while it arrives. Nothing in front of
-// this route provides one: the box serves its web UI from Next itself with no
-// reverse proxy trimming bodies, and a route handler gets no default body
-// limit. The spare megabyte is multipart framing and the `model` field, the
-// same headroom the attachment route next door allows itself.
+// whole needs a second bound, applied while it arrives, before the platform's
+// 10 MB cut turns an oversized upload into an unparseable one. The spare
+// megabyte is multipart framing and the `model` field, the same headroom the
+// attachment route next door allows itself.
 const MAX_REQUEST_BYTES = MAX_AUDIO_BYTES + 1024 * 1024;
+
+const TOO_LONG = `The recording is too long (over ${MAX_AUDIO_BYTES / (1024 * 1024)} MB).`;
 const MAX_MULTIPART_PARTS = 4;
 
 // Long enough that a slow uplink on a busy box still finishes, short enough
@@ -124,7 +135,7 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
   // gets it past this line. The counted read is what actually holds.
   const declared = Number(req.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > MAX_REQUEST_BYTES) {
-    return { status: 413, error: "The recording is too long" };
+    return { status: 413, error: TOO_LONG };
   }
   if (!req.body) return { status: 400, error: "Could not read the recording." };
 
@@ -182,7 +193,7 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
       });
       nodeStream.on("error", () => {
         finish(bounded.overflowed()
-          ? { status: 413, error: "The recording is too long" }
+          ? { status: 413, error: TOO_LONG }
           : { status: 400, error: "Could not read the recording." }, true);
       });
 
@@ -200,12 +211,12 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
           if (settled) return;
           fileBytes += chunk.byteLength;
           if (fileBytes > MAX_AUDIO_BYTES) {
-            finish({ status: 413, error: "The recording is too long" }, true);
+            finish({ status: 413, error: TOO_LONG }, true);
             return;
           }
           chunks.push(Buffer.from(chunk));
         });
-        stream.on("limit", () => finish({ status: 413, error: "The recording is too long" }, true));
+        stream.on("limit", () => finish({ status: 413, error: TOO_LONG }, true));
         stream.on("error", badMultipart);
         stream.on("end", () => {
           if (settled) return;
@@ -239,7 +250,7 @@ async function readAudio(req: NextRequest): Promise<{ file: Blob; name: string }
     });
   } catch (err) {
     if (bounded.overflowed()) {
-      return { status: 413, error: "The recording is too long" };
+      return { status: 413, error: TOO_LONG };
     }
     // A truncated or malformed multipart body is the caller's to fix, so it is
     // a 400 -- reporting it as a 500 sends the user off debugging the box. The

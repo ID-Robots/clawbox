@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { clawhubSkillUrl } from "@/lib/clawhub-url";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { clawhubSkillUrl, isClawhubHandle, lookupClawhubOwner, pickClawhubMatch } from "@/lib/clawhub-url";
 
 describe("clawhubSkillUrl", () => {
   it("namespaces the skill under its publisher", () => {
@@ -45,5 +45,80 @@ describe("clawhubSkillUrl", () => {
     expect(clawhubSkillUrl("a b", "publisher")).toBe(
       "https://clawhub.ai/publisher/skills/a%20b",
     );
+  });
+});
+
+describe("isClawhubHandle", () => {
+  it("accepts ClawHub's handle shapes and refuses everything that cannot be one", () => {
+    for (const handle of ["steipete", "alex098929", "legionspace-hackathon", "a", "iAhmadZain", "a.b_c"]) {
+      expect(isClawhubHandle(handle)).toBe(true);
+    }
+    for (const bad of ["", "-x", "x-", ".x", "ClawHub Community", "a/b", "@steipete", 42, undefined, "a".repeat(41)]) {
+      expect(isClawhubHandle(bad)).toBe(false);
+    }
+  });
+});
+
+describe("pickClawhubMatch", () => {
+  const matches = [
+    { ownerHandle: "steipete", ref: "@steipete/weather", url: "https://clawhub.ai/steipete/skills/weather" },
+    { ownerHandle: "thcjp", ref: "@thcjp/weather", url: "https://clawhub.ai/thcjp/skills/weather" },
+  ];
+
+  it("picks the one candidate the store's developer names, case-insensitively", () => {
+    expect(pickClawhubMatch(matches, "THCJP")).toBe(matches[1]);
+  });
+
+  it("never guesses: no developer, a display name, or a stranger picks nothing", () => {
+    expect(pickClawhubMatch(matches, undefined)).toBeUndefined();
+    expect(pickClawhubMatch(matches, "ClawHub Community")).toBeUndefined();
+    expect(pickClawhubMatch(matches, "weatherpro")).toBeUndefined();
+  });
+});
+
+describe("lookupClawhubOwner", () => {
+  const mockFetch = vi.fn();
+  vi.stubGlobal("fetch", mockFetch);
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  const answer = (status: number, body: unknown) =>
+    mockFetch.mockResolvedValue({ ok: status >= 200 && status < 300, status, json: () => Promise.resolve(body) });
+
+  it("names the owner of a unique slug", async () => {
+    answer(200, { skill: { slug: "weather-forecast" }, owner: { handle: "alex098929" } });
+    await expect(lookupClawhubOwner("weather-forecast")).resolves.toEqual({ status: "found", ownerHandle: "alex098929" });
+    expect(mockFetch).toHaveBeenCalledWith("https://clawhub.ai/api/v1/skills/weather-forecast", expect.anything());
+  });
+
+  it("lists the publishers of an ambiguous slug, dropping any that is not a handle", async () => {
+    answer(409, {
+      code: "AMBIGUOUS_SKILL_SLUG",
+      matches: [
+        { ownerHandle: "steipete", slug: "weather", ref: "@steipete/weather", url: "https://clawhub.ai/steipete/skills/weather" },
+        { ownerHandle: "not a handle", ref: "@x/weather", url: "https://clawhub.ai/x" },
+        { ownerHandle: "thcjp" },
+      ],
+    });
+    await expect(lookupClawhubOwner("weather")).resolves.toEqual({
+      status: "ambiguous",
+      matches: [
+        { ownerHandle: "steipete", ref: "@steipete/weather", url: "https://clawhub.ai/steipete/skills/weather" },
+        { ownerHandle: "thcjp", ref: "@thcjp/weather", url: "https://clawhub.ai/thcjp/skills/weather" },
+      ],
+    });
+  });
+
+  it("reports a missing slug, and never throws for anything else", async () => {
+    answer(404, "Skill not found");
+    await expect(lookupClawhubOwner("nope")).resolves.toEqual({ status: "not_found" });
+
+    answer(500, "boom");
+    await expect(lookupClawhubOwner("x")).resolves.toMatchObject({ status: "unavailable" });
+
+    mockFetch.mockRejectedValue(new Error("TimeoutError"));
+    await expect(lookupClawhubOwner("x")).resolves.toMatchObject({ status: "unavailable", error: "TimeoutError" });
   });
 });

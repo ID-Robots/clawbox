@@ -1,12 +1,52 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR } from "@/lib/config-store";
+import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
 
 export const dynamic = "force-dynamic";
 
 const ICONS_DIR = path.join(DATA_DIR, "icons");
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
+
+// Ids the store has no icon for, remembered so a card re-render does not cost
+// another outbound request. Most of the catalogue past the first screens has
+// no icon, and one Store session used to make ~850 such fetches at ~0.3 s
+// each. Only a genuine upstream 404 lands here — a timeout or 5xx is retried
+// next time — and the local-file check above it always runs first, so an icon
+// that arrives on disk meanwhile (an install, a generated web-app icon) is
+// found regardless.
+const MISSING_UPSTREAM_TTL_MS = 60 * 60_000;
+const MISSING_UPSTREAM_MAX = 2_000;
+const missingUpstream = new Map<string, number>();
+
+function rememberMissing(appId: string): void {
+  if (missingUpstream.size >= MISSING_UPSTREAM_MAX) {
+    const oldest = missingUpstream.keys().next().value;
+    if (oldest !== undefined) missingUpstream.delete(oldest);
+  }
+  missingUpstream.set(appId, Date.now() + MISSING_UPSTREAM_TTL_MS);
+}
+
+function knownMissing(appId: string): boolean {
+  const until = missingUpstream.get(appId);
+  if (until === undefined) return false;
+  if (until > Date.now()) return true;
+  missingUpstream.delete(appId);
+  return false;
+}
+
+// Short enough that an icon added later is not hidden for long, long enough
+// that switching a category and back does not re-request every missing one.
+const MISSING_HEADERS = { "Cache-Control": "public, max-age=600" };
+
+async function isInstalled(appId: string): Promise<boolean> {
+  try {
+    const list = (await configGetAll())["pref:installed_apps"];
+    return Array.isArray(list) && list.includes(appId);
+  } catch {
+    return false;
+  }
+}
 
 export async function GET(
   req: Request,
@@ -41,7 +81,13 @@ export async function GET(
     // Not cached locally
   }
 
-  // Proxy from remote store and cache
+  if (knownMissing(appId)) {
+    return NextResponse.json({ error: "Icon not found" }, { status: 404, headers: MISSING_HEADERS });
+  }
+
+  // Proxy from the remote store. The desktop cannot load clawbox.com itself
+  // (CSP img-src, and the store proxy rule), so every card's icon comes
+  // through here.
   try {
     const res = await fetch(`${STORE_ICONS_BASE}/${appId}.png`, {
       signal: AbortSignal.timeout(5000),
@@ -49,10 +95,17 @@ export async function GET(
     if (res.ok) {
       const buffer = Buffer.from(await res.arrayBuffer());
 
-      // Cache locally (fire and forget)
-      fs.mkdir(ICONS_DIR, { recursive: true })
-        .then(() => fs.writeFile(iconPath, buffer))
-        .catch(() => {});
+      // data/icons holds INSTALLED apps' icons — the install route downloads
+      // one, uninstall removes it, webapp-icon.ts generates one. Persisting
+      // every browsed card's icon too left 62 MB behind after one Store
+      // session, with nothing that ever pruned it. The write here is only the
+      // repair for an install whose own download failed; a browsed icon is
+      // served with `max-age` and left to the browser's cache.
+      if (await isInstalled(appId)) {
+        fs.mkdir(ICONS_DIR, { recursive: true })
+          .then(() => fs.writeFile(iconPath, buffer))
+          .catch(() => {});
+      }
 
       return new NextResponse(buffer, {
         headers: {
@@ -60,6 +113,10 @@ export async function GET(
           "Cache-Control": "public, max-age=86400",
         },
       });
+    }
+    if (res.status === 404) {
+      rememberMissing(appId);
+      return NextResponse.json({ error: "Icon not found" }, { status: 404, headers: MISSING_HEADERS });
     }
   } catch {
     // Remote failed

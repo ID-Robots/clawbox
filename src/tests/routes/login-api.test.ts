@@ -13,6 +13,10 @@ vi.mock("@/lib/auth", () => ({
   getSessionGeneration: vi.fn().mockResolvedValue(0),
 }));
 
+vi.mock("@/lib/system-password", () => ({
+  hasOwnerPassword: vi.fn(),
+}));
+
 vi.mock("@/lib/login-rate-limit", () => ({
   checkLockout: vi.fn(),
   recordFailure: vi.fn(),
@@ -25,6 +29,7 @@ vi.mock("@/lib/login-rate-limit", () => ({
 import * as config from "@/lib/config-store";
 import { verifyPassword, createSessionCookie, getSessionSigningSecret } from "@/lib/auth";
 import { checkLockout, recordFailure, recordSuccess, padResponseTime } from "@/lib/login-rate-limit";
+import { hasOwnerPassword } from "@/lib/system-password";
 
 const mockGet = vi.mocked(config.get);
 const mockSet = vi.mocked(config.set);
@@ -35,6 +40,7 @@ const mockCheckLockout = vi.mocked(checkLockout);
 const mockRecordFailure = vi.mocked(recordFailure);
 const mockRecordSuccess = vi.mocked(recordSuccess);
 const mockPadResponseTime = vi.mocked(padResponseTime);
+const mockHasOwnerPassword = vi.mocked(hasOwnerPassword);
 
 describe("/login-api", () => {
   let POST: (req: Request) => Promise<Response>;
@@ -49,6 +55,9 @@ describe("/login-api", () => {
     mockCheckLockout.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
     mockRecordFailure.mockResolvedValue({ locked: false, retryAfterSeconds: 0 });
     mockRecordSuccess.mockResolvedValue(undefined);
+    // Default: no owner password on the account, so the flag alone decides and
+    // the pre-existing cases below are unaffected by the shadow fallback.
+    mockHasOwnerPassword.mockResolvedValue(false);
     const mod = await import("@/app/login-api/route");
     POST = mod.POST;
   });
@@ -185,5 +194,103 @@ describe("/login-api", () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(mockSet).toHaveBeenCalledWith("password_configured", true);
+  });
+
+  // The unclaimable-box deadlock: config.json says "no password" while the OS
+  // account carries one somebody set. system/credentials refuses (shadow says
+  // the box is owned, so it demands a session) and this route used to refuse
+  // too (flag says unconfigured), leaving no way in from the UI at all.
+  describe("when the flag and /etc/shadow disagree", () => {
+    it("lets the owner log in when shadow says the account is owned", async () => {
+      mockGet
+        .mockResolvedValueOnce(null as never)   // password_configured
+        .mockResolvedValueOnce(false as never); // setup_complete — wizard never finished
+      mockHasOwnerPassword.mockResolvedValue(true);
+      mockVerifyPassword.mockResolvedValue(true);
+
+      const req = new Request("http://localhost/login-api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.11" },
+        body: JSON.stringify({ password: "the-owners-password", duration: 43200 }),
+      });
+      const res = await POST(req);
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).success).toBe(true);
+    });
+
+    it("heals the stale flag so the next request takes the normal path", async () => {
+      mockGet
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(false as never);
+      mockHasOwnerPassword.mockResolvedValue(true);
+      mockVerifyPassword.mockResolvedValue(true);
+
+      const req = new Request("http://localhost/login-api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.12" },
+        body: JSON.stringify({ password: "the-owners-password", duration: 43200 }),
+      });
+      await POST(req);
+
+      expect(mockSet).toHaveBeenCalledWith("password_configured", true);
+    });
+
+    it("still rejects the wrong password on such a box", async () => {
+      mockGet
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(false as never);
+      mockHasOwnerPassword.mockResolvedValue(true);
+      mockVerifyPassword.mockResolvedValue(false);
+
+      const req = new Request("http://localhost/login-api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.13" },
+        body: JSON.stringify({ password: "wrong", duration: 43200 }),
+      });
+      const res = await POST(req);
+
+      expect(res.status).toBe(401);
+    });
+
+    // The security property that makes trusting shadow safe: hasOwnerPassword()
+    // is false for the published factory default, so an as-flashed box is still
+    // refused here and must go through the wizard.
+    it("keeps refusing an as-flashed box, whose account holds only the factory default", async () => {
+      mockGet
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(false as never);
+      mockHasOwnerPassword.mockResolvedValue(false);
+      mockVerifyPassword.mockResolvedValue(true);
+
+      const req = new Request("http://localhost/login-api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.14" },
+        body: JSON.stringify({ password: "clawbox", duration: 43200 }),
+      });
+      const res = await POST(req);
+
+      expect(res.status).toBe(400);
+      expect(mockSet).not.toHaveBeenCalledWith("password_configured", true);
+    });
+
+    // hasOwnerPassword() returns null when /etc/shadow cannot be read at all.
+    // "Unknown" must not open the path.
+    it("refuses when the shadow state cannot be read", async () => {
+      mockGet
+        .mockResolvedValueOnce(null as never)
+        .mockResolvedValueOnce(false as never);
+      mockHasOwnerPassword.mockResolvedValue(null);
+      mockVerifyPassword.mockResolvedValue(true);
+
+      const req = new Request("http://localhost/login-api", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "1.2.3.15" },
+        body: JSON.stringify({ password: "anything", duration: 43200 }),
+      });
+      const res = await POST(req);
+
+      expect(res.status).toBe(400);
+    });
   });
 });

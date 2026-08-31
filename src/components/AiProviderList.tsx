@@ -115,6 +115,18 @@ export default function AiProviderList() {
                   {row.enabled
                     ? <ProviderConnectionLabel state={row.state} className="text-[11px]" />
                     : <span className="block text-[11px] text-[var(--text-muted)]">{t("settings.providers.switchedOff")}</span>}
+                  {/* Visible, not only a hover title: on a phone there is no
+                      hover, and a dimmed switch with no reason looks broken.
+                      The switch names this line as its description. */}
+                  {row.isDefault && (
+                    <span
+                      id={`ai-provider-locked-${row.id}`}
+                      className="block text-[11px] text-[var(--text-secondary)]"
+                      data-testid={`ai-provider-locked-hint-${row.id}`}
+                    >
+                      {t("settings.providers.lockedHint")}
+                    </span>
+                  )}
                 </span>
 
                 {canMakeDefault && (
@@ -136,6 +148,7 @@ export default function AiProviderList() {
                   aria-checked={row.enabled}
                   aria-label={t("settings.providers.enable", { name: row.label })}
                   aria-busy={busy}
+                  aria-describedby={row.isDefault ? `ai-provider-locked-${row.id}` : undefined}
                   disabled={busy || row.isDefault}
                   title={row.isDefault ? t("settings.providers.lockedHint") : undefined}
                   onClick={() => void setEnabled(row, !row.enabled)}

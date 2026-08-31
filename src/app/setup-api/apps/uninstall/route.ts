@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
-import { DATA_DIR, getAll as configGetAll } from "@/lib/config-store";
+import { DATA_DIR, getAll as configGetAll, setMany as configSetMany } from "@/lib/config-store";
 import { setPreferences } from "@/lib/preference-store";
-import { getSkillsDir } from "@/lib/openclaw-config";
+import { clearSkillEntry, getSkillsDir } from "@/lib/openclaw-config";
+import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
+import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
 
 export const dynamic = "force-dynamic";
@@ -44,10 +46,18 @@ export async function POST(req: Request) {
     const iconPath = path.join(DATA_DIR, "icons", `${appId}.png`);
     await fs.rm(iconPath, { force: true }).catch(() => {});
 
+    // The skill's `skills.entries.<id>` in openclaw.json goes too, or a later
+    // install under the same id silently inherits `enabled: false`. Best
+    // effort, like the icon: the files are already gone.
+    await clearSkillEntry(appId).catch((err) => {
+      console.warn("[uninstall] Failed to clear the skill's openclaw.json entry:", err instanceof Error ? err.message : err);
+    });
+
     // Keep the desktop's `installed_apps` and `installed_meta` preferences
     // in sync — same reason as the install route: MCP / CLI uninstalls would
     // otherwise leave stale entries in the Store's Installed tab and a
-    // phantom desktop icon until the next page mount.
+    // phantom desktop icon until the next page mount. These routes are the
+    // only writers of the two keys; the desktop reads them.
     try {
       const all = await configGetAll();
       const currentApps = all["pref:installed_apps"];
@@ -69,12 +79,33 @@ export async function POST(req: Request) {
       // POST /setup-api/preferences, and removing one entry writes the rest of
       // the collection back out with it.
       await setPreferences(updates);
+      // The window's saved form values. A delete, not a preference write, so
+      // it goes straight to the store: setPreferences drops an undefined.
+      const settingsKey = `pref:app_${appId}_settings`;
+      if (settingsKey in all) await configSetMany({ [settingsKey]: undefined });
     } catch (err) {
       console.warn("[uninstall] Failed to update installed_apps/meta preferences:", err instanceof Error ? err.message : err);
     }
 
+    // What the installed-app window kept in KV for this app: the form draft,
+    // the enabled flag it used to mirror, and the window size. Left behind,
+    // the flag made a reinstalled skill open as "Disabled".
+    for (const key of [
+      `clawbox-app-settings-${appId}`,
+      `clawbox-skill-enabled-${appId}`,
+      `clawbox-winsize-installed-${appId}`,
+    ]) {
+      try {
+        kvDelete(key);
+      } catch (err) {
+        console.warn(`[uninstall] Failed to drop KV key ${key}:`, err instanceof Error ? err.message : err);
+      }
+    }
+
     // No gateway bounce: removing the skill directory is a change under a
-    // watched skill root, so the agent drops the skill on its next turn.
+    // watched skill root, so the agent drops the skill on its next turn. The
+    // skill-info cache rescans behind this reply.
+    refreshSkillsCache();
     return NextResponse.json({ ok: true, appId });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);

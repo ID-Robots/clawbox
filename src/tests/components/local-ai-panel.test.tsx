@@ -8,7 +8,7 @@
  * never writes routing state of its own.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import LocalAiPanel from "@/components/LocalAiPanel";
 import { OPEN_APP_EVENT } from "@/lib/ui-events";
@@ -196,5 +196,235 @@ describe("LocalAiPanel", () => {
     expect(spinner).not.toHaveClass("animate-spin");
     release();
     await waitFor(() => expect(within(row).queryByText("progress_activity")).not.toBeInTheDocument());
+  });
+
+  it("reads the Gemma install route as the stream it is, showing its progress and surfacing its error", async () => {
+    // The route answers 200 and streams NDJSON; a failure is an `error` LINE,
+    // never a status code. Read with res.json() the stream fails to parse and
+    // the failure vanished with it.
+    const body = [
+      JSON.stringify({ status: "Starting preinstalled Gemma 4..." }),
+      JSON.stringify({ error: "llama.cpp exited before becoming ready." }),
+      "",
+    ].join("\n");
+    let release: () => void = () => {};
+    stubFetch({
+      llmDefault: false,
+      post: (url) => {
+        if (url !== "/setup-api/llamacpp/install") return undefined;
+        return new Promise<Response>((resolve) => {
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              const encoder = new TextEncoder();
+              controller.enqueue(encoder.encode(body.slice(0, body.indexOf("\n") + 1)));
+              release = () => {
+                controller.enqueue(encoder.encode(body.slice(body.indexOf("\n") + 1)));
+                controller.close();
+              };
+            },
+          });
+          resolve(new Response(stream, { status: 200, headers: { "content-type": "application/x-ndjson" } }));
+        });
+      },
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("local-model-menu-llamacpp"));
+    fireEvent.click(await screen.findByTestId("local-model-action-llamacpp-primary"));
+    // The last status line shows on the row while the install runs.
+    expect(await screen.findByTestId("local-model-progress-llamacpp")).toHaveTextContent("Starting preinstalled Gemma 4...");
+    release();
+    expect(await screen.findByRole("alert")).toHaveTextContent("llama.cpp exited before becoming ready.");
+    expect(screen.queryByTestId("local-model-progress-llamacpp")).not.toBeInTheDocument();
+  });
+
+  it("keeps each row's own spinner while two actions are in flight, and holds the poll until both settle", async () => {
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const releases: Record<string, () => void> = {};
+    stubFetch({
+      post: (url) => {
+        if (url !== "/setup-api/local-models" && url !== "/setup-api/tts") return undefined;
+        return new Promise<Response>((resolve) => {
+          releases[url] = () => resolve(json({ ok: true }));
+        });
+      },
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const ollama = screen.getByTestId("local-model-ollama");
+    const kokoro = screen.getByTestId("local-model-kokoro");
+    fireEvent.click(screen.getByTestId("local-model-menu-ollama"));
+    fireEvent.click(await screen.findByTestId("local-model-action-ollama-enable"));
+    fireEvent.click(screen.getByTestId("local-model-menu-kokoro"));
+    fireEvent.click(await screen.findByTestId("local-model-action-kokoro-primary"));
+    await waitFor(() => {
+      expect(within(ollama).getByText("progress_activity")).toBeInTheDocument();
+      expect(within(kokoro).getByText("progress_activity")).toBeInTheDocument();
+    });
+    expect(ollama).toHaveAttribute("aria-busy", "true");
+    expect(screen.getByTestId("local-model-menu-ollama")).toHaveAttribute("aria-disabled", "true");
+    const inventoryReads = () => (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .filter((c) => String(c[0]).startsWith("/setup-api/local-models") && (c[1] as RequestInit | undefined)?.method !== "POST").length;
+    const readsBefore = inventoryReads();
+    // The first to settle must not clear the other row, nor let the poll in.
+    releases["/setup-api/tts"]();
+    await waitFor(() => expect(within(kokoro).queryByText("progress_activity")).not.toBeInTheDocument());
+    expect(within(ollama).getByText("progress_activity")).toBeInTheDocument();
+    expect(inventoryReads()).toBe(readsBefore);
+    releases["/setup-api/local-models"]();
+    await waitFor(() => expect(within(ollama).queryByText("progress_activity")).not.toBeInTheDocument());
+    await waitFor(() => expect(inventoryReads()).toBeGreaterThan(readsBefore));
+  });
+
+  it("says so under the skeleton when the first inventory read fails, and recovers on the next", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    let fail = true;
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (fail && input.toString().startsWith("/setup-api/local-models")) {
+        return new Response(JSON.stringify({ error: "boom" }), { status: 500, headers: { "content-type": "application/json" } });
+      }
+      return answer(input, init);
+    });
+    // Capture the poll's tick instead of waiting out the real 5 s interval:
+    // the recovery is driven by calling it, so the test costs milliseconds
+    // and cannot flake on a loaded runner. restoreMocks puts the real
+    // setInterval back after the test.
+    const ticks: Array<() => void> = [];
+    vi.spyOn(window, "setInterval").mockImplementation(((handler: TimerHandler) => {
+      ticks.push(handler as () => void);
+      return 0;
+    }) as typeof window.setInterval);
+    renderPanel();
+    const skeleton = screen.getByTestId("local-ai-loading");
+    // waitFor rather than a one-shot assertion: the catalogue loads async, so
+    // the first paint of the alert can still carry the raw key.
+    await waitFor(() => expect(within(skeleton).getByRole("alert")).toHaveTextContent("Could not read what is running on this box."));
+    // The poll keeps trying; the message goes with the skeleton once it lands.
+    fail = false;
+    expect(ticks.length).toBeGreaterThan(0);
+    await act(async () => { for (const tick of ticks) tick(); });
+    await waitFor(() => expect(screen.queryByTestId("local-ai-load-failed")).not.toBeInTheDocument());
+    expect(screen.getByTestId("local-ai-panel")).toBeInTheDocument();
+  });
+
+  it("names engines in the 'could not read' banner the way their rows do", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString().startsWith("/setup-api/local-models") && init?.method !== "POST") {
+        return new Response(JSON.stringify({ models: MODELS.filter((m) => m.kind === "llm"), unavailable: ["kokoro", "whisper", "embeddings"] }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      return answer(input, init);
+    });
+    renderPanel();
+    await waitFor(() => expect(screen.getByTestId("local-ai-unavailable")).toHaveTextContent("Could not read the state of: Kokoro, Whisper, Memory search."));
+  });
+
+  it("is a menu to the keyboard too: focus lands on the first item, the arrows move it, Escape hands it back", async () => {
+    stubFetch({ llmDefault: false });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => expect(screen.getByTestId("local-model-role-llamacpp")).toBeInTheDocument());
+    const trigger = screen.getByTestId("local-model-menu-llamacpp");
+    fireEvent.click(trigger);
+    const menu = await screen.findByRole("menu");
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items.length).toBeGreaterThan(1);
+    await waitFor(() => expect(items[0]).toHaveFocus());
+    fireEvent.keyDown(menu, { key: "ArrowDown" });
+    await waitFor(() => expect(items[1]).toHaveFocus());
+    fireEvent.keyDown(menu, { key: "ArrowUp" });
+    await waitFor(() => expect(items[0]).toHaveFocus());
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("menu")).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+  });
+
+  it("offers to wake an enabled engine that is asleep, ahead of disabling it, and says so in the footer", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    // Ollama's idle standby: the unit is enabled, so the only verb the menu
+    // used to offer was Disable, while the row itself said "turn it on".
+    const asleep = MODELS.map((m) => m.id !== "ollama" ? m : {
+      ...m, enabled: true, running: "on-demand", detailCode: "ollamaStandby",
+      detail: "Asleep to save memory. Wakes when a model is asked for, or turn it on now from the menu.",
+    });
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString().startsWith("/setup-api/local-models") && init?.method !== "POST") {
+        return new Response(JSON.stringify({ models: asleep, unavailable: [] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return answer(input, init);
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    const row = screen.getByTestId("local-model-ollama");
+    await waitFor(() => expect(within(row).getByText(/turn it on now from the menu/)).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("local-model-menu-ollama"));
+    const menu = await screen.findByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.getAttribute("data-testid"))).toEqual([
+      "local-model-action-ollama-turn-on",
+      "local-model-action-ollama-disable",
+    ]);
+    fireEvent.click(screen.getByTestId("local-model-action-ollama-turn-on"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/local-models", body: { id: "ollama", enabled: true } }));
+    // "Disable", the menu's verb — standby also turns the engine off, and that comes back.
+    await waitFor(() => expect(screen.getByText("Anything you disable stays off after a restart.")).toBeInTheDocument());
+  });
+
+  it("renders each row's lines from their codes in the owner's language, and keeps the server's English for a code it does not know", async () => {
+    stubFetch();
+    const stubbed = fetch as unknown as ReturnType<typeof vi.fn>;
+    const answer = stubbed.getMockImplementation() as (input: string | URL, init?: RequestInit) => Promise<Response>;
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    const coded = [
+      model({ id: "ollama", name: "Ollama", kind: "llm", runtimeCode: "runsExtraModels", enabled: true, running: "running", control: "system-unit", detailCode: "ollamaServing", params: { names: "Qwen 3" }, detail: "Serving Qwen 3." }),
+      model({ id: "kokoro", name: "Kokoro", kind: "tts", runtimeCode: "voiceOnBox", enabled: true, running: "running", control: "user-unit", detailCode: "kokoroSpeaking", detail: "Speaking from this box." }),
+      model({ id: "whisper", name: "Whisper", kind: "stt", enabled: true, running: "running", control: "user-unit", detailCode: "somethingNewer", detail: "Only the server knows this one." }),
+      model({ id: "embeddings", name: "Memory search", nameCode: "memorySearch", kind: "embedding", runtimeCode: "modelVia", params: { model: "Qwen 3", via: "Ollama" }, runtime: "Qwen 3 via Ollama", running: "running", managedBy: "clawkeep", detailCode: "embeddingsLocal", detail: "Searching your memory on this box." }),
+    ];
+    stubbed.mockImplementation(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/preferences")) return json({ ui_language: "de" });
+      if (url.startsWith("/setup-api/local-models") && init?.method !== "POST") return json({ models: coded, unavailable: [] });
+      return answer(input, init);
+    });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-llm");
+    await waitFor(() => {
+      expect(within(screen.getByTestId("local-model-ollama")).getByText("Stellt Qwen 3 bereit.")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-kokoro")).getByText("Stimme auf dieser Box")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText("Speichersuche")).toBeInTheDocument();
+      expect(within(screen.getByTestId("local-model-embeddings")).getByText("Qwen 3 über Ollama")).toBeInTheDocument();
+    });
+    // A code this build has no key for must never reach the row as a raw key.
+    expect(within(screen.getByTestId("local-model-whisper")).getByText("Only the server knows this one.")).toBeInTheDocument();
+    expect(screen.queryByText(/localModels\./)).not.toBeInTheDocument();
+  });
+
+  it("navigates to Memory Shard from the standalone page, where no desktop listens for the open-app event", async () => {
+    stubFetch({ llmDefault: true });
+    const assign = vi.fn();
+    vi.stubGlobal("location", { ...window.location, pathname: "/app/settings", assign });
+    renderPanel();
+    await screen.findByTestId("local-ai-group-embedding");
+    const opened: string[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener(OPEN_APP_EVENT, onOpen);
+    try {
+      fireEvent.click(screen.getByTestId("local-model-manage-embedding"));
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, onOpen);
+    }
+    expect(assign).toHaveBeenCalledWith("/app/memory-shard");
+    expect(opened).toEqual([]);
   });
 });

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { resolveIndexMode, startMemoryIndex } from "@/lib/clawkeep-memory";
+import { startMemoryIndex } from "@/lib/clawkeep-memory";
 
 export const dynamic = "force-dynamic";
 
@@ -20,15 +20,14 @@ export async function POST(request: NextRequest) {
   // that into a 500.
   const requested = (body as { mode?: unknown } | null)?.mode === "full" ? "full" : "incremental";
   try {
-    // On a box with no index yet, an incremental pass cannot succeed — see
-    // resolveIndexMode. The run reports the mode it actually used.
-    const { accepted, run } = await startMemoryIndex(await resolveIndexMode(requested), "manual");
-    // The run state only. Attaching the status here made the accept path pay
-    // for a fresh `openclaw memory status --deep` probe — startMemoryIndex
-    // invalidates the cache as it spawns, so it always missed — and that probe
-    // is bounded at 90s and would compete with the indexing child it had just
-    // started, on a box with 8 GB. The panel refetches the status straight
-    // after this resolves anyway.
+    // The mode asked for, not a resolved one: on a box with no index yet an
+    // incremental pass cannot succeed, and startMemoryIndex settles that
+    // AFTER declining a caller that overlaps a run — resolving it here first
+    // made that caller wait on the CLI probe and then start a second run.
+    // The run reports the mode it actually used.
+    const { accepted, run } = await startMemoryIndex(requested, "manual");
+    // The run state only. The panel adopts it at once and refetches the status
+    // straight after this resolves anyway.
     return NextResponse.json(
       { accepted, run },
       { status: accepted ? 200 : 409, headers: { "Cache-Control": "no-store" } },

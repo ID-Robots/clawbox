@@ -6,10 +6,10 @@ import { saveEnv } from "../helpers/env";
 
 /**
  * TASK-434 — the selection has to survive a reboot, and a damaged state file
- * must cost an "unproven" badge rather than the Voice panel. Validation happens
- * per FIELD, not per envelope: a check entry whose shape is half-right would
- * otherwise reach a render that reads a sibling it never checked, which is the
- * failure that took the whole ClawKeep window down on TASK-398.
+ * must cost the selection rather than the Voice panel. Validation happens per
+ * FIELD, not per envelope: a field whose shape is half-right would otherwise
+ * reach a render that reads a sibling it never checked, which is the failure
+ * that took the whole ClawKeep window down on TASK-398.
  */
 
 let dir: string;
@@ -40,36 +40,32 @@ async function writeRaw(contents: string) {
 }
 
 describe("voice-output-store", () => {
-  it("defaults to Auto when the box has never been asked", async () => {
+  it("defaults to Auto when the box has never been asked, with no language picked", async () => {
     const { readVoiceState } = await store();
     const state = await readVoiceState();
-    expect(state.choice).toBe("auto");
-    expect(state.lastCheck).toBeNull();
-    expect(state.engineChecks).toEqual({});
+    expect(state).toEqual({ choice: "auto" });
   });
 
-  it("round-trips a selection and a check", async () => {
+  it("round-trips a selection and a language pick", async () => {
     const { readVoiceState, writeVoiceState } = await store();
-    await writeVoiceState({
-      choice: "local",
-      engineChecks: {
-        local: { providerId: "tts-local-cli", engine: "local", ok: true, message: null, latencyMs: 900, at: 7 },
-      },
-      lastCheck: {
-        at: 7, ok: true, servedByProviderId: "tts-local-cli", servedEngine: "local",
-        attempts: [{ providerId: "tts-local-cli", engine: "local", ok: true, message: null, latencyMs: 900 }],
-        message: null,
-      },
-    });
+    await writeVoiceState({ choice: "local", language: "de" });
+    expect(await readVoiceState()).toEqual({ choice: "local", language: "de" });
+  });
+
+  it("leaves the language absent until the owner picks one, rather than backfilling English", async () => {
+    // The tts route shows the UI language while this is absent. A backfilled
+    // "en" would be indistinguishable from a pick and would pin a German
+    // desktop to an English sample after the first selection.
+    await writeRaw(JSON.stringify({ choice: "local", language: "tlh" }));
+    const { readVoiceState } = await store();
     const state = await readVoiceState();
     expect(state.choice).toBe("local");
-    expect(state.engineChecks.local?.ok).toBe(true);
-    expect(state.lastCheck?.servedEngine).toBe("local");
+    expect("language" in state).toBe(false);
   });
 
   it("writes the state file so only the box's own user can read it", async () => {
     const { writeVoiceState } = await store();
-    await writeVoiceState({ choice: "cloud", engineChecks: {}, lastCheck: null });
+    await writeVoiceState({ choice: "cloud" });
     const stat = await fs.stat(path.join(dir, "data", "voice-output.json"));
     expect(stat.mode & 0o777).toBe(0o600);
   });
@@ -86,22 +82,21 @@ describe("voice-output-store", () => {
     expect((await readVoiceState()).choice).toBe("auto");
   });
 
-  it("drops a check entry that is missing the fields the panel reads", async () => {
+  it("reads past the check records an earlier build wrote", async () => {
+    // Files from before the Check button went carry engineChecks/lastCheck;
+    // they are neither read nor carried forward.
     await writeRaw(JSON.stringify({
       choice: "local",
-      engineChecks: { local: { ok: true } },      // no providerId, no timestamp
-      lastCheck: { ok: true },                     // no `at`
+      engineChecks: { local: { providerId: "tts-local-cli", engine: "local", ok: false, message: "x", latencyMs: 1, at: 5 } },
+      lastCheck: { at: 5, ok: false, servedByProviderId: null, servedEngine: null, attempts: [], message: null },
     }));
     const { readVoiceState } = await store();
-    const state = await readVoiceState();
-    expect(state.choice).toBe("local");
-    expect(state.engineChecks.local).toBeUndefined();
-    expect(state.lastCheck).toBeNull();
+    expect(await readVoiceState()).toEqual({ choice: "local" });
   });
 
   it("leaves no temp file behind after a write", async () => {
     const { writeVoiceState } = await store();
-    await writeVoiceState({ choice: "auto", engineChecks: {}, lastCheck: null });
+    await writeVoiceState({ choice: "auto" });
     const entries = await fs.readdir(path.join(dir, "data"));
     expect(entries.filter(f => f.includes(".tmp"))).toEqual([]);
   });
@@ -170,7 +165,7 @@ describe("durability of the swap", () => {
     const watch = watchSyncs();
     try {
       const { readVoiceState, writeVoiceState, readLocalVoice, writeLocalVoice } = await store();
-      await writeVoiceState({ choice: "local", engineChecks: {}, lastCheck: null });
+      await writeVoiceState({ choice: "local" });
       expect(watch.synced).toContain(path.join(dir, "data"));
       expect((await readVoiceState()).choice).toBe("local");
 
@@ -190,7 +185,7 @@ describe("durability of the swap", () => {
     const watch = watchSyncs(refusal);
     try {
       const { readVoiceState, writeVoiceState } = await store();
-      await expect(writeVoiceState({ choice: "cloud", engineChecks: {}, lastCheck: null })).resolves.toBeUndefined();
+      await expect(writeVoiceState({ choice: "cloud" })).resolves.toBeUndefined();
       expect(watch.synced).toContain(path.join(dir, "data"));
       expect((await readVoiceState()).choice).toBe("cloud");
       expect((await fs.readdir(path.join(dir, "data"))).filter((f) => f.includes(".tmp"))).toEqual([]);

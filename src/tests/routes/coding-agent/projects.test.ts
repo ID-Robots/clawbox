@@ -16,6 +16,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { HARNESS_TEST_PROJECT_ID } from "@/lib/coding-agent";
 
 let GET: () => Promise<Response>;
 let base: string;
@@ -170,6 +171,15 @@ describe("GET projects", () => {
       expect(timer.onDesktop).toBe(true);
       expect((timer.lastCommit as { subject: string }).subject).toBe("Coding agent: build the timer");
       expect(projects[2]).toMatchObject({ name: "Notes", lastCommit: null, onDesktop: false, latestRun: null });
+    });
+
+    it("leaves out the Test-harness button's scratch project", async () => {
+      // The app inits it for its own smoke run; the run is listed on the home
+      // face like any run, the project is not one the owner made.
+      scaffoldCodeProject(HARNESS_TEST_PROJECT_ID, "Harness Test");
+      scaffoldCodeProject("notes", "Notes");
+      const { projects } = await body();
+      expect(projects.map((p) => p.folder)).toEqual(["notes"]);
     });
 
     it("does not read a project.json past the bound, and names the folder instead", async () => {

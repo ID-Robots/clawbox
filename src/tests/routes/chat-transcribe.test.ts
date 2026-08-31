@@ -384,10 +384,15 @@ describe("/setup-api/chat/transcribe", () => {
     // proves nothing on its own. The byte count is the assertion that does: on
     // a device with a couple of gigabytes free, reading all 40 MB and then
     // refusing them is the failure this test exists to catch. A cut-off read
-    // stops around 27 MB — the 26 MB cap plus whatever the parser had already
-    // asked for — so the bound here is loose enough not to count chunks and
-    // tight enough that the whole 40 MB cannot slip under it.
-    expect(pulled).toBeLessThan(32 * 1024 * 1024);
+    // stops around 10 MB — the 9 MB request cap plus whatever the parser had
+    // already asked for — so the bound here is loose enough not to count
+    // chunks and tight enough that the whole 40 MB cannot slip under it.
+    //
+    // Note this calls POST in-process: the Next server's own 10 MB body cut
+    // (experimental.proxyClientMaxBodySize) is not in the path here, which is
+    // exactly why the route's cap has to sit under it — a test at this level
+    // cannot see the platform truncate what the meters were meant to refuse.
+    expect(pulled).toBeLessThan(16 * 1024 * 1024);
   });
 
   it("never relays an upstream error body, which can echo the bearer token back", async () => {

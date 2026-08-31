@@ -188,9 +188,64 @@ describe("routing to ClawBox AI", () => {
     expect(capturedEnv().ANTHROPIC_AUTH_TOKEN).toBe("claw_test_token");
   });
 
-  it("passes its arguments through to Claude Code untouched", () => {
+  it("passes its arguments through to Claude Code untouched on a pinned level", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
     runWrapper({}, ["-p", "explain this repo"]);
     expect(readFileSync(claudeLog, "utf-8")).toBe("-p\nexplain this repo\n");
+  });
+});
+
+/**
+ * Effort: a pin for the fixed levels, a flag for ultracode.
+ *
+ * Seen on a real box: with CLAUDE_CODE_EFFORT_LEVEL=max exported, `/effort
+ * ultracode` in the terminal the app opened answered "overrides effort this
+ * session — clear it and ultracode takes over" and changed nothing. The mode
+ * is Claude Code's xhigh-plus-workflows setting and only `--effort ultracode`
+ * requests it, so the wrapper must leave the pin unset for it — and a
+ * terminal must follow the same setting the delegated runs use.
+ */
+describe("effort", () => {
+  it("asks for ultracode with the flag and no env pin when nothing else was chosen", () => {
+    runWrapper({}, ["-p", "explain this repo"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n-p\nexplain this repo\n");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+
+  it("follows the effort the owner picked in the Coding Agent app", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
+    runWrapper({}, ["--resume", "abc"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("max");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--resume\nabc\n");
+  });
+
+  it("lets the run's own setting outrank the stored one", () => {
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "ultracode" });
+    runWrapper({ CLAUDE_DS_EFFORT: "low" }, ["-p", "x"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("low");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("-p\nx\n");
+  });
+
+  it("drops an inherited pin, which would block the mode", () => {
+    runWrapper({ CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_DS_EFFORT: "ultracode" }, ["-p", "x"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n-p\nx\n");
+  });
+
+  it("never doubles a --effort the caller passed itself", () => {
+    runWrapper({ CLAUDE_DS_EFFORT: "ultracode" }, ["--effort", "low", "-p", "x"]);
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nlow\n-p\nx\n");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+  });
+
+  it("lets a caller's own --effort past a stored fixed level, unpinned", () => {
+    // A set CLAUDE_CODE_EFFORT_LEVEL overrides --effort for the session, so
+    // pinning here would make `claude-ds --effort ultracode` typed in a
+    // terminal silently stay at the owner's stored level.
+    writeDeviceConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_effort: "max" });
+    runWrapper({ CLAUDE_CODE_EFFORT_LEVEL: "max" }, ["--effort", "ultracode", "-p", "x"]);
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n-p\nx\n");
   });
 });
 
@@ -414,7 +469,7 @@ describe("the trust dialog", () => {
     // it, so the formatting itself is the tell.
     mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
     const pretty = JSON.stringify(
-      { theme: "dark", projects: { [home]: { hasTrustDialogAccepted: true } } },
+      { theme: "dark", hasCompletedOnboarding: true, projects: { [home]: { hasTrustDialogAccepted: true } } },
       null,
       4,
     );
@@ -422,6 +477,60 @@ describe("the trust dialog", () => {
 
     expect(runWrapper({}, [], home).status).toBe(0);
 
+    expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);
+  });
+});
+
+/**
+ * The first-run onboarding, and why the wrapper answers it.
+ *
+ * Seen on a real box: "Open in terminal" on a finished run (`claude-ds
+ * --resume <session>`) showed "Welcome to Claude Code … Choose the text
+ * style" instead of the session. The harness's state directory is written
+ * only by headless runs, which skip the onboarding, so the interactive CLI
+ * treated every first terminal as a first launch. Unlike the trust answer,
+ * this one is global, so it is seeded wherever the wrapper starts.
+ */
+describe("the first-run onboarding", () => {
+  const claudeConfig = () => path.join(home, ".claude-ds", ".claude.json");
+  const readConfig = (): Record<string, unknown> =>
+    JSON.parse(readFileSync(claudeConfig(), "utf-8")) as Record<string, unknown>;
+
+  it("is pre-answered on a fresh state directory, from any folder", () => {
+    const repoDir = path.join(home, "someones-repo");
+    mkdirSync(repoDir, { recursive: true });
+    expect(runWrapper({}, ["--resume", "abc"], repoDir).status).toBe(0);
+    const cfg = readConfig();
+    expect(cfg.hasCompletedOnboarding).toBe(true);
+    expect(cfg.theme).toBe("dark");
+    // The trust answer keeps its scope: none for a folder that is not the home.
+    expect(cfg.projects).toBeUndefined();
+  });
+
+  it("keeps a theme the owner chose", () => {
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({ theme: "light" }), "utf-8");
+    expect(runWrapper().status).toBe(0);
+    expect(readConfig()).toMatchObject({ theme: "light", hasCompletedOnboarding: true });
+  });
+
+  it("re-answers an onboarding recorded as false, not only an absent one", () => {
+    // Deliberate: `false` here is not an owner's answer — it is an
+    // interrupted wizard (or Claude Code's own initial write), and on this
+    // box the question has only one answer. Seeding only-when-absent would
+    // put the theme picker back in front of "Open in terminal".
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    writeFileSync(claudeConfig(), JSON.stringify({ hasCompletedOnboarding: false, theme: "light" }), "utf-8");
+    expect(runWrapper().status).toBe(0);
+    expect(readConfig()).toMatchObject({ theme: "light", hasCompletedOnboarding: true });
+  });
+
+  it("does not rewrite a config that already has the answers", () => {
+    // Bytes, not mtime, for the reason the trust test gives.
+    mkdirSync(path.join(home, ".claude-ds"), { recursive: true });
+    const pretty = JSON.stringify({ hasCompletedOnboarding: true, theme: "light" }, null, 4);
+    writeFileSync(claudeConfig(), pretty, "utf-8");
+    expect(runWrapper().status).toBe(0);
     expect(readFileSync(claudeConfig(), "utf-8")).toBe(pretty);
   });
 });

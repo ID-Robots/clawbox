@@ -47,12 +47,45 @@ export type RunState =
    */
   | "not-on-this-edition";
 
+/**
+ * The machine-readable twin of each `runtime` line. The panel translates it
+ * as `localModels.runtime.<code>` with `params` interpolated; the English
+ * `runtime` string stays for readers that have no locale (MCP, the CLI).
+ */
+export type RuntimeCode =
+  | "voiceOnBox"
+  | "transcribesOnBox"
+  | "runsExtraModels"
+  | "answersOnBox"
+  | "findsInMemory"
+  /** "{model} via {via}", "{model}", "via {via}" — whichever facts are known. */
+  | "modelVia"
+  | "model"
+  | "via";
+
+/** The twin of `detail`, translated as `localModels.detail.<code>`. */
+export type DetailCode =
+  | "kokoroSpeaking" | "kokoroOff" | "kokoroServiceMissing" | "kokoroNotInstalled"
+  | "whisperReady" | "whisperOff" | "whisperNotInstalled"
+  | "ollamaNotInstalled" | "ollamaOff" | "ollamaStandby" | "ollamaFailed"
+  | "ollamaChecking" | "ollamaServing" | "ollamaNoModels"
+  | "llamacppNotInstalled" | "llamacppAnswering" | "llamacppReady" | "llamacppOff"
+  | "embeddingsNotOnEdition" | "embeddingsOff" | "embeddingsAsleep" | "embeddingsPaused"
+  | "embeddingsLocal" | "embeddingsCloud";
+
 export interface LocalModelEntry {
   id: string;
   name: string;
+  /**
+   * Set only when `name` is a ClawBox feature name rather than a product name
+   * ("Memory search"), translated as `localModels.name.<code>`. Gemma, Qwen,
+   * Ollama, Kokoro and Whisper are names in every language.
+   */
+  nameCode?: "memorySearch";
   kind: ModelKind;
   /** What supplies it, shown as the subtitle: "systemd user service", "Ollama"… */
   runtime: string;
+  runtimeCode: RuntimeCode;
   installed: boolean;
   /** null when the engine has no unit, so "enabled" is not a meaningful question. */
   enabled: boolean | null;
@@ -64,8 +97,16 @@ export interface LocalModelEntry {
   control: ControlKind;
   /** One line the customer can act on. Never a command line, never a path. */
   detail: string;
+  detailCode: DetailCode;
+  /** The names the `runtime` / `detail` codes interpolate: model names, never paths. */
+  params?: Record<string, string>;
   /** Settings section or app that owns this engine's deeper controls. */
   managedBy?: "clawkeep" | "localAi";
+}
+
+/** `detailCode` + `detail` (+ `params`) for one branch of an entry, spread into it. */
+function line(detailCode: DetailCode, detail: string, params?: Record<string, string>) {
+  return params ? { detailCode, detail, params } : { detailCode, detail };
 }
 
 export interface LocalModelsSnapshot {
@@ -135,6 +176,8 @@ export interface UnitState {
   present: boolean;
   active: boolean;
   enabled: boolean;
+  /** `is-active` says "failed": it exited with an error, it is not merely stopped. */
+  failed: boolean;
 }
 
 export async function readUnitState(unit: string, scope: "user" | "system"): Promise<UnitState> {
@@ -148,10 +191,12 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
   // `is-enabled` answers with an error string, not a state, when the unit file
   // is missing — that is how "absent" is told apart from "installed but off".
   const present = enabledWord !== "" && !enabledWord.toLowerCase().includes("no such file");
+  const activeWord = (isActive ?? "").trim();
   return {
     present,
-    active: (isActive ?? "").trim() === "active",
+    active: activeWord === "active",
     enabled: ["enabled", "enabled-runtime", "static", "alias", "indirect"].includes(enabledWord),
+    failed: activeWord === "failed",
   };
 }
 
@@ -171,10 +216,17 @@ export async function readUnitState(unit: string, scope: "user" | "system"): Pro
  * The filter is negative rather than a positive match on the binary path
  * because `LlamaCppLaunchSpec.binPath` is configurable, so a path this file
  * hard-coded could drift out from under it.
+ *
+ * `include` is the positive half for a row whose executable IS known: it sees
+ * the process's argv and keeps only what it accepts. The Ollama row needs it
+ * because `pgrep -f ollama` also finds a shell, an editor or a chat turn whose
+ * argv merely mentions the word — measured: a python process with "# ollama"
+ * in its arguments added its 307 MiB to the row.
  */
 export async function processMemoryBytes(
   pattern: string,
   exclude?: RegExp,
+  include?: (argv: string[]) => boolean,
 ): Promise<number | null> {
   const out = await run("/usr/bin/pgrep", ["-f", pattern]);
   const pids = (out ?? "").split("\n").map(s => s.trim()).filter(Boolean);
@@ -184,11 +236,12 @@ export async function processMemoryBytes(
   for (const pid of pids) {
     if (!/^\d+$/.test(pid)) continue;
     try {
-      if (exclude) {
-        // NUL-separated argv; the separators only matter for not gluing
-        // arguments together, so a space is enough to match against.
-        const cmdline = (await fs.readFile(`/proc/${pid}/cmdline`, "utf8")).replace(/\0/g, " ");
-        if (exclude.test(cmdline)) continue;
+      if (exclude || include) {
+        const argv = (await fs.readFile(`/proc/${pid}/cmdline`, "utf8")).split("\0").filter(Boolean);
+        // The separators only matter for not gluing arguments together, so a
+        // space is enough for the negative match.
+        if (exclude && exclude.test(argv.join(" "))) continue;
+        if (include && !include(argv)) continue;
       }
       const status = await fs.readFile(`/proc/${pid}/status`, "utf8");
       const m = status.match(/^VmRSS:\s+(\d+) kB$/m);
@@ -208,6 +261,19 @@ export async function processMemoryBytes(
  * Anything running out of an `ollama` directory belongs on the Ollama row.
  */
 export const OLLAMA_OWNED_PROCESS = /[/\\]ollama[/\\]/;
+
+/**
+ * argv[0] of the ollama server, whatever path it was installed at. Shared with
+ * the runtime's stop path so the row and the kill target name the same thing.
+ */
+export function isOllamaExecutable(argv0: string): boolean {
+  return argv0.trim().replace(/ \(deleted\)$/, "").split("/").pop() === "ollama";
+}
+
+/** The processes the Ollama row counts: its server, and its bundled runner. */
+function isOllamaProcess(argv: string[]): boolean {
+  return isOllamaExecutable(argv[0] ?? "") || OLLAMA_OWNED_PROCESS.test(argv[0] ?? "");
+}
 
 async function ollamaModels(baseUrl: string): Promise<{ name: string; size: number }[] | null> {
   try {
@@ -276,19 +342,20 @@ async function kokoroEntry(): Promise<LocalModelEntry> {
     name: "Kokoro",
     kind: "tts",
     runtime: "Voice on this box",
+    runtimeCode: "voiceOnBox",
     installed,
     enabled: installed ? unit.enabled : null,
     running: !installed ? "not-installed" : unit.active ? "running" : "idle",
     diskBytes: null,
     memoryBytes,
     control: installed ? "user-unit" : "none",
-    detail: installed
+    ...(installed
       ? unit.active
-        ? "Speaking from this box."
-        : "Off. Turn it on from the menu."
+        ? line("kokoroSpeaking", "Speaking from this box.")
+        : line("kokoroOff", "Off. Turn it on from the menu.")
       : stamped
-        ? "Its service is missing, so it cannot speak."
-        : "Not installed. The cloud voice speaks instead.",
+        ? line("kokoroServiceMissing", "Its service is missing, so it cannot speak.")
+        : line("kokoroNotInstalled", "Not installed. The cloud voice speaks instead.")),
   };
 }
 
@@ -300,44 +367,62 @@ async function whisperEntry(): Promise<LocalModelEntry> {
     name: "Whisper",
     kind: "stt",
     runtime: "Transcribes on this box",
+    runtimeCode: "transcribesOnBox",
     installed: unit.present,
     enabled: unit.present ? unit.enabled : null,
     running: !unit.present ? "not-installed" : unit.active ? "running" : "idle",
     diskBytes: null,
     memoryBytes,
     control: unit.present ? "user-unit" : "none",
-    detail: unit.present
+    ...(unit.present
       ? unit.active
-        ? "Ready to transcribe."
-        : "Off. Starts by itself when you speak."
-      : "Not installed. Speech is transcribed in the cloud.",
+        ? line("whisperReady", "Ready to transcribe.")
+        : line("whisperOff", "Off. Starts by itself when you speak.")
+      : line("whisperNotInstalled", "Not installed. Speech is transcribed in the cloud.")),
   };
 }
 
 async function ollamaEntry(baseUrl: string): Promise<LocalModelEntry> {
   const unit = await readUnitState(OLLAMA_UNIT, "system");
   const models = unit.active ? await ollamaModels(baseUrl) : null;
-  const memoryBytes = unit.active ? await processMemoryBytes("ollama") : null;
+  const memoryBytes = unit.active ? await processMemoryBytes("ollama", undefined, isOllamaProcess) : null;
   const diskBytes = models?.length ? models.reduce((sum, m) => sum + m.size, 0) : null;
   const names = Array.from(new Set((models ?? []).map(m => friendlyModelName(shortModelName(m.name)) ?? m.name)));
+  // Enabled but inactive is the runtime's standby: ten idle minutes after the
+  // last proxied use it runs `systemctl stop` — never `disable`, precisely so
+  // the engine comes back — and the proxy starts it again on the next request.
+  // That is what "on-demand" means, and it is not "off": the owner did not turn
+  // it off, and the menu's only verb for an enabled unit is Disable. A unit
+  // that exited with an error is not asleep and must not read as such.
+  const standby = unit.present && unit.enabled && !unit.active && !unit.failed;
   return {
     id: "ollama",
     name: "Ollama",
     kind: "llm",
     runtime: "Runs extra models on this box",
+    runtimeCode: "runsExtraModels",
     installed: unit.present,
     enabled: unit.present ? unit.enabled : null,
-    running: !unit.present ? "not-installed" : unit.active ? "running" : "idle",
+    running: !unit.present ? "not-installed" : unit.active ? "running" : standby ? "on-demand" : "idle",
     diskBytes,
     memoryBytes,
     control: unit.present ? "system-unit" : "none",
-    detail: !unit.present
-      ? "Not installed."
-      : !unit.active
-        ? "Off. Turn it on from the menu."
-        : names.length
-          ? `Serving ${names.join(", ")}.`
-          : "On, with no models downloaded yet.",
+    ...(!unit.present
+      ? line("ollamaNotInstalled", "Not installed.")
+      : standby
+        ? line("ollamaStandby", "Asleep to save memory. Wakes when a model is asked for, or turn it on now from the menu.")
+        : unit.failed
+          ? line("ollamaFailed", "Stopped after an error. Turn it on from the menu.")
+          : !unit.active
+            ? line("ollamaOff", "Off. Turn it on from the menu.")
+            // The unit is active but /api/tags did not answer: right after
+            // Enable the listener is ~1 s behind systemd's "active", and a
+            // probe that has not answered is not an empty model list.
+            : models === null
+              ? line("ollamaChecking", "On. Checking which models are downloaded…")
+              : names.length
+                ? line("ollamaServing", `Serving ${names.join(", ")}.`, { names: names.join(", ") })
+                : line("ollamaNoModels", "On, with no models downloaded yet.")),
   };
 }
 
@@ -345,6 +430,13 @@ interface LlamaCppProbe {
   installed: boolean;
   running: boolean;
   model: string | null;
+  /**
+   * Local AI is wired to it (primary or fallback), so the proxy will wake it.
+   * Without this one "idle" covered two facts: an engine that sleeps between
+   * requests and one nothing will ever ask for — the first is "starts when
+   * needed", the second is off.
+   */
+  configured: boolean;
 }
 
 async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
@@ -356,18 +448,21 @@ async function llamaCppEntry(probe: LlamaCppProbe): Promise<LocalModelEntry> {
     name: friendlyModelName(probe.model) ?? "Local model",
     kind: "llm",
     runtime: "Answers on this box",
+    runtimeCode: "answersOnBox",
     installed: probe.installed,
     enabled: null,
-    running: !probe.installed ? "not-installed" : probe.running ? "running" : "idle",
+    running: !probe.installed ? "not-installed" : probe.running ? "running" : probe.configured ? "on-demand" : "idle",
     diskBytes: null,
     memoryBytes,
     control: "none",
     managedBy: "localAi",
-    detail: !probe.installed
-      ? "Not installed."
+    ...(!probe.installed
+      ? line("llamacppNotInstalled", "Not installed.")
       : probe.running
-        ? "Answering right now."
-        : "Ready. Sleeps until needed to save memory.",
+        ? line("llamacppAnswering", "Answering right now.")
+        : probe.configured
+          ? line("llamacppReady", "Ready. Sleeps until needed to save memory.")
+          : line("llamacppOff", "Off. Make it primary or fallback from the menu.")),
   };
 }
 
@@ -413,20 +508,29 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
     return {
       id: "embeddings",
       name: "Memory search",
+      nameCode: "memorySearch",
       kind: "embedding",
       runtime: "Finds things in your memory",
+      runtimeCode: "findsInMemory",
       installed: false,
       enabled: null,
       running: "not-on-this-edition",
       diskBytes: null,
       memoryBytes: null,
       control: "none",
-      detail: "Memory search is an OpenClaw feature. This edition does not include it.",
+      ...line("embeddingsNotOnEdition", "Memory search is an OpenClaw feature. This edition does not include it."),
     };
   }
   const providerId = probe.provider ? probe.provider.toLowerCase() : null;
   const host = providerId ? engines.find(e => e.id === providerId) : undefined;
-  const hostStopped = !!host && host.running !== "running" && host.running !== "on-demand";
+  // "on-demand" counts as live only when the request that needs the engine is
+  // the one that wakes it. The chat reaches llama.cpp through the local-ai
+  // proxy, which starts it; OpenClaw's memory search embeds straight at
+  // 127.0.0.1:11434 (its journal shows the direct /api/embed calls, none
+  // through /setup-api/local-ai/ollama), so a sleeping Ollama is not woken by
+  // a search and the row must not claim it is searching.
+  const hostAsleep = !!host && host.running === "on-demand" && host.id === "ollama";
+  const hostStopped = !!host && (hostAsleep || (host.running !== "running" && host.running !== "on-demand"));
   const running: RunState = !probe.available
     ? "not-installed"
     : hostStopped
@@ -434,11 +538,19 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
       : probe.local ? "running" : "on-demand";
   const model = friendlyModelName(probe.model);
   const via = host?.name ?? (probe.provider ? probe.provider.replace(/^./, (c) => c.toUpperCase()) : null);
+  const hostName = host?.name ?? "Its engine";
+  // One `params` serves the runtime code and the detail code alike.
+  const params: Record<string, string> = {};
+  if (model) params.model = model;
+  if (via) params.via = via;
+  if (probe.available && hostStopped) params.host = hostName;
   return {
     id: "embeddings",
     name: "Memory search",
+    nameCode: "memorySearch",
     kind: "embedding",
     runtime: [model, via ? `via ${via}` : null].filter(Boolean).join(" ") || "Finds things in your memory",
+    runtimeCode: model && via ? "modelVia" : model ? "model" : via ? "via" : "findsInMemory",
     installed: probe.available,
     enabled: null,
     running,
@@ -446,13 +558,16 @@ function embeddingEntry(probe: EmbeddingProbe, engines: LocalModelEntry[]): Loca
     memoryBytes: null,
     control: "none",
     managedBy: "clawkeep",
-    detail: !probe.available
-      ? "No memory model is answering, so memory search is off."
-      : hostStopped
-        ? `${host?.name ?? "Its engine"} is off, so memory search is paused.`
-        : probe.local
-          ? "Searching your memory on this box."
-          : "Searching your memory in the cloud.",
+    ...(!probe.available
+      ? line("embeddingsOff", "No memory model is answering, so memory search is off.")
+      : hostAsleep
+        ? line("embeddingsAsleep", `${hostName} is asleep, so memory search is paused until it wakes.`)
+        : hostStopped
+          ? line("embeddingsPaused", `${hostName} is off, so memory search is paused.`)
+          : probe.local
+            ? line("embeddingsLocal", "Searching your memory on this box.")
+            : line("embeddingsCloud", "Searching your memory in the cloud.")),
+    ...(Object.keys(params).length ? { params } : {}),
   };
 }
 
@@ -566,6 +681,9 @@ export async function setEngineEnabled(
     };
   }
 }
+
+/** Every engine the inventory can name, so a route can tell "unknown" from "has no switch". */
+export const ENGINE_IDS: ReadonlySet<string> = new Set(["llamacpp", "ollama", "kokoro", "whisper", "embeddings"]);
 
 /** The unit and scope a toggleable engine maps to, or null when it has none. */
 export function unitForEngine(id: string): { unit: string; scope: "user" | "system" } | null {

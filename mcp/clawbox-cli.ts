@@ -149,7 +149,9 @@ async function main() {
     // 1. Save webapp
     await apiPost("/setup-api/webapps", { appId, html, name, color });
 
-    // 2. Register on desktop
+    // 2. Register on desktop. The legacy single-slot key is what this process
+    // can address; /setup-api/kv folds it into the owner-notice ring
+    // (src/lib/pending-actions.ts) that every open desktop polls.
     await apiPost("/setup-api/kv", {
       key: "ui:pending-action",
       value: JSON.stringify({

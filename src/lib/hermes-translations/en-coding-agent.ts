@@ -68,16 +68,18 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.notConnected": "not connected",
 
   // Real Claude Code settings: --effort, and whether the Task tool is in
-  // --tools at all. There is no "ultracode" setting in the CLI, so the app
-  // does not pretend there is one.
+  // --tools at all. "Ultracode" is the CLI's own name for its xhigh-plus-
+  // workflow-orchestration mode (`--effort ultracode` since 2.1.x), kept as
+  // is so the label matches what the terminal says.
   "codingAgent.effortLabel": "Effort",
   "codingAgent.effort.low": "Low",
-  // The picker offers three levels, but a box that stored "medium" or "high"
+  // The picker offers four levels, but a box that stored "medium" or "high"
   // before it narrowed still has to name what is in force.
   "codingAgent.effort.medium": "Medium",
   "codingAgent.effort.high": "High",
   "codingAgent.effort.xhigh": "Very high",
   "codingAgent.effort.max": "Max",
+  "codingAgent.effort.ultracode": "Ultracode",
   "codingAgent.effortFailed": "Could not change the thinking effort.",
   // The ceilings a run stops at. Neither has a time or a price behind it.
   "codingAgent.turnsLabel": "Steps per run",
@@ -199,4 +201,14 @@ export const codingAgentEn: Record<string, string> = {
   // there is no chat there to hand the message to.
   "codingAgent.newNeedsDesktop": "A new app starts in the chat, which lives on the desktop. Open the Coding agent there to ask for one.",
   "codingAgent.codeProject": "code project",
+
+  // The automatic review pass: the owner's switch in the settings card, its
+  // one-sentence cost, and the chips that tie a review run to the run it
+  // reviewed — the fixed review task reads like any other run otherwise.
+  "codingAgent.reviewPassLabel": "Review each finished run",
+  "codingAgent.reviewPassHint": "After a run that changed files finishes, one more run in the same session hunts for defects and fixes what it confirms. It costs a second, smaller run and takes the run slot while it works; never after Stop or Pause.",
+  "codingAgent.reviewPassFailed": "Could not change the review pass setting.",
+  "codingAgent.reviewOf": "review of {id}",
+  "codingAgent.reviewedBy": "reviewed by {id}",
+  "codingAgent.reviewPassTitle": "Automatic review pass of {id}",
 };

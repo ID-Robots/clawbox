@@ -32,6 +32,7 @@ vi.mock("@/lib/llamacpp", () => ({
 }));
 vi.mock("@/lib/llamacpp-server", () => ({
   getLlamaCppProvisioningStatus: async () => ({ installed: false }),
+  resolveConfiguredLlamaCppAlias: async () => null,
 }));
 vi.mock("@/lib/local-ai-runtime", () => ({
   getOllamaBaseUrl: () => "http://127.0.0.1:11434",

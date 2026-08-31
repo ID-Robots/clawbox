@@ -1,10 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useMemo, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as kv from "@/lib/client-kv";
+import { useModalDialog } from "@/hooks/useModalDialog";
+import { WEBAPP_IFRAME_SANDBOX } from "@/lib/webapp-sandbox";
+import { attachWebappKvBridge } from "@/lib/webapp-kv-bridge";
 import TierUpgradeCelebration from "@/components/TierUpgradeCelebration";
-import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT } from "@/lib/ui-events";
+import { OPEN_APP_EVENT, FIX_ERROR_EVENT, CHAT_MESSAGE_EVENT, notifyCodingRunStarted } from "@/lib/ui-events";
 import { purgeLegacyChatCaches } from "@/lib/chat-history-cache";
 import ChromeShelf from "@/components/ChromeShelf";
 import ChromeLauncher from "@/components/ChromeLauncher";
@@ -152,6 +155,51 @@ function isInstalledAppVisible(meta: InstalledMeta | undefined, harness: string 
 
 // LAN port of the auth-gated Hermes dashboard proxy (scripts/hermes-dashboard-proxy.js).
 const HERMES_DASH_PROXY_PORT = 8090;
+
+/**
+ * One debounced POST per preference key, sent only when THAT key's state
+ * changes.
+ *
+ * The desktop used to persist a snapshot of every key it holds 500 ms after
+ * any of them changed. A desktop loaded before the agent (or the CLI, or a
+ * second tab) installed or uninstalled an app still held the old
+ * `installed_apps`, and wrote it back over the route's server-side write the
+ * next time a window opened — the skill's files were gone but its icon came
+ * back on every desktop, or a fresh install vanished from the desktop while
+ * its files stayed. The same last-writer-wins race existed for every other
+ * key between two open desktops, or a desktop and the agent's preferences_set.
+ * So `installed_apps` and `installed_meta` are not written from here at all
+ * any more — apps/install, apps/uninstall and webapp-registry.ts own them —
+ * and each remaining key is its own write, keyed on its own state.
+ */
+function usePreferenceWriter(loadedRef: { current: boolean }) {
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  // A write still pending when the desktop unmounts must not fire from the
+  // torn-down tree.
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const t of map.values()) clearTimeout(t);
+      map.clear();
+    };
+  }, []);
+  return useCallback((body: Record<string, unknown>) => {
+    // Nothing is written before the saved preferences have been read: until
+    // then the state is the defaults, and writing them would erase the device's.
+    if (!loadedRef.current) return;
+    const slot = Object.keys(body).join(",");
+    const pending = timers.current.get(slot);
+    if (pending) clearTimeout(pending);
+    timers.current.set(slot, setTimeout(() => {
+      timers.current.delete(slot);
+      fetch("/setup-api/preferences", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => {});
+    }, 500));
+  }, [loadedRef]);
+}
 
 // Inline SVG icons for each app
 function MIcon({ name, className = "", size = 24 }: { name: string; className?: string; size?: number }) {
@@ -394,10 +442,19 @@ function ChromeDesktopInner() {
     [installedApps, hiddenInstalledApps, installedMeta, activeHarness],
   );
   const handleAddToDesktop = useCallback((appId: string) => {
-    // Also unhide installed apps when adding to desktop
-    setHiddenInstalledApps(prev => prev.filter(id => id !== appId && id !== `installed-${appId}`));
+    // The launcher hands over its own ids, which for an installed app carry
+    // the `installed-` prefix; "Remove from desktop" stores the RAW id in
+    // hidden_installed, and installed apps are drawn from installed_apps minus
+    // that list — never from desktop_apps, which holds built-in ids only. The
+    // two lists must not cross: this used to filter for `installed-x` (and
+    // `installed-installed-x`), un-hiding nothing, while pushing the prefixed
+    // id into desktop_apps, where it drew an empty grid slot forever.
+    if (appId.startsWith("installed-")) {
+      const rawId = appId.slice("installed-".length);
+      setHiddenInstalledApps(prev => prev.filter(id => id !== rawId));
+      return;
+    }
     setDesktopApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
-
   }, []);
 
   // ─── Dynamic pin state ───
@@ -458,7 +515,10 @@ function ChromeDesktopInner() {
         if (data.installed_meta && typeof data.installed_meta === "object") setInstalledMeta(data.installed_meta as Record<string, InstalledMeta>);
         // Merge new built-ins into the saved list so they appear without a factory reset.
         if (Array.isArray(data.desktop_apps)) {
-          const saved = data.desktop_apps as string[];
+          // Built-in ids only. An older launcher pushed `installed-*` ids here
+          // (see handleAddToDesktop); an id that names no built-in reserves an
+          // empty grid slot, so a box that already saved one sheds it on load.
+          const saved = (data.desktop_apps as string[]).filter(id => DEFAULT_DESKTOP_APPS.includes(id));
           const missingNewBuiltins = DEFAULT_DESKTOP_APPS.filter(id => !saved.includes(id));
           setDesktopApps(missingNewBuiltins.length > 0 ? [...saved, ...missingNewBuiltins] : saved);
         }
@@ -646,37 +706,28 @@ function ChromeDesktopInner() {
   const [dragGhost, setDragGhost] = useState<{ row: number; col: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
-  // ─── Unified SQLite save (debounced, after all state is declared) ───
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ─── Preference writes (per key, debounced, after all state is declared) ───
+  // See usePreferenceWriter for why these are separate and why installed_apps
+  // and installed_meta are not among them.
+  const savePreferences = usePreferenceWriter(prefsLoaded);
   useEffect(() => {
-    if (!prefsLoaded.current) return;
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      fetch("/setup-api/preferences", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          wp_id: wallpaperId,
-          wp_fit: wpFit,
-          wp_bg_color: wpBgColor,
-          wp_opacity: wpOpacity,
-          installed_apps: installedApps,
-          installed_meta: installedMeta,
-          desktop_apps: desktopApps,
-          hidden_installed: hiddenInstalledApps,
-          pinned_apps: pinnedOverrides,
-          icon_grid: iconPositions,
-          desktop_open_windows: openWindows
-            .filter((w) => w.appId !== "setup")
-            .map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
-          ui_mascot_hidden: mascotHidden ? 1 : 0,
-          ui_chat_panel_width: chatPanelWidth || 0,
-          ui_chat_open: chatOpen ? 1 : 0,
-        }),
-      }).catch(() => {});
-    }, 500);
-    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
-  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, installedApps, installedMeta, desktopApps, hiddenInstalledApps, pinnedOverrides, iconPositions, openWindows, mascotHidden, chatPanelWidth, chatOpen]);
+    savePreferences({ wp_id: wallpaperId, wp_fit: wpFit, wp_bg_color: wpBgColor, wp_opacity: wpOpacity });
+  }, [wallpaperId, wpFit, wpBgColor, wpOpacity, savePreferences]);
+  useEffect(() => { savePreferences({ desktop_apps: desktopApps }); }, [desktopApps, savePreferences]);
+  useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);
+  useEffect(() => { savePreferences({ pinned_apps: pinnedOverrides }); }, [pinnedOverrides, savePreferences]);
+  useEffect(() => { savePreferences({ icon_grid: iconPositions }); }, [iconPositions, savePreferences]);
+  useEffect(() => {
+    savePreferences({
+      desktop_open_windows: openWindows
+        .filter((w) => w.appId !== "setup")
+        .map(w => ({ appId: w.appId, minimized: w.minimized, x: w.x, y: w.y, width: w.width, height: w.height })),
+    });
+  }, [openWindows, savePreferences]);
+  useEffect(() => { savePreferences({ ui_mascot_hidden: mascotHidden ? 1 : 0 }); }, [mascotHidden, savePreferences]);
+  useEffect(() => {
+    savePreferences({ ui_chat_panel_width: chatPanelWidth || 0, ui_chat_open: chatOpen ? 1 : 0 });
+  }, [chatPanelWidth, chatOpen, savePreferences]);
 
   // ─── Marquee selection ───
   const [selectedIcons, setSelectedIcons] = useState<Set<string>>(new Set());
@@ -1019,14 +1070,30 @@ function ChromeDesktopInner() {
 
   // Uninstall confirmation
   const [uninstallConfirm, setUninstallConfirm] = useState<string | null>(null);
+  const dismissUninstall = useCallback(() => setUninstallConfirm(null), []);
+  // The same trap the Store's install confirmation uses — dialog role, Escape,
+  // focus moved in and restored — so a keyboard user is not left Tabbing
+  // through the scrim into the desktop behind it. Cancel is first in DOM
+  // order, so that is where focus lands rather than on the destructive button.
+  const uninstallTitleId = useId();
+  const uninstallPanelRef = useModalDialog<HTMLDivElement>({ open: uninstallConfirm !== null, onClose: dismissUninstall });
 
   const requestUninstallApp = useCallback((appId: string) => {
     setUninstallConfirm(appId);
   }, []);
 
+  // Read through a ref inside the callback: capturing `uninstallConfirm`
+  // directly made react-hooks/preserve-manual-memoization skip compiling the
+  // whole component. The dialog's confirm button only renders (and is only
+  // clickable) after the render that set the state, so the ref is current.
+  const uninstallConfirmRef = useRef<string | null>(null);
+  useEffect(() => {
+    uninstallConfirmRef.current = uninstallConfirm;
+  }, [uninstallConfirm]);
+
   const confirmUninstallApp = useCallback(async () => {
-    if (!uninstallConfirm) return;
-    const appId = uninstallConfirm;
+    const appId = uninstallConfirmRef.current;
+    if (!appId) return;
     // Remove skill files and reload gateway
     try {
       const controller = new AbortController();
@@ -1042,6 +1109,19 @@ function ChromeDesktopInner() {
       console.warn("[uninstall] Failed to uninstall skill:", err);
     }
     setInstalledApps((prev) => prev.filter((id) => id !== appId));
+    // Meta and the shelf-pin override go with the app: both used to outlive
+    // it, and the meta the desktop kept undid the route's own delete.
+    setInstalledMeta((prev) => {
+      const next = { ...prev };
+      delete next[appId];
+      return next;
+    });
+    setPinnedOverrides((prev) => {
+      if (!(`installed-${appId}` in prev)) return prev;
+      const next = { ...prev };
+      delete next[`installed-${appId}`];
+      return next;
+    });
     setOpenWindows((prev) => prev.filter((w) => w.appId !== `installed-${appId}`));
     setIconPositions((prev) => {
       const next = { ...prev };
@@ -1051,7 +1131,7 @@ function ChromeDesktopInner() {
     setUninstallConfirm(null);
     // Refresh agent session with updated skills
     window.dispatchEvent(new CustomEvent('clawbox-skill-installed', { detail: { action: 'uninstall', id: appId } }));
-  }, [uninstallConfirm]);
+  }, []);
 
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
@@ -1194,17 +1274,6 @@ function ChromeDesktopInner() {
     const handlePrimaryAiConfigured = () => {
       void syncSetupStatus().catch(() => {});
     };
-    // The Coding Agent app asks for a terminal on a specific run: a live tail
-    // while it works, or `claude-ds --resume` once it has finished.
-    const handleOpenTerminal = (e: Event) => {
-      const command = (e as CustomEvent<{ command?: string }>).detail?.command;
-      if (typeof command !== "string" || !command) return;
-      // forceNew: a second run must get its own terminal rather than typing
-      // into one already busy following the first.
-      setTerminalCommand(command);
-      openApp("terminal", true);
-    };
-    window.addEventListener("clawbox:open-terminal", handleOpenTerminal);
     window.addEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
     return () => window.removeEventListener("clawbox:primary-ai-configured", handlePrimaryAiConfigured);
   }, [syncSetupStatus]);
@@ -1253,64 +1322,125 @@ function ChromeDesktopInner() {
     return () => window.removeEventListener(OPEN_APP_EVENT, handler);
   }, []);
 
-  /** Finished coding runs waiting to be seen, newest first. */
   // Typed into the next terminal window that opens — see clawbox:open-terminal.
   const [terminalCommand, setTerminalCommand] = useState<string | null>(null);
+
+  // The Coding Agent app asks for a terminal on a specific run: a live tail
+  // while it works, or `claude-ds --resume` once it has finished. Through
+  // openAppRef like the OPEN_APP_EVENT handler above: this listener used to
+  // sit in a run-once effect holding the first render's openApp, whose
+  // nextZIndex was still 100, so every terminal it opened landed BEHIND the
+  // Coding Agent window the owner had just clicked in — and that effect never
+  // removed the listener either.
+  useEffect(() => {
+    const handleOpenTerminal = (e: Event) => {
+      const command = (e as CustomEvent<{ command?: string }>).detail?.command;
+      if (typeof command !== "string" || !command) return;
+      setTerminalCommand(command);
+      // forceNew: a second run must get its own terminal rather than typing
+      // into one already busy following the first.
+      openAppRef.current("terminal", true);
+    };
+    window.addEventListener("clawbox:open-terminal", handleOpenTerminal);
+    return () => window.removeEventListener("clawbox:open-terminal", handleOpenTerminal);
+  }, []);
+
+  /** Finished coding runs waiting to be seen, newest first. */
   const [codingNotices, setCodingNotices] = useState<{ runId: string; status: string; projectId: string | null; message: string }[]>([]);
 
+  // The owner-notice ring: `ui:pending-actions` holds an array of
+  // { id, ts, ...action }, newest last, written through pushPendingAction()
+  // in src/lib/pending-actions.ts by every server-side notice (ui_notify,
+  // `clawbox notify`, the coding agent's finish card, the webapp icon nudge).
+  // Readers never delete or rewrite it — the writer prunes it. The previous
+  // single-value slot was deleted by whichever desktop polled first, so with
+  // a phone, a second tab or the remote-control tunnel open, every other
+  // desktop missed the notice. Each desktop instead remembers what it has
+  // seen: a watermark with a few seconds of replay grace, plus the ids at or
+  // past it. The coding card is deduped by run id and register_webapp is
+  // idempotent, so a replay is harmless. Entries are stamped by the BOX's
+  // clock, which can be minutes off before NTP syncs (no RTC), so the
+  // watermark is baselined against the ring's own newest stamp on first
+  // sight rather than the browser's clock — comparing across the two dropped
+  // every notice while the box ran behind.
   useEffect(() => {
     let active = true;
-    let lastProcessedTs = 0;
     let polling = false;
+    let lastSeenTs = Date.now() - 5_000;
+    let baselined = false;
+    let seen = new Set<string>();
+    const handle = (action: Record<string, unknown>) => {
+      if (action.type === "open_app" && typeof action.appId === "string") {
+        openAppRef.current(action.appId);
+      } else if (action.type === "register_webapp" && typeof action.appId === "string" && action.name && action.url) {
+        const appId = action.appId;
+        setInstalledApps(prev => prev.includes(appId) ? prev : [...prev, appId]);
+        setInstalledMeta(prev => ({
+          ...prev,
+          [appId]: {
+            name: String(action.name),
+            color: typeof action.color === "string" && action.color ? action.color : "#f97316",
+            iconUrl: typeof action.iconUrl === "string" ? action.iconUrl : "",
+            webappUrl: String(action.url),
+          },
+        }));
+        setHiddenInstalledApps(prev => prev.includes(appId) ? prev.filter(id => id !== appId) : prev);
+      } else if (action.type === "coding_agent" && typeof action.runId === "string") {
+        // A finished coding run is something the owner may want to act on,
+        // so it becomes a top-right CARD with a button rather than a toast
+        // that slides away. Newest first, deduped by run id.
+        const runId = action.runId;
+        setCodingNotices(prev => (
+          prev.some(n => n.runId === runId)
+            ? prev
+            : [{ runId, status: String(action.status ?? ""), projectId: typeof action.projectId === "string" ? action.projectId : null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
+        ));
+        // A notice here can be the first this browser hears of a run — one
+        // started from another device, or the server-side review pass that
+        // follows a finish. Nudge the activity hook (idempotent: it only
+        // re-asks the runs route) so an open chat shows the run card too.
+        notifyCodingRunStarted();
+      } else if (action.type === "notify" && action.message) {
+        window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+      }
+    };
     const poll = async () => {
       if (!active || polling) return;
       polling = true;
       try {
-        const res = await fetch("/setup-api/kv?key=ui:pending-action");
+        const res = await fetch("/setup-api/kv?key=ui:pending-actions");
         if (res.ok) {
           const data = await res.json();
-          if (data.value) {
-            const action = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
-            const ts = action.ts ?? 0;
-            // Skip if already processed
-            if (ts > 0 && ts <= lastProcessedTs) { polling = false; return; }
-            lastProcessedTs = ts;
-            // Delete before processing to prevent re-reads. The KV route's
-            // delete contract is { delete: "<key>" } — sending { delete: true }
-            // silently 400s, leaving the action in KV so it re-fires (and
-            // reopens the app) on every reload.
-            await fetch("/setup-api/kv", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ delete: "ui:pending-action" }),
-            }).catch(() => {});
-            if (action.type === "open_app" && action.appId) {
-              openAppRef.current(action.appId);
-            } else if (action.type === "register_webapp" && action.appId && action.name && action.url) {
-              setInstalledApps(prev => prev.includes(action.appId) ? prev : [...prev, action.appId]);
-              setInstalledMeta(prev => ({
-                ...prev,
-                [action.appId]: {
-                  name: action.name,
-                  color: action.color || "#f97316",
-                  iconUrl: action.iconUrl || "",
-                  webappUrl: action.url,
-                },
-              }));
-              setHiddenInstalledApps(prev => prev.includes(action.appId) ? prev.filter(id => id !== action.appId) : prev);
-            } else if (action.type === "coding_agent" && action.runId) {
-              // A finished coding run is something the owner may want to act
-              // on, so it becomes a top-right CARD with a button rather than a
-              // toast that slides away. Newest first, deduped by run id — the
-              // slot is single-consumer but a reload can replay one.
-              setCodingNotices(prev => (
-                prev.some(n => n.runId === action.runId)
-                  ? prev
-                  : [{ runId: action.runId as string, status: String(action.status ?? ""), projectId: (action.projectId as string | null) ?? null, message: String(action.message ?? "") }, ...prev].slice(0, 3)
-              ));
-            } else if (action.type === "notify" && action.message) {
-              window.dispatchEvent(new CustomEvent("clawbox:toast", { detail: { message: action.message } }));
+          const ring = typeof data.value === "string" ? JSON.parse(data.value) : data.value;
+          if (Array.isArray(ring)) {
+            if (!baselined && ring.length > 0) {
+              const newestRing = ring.reduce((max: number, e: unknown) => {
+                const ts = e && typeof e === "object" && typeof (e as { ts?: unknown }).ts === "number" ? (e as { ts: number }).ts : 0;
+                return ts > max ? ts : max;
+              }, 0);
+              if (newestRing > 0) {
+                lastSeenTs = newestRing - 5_000;
+                baselined = true;
+              }
             }
+            const present = new Set<string>();
+            let newest = lastSeenTs;
+            for (const entry of ring) {
+              if (!entry || typeof entry !== "object") continue;
+              const action = entry as Record<string, unknown>;
+              const id = typeof action.id === "string" ? action.id : "";
+              const ts = typeof action.ts === "number" ? action.ts : 0;
+              if (!id || ts < lastSeenTs) continue;
+              present.add(id);
+              if (seen.has(id)) continue;
+              seen.add(id);
+              if (ts > newest) newest = ts;
+              handle(action);
+            }
+            // Ids the writer has pruned can be forgotten; what is left is
+            // bounded by the ring's own cap.
+            seen = new Set([...seen].filter(id => present.has(id)));
+            lastSeenTs = newest;
           }
         }
       } catch {}
@@ -1319,6 +1449,9 @@ function ChromeDesktopInner() {
     const id = setInterval(poll, 2000);
     return () => { active = false; clearInterval(id); };
   }, []);
+
+  // Answers the KV requests framed webapps post — see src/lib/webapp-kv-bridge.ts.
+  useEffect(() => attachWebappKvBridge(), []);
 
   // Surfaces a corner card when ClawBox or OpenClaw has a newer release.
   // Dismissals persist per exact target-version pair via SQLite so the user
@@ -1631,11 +1764,16 @@ function ChromeDesktopInner() {
       case "webapp": {
         let webappSrc = "about:blank";
         try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
+        // Sandboxed to an opaque origin, the same as /app/[id]: the app is HTML
+        // the agent wrote, and with allow-same-origin it ran in the desktop's
+        // origin with the owner's session. Its persistence goes through the KV
+        // bridge (data-webapp-id is how the bridge knows whose keys to serve).
         return (
           <iframe
             src={webappSrc}
             style={{ width: "100%", height: "100%", border: "none", background: "#fff" }}
-            sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
+            sandbox={WEBAPP_IFRAME_SANDBOX}
+            data-webapp-id={app.storeApp?.id}
             title={resolveAppName(app)}
           />
         );
@@ -2485,7 +2623,7 @@ function ChromeDesktopInner() {
           {ctxMenu.isGroup && ctxMenu.appId ? (
             <>
               <div className="px-4 py-1.5 text-xs text-white/40 font-medium">
-                {selectedIcons.size} items selected
+                {t("desktop.ctx.itemsSelected", { count: selectedIcons.size })}
               </div>
               <div className="border-t border-white/10 my-0.5" />
               <button onClick={() => {
@@ -2498,7 +2636,7 @@ function ChromeDesktopInner() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open all
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("desktop.ctx.openAll")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -2509,7 +2647,7 @@ function ChromeDesktopInner() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Reset positions
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> {t("desktop.ctx.resetPositions")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -2523,7 +2661,7 @@ function ChromeDesktopInner() {
                 });
                 setSelectedIcons(new Set());
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove all from desktop
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> {t("desktop.ctx.removeAllFromDesktop")}
               </button>
             </>
           ) : ctxMenu.appId ? (() => {
@@ -2531,29 +2669,35 @@ function ChromeDesktopInner() {
             const resolvedAppId = ctxMenu.appId!.startsWith("desktop-")
               ? ctxMenu.appId!.replace("desktop-", "")
               : `installed-${ctxMenu.appId}`;
+            // A store skill's window is its settings page; a new tab of that
+            // is not something anyone asks for, and it used to open a broken
+            // page. Webapps and built-ins keep the entry.
+            const isSkill = allApps.find((a) => a.id === resolvedAppId)?.type === "installed";
             return (
             <>
               <button onClick={() => openApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.open")}
               </button>
               {openWindows.some(w => w.appId === resolvedAppId) && (
                 <button onClick={() => openApp(resolvedAppId, true)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>tab</span> New Window
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>tab</span> {t("shelf.newWindow")}
                 </button>
               )}
-              <button onClick={() => {
-                window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
-              }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> Open in new tab
-              </button>
+              {!isSkill && (
+                <button onClick={() => {
+                  window.open(`/app/${encodeURIComponent(resolvedAppId)}`, "_blank");
+                }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("shelf.openNewTab")}
+                </button>
+              )}
               <div className="border-t border-white/10 my-1" />
               {isAppPinned(resolvedAppId) ? (
                 <button onClick={() => handleUnpinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep_off</span> Unpin from shelf
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep_off</span> {t("shelf.unpinFromShelf")}
                 </button>
               ) : (
                 <button onClick={() => handlePinApp(resolvedAppId)} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep</span> Pin to shelf
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>keep</span> {t("shelf.pinToShelf")}
                 </button>
               )}
               <div className="border-t border-white/10 my-1" />
@@ -2562,7 +2706,7 @@ function ChromeDesktopInner() {
                   <button onClick={() => {
                     if (ctxMenu.appId) requestUninstallApp(ctxMenu.appId);
                   }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> Uninstall
+                    <span className="material-symbols-rounded" style={{ fontSize: 16 }}>delete</span> {t("store.uninstall")}
                   </button>
                   <div className="border-t border-white/10 my-1" />
                 </>
@@ -2574,7 +2718,7 @@ function ChromeDesktopInner() {
                   return next;
                 });
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Reset Position
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> {t("desktop.ctx.resetPosition")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => {
@@ -2589,7 +2733,7 @@ function ChromeDesktopInner() {
                   setHiddenInstalledApps(prev => prev.includes(id) ? prev : [...prev, id]);
                 }
               }} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3 text-red-400">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> Remove from desktop
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>visibility_off</span> {t("desktop.ctx.removeFromDesktop")}
               </button>
             </>
             ); })() : (
@@ -2607,11 +2751,11 @@ function ChromeDesktopInner() {
               )}
               {!harnessHiddenAppIds.includes("store") && (
                 <button onClick={() => openApp("store")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> App Store
+                  <span className="material-symbols-rounded" style={{ fontSize: 16 }}>storefront</span> {t("store.appStore")}
                 </button>
               )}
               <button onClick={() => openApp("terminal")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> Terminal
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>terminal</span> {t("app.terminal")}
               </button>
               <button onClick={() => openApp("coding")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
                 <span className="material-symbols-rounded" style={{ fontSize: 16 }}>code</span> {t("app.codingAgent")}
@@ -2628,15 +2772,15 @@ function ChromeDesktopInner() {
                 </button>
               )}
               <button onClick={() => arrangeIcons()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> Arrange icons
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>grid_view</span> {t("desktop.ctx.arrangeIcons")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => openApp("settings")} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> Settings
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>settings</span> {t("app.settings")}
               </button>
               <div className="border-t border-white/10 my-1" />
               <button onClick={() => window.location.reload()} className="w-full px-4 py-2 text-left hover:bg-white/10 flex items-center gap-3">
-                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span> Refresh
+                <span className="material-symbols-rounded" style={{ fontSize: 16 }}>refresh</span> {t("desktop.ctx.refresh")}
               </button>
             </>
           )}
@@ -2648,26 +2792,33 @@ function ChromeDesktopInner() {
         const meta = installedMeta[uninstallConfirm];
         const appName = meta?.name || uninstallConfirm;
         return (
-          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setUninstallConfirm(null)}>
-            <div className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 z-[999999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={dismissUninstall}>
+            {/* The role sits on the panel, not the scrim — see useModalDialog. */}
+            <div
+              ref={uninstallPanelRef}
+              role="dialog" aria-modal="true" aria-labelledby={uninstallTitleId}
+              data-testid="uninstall-dialog"
+              className="bg-[var(--bg-elevated)] border border-white/10 rounded-2xl shadow-2xl p-6 max-w-sm w-full mx-4" onClick={(e) => e.stopPropagation()}>
               <div className="flex flex-col items-center text-center">
                 <div className="w-14 h-14 rounded-xl flex items-center justify-center mb-4" style={{ backgroundColor: meta?.color || "#6b7280" }}>
                   <InstalledAppIcon appId={uninstallConfirm} iconUrl={meta?.iconUrl} name={appName} size="w-7 h-7" />
                 </div>
-                <h3 className="text-lg font-semibold text-white mb-1">Uninstall {appName}?</h3>
-                <p className="text-sm text-white/50 mb-6">This will remove the app from your desktop and launcher. You can reinstall it from the App Store.</p>
+                <h3 id={uninstallTitleId} className="text-lg font-semibold text-white mb-1">{t("uninstall.title", { name: appName })}</h3>
+                <p className="text-sm text-white/50 mb-6">{t("uninstall.message")}</p>
                 <div className="flex gap-3 w-full">
                   <button
-                    onClick={() => setUninstallConfirm(null)}
+                    type="button"
+                    onClick={dismissUninstall}
                     className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-white/10 hover:bg-white/15 text-white transition-colors cursor-pointer"
                   >
-                    Cancel
+                    {t("cancel")}
                   </button>
                   <button
+                    type="button"
                     onClick={confirmUninstallApp}
                     className="flex-1 px-4 py-2 rounded-lg text-sm font-medium bg-red-500/20 hover:bg-red-500/30 text-red-400 transition-colors cursor-pointer"
                   >
-                    Uninstall
+                    {t("store.uninstall")}
                   </button>
                 </div>
               </div>

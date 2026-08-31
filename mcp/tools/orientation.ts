@@ -8,6 +8,7 @@ import { DEFAULT_CWD } from "../lib/guard";
 import { json, text, type Registrar } from "../lib/register";
 import { reported } from "../lib/report";
 import type { McpContext } from "../lib/context";
+import { WEBAPP_KV_CLIENT_SNIPPET } from "../../src/lib/webapp-sandbox";
 
 const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
 
@@ -15,16 +16,37 @@ const FIELD_GUIDE_PATH = join(DEFAULT_CWD, "Clawbox.md");
 // were 700+ chars of tutorial that a small model had to read on every
 // tools/list, to learn something it only needs once it is actually writing an
 // app. It lives here, load-on-demand.
+//
+// The storage path is the desktop's KV bridge, not fetch('/setup-api/kv'):
+// a webapp runs in a sandboxed frame with an opaque origin (see
+// src/lib/webapp-sandbox.ts), so a fetch from inside it carries no session and
+// is refused. The bridge snippet is quoted whole because a one-file app from
+// webapp_create has to carry it itself; code_project_init writes it into the
+// scaffold.
 const WEBAPP_STORAGE_GUIDE = `## Storing data in a ClawBox webapp
 
-Do NOT use localStorage — it does not survive a session. Use the device KV store:
-  GET  /setup-api/kv?key=myapp:data      -> { key, value }
-  GET  /setup-api/kv?prefix=myapp:       -> { "myapp:a": "...", "myapp:b": "..." }
-  POST /setup-api/kv  { key: "myapp:data", value: JSON.stringify(data) }
-  POST /setup-api/kv  { delete: "myapp:data" }
+Do NOT use localStorage — it does not survive a session. Do NOT fetch
+/setup-api/kv (or any /setup-api route) from the app: a webapp runs in a
+sandboxed frame without the ClawBox session, and the call is refused. Use the
+desktop's KV bridge, window.clawboxKv — every method returns a Promise:
+  await window.clawboxKv.set("items", JSON.stringify(items));
+  const raw = await window.clawboxKv.get("items");   // string, or null when unset
+  await window.clawboxKv.delete("items");
+  const mine = await window.clawboxKv.list();        // this app's saved keys and values
 
-Namespace every key with your app id ("todo:items", "notes:list"). Values are
-strings: JSON.stringify before saving, JSON.parse after loading.
+Use plain key names ("items", "settings"): the desktop keeps them under your
+app's own namespace and refuses a key that names another app's. Values are
+strings: JSON.stringify before saving, JSON.parse after loading. A call rejects
+after 30 s when no ClawBox desktop is hosting the app.
+
+A project from code_project_init already has the bridge in index.html. A
+one-file app from webapp_create must include it — paste this in <head>,
+unchanged:
+
+${WEBAPP_KV_CLIENT_SNIPPET}
+
+An app written earlier against fetch('/setup-api/kv') no longer reaches its
+saved data; move it to window.clawboxKv with webapp_update or a rebuild.
 
 Style single-file apps dark: background #1a1a2e, text #e0e0e0, accent #f97316.
 No CDN links — the device may be offline.`;

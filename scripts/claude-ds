@@ -100,6 +100,7 @@ if not token:
 print("OK")
 print(token)
 print(str(cfg.get("clawai_tier") or "").strip())
+print(str(cfg.get("coding_agent_effort") or "").strip())
 PYEOF
 )"
 
@@ -108,6 +109,10 @@ STATUS="$(printf '%s' "$CREDS" | sed -n 1p)"
 
 TOKEN="$(printf '%s' "$CREDS" | sed -n 2p)"
 TIER="$(printf '%s' "$CREDS" | sed -n 3p)"
+# The effort the owner picked in the Coding Agent app. Read here so a terminal
+# the app opens (`claude-ds --resume ...`) thinks as hard as the delegated runs
+# do, instead of at a default the wrapper made up.
+OWNER_EFFORT="$(printf '%s' "$CREDS" | sed -n 4p)"
 
 # "pro" is the device's name for the Max plan — the only tier ClawBox AI lets
 # reach deepseek-v4-pro. Anything else (flash, free, unset) gets flash, which
@@ -164,12 +169,62 @@ export ANTHROPIC_DEFAULT_HAIKU_MODEL="$SMALL_MODEL"
 if [ -n "${CLAUDE_DS_SUBAGENT_MODEL:-}" ]; then
   export CLAUDE_CODE_SUBAGENT_MODEL="$CLAUDE_DS_SUBAGENT_MODEL"
 fi
-export CLAUDE_CODE_EFFORT_LEVEL="${CLAUDE_DS_EFFORT:-max}"
+# EFFORT: A PIN FOR THE FIXED LEVELS, A FLAG FOR ULTRACODE.
+#
+# CLAUDE_DS_EFFORT (the delegated run's setting) outranks the owner's stored
+# choice, which outranks the default — ultracode, the same default the Coding
+# Agent app applies when the owner never touched its picker, so a terminal
+# and a delegated run agree. The fixed levels are pinned through
+# CLAUDE_CODE_EFFORT_LEVEL as before.
+#
+# "ultracode" is Claude Code's xhigh-plus-dynamic-workflows mode and is NOT a
+# level that variable accepts: while the variable is set, `/effort ultracode`
+# answers "CLAUDE_CODE_EFFORT_LEVEL=max overrides effort this session — clear
+# it and ultracode takes over" and nothing changes. So for ultracode the pin is
+# left unset (an inherited one is dropped for the same reason) and the mode is
+# requested through `--effort ultracode`, which the installed CLI honours in
+# both interactive and -p sessions (checked on this box, 2026-08-31: a -p run
+# reported "Ultracode is on"). A caller's own --effort always wins: the flag
+# is added only when the caller passed none, and the pin is skipped too —
+# pinned, `claude-ds --effort ultracode` against a stored fixed level would
+# silently stay at that level. So `claude-ds --effort low` still means low.
+EFFORT="${CLAUDE_DS_EFFORT:-${OWNER_EFFORT:-ultracode}}"
+EFFORT_ARGS=()
+wants_own_effort=0
+for arg in "$@"; do
+  case "$arg" in
+    --effort|--effort=*) wants_own_effort=1 ;;
+  esac
+done
+if [ "$EFFORT" = "ultracode" ]; then
+  unset CLAUDE_CODE_EFFORT_LEVEL
+  if [ "$wants_own_effort" = 0 ]; then
+    EFFORT_ARGS=(--effort ultracode)
+  fi
+else
+  if [ "$wants_own_effort" = 0 ]; then
+    export CLAUDE_CODE_EFFORT_LEVEL="$EFFORT"
+  else
+    unset CLAUDE_CODE_EFFORT_LEVEL
+  fi
+fi
 
 mkdir -p "$CLAUDE_CONFIG_DIR"
 chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 
-# PRE-ANSWER THE TRUST QUESTION, FOR THE BOX'S OWN HOME AND NOTHING ELSE.
+# PRE-ANSWER THE TWO QUESTIONS THAT HAVE ONLY ONE ANSWER ON THIS BOX.
+#
+# THE FIRST-RUN ONBOARDING. Before an interactive session, Claude Code walks a
+# fresh state directory through "Choose the text style" and records
+# hasCompletedOnboarding. The headless runs the Coding Agent app makes (-p)
+# never go through it, and this harness's own state directory is written by
+# those runs alone — so the app's "Open in terminal" button (`claude-ds
+# --resume <session>`) dropped the owner into a theme picker instead of the
+# session they asked for. Seeded on every launch, in every folder: the
+# onboarding is global, not per project. The theme is filled in only when
+# there is none, so a choice the owner made in the CLI is kept.
+#
+# THE TRUST QUESTION, for the box's own home and nothing else.
 #
 # Claude Code asks "is this a project you created or one you trust?" before it
 # will read a folder, and never remembers the answer for $HOME: the flag it
@@ -190,11 +245,19 @@ chmod 700 "$CLAUDE_CONFIG_DIR" 2>/dev/null || true
 # Claude Code documents this key as the supported alternative to answering
 # interactively ("accept the trust dialog here once interactively, or set
 # projects[...].hasTrustDialogAccepted in <config>").
-seed_home_trust() {
-  python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$HOME" <<'PYEOF' || true
+#
+# Both flags are seeded whenever they are not already `true` — NOT only when
+# absent, because Claude Code records `false` for both on its own (the trust
+# flag on every clean exit, see above; onboarding when a run creates the state
+# file without walking the wizard), so an absent-only check would show the
+# wizard again on exactly the boxes this exists for. A config whose answers
+# are already `true` is left alone, byte for byte — and every write goes
+# through a temp file plus rename.
+seed_harness_config() {
+  python3 - "$CLAUDE_CONFIG_DIR/.claude.json" "$HOME" "$1" <<'PYEOF' || true
 import json, os, sys, tempfile
 
-cfg_path, home = sys.argv[1], sys.argv[2]
+cfg_path, home, seed_trust = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
 try:
     with open(cfg_path) as fh:
         cfg = json.load(fh)
@@ -208,15 +271,23 @@ except Exception:
     # would be a bad trade.
     raise SystemExit(0)
 
-projects = cfg.setdefault("projects", {})
-if not isinstance(projects, dict):
-    raise SystemExit(0)
-entry = projects.setdefault(home, {})
-if not isinstance(entry, dict):
-    raise SystemExit(0)
-if entry.get("hasTrustDialogAccepted") is True:
-    raise SystemExit(0)          # already set; leave the file alone
-entry["hasTrustDialogAccepted"] = True
+changed = False
+if cfg.get("hasCompletedOnboarding") is not True:
+    cfg["hasCompletedOnboarding"] = True
+    changed = True
+if "theme" not in cfg:
+    cfg["theme"] = "dark"
+    changed = True
+
+if seed_trust:
+    projects = cfg.setdefault("projects", {})
+    entry = projects.setdefault(home, {}) if isinstance(projects, dict) else None
+    if isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is not True:
+        entry["hasTrustDialogAccepted"] = True
+        changed = True
+
+if not changed:
+    raise SystemExit(0)          # already answered; leave the file alone
 
 # Written through a temp file in the same directory and renamed, so a crash
 # mid-write cannot leave Claude Code with half a config.
@@ -236,11 +307,13 @@ PYEOF
 }
 
 if [ "$PWD" = "$HOME" ]; then
-  seed_home_trust
+  seed_harness_config 1
+else
+  seed_harness_config 0
 fi
 
 # Say which model is actually about to answer. "Chosen vs actually used" is the
 # question this banner exists to close: the plan, not the wrapper, picks it.
 printf 'claude-ds: ClawBox AI (%s) — state in %s\n' "$MODEL" "$CLAUDE_CONFIG_DIR" >&2
 
-exec claude "$@"
+exec claude "${EFFORT_ARGS[@]}" "$@"

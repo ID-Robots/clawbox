@@ -29,13 +29,26 @@ const DATA_ROOT = process.env.CLAWBOX_ROOT
 const TOKEN_PATH = path.join(DATA_ROOT, "data", ".local-ai-token");
 const MIGRATED_FLAG_PATH = path.join(DATA_ROOT, "data", ".local-ai-token-migrated");
 
-// Sentinels older builds wrote into openclaw.json. Existing installs
-// upgrading to this version still send these in `Authorization: Bearer`
-// until the user re-saves AI Models settings, which rotates openclaw.json's
-// apiKey to the per-install random token AND calls `markLocalAiTokenMigrated()`
-// to drop the flag file below — at which point legacy strings are rejected.
-// Without the sunset, these public string constants would authenticate to
-// the proxy indefinitely on any device they leak from.
+// The two places a pre-b0c6e452 build wrote its credential for the local-AI
+// providers: the agent's auth profiles and the provider block in openclaw.json.
+// Same resolution as the configure route and src/lib/openclaw-config.ts.
+const OPENCLAW_HOME_DIR = process.env.OPENCLAW_HOME
+  || path.join(process.env.HOME ?? "/home/clawbox", ".openclaw");
+const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_HOME_DIR, "openclaw.json");
+const AUTH_PROFILES_PATH = path.join(OPENCLAW_HOME_DIR, "agents", "main", "agent", "auth-profiles.json");
+
+// Sentinels older builds wrote into openclaw.json. An install upgrading from
+// one of those still sends them in `Authorization: Bearer` until the user
+// re-saves AI Models settings, which rotates openclaw.json's apiKey to the
+// per-install random token AND calls `markLocalAiTokenMigrated()`.
+//
+// They are public string constants, so they are only honoured on POSITIVE
+// evidence of that upgrade: the sentinel has to be the credential openclaw's
+// own config currently holds for the provider. A fresh install never wrote
+// one, so on a fresh install they authenticate to nothing — the previous
+// rule ("accept until the flag file exists") left every box that had not
+// re-saved a local provider open to anyone on the LAN who had read the
+// source, because the flag was only ever written by that re-save.
 const LEGACY_TOKENS: ReadonlySet<string> = new Set(["llamacpp-local", "ollama-local"]);
 
 let cached: string | null = null;
@@ -85,11 +98,11 @@ export function verifyLocalAiBearer(headerValue: string | null): boolean {
     return true;
   }
 
-  // Legacy sentinels are only honored until the configure route writes
-  // `data/.local-ai-token-migrated`, which it does the first time the
-  // user re-saves AI Models post-upgrade. After that, the per-install
-  // token is the only valid credential.
-  if (legacyTokensStillAccepted() && LEGACY_TOKENS.has(presented)) {
+  // A legacy sentinel is honoured only while openclaw's config still carries
+  // it as the credential (a genuine in-place upgrade that has not re-saved
+  // AI Models yet) and the migration flag has not been stamped. After either,
+  // the per-install token is the only valid credential.
+  if (LEGACY_TOKENS.has(presented) && legacySentinelStillConfigured(presented)) {
     return true;
   }
   return false;
@@ -105,31 +118,62 @@ export function markLocalAiTokenMigrated(): void {
   try {
     fs.mkdirSync(path.dirname(MIGRATED_FLAG_PATH), { recursive: true });
     fs.writeFileSync(MIGRATED_FLAG_PATH, `${new Date().toISOString()}\n`, { mode: 0o600 });
-    legacyAcceptCache = { mtimeMs: -1, accept: false };
+    legacyCache = null;
   } catch {
-    // Disk write failed (read-only fs, permission). Legacy acceptance
-    // stays open until the next successful configure save — not a
-    // correctness issue, just delays the sunset.
+    // Disk write failed (read-only fs, permission). The sentinel stays
+    // accepted only for as long as openclaw.json still carries it, so this
+    // delays nothing that matters — the next configure save rewrites both.
   }
 }
 
-// Cache the flag-file stat so we don't hit the FS on every chat turn.
-let legacyAcceptCache: { mtimeMs: number; accept: boolean } | null = null;
-function legacyTokensStillAccepted(): boolean {
+/** The credential strings a JSON file holds under `apiKey` / `key`. */
+function collectCredentials(file: string, into: Set<string>): void {
+  let parsed: unknown;
   try {
-    const stat = fs.statSync(MIGRATED_FLAG_PATH);
-    if (legacyAcceptCache && legacyAcceptCache.mtimeMs === stat.mtimeMs) {
-      return legacyAcceptCache.accept;
-    }
-    legacyAcceptCache = { mtimeMs: stat.mtimeMs, accept: false };
-    return false;
+    parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
   } catch {
-    legacyAcceptCache = { mtimeMs: -1, accept: true };
-    return true;
+    return;
   }
+  const walk = (node: unknown, depth: number) => {
+    if (!node || typeof node !== "object" || depth > 6) return;
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if ((key === "apiKey" || key === "key") && typeof value === "string") into.add(value);
+      else walk(value, depth + 1);
+    }
+  };
+  walk(parsed, 0);
+}
+
+function mtimeOf(file: string): number {
+  try {
+    return fs.statSync(file).mtimeMs;
+  } catch {
+    return -1;
+  }
+}
+
+// Cache the file stats so a chat turn does not re-parse openclaw's config.
+let legacyCache: { flag: number; config: number; profiles: number; sentinels: Set<string> } | null = null;
+function legacySentinelStillConfigured(sentinel: string): boolean {
+  const flag = mtimeOf(MIGRATED_FLAG_PATH);
+  const config = mtimeOf(OPENCLAW_CONFIG_PATH);
+  const profiles = mtimeOf(AUTH_PROFILES_PATH);
+  if (!legacyCache || legacyCache.flag !== flag || legacyCache.config !== config || legacyCache.profiles !== profiles) {
+    const sentinels = new Set<string>();
+    // The stamped flag is the sunset: nothing is accepted after it, whatever
+    // an unrewritten config still says.
+    if (flag < 0) {
+      const found = new Set<string>();
+      collectCredentials(OPENCLAW_CONFIG_PATH, found);
+      collectCredentials(AUTH_PROFILES_PATH, found);
+      for (const legacy of LEGACY_TOKENS) if (found.has(legacy)) sentinels.add(legacy);
+    }
+    legacyCache = { flag, config, profiles, sentinels };
+  }
+  return legacyCache.sentinels.has(sentinel);
 }
 
 export function _resetLocalAiTokenCacheForTests(): void {
   cached = null;
-  legacyAcceptCache = null;
+  legacyCache = null;
 }

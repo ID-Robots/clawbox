@@ -2,6 +2,7 @@ import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { startLlamaCppServer, stopLlamaCppServer } from "@/instrumentation-node";
 import { terminateByArgv } from "@/lib/process-match";
+import { isOllamaExecutable } from "@/lib/local-models";
 import { getDefaultLlamaCppModel, getLlamaCppBaseUrl, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import {
   getLlamaCppLaunchSpec,
@@ -352,11 +353,6 @@ export async function ensureLocalAiReady(provider: LocalAiProvider): Promise<voi
       scheduleIdleStop(provider);
     }
   }
-}
-
-/** argv[0] of the ollama server, whatever path it was installed at. */
-function isOllamaExecutable(argv0: string): boolean {
-  return argv0.trim().replace(/ \(deleted\)$/, "").split("/").pop() === "ollama";
 }
 
 async function stopOllama(): Promise<void> {

@@ -159,6 +159,10 @@ describe("code-projects", () => {
       expect(mockMkdir).toHaveBeenCalled();
       // Should write index.html, style.css, app.js, project.json
       expect(mockWriteFile).toHaveBeenCalledTimes(4);
+      // The built app runs in a sandboxed frame; the KV bridge is its only
+      // way to persist anything, and the field guide assumes it is there.
+      const index = [...writtenFiles.entries()].find(([p]) => p.endsWith("index.html"))?.[1];
+      expect(index).toContain("window.clawboxKv");
     });
 
     it("creates project with blank template", async () => {
@@ -167,6 +171,8 @@ describe("code-projects", () => {
       expect(meta.projectId).toBe("blank-app");
       // Should write index.html and project.json only
       expect(mockWriteFile).toHaveBeenCalledTimes(2);
+      const index = [...writtenFiles.entries()].find(([p]) => p.endsWith("index.html"))?.[1];
+      expect(index).toContain("window.clawboxKv");
     });
 
     it("rejects invalid project ID", async () => {

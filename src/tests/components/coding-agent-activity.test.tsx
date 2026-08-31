@@ -19,6 +19,7 @@ import { cleanup, renderHook } from "@testing-library/react";
 import { translations } from "@/lib/translations";
 import CodingAgentActivityPill from "@/components/CodingAgentActivityPill";
 import { artifactUrl, isCodingAgentTool, useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
+import { notifyCodingRunStarted } from "@/lib/ui-events";
 
 const NOW = Date.now();
 const RUNNING = {
@@ -211,6 +212,75 @@ describe("useCodingAgentActivity", () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
     expect(result.current.runs).toHaveLength(1);
     expect(fetchMock.mock.calls.length).toBe(calls);
+  });
+
+  it("asks once more after a run it watched settles — the review pass starts after the record is written", async () => {
+    // The runner persists the settled record before it commits and starts
+    // the automatic review pass, so the poll that saw the finish cannot have
+    // seen the run that follows it. One round more; not a timer.
+    vi.useFakeTimers();
+    let status = "running";
+    const fetchMock = vi.fn(async () =>
+      runsResponse([{ ...RUNNING, status, completedAt: status === "running" ? null : NOW + 12_000 }]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    status = "completed";
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // saw it settle
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // the one round owed
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // and nothing after it
+  });
+
+  it("asks again when the desktop says a run started — begun from the Coding Agent app while the chat sat open", async () => {
+    // Nothing the chat sees passes through it for such a run, so without
+    // this the card only ever appeared if the chat was reopened in time.
+    const fetchMock = vi.fn(async () => runsResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.current.runs).toHaveLength(0);
+
+    fetchMock.mockImplementation(async () => runsResponse([RUNNING]));
+    act(() => { notifyCodingRunStarted(); });
+    await waitFor(() => expect(result.current.runs).toHaveLength(1));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not hear the desktop while the chat is closed", async () => {
+    const fetchMock = vi.fn(async () => runsResponse([RUNNING]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderHook(() => useCodingAgentActivity(false));
+    act(() => { notifyCodingRunStarted(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("asks again when the tab comes back into view", async () => {
+    const fetchMock = vi.fn(async () => runsResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", { value: "visible", configurable: true });
+    try {
+      renderHook(() => useCodingAgentActivity(true));
+      await act(async () => { await Promise.resolve(); });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+      await act(async () => { await Promise.resolve(); });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      if (visibility) Object.defineProperty(document, "visibilityState", visibility);
+      else delete (document as { visibilityState?: unknown }).visibilityState;
+    }
   });
 
   it("does not adopt runs that finished before this conversation", async () => {

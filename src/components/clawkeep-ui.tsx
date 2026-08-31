@@ -44,6 +44,15 @@ export function formatBytes(n: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+/** "8 s", "2 min 10 s" — the length of a run, in units no locale spells out differently. */
+export function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes} min ${rest} s` : `${minutes} min`;
+}
+
 export async function jsonOrError<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
     let detail = resp.statusText;

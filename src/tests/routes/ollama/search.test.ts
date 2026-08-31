@@ -52,7 +52,7 @@ describe("GET /setup-api/ollama/search", () => {
             <a href="/library/mistral">Mistral</a>
             <p>Fast and efficient</p>
             <span>500K Pulls</span>
-            <span>7b</span>
+            <span>3b</span>
             <span>vision</span>
           </li>
         </body>
@@ -70,10 +70,81 @@ describe("GET /setup-api/ollama/search", () => {
     expect(res.status).toBe(200);
     expect(body.results).toHaveLength(2);
     expect(body.results[0].name).toBe("llama2");
+    expect(body.results[0].pulls).toBe("1.5M");
     expect(body.results[1].name).toBe("mistral");
+    // The cap the filter applied, so the picker's copy is derived from it.
+    expect(body.maxParamBillions).toBe(4);
   });
 
-  it("filters out models too large for Jetson (>8B)", async () => {
+  it("reads each card's own description and pull count from the real markup", async () => {
+    // A trimmed ollama.com page: <link> tags in <head> and a nav <p> before
+    // the first card. `<li[^>]*>` also matched `<link`, so the first "card"
+    // spanned the whole head and nav, and its description was the nav text.
+    const mockHtml = `
+      <html>
+        <head>
+          <link rel="icon" href="/public/icon-16x16.png">
+          <link rel="stylesheet" href="/public/app.css">
+        </head>
+        <body>
+          <nav><p>Sign in Download</p><span>vision</span></nav>
+          <ul>
+            <li class="flex items-baseline">
+              <a href="/library/smollm2">
+                <h2>smollm2</h2>
+                <p class="max-w-lg">SmolLM2 is a family of compact language models with tools.</p>
+                <span>tools</span>
+                <span>135m</span>
+                <span>360m</span>
+                <span>1.7b</span>
+                <span >3.9M</span>
+                <span class="hidden sm:flex">&nbsp;Pulls</span>
+              </a>
+            </li>
+          </ul>
+        </body>
+      </html>
+    `;
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(mockHtml),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const res = await ollamaSearchGet(createRequest("smollm2"));
+    const body = await res.json();
+
+    expect(body.results).toHaveLength(1);
+    const [hit] = body.results;
+    expect(hit.name).toBe("smollm2");
+    expect(hit.description).toBe("SmolLM2 is a family of compact language models with tools.");
+    expect(hit.pulls).toBe("3.9M");
+    // Chips only: "tools" in the prose is not a capability.
+    expect(hit.tags).toEqual(["tools"]);
+    // Sub-billion variants are offered, not dropped.
+    expect(hit.filteredSizes).toEqual(["135m", "360m", "1.7b"]);
+  });
+
+  it("drops a size the memory cap cannot serve, not just the 70B class", async () => {
+    // config/clawbox-resource-limits.env: a 7-8B Q4 model does not fit under
+    // ollama.service's MemoryMax, so offering 8b only sets up an OOM kill.
+    const mockHtml = `
+      <li><a href="/library/llama3.1">Llama</a><span>8b</span><span>70b</span></li>
+      <li><a href="/library/phi4-mini">Phi</a><span>3.8b</span></li>
+    `;
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(mockHtml),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const res = await ollamaSearchGet(createRequest("llama"));
+    const body = await res.json();
+
+    expect(body.results.map((r: { name: string }) => r.name)).toEqual(["phi4-mini"]);
+  });
+
+  it("filters out models too large for Jetson (over the memory cap)", async () => {
     const mockHtml = `
       <html>
         <body>
@@ -148,7 +219,7 @@ describe("GET /setup-api/ollama/search", () => {
             <p>Has vision and tools</p>
             <span>vision</span>
             <span>tools</span>
-            <span>7b</span>
+            <span>3b</span>
           </li>
         </body>
       </html>

@@ -45,8 +45,8 @@ describe("/setup-api/tts on the hermes edition", () => {
     expect(body.engines).toBeUndefined();
   });
 
-  it("refuses a check instead of spawning a binary that is not there", async () => {
-    const res = await POST(post({ action: "check" }));
+  it("refuses a language pick before reading the body, with the same fact", async () => {
+    const res = await POST(post({ action: "language", language: "de" }));
     expect(res.status).toBe(409);
     expect((await res.json()).supportedOnEdition).toBe(false);
   });

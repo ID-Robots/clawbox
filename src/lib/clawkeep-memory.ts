@@ -7,7 +7,7 @@
  * output, database paths and provider errors never cross the API boundary.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -62,7 +62,6 @@ export interface ClawKeepMemoryStatus {
   failedItems: number;
   dirty: boolean;
   indexBytes: number;
-  lastIndexedAtMs: number;
   error: string;
   run: MemoryRunState;
   schedule: MemoryIndexSchedule;
@@ -89,6 +88,15 @@ const EMBED_MIGRATION_LOCK =
   || path.join(os.homedir(), "clawbox", "data", "local-embeddings.state.lock");
 /** `flock -E` exit code for "someone else holds it", distinct from a failure. */
 const LOCK_BUSY_EXIT = 75;
+/**
+ * What `flock` exits with when it cannot exec the command: 69 (EX_UNAVAILABLE)
+ * on the util-linux 2.37 this box ships, 126/127 on newer releases and on a
+ * shell. `findOpenclawBin` falls back to the bare name when nothing is
+ * installed, so a missing OpenClaw reaches flock and comes back as one of these.
+ */
+const EXEC_FAILURE_EXITS = new Set([69, 126, 127]);
+/** How long a SIGTERM gets to close SQLite cleanly before SIGKILL follows. */
+const TERMINATE_GRACE_MS = 5_000;
 
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-schedule.json");
 const RUN_STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "memory-index-state.json");
@@ -119,6 +127,13 @@ let writeSeq = 0;
 let cachedStatus: ClawKeepMemoryStatus | null = null;
 let cachedStatusAtMs = 0;
 let statusInFlight: Promise<ClawKeepMemoryStatus> | null = null;
+/**
+ * Bumped by every invalidation. A probe that was already running when a run
+ * finished reports the index as it was mid-run; comparing the generation it
+ * started under with the current one is how that answer is kept from being
+ * served as fresh for the next two minutes.
+ */
+let statusGeneration = 0;
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -256,6 +271,8 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
+const INTERRUPTED_MESSAGE = "Indexing was interrupted. Run it again.";
+
 async function markInterrupted(state: PersistedMemoryRunState): Promise<PersistedMemoryRunState> {
   const finishedAtMs = Date.now();
   const failed: PersistedMemoryRunState = {
@@ -263,7 +280,7 @@ async function markInterrupted(state: PersistedMemoryRunState): Promise<Persiste
     status: "failed",
     finishedAtMs,
     durationMs: state.startedAtMs ? Math.max(0, finishedAtMs - state.startedAtMs) : 0,
-    error: "Indexing was interrupted. Run it again.",
+    error: INTERRUPTED_MESSAGE,
     childPid: 0,
   };
   await writeRunState(failed);
@@ -296,7 +313,34 @@ function openclawEnv(): NodeJS.ProcessEnv {
   dirs.add(path.join(os.homedir(), ".local", "bin"));
   const prefix = Array.from(dirs).join(path.delimiter);
   const parent = process.env.PATH || "";
-  return { ...process.env, PATH: parent ? `${prefix}${path.delimiter}${parent}` : prefix };
+  // `openclaw` on the box is a launcher (openclaw.mjs) that re-spawns the real
+  // CLI as a detached grandchild and only forwards SIGTERM to it. With the
+  // launcher's own opt-out, the pid this module records, supervises and
+  // signals IS the CLI — verified: same JSON output, no child process.
+  return {
+    ...process.env,
+    OPENCLAW_NO_RESPAWN: "1",
+    PATH: parent ? `${prefix}${path.delimiter}${parent}` : prefix,
+  };
+}
+
+/**
+ * SIGTERM first, SIGKILL only if the process is still there after the grace.
+ *
+ * Never SIGKILL straight away: an older launcher that ignores
+ * OPENCLAW_NO_RESPAWN forwards SIGTERM to the indexer and force-kills it
+ * itself, whereas SIGKILL stops at the launcher and leaves the indexer
+ * writing the same SQLite file the next run opens. SIGTERM also lets the
+ * indexer close the database cleanly.
+ */
+function terminate(child: ChildProcess): void {
+  try { child.kill("SIGTERM"); } catch { /* already gone */ }
+  const escalate = setTimeout(() => {
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    }
+  }, TERMINATE_GRACE_MS);
+  escalate.unref();
 }
 
 function collectMemoryStatusJson(): Promise<unknown> {
@@ -317,12 +361,18 @@ function collectMemoryStatusJson(): Promise<unknown> {
     };
     const timer = setTimeout(() => {
       timedOut = true;
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      terminate(child);
     }, STATUS_TIMEOUT_MS);
+    // terminate() arms its own SIGKILL escalation, so it must fire once:
+    // every chunk after the overflow would otherwise add a signal and a timer.
+    let overflowed = false;
     child.stdout.on("data", (chunk: Buffer) => {
       bytes += chunk.length;
       if (bytes > MAX_STATUS_OUTPUT_BYTES) {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
+        if (!overflowed) {
+          overflowed = true;
+          terminate(child);
+        }
         return;
       }
       chunks.push(chunk);
@@ -399,16 +449,15 @@ export async function parseMemoryStatus(
         .slice(0, 12)
     : "";
 
+  // Size only. The file's mtime is NOT "last indexed": the status probe itself
+  // touches the database every time it runs. When an index run finished is
+  // `run.finishedAtMs`, which the panel already shows.
   let indexBytes = 0;
-  let lastIndexedAtMs = 0;
   const dbPath = cleanString(status.dbPath);
   if (dbPath) {
     try {
       const stat = await fs.stat(dbPath);
-      if (stat.isFile()) {
-        indexBytes = stat.size;
-        lastIndexedAtMs = stat.mtimeMs;
-      }
+      if (stat.isFile()) indexBytes = stat.size;
     } catch { /* a missing index is represented by the identity/status fields */ }
   }
 
@@ -434,7 +483,6 @@ export async function parseMemoryStatus(
     failedItems,
     dirty: status.dirty === true,
     indexBytes,
-    lastIndexedAtMs,
     error: indexIdentity === "mismatched"
       ? "The index does not match the configured embedding model. Run a full reindex."
       : indexIdentity === "missing"
@@ -470,7 +518,6 @@ function unavailableStatus(
     failedItems: 0,
     dirty: false,
     indexBytes: 0,
-    lastIndexedAtMs: 0,
     error: "Memory status is unavailable. Try again.",
     run,
     schedule,
@@ -478,25 +525,49 @@ function unavailableStatus(
   };
 }
 
-async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
+async function withLiveRunState(base: ClawKeepMemoryStatus): Promise<ClawKeepMemoryStatus> {
+  // Run/schedule state changes independently from the expensive CLI probe.
   const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
+  return { ...base, run, schedule, nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()) };
+}
+
+async function loadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
+  // The probe first, the run state after it. Read the other way round, a
+  // cold answer carried the run state from when the probe STARTED — "running"
+  // for a pass that had finished eight seconds before the answer arrived.
+  const probe = await collectMemoryStatusJson().then(
+    (raw) => ({ raw, ok: true as const }),
+    () => ({ raw: null, ok: false as const }),
+  );
+  const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
+  if (!probe.ok) return unavailableStatus(run, schedule);
   try {
-    return await parseMemoryStatus(await collectMemoryStatusJson(), run, schedule);
+    return await parseMemoryStatus(probe.raw, run, schedule);
   } catch {
     return unavailableStatus(run, schedule);
   }
 }
 
+/**
+ * Marks the reading stale rather than dropping it. Dropping it made the very
+ * next read after every run — the panel's — block on the cold probe, so the
+ * button sat on a disabled "Index now" for the whole pass. A stale reading
+ * is answered at once with the live run state and refreshed behind it.
+ */
 export function invalidateMemoryStatusCache(): void {
-  cachedStatus = null;
+  statusGeneration++;
   cachedStatusAtMs = 0;
 }
 
 function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   if (!statusInFlight) {
+    const generation = statusGeneration;
     statusInFlight = loadMemoryStatus().then((status) => {
       cachedStatus = status;
-      cachedStatusAtMs = Date.now();
+      // Invalidated while the probe ran: keep the answer, but as stale, so
+      // the next reader refreshes it again instead of trusting a mid-run
+      // reading for two minutes.
+      cachedStatusAtMs = generation === statusGeneration ? Date.now() : 0;
       return status;
     }).finally(() => {
       statusInFlight = null;
@@ -511,20 +582,18 @@ function reloadMemoryStatus(): Promise<ClawKeepMemoryStatus> {
  * status has been read, a stale one is answered at once and refreshed in the
  * background — otherwise Settings → Local AI, which polls the inventory every
  * five seconds, froze on a skeleton for eight seconds every half minute.
+ *
+ * The run state is read at answer time on both paths, so a caller that
+ * joined a probe already in flight still gets the run as it is now.
  */
 export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
-  if (!cachedStatus) return reloadMemoryStatus();
-  if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
+  let base = cachedStatus;
+  if (!base) {
+    base = await reloadMemoryStatus();
+  } else if (Date.now() - cachedStatusAtMs >= STATUS_CACHE_MS) {
     reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   }
-  // Run/schedule state changes independently from the expensive CLI probe.
-  const [run, schedule] = await Promise.all([readMemoryRunState(), readMemorySchedule()]);
-  return {
-    ...cachedStatus,
-    run,
-    schedule,
-    nextRunAtMs: computeNextMemoryRunMs(schedule, new Date()),
-  };
+  return withLiveRunState(base);
 }
 
 /**
@@ -568,8 +637,14 @@ export function warmMemoryStatusCache(): Promise<void> {
  * message telling them to check a model that was perfectly fine.
  *
  * There is nothing to preserve when the index is empty, so the first build IS
- * the full build. The run records the mode it really used, so the panel never
- * claims an incremental pass it did not do.
+ * the full build. The run records the mode it really used, and the panel
+ * prints it, so "Index now" never claims an incremental pass it did not do.
+ *
+ * Answered from the cached reading when there is one (stale included: the
+ * cost of a stale zero is one more pass over an index that was just built,
+ * inside the ten seconds before the refresh lands). Only a box that has never
+ * been probed waits for the probe — and `startMemoryIndex` asks this AFTER
+ * declining a caller that overlaps a run, so that wait never overlaps one.
  */
 export async function resolveIndexMode(requested: MemoryIndexMode): Promise<MemoryIndexMode> {
   if (requested === "full") return "full";
@@ -612,17 +687,37 @@ async function acquireRunLock(): Promise<boolean> {
   }
 }
 
-function fixedFailureMessage(timedOut: boolean, code: number | null): string {
+function fixedFailureMessage(timedOut: boolean, code: number | null, signal: NodeJS.Signals | null): string {
   if (timedOut || code === 124) return "Indexing timed out. Try again after the device is idle.";
+  // Killed from outside — the OOM killer, an operator, a service restart. The
+  // embedding model had nothing to do with it, so do not send the owner to
+  // check it; the same words the reconcile uses for a run lost to a reboot.
+  if (signal || code === null) return INTERRUPTED_MESSAGE;
   if (code === LOCK_BUSY_EXIT) return "The embedding model is still being set up. Try again in a few minutes.";
-  if (code === 127) return "OpenClaw is not installed or could not be started.";
+  if (EXEC_FAILURE_EXITS.has(code)) return "OpenClaw is not installed or could not be started.";
   return "Indexing failed. Check that the embedding model is available, then try again.";
 }
 
+/**
+ * Start one indexing pass, or decline because one is going.
+ *
+ * Takes the mode the caller ASKED for; the mode actually run (an incremental
+ * pass on an empty index becomes a full build, see resolveIndexMode) is what
+ * the run records. The decline comes first and costs a file read plus a pid
+ * check — never the CLI probe. Resolving the mode before the decline made a
+ * second "Index now" wait on the cold probe for as long as the run itself
+ * took, then start a second run over the first one's record instead of
+ * answering 409. The lock afterwards is the authoritative single-flight for
+ * the few milliseconds two callers can both pass the read.
+ */
 export async function startMemoryIndex(
-  mode: MemoryIndexMode,
+  requested: MemoryIndexMode,
   trigger: MemoryIndexTrigger = "manual",
 ): Promise<{ accepted: boolean; run: MemoryRunState }> {
+  const current = await readMemoryRunState();
+  if (current.status === "running") return { accepted: false, run: current };
+
+  const mode = await resolveIndexMode(requested);
   if (!await acquireRunLock()) {
     return { accepted: false, run: await readMemoryRunState() };
   }
@@ -655,13 +750,27 @@ export async function startMemoryIndex(
   // killing it on the timeout or on a failed state write would leave
   // `openclaw memory index` running unsupervised while the lock it was holding
   // is released with the wrapper — the exact opposite of what both of those
-  // paths are trying to achieve. With `--no-fork` flock execs into openclaw, so
-  // the pid we record, supervise and signal is the indexer itself.
+  // paths are trying to achieve. With `--no-fork` flock execs into openclaw —
+  // and with OPENCLAW_NO_RESPAWN in the environment (see openclawEnv) that is
+  // the CLI itself rather than a launcher in front of it — so the pid we
+  // record, supervise and signal is the indexer.
   const child = spawn(
     "flock",
     ["--no-fork", "-n", "-E", String(LOCK_BUSY_EXIT), EMBED_MIGRATION_LOCK, openclawBin(), ...args],
     { env: openclawEnv(), stdio: "ignore" },
   );
+  // Listen BEFORE the first await. A busy migration lock makes `flock -n`
+  // exit in a couple of milliseconds, inside the state write below; with the
+  // listeners attached after it, that exit went unseen, the run stayed
+  // "running" with a dead pid, and the reconcile later called it interrupted
+  // — the one outcome `-E 75` exists to avoid. A spawn error is emitted on
+  // the next tick, which without a listener is an unhandled event.
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+    child.once("error", (err) => {
+      resolve({ code: (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1, signal: null });
+    });
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
   state = { ...state, childPid: child.pid ?? 0 };
   try {
     await writeRunState(state);
@@ -669,19 +778,22 @@ export async function startMemoryIndex(
     // Without this, the child keeps indexing unsupervised while the lock stays
     // on disk with childPid 0; LOCK_START_GRACE_MS later the reconcile calls
     // the live run interrupted and frees the lock, and a second index starts
-    // on top of the first.
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+    // on top of the first. `exited` has no handler yet, so the child's end
+    // cannot write a final state over this cleanup.
+    terminate(child);
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
-    invalidateMemoryStatusCache();
     throw err;
   }
-  invalidateMemoryStatusCache();
+  // Deliberately no cache invalidation here: nothing the probe reports changes
+  // until the pass ends, and dropping the reading at spawn time made the
+  // panel's very next read block on the cold probe for the whole run.
 
-  let settled = false;
   let timedOut = false;
-  const finish = async (code: number | null) => {
-    if (settled) return;
-    settled = true;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    terminate(child);
+  }, INDEX_TIMEOUT_MS);
+  const finish = async ({ code, signal }: { code: number | null; signal: NodeJS.Signals | null }) => {
     clearTimeout(timer);
     const finishedAtMs = Date.now();
     const ok = code === 0 && !timedOut;
@@ -690,22 +802,17 @@ export async function startMemoryIndex(
       status: ok ? "succeeded" : "failed",
       finishedAtMs,
       durationMs: Math.max(0, finishedAtMs - startedAtMs),
-      error: ok ? "" : fixedFailureMessage(timedOut, code),
+      error: ok ? "" : fixedFailureMessage(timedOut, code, signal),
       childPid: 0,
     };
     await writeRunState(finalState).catch(() => { /* status route will reconcile */ });
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     invalidateMemoryStatusCache();
+    // Refresh behind the finished run rather than on the next read, so the new
+    // counts are there by the time the owner looks, not ten seconds after.
+    reloadMemoryStatus().catch(() => { /* the next read tries again */ });
   };
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
-  }, INDEX_TIMEOUT_MS);
-  child.once("error", (err) => {
-    const code = (err as NodeJS.ErrnoException).code === "ENOENT" ? 127 : 1;
-    void finish(code);
-  });
-  child.once("close", (code) => { void finish(code); });
+  void exited.then(finish);
 
   return { accepted: true, run: publicMemoryRunState(state) };
 }

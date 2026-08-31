@@ -305,3 +305,36 @@ export function onCodingAgentChanged(listener: () => void): () => void {
   window.addEventListener(CODING_AGENT_CHANGED_EVENT, listener);
   return () => window.removeEventListener(CODING_AGENT_CHANGED_EVENT, listener);
 }
+
+/**
+ * "A coding run was just started, or just finished, somewhere this browser
+ * can see."
+ *
+ * The chat's run cards (useCodingAgentActivity) probe the box once when the
+ * chat opens and again when a coding-agent tool call passes through the chat
+ * itself — nothing else, by design: an idle box is not polled. That left one
+ * gap: a run the owner started from the Coding Agent app while the chat sat
+ * open was never adopted, because nothing told the chat to look. This is
+ * that signal. Deliberately NOT `CODING_AGENT_CHANGED_EVENT`, whose contract
+ * is "a setting was SAVED" and whose listener in the app reloads the whole
+ * window — the app emitting it on its own start would reload itself.
+ *
+ * A signal, not data, like the others here: the listener re-asks the runs
+ * route, which is the one source of truth for what a run is doing.
+ */
+export const CODING_RUN_STARTED_EVENT = "clawbox:coding-run-started";
+
+/** Emit the signal above. Call it once the run route has ANSWERED that a run
+ *  is on its way (202), or when the desktop hears that one finished — never
+ *  on the click. */
+export function notifyCodingRunStarted(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new Event(CODING_RUN_STARTED_EVENT));
+}
+
+/** Subscribe to "a coding run started" and return the unsubscribe. */
+export function onCodingRunStarted(listener: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(CODING_RUN_STARTED_EVENT, listener);
+  return () => window.removeEventListener(CODING_RUN_STARTED_EVENT, listener);
+}

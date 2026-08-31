@@ -84,23 +84,42 @@ describe("the memory index scheduler", () => {
 
   it("runs an incremental pass when the slot arrives, never a full reindex", async () => {
     // A scheduled run must not spend hours re-embedding everything unattended.
-    // `resolveIndexMode` is stubbed rather than exercised here: it shells out
+    // `startMemoryIndex` is stubbed rather than exercised here: it shells out
     // to the OpenClaw CLI, and under fake timers that promise would never
-    // settle. Its own rule is covered in clawkeep-memory.test.ts.
+    // settle. The empty-index upgrade it applies to the request is covered in
+    // clawkeep-memory.test.ts.
     const startMemoryIndex = vi.fn(async () => ({ accepted: true, run: {} as never }));
-    const resolveIndexMode = vi.fn(async (m: string) => m);
     vi.doMock("@/lib/clawkeep-memory", async () => {
       const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
-      return { ...actual, startMemoryIndex, resolveIndexMode };
+      return { ...actual, startMemoryIndex };
     });
     await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "06:00", weekday: 0 });
     const sched = await import("@/lib/clawkeep-memory-scheduler");
     await sched.start();
 
     await vi.advanceTimersByTimeAsync(61 * 60_000);
-    // The schedule asks for an incremental pass and runs whatever the shared
-    // rule resolves — so the button and the schedule can never disagree.
-    expect(resolveIndexMode).toHaveBeenCalledWith("incremental");
+    // The schedule asks for an incremental pass through the same call the
+    // button makes — so the button and the schedule can never disagree.
     expect(startMemoryIndex).toHaveBeenCalledWith("incremental", "schedule");
+  });
+
+  it("leaves a manual run alone when the slot lands on it, and says so in the log", async () => {
+    // The decline is startMemoryIndex's; the scheduler's job is to not paper
+    // over it. Before this line existed a declined slot left no trace at all
+    // — the card showed the manual run, the journal showed nothing.
+    const startMemoryIndex = vi.fn(async () => ({ accepted: false, run: { status: "running" } as never }));
+    vi.doMock("@/lib/clawkeep-memory", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/clawkeep-memory")>("@/lib/clawkeep-memory");
+      return { ...actual, startMemoryIndex };
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await writeSchedule({ enabled: true, frequency: "daily", timeOfDay: "06:00", weekday: 0 });
+    const sched = await import("@/lib/clawkeep-memory-scheduler");
+    await sched.start();
+
+    await vi.advanceTimersByTimeAsync(61 * 60_000);
+    expect(startMemoryIndex).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("skipped: an index run is in progress"));
+    log.mockRestore();
   });
 });

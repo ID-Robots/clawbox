@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -309,6 +310,110 @@ describe("the status cache", () => {
     expect((await fs.readFile(calls, "utf8")).trim().split("\n")).toHaveLength(2);
     vi.restoreAllMocks();
   });
+
+  it("keeps answering at once after an invalidation, rather than blocking on the probe", async () => {
+    // A finished run invalidates the reading. Dropping it outright made the
+    // panel's very next read — the one right after "Index now" — wait on the
+    // cold probe for the whole pass. Stale is answered now, fresh follows.
+    const script = path.join(tmpDir, "slow-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\nsleep 1\ncat <<'JSON'\n${JSON.stringify(REAL_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    vi.resetModules();
+    const { getMemoryStatus, invalidateMemoryStatusCache } = await import("@/lib/clawkeep-memory");
+    await getMemoryStatus();
+    invalidateMemoryStatusCache();
+    const started = performance.now();
+    expect((await getMemoryStatus()).available).toBe(true);
+    expect(performance.now() - started).toBeLessThan(500);
+    await new Promise((r) => setTimeout(r, 1500));
+  });
+
+  it("answers the run state as it is when the cold probe returns, not as it was when it started", async () => {
+    // The panel's read after a short run used to say "running" for a pass
+    // that had finished during the probe — the run state was read before
+    // the eight-second probe and handed back unchanged.
+    const script = path.join(tmpDir, "slow-openclaw");
+    await fs.writeFile(script, `#!/bin/sh\nsleep 1\ncat <<'JSON'\n${JSON.stringify(REAL_STATUS)}\nJSON\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    vi.resetModules();
+    const { getMemoryStatus } = await import("@/lib/clawkeep-memory");
+    const pending = getMemoryStatus();
+    await new Promise((r) => setTimeout(r, 300));
+    await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
+      status: "succeeded", mode: "full", trigger: "manual",
+      startedAtMs: Date.now() - 9_000, finishedAtMs: Date.now(), durationMs: 9_000, error: "", childPid: 0,
+    }));
+    expect((await pending).run.status).toBe("succeeded");
+  });
+});
+
+describe("how a run ends", () => {
+  afterEach(() => {
+    delete process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN;
+    delete process.env.CLAWKEEP_MEMORY_EMBED_LOCK;
+  });
+
+  async function settledRun(): Promise<{ status: string; error: string; childPid: number }> {
+    for (let i = 0; i < 300; i++) {
+      const now = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8").catch(() => "{}"));
+      if (now.status && now.status !== "running") return now;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error("the run never settled");
+  }
+
+  it("reports a busy model migration as such, within milliseconds — never as interrupted", async () => {
+    // `flock -n` exits in a couple of milliseconds when ensure-local-embeddings
+    // holds the lock, inside the state write. With the listeners attached
+    // after that write, the exit went unseen and the reconcile later called
+    // the run interrupted — advice that fails identically on the retry.
+    const lock = path.join(tmpDir, "embed.lock");
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = lock;
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = "true";
+    const holder = spawn("flock", ["--no-fork", lock, "sleep", "5"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 300));
+    vi.resetModules();
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    try {
+      const started = performance.now();
+      expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+      const run = await settledRun();
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain("still being set up");
+      expect(run.error).not.toContain("interrupted");
+    } finally {
+      holder.kill("SIGKILL");
+    }
+  });
+
+  it("says a run killed from outside was interrupted, not that the model is broken", async () => {
+    // The OOM killer, an operator, a service restart: none of them is the
+    // embedding model's fault, and the old message sent the owner to check
+    // a model that was fine.
+    const script = path.join(tmpDir, "fake-index");
+    await fs.writeFile(script, `#!/bin/sh\nexec sleep 5\n`, { mode: 0o755 });
+    process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
+    vi.resetModules();
+    const { startMemoryIndex } = await import("@/lib/clawkeep-memory");
+    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    let childPid = 0;
+    for (let i = 0; i < 100 && !childPid; i++) {
+      childPid = JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")).childPid;
+      if (!childPid) await new Promise((r) => setTimeout(r, 20));
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    // Never signal pid 0: on Unix that targets this whole process group —
+    // the test runner included — so a run that never recorded its child must
+    // fail here, not kill the suite.
+    expect(childPid).toBeGreaterThan(0);
+    process.kill(childPid, "SIGKILL");
+    const run = await settledRun();
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("interrupted");
+    expect(run.error).not.toContain("embedding model");
+  });
 });
 
 describe("the process the run supervises", () => {
@@ -321,14 +426,27 @@ describe("the process the run supervises", () => {
      * the lock it was holding is released along with the wrapper — the exact
      * opposite of what both paths are for.
      *
+     * The same goes one level down: the installed `openclaw` is a launcher
+     * that re-spawns the real CLI as a grandchild unless OPENCLAW_NO_RESPAWN
+     * is set, and only forwards SIGTERM to it. The fake binary here does the
+     * same, so a run that forgets the opt-out records the launcher's pid and
+     * fails this.
+     *
      * Asserted against the real spawn, by giving the run a "binary" that
-     * writes its own pid: with `--no-fork` that pid is the child we recorded.
+     * writes its own pid: with `--no-fork` and the opt-out that pid is the
+     * child we recorded.
      */
     const marker = path.join(tmpDir, "who-am-i");
     const script = path.join(tmpDir, "fake-index");
     // Lives just long enough for the module to record its pid; the test then
     // waits for it to exit before the fixture directory is torn down.
-    await fs.writeFile(script, `#!/bin/sh\nprintf '%s' "$$" > ${JSON.stringify(marker)}\nsleep 0.5\n`, { mode: 0o755 });
+    await fs.writeFile(script, [
+      "#!/bin/sh",
+      'if [ -z "$OPENCLAW_NO_RESPAWN" ] && [ -z "$FAKE_INNER" ]; then FAKE_INNER=1 "$0" "$@" & wait; exit 0; fi',
+      `printf '%s' "$$" > ${JSON.stringify(marker)}`,
+      "sleep 0.5",
+      "",
+    ].join("\n"), { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
     process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
     vi.resetModules();

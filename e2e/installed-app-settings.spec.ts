@@ -48,7 +48,9 @@ test("installed app settings can save configuration and toggle enablement", asyn
 
   await settingsWindow.getByPlaceholder("http://homeassistant.local:8123").fill("http://ha.local:8123");
   await settingsWindow.getByPlaceholder("Enter HA access token").fill("ha-secret-token");
-  await settingsWindow.getByRole("switch", { name: "Enable Webhooks" }).click({ force: true });
+  // No webhook switch: the form offers only what the skill's config writer
+  // persists, and HA's inbound webhooks are configured on the HA side.
+  await expect(settingsWindow.getByRole("switch", { name: "Enable Webhooks" })).toHaveCount(0);
   await settingsWindow.getByRole("button", { name: /^Connect$/ }).click({ force: true });
   await expect(settingsWindow.getByText("Home Assistant URL")).toBeVisible();
 });

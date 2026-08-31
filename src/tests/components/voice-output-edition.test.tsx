@@ -1,18 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { render as renderBare, screen, waitFor } from "@/tests/helpers/test-utils";
+import { I18nProvider } from "@/lib/i18n";
 import VoiceOutputPanel from "@/components/VoiceOutputPanel";
 
 /**
  * Settings → Voice was a dead end on the Hermes edition.
  *
- * Every action behind the panel runs the openclaw CLI — `capability tts
- * convert` for Check, `config set messages.tts.provider` for Select — and the
- * Hermes SKU ships no openclaw binary. The panel rendered anyway, offering a
- * Check that reported a blank failure and a Select the route answered with 409.
+ * Every write behind the panel runs the openclaw CLI (`config set
+ * messages.tts.provider` for Select) and the Hermes SKU ships no openclaw
+ * binary. The panel rendered anyway, offering a Select the route answered
+ * with 409.
  *
  * The box now says the true thing once, and the panel repeats it, the same way
  * ClawKeep already handles a feature that is not part of this edition.
  */
+
+// The panel's copy comes through the i18n provider, like every Settings panel.
+const render = (ui: React.ReactElement) => renderBare(<I18nProvider>{ui}</I18nProvider>);
 
 const OPENCLAW_STATUS = {
   // The source dropdown reads `choice` and nothing else: "local" is the box
@@ -25,8 +29,6 @@ const OPENCLAW_STATUS = {
       detail: "Kokoro",
       providerId: "tts-local-cli",
       configured: true,
-      proven: true,
-      usable: true,
     },
   ],
   activeProviderId: "piper",
@@ -34,7 +36,6 @@ const OPENCLAW_STATUS = {
   preferredEngine: "local",
   drifted: false,
   warning: null,
-  lastCheck: null,
   language: "en",
   // The voice each engine speaks with. The LISTS to pick from are not part of
   // the payload — the panel carries its own catalogue (@/lib/voice-catalog).
@@ -63,13 +64,13 @@ describe("Settings → Voice on an edition without OpenClaw", () => {
     render(<VoiceOutputPanel active />);
 
     await screen.findByTestId("voice-output-unsupported");
-    expect(screen.getByText(/Not available on this edition/)).toBeInTheDocument();
+    expect(await screen.findByText(/Not available on this edition/)).toBeInTheDocument();
     // The three grey cards are what a customer saw while the panel waited for a
     // status the box was never going to produce.
     expect(screen.queryByTestId("voice-output-loading")).toBeNull();
   });
 
-  it("offers neither a choice to make nor a check to run", async () => {
+  it("offers no choice to make", async () => {
     installFetch({ supportedOnEdition: false });
 
     render(<VoiceOutputPanel active />);
@@ -95,7 +96,7 @@ describe("Settings → Voice on the OpenClaw edition", () => {
     expect(screen.getByTestId("voice-panel")).toBeInTheDocument();
     expect(screen.getByTestId("voice-source")).toHaveValue("local");
     expect(screen.getByTestId("voice-voice")).toHaveValue("af_heart");
-    const cloud = screen.getByRole("option", { name: /ClawBox cloud/ }) as HTMLOptionElement;
+    const cloud = await screen.findByRole("option", { name: /ClawBox cloud/ }) as HTMLOptionElement;
     expect(cloud.disabled).toBe(true);
   });
 });

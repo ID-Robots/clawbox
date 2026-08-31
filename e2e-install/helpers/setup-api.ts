@@ -284,6 +284,34 @@ export const installApp = (appId: string) =>
     { method: "POST", body: JSON.stringify({ appId }) },
   );
 
+export interface InstallOutcome {
+  status: number;
+  ok: boolean;
+  code?: string;
+  error?: string;
+  retryable?: boolean;
+  matches?: Array<{ ownerHandle?: string; ref?: string }>;
+  clawhub?: { success: boolean; error?: string };
+}
+
+/**
+ * Like installApp, but a refusal is an answer, not an exception: the install
+ * route reports ClawHub's honest verdict as a non-2xx with `ok:false` and a
+ * `code` (review_required, ambiguous, not_found, rate_limited, …), and the
+ * store spec needs to read that verdict rather than blow up on it.
+ */
+export async function installAppRaw(appId: string): Promise<InstallOutcome> {
+  const res = await fetch(`${BASE_URL}/setup-api/apps/install`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ appId }),
+  });
+  const text = await res.text();
+  let body: Record<string, unknown> = {};
+  try { body = text ? JSON.parse(text) as Record<string, unknown> : {}; } catch { /* non-JSON body */ }
+  return { status: res.status, ...body, ok: res.ok && body.ok !== false } as InstallOutcome;
+}
+
 export const uninstallApp = (appId: string) =>
   request<{ success: boolean }>(
     "/setup-api/apps/uninstall",

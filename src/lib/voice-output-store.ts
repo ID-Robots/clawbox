@@ -7,9 +7,11 @@
  * the choice is kept beside the setup app's own state, and openclaw.json stays
  * the single truth for what is actually configured.
  *
- * The per-engine check memory rides along in the same file: it is a record of
- * what this box observed, not configuration, and losing it costs nothing worse
- * than an "unproven" badge until the next check.
+ * The sample language rides along in the same file, and only once the owner
+ * has picked one: until then the field is absent and the tts route shows the
+ * UI language, so nothing here ever writes an "en" the owner did not choose.
+ * Files written by earlier builds carry the check records of a Check button
+ * the panel no longer has; those keys are simply not read.
  */
 import { promises as fs } from "fs";
 import os from "os";
@@ -17,63 +19,13 @@ import path from "path";
 import crypto from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
 import { isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
-import {
-  DEFAULT_VOICE_STATE,
-  isVoiceChoice,
-  normalizeProviderId,
-  type VoiceAttempt,
-  type VoiceCheck,
-  VOICE_ENGINE_IDS,
-  type VoiceEngineId,
-  type VoiceOutputState,
-} from "@/lib/voice-output";
+import { DEFAULT_VOICE_STATE, isVoiceChoice, type VoiceOutputState } from "@/lib/voice-output";
 
 export const VOICE_STATE_PATH = path.join(DATA_DIR, "voice-output.json");
 
-const ENGINE_IDS = VOICE_ENGINE_IDS;
-
-function readAttempt(value: unknown): VoiceAttempt | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Record<string, unknown>;
-  const providerId = normalizeProviderId(raw.providerId);
-  if (!providerId) return null;
-  const engine = ENGINE_IDS.includes(raw.engine as VoiceEngineId)
-    ? raw.engine as VoiceEngineId
-    : null;
-  return {
-    providerId,
-    engine,
-    ok: raw.ok === true,
-    message: typeof raw.message === "string" ? raw.message : null,
-    latencyMs: typeof raw.latencyMs === "number" && Number.isFinite(raw.latencyMs)
-      ? raw.latencyMs
-      : null,
-  };
-}
-
-function readCheck(value: unknown): VoiceCheck | null {
-  if (!value || typeof value !== "object") return null;
-  const raw = value as Record<string, unknown>;
-  const at = typeof raw.at === "number" && Number.isFinite(raw.at) ? raw.at : null;
-  if (at === null) return null;
-  const attempts = Array.isArray(raw.attempts)
-    ? raw.attempts.map(readAttempt).filter((a): a is VoiceAttempt => a !== null)
-    : [];
-  return {
-    at,
-    ok: raw.ok === true,
-    servedByProviderId: normalizeProviderId(raw.servedByProviderId),
-    servedEngine: ENGINE_IDS.includes(raw.servedEngine as VoiceEngineId)
-      ? raw.servedEngine as VoiceEngineId
-      : null,
-    attempts,
-    message: typeof raw.message === "string" ? raw.message : null,
-  };
-}
-
 /**
  * Never throws and never returns a half-read shape: a corrupt or truncated
- * state file must cost the customer an "unproven" badge, not the Voice panel.
+ * state file must cost the customer their selection, not the Voice panel.
  * Every field is validated the way it will be read, because a guard that
  * checks the envelope and lets an entry through is the mistake that took the
  * whole ClawKeep window down on TASK-398.
@@ -83,30 +35,17 @@ export async function readVoiceState(): Promise<VoiceOutputState> {
   try {
     parsed = JSON.parse(await fs.readFile(VOICE_STATE_PATH, "utf8"));
   } catch {
-    return { ...DEFAULT_VOICE_STATE, engineChecks: {} };
+    return { ...DEFAULT_VOICE_STATE };
   }
   if (!parsed || typeof parsed !== "object") {
-    return { ...DEFAULT_VOICE_STATE, engineChecks: {} };
+    return { ...DEFAULT_VOICE_STATE };
   }
   const raw = parsed as Record<string, unknown>;
-  const engineChecks: VoiceOutputState["engineChecks"] = {};
-  const rawChecks = raw.engineChecks;
-  if (rawChecks && typeof rawChecks === "object") {
-    for (const engine of ENGINE_IDS) {
-      const entry = (rawChecks as Record<string, unknown>)[engine];
-      const attempt = readAttempt(entry);
-      const at = (entry as { at?: unknown })?.at;
-      if (attempt && typeof at === "number" && Number.isFinite(at)) {
-        engineChecks[engine] = { ...attempt, at };
-      }
-    }
-  }
-  return {
+  const state: VoiceOutputState = {
     choice: isVoiceChoice(raw.choice) ? raw.choice : DEFAULT_VOICE_STATE.choice,
-    engineChecks,
-    lastCheck: readCheck(raw.lastCheck),
-    language: isVoiceLanguage(raw.language) ? raw.language : DEFAULT_VOICE_STATE.language,
   };
+  if (isVoiceLanguage(raw.language)) state.language = raw.language;
+  return state;
 }
 
 /**

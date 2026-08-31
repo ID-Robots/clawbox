@@ -5,13 +5,15 @@ import { useEffect, useState } from "react";
 /**
  * The desktop's toast surface.
  *
- * Every server-side "tell the owner" path ends in a `clawbox:toast` window
- * event: the MCP `ui_notify` tool, `clawbox notify`, notifyOwner() in
- * src/lib/email-notify.ts and the coding agent's finish notice all write the
- * `ui:pending-action` slot that src/app/page.tsx polls, and page.tsx turns a
- * `notify` action into this event. Until this component existed nothing
- * LISTENED — the event fired into the void and every one of those notices was
- * invisible. Keep this mounted once, on the desktop.
+ * Every server-side "tell the owner" path goes through the owner-notice ring
+ * (`ui:pending-actions`, src/lib/pending-actions.ts) that every open desktop
+ * polls: the MCP `ui_notify` tool, `clawbox notify` and notifyOwner() in
+ * src/lib/email-notify.ts all push onto it, and src/app/page.tsx turns a
+ * `notify` action into a `clawbox:toast` window event. (The coding agent's
+ * finish notice rides the same ring but becomes a top-right card, not a
+ * toast — only `notify` actions end here.) Until this component existed
+ * nothing LISTENED — the event fired into the void and every one of those
+ * notices was invisible. Keep this mounted once, on the desktop.
  *
  * Text is shown as text. It may have been authored by the agent (ui_notify),
  * so it is never rendered as markup.

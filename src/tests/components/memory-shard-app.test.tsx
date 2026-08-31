@@ -30,7 +30,6 @@ const LOCAL_MEMORY = {
   failedItems: 0,
   dirty: false,
   indexBytes: 4_194_304,
-  lastIndexedAtMs: 0,
   error: "",
   run: { status: "idle", mode: "", trigger: "", startedAtMs: 0, finishedAtMs: 0, durationMs: 0, error: "" },
   schedule: { enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0 },
@@ -41,6 +40,10 @@ let memory: Record<string, unknown> = { ...LOCAL_MEMORY };
 let indexCalls: unknown[] = [];
 let scheduleCalls: unknown[] = [];
 let indexStatus = 200;
+// A promise a POST/PUT waits on before answering — never resolved when a test
+// needs the request to stay in flight.
+let indexGate: Promise<void> | null = null;
+let scheduleGate: Promise<void> | null = null;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -48,11 +51,13 @@ function installFetch() {
     const ok = (json: unknown, status = 200) => ({ ok: status < 400, status, json: async () => json });
     if (url.includes("/setup-api/clawkeep/memory/index")) {
       indexCalls.push(JSON.parse(String(init?.body ?? "{}")));
+      if (indexGate) await indexGate;
       return ok({ accepted: indexStatus === 200, run: memory.run, status: memory }, indexStatus);
     }
     if (url.includes("/setup-api/clawkeep/memory/schedule")) {
       const body = JSON.parse(String(init?.body ?? "{}"));
       scheduleCalls.push(body);
+      if (scheduleGate) await scheduleGate;
       return ok({ schedule: body, nextRunAtMs: Date.now() + 3_600_000 });
     }
     if (url.includes("/setup-api/clawkeep/memory")) return ok(memory);
@@ -70,6 +75,8 @@ describe("the Memory Shard app", () => {
     indexCalls = [];
     scheduleCalls = [];
     indexStatus = 200;
+    indexGate = null;
+    scheduleGate = null;
     installFetch();
   });
 
@@ -123,6 +130,41 @@ describe("the Memory Shard app", () => {
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
     await waitFor(() => expect(indexCalls).toEqual([{ mode: "incremental" }]));
+  });
+
+  it("reads Indexing… from the click, not from the first status read that comes back", async () => {
+    // A short pass is over before the status read after the click answers;
+    // waiting for that read to flip the label meant no feedback for the whole
+    // run and a flash of "Indexing…" once it was done.
+    indexGate = new Promise(() => {});
+    mount();
+    fireEvent.click(await screen.findByRole("button", { name: "Index now" }));
+    const button = await screen.findByRole("button", { name: "Indexing…" });
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows who started the last run, what it did and how long it took", async () => {
+    // Without these a scheduled pass was indistinguishable from a click, and
+    // "Index now" on an empty index — which runs a full build — looked like
+    // the incremental pass it was not.
+    memory = {
+      ...LOCAL_MEMORY,
+      run: { status: "succeeded", mode: "full", trigger: "schedule", startedAtMs: Date.now() - 68_248, finishedAtMs: Date.now() - 60_000, durationMs: 8_248, error: "" },
+    };
+    mount();
+    const line = await screen.findByText(/finished 1m ago/);
+    expect(line.textContent).toContain("scheduled");
+    expect(line.textContent).toContain("full");
+    expect(line.textContent).toContain("8 s");
+  });
+
+  it("says there is nothing to index yet on a box whose assistant has written no memory", async () => {
+    // A stock box showed "Healthy" over six zeros and nothing else; the CLI's
+    // own hint for that state carries a path, so the panel says it in its
+    // own words instead.
+    memory = { ...LOCAL_MEMORY, files: 0, chunks: 0, vectors: 0, pendingFiles: 0, sourceCount: 1, indexBytes: 131_072 };
+    mount();
+    expect(await screen.findByText(/Nothing to index yet/)).toBeTruthy();
   });
 
   it("asks before a full reindex, and only sends it once confirmed", async () => {
@@ -181,6 +223,40 @@ describe("the Memory Shard app", () => {
     await waitFor(() => expect(scheduleCalls).toEqual([
       { enabled: true, frequency: "daily", timeOfDay: "04:45", weekday: 0 },
     ]));
+  });
+
+  it("keeps the saved time when another control is clicked mid-edit, rather than sending the half-typed one", async () => {
+    // One Backspace in the time field leaves it at "". The toggle, Daily/Weekly
+    // and the weekday buttons all spread the draft into their save, and a ""
+    // in there came back from the server as 03:00 — the saved 21:45 was lost
+    // to a click on "Daily".
+    memory = { ...LOCAL_MEMORY, schedule: { enabled: true, frequency: "weekly", timeOfDay: "21:45", weekday: 3 } };
+    mount();
+    const time = await screen.findByLabelText("Time");
+    fireEvent.change(time, { target: { value: "" } });
+    await waitFor(() => expect((time as HTMLInputElement).value).toBe(""));
+    fireEvent.click(screen.getByRole("button", { name: "Daily" }));
+    await waitFor(() => expect(scheduleCalls).toEqual([
+      { enabled: true, frequency: "daily", timeOfDay: "21:45", weekday: 3 },
+    ]));
+    // And the field snaps back to the time that is actually saved.
+    await waitFor(() => expect((time as HTMLInputElement).value).toBe("21:45"));
+  });
+
+  it("never disables the schedule controls while a save is in flight, so focus and keystrokes survive it", async () => {
+    // Chrome drops focus to <body> the moment the focused control is disabled:
+    // in the time field that ate the rest of what was being typed, and after
+    // Space on the toggle the next Tab started over from the shelf. jsdom does
+    // not move focus, so the attribute is what is asserted.
+    memory = { ...LOCAL_MEMORY, schedule: { enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 } };
+    scheduleGate = new Promise(() => {});
+    mount();
+    const time = await screen.findByLabelText("Time");
+    fireEvent.change(time, { target: { value: "04:45" } });
+    await waitFor(() => expect(scheduleCalls).toHaveLength(1));
+    expect((time as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Daily" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByLabelText("Automatic indexing") as HTMLInputElement).disabled).toBe(false);
   });
 
   it("names the weekday picker as a group, since no single control owns that label", async () => {
