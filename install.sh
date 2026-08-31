@@ -439,27 +439,6 @@ NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 OPENCLAW_VERSION="2026.8.1"
 
-# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
-# answers when it can — it is the process that parses whatever we write — and
-# the pinned target only fills in before the first install. Used to route the
-# steps that speak different config dialects per generation.
-# The generation rule itself, callable with any version string, so the
-# installed-binary probe below and the freshly-pinned TARGET gate in
-# step_openclaw_install cannot drift apart.
-openclaw_version_is_v2() {
-  [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
-}
-openclaw_is_v2() {
-  local v=""
-  if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
-    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
-  fi
-  if [ -z "$v" ] && [ -f "$PROJECT_DIR/config/openclaw-target.txt" ]; then
-    v=$(head -1 "$PROJECT_DIR/config/openclaw-target.txt" | awk '{print $1}')
-  fi
-  [ -z "$v" ] && v="$OPENCLAW_VERSION"
-  openclaw_version_is_v2 "$v"
-}
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
 # NousResearch/hermes-agent had on `main` the second a box was flashed.
@@ -484,6 +463,28 @@ HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-fcbd1076a93841fa88855acce810e342a5b78101
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 DNSMASQ_DIR="/etc/NetworkManager/dnsmasq-shared.d"
 AVAHI_CONF="/etc/avahi/avahi-daemon.conf"
+
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
+# answers when it can — it is the process that parses whatever we write — and
+# the pinned target only fills in before the first install. Used to route the
+# steps that speak different config dialects per generation.
+# The generation rule itself, callable with any version string, so the
+# installed-binary probe below and the freshly-pinned TARGET gate in
+# step_openclaw_install cannot drift apart.
+openclaw_version_is_v2() {
+  [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
+}
+openclaw_is_v2() {
+  local v=""
+  if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
+    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+  fi
+  if [ -z "$v" ] && [ -f "$PROJECT_DIR/config/openclaw-target.txt" ]; then
+    v=$(head -1 "$PROJECT_DIR/config/openclaw-target.txt" | awk '{print $1}')
+  fi
+  [ -z "$v" ] && v="$OPENCLAW_VERSION"
+  openclaw_version_is_v2 "$v"
+}
 
 # ── Service registry ─────────────────────────────────────────────────────────
 # Authoritative list of clawbox systemd units. Used by step_systemd_services
