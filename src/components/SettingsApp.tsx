@@ -2962,7 +2962,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                         type="button"
                         onClick={() => ui.onCustomWallpaperDelete(i)}
                         aria-label={`Remove Custom ${i + 1}`}
-                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
+                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-60 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 12 }}>close</span>
                       </button>

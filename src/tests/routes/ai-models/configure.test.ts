@@ -1788,6 +1788,11 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(res.status).toBe(502);
       expect(body.error).toMatch(/Credential migration failed/);
+      const versionCall = vi.mocked(spawnOpenclawCli).mock.calls.find(
+        (call) => Array.isArray(call[0]) && call[0].includes("--version"),
+      );
+      expect(versionCall?.[0]).toEqual(["--version"]);
+      expect(versionCall?.[1]).toEqual(expect.objectContaining({ captureStdout: true }));
       expect(vi.mocked(runOpenclawConfigSetBatch)).not.toHaveBeenCalled();
       expect(mockFs.rename).toHaveBeenCalledWith(
         expect.stringMatching(/auth-profiles\.json$/),

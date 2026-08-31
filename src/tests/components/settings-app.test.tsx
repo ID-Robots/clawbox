@@ -188,6 +188,8 @@ describe("SettingsApp factory reset overlay", () => {
     const select = await screen.findByRole("button", { name: "Custom 1" });
     const remove = screen.getByRole("button", { name: "Remove Custom 1" });
     expect(select).not.toContainElement(remove);
+    expect(remove.className).toContain("opacity-60");
+    expect(remove.className).not.toContain("opacity-0 ");
   });
 
   it("keeps the dialog up and shows why when the box refuses the reset", async () => {

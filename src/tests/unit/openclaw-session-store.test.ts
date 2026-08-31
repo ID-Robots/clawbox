@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createRequire } from "module";
+import { Worker } from "node:worker_threads";
 import os from "os";
 import path from "path";
 import { sweepSessionEntries } from "@/lib/openclaw-session-store";
@@ -39,6 +40,29 @@ afterEach(() => {
 });
 
 describe("sweepSessionEntries schema guard", () => {
+  it("uses the device home fallback when HOME is present but empty", async () => {
+    const originalClawboxHome = process.env.CLAWBOX_OPENCLAW_HOME;
+    const originalOpenclawHome = process.env.OPENCLAW_HOME;
+    const originalHome = process.env.HOME;
+    try {
+      delete process.env.CLAWBOX_OPENCLAW_HOME;
+      delete process.env.OPENCLAW_HOME;
+      process.env.HOME = "";
+      vi.resetModules();
+
+      const fresh = await import("@/lib/openclaw-session-store");
+      expect(fresh.OPENCLAW_HOME_DEFAULT).toBe("/home/clawbox/.openclaw");
+    } finally {
+      if (originalClawboxHome === undefined) delete process.env.CLAWBOX_OPENCLAW_HOME;
+      else process.env.CLAWBOX_OPENCLAW_HOME = originalClawboxHome;
+      if (originalOpenclawHome === undefined) delete process.env.OPENCLAW_HOME;
+      else process.env.OPENCLAW_HOME = originalOpenclawHome;
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+      vi.resetModules();
+    }
+  });
+
   it("sweeps a store at the schema it knows (2026.8.1 stamps v19)", () => {
     const root = makeAgentStore(19, { "agent:main:main": { modelOverride: "old/model" } });
     const result = sweepSessionEntries("main", (_key, entry) => {
@@ -61,6 +85,41 @@ describe("sweepSessionEntries schema guard", () => {
     }, root);
     expect(result).toEqual({ updated: 0, ok: false, unsupportedSchema: 20 });
     expect(readEntries(root)["agent:main:main"].modelOverride).toBe("old/model");
+  });
+
+  it("takes the write reservation before checking schema so a concurrent migration cannot race it", async () => {
+    const root = makeAgentStore(19, { "agent:main:main": { modelOverride: "old/model" } });
+    const dbPath = path.join(root, "main", "agent", "openclaw-agent.sqlite");
+    const worker = new Worker(`
+      const { parentPort, workerData } = require("node:worker_threads");
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(workerData.dbPath);
+      db.exec("BEGIN IMMEDIATE; PRAGMA user_version = 20");
+      parentPort.postMessage("migration-started");
+      setTimeout(() => {
+        db.exec("COMMIT");
+        db.close();
+        parentPort.postMessage("migration-complete");
+        parentPort.close();
+      }, 100);
+    `, { eval: true, workerData: { dbPath } });
+    const workerError = new Promise<never>((_, reject) => worker.once("error", reject));
+    const nextMessage = () => new Promise<string>((resolve) => worker.once("message", resolve));
+
+    expect(await Promise.race([nextMessage(), workerError])).toBe("migration-started");
+    const workerExit = new Promise<number>((resolve) => worker.once("exit", resolve));
+
+    // The old ordering read v19 here, then waited for BEGIN IMMEDIATE. Once the
+    // worker committed v20 it blindly updated that newer store. The fixed
+    // ordering waits for the reservation first and therefore observes v20.
+    const result = sweepSessionEntries("main", (_key, entry) => {
+      entry.modelOverride = "new/model";
+      return true;
+    }, root);
+
+    expect(result).toEqual({ updated: 0, ok: false, unsupportedSchema: 20 });
+    expect(readEntries(root)["agent:main:main"].modelOverride).toBe("old/model");
+    expect(await Promise.race([workerExit, workerError])).toBe(0);
   });
 
   it("does not mutate a leftover sessions.json after a newer SQLite schema refuses the sweep", async () => {

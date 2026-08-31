@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -13,6 +13,13 @@ function v2SeedProgram(): string {
   const end = SOURCE.indexOf("\nPY", start);
   if (start < 0 || end < 0) throw new Error("OpenClaw 2 seed block not found");
   return SOURCE.slice(start, end);
+}
+
+function openclawPatchFunction(): string {
+  const start = SOURCE.indexOf("step_openclaw_patch() {");
+  const end = SOURCE.indexOf("\n}\n\nstep_openclaw_config()", start);
+  if (start < 0 || end < 0) throw new Error("OpenClaw patch function not found");
+  return SOURCE.slice(start, end + 2);
 }
 
 describe("install-x64.sh safety contracts", () => {
@@ -30,6 +37,41 @@ describe("install-x64.sh safety contracts", () => {
     expect(SOURCE).toContain('curl -fsSL -o "$nodesource_script"');
     expect(SOURCE).toContain(String.raw`cd \"$PROJECT_DIR\" && \"$BUN\" install`);
     expect(SOURCE).toContain(String.raw`PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$BUN\" x playwright install chromium`);
+  });
+
+  it("patches every gateway file when the configured home contains spaces", () => {
+    const root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-spaced-path-"));
+    try {
+      const clawboxHome = path.join(root, "owner home");
+      const gatewayDist = path.join(clawboxHome, ".npm global", "openclaw", "gateway dist");
+      mkdirSync(gatewayDist, { recursive: true });
+      const gatewayFile = path.join(gatewayDist, "gateway runtime.js");
+      writeFileSync(gatewayFile, [
+        "if (scopes.length > 0) {",
+        'const reason = "reject-device-required";',
+        'if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };',
+      ].join("\n"));
+
+      execFileSync("bash", ["-c", [
+        "openclaw_is_v2() { return 1; }",
+        "as_user_runtime() { :; }",
+        openclawPatchFunction(),
+        "step_openclaw_patch",
+      ].join("\n")], {
+        env: {
+          ...process.env,
+          CLAWBOX_HOME: clawboxHome,
+          GATEWAY_DIST: gatewayDist,
+          OPENCLAW_BIN: "/bin/true",
+        },
+      });
+
+      const patched = readFileSync(gatewayFile, "utf8");
+      expect(patched).toContain("scopes.length > 0 && !(isControlUi && allowControlUiBypass)");
+      expect(patched).toContain("controlUiAuthPolicy.allowBypass) return");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

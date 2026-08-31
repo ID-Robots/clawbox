@@ -3,6 +3,7 @@ import { listAgentIds, sessionStorePath, sweepSessionEntries } from "./openclaw-
 import fsSync from "fs";
 import path from "path";
 import { execFile, spawn } from "child_process";
+import { randomUUID } from "crypto";
 import { promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { readEdition } from "@/lib/edition-source";
@@ -953,6 +954,168 @@ export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.rename(tmpPath, CONFIG_PATH);
 }
 
+const OPENCLAW_CONFIG_LOCK_STALE_MS = 30_000;
+const OPENCLAW_CONFIG_LOCK_MAX_BYTES = 1024 * 1024;
+
+type FileStat = Awaited<ReturnType<typeof fs.lstat>>;
+type LockOwnerPayload = {
+  pid?: number;
+  createdAt?: string;
+  starttime?: number;
+  clawboxOwnerToken?: string;
+};
+type LockSnapshot = { raw: string; payload: LockOwnerPayload | null; stat: FileStat };
+
+/** True only when both stats name the same filesystem object. */
+function sameFileIdentity(left: FileStat, right: FileStat): boolean {
+  return BigInt(left.dev) === BigInt(right.dev) && BigInt(left.ino) === BigInt(right.ino);
+}
+
+/** Read Linux's process-start identity, which disambiguates a reused PID. */
+async function processStarttime(pid: number): Promise<number | null> {
+  if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const raw = await fs.readFile(`/proc/${pid}/stat`, "utf8");
+    const commEnd = raw.lastIndexOf(")");
+    if (commEnd < 0) return null;
+    const fields = raw.slice(commEnd + 1).trimStart().split(/\s+/);
+    const value = Number(fields[19]);
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Prove a PID dead without treating EPERM or an unreadable procfs as death. */
+async function pidIsDefinitelyDead(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ESRCH";
+  }
+  if (process.platform !== "linux") return false;
+  try {
+    return /^State:\s+Z\b/m.test(await fs.readFile(`/proc/${pid}/status`, "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Read one stable, bounded snapshot of a sidecar without following symlinks.
+ * A changed inode or oversized/malformed payload is retained, never guessed
+ * stale; fail-closed is the safe direction for another process's lock.
+ */
+async function readLockSnapshot(lockPath: string): Promise<LockSnapshot | null> {
+  let before: FileStat;
+  try {
+    before = await fs.lstat(lockPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  if (!before.isFile() || before.isSymbolicLink()) return null;
+
+  const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(lockPath, fsSync.constants.O_RDONLY | noFollow);
+    const opened = await handle.stat();
+    if (!opened.isFile() || !sameFileIdentity(before, opened as FileStat)) return null;
+    const capacity = Math.min(opened.size, OPENCLAW_CONFIG_LOCK_MAX_BYTES) + 1;
+    const buffer = Buffer.alloc(capacity);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > OPENCLAW_CONFIG_LOCK_MAX_BYTES) return null;
+    const after = await fs.lstat(lockPath).catch(() => null);
+    if (!after?.isFile() || !sameFileIdentity(opened as FileStat, after)) return null;
+    const raw = buffer.subarray(0, bytesRead).toString("utf8");
+    let payload: LockOwnerPayload | null = null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        payload = parsed as LockOwnerPayload;
+      }
+    } catch {
+      // OpenClaw's ownership token is whitespace, so its payload remains valid
+      // JSON. Any other trailing content is not an owner we can safely judge.
+    }
+    return { raw, payload, stat: after };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ELOOP") return null;
+    throw err;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** Apply OpenClaw's dead-PID/expired-owner stale policy to one snapshot. */
+async function lockIsStale(snapshot: LockSnapshot): Promise<boolean> {
+  const payload = snapshot.payload;
+  const pid = typeof payload?.pid === "number" && Number.isInteger(payload.pid) && payload.pid > 0
+    ? payload.pid
+    : null;
+  if (pid !== null) {
+    if (typeof payload?.starttime === "number" && Number.isInteger(payload.starttime) && payload.starttime >= 0) {
+      const current = await processStarttime(pid);
+      if (current !== null && current !== payload.starttime) return true;
+    }
+    // A valid, live PID wins over an old createdAt, exactly as OpenClaw's own
+    // shouldRemoveDeadOwnerOrExpiredLock policy does.
+    return pidIsDefinitelyDead(pid);
+  }
+  if (typeof payload?.createdAt !== "string") return false;
+  const createdAt = Date.parse(payload.createdAt);
+  return !Number.isFinite(createdAt) || Date.now() - createdAt > OPENCLAW_CONFIG_LOCK_STALE_MS;
+}
+
+/** Remove only the exact inode and bytes represented by `snapshot`. */
+async function unlinkUnchangedSnapshot(lockPath: string, snapshot: LockSnapshot): Promise<boolean> {
+  const current = await readLockSnapshot(lockPath);
+  if (!current || !sameFileIdentity(snapshot.stat, current.stat) || snapshot.raw !== current.raw) return false;
+  try {
+    await fs.unlink(lockPath);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+/** Reclaim one proven-stale lock under OpenClaw's `.reclaim` hand-off guard. */
+async function reclaimStaleLock(lockPath: string): Promise<boolean> {
+  const observed = await readLockSnapshot(lockPath);
+  if (!observed || !(await lockIsStale(observed))) return false;
+  const guardPath = `${lockPath}.reclaim`;
+  try {
+    await fs.mkdir(guardPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+    throw err;
+  }
+  try {
+    const current = await readLockSnapshot(lockPath);
+    if (!current
+      || !sameFileIdentity(observed.stat, current.stat)
+      || observed.raw !== current.raw
+      || !(await lockIsStale(current))) return false;
+    return unlinkUnchangedSnapshot(lockPath, current);
+  } finally {
+    await fs.rmdir(guardPath).catch(() => {});
+  }
+}
+
+/** Release our sidecar only while its inode or unique owner token is ours. */
+async function releaseOwnedLock(lockPath: string, heldStat: FileStat | null, ownerToken: string): Promise<void> {
+  const current = await readLockSnapshot(lockPath).catch(() => null);
+  if (!current) return;
+  const owns = heldStat
+    ? sameFileIdentity(heldStat, current.stat)
+    : current.payload?.clawboxOwnerToken === ownerToken;
+  if (owns) await unlinkUnchangedSnapshot(lockPath, current).catch(() => {});
+}
+
 /**
  * Run one direct config mutation under OpenClaw 2's cross-process sidecar
  * lock. The core CLI uses an exclusive `openclaw.json.lock` regular file for
@@ -961,9 +1124,19 @@ export async function writeConfig(config: OpenClawConfig): Promise<void> {
  */
 async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
   const lockPath = `${CONFIG_PATH}.lock`;
+  const reclaimGuardPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + 30_000;
   let attempt = 0;
   let lockHandle: Awaited<ReturnType<typeof fs.open>>;
+  let heldStat: FileStat | null = null;
+  const ownerToken = randomUUID();
+  const starttime = await processStarttime(process.pid);
+  const ownerRaw = JSON.stringify({
+    pid: process.pid,
+    createdAt: new Date().toISOString(),
+    ...(starttime === null ? {} : { starttime }),
+    clawboxOwnerToken: ownerToken,
+  }) + "\n";
 
   // `readConfigStrict` deliberately treats ENOENT as a fresh `{}` config and
   // `writeConfig` creates this directory. The lock has to preserve that same
@@ -973,45 +1146,47 @@ async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promi
 
   while (true) {
     try {
-      lockHandle = await fs.open(lockPath, "wx", 0o600);
       try {
-        // OpenClaw understands this owner payload when deciding whether a
-        // sidecar is stale. A normal mutation finishes far inside its 30 s
-        // stale window; the live pid prevents premature reclamation too.
-        await lockHandle.writeFile(JSON.stringify({
-          pid: process.pid,
-          createdAt: new Date().toISOString(),
-        }) + "\n", "utf8");
+        await fs.lstat(reclaimGuardPath);
+        throw Object.assign(new Error(`config lock reclamation is active: ${reclaimGuardPath}`), { code: "EEXIST" });
+      } catch (guardErr) {
+        if ((guardErr as NodeJS.ErrnoException).code !== "ENOENT") throw guardErr;
+      }
+      lockHandle = await fs.open(lockPath, "wx", 0o600);
+      let acquisitionError: unknown = null;
+      try {
+        heldStat = await lockHandle.stat() as FileStat;
       } catch (err) {
+        acquisitionError = err;
+      }
+      try {
+        await lockHandle.writeFile(ownerRaw, "utf8");
+      } catch (err) {
+        acquisitionError ??= err;
+      }
+      if (acquisitionError) {
         await lockHandle.close().catch(() => {});
-        await fs.unlink(lockPath).catch(() => {});
-        throw err;
+        await releaseOwnedLock(lockPath, heldStat, ownerToken);
+        throw acquisitionError;
       }
       break;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") {
         throw err;
       }
+      if (await reclaimStaleLock(lockPath)) continue;
+      if (Date.now() >= deadline) throw err;
       const delayMs = Math.min(250, Math.round(25 * (1.2 ** attempt)));
       attempt += 1;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 
-  let heldStat: Awaited<ReturnType<typeof lockHandle.stat>> | null = null;
   try {
-    heldStat = await lockHandle.stat();
     return await mutate();
   } finally {
     await lockHandle.close().catch(() => {});
-    // Never unlink a successor's lock if ours was externally reclaimed. This
-    // is the same inode/device ownership check OpenClaw's sidecar release uses.
-    if (heldStat) {
-      const current = await fs.lstat(lockPath).catch(() => null);
-      if (current?.isFile() && current.dev === heldStat.dev && current.ino === heldStat.ino) {
-        await fs.unlink(lockPath).catch(() => {});
-      }
-    }
+    await releaseOwnedLock(lockPath, heldStat, ownerToken);
   }
 }
 

@@ -517,12 +517,12 @@ step_openclaw_patch() {
     echo "  Gateway scope patch: already applied"
   else
     # Find files containing the unpatched pattern
-    local SCOPE_FILES
-    SCOPE_FILES=$(grep -Prl --include='*.js' 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
-    if [ -z "$SCOPE_FILES" ]; then
+    local -a SCOPE_FILES=()
+    mapfile -t SCOPE_FILES < <(grep -Prl --include='*.js' 'if\s*\(\s*scopes\.length\s*>\s*0\s*\)\s*\{' "$GATEWAY_DIST" 2>/dev/null || true)
+    if [ "${#SCOPE_FILES[@]}" -eq 0 ]; then
       echo "  Warning: Gateway scope patch: pattern not found and patch not already applied"
     else
-      for file in $SCOPE_FILES; do
+      for file in "${SCOPE_FILES[@]}"; do
         sed -i -E 's/if[[:space:]]*\([[:space:]]*scopes\.length[[:space:]]*>[[:space:]]*0[[:space:]]*\)[[:space:]]*\{/if (scopes.length > 0 \&\& !(isControlUi \&\& allowControlUiBypass)) {/g' "$file"
       done
       if ! grep -qrl --include='*.js' "$PATCHED_MARKER" "$GATEWAY_DIST" 2>/dev/null; then
@@ -536,38 +536,38 @@ step_openclaw_patch() {
   # --- Device identity bypass patch ---
   local DEVICE_MARKER='controlUiAuthPolicy.allowBypass) return'
 
-  local DEVICE_FILES
-  DEVICE_FILES=$(grep -rl --include='*.js' 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
-  if [ -z "$DEVICE_FILES" ]; then
+  local -a DEVICE_FILES=()
+  mapfile -t DEVICE_FILES < <(grep -rl --include='*.js' 'reject-device-required' "$GATEWAY_DIST" 2>/dev/null || true)
+  if [ "${#DEVICE_FILES[@]}" -eq 0 ]; then
     echo "  Device identity bypass patch: pattern not found, skipping"
     return
   fi
 
-  local NEEDS_PATCH=""
-  for file in $DEVICE_FILES; do
+  local -a NEEDS_PATCH=()
+  for file in "${DEVICE_FILES[@]}"; do
     if ! grep -q "$DEVICE_MARKER" "$file" 2>/dev/null; then
-      NEEDS_PATCH="$NEEDS_PATCH $file"
+      NEEDS_PATCH+=("$file")
     fi
   done
 
-  if [ -z "$NEEDS_PATCH" ]; then
+  if [ "${#NEEDS_PATCH[@]}" -eq 0 ]; then
     echo "  Device identity bypass patch: already applied"
     return
   fi
 
-  for file in $NEEDS_PATCH; do
+  for file in "${NEEDS_PATCH[@]}"; do
     sed -i 's|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };|if (roleCanSkipDeviceIdentity(params.role, params.sharedAuthOk)) return { kind: "allow" };\n\tif (params.isControlUi \&\& params.controlUiAuthPolicy.allowBypass) return { kind: "allow" };|' "$file"
   done
 
-  local UNPATCHED=""
-  for file in $DEVICE_FILES; do
+  local -a UNPATCHED=()
+  for file in "${DEVICE_FILES[@]}"; do
     if ! grep -q "$DEVICE_MARKER" "$file" 2>/dev/null; then
-      UNPATCHED="$UNPATCHED $file"
+      UNPATCHED+=("$file")
     fi
   done
 
-  if [ -n "$UNPATCHED" ]; then
-    echo "  Warning: Device identity bypass patch failed for:$UNPATCHED"
+  if [ "${#UNPATCHED[@]}" -gt 0 ]; then
+    echo "  Warning: Device identity bypass patch failed for: ${UNPATCHED[*]}"
   else
     echo "  Device identity bypass patch applied and verified"
   fi
