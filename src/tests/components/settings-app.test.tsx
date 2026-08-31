@@ -181,6 +181,15 @@ describe("SettingsApp factory reset overlay", () => {
     expect(within(overlay).getByText("settings.startingSetup")).toBeInTheDocument();
   });
 
+  it("renders custom wallpaper removal beside, not inside, the selection control", async () => {
+    render(<SettingsApp ui={{ ...defaultUi, customWallpapers: ["data:image/png;base64,AA=="] }} />);
+    fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
+
+    const select = await screen.findByRole("button", { name: "Custom 1" });
+    const remove = screen.getByRole("button", { name: "Remove Custom 1" });
+    expect(select).not.toContainElement(remove);
+  });
+
   it("keeps the dialog up and shows why when the box refuses the reset", async () => {
     vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
       if (input.toString() === "/setup-api/setup/reset") {
@@ -203,6 +212,26 @@ describe("SettingsApp factory reset overlay", () => {
     // The old flow went straight to the "erasing..." overlay without reading
     // the response, so a refusal was indistinguishable from a wipe in progress.
     expect(await screen.findByRole("alert")).toHaveTextContent("Incorrect password");
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
+  });
+
+  it("does not enter reconnect polling when the reset request never reaches the box", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/setup/reset") {
+        return Promise.reject(new TypeError("network offline"));
+      }
+      return defaultFetch(input, init);
+    }));
+
+    render(<SettingsApp ui={defaultUi} />);
+    fireEvent.click(screen.getByRole("button", { name: /settings\.about$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /factoryReset/ }));
+    fireEvent.change(document.getElementById("factory-reset-password")!, { target: { value: "hunter2" } });
+    fireEvent.change(document.getElementById("factory-reset-confirm")!, { target: { value: "RESET" } });
+    fireEvent.click(screen.getByRole("button", { name: "settings.reset" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("settings.connectionFailed");
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(document.getElementById("factory-reset-confirm")).toBeInTheDocument();
   });

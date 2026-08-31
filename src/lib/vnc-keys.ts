@@ -61,7 +61,7 @@ export function getTrackedVncKey(event: Pick<KeyboardEvent, "code" | "key">): Tr
     keysym = MODIFIER_KEYSYMS[event.key];
   } else if (event.key in SPECIAL_KEYSYMS) {
     keysym = SPECIAL_KEYSYMS[event.key];
-  } else if (event.key.length === 1) {
+  } else if (Array.from(event.key).length === 1) {
     const codepoint = event.key.codePointAt(0);
     if (codepoint !== undefined) {
       // X11 keysyms are identical to Latin-1 through U+00FF. Every other

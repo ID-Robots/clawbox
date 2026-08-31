@@ -41,6 +41,13 @@ export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: 
 
   const completed = phase === "ready";
   const phaseIndex = completed ? 1 : 0;
+  const setupUrl = `${targetUrl.replace(/\/+$/, "")}/setup`;
+  let prettyUrl = targetUrl;
+  try {
+    prettyUrl = new URL(targetUrl).host;
+  } catch {
+    /* keep raw */
+  }
 
   return (
     <ReconnectStage
@@ -58,6 +65,7 @@ export default function WifiHandoffOverlay({ ssid, targetUrl, graceMs = 4000 }: 
       // ClawBox-Setup hotspot, so the user must reconnect THIS device to it to
       // get back into the wizard (and see the error).
       secondaryInstruction={!completed ? t("wifi.handoffRecover", { ap: "ClawBox-Setup" }) : undefined}
+      action={completed ? undefined : { label: t("wifi.openUrl", { url: prettyUrl }), href: setupUrl }}
     />
   );
 }

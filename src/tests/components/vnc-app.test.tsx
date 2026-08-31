@@ -264,6 +264,13 @@ describe("VNCApp", () => {
     });
   });
 
+  it("maps one astral Unicode code point instead of rejecting its surrogate pair", () => {
+    expect(getTrackedVncKey({ key: "😀", code: "Unidentified" })).toEqual({
+      code: null,
+      keysym: 0x0101f600,
+    });
+  });
+
   it("re-focuses the VNC canvas after the window content stops suppressing pointer events", async () => {
     render(
       <div data-chrome-window-content="true">

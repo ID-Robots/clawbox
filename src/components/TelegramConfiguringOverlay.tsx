@@ -6,6 +6,8 @@ import { cachedEdition, resolveEdition } from "@/lib/client-harness";
 
 interface TelegramConfiguringOverlayProps {
   onDone: () => void;
+  /** Called when the configured harness never reports Telegram readiness. */
+  onTimeout: () => void;
   /**
    * Optional promise the overlay awaits before transitioning to the
    * final "ready" phase. When the caller knows the configure request is
@@ -17,7 +19,7 @@ interface TelegramConfiguringOverlayProps {
   waitFor?: Promise<void>;
   /**
    * Max ms to poll for readiness before giving up. When the poll times
-   * out, the overlay calls onDone() without transitioning to phase 4 so
+   * out, the overlay calls onTimeout() without transitioning to phase 4 so
    * the parent can surface its own error instead of falsely reporting
    * "ready". Default: 60_000.
    */
@@ -26,6 +28,7 @@ interface TelegramConfiguringOverlayProps {
 
 export default function TelegramConfiguringOverlay({
   onDone,
+  onTimeout,
   waitFor,
   healthTimeoutMs = 60_000,
 }: TelegramConfiguringOverlayProps) {
@@ -68,6 +71,14 @@ export default function TelegramConfiguringOverlay({
 
     const POLL_INTERVAL_MS = 2000;
     const maxAttempts = Math.ceil(healthTimeoutMs / POLL_INTERVAL_MS);
+    // Attach the rejection handler immediately. The visual choreography takes
+    // six seconds before readiness polling starts, while the configure POST
+    // can fail much earlier; leaving its promise bare until Promise.all below
+    // would emit an unhandled rejection in that gap.
+    const configureResult = (waitFor ?? Promise.resolve()).then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
 
     async function pollGatewayHealth(): Promise<boolean> {
       for (let i = 0; i < maxAttempts; i++) {
@@ -89,7 +100,7 @@ export default function TelegramConfiguringOverlay({
      *
      * /setup-api/gateway/health is meaningless here — the OpenClaw gateway is
      * not installed and its unit is masked, so polling it burned the whole
-     * healthTimeoutMs budget and then called onDone() having never reached the
+     * healthTimeoutMs budget and then timed out having never reached the
      * "ready to chat" phase. The owner saw a minute of spinner and no green
      * check on a save that had actually succeeded.
      *
@@ -149,15 +160,17 @@ export default function TelegramConfiguringOverlay({
       // Running them concurrently matches the phase-3 spinner the user already
       // sees — we don't want to add more delay, just make sure neither
       // completes prematurely.
-      const [ready] = await Promise.all([
+      const [ready, configured] = await Promise.all([
         hermes ? pollHermesTelegramReady() : pollGatewayHealth(),
-        waitFor ?? Promise.resolve(),
+        configureResult,
       ]);
       if (cancelledRef.current) return;
+      if (!configured.ok) throw configured.error;
       if (!ready) {
-        // Nothing reported itself listening within healthTimeoutMs — hand
-        // control back to the parent without pretending we finished.
-        onDone();
+        // Nothing reported itself listening within healthTimeoutMs. This is
+        // not completion: setup must stay on Telegram, and Settings must show
+        // an actionable failure instead of silently hiding the overlay.
+        onTimeout();
         return;
       }
 
@@ -167,14 +180,18 @@ export default function TelegramConfiguringOverlay({
       onDone();
     }
 
-    run();
+    void run().catch((err) => {
+      if (cancelledRef.current) return;
+      console.warn("[telegram] Readiness sequence failed:", err);
+      onTimeout();
+    });
 
     overlayRef.current?.focus();
     return () => {
       cancelledRef.current = true;
       timers.forEach((t) => clearTimeout(t));
     };
-  }, [onDone, waitFor, healthTimeoutMs]);
+  }, [onDone, onTimeout, waitFor, healthTimeoutMs]);
 
   useEffect(() => {
     const id = setInterval(() => setDots((d) => (d.length >= 3 ? "" : d + ".")), 500);

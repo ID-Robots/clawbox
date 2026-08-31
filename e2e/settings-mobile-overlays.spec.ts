@@ -24,8 +24,22 @@ test("mobile Settings renders account and password confirmation overlays", async
   await page.getByRole("button", { name: "Verify" }).click();
   await page.getByRole("textbox", { name: "New password", exact: true }).fill("new-password-123");
   await page.getByRole("textbox", { name: "Confirm new password", exact: true }).fill("new-password-123");
-  await page.getByRole("button", { name: "Update password" }).click();
+  const updatePassword = page.getByRole("button", { name: "Update password" });
+  await updatePassword.click();
 
-  await expect(page.getByRole("alertdialog")).toBeVisible();
-  await expect(page.getByRole("alertdialog")).toContainText("New password");
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("New password");
+
+  const reveal = dialog.getByRole("button", { name: "Reveal password" });
+  const confirm = dialog.getByRole("button", { name: "I’ve written it down — change" });
+  await expect(reveal).toBeFocused();
+  await reveal.press("Shift+Tab");
+  await expect(confirm).toBeFocused();
+  await confirm.press("Tab");
+  await expect(reveal).toBeFocused();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(updatePassword).toBeFocused();
 });

@@ -30,7 +30,7 @@ message actions are covered with mocks unless explicitly marked live.
 - Desktop shell: icons/grid, selection/drag/context menus, window lifecycle,
   launcher, shelf, tray/power, mascot, notifications, upload overlay, mobile.
 - Apps: Chat, Files, Terminal, Coding Agent, ClawKeep, Memory Shard, System
-  Update, Store/installed skills/webapps, Browser, Remote Desktop, OpenClaw,
+  Update, Store/installed skills/web apps, Browser, Remote Desktop, OpenClaw,
   Hermes Skills/dashboard.
 - Settings: Appearance, Providers, Local AI, Telegram, Email, WhatsApp,
   Discord, Voice, Network, Remote Control, System, About.
@@ -48,38 +48,55 @@ message actions are covered with mocks unless explicitly marked live.
 | QA-003 | P0 | Fixed | New-tab routes for Chat, ClawKeep, System Update, Setup, and Hermes were missing. |
 | QA-004 | P0 | Fixed | Mobile Settings returned before rendering ClawBox login and password-confirmation overlays. |
 | QA-005 | P0 | Fixed | Shelf clock was labelled “System Settings” but wired to a no-op. |
-| QA-006 | P1 | Open | Telegram readiness timeout calls success and can advance setup while messaging is unavailable. |
-| QA-007 | P1 | Open | Factory reset treats any fetch exception as accepted and then polls without a hard deadline. |
-| QA-008 | P1 | Open | Installed skill settings can show Saved after non-OK preference/config writes. |
-| QA-009 | P1 | Open | Wi-Fi handoff promises manual fallback but supplies no fallback action. |
+| QA-006 | P1 | Fixed | Telegram readiness timeout called success and could advance setup while messaging was unavailable. |
+| QA-007 | P1 | Fixed | Factory reset treated any fetch exception as accepted and then polled without a hard deadline. |
+| QA-008 | P1 | Fixed | Installed skill settings could show Saved after non-OK preference/config writes. |
+| QA-009 | P1 | Fixed | Wi-Fi handoff promised manual fallback but supplied no fallback action. |
 | QA-010 | P1 | Open | Settings Wi-Fi/hotspot radio switches lack the setup wizard’s reconnection recovery. |
-| QA-011 | P1 | Open | Tray power flow ignores request status and reconnect has no terminal timeout. |
-| QA-012 | P1 | Open | Hostname save does not verify the POST before entering reboot UI. |
-| QA-013 | P1 | Open | OpenAI OAuth popup opens after an awaited request and has no blocked-popup recovery link. |
-| QA-014 | P1 | Open | Store Installed view only filters loaded catalogue rows; unloaded installed apps disappear. |
-| QA-015 | P1 | Open | Custom wallpaper delete button is nested inside another button. |
+| QA-011 | P1 | Fixed | Tray power flow ignored request status and reconnect had no terminal timeout. |
+| QA-012 | P1 | Verified | Hostname save already checks the hostname POST on current beta; no defect remains. |
+| QA-013 | P1 | Fixed | OpenClaw redirect OAuth now reserves its tab synchronously and exposes the authorization URL as a recovery link; OpenAI itself already uses a user-click device-code page. |
+| QA-014 | P1 | Fixed | Store Installed view now resolves installed ids missing from the capped initial catalogue page through the per-app endpoint. |
+| QA-015 | P1 | Fixed | Custom wallpaper delete button was nested inside another button. |
 | QA-016 | P1 | Open | Files mutation/discard dialogs lack complete dialog semantics, focus containment, and Escape handling. |
 | QA-017 | P1 | Open | ClawKeep has no change-passphrase action after encryption is configured. |
-| QA-018 | P1 | Open | Remote Control/Browser can interpret unreadable status as not installed while also reporting a fetch error. |
+| QA-018 | P1 | Fixed | Remote Control/Browser now require an explicit readable `installed: false` before offering installation. |
 | QA-019 | P2 | Open | Standalone Settings appearance callbacks and Store/install/uninstall state are incomplete. |
 | QA-020 | P2 | Open | No mobile, Firefox/WebKit, accessibility, or broad visual-regression Playwright project exists. |
+| QA-021 | P1 | Fixed | Full-install “main → target” upgrade silently started on the target branch because systemd never received the Docker branch environment. |
+| QA-022 | P1 | Fixed | Chat popup placement retained a 400 px-width offset after the default grew to 520 px, so first-load alignment was wrong and CI sampled its entrance animation. |
+| QA-023 | P1 | Open | Chat popup drag coordinates are not viewport-clamped and can leave the window off-screen. |
+| QA-024 | P1 | Open | Chat silently discards the oldest queued turn once the 20-turn client queue fills. |
+| QA-025 | P1 | Open | Main-chat reset is destructive on one click while secondary-session deletion requires a confirming second click. |
+| QA-026 | P2 | Open | Launcher page index is not clamped when filtering, app count, or grid dimensions change, which can expose an empty invalid page. |
+| QA-027 | P2 | Open | Several Settings toggles expose neither switch semantics nor checked state to assistive technology. |
+| QA-028 | P1 | Open | Voice settings can remain on a permanent loading skeleton after the first status request fails. |
+| QA-029 | P1 | Open | Telegram approved users can be inspected but not revoked from Settings. |
+| QA-030 | P1 | Open | Email disconnect is immediate and failed approved-mail “lost drafts” have no retry/copy/requeue recovery. |
+| QA-031 | P1 | Open | Discord Settings exposes no disconnect/remove-token path. |
+| QA-032 | P1 | Open | Wi-Fi rescan can retain stale networks after a successful empty scan, and connect can be re-entered from Enter while its button is disabled. |
+| QA-033 | P1 | Open | Coding Agent GitHub device polling ignores non-OK responses and can remain indefinitely on Waiting. |
+| QA-034 | P1 | Open | Memory Shard treats an unreachable or malformed first response as permanent loading with no error/retry action. |
+| QA-035 | P1 | Open | VNC “Install / Repair & Reboot” is a single impactful action with no confirmation. |
+| QA-036 | P2 | Open | The System Update beta control and several Chat icon controls have incomplete accessible names. |
+| QA-037 | P1 | Open | Files rows require pointer double-click and mutation/discard dialogs are incomplete for keyboard-only users. |
 
 ## False-green tests to harden
 
-- Chat “streams a reply” does not assert the assistant reply.
-- Installed-app settings does not toggle enablement despite its title.
-- Main-to-beta precondition accepts any branch string.
+- Chat “streams a reply” did not assert the assistant reply. **Hardened.**
+- Installed-app settings did not toggle enablement despite its title. **Hardened.**
+- Main-to-beta precondition accepted any branch string. **Hardened.**
 - Power restart can ignore request failure and force-stop the test container.
 - Store live install can install nothing and skip all useful follow-ups.
-- Full-install desktop smoke claims Files/Terminal without opening them.
+- Full-install desktop smoke claimed Files/Terminal without opening them. **Hardened.**
 - Captive probes accept unrelated 404 responses.
-- Wrong-password login checks only that the URL stays on `/login`.
+- Wrong-password login checked only that the URL stayed on `/login`. **Hardened.**
 - ClawKeep schedule checks only a heading; the live ClawKeep suite is skipped.
 
 ## Next order
 
-1. Fix QA-006 through QA-012 with explicit failure-path tests.
-2. Harden false-green PR tests so their names match what they prove.
+1. Close the current CI/review loop, then add reconnection recovery for QA-010.
+2. Harden the remaining false-green power, Store, captive-probe, and ClawKeep tests.
 3. Add mocked Email/WhatsApp/Discord/Remote state-machine coverage.
-4. Add live spokes for Store, VNC input, System Update, webapps, and ClawKeep.
+4. Add live spokes for Store, VNC input, System Update, web apps, and ClawKeep.
 5. Add Hermes and mobile Playwright projects, then keyboard/a11y and browser matrix.

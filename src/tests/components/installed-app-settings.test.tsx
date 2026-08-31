@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
 import InstalledAppSettings from "@/components/InstalledAppSettings";
 import type { StoreApp } from "@/components/AppStore";
 
@@ -124,6 +124,35 @@ describe("installed app settings — Home Assistant form", () => {
     expect(screen.getByText("Long-Lived Access Token")).toBeInTheDocument();
     expect(screen.queryByRole("switch", { name: "Enable Webhooks" })).toBeNull();
     expect(screen.getByText("installed.haWebhookNote")).toBeInTheDocument();
+  });
+
+  it("shows a failure instead of Saved when a backend write is refused", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith("/setup-api/apps/skill-info")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => HEALTHY_SKILL } as Response);
+        }
+        if (url.startsWith("/setup-api/apps/store")) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({}) } as Response);
+        }
+        if (url === "/setup-api/preferences") {
+          return Promise.resolve({ ok: false, status: 500, json: async () => ({ error: "disk full" }) } as Response);
+        }
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ configWritten: true }) } as Response);
+      }),
+    );
+
+    renderWindow("home-assistant", storeApp({ id: "home-assistant", name: "Home Assistant" }));
+    fireEvent.change(await screen.findByPlaceholderText("http://homeassistant.local:8123"), {
+      target: { value: "http://ha.local:8123" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "installed.connect" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("installed.saveFailed");
+    expect(screen.queryByText("installed.saved")).not.toBeInTheDocument();
+    expect(screen.queryByText("installed.savedToConfig")).not.toBeInTheDocument();
   });
 });
 

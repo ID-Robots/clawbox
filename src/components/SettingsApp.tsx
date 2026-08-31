@@ -33,6 +33,7 @@ import { RESTART_STEP_ID } from "@/lib/update-constants";
 import { cleanVersion } from "@/lib/version-utils";
 import { BuildDriftBanner, BuildIdentityRows, useBuildIdentity } from "./BuildIdentityPanel";
 import { useReconnect } from "@/hooks/useReconnect";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import { DISCORD_INVITE_URL } from "@/lib/community";
 import { isGenerationLocale } from "@/lib/mascot-phrases";
 
@@ -981,20 +982,13 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [sysPasswordStatus, setSysPasswordStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [sysPasswordConfirmOpen, setSysPasswordConfirmOpen] = useState(false);
   const [sysPasswordConfirmReveal, setSysPasswordConfirmReveal] = useState(false);
-  const sysPasswordConfirmCancelRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (!sysPasswordConfirmOpen) return;
-    const previouslyFocused = typeof document !== "undefined" ? (document.activeElement as HTMLElement | null) : null;
-    sysPasswordConfirmCancelRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !sysPasswordSaving) setSysPasswordConfirmOpen(false);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      previouslyFocused?.focus?.();
-    };
-  }, [sysPasswordConfirmOpen, sysPasswordSaving]);
+  const closeSystemPasswordConfirm = useCallback(() => {
+    if (!sysPasswordSaving) setSysPasswordConfirmOpen(false);
+  }, [sysPasswordSaving]);
+  const systemPasswordConfirmPanelRef = useModalDialog<HTMLDivElement>({
+    open: sysPasswordConfirmOpen,
+    onClose: closeSystemPasswordConfirm,
+  });
   const verifyCurrentPassword = async () => {
     if (!sysCurrentPassword) return;
     setSysVerifying(true);
@@ -2548,6 +2542,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   const [resetDots, setResetDots] = useState(0);
   const resetPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const resetDotsRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resetReconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const factoryResetCancelRef = useRef<HTMLButtonElement | null>(null);
 
@@ -2601,9 +2596,11 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
         setResetError(detail.error || t("settings.factoryResetRefused"));
       }
     } catch {
-      // The box wipes and reboots mid-request, so a dropped connection is the
-      // normal success path, not a failure.
-      accepted = true;
+      // The reset route schedules reboot only after it has returned a success
+      // response. A fetch exception therefore gives us no evidence the wipe
+      // was accepted; treating it as success strands the UI in reconnect
+      // polling when the request never reached the device.
+      setResetError(t("settings.connectionFailed"));
     } finally {
       setResetSubmitting(false);
     }
@@ -2617,6 +2614,16 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
 
     // Animate dots
     resetDotsRef.current = setInterval(() => setResetDots(d => (d + 1) % 4), 500);
+    resetReconnectTimeoutRef.current = setTimeout(() => {
+      if (resetPollRef.current) clearInterval(resetPollRef.current);
+      if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+      resetPollRef.current = null;
+      resetDotsRef.current = null;
+      setResetting(false);
+      setResetPhase(null);
+      setResetError(t("settings.connectionFailed"));
+      setResetConfirm(true);
+    }, 5 * 60 * 1000);
 
     // Wait for device to go down, then poll for reconnect
     setTimeout(() => {
@@ -2627,6 +2634,8 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           if (res.ok) {
             if (resetPollRef.current) clearInterval(resetPollRef.current);
             if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+            if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
+            resetReconnectTimeoutRef.current = null;
             setResetPhase("done");
             setTimeout(() => { window.location.replace("/setup"); }, 1500);
           }
@@ -2640,6 +2649,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     return () => {
       if (resetPollRef.current) clearInterval(resetPollRef.current);
       if (resetDotsRef.current) clearInterval(resetDotsRef.current);
+      if (resetReconnectTimeoutRef.current) clearTimeout(resetReconnectTimeoutRef.current);
     };
   }, []);
 
@@ -2826,7 +2836,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
   // early-return layout from silently dropping password confirmation.
   const systemPasswordConfirmDialog = sysPasswordConfirmOpen && (
     <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-      <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+      <div ref={systemPasswordConfirmPanelRef} role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
         <div className="flex items-center gap-2 mb-3">
           <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
           <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">{t("settings.security.confirmTitle")}</h3>
@@ -2847,7 +2857,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
           </div>
         </div>
         <div className="flex gap-3">
-          <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
+          <button disabled={sysPasswordSaving} onClick={closeSystemPasswordConfirm} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
           <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
             {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.confirmChange")}
           </button>
@@ -2925,29 +2935,38 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                 {ui.customWallpapers.map((dataUrl, i) => {
                   const selected = ui.wallpaperId === `custom-${i}`;
                   return (
-                    <button
+                    <div
                       key={`custom-${i}`}
-                      onClick={() => ui.onWallpaperChange(`custom-${i}`)}
-                      className={`relative rounded-xl overflow-hidden aspect-video transition-all cursor-pointer border-none p-0 group ${
-                        selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
-                      }`}
+                      className="relative aspect-video group"
                     >
-                      <img src={dataUrl} alt={`Custom ${i + 1}`} className="w-full h-full object-cover" />
-                      {selected && (
-                        <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
-                          <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
-                        </span>
-                      )}
                       <button
-                        onClick={e => { e.stopPropagation(); ui.onCustomWallpaperDelete(i); }}
-                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
+                        type="button"
+                        aria-pressed={selected}
+                        aria-label={`Custom ${i + 1}`}
+                        onClick={() => ui.onWallpaperChange(`custom-${i}`)}
+                        className={`relative w-full h-full rounded-xl overflow-hidden transition-all cursor-pointer border-none p-0 ${
+                          selected ? "ring-2 ring-orange-400 ring-offset-2 ring-offset-[#0d1117] scale-[1.02]" : "hover:scale-[1.02]"
+                        }`}
+                      >
+                        <img src={dataUrl} alt="" className="w-full h-full object-cover" />
+                        {selected && (
+                          <span className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-orange-500 flex items-center justify-center shadow-lg">
+                            <span className="material-symbols-rounded text-white" style={{ fontSize: 14 }}>check</span>
+                          </span>
+                        )}
+                        <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
+                          selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
+                        }`}>Custom {i + 1}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => ui.onCustomWallpaperDelete(i)}
+                        aria-label={`Remove Custom ${i + 1}`}
+                        className="absolute top-1.5 left-1.5 w-5 h-5 bg-red-500/90 rounded-full text-white opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity flex items-center justify-center cursor-pointer border-none shadow-lg"
                       >
                         <span className="material-symbols-rounded" style={{ fontSize: 12 }}>close</span>
                       </button>
-                      <span className={`absolute bottom-0 inset-x-0 text-[10px] py-1.5 text-center font-medium backdrop-blur-md ${
-                        selected ? "bg-orange-500/70 text-white" : "bg-black/50 text-white/70"
-                      }`}>Custom {i + 1}</span>
-                    </button>
+                    </div>
                   );
                 })}
                 <button
@@ -3853,6 +3872,12 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
                     onDone={() => {
                       setTgConfiguring(false);
                       setTgConfigurePromise(undefined);
+                      refreshTelegramStatus();
+                    }}
+                    onTimeout={() => {
+                      setTgConfiguring(false);
+                      setTgConfigurePromise(undefined);
+                      setTgStatus({ type: "error", message: t("settings.connectionFailed") });
                       refreshTelegramStatus();
                     }}
                   />

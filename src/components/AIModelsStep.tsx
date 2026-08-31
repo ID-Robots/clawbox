@@ -707,6 +707,7 @@ export default function AIModelsStep({
   }, []);
   // OAuth redirect flow state (Anthropic)
   const [oauthStarted, setOauthStarted] = useState(false);
+  const [oauthUrl, setOauthUrl] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState("");
   const [exchanging, setExchanging] = useState(false);
 
@@ -998,6 +999,8 @@ export default function AIModelsStep({
 
   const syncProviderSelection = useCallback((providerId: string) => {
     stopPolling();
+    oauthStartControllerRef.current?.abort();
+    tryCloseOAuthWindow(oauthWindowRef);
     setSelectedProvider(providerId);
     setAuthMode(getAvailableAuthOptionsForProvider(providerId)[0]?.mode ?? "token");
     setModelTouched(false);
@@ -1005,6 +1008,7 @@ export default function AIModelsStep({
     setShowKey(false);
     setStatus(null);
     setOauthStarted(false);
+    setOauthUrl(null);
     setAuthCode("");
     setDeviceCode(null);
     setDeviceUrl(null);
@@ -1524,13 +1528,33 @@ export default function AIModelsStep({
 
   // --- Redirect OAuth flow (Anthropic) ---
 
+  /**
+   * Start redirect OAuth without losing the click's browser user activation.
+   *
+   * The authorization URL comes from an awaited device request. Opening it
+   * only after that await lets popup blockers reject a legitimate sign-in, so
+   * reserve a blank tab synchronously and navigate it when the URL arrives.
+   * The rendered URL remains a direct recovery path when even that reservation
+   * is blocked (or an embedded browser refuses scripted windows entirely).
+   */
   const startOAuth = async () => {
     oauthStartControllerRef.current?.abort();
     const controller = new AbortController();
     oauthStartControllerRef.current = controller;
 
+    tryCloseOAuthWindow(oauthWindowRef);
+    let preparedWindow: Window | null = null;
+    try {
+      preparedWindow = window.open("about:blank", "_blank");
+      if (preparedWindow) oauthWindowRef.current = preparedWindow;
+    } catch {
+      // Embedded browsers may reject window.open itself. The direct link shown
+      // after the request is the recovery path, so the request still proceeds.
+    }
+
     setStatus(null);
     setOauthStarted(false);
+    setOauthUrl(null);
     setAuthCode("");
     try {
       const res = await fetch("/setup-api/ai-models/oauth/start", {
@@ -1539,15 +1563,38 @@ export default function AIModelsStep({
         body: JSON.stringify({ provider: selectedProvider }),
         signal: controller.signal,
       });
-      if (controller.signal.aborted) return;
-      if (!res.ok) return showError(await extractError(res, "Failed to start OAuth"));
+      if (controller.signal.aborted) {
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        return;
+      }
+      if (!res.ok) {
+        const message = await extractError(res, "Failed to start OAuth");
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        return showError(message);
+      }
       const data = await res.json();
-      if (controller.signal.aborted) return;
-      if (data.url) {
-        oauthWindowRef.current = window.open(data.url, "_blank");
+      if (controller.signal.aborted) {
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        return;
+      }
+      const authorizationUrl = typeof data.url === "string" && data.url ? data.url : null;
+      if (authorizationUrl) {
+        setOauthUrl(authorizationUrl);
+        if (preparedWindow && !preparedWindow.closed) {
+          try {
+            preparedWindow.location.replace(authorizationUrl);
+          } catch {
+            // The direct link below remains usable if the reserved tab was
+            // closed or its WindowProxy cannot be navigated.
+          }
+        }
         setOauthStarted(true);
+      } else {
+        if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
+        showError("Unexpected response from OAuth");
       }
     } catch (err) {
+      if (oauthWindowRef.current === preparedWindow) tryCloseOAuthWindow(oauthWindowRef);
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
@@ -1864,6 +1911,16 @@ export default function AIModelsStep({
         </button>
       ) : (
         <div>
+          {oauthUrl && (
+            <a
+              href={oauthUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`mb-3 inline-flex ${QUIET_LINK_CLASS}`}
+            >
+              {t("ai.openAuthPage")}
+            </a>
+          )}
           {/* A numbered list, not three lines separated by <br>: the steps
               are an ordered list, so a screen reader should be told how
               many there are and which one it is on. */}
@@ -2177,12 +2234,15 @@ export default function AIModelsStep({
                     key={opt.mode}
                     onClick={() => {
                       stopPolling();
+                      oauthStartControllerRef.current?.abort();
+                      tryCloseOAuthWindow(oauthWindowRef);
                       setAuthMode(opt.mode);
                       setModelTouched(false);
                       setApiKey("");
                       setShowKey(false);
                       setStatus(null);
                       setOauthStarted(false);
+                      setOauthUrl(null);
                       setAuthCode("");
                       setDeviceCode(null);
                       setDeviceUrl(null);
