@@ -927,7 +927,7 @@ function existingChannelBlock(
   return isPlainObject(existing) ? existing : {};
 }
 
-async function writeConfig(config: OpenClawConfig): Promise<void> {
+export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");

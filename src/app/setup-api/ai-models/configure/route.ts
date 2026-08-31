@@ -16,6 +16,8 @@ import {
   compactionReserveFloorForContext,
   inferConfiguredLocalModel,
   readConfig as readOpenClawConfig,
+  writeConfig as writeOpenClawConfig,
+  spawnOpenclawCli,
   readConfigStrict as readOpenClawConfigStrict,
   applyModelOverrideToAllAgentSessions,
   parseFullyQualifiedModel,
@@ -1950,7 +1952,65 @@ export async function POST(request: Request) {
     // validation outright. Browsers authenticate with the gateway token plus
     // a device identity now (src/lib/gateway-device-identity.ts), so there
     // is nothing to write here any more.
-    await runConfigSetBatch(baseOps);
+    // ClawBox AI rides the deepseek provider, which OpenClaw 2 unbundled
+    // into its own plugin — without it the catalog resolves zero models and
+    // the primary write below is refused even with a VALID token (the fresh
+    // e2e container reproduced exactly that). gateway-pre-start heals this on
+    // boot, but only once a deepseek provider already exists in the config —
+    // which is what THIS route is in the middle of creating — so the first
+    // configure has to bring the plugin itself. Best effort: a failed
+    // install falls through to the direct primary write below and the
+    // gateway's own readiness report names the missing plugin loudly.
+    if (isClawAI) {
+      try {
+        await fs.access(path.join(OPENCLAW_HOME_DIR, "extensions", "deepseek", "openclaw.plugin.json"));
+      } catch {
+        try {
+          console.log("[AI Config] Installing @openclaw/deepseek-provider (OpenClaw 2 unbundled it)...");
+          await spawnOpenclawCli(["plugins", "install", "clawhub:@openclaw/deepseek-provider", "--accept-capabilities"]);
+        } catch (pluginErr) {
+          console.warn(
+            "[AI Config] deepseek provider plugin install did not complete:",
+            pluginErr instanceof Error ? logSafe(pluginErr.message) : pluginErr,
+          );
+        }
+      }
+    }
+
+    try {
+      await runConfigSetBatch(baseOps);
+    } catch (batchErr) {
+      const message = batchErr instanceof Error ? batchErr.message : String(batchErr);
+      const primaryIdx = baseOps.findIndex((op) => op[0] === "agents.defaults.model.primary");
+      // Only the OpenClaw 2 catalog-validation refusal of the primary falls
+      // through — anything else keeps its existing failure path. v2 checks a
+      // model reference against a freshly refreshed provider catalog, so a
+      // placeholder key (the wizard's documented "save the profile without
+      // validating the key" contract) or a provider plugin on its first boot
+      // resolves ZERO models and the whole batch was refused with it.
+      if (primaryIdx === -1 || !/Cannot set model reference/i.test(message)) {
+        throw batchErr;
+      }
+      const remaining = baseOps.filter((_, index) => index !== primaryIdx);
+      if (remaining.length > 0) {
+        await runConfigSetBatch(remaining);
+      }
+      // Direct atomic write for the primary alone, the same way this route
+      // already writes provider entries the CLI's schema lags behind. The
+      // gateway tolerates an unresolvable primary at rest; the model is
+      // proven the first time it speaks, exactly as before OpenClaw 2.
+      const primaryModel = String(baseOps[primaryIdx][1]);
+      const parsed = ((await readOpenClawConfig()) ?? {}) as OpenClawConfig;
+      const agents = (parsed.agents ??= {});
+      const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
+      const model = (defaults.model ??= {}) as Record<string, unknown>;
+      model.primary = primaryModel;
+      await writeOpenClawConfig(parsed);
+      console.warn(
+        "[AI Config] Primary written directly — the CLI refused the reference (empty catalog for this key/plugin):",
+        logSafe(message),
+      );
+    }
 
     // 5. Ensure openclaw config files are owned by clawbox
     await Promise.all(

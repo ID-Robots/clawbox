@@ -88,6 +88,8 @@ vi.mock("@/lib/openclaw-config", () => ({
   readConfigStrict: vi.fn(),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
+  spawnOpenclawCli: vi.fn().mockResolvedValue(""),
+  writeConfig: vi.fn().mockResolvedValue(undefined),
   runOpenclawConfigSetBatch: vi.fn(),
   runOpenclawConfigUnset: vi.fn(),
   // Added by PR #83 — the configure route sweeps agent sessions so the
@@ -140,7 +142,9 @@ vi.mock("@/lib/local-ai-token", () => ({
 
 import { getAll, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
-import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel } from "@/lib/openclaw-config";
+import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
+  writeConfig,
+} from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
@@ -1703,6 +1707,38 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(res.status).toBe(200);
       expect(invocationCount()).toBeLessThanOrEqual(2);
+    });
+
+    it("saves the primary directly when OpenClaw 2's catalog refuses the reference", async () => {
+      // v2 validates agents.defaults.model.primary against a live catalog
+      // refresh; a placeholder key resolves zero models and refuses the whole
+      // batch. The route must retry the batch without the primary and write
+      // the primary itself, keeping the save-without-validating contract.
+      vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
+        new Error(
+          'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
+        ),
+      );
+      vi.mocked(readConfig).mockResolvedValueOnce({});
+
+      const res = await configurePost(jsonRequest({
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+      }));
+
+      expect(res.status).toBe(200);
+      const batches = vi.mocked(runOpenclawConfigSetBatch).mock.calls;
+      // The refused batch and its retry lead; the flow may batch again later.
+      expect(batches.length).toBeGreaterThanOrEqual(2);
+      const firstOps = batches[0][0] as Array<[string, string]>;
+      const primaryOp = firstOps.find(([p]) => p === "agents.defaults.model.primary");
+      expect(primaryOp).toBeDefined();
+      const retryPaths = (batches[1][0] as Array<[string, string]>).map(([p]) => p);
+      expect(retryPaths).not.toContain("agents.defaults.model.primary");
+      const written = vi.mocked(writeConfig).mock.calls.at(-1)?.[0] as {
+        agents?: { defaults?: { model?: { primary?: string } } };
+      };
+      expect(written?.agents?.defaults?.model?.primary).toBe(primaryOp?.[1]);
     });
 
     it("still writes every key the old sequence wrote", async () => {
