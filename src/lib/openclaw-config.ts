@@ -971,6 +971,11 @@ function sameFileIdentity(left: FileStat, right: FileStat): boolean {
   return BigInt(left.dev) === BigInt(right.dev) && BigInt(left.ino) === BigInt(right.ino);
 }
 
+/** Normalize Stats/BigIntStats' millisecond timestamp overload to a number. */
+function fileMtimeMs(stat: FileStat): number {
+  return Number(stat.mtimeMs);
+}
+
 /** Read Linux's process-start identity, which disambiguates a reused PID. */
 async function processStarttime(pid: number): Promise<number | null> {
   if (process.platform !== "linux" || !Number.isInteger(pid) || pid <= 0) return null;
@@ -1066,7 +1071,7 @@ async function lockIsStale(snapshot: LockSnapshot): Promise<boolean> {
   // A crash can leave the exclusively-created sidecar empty, before its owner
   // payload is written. Missing/malformed owner data ages by the file itself;
   // otherwise that zero-byte lock can never be reclaimed.
-  const ownerTimestamp = Number.isFinite(createdAt) ? createdAt : snapshot.stat.mtimeMs;
+  const ownerTimestamp = Number.isFinite(createdAt) ? createdAt : fileMtimeMs(snapshot.stat);
   return Number.isFinite(ownerTimestamp) && Date.now() - ownerTimestamp > OPENCLAW_CONFIG_LOCK_STALE_MS;
 }
 
@@ -1089,7 +1094,8 @@ async function inspectReclaimGuard(guardPath: string): Promise<ReclaimGuardState
     handle = await fs.open(guardPath, fsSync.constants.O_RDONLY | noFollow | nonBlock | directory);
     const opened = await handle.stat() as FileStat;
     if (!opened.isDirectory()) return "active";
-    if (!Number.isFinite(opened.mtimeMs) || Date.now() - opened.mtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
+    const guardMtimeMs = fileMtimeMs(opened);
+    if (!Number.isFinite(guardMtimeMs) || Date.now() - guardMtimeMs <= OPENCLAW_CONFIG_LOCK_STALE_MS) {
       return "active";
     }
     const quarantinePath = `${guardPath}.quarantine-${randomUUID()}`;
