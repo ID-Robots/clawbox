@@ -172,13 +172,14 @@ const FAILURES: Array<{
 const UNKNOWN_FAILURE = { code: "failed" as const, status: 502, retryable: true, message: () => "Install failed. Please try again." };
 
 /**
- * Request-derived text on its way into a log line: one line, bounded, and
- * never handed to console.* as a format string (CodeQL js/log-injection,
- * js/tainted-format-string — the ref is validated upstream, but the sink
- * carries its own guard).
+ * Request-derived text on its way into a log line: JSON-quoted so every
+ * newline and control character is escaped (the one sanitizer CodeQL models
+ * for js/log-injection), bounded so a CLI dump cannot flood the journal, and
+ * never handed to console.* as a format string (js/tainted-format-string).
+ * The ref is validated upstream; the sink carries its own guard.
  */
 function logSafe(value: string): string {
-  return value.replace(/[^\x20-\x7E]+/g, " ").slice(0, 200);
+  return JSON.stringify(value.slice(0, 200));
 }
 
 function classifyInstallError(rawMsg: string, killed: boolean) {
