@@ -1052,6 +1052,16 @@ export async function ensureCompactionReserveFloor(
   reserveTokensFloor = DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR
 ): Promise<void> {
   const config = await readConfig();
+  // OpenClaw 2 replaced the reserve-tuning keys with compaction.mode and
+  // fails config validation on reserveTokensFloor — writing it here would
+  // brick the next gateway load. The mode key is the generation marker the
+  // loader migration leaves behind; a config carrying it never gets the
+  // legacy write. (A fresh v2 box without it is covered by the writers all
+  // being gone: install.sh, the configure route and the reset seed are
+  // version-gated, so this repair is the last legacy writer standing.)
+  const compactionProbe = (config as { agents?: { defaults?: { compaction?: { mode?: unknown } } } })
+    .agents?.defaults?.compaction;
+  if (compactionProbe && typeof compactionProbe.mode === "string") return;
   const agents = ensurePlainObject(asBag(config), "agents");
   const defaults = ensurePlainObject(agents, "defaults");
   const compaction = ensurePlainObject(defaults, "compaction");

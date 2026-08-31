@@ -20,7 +20,7 @@ import {
   onCodingAgentChanged,
   onStandaloneAppPage,
 } from "@/lib/ui-events";
-import NewAppWizardCard, { NEW_APP_NAME_MAX } from "./NewAppWizardCard";
+import NewAppWizardCard, { DEFAULT_MAX_TASK_CHARS, NEW_APP_NAME_MAX } from "./NewAppWizardCard";
 import { copyToClipboard } from "@/lib/clipboard";
 import type { AgentStatus, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 
@@ -824,7 +824,7 @@ export default function CodingAgentApp() {
           {showNew && (
             <NewAppWizardCard
               className="mt-2"
-              maxTaskChars={status?.maxTaskChars ?? 4_000}
+              maxTaskChars={status?.maxTaskChars ?? DEFAULT_MAX_TASK_CHARS}
               onClose={closeNew}
               onHanded={onHanded}
             />

@@ -443,6 +443,12 @@ OPENCLAW_VERSION="2026.8.1"
 # answers when it can — it is the process that parses whatever we write — and
 # the pinned target only fills in before the first install. Used to route the
 # steps that speak different config dialects per generation.
+# The generation rule itself, callable with any version string, so the
+# installed-binary probe below and the freshly-pinned TARGET gate in
+# step_openclaw_install cannot drift apart.
+openclaw_version_is_v2() {
+  [ -n "$1" ] && [ "$(printf '%s\n' 2026.8 "$1" | sort -V | head -1)" = "2026.8" ]
+}
 openclaw_is_v2() {
   local v=""
   if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
@@ -452,7 +458,7 @@ openclaw_is_v2() {
     v=$(head -1 "$PROJECT_DIR/config/openclaw-target.txt" | awk '{print $1}')
   fi
   [ -z "$v" ] && v="$OPENCLAW_VERSION"
-  [ "$(printf '%s\n' 2026.8 "$v" | sort -V | head -1)" = "2026.8" ]
+  openclaw_version_is_v2 "$v"
 }
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -2228,13 +2234,19 @@ step_openclaw_install() {
   # purpose — a doctor refusal leaves evidence in the gateway's own logs and
   # the gateway start below will say so loudly — and non-interactive so an
   # unattended update never parks on a prompt.
-  if [ "$(printf '%s\n' 2026.8 "$TARGET" | sort -V | head -1)" = "2026.8" ]; then
+  if openclaw_version_is_v2 "$TARGET"; then
     echo "  Running openclaw doctor --fix (OpenClaw 2 config + session migrations)..."
     # The sessions-to-SQLite move must not race a still-running v1 gateway
     # writing the very files being migrated; gateway_setup restarts it later.
     systemctl stop clawbox-gateway.service 2>/dev/null || true
     as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
       || echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+    # The stop above was for doctor's benefit. A FULL install restarts the
+    # gateway later (gateway_setup), but this step is also on the standalone
+    # run-step allow-list, where nothing follows — leaving it down would turn
+    # a UI-triggered core update into an outage. Best effort: a box where the
+    # unit does not exist yet (first install) has nothing to start.
+    systemctl start clawbox-gateway.service 2>/dev/null || true
   fi
 
   # Force-reinstall every externally-installed plugin so they're bumped
@@ -2508,8 +2520,14 @@ step_openclaw_config() {
   else
     echo "  Default model already set ($CURRENT_PRIMARY) — preserving"
   fi
-  oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
-  echo "  Compaction reserve floor set"
+  if openclaw_is_v2; then
+    # Gen 2 replaced the reserve-tuning keys with compaction.mode and fails
+    # validation on the old one; its own safeguard default needs no seeding.
+    echo "  Compaction reserve floor: managed by OpenClaw 2 (compaction.mode)"
+  else
+    oc_config_set agents.defaults.compaction.reserveTokensFloor 24000
+    echo "  Compaction reserve floor set"
+  fi
 
   if [ -z "$CLAWBOX_AI_KEY" ] && [ -f "$CLAWBOX_AI_ENV" ]; then
     CLAWBOX_AI_KEY=$(grep '^CLAWBOX_AI_API_KEY=' "$CLAWBOX_AI_ENV" 2>/dev/null | tail -1 | cut -d= -f2- || true)

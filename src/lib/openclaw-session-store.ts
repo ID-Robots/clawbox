@@ -81,7 +81,16 @@ export function readTranscriptRaw(
 ): { raw: string; identity: string } | null {
   const dbPath = sessionStorePath(agentId, agentsDir);
   if (!dbPath) return null;
-  const db = open(dbPath, true);
+  // open() sits INSIDE the guarded region: a corrupt header or permission
+  // error must resolve to null (the legacy-file fallback), not escape as a
+  // 500 from a chat-history read.
+  let db: DatabaseSyncType;
+  try {
+    db = open(dbPath, true);
+  } catch (err) {
+    console.warn(`[session-store] could not open ${dbPath}:`, err);
+    return null;
+  }
   try {
     const node = db
       .prepare("SELECT current_session_id AS sid, updated_at AS updatedAt FROM session_nodes WHERE session_key = ?")
@@ -101,7 +110,9 @@ export function readTranscriptRaw(
       if (typeof row.seq === "number" && row.seq > lastSeq) lastSeq = row.seq;
       if (typeof row.line !== "string" || !row.line) continue;
       lines.push(row.line);
-      bytes += row.line.length + 1;
+      // A byte budget, counted in bytes: .length is UTF-16 units and a CJK
+      // transcript would blow past maxBytes threefold on this hardware.
+      bytes += Buffer.byteLength(row.line, "utf8") + 1;
       if (bytes > maxBytes) break;
     }
     lines.reverse();
@@ -152,7 +163,13 @@ export function sweepSessionEntries(
 ): SessionEntrySweepResult | null {
   const dbPath = sessionStorePath(agentId, agentsDir);
   if (!dbPath) return null;
-  const db = open(dbPath, false);
+  let db: DatabaseSyncType;
+  try {
+    db = open(dbPath, false);
+  } catch (err) {
+    console.error(`[session-store] could not open ${dbPath} for sweep:`, err);
+    return { updated: 0, ok: false };
+  }
   try {
     db.exec("BEGIN IMMEDIATE");
     let updated = 0;

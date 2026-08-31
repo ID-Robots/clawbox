@@ -20,6 +20,14 @@ import { isLocalProviderId, LOCAL_TTS_PROVIDER_ID } from "@/lib/voice-output";
 const INSTALLER = new URL("../../../install.sh", import.meta.url);
 
 describe("the voice selector agrees with the installer", () => {
+  it("resolves the home per OpenClaw generation — messages.tts, or tts on gen 2", async () => {
+    const script = await fs.readFile(INSTALLER, "utf8");
+    // Without these two pins the $TTS_HOME assertions below would pass for
+    // ANY value a future edit put in the variable.
+    expect(script).toContain('TTS_HOME="messages.tts"');
+    expect(script).toContain('openclaw_is_v2 && TTS_HOME="tts"');
+  });
+
   it("writes the provider id install.sh selects", async () => {
     const script = await fs.readFile(INSTALLER, "utf8");
     expect(script).toContain(`oc_config_set "$TTS_HOME.provider" "${LOCAL_TTS_PROVIDER_ID}"`);

@@ -457,7 +457,10 @@ describe("POST /setup-api/ai-models/configure", () => {
     // the agent's system prompt + tools, so every turn overflows before the
     // model runs.
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
-    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 8192");
+    // OpenClaw 2 retired the reserve-tuning keys (compaction.mode owns this
+    // now); the route must not write one for ANY provider, small-window
+    // local models included.
+    expect(commands.some((c) => c.includes("reserveTokensFloor"))).toBe(false);
   });
 
   it("honours the model FIELD for Ollama when the apiKey slot is empty", async () => {
@@ -523,7 +526,6 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
     expect(commands).toContain("config set agents.defaults.model.primary llamacpp/gemma4-e2b-it-q4_0");
-    expect(commands).toContain("config set agents.defaults.compaction.reserveTokensFloor 24000");
     expect(commands).toContain("config set gateway.auth.mode token");
     // Token must be a per-device 32-byte random hex from
     // getOrGenerateGatewayToken — never the legacy literal "clawbox"
@@ -1714,7 +1716,6 @@ describe("POST /setup-api/ai-models/configure", () => {
       for (const expected of [
         "auth.profiles.deepseek:default",
         "agents.defaults.model.primary",
-        "agents.defaults.compaction.reserveTokensFloor",
         "gateway.auth.mode",
         "gateway.auth.token",
         "models.providers.deepseek",

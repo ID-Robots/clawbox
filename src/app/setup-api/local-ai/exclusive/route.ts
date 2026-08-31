@@ -203,9 +203,10 @@ async function patchAllSessionOverrides(
  * Sessions that have appeared since the backup was taken are left alone
  * (no backup entry → nothing to restore → user's current state wins).
  */
-async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
+async function restoreSessionOverrides(backup: FilesBackup): Promise<boolean> {
+  let allOk = true;
   const restoreIntoStore = (agentId: string, sessions: SessionsFileBackup) => {
-    sweepSessionEntries(agentId, (sessionKey, session) => {
+    const swept = sweepSessionEntries(agentId, (sessionKey, session) => {
       const snapshot = sessions[sessionKey];
       if (!snapshot) return false;
       for (const field of SESSION_OVERRIDE_FIELDS) {
@@ -217,6 +218,10 @@ async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
       }
       return true;
     }, AGENTS_DIR);
+    if (!swept?.ok) {
+      allOk = false;
+      console.error(`[local-only] SQLite restore did not complete for agent ${agentId}`);
+    }
   };
   for (const [file, sessions] of Object.entries(backup)) {
     if (file.startsWith("sqlite:")) {
@@ -255,6 +260,7 @@ async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
       console.error(`[local-only] Failed to write restored sessions file ${file}:`, err);
     }
   }
+  return allOk;
 }
 
 // Local-only mode is built entirely out of OpenClaw CLI calls: it flips
@@ -355,14 +361,19 @@ export async function POST(request: Request) {
       if (Array.isArray(savedFallbacks) && savedFallbacks.length > 0) {
         await setConfig("agents.defaults.model.fallbacks", JSON.stringify(savedFallbacks));
       }
+      let restoreOk = true;
       if (savedSessionOverrides) {
-        await restoreSessionOverrides(savedSessionOverrides);
+        restoreOk = await restoreSessionOverrides(savedSessionOverrides);
       }
 
       await setMany({
         [SAVED_PRIMARY_KEY]: undefined,
         [SAVED_FALLBACKS_KEY]: undefined,
-        [SAVED_SESSION_OVERRIDES_KEY]: undefined,
+        // The snapshot is the ONLY copy of the pre-Local-only overrides. A
+        // restore that could not complete (contended or corrupt store) keeps
+        // it, so the next toggle-off can finish the job instead of stranding
+        // every session on the local model for ever.
+        [SAVED_SESSION_OVERRIDES_KEY]: restoreOk ? undefined : savedSessionOverrides,
         [MODE_KEY]: undefined,
       });
     }

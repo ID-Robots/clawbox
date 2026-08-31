@@ -311,6 +311,22 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // controlUi.allowedOrigins check passes — the allowlist uses port-less
 // entries and a port-suffixed origin would be rejected. Host is rewritten
 // to 127.0.0.1:<port> since upstream does need the port for Host routing.
+// Forwarded-client headers are DROPPED, not piped through: a request that
+// arrives via the Cloudflare tunnel carries the CF forwarded-client set
+// (X-Forwarded-For, CF-Connecting-IP, ...), and OpenClaw 2 refuses an
+// upgrade that presents proxy attribution from a proxy it has not been
+// told to trust - 403 "Proxy client attribution is required. Configure
+// gateway.trustedProxies narrowly and make the proxy overwrite or safely
+// rebuild forwarded client headers." (reproduced over a live quick tunnel
+// on 2026.8.1; this strip is that overwrite). Every proxied upgrade then
+// looks like the clean loopback client it is - exactly what LAN requests
+// already look like - which also keeps the gateway loopback device-pairing
+// auto-approval working for tunnel browsers.
+const FORWARDED_CLIENT_HEADERS = new Set([
+  "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port",
+  "x-real-ip", "forwarded", "true-client-ip", "cdn-loop",
+  "cf-connecting-ip", "cf-connecting-ipv6", "cf-ipcountry", "cf-visitor", "cf-ray", "cf-warp-tag-id",
+]);
 function attachUpgradeProxy(server) {
   server.on("upgrade", (req, socket, head) => {
     const { targetPort, url, requireAuth } = resolveUpgradeTarget(req.url);
@@ -324,6 +340,7 @@ function attachUpgradeProxy(server) {
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
         const lc = name.toLowerCase();
+        if (FORWARDED_CLIENT_HEADERS.has(lc)) continue;
         const value =
           lc === "origin" ? originHeader :
           lc === "host" ? hostHeader :

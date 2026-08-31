@@ -800,19 +800,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [showNewApp, setShowNewApp] = useState(false)
   const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
   const toggleNewApp = useCallback(() => {
-    setShowNewApp(open => {
-      if (!open && newAppMaxChars === null) {
-        void fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
-          .then(res => res.ok ? res.json() as Promise<{ maxTaskChars?: unknown }> : null)
-          .then(data => {
-            const n = data?.maxTaskChars
-            if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
-          })
-          .catch(() => { /* the card keeps the default ceiling */ })
-      }
-      return !open
-    })
-  }, [newAppMaxChars])
+    // The fetch sits BESIDE the setter, not inside the updater: React may run
+    // an updater more than once per call, and one click must cost one request.
+    if (!showNewApp && newAppMaxChars === null) {
+      void fetch('/setup-api/coding-agent/status', { cache: 'no-store' })
+        .then(res => res.ok ? res.json() as Promise<{ maxTaskChars?: unknown }> : null)
+        .then(data => {
+          const n = data?.maxTaskChars
+          if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
+        })
+        .catch(() => { /* the card keeps the default ceiling */ })
+    }
+    setShowNewApp(open => !open)
+  }, [showNewApp, newAppMaxChars])
 
   // ── Drag + resize state ──
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -1185,6 +1185,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // its running one. Restored when the tab is shown again, so text typed for
   // one conversation is never sent into another.
   const tabStashRef = useRef<Map<string, { input: string; queuedSends: { id: string; text: string; attachments: ChatAttachment[] }[]; attachments: ChatAttachment[] }>>(new Map())
+  // Closing a tab DELETES its gateway session — irreversible, so the ✕ arms
+  // on the first tap and only a second tap within the window closes. Same
+  // two-tap pattern as the Coding Agent's Clear (a browser confirm() has no
+  // reliable focus story on the phones this ships to).
+  const [armedCloseKey, setArmedCloseKey] = useState<string | null>(null)
+  const armedCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const armCloseTab = useCallback((key: string) => {
+    if (armedCloseTimerRef.current) clearTimeout(armedCloseTimerRef.current)
+    armedCloseTimerRef.current = setTimeout(() => {
+      armedCloseTimerRef.current = null
+      setArmedCloseKey(null)
+    }, 3500)
+    setArmedCloseKey(key)
+  }, [])
+  useEffect(() => () => { if (armedCloseTimerRef.current) clearTimeout(armedCloseTimerRef.current) }, [])
   // A run that died in a background tab leaves NOTHING in the transcript to
   // explain itself — the error line is client-side only. It is kept here when
   // the terminal event goes by and handed over when the tab is next shown.
@@ -4083,42 +4098,43 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 const unread = !!tab.key && !active && unreadKeys.has(tab.key)
                 const switchable = status === 'connected' && !active && !!tab.key
                 const select = () => { if (switchable) void switchSession(tab.key) }
+                const armed = !tab.main && armedCloseKey === tab.key
                 return (
-                  <div
-                    key={tab.main ? 'main' : tab.key}
-                    role="tab"
-                    tabIndex={0}
-                    aria-selected={active}
-                    data-testid="chat-tab"
-                    data-session-key={tab.key}
-                    title={tab.label}
-                    onPointerDown={stopHeaderDrag}
-                    onClick={select}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 6,
-                      padding: '4px 8px', borderRadius: 8, maxWidth: 150, flexShrink: 0,
-                      background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
-                      color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
-                      cursor: switchable ? 'pointer' : 'default',
-                      fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
-                      userSelect: 'none', transition: 'background 0.15s, color 0.15s',
-                    }}
-                    onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
-                    onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
-                  >
-                    {busy && (
-                      <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
-                    )}
-                    {!busy && unread && (
-                      <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
-                    )}
-                    <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{tab.label}</span>
-                    {/* Main cannot be closed — its ✕ starts a FRESH main
-                        conversation instead (the /new the owner asked for),
-                        and only shows itself on hover so the resting header
-                        stays a title. Rendered only while main is the bound
-                        session: startNewSession resets whatever is bound. */}
+                  /* The wrapper groups the tab with its own control BESIDE it —
+                     a button nested inside role="tab" is one opaque element to
+                     assistive tech, and 16px inside a padded row was below the
+                     24px minimum target. */
+                  <div key={tab.main ? 'main' : tab.key} style={{ display: 'flex', alignItems: 'center', flexShrink: 0 }}>
+                    <div
+                      role="tab"
+                      tabIndex={0}
+                      aria-selected={active}
+                      data-testid="chat-tab"
+                      data-session-key={tab.key}
+                      title={tab.label}
+                      onPointerDown={stopHeaderDrag}
+                      onClick={select}
+                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select() } }}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        padding: '4px 8px', borderRadius: 8, maxWidth: 150, minHeight: 24,
+                        background: active && tabs.length > 0 ? 'rgba(255,255,255,0.08)' : 'transparent',
+                        color: active ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.5)',
+                        cursor: switchable ? 'pointer' : 'default',
+                        fontSize: 12, fontWeight: 600, letterSpacing: 0.2,
+                        userSelect: 'none', transition: 'background 0.15s, color 0.15s',
+                      }}
+                      onMouseEnter={(e) => { if (switchable) { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.color = 'rgba(255,255,255,0.8)' } }}
+                      onMouseLeave={(e) => { if (!active) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.5)' } }}
+                    >
+                      {busy && (
+                        <span data-testid="chat-tab-busy" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#f97316', flexShrink: 0, animation: 'clawHeaderPulse 1.2s ease-in-out infinite' }} />
+                      )}
+                      {!busy && unread && (
+                        <span data-testid="chat-tab-unread" aria-hidden="true" style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', flexShrink: 0 }} />
+                      )}
+                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{tab.label}</span>
+                    </div>
                     {tab.main && active && (
                       <button
                         onPointerDown={stopHeaderDrag}
@@ -4129,33 +4145,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                         className="claw-tab-hover-close"
                         style={{
                           background: 'none', border: 'none', color: 'rgba(255,255,255,0.45)',
-                          cursor: 'pointer', padding: 0, width: 16, height: 16, borderRadius: 4,
+                          cursor: 'pointer', padding: 0, width: 24, height: 24, borderRadius: 6,
                           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                         }}
                         onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
                         onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' }}
                       >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
                           <path d="M18 6L6 18M6 6l12 12" />
                         </svg>
                       </button>
                     )}
                     {!tab.main && active && (
+                      /* First tap arms (the button turns red and says so);
+                         only the second tap within the window deletes. */
                       <button
                         onPointerDown={stopHeaderDrag}
-                        onClick={(e) => { e.stopPropagation(); closeTab(tab.key) }}
-                        aria-label={t('chat.tabClose')}
-                        title={t('chat.tabClose')}
+                        onClick={(e) => { e.stopPropagation(); if (armed) { setArmedCloseKey(null); closeTab(tab.key) } else { armCloseTab(tab.key) } }}
+                        aria-label={armed ? `${t('chat.tabClose')}?` : t('chat.tabClose')}
+                        title={armed ? `${t('chat.tabClose')}?` : t('chat.tabClose')}
                         data-testid="chat-tab-close"
+                        data-armed={armed || undefined}
                         style={{
-                          background: 'none', border: 'none', color: 'rgba(255,255,255,0.45)',
-                          cursor: 'pointer', padding: 0, width: 16, height: 16, borderRadius: 4,
+                          background: armed ? 'rgba(239,68,68,0.25)' : 'none',
+                          border: 'none', color: armed ? '#ef4444' : 'rgba(255,255,255,0.45)',
+                          cursor: 'pointer', padding: 0, width: 24, height: 24, borderRadius: 6,
                           display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
                         }}
-                        onMouseEnter={(e) => { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' }}
-                        onMouseLeave={(e) => { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' }}
+                        onMouseEnter={(e) => { if (!armed) { e.currentTarget.style.color = '#fff'; e.currentTarget.style.background = 'rgba(255,255,255,0.12)' } }}
+                        onMouseLeave={(e) => { if (!armed) { e.currentTarget.style.color = 'rgba(255,255,255,0.45)'; e.currentTarget.style.background = 'none' } }}
                       >
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
                           <path d="M18 6L6 18M6 6l12 12" />
                         </svg>
                       </button>

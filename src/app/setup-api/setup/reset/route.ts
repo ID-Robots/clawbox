@@ -497,13 +497,9 @@ export async function POST(request: Request) {
     try {
       await fs.mkdir(OPENCLAW_DIR, { recursive: true });
       const seed = {
-        agents: {
-          defaults: {
-            compaction: {
-              reserveTokensFloor: 24000,
-            },
-          },
-        },
+        // No compaction block: OpenClaw 2 replaced the reserve-tuning keys
+        // with compaction.mode and fails validation on the old one; its own
+        // safeguard default needs no seeding.
         gateway: {
           auth: { mode: "token", token: crypto.randomBytes(32).toString("hex") },
           // No controlUi block: OpenClaw 2 retired allowInsecureAuth and

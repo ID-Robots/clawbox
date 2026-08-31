@@ -112,6 +112,23 @@ async function status(): Promise<VoiceOutputStatus> {
  * here, instead of letting the customer discover it a button at a time. Same
  * shape ClawKeep reports for the same reason (lib/clawkeep.ts).
  */
+/**
+ * Which home this box's speech config lives in: top-level `tts` (OpenClaw 2)
+ * or the legacy `messages.tts`. Decided by where a providers map actually
+ * exists — the same rule voice-output.ts reads with — so a write can never
+ * land in the other generation's slot beside the real one. A box with
+ * NEITHER (fresh, unconfigured) gets the v2 home: the repo pairs with the
+ * 2026.8 pin.
+ */
+async function ttsConfigHome(): Promise<"tts" | "messages.tts"> {
+  const config = await readConfig();
+  const top = (config as { tts?: { providers?: unknown } }).tts;
+  if (top && typeof top === "object" && top.providers) return "tts";
+  const legacy = (config as { messages?: { tts?: { providers?: unknown } } }).messages?.tts;
+  if (legacy && typeof legacy === "object" && legacy.providers) return "messages.tts";
+  return "tts";
+}
+
 const EDITION_UNSUPPORTED = {
   supportedOnEdition: false,
   error: "Voice output is an OpenClaw feature and is not part of this edition.",
@@ -168,7 +185,12 @@ async function handleVoice(engine: unknown, voice: unknown) {
     if (!isCloudVoiceFor(target.model, voice)) {
       return refuse(`The cloud voice's model (${target.model}) does not have that voice.`, "unknown_voice", 400);
     }
-    await runOpenclawConfigSet([`tts.providers.${target.providerId}.voice`, voice]);
+    // The DETECTED home, not a hardcoded one: writing top-level tts.* while
+    // the providers still live under the legacy messages.tts would split the
+    // voice from its provider definition (and the readers prefer the
+    // top-level home). ttsConfigHome() keys off the same signal the readers
+    // use — where the providers actually are.
+    await runOpenclawConfigSet([`${await ttsConfigHome()}.providers.${target.providerId}.voice`, voice]);
   } else {
     return refuse("Pick the voice on this box or the cloud voice.", "unknown_engine", 400);
   }
@@ -206,7 +228,7 @@ async function handleSelect(choice: VoiceChoice) {
     if (openclawIsAbsent()) {
       return refuse("This box cannot change the voice.", "cannot_change", 409);
     }
-    await runOpenclawConfigSet(["tts.provider", providerId]);
+    await runOpenclawConfigSet([`${await ttsConfigHome()}.provider`, providerId]);
   }
 
   // Re-read under the lock: the copy above decided the refusal, but the CLI

@@ -1923,20 +1923,9 @@ export async function POST(request: Request) {
         console.log(`[AI Config] Promoted local model to active primary: ${logSafe(config.defaultModel)}`);
       }
     }
-    // Reserve sized to the active model's context window. Local models run on
-    // small windows (Ollama 32K) where the flat default leaves no room for the
-    // agent's heavy system prompt + tools; cloud models (unbounded window)
-    // fall through to the full default.
-    const activeContextWindow = isOllama
-      ? OLLAMA_CONTEXT_WINDOW
-      : isLlamaCpp
-        ? llamaCppContextWindow
-        : Number.POSITIVE_INFINITY;
-    const compactionReserveFloor = compactionReserveFloorForContext(activeContextWindow);
-    baseOps.push([
-      "agents.defaults.compaction.reserveTokensFloor",
-      `${compactionReserveFloor}`,
-    ]);
+    // No compaction write any more: OpenClaw 2 replaced the reserve-tuning
+    // keys with compaction.mode (whose safeguard default needs no seeding)
+    // and fails validation on the retired reserveTokensFloor.
 
     // 4c. Local device gateway setup: keep token auth enabled for LAN binding,
     // but relax Control UI browser checks because the setup surface runs over

@@ -238,10 +238,18 @@ describe("chat tabs", () => {
     expect(frames("sessions.messages.subscribe").map((f) => params(f).key)).toEqual([MAIN, key, MAIN]);
   });
 
-  it("closing the tab deletes its session and returns to its neighbour", async () => {
+  it("closing the tab takes two taps — armed first — then deletes its session and returns to its neighbour", async () => {
     await mountReady();
     const key = await openNewTab();
+    // First tap only ARMS: the delete is irreversible, so nothing may leave
+    // the box until the owner confirms with a second tap.
     fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    await settle();
+    expect(frames("sessions.delete")).toHaveLength(0);
+    expect(tabKeys()).toEqual([MAIN, key]);
+    const armed = screen.getByTestId("chat-tab-close");
+    expect(armed.getAttribute("data-armed")).toBe("true");
+    fireEvent.click(armed);
     await settle();
     expect(tabKeys()).toEqual([MAIN]);
     expect(activeTabKey()).toBe(MAIN);
@@ -349,7 +357,8 @@ describe("chat tabs", () => {
     await mountReady();
     const key = await openNewTab();
     await sendInActiveTab("long task");
-    fireEvent.click(screen.getByRole("button", { name: "Close tab" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" })); // arm
+    fireEvent.click(screen.getByTestId("chat-tab-close")); // confirm
     await settle();
     const abortIdx = sent.findIndex((f) => f.method === "chat.abort" && params(f).sessionKey === key);
     const deleteIdx = sent.findIndex((f) => f.method === "sessions.delete" && params(f).key === key);
@@ -364,7 +373,8 @@ describe("chat tabs", () => {
     await openNewTab(); // Chat 3, active
     fireEvent.click(tabs()[1]); // over to Chat 2
     await settle();
-    fireEvent.click(screen.getByRole("button", { name: "Close tab" })); // close Chat 2
+    fireEvent.click(screen.getByRole("button", { name: "Close tab" })); // arm...
+    fireEvent.click(screen.getByTestId("chat-tab-close")); // ...and close Chat 2
     await settle();
     expect(tabs().map((el) => el.textContent)).toEqual(["ClawBox", "Chat 3"]);
     fireEvent.click(screen.getByTestId("chat-new-tab"));

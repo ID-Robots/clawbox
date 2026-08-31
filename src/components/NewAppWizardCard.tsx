@@ -107,7 +107,7 @@ export default function NewAppWizardCard({
           placeholder={t("codingAgent.newNamePlaceholder")}
           autoFocus
           data-testid="coding-agent-new-name"
-          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60"
+          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-base sm:text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60"
         />
       </label>
       <label className="block text-[11px] text-[var(--text-muted)]">
@@ -119,7 +119,7 @@ export default function NewAppWizardCard({
           rows={3}
           placeholder={t("codingAgent.newWhatPlaceholder")}
           data-testid="coding-agent-new-what"
-          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60 resize-y"
+          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-base sm:text-xs text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/60 focus:outline-none focus:border-[var(--coral-bright)]/60 resize-y"
         />
       </label>
       <label className="block text-[11px] text-[var(--text-muted)]">
@@ -128,7 +128,7 @@ export default function NewAppWizardCard({
           value={template}
           onChange={(e) => setTemplate(e.target.value as NewAppTemplate)}
           data-testid="coding-agent-new-template"
-          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/60"
+          className="mt-1 w-full rounded-lg bg-black/30 border border-white/10 px-2.5 py-1.5 text-base sm:text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--coral-bright)]/60"
         >
           {NEW_APP_TEMPLATES.map((tpl) => (
             <option key={tpl} value={tpl}>
