@@ -43,3 +43,14 @@ global.IntersectionObserver = vi.fn().mockImplementation(() => ({
   unobserve: vi.fn(),
   disconnect: vi.fn(),
 }));
+
+// Unit tests must never write the REAL ~/.openclaw: on an OpenClaw 2 box a
+// recreated legacy auth-profiles.json poisons the migrated sqlite auth store
+// and the gateway refuses every turn until `doctor --fix` runs (this bit the
+// dev box on 2026-08-31 — a configure-route suite without an fs mock wrote
+// the real store mid-run). Every openclaw-path module honors OPENCLAW_HOME,
+// so point it at a per-run scratch before any suite imports one. `??=` keeps
+// suites that stage their own OPENCLAW_HOME fully in charge.
+import os from "os";
+import path from "path";
+process.env.OPENCLAW_HOME ??= path.join(os.tmpdir(), `clawbox-vitest-openclaw-${process.pid}`);
