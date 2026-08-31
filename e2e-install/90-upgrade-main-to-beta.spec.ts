@@ -34,6 +34,22 @@ test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
     // precondition: security/UI tests before this file must run against the PR
     // head. Transition this already-configured device to main through the same
     // update path a field device uses, preserving its setup state.
+    // This suite initially installs the PR head (OpenClaw 2 / schema 2026.8)
+    // so every general assertion exercises the code under review. `main`
+    // currently pins OpenClaw 2026.7, whose binary deliberately refuses to
+    // touch config last written by 2026.8. A field device should never be
+    // downgraded this way; this is only the ephemeral harness constructing a
+    // clean historical baseline. Archive the future OpenClaw home while
+    // leaving ClawBox's data/config.json (the setup state this test promises to
+    // preserve) untouched, then let main create the store shape it understands.
+    await dockerExec([
+      "bash", "-lc",
+      "set -e; systemctl stop clawbox-gateway.service || true; " +
+      "test ! -e /home/clawbox/.openclaw-e2e-future; " +
+      "if [ -e /home/clawbox/.openclaw ]; then mv /home/clawbox/.openclaw /home/clawbox/.openclaw-e2e-future; fi; " +
+      "install -d -o clawbox -g clawbox -m 700 /home/clawbox/.openclaw",
+    ], { user: "root" });
+
     await setUpdateBranch("main");
     const result = await startUpdate(true);
     expect(result.started).toBe(true);
