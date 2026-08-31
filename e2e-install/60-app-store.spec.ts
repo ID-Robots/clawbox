@@ -18,11 +18,16 @@
  */
 import { test, expect } from "@playwright/test";
 import { dockerExec } from "./helpers/container";
-import { getPreferences, installApp, searchApps, uninstallApp } from "./helpers/setup-api";
+import { getPreferences, installAppRaw, searchApps, uninstallApp } from "./helpers/setup-api";
 
 const FORCED_APP_ID = process.env.CLAWBOX_E2E_STORE_APP_ID;
 // Capture target across tests. Populated by the first catalog-search test.
 let TEST_APP_ID = "";
+// The install test walks these until one installs: the route now reports
+// ClawHub's honest verdict, and a top-rated slug can be legitimately
+// refused (review_required) or namespaced (ambiguous) — neither of which
+// is a ClawBox regression.
+let CANDIDATE_APP_IDS: string[] = [];
 // Set by the install test: false when ClawHub itself reported failure
 // (e.g. rate-limited). The follow-up assertions (registered / icon /
 // uninstall) skip gracefully in that case so rate-limit hiccups on the
@@ -74,8 +79,9 @@ test.describe("app store happy path", () => {
       expect(app.name).toBeTruthy();
       expect(app.category).toBeTruthy();
     }
-    TEST_APP_ID = FORCED_APP_ID ?? result.apps[0].slug;
-    console.log(`[app-store] using test app id '${TEST_APP_ID}'`);
+    CANDIDATE_APP_IDS = FORCED_APP_ID ? [FORCED_APP_ID] : result.apps.slice(0, 6).map((a) => a.slug);
+    TEST_APP_ID = CANDIDATE_APP_IDS[0];
+    console.log(`[app-store] install candidates: ${CANDIDATE_APP_IDS.join(", ")}`);
   });
 
   test("search filter narrows results", async () => {
@@ -90,16 +96,33 @@ test.describe("app store happy path", () => {
 
   test("install selected app", async () => {
     test.skip(!STORE_OK, "public store refused the runner; no test app selected");
-    test.setTimeout(120_000);
-    expect(TEST_APP_ID).toBeTruthy();
-    const result = await installApp(TEST_APP_ID);
-    INSTALL_OK = !!result.clawhub?.success;
-    // The openclaw CLI may fail on network-dependent paths (ClawHub rate
-    // limit, upstream outage, skill config gaps). Treat that as a warning
-    // so the rest of the suite keeps moving; follow-up tests skip below.
-    if (!INSTALL_OK) {
-      console.warn(`[app-store] openclaw skills install fallback: ${result.clawhub?.error ?? "unknown"}`);
+    test.setTimeout(300_000);
+    expect(CANDIDATE_APP_IDS.length).toBeGreaterThan(0);
+    // ClawHub's per-release verdicts are data, not regressions: a flagged
+    // release answers review_required, a slug several publishers use answers
+    // ambiguous with the refs to choose from. Walk the candidates until one
+    // installs; an ambiguous one is retried with its first publisher ref —
+    // the exact re-post the Store UI makes. Only a retryable failure
+    // (rate limit, outage) ends the walk early: more requests would just
+    // spend the rate-limit budget on a store that is refusing the runner.
+    for (const slug of CANDIDATE_APP_IDS) {
+      let outcome = await installAppRaw(slug);
+      if (!outcome.ok && outcome.code === "ambiguous" && outcome.matches?.[0]?.ref) {
+        outcome = await installAppRaw(outcome.matches[0].ref);
+      }
+      if (outcome.ok) {
+        INSTALL_OK = true;
+        TEST_APP_ID = slug;
+        console.log(`[app-store] installed '${slug}'`);
+        return;
+      }
+      // The refusal must at least be the honest shape this round introduced.
+      expect(outcome.status, `refusal for '${slug}' carries a real status`).toBeGreaterThanOrEqual(400);
+      expect(outcome.code, `refusal for '${slug}' names its code`).toBeTruthy();
+      console.warn(`[app-store] '${slug}' refused (${outcome.code}): ${outcome.error ?? outcome.clawhub?.error ?? "unknown"}`);
+      if (outcome.retryable !== false) break;
     }
+    console.warn("[app-store] no candidate installed; follow-up tests skip");
   });
 
   test("app registered in preferences", async () => {

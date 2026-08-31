@@ -112,21 +112,41 @@ export async function listSkills(): Promise<SkillInfo[]> {
  * folder is either bundled — and then already in the list — or gone, and
  * answers in milliseconds either way.
  */
+// Every character a skill folder name may contain. A name is REBUILT from
+// this alphabet before it touches a path (same discipline as webapp-icon's
+// safeAppId): a `.test()` alone does not break the taint chain CodeQL
+// follows for js/path-injection, a character-by-character rebuild does.
+const SKILL_NAME_ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-";
+
+/** The name rebuilt from the alphabet, or null when it is no skill name. */
+function safeSkillName(appId: string): string | null {
+  if (appId.length < 1 || appId.length > 64) return null;
+  // No leading dot or dash: never a hidden folder, never a flag lookalike.
+  if (appId[0] === "." || appId[0] === "-") return null;
+  let safe = "";
+  for (const ch of appId) {
+    const at = SKILL_NAME_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += SKILL_NAME_ALPHABET[at];
+  }
+  return safe;
+}
+
 export async function findSkill(appId: string): Promise<SkillInfo | null> {
   // The route validates its query param, but this is the function that puts
   // the name into a filesystem path, so the guard lives here too (CodeQL
-  // js/path-injection): a skill folder name is a bare slug — no separators,
-  // no leading dot or dash — and anything else cannot be installed.
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(appId)) return null;
+  // js/path-injection): anything not a bare slug cannot be installed.
+  const safeName = safeSkillName(appId);
+  if (safeName === null) return null;
   const skills = await listSkills();
-  const hit = skills.find((s) => s.name === appId);
+  const hit = skills.find((s) => s.name === safeName);
   if (hit) return hit;
   const scannedAt = cacheTime;
-  const onDisk = await fs.stat(path.join(getSkillsDir(), "skills", appId)).then((s) => s.isDirectory()).catch(() => false);
+  const onDisk = await fs.stat(path.join(getSkillsDir(), "skills", safeName)).then((s) => s.isDirectory()).catch(() => false);
   if (!onDisk) return null;
   // A refresh may have landed while the disk was checked; otherwise run one.
   const fresh = scannedAt === cacheTime ? await load() : (cachedSkills ?? skills);
-  return fresh.find((s) => s.name === appId) ?? null;
+  return fresh.find((s) => s.name === safeName) ?? null;
 }
 
 /**
