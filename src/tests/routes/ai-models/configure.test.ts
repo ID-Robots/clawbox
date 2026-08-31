@@ -16,6 +16,7 @@ vi.mock("fs/promises", () => ({
     rename: vi.fn(),
     chown: vi.fn(),
     mkdir: vi.fn(),
+    readdir: vi.fn(),
     rm: vi.fn(),
     unlink: vi.fn(),
   },
@@ -86,6 +87,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   findOpenclawBin: vi.fn().mockReturnValue("/usr/local/bin/openclaw"),
   readConfig: vi.fn(),
   readConfigStrict: vi.fn(),
+  setPrimaryModelWithoutCatalogValidation: vi.fn().mockResolvedValue(undefined),
   inferConfiguredLocalModel: vi.fn(),
   runOpenclawConfigSet: vi.fn(),
   runOpenclawDoctorFix: vi.fn().mockResolvedValue(undefined),
@@ -144,7 +146,7 @@ vi.mock("@/lib/local-ai-token", () => ({
 import { getAll, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
-  writeConfig,
+  setPrimaryModelWithoutCatalogValidation,
   runOpenclawDoctorFix,
   spawnOpenclawCli,
 } from "@/lib/openclaw-config";
@@ -236,6 +238,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     mockFs.rename.mockResolvedValue();
     mockFs.chown.mockResolvedValue();
     mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.readdir.mockResolvedValue([]);
     mockFs.rm.mockResolvedValue(undefined);
     mockFs.unlink.mockResolvedValue(undefined);
     mockGetAll.mockResolvedValue({});
@@ -249,6 +252,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     vi.mocked(runOpenclawConfigSetBatch).mockResolvedValue(undefined);
     vi.mocked(runOpenclawConfigUnset).mockResolvedValue(undefined);
     mockUnpairLocal.mockResolvedValue(undefined);
+    vi.mocked(setPrimaryModelWithoutCatalogValidation).mockResolvedValue(undefined);
 
     // Re-apply implementations cleared by vi.clearAllMocks above. Factory
     // defaults set in `vi.mock(...)` hold across vi.resetModules but are
@@ -1730,8 +1734,6 @@ describe("POST /setup-api/ai-models/configure", () => {
           'Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog',
         ),
       );
-      vi.mocked(readConfigStrict).mockResolvedValueOnce({});
-
       const res = await configurePost(jsonRequest({
         provider: "clawai",
         apiKey: "claw_token_abc",
@@ -1746,10 +1748,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(primaryOp).toBeDefined();
       const retryPaths = (batches[1][0] as Array<[string, string]>).map(([p]) => p);
       expect(retryPaths).not.toContain("agents.defaults.model.primary");
-      const written = vi.mocked(writeConfig).mock.calls.at(-1)?.[0] as {
-        agents?: { defaults?: { model?: { primary?: string } } };
-      };
-      expect(written?.agents?.defaults?.model?.primary).toBe(primaryOp?.[1]);
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledWith(primaryOp?.[1]);
     });
 
     it("stores an API key through the CLI's auth store, key on stdin, no doctor", async () => {
@@ -1770,14 +1769,58 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
     });
 
-    it("refuses to rebuild the config from a fragment when the direct-write read fails", async () => {
-      // readConfigStrict throws on a malformed openclaw.json (only ENOENT is
-      // {}); the fallback must NOT write model.primary into an empty object —
-      // that would replace the whole config with a fragment (CodeRabbit #565).
+    it("fails closed when OpenClaw 2 doctor rejects before creating a migrated sibling", async () => {
+      // The early failure is the dangerous case: there is no .migrated-* file
+      // yet, but the legacy auth-profiles.json we just wrote still prevents an
+      // OpenClaw 2 gateway from starting.
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("doctor stopped before migration"));
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.8.1 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/Credential migration failed/);
+      expect(vi.mocked(runOpenclawConfigSetBatch)).not.toHaveBeenCalled();
+      expect(mockFs.rename).toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+    });
+
+    it("keeps the legacy best-effort doctor behavior on an explicit OpenClaw 1 binary", async () => {
+      vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("v1 doctor unavailable"));
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        apiKey: ANTHROPIC_OAUTH_ACCESS,
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }));
+
+      expect(res.status).toBe(200);
+      expect(vi.mocked(runOpenclawConfigSetBatch)).toHaveBeenCalled();
+    });
+
+    it("propagates a serialized direct-write failure instead of claiming success", async () => {
+      // The narrow helper owns the strict read and cross-process lock. Any
+      // refusal there must stop the route rather than claim a configured model.
       vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(
         new Error('Cannot set model reference "deepseek/deepseek-v4-pro" at agents.defaults.model.primary: Unable to refresh provider catalog'),
       );
-      vi.mocked(readConfigStrict).mockRejectedValueOnce(new Error("openclaw.json does not contain a configuration object"));
+      vi.mocked(setPrimaryModelWithoutCatalogValidation).mockRejectedValueOnce(
+        new Error("openclaw.json does not contain a configuration object"),
+      );
 
       const res = await configurePost(jsonRequest({
         provider: "clawai",
@@ -1785,7 +1828,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       }));
 
       expect(res.status).toBe(500);
-      expect(vi.mocked(writeConfig)).not.toHaveBeenCalled();
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).toHaveBeenCalledOnce();
     });
 
     it("still writes every key the old sequence wrote", async () => {

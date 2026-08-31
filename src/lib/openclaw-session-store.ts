@@ -156,6 +156,10 @@ export interface SessionEntrySweepResult {
    *  be said about what was written, and a caller must not treat the pass
    *  as done — record no backup, count no update. */
   ok: boolean;
+  /** Present only when the store is from a newer OpenClaw generation. The
+   *  caller must not reinterpret that refusal as permission to mutate a
+   *  leftover legacy sessions.json for the same migrated agent. */
+  unsupportedSchema?: number;
 }
 
 /**
@@ -191,7 +195,7 @@ export function sweepSessionEntries(
       console.error(
         `[session-store] ${dbPath} carries schema v${schemaVersion}, newer than the v${KNOWN_SESSION_SCHEMA_VERSION} this sweep knows; refusing to write`,
       );
-      return { updated: 0, ok: false };
+      return { updated: 0, ok: false, unsupportedSchema: schemaVersion };
     }
     db.exec("BEGIN IMMEDIATE");
     let updated = 0;

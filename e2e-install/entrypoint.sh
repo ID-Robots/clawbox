@@ -39,6 +39,7 @@ cat > /etc/clawbox/test-mode.env <<EOF
 CLAWBOX_TEST_MODE=1
 NETWORK_INTERFACE=${NETWORK_INTERFACE:-eth0}
 CLAWBOX_TEST_NO_GPU=1
+CLAWBOX_BRANCH=${CLAWBOX_BRANCH:-main}
 EOF
 # CLAWBOX_TEST_NO_GPU=1: this container has no GPU by construction, so the
 # only on-device TTS engine (Kokoro, CUDA) declines here on every run. The

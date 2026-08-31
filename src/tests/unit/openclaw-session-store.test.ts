@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { createRequire } from "module";
 import os from "os";
 import path from "path";
 import { sweepSessionEntries } from "@/lib/openclaw-session-store";
+import { applyModelOverrideToAllAgentSessions } from "@/lib/openclaw-config";
 
 // The store lib reaches node:sqlite the same lazy way (vite cannot bundle the
 // builtin); the fixtures here do too.
@@ -58,7 +59,27 @@ describe("sweepSessionEntries schema guard", () => {
       entry.modelOverride = "new/model";
       return true;
     }, root);
-    expect(result).toEqual({ updated: 0, ok: false });
+    expect(result).toEqual({ updated: 0, ok: false, unsupportedSchema: 20 });
     expect(readEntries(root)["agent:main:main"].modelOverride).toBe("old/model");
+  });
+
+  it("does not mutate a leftover sessions.json after a newer SQLite schema refuses the sweep", async () => {
+    const root = makeAgentStore(20, { "agent:main:main": { modelOverride: "sqlite/old" } });
+    const sessionsDir = path.join(root, "main", "sessions");
+    const legacyPath = path.join(sessionsDir, "sessions.json");
+    mkdirSync(sessionsDir, { recursive: true });
+    writeFileSync(legacyPath, JSON.stringify({
+      "agent:main:main": { modelOverride: "legacy/old" },
+    }));
+
+    const result = await applyModelOverrideToAllAgentSessions({
+      provider: "deepseek",
+      modelId: "deepseek-v4-pro",
+    }, { agentsDir: root });
+
+    expect(result).toEqual({ filesUpdated: 0, sessionsUpdated: 0 });
+    expect(readEntries(root)["agent:main:main"].modelOverride).toBe("sqlite/old");
+    expect(JSON.parse(readFileSync(legacyPath, "utf8"))["agent:main:main"].modelOverride)
+      .toBe("legacy/old");
   });
 });

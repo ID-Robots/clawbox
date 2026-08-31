@@ -160,6 +160,11 @@ ensure_openclaw_node_engine() {
   curl -fsSLo "$tmp_dir/SHASUMS256.txt" "https://nodejs.org/dist/v${NODE_DIST_VERSION}/SHASUMS256.txt"
   (cd "$tmp_dir" && grep "  $archive\$" SHASUMS256.txt | sha256sum -c -)
   mkdir -p /opt/clawbox
+  if [ -e "$NODE_DIST_ROOT" ] && [ ! -L "$NODE_DIST_ROOT" ]; then
+    rm -rf "$tmp_dir"
+    echo "Error: $NODE_DIST_ROOT exists and is not a symlink; move it aside and rerun." >&2
+    exit 1
+  fi
   rm -rf "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64"
   tar -xJf "$tmp_dir/$archive" -C /opt/clawbox
   ln -sfn "/opt/clawbox/node-v${NODE_DIST_VERSION}-linux-x64" "$NODE_DIST_ROOT"
@@ -323,7 +328,7 @@ ensure_playwright_chromium() {
   if [ -x "$PLAYWRIGHT_BIN" ]; then
     as_user_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$PLAYWRIGHT_BIN\" install chromium"
   else
-    as_user_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" $BUN x playwright install chromium"
+    as_user_login "cd \"$PROJECT_DIR\" && PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$BUN\" x playwright install chromium"
   fi
 
   if ! has_playwright_chromium; then
@@ -412,12 +417,12 @@ step_git_pull() {
 
 step_build() {
   cd "$PROJECT_DIR"
-  as_user_login "cd \"$PROJECT_DIR\" && $BUN install"
+  as_user_login "cd \"$PROJECT_DIR\" && \"$BUN\" install"
   if ! as_user_login "cd \"$PROJECT_DIR\" && node -e \"require('node-pty')\"" &>/dev/null; then
     echo "  Rebuilding native modules (node-pty)..."
     as_user_login "cd \"$PROJECT_DIR\" && npm_config_python=/usr/bin/python3 npm rebuild node-pty --foreground-scripts"
   fi
-  as_user_login "cd \"$PROJECT_DIR\" && $BUN run build"
+  as_user_login "cd \"$PROJECT_DIR\" && \"$BUN\" run build"
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
     echo "Error: Build failed — .next/standalone/server.js not found"
     exit 1

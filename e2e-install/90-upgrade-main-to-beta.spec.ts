@@ -29,14 +29,7 @@ test.describe.configure({ mode: "serial" });
 test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
   test("verify current branch is main", async () => {
     const branch = await readGitBranch();
-    // On a fresh `git clone --branch main` we'd expect main, but a developer
-    // might have seeded the container from a branch checkout. In that case
-    // the upgrade still exercises the important code path (fetch + reset),
-    // just from a different starting point — log and continue.
-    if (branch !== "main") {
-      console.warn(`[upgrade] starting branch is '${branch}', not 'main'`);
-    }
-    expect(typeof branch).toBe("string");
+    expect(branch, "the upgrade must exercise main → target, not target → itself").toBe("main");
   });
 
   test(`pin .update-branch to ${UPGRADE_BRANCH}`, async () => {

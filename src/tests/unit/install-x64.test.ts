@@ -22,13 +22,14 @@ describe("install-x64.sh safety contracts", () => {
   });
 
   it("refuses to overlay the managed Node symlink onto a real directory", () => {
-    expect(SOURCE).toContain('[ -e "$NODE_DIST_ROOT" ] && [ ! -L "$NODE_DIST_ROOT" ]');
+    expect(SOURCE.match(/\[ -e "\$NODE_DIST_ROOT" \] && \[ ! -L "\$NODE_DIST_ROOT" \]/g)).toHaveLength(2);
   });
 
   it("downloads NodeSource before executing it and quotes the project directory", () => {
     expect(SOURCE).not.toMatch(/setup_22\.x\s*\|\s*bash/);
     expect(SOURCE).toContain('curl -fsSL -o "$nodesource_script"');
-    expect(SOURCE).toContain(String.raw`cd \"$PROJECT_DIR\" && $BUN install`);
+    expect(SOURCE).toContain(String.raw`cd \"$PROJECT_DIR\" && \"$BUN\" install`);
+    expect(SOURCE).toContain(String.raw`PLAYWRIGHT_BROWSERS_PATH=\"$PLAYWRIGHT_PATH\" \"$BUN\" x playwright install chromium`);
   });
 });
 

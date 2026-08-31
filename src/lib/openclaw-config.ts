@@ -611,8 +611,11 @@ export async function applyModelOverrideToAllAgentSessions(
   for (const agentId of listAgentIds(agentsDir)) {
     if (!sessionStorePath(agentId, agentsDir)) continue;
     const result = sweepSessionEntries(agentId, (_key, entry) => applyToSession(entry), agentsDir);
-    // A failed sweep is not a swept agent: leave it to the legacy file pass
-    // rather than reporting sessions updated that never were.
+    // A newer SQLite schema is still authoritative for this migrated agent.
+    // It refused our write on purpose; falling through to an old sessions.json
+    // would report success while the gateway keeps reading unchanged SQLite.
+    if (result?.unsupportedSchema !== undefined) migratedAgents.add(agentId);
+    // Other failed sweeps retain the established best-effort legacy behavior.
     if (!result?.ok) continue;
     migratedAgents.add(agentId);
     if (result.updated > 0) {
@@ -948,6 +951,91 @@ export async function writeConfig(config: OpenClawConfig): Promise<void> {
   const tmpPath = CONFIG_PATH + ".tmp";
   await fs.writeFile(tmpPath, JSON.stringify(config, null, 2), "utf-8");
   await fs.rename(tmpPath, CONFIG_PATH);
+}
+
+/**
+ * Run one direct config mutation under OpenClaw 2's cross-process sidecar
+ * lock. The core CLI uses an exclusive `openclaw.json.lock` regular file for
+ * the same purpose, so holding it serializes this exceptional unvalidated
+ * write with gateway and CLI mutations as well as concurrent setup requests.
+ */
+async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promise<T> {
+  const lockPath = `${CONFIG_PATH}.lock`;
+  const deadline = Date.now() + 30_000;
+  let attempt = 0;
+  let lockHandle: Awaited<ReturnType<typeof fs.open>>;
+
+  // `readConfigStrict` deliberately treats ENOENT as a fresh `{}` config and
+  // `writeConfig` creates this directory. The lock has to preserve that same
+  // first-run contract rather than failing one step earlier when even the
+  // OpenClaw home directory does not exist yet.
+  await fs.mkdir(OPENCLAW_HOME, { recursive: true });
+
+  while (true) {
+    try {
+      lockHandle = await fs.open(lockPath, "wx", 0o600);
+      try {
+        // OpenClaw understands this owner payload when deciding whether a
+        // sidecar is stale. A normal mutation finishes far inside its 30 s
+        // stale window; the live pid prevents premature reclamation too.
+        await lockHandle.writeFile(JSON.stringify({
+          pid: process.pid,
+          createdAt: new Date().toISOString(),
+        }) + "\n", "utf8");
+      } catch (err) {
+        await lockHandle.close().catch(() => {});
+        await fs.unlink(lockPath).catch(() => {});
+        throw err;
+      }
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST" || Date.now() >= deadline) {
+        throw err;
+      }
+      const delayMs = Math.min(250, Math.round(25 * (1.2 ** attempt)));
+      attempt += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  let heldStat: Awaited<ReturnType<typeof lockHandle.stat>> | null = null;
+  try {
+    heldStat = await lockHandle.stat();
+    return await mutate();
+  } finally {
+    await lockHandle.close().catch(() => {});
+    // Never unlink a successor's lock if ours was externally reclaimed. This
+    // is the same inode/device ownership check OpenClaw's sidecar release uses.
+    if (heldStat) {
+      const current = await fs.lstat(lockPath).catch(() => null);
+      if (current?.isFile() && current.dev === heldStat.dev && current.ino === heldStat.ino) {
+        await fs.unlink(lockPath).catch(() => {});
+      }
+    }
+  }
+}
+
+/**
+ * Set only `agents.defaults.model.primary` without catalog validation.
+ *
+ * This is reserved for the setup contract that accepts a placeholder API key:
+ * OpenClaw 2's CLI rejects the model when its live catalog cannot authenticate,
+ * even though the gateway may keep that unresolved reference at rest. The
+ * complete-file fallback must nevertheless use the core's sidecar lock so it
+ * cannot overwrite a concurrent provider, auth, or gateway mutation.
+ */
+export async function setPrimaryModelWithoutCatalogValidation(modelRef: string): Promise<void> {
+  if (!parseFullyQualifiedModel(modelRef)) {
+    throw new Error(`Invalid fully-qualified model reference: ${modelRef}`);
+  }
+  await withOpenclawConfigSidecarLock(async () => {
+    const config = await readConfigStrict();
+    const agents = (config.agents ??= {});
+    const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
+    const model = (defaults.model ??= {}) as Record<string, unknown>;
+    model.primary = modelRef;
+    await writeConfig(config);
+  });
 }
 
 /**
