@@ -257,6 +257,9 @@ async function restoreSessionOverrides(backup: FilesBackup): Promise<boolean> {
     try {
       await atomicWriteJson(file, parsed);
     } catch (err) {
+      // A legacy write that failed is exactly as incomplete as a refused
+      // SQLite sweep: the caller must keep the snapshot and the mode.
+      allOk = false;
       console.error(`[local-only] Failed to write restored sessions file ${file}:`, err);
     }
   }
@@ -374,8 +377,20 @@ export async function POST(request: Request) {
         // it, so the next toggle-off can finish the job instead of stranding
         // every session on the local model for ever.
         [SAVED_SESSION_OVERRIDES_KEY]: restoreOk ? undefined : savedSessionOverrides,
-        [MODE_KEY]: undefined,
+        // The mode stays ON while the restore is incomplete: clearing it
+        // would make the next disable return early as a no-op, and an
+        // enable-then-disable cycle would overwrite the kept snapshot with
+        // local values. The owner retries the same toggle instead.
+        [MODE_KEY]: restoreOk ? undefined : true,
       });
+      if (!restoreOk) {
+        return NextResponse.json({
+          enabled: true,
+          restoreIncomplete: true,
+          warning:
+            "Some sessions could not be switched back yet (the session store was busy). Local-only stays on — try turning it off again in a moment.",
+        });
+      }
     }
 
     let restartWarning: string | undefined;

@@ -322,8 +322,11 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // looks like the clean loopback client it is - exactly what LAN requests
 // already look like - which also keeps the gateway loopback device-pairing
 // auto-approval working for tunnel browsers.
+// The x-forwarded-* FAMILY is matched by prefix at the call site — OpenClaw 2
+// treats any of them (x-forwarded-user included) as forwarded-client
+// evidence; this set carries the attribution headers that do not share the
+// prefix.
 const FORWARDED_CLIENT_HEADERS = new Set([
-  "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "x-forwarded-port",
   "x-real-ip", "forwarded", "true-client-ip", "cdn-loop",
   "cf-connecting-ip", "cf-connecting-ipv6", "cf-ipcountry", "cf-visitor", "cf-ray", "cf-warp-tag-id",
 ]);
@@ -340,7 +343,7 @@ function attachUpgradeProxy(server) {
       for (let i = 0; i < req.rawHeaders.length; i += 2) {
         const name = req.rawHeaders[i];
         const lc = name.toLowerCase();
-        if (FORWARDED_CLIENT_HEADERS.has(lc)) continue;
+        if (lc.startsWith("x-forwarded-") || FORWARDED_CLIENT_HEADERS.has(lc)) continue;
         const value =
           lc === "origin" ? originHeader :
           lc === "host" ? hostHeader :
