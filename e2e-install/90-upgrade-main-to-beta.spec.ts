@@ -1,7 +1,9 @@
 /**
- * Upgrade test: install.sh was run against `main`; we pin .update-branch to
- * `beta`, trigger the in-app updater, and verify the device lands on the
- * beta HEAD after the post-reboot continuation step.
+ * Upgrade test: the general suite first installs the checked-out PR head so
+ * all preceding installer/UI assertions exercise the code under review. This
+ * serial tail then uses that live updater to establish a real `main` baseline,
+ * pins .update-branch to the target, and verifies main → target through the
+ * post-reboot continuation step.
  *
  * This test relies on the shared container set up by `global-setup.ts` —
  * run it after happy-path.spec.ts. Because the updater literally bounces
@@ -27,6 +29,29 @@ const UPGRADE_BRANCH = process.env.CLAWBOX_UPGRADE_TARGET_BRANCH ?? "beta";
 test.describe.configure({ mode: "serial" });
 
 test.describe(`in-app upgrade: main → ${UPGRADE_BRANCH}`, () => {
+  test("establish a real main baseline through the in-app updater", async () => {
+    // Do not make the whole suite install stale main just to create this one
+    // precondition: security/UI tests before this file must run against the PR
+    // head. Transition this already-configured device to main through the same
+    // update path a field device uses, preserving its setup state.
+    await setUpdateBranch("main");
+    const result = await startUpdate(true);
+    expect(result.started).toBe(true);
+
+    const state = await waitForUpdate({ timeoutMs: 45 * 60_000 });
+    expect(["completed", "failed"]).toContain(state.phase);
+    if (state.phase === "failed") {
+      const failedStep = state.steps.find((step) => step.status === "failed");
+      throw new Error(
+        `main baseline failed at step '${failedStep?.id}': ${failedStep?.error ?? state.error ?? "unknown"}`,
+      );
+    }
+    for (const step of state.steps) {
+      expect(step.status).toBe("completed");
+    }
+    await waitForHttpReady(60_000);
+  });
+
   test("verify current branch is main", async () => {
     const branch = await readGitBranch();
     expect(branch, "the upgrade must exercise main → target, not target → itself").toBe("main");

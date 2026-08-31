@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render as renderBare, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render as renderBare, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
 import VoiceOutputPanel, { isVoiceStatus } from "@/components/VoiceOutputPanel";
 import { sampleSentence } from "@/lib/voice-catalog";
@@ -108,6 +108,7 @@ function stubAudio(play?: () => Promise<void>) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   URL.createObjectURL = original.createObjectURL;
   URL.revokeObjectURL = original.revokeObjectURL;
@@ -226,25 +227,28 @@ describe("Voice panel", () => {
     // A local sample can take 15 s on a cold Kokoro; "Speaking…" alone for
     // that long reads as a hang.
     stubAudio();
-    const { release } = mockFetch(status(), { hold: true });
-    // The sample fetch is held the way the tts POST is.
+    // Keep the sample pending without making this test itself wait multiple
+    // wall-clock seconds. Under full coverage the old 3.5 s real timeout left
+    // less than 1.5 s for render + worker contention and hit Vitest's 5 s test
+    // ceiling even though the counter was correct.
     vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
       if (init?.method === "POST" && input.toString() === "/setup-api/tts/sample") {
-        // Held long enough that "Speaking… 1s" survives a loaded CI runner:
-        // the 1s tick renders at ~1000ms and the label moves on when the
-        // sample resolves, so a short hold left a ~200ms observation window.
-        await new Promise<void>((resolve) => setTimeout(resolve, 3500));
-        return new Response(new Uint8Array(2048), { status: 200, headers: { "content-type": "audio/wav" } });
+        return await new Promise<Response>(() => {});
       }
       return new Response(JSON.stringify(status()), { status: 200, headers: { "content-type": "application/json" } });
     }));
     render(<VoiceOutputPanel active />);
     const play = await screen.findByTestId("voice-play");
+    // This test can run alone: wait for the provider's async translation chunk
+    // instead of relying on an earlier test to have warmed the module cache.
+    await screen.findByText("Speak from");
+    vi.useFakeTimers();
     fireEvent.click(play);
-    expect(await screen.findByText("Speaking… 0s")).toBeInTheDocument();
-    expect(await screen.findByText("Speaking… 1s", {}, { timeout: 6000 })).toBeInTheDocument();
-    await screen.findByTestId("voice-sample-audio");
-    release();
+    expect(screen.getByText("Speaking… 0s")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(screen.getByText("Speaking… 1s")).toBeInTheDocument();
+    vi.clearAllTimers();
+    vi.useRealTimers();
   });
 
   it("says the sound was blocked rather than losing the sample, when the browser refuses to start it", async () => {

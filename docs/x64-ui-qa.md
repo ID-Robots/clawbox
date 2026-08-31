@@ -63,7 +63,7 @@ message actions are covered with mocks unless explicitly marked live.
 | QA-018 | P1 | Fixed | Remote Control/Browser now require an explicit readable `installed: false` before offering installation. |
 | QA-019 | P2 | Open | Standalone Settings appearance callbacks and Store/install/uninstall state are incomplete. |
 | QA-020 | P2 | Open | No mobile, Firefox/WebKit, accessibility, or broad visual-regression Playwright project exists. |
-| QA-021 | P1 | Fixed | Full-install “main → target” upgrade silently started on the target branch because systemd never received the Docker branch environment. |
+| QA-021 | P1 | Fixed | Full-install “main → target” did not establish a real main baseline; its serial tail now updates the PR-head install to main, verifies it, then exercises main → target. |
 | QA-022 | P1 | Fixed | Chat popup placement retained a 400 px-width offset after the default grew to 520 px, so first-load alignment was wrong and CI sampled its entrance animation. |
 | QA-023 | P1 | Open | Chat popup drag coordinates are not viewport-clamped and can leave the window off-screen. |
 | QA-024 | P1 | Open | Chat silently discards the oldest queued turn once the 20-turn client queue fills. |
