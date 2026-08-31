@@ -141,6 +141,13 @@ export interface SpawnOpenclawOptions {
   /** Capture and resolve stdout (needed to read `--json` output). Default false. */
   captureStdout?: boolean;
   /**
+   * Write this to the child's stdin and close it. The one way to hand the CLI
+   * a secret without putting it in argv (`models auth paste-api-key` reads the
+   * key from stdin). Callers passing one should set labelArgs anyway — the
+   * value never appears in the label, but argv hygiene is theirs to keep.
+   */
+  stdinData?: string;
+  /**
    * Argv to name the process by in error messages, when the real argv must not
    * appear in one. Defaults to `args`. See {@link spawnOpenclawConfigSet}.
    */
@@ -169,7 +176,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
     return Promise.reject(new OpenclawUnavailableError());
   }
   const bin = findOpenclawBin();
-  const { uid, gid, captureStdout = false } = options;
+  const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? 30_000;
   const cwd = options.cwd ?? process.env.HOME ?? "/home/clawbox";
   const env = { HOME: "/home/clawbox", ...process.env, ...(options.env ?? {}) };
@@ -178,7 +185,7 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   return new Promise((resolve, reject) => {
     let settled = false;
     const child = spawn(bin, args, {
-      stdio: ["ignore", captureStdout ? "pipe" : "ignore", "pipe"],
+      stdio: [stdinData !== undefined ? "pipe" : "ignore", captureStdout ? "pipe" : "ignore", "pipe"],
       cwd,
       ...(uid !== undefined ? { uid } : {}),
       ...(gid !== undefined ? { gid } : {}),
@@ -193,6 +200,13 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
+
+    if (stdinData !== undefined) {
+      // EPIPE when the child exits before reading — close() reports the truth.
+      child.stdin?.on("error", () => {});
+      child.stdin?.write(stdinData);
+      child.stdin?.end();
+    }
 
     const timer = setTimeout(() => {
       if (!settled) {

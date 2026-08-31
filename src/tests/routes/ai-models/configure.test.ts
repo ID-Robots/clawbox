@@ -146,6 +146,7 @@ import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   writeConfig,
   runOpenclawDoctorFix,
+  spawnOpenclawCli,
 } from "@/lib/openclaw-config";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
@@ -199,6 +200,20 @@ function createFailingChildProcess(errorMessage: string): ChildProcess {
   });
 
   return emitter;
+}
+
+/**
+ * The `models auth paste-api-key` call that stored a credential: args carry
+ * provider + profile id (never the secret), the secret rides stdinData.
+ */
+function pasteCallFor(profileId: string) {
+  return vi.mocked(spawnOpenclawCli).mock.calls.find(
+    (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key") && call[0].includes(profileId),
+  );
+}
+
+function pasteStdin(profileId: string): string {
+  return (pasteCallFor(profileId)?.[1] as { stdinData?: string } | undefined)?.stdinData ?? "";
 }
 
 describe("POST /setup-api/ai-models/configure", () => {
@@ -356,14 +371,9 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
 
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["deepseek:default"]).toEqual(
-      expect.objectContaining({
-        type: "api_key",
-        provider: "deepseek",
-        key: "portal-token-123",
-      }),
-    );
+    const paste = pasteCallFor("deepseek:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--provider", "deepseek"]));
+    expect(pasteStdin("deepseek:default")).toContain("portal-token-123");
 
     const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
     const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
@@ -759,13 +769,10 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "sk-test",
     }));
 
-    expect(mockFs.writeFile).toHaveBeenCalled();
-    const writeCall = mockFs.writeFile.mock.calls[0];
-    const writtenContent = JSON.parse(writeCall[1] as string);
-
-    expect(writtenContent.profiles["anthropic:default"]).toBeDefined();
-    expect(writtenContent.profiles["anthropic:default"].type).toBe("api_key");
-    expect(writtenContent.profiles["anthropic:default"].key).toBe("sk-test");
+    // Stored through the CLI's own auth store (paste-api-key, key on stdin) —
+    // the CLI owns the `api_key` shape on every generation.
+    expect(pasteCallFor("anthropic:default")).toBeDefined();
+    expect(pasteStdin("anthropic:default")).toContain("sk-test");
   });
 
   it("writes auth profile with the local-ai bearer for Ollama", async () => {
@@ -774,11 +781,9 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "mistral:7b",
     }));
 
-    const writeCall = mockFs.writeFile.mock.calls[0];
-    const writtenContent = JSON.parse(writeCall[1] as string);
     // Per-install token (>=16 chars) — the proxy validates against the same
     // value via `verifyLocalAiBearer` in src/lib/local-ai-token.ts.
-    expect(writtenContent.profiles["ollama:default"].key).toMatch(/^[a-f0-9]{32,}$/);
+    expect(pasteStdin("ollama:default")).toMatch(/[a-f0-9]{32,}/);
   });
 
   it("writes auth profile with the local-ai bearer for llama.cpp", async () => {
@@ -787,9 +792,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       apiKey: "gemma-q4",
     }));
 
-    const writeCall = mockFs.writeFile.mock.calls[0];
-    const writtenContent = JSON.parse(writeCall[1] as string);
-    expect(writtenContent.profiles["llamacpp:default"].key).toMatch(/^[a-f0-9]{32,}$/);
+    expect(pasteStdin("llamacpp:default")).toMatch(/[a-f0-9]{32,}/);
   });
 
   it("configures ClawBox AI as a fallback model when a stored user token is present", async () => {
@@ -806,14 +809,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(commands).toContain('config set agents.defaults.model.fallbacks ["deepseek/deepseek-v4-flash"] --json');
     expect(commands.some((command) => command.includes("config set models.providers.deepseek"))).toBe(true);
 
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["deepseek:default"]).toEqual(
-      expect.objectContaining({
-        type: "api_key",
-        provider: "deepseek",
-        key: "stored-fallback-token",
-      })
-    );
+    expect(pasteStdin("deepseek:default")).toContain("stored-fallback-token");
   });
 
   it("prefers the configured local AI model as the OpenClaw fallback", async () => {
@@ -1018,10 +1014,9 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     // ...and the managed auth profile uses api_key (not the legacy token mode
     // that 6.8 no longer turns into an Authorization header).
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["openrouter:default"]).toEqual(
-      expect.objectContaining({ type: "api_key", provider: "openrouter", key: "sk-or-v1-test" })
-    );
+    const paste = pasteCallFor("openrouter:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--provider", "openrouter"]));
+    expect(pasteStdin("openrouter:default")).toContain("sk-or-v1-test");
   });
 
   it("honors an openrouter model picked by the user", async () => {
@@ -1075,10 +1070,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(modelIds).toContain("gemini-3.1-flash-lite");
 
     // ...and the managed auth profile is api_key with the inline key.
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["google:default"]).toEqual(
-      expect.objectContaining({ type: "api_key", provider: "google", key: "AIzaTestKey123" })
-    );
+    expect(pasteStdin("google:default")).toContain("AIzaTestKey123");
   });
 
   it("configures anthropic as an openai-compat provider with the key inline", async () => {
@@ -1103,10 +1095,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     const modelIds = providerDef.models?.map((m: { id: string }) => m.id) ?? [];
     expect(modelIds).toContain("claude-sonnet-4-6");
 
-    const writtenContent = JSON.parse(mockFs.writeFile.mock.calls.at(-1)?.[1] as string);
-    expect(writtenContent.profiles["anthropic:default"]).toEqual(
-      expect.objectContaining({ type: "api_key", provider: "anthropic", key: "sk-ant-test123" })
-    );
+    expect(pasteStdin("anthropic:default")).toContain("sk-ant-test123");
   });
 
   // ------------------------------------------------------------------
@@ -1743,13 +1732,22 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(written?.agents?.defaults?.model?.primary).toBe(primaryOp?.[1]);
     });
 
-    it("runs doctor --fix after writing an auth profile, so OpenClaw 2 hydrates it", async () => {
+    it("stores an API key through the CLI's auth store, key on stdin, no doctor", async () => {
+      // OpenClaw 2 refuses a hand-written auth-profiles.json (legacy store);
+      // `models auth paste-api-key` writes the running generation's store and
+      // needs no migration afterwards — so doctor must NOT run here.
       const res = await configurePost(jsonRequest({
         provider: "clawai",
         apiKey: "claw_token_abc",
       }));
       expect(res.status).toBe(200);
-      expect(vi.mocked(runOpenclawDoctorFix)).toHaveBeenCalled();
+      const paste = vi.mocked(spawnOpenclawCli).mock.calls.find(
+        (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key"),
+      );
+      expect(paste).toBeDefined();
+      expect(paste?.[0]).not.toContain("claw_token_abc");
+      expect((paste?.[1] as { stdinData?: string })?.stdinData).toContain("claw_token_abc");
+      expect(vi.mocked(runOpenclawDoctorFix)).not.toHaveBeenCalled();
     });
 
     it("still writes every key the old sequence wrote", async () => {
