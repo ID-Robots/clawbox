@@ -251,18 +251,20 @@ changed = False
 # OpenClaw 2 moved/retired these v1 state and tuning fields. Doctor normally
 # removes them, but plugin-verification failures can make doctor exit before
 # it writes the repaired config, leaving the gateway in a permanent loop.
-meta = cfg.get("meta")
-if isinstance(meta, dict) and "lastTouchedAt" in meta:
-    del meta["lastTouchedAt"]
-    changed = True
-commands = cfg.get("commands")
-if isinstance(commands, dict) and "ownerDisplay" in commands:
-    del commands["ownerDisplay"]
-    changed = True
-tailscale = (cfg.get("gateway") or {}).get("tailscale") if isinstance(cfg.get("gateway"), dict) else None
-if isinstance(tailscale, dict) and "resetOnExit" in tailscale:
-    del tailscale["resetOnExit"]
-    changed = True
+# They remain valid on v1, so never run this cleanup there.
+if CLAWBOX_OPENCLAW_V2:
+    meta = cfg.get("meta")
+    if isinstance(meta, dict) and "lastTouchedAt" in meta:
+        del meta["lastTouchedAt"]
+        changed = True
+    commands = cfg.get("commands")
+    if isinstance(commands, dict) and "ownerDisplay" in commands:
+        del commands["ownerDisplay"]
+        changed = True
+    tailscale = (cfg.get("gateway") or {}).get("tailscale") if isinstance(cfg.get("gateway"), dict) else None
+    if isinstance(tailscale, dict) and "resetOnExit" in tailscale:
+        del tailscale["resetOnExit"]
+        changed = True
 
 # Strip invalid agent keys that prevent gateway from starting.
 agents_defaults = cfg.setdefault("agents", {}).setdefault("defaults", {})
@@ -270,10 +272,11 @@ for k in ("tools", "systemPromptSuffix"):
     if k in agents_defaults:
         del agents_defaults[k]
         changed = True
-compaction = agents_defaults.get("compaction")
-if isinstance(compaction, dict) and "reserveTokensFloor" in compaction:
-    del compaction["reserveTokensFloor"]
-    changed = True
+if CLAWBOX_OPENCLAW_V2:
+    compaction = agents_defaults.get("compaction")
+    if isinstance(compaction, dict) and "reserveTokensFloor" in compaction:
+        del compaction["reserveTokensFloor"]
+        changed = True
 
 # Model migration: some early ClawBox images/configs can leave the active
 # primary on Anthropic's retired May 2025 Sonnet id. New OpenClaw builds no
@@ -1380,16 +1383,18 @@ PY
 # normally runs doctor before restarting, but an interrupted configure or a
 # late writer from an older x64 install can recreate the file after that pass.
 # Repair only when the sentinel file exists, so normal boots pay no CLI cost.
-LEGACY_AUTH_PROFILE="$(find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null || true)"
-if [ -n "$LEGACY_AUTH_PROFILE" ]; then
-  echo "  Migrating legacy auth profiles into OpenClaw 2 SQLite state..."
-  if ! timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
-    echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2
-    exit 1
-  fi
-  if find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null | grep -q .; then
-    echo "  ERROR: OpenClaw doctor left a legacy auth-profiles.json in place" >&2
-    exit 1
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  LEGACY_AUTH_PROFILE="$(find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null || true)"
+  if [ -n "$LEGACY_AUTH_PROFILE" ]; then
+    echo "  Migrating legacy auth profiles into OpenClaw 2 SQLite state..."
+    if ! timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null; then
+      echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2
+      exit 1
+    fi
+    if find "$(dirname "$OPENCLAW_CONFIG")/agents" -mindepth 3 -maxdepth 3 -name auth-profiles.json -type f -print -quit 2>/dev/null | grep -q .; then
+      echo "  ERROR: OpenClaw doctor left a legacy auth-profiles.json in place" >&2
+      exit 1
+    fi
   fi
 fi
 

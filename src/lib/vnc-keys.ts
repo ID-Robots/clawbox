@@ -1,5 +1,3 @@
-import keysymdef from "@novnc/novnc/lib/input/keysymdef";
-
 export type TrackedKey = {
   code: string | null;
   keysym: number;
@@ -66,10 +64,14 @@ export function getTrackedVncKey(event: Pick<KeyboardEvent, "code" | "key">): Tr
   } else if (event.key.length === 1) {
     const codepoint = event.key.codePointAt(0);
     if (codepoint !== undefined) {
-      const lookedUpKeysym = keysymdef.lookup(codepoint);
-      if (typeof lookedUpKeysym === "number") {
-        keysym = lookedUpKeysym;
-      }
+      // X11 keysyms are identical to Latin-1 through U+00FF. Every other
+      // Unicode scalar uses the standard 0x01000000-prefixed encoding. This
+      // was previously delegated to noVNC's private keysymdef submodule, but
+      // noVNC 1.7 exposes only its public RFB entry point. Keeping the tiny
+      // standard mapping here avoids a private deep import and works for the
+      // fallback keyboard-forwarding path (normal focused input is handled by
+      // RFB itself).
+      keysym = codepoint <= 0xff ? codepoint : 0x01000000 | codepoint;
     }
   }
 

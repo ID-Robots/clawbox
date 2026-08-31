@@ -35,8 +35,14 @@ fi
 # when root invokes the installer directly. Resolve without tripping `set -u`.
 DEFAULT_USER="$(logname 2>/dev/null || true)"
 [ -n "$DEFAULT_USER" ] || DEFAULT_USER="${SUDO_USER:-}"
-[ -n "$DEFAULT_USER" ] || DEFAULT_USER="$(id -un)"
+if [ -z "$DEFAULT_USER" ] && [ "$(id -u)" -ne 0 ]; then
+  DEFAULT_USER="$(id -un)"
+fi
 CLAWBOX_USER="${CLAWBOX_USER:-$DEFAULT_USER}"
+if [ -z "$CLAWBOX_USER" ] || [ "$CLAWBOX_USER" = "root" ]; then
+  echo "Error: could not resolve an unprivileged install user. Set CLAWBOX_USER=<user>." >&2
+  exit 1
+fi
 # Look up the user's home from passwd instead of `eval echo ~$CLAWBOX_USER`,
 # which would expand shell metacharacters in CLAWBOX_USER.
 CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
@@ -105,6 +111,10 @@ activate_node_runtime() {
   node_real=$(readlink -f "$(command -v node)")
   node_root=$(dirname "$(dirname "$node_real")")
   mkdir -p /opt/clawbox
+  if [ -e "$NODE_DIST_ROOT" ] && [ ! -L "$NODE_DIST_ROOT" ]; then
+    echo "Error: $NODE_DIST_ROOT exists and is not a symlink; move it aside and rerun." >&2
+    exit 1
+  fi
   if [ "$node_root" != "$(readlink -f "$NODE_DIST_ROOT" 2>/dev/null || true)" ]; then
     ln -sfn "$node_root" "$NODE_DIST_ROOT"
   fi
@@ -119,7 +129,19 @@ ensure_openclaw_node_engine() {
   fi
   echo "  Installing/upgrading Node.js 22 for OpenClaw $OPENCLAW_VERSION..."
   wait_for_apt
-  curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  local nodesource_script
+  nodesource_script=$(mktemp)
+  if ! curl -fsSL -o "$nodesource_script" https://deb.nodesource.com/setup_22.x; then
+    rm -f "$nodesource_script"
+    echo "Error: failed to download the NodeSource setup script." >&2
+    exit 1
+  fi
+  if ! bash "$nodesource_script"; then
+    rm -f "$nodesource_script"
+    echo "Error: the NodeSource setup script failed." >&2
+    exit 1
+  fi
+  rm -f "$nodesource_script"
   wait_for_apt
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nodejs
   if node_satisfies_openclaw_engine; then
@@ -390,12 +412,12 @@ step_git_pull() {
 
 step_build() {
   cd "$PROJECT_DIR"
-  as_user_login "cd $PROJECT_DIR && $BUN install"
-  if ! as_user_login "cd $PROJECT_DIR && node -e \"require('node-pty')\"" &>/dev/null; then
+  as_user_login "cd \"$PROJECT_DIR\" && $BUN install"
+  if ! as_user_login "cd \"$PROJECT_DIR\" && node -e \"require('node-pty')\"" &>/dev/null; then
     echo "  Rebuilding native modules (node-pty)..."
-    as_user_login "cd $PROJECT_DIR && npm_config_python=/usr/bin/python3 npm rebuild node-pty --foreground-scripts"
+    as_user_login "cd \"$PROJECT_DIR\" && npm_config_python=/usr/bin/python3 npm rebuild node-pty --foreground-scripts"
   fi
-  as_user_login "cd $PROJECT_DIR && $BUN run build"
+  as_user_login "cd \"$PROJECT_DIR\" && $BUN run build"
   if [ ! -f "$PROJECT_DIR/.next/standalone/server.js" ]; then
     echo "Error: Build failed — .next/standalone/server.js not found"
     exit 1
@@ -560,7 +582,7 @@ step_openclaw_config() {
     chown "$CLAWBOX_USER:$CLAWBOX_USER" "$OPENCLAW_HOME"
     local OPENCLAW_CONFIG="$OPENCLAW_HOME/openclaw.json"
     as_user env OPENCLAW_CONFIG="$OPENCLAW_CONFIG" CLAWBOX_PORT="$PORT" python3 - <<'PY'
-import json, os, secrets, tempfile
+import json, os, re, secrets, tempfile
 
 path = os.environ["OPENCLAW_CONFIG"]
 try:
@@ -575,7 +597,23 @@ gateway.setdefault("bind", "loopback")
 auth = gateway.setdefault("auth", {})
 auth["mode"] = "token"
 token = auth.get("token")
-if not (isinstance(token, str) and token != "clawbox" and len(token) >= 32):
+def is_strong_gateway_token(value):
+    if isinstance(value, dict):
+        return (
+            value.get("source") in ("env", "file", "exec")
+            and isinstance(value.get("provider"), str)
+            and bool(value["provider"].strip())
+            and isinstance(value.get("id"), str)
+            and bool(value["id"].strip())
+            and set(value) == {"source", "provider", "id"}
+        )
+    if isinstance(value, str):
+        if re.fullmatch(r"\$\{.+\}", value):
+            return True
+        return value != "clawbox" and len(value) >= 32
+    return False
+
+if not is_strong_gateway_token(token):
     auth["token"] = secrets.token_hex(32)
 control = gateway.setdefault("controlUi", {})
 control.pop("allowInsecureAuth", None)

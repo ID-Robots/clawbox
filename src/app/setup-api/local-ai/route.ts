@@ -16,7 +16,7 @@ const CLAWBOX_HOME_DIR = process.env.CLAWBOX_HOME_DIR || process.env.HOME || "/h
 async function runCommand(cmd: string, args: string[]) {
   return await execFile(cmd, args, {
     cwd: CLAWBOX_HOME_DIR,
-    env: { HOME: CLAWBOX_HOME_DIR, ...process.env },
+    env: { ...process.env, HOME: CLAWBOX_HOME_DIR },
     timeout: 30_000,
   });
 }

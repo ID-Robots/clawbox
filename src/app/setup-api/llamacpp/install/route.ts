@@ -198,7 +198,7 @@ function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: st
       cwd: CLAWBOX_HOME_DIR,
       detached: true,
       stdio: "ignore",
-      env: { HOME: CLAWBOX_HOME_DIR, ...process.env },
+      env: { ...process.env, HOME: CLAWBOX_HOME_DIR },
     }
   );
 }

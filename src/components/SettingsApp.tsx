@@ -2822,6 +2822,40 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
     </div>
   );
 
+  // Shared by mobile and desktop. Keeping one dialog prevents the mobile
+  // early-return layout from silently dropping password confirmation.
+  const systemPasswordConfirmDialog = sysPasswordConfirmOpen && (
+    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+      <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
+        <div className="flex items-center gap-2 mb-3">
+          <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
+          <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">{t("settings.security.confirmTitle")}</h3>
+        </div>
+        <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
+          {t("settings.security.confirmBodyPrefix")} <span className="text-[var(--text-primary)] font-medium">{t("settings.security.confirmBodyScope")}</span>{t("settings.security.confirmBodySuffix")}
+        </p>
+        <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
+          <div className="flex items-center justify-between gap-2 mb-1.5">
+            <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">{t("settings.security.newPassword")}</span>
+            <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? t("settings.security.hidePassword") : t("settings.security.revealPassword")}>
+              <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
+              {sysPasswordConfirmReveal ? t("settings.security.hide") : t("settings.security.reveal")}
+            </button>
+          </div>
+          <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
+            {sysPasswordConfirmReveal ? sysPassword : "••••••••"}
+          </div>
+        </div>
+        <div className="flex gap-3">
+          <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
+          <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
+            {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.confirmChange")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   const renderContent = () => (
     <>
         {/* ─── Appearance ─── */}
@@ -5770,6 +5804,14 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       {/* Factory Reset confirmation modal */}
       {factoryResetDialog}
 
+      <ClawBoxLoginModal
+        open={loginModal.open}
+        feature={loginModal.feature}
+        onClose={() => setLoginModal((m) => ({ ...m, open: false }))}
+      />
+
+      {systemPasswordConfirmDialog}
+
       {/* Hotspot enable confirmation — single-radio collision warning */}
       {hotspotConfirmEnable && (
         <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
@@ -5993,37 +6035,7 @@ export default function SettingsApp({ ui }: SettingsAppProps) {
       )}
 
       {/* System password change confirmation */}
-      {sysPasswordConfirmOpen && (
-        <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
-          <div role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
-            <div className="flex items-center gap-2 mb-3">
-              <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
-              <h3 id="sys-pw-confirm-title" className="text-lg font-bold text-[var(--text-primary)]">{t("settings.security.confirmTitle")}</h3>
-            </div>
-            <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
-              {t("settings.security.confirmBodyPrefix")} <span className="text-[var(--text-primary)] font-medium">{t("settings.security.confirmBodyScope")}</span>{t("settings.security.confirmBodySuffix")}
-            </p>
-            <div className="rounded-lg border border-amber-400/30 bg-amber-400/[0.08] px-3 py-2.5 mb-5">
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-[10px] font-semibold text-amber-200/80 uppercase tracking-widest">{t("settings.security.newPassword")}</span>
-                <button type="button" onClick={() => setSysPasswordConfirmReveal(v => !v)} className="text-[10px] text-amber-200 hover:text-amber-100 bg-transparent border-none cursor-pointer flex items-center gap-1" aria-label={sysPasswordConfirmReveal ? t("settings.security.hidePassword") : t("settings.security.revealPassword")}>
-                  <span className="material-symbols-rounded" style={{ fontSize: 14 }}>{sysPasswordConfirmReveal ? "visibility_off" : "visibility"}</span>
-                  {sysPasswordConfirmReveal ? t("settings.security.hide") : t("settings.security.reveal")}
-                </button>
-              </div>
-              <div className="font-mono text-sm text-amber-50 break-all min-h-[1.25rem]">
-                {sysPasswordConfirmReveal ? sysPassword : "••••••••"}
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <button ref={sysPasswordConfirmCancelRef} disabled={sysPasswordSaving} onClick={() => setSysPasswordConfirmOpen(false)} className="flex-1 py-2.5 bg-white/5 text-[var(--text-secondary)] rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-white/10 transition-colors disabled:opacity-50">{t("cancel")}</button>
-              <button disabled={sysPasswordSaving} onClick={() => { setSysPasswordConfirmOpen(false); void saveSystemPassword(); }} className="flex-1 py-2.5 bg-[#fe6e00] text-white rounded-xl text-sm font-semibold cursor-pointer border-none hover:bg-[#ff8b1a] transition-colors disabled:opacity-50">
-                {sysPasswordSaving ? t("settings.security.saving") : t("settings.security.confirmChange")}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {systemPasswordConfirmDialog}
 
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
       {hostnameRebootTo && typeof document !== "undefined" && createPortal(

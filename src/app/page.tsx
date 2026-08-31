@@ -1516,7 +1516,7 @@ function ChromeDesktopInner() {
     dismissUpdateNotification();
   }, [dismissUpdateNotification]);
 
-  const openSettingsSection = useCallback((section: "ai" | "localAi") => {
+  const openSettingsSection = useCallback((section: "ai" | "localAi" | "system") => {
     (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
     window.dispatchEvent(new CustomEvent("clawbox:open-settings-section", { detail: { section } }));
     openApp("settings");
@@ -2587,7 +2587,9 @@ function ChromeDesktopInner() {
           setLauncherOpen((prev) => !prev);
         }}
         onTrayClick={() => {
-          // Clock click — no-op for now (could open a calendar/notifications panel)
+          setLauncherOpen(false);
+          setTrayOpen(false);
+          openSettingsSection("system");
         }}
         onClawKeepShieldClick={openClawKeepOrAiProvider}
         clawkeepStatus={{ stale: clawkeepStale, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
