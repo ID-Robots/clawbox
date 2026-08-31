@@ -506,10 +506,11 @@ export async function POST(request: Request) {
         },
         gateway: {
           auth: { mode: "token", token: crypto.randomBytes(32).toString("hex") },
-          controlUi: {
-            allowInsecureAuth: true,
-            dangerouslyDisableDeviceAuth: true,
-          },
+          // No controlUi block: OpenClaw 2 retired allowInsecureAuth and
+          // dangerouslyDisableDeviceAuth (a config carrying them fails
+          // validation), and gateway-pre-start.sh writes allowedOrigins on
+          // every boot. Browsers authenticate with the token plus a device
+          // identity (src/lib/gateway-device-identity.ts).
         },
       };
       await fs.writeFile(

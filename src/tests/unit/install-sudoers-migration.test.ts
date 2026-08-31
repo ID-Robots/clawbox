@@ -593,6 +593,12 @@ d("the allow-list a device ends up with", () => {
   const EXPECTED = [
     "restart clawbox-gateway.service",
     "restart clawbox-gateway",
+    // restartGateway() clears a crash-loop's start-rate-limit state before
+    // restarting (StartLimitBurst=20/hour; the OpenClaw 1->2 transition was
+    // enough to exhaust it, after which every allowed restart was refused
+    // for the rest of the window with nothing the clawbox user could do).
+    "reset-failed clawbox-gateway.service",
+    "reset-failed clawbox-gateway",
     "stop clawbox-gateway.service",
     "stop clawbox-gateway",
     "--runtime mask clawbox-gateway.service",

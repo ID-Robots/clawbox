@@ -22,12 +22,12 @@ const INSTALLER = new URL("../../../install.sh", import.meta.url);
 describe("the voice selector agrees with the installer", () => {
   it("writes the provider id install.sh selects", async () => {
     const script = await fs.readFile(INSTALLER, "utf8");
-    expect(script).toContain(`oc_config_set messages.tts.provider "${LOCAL_TTS_PROVIDER_ID}"`);
+    expect(script).toContain(`oc_config_set "$TTS_HOME.provider" "${LOCAL_TTS_PROVIDER_ID}"`);
   });
 
   it("reads the provider entry install.sh writes", async () => {
     const script = await fs.readFile(INSTALLER, "utf8");
-    expect(script).toContain(`oc_config_set messages.tts.providers.${LOCAL_TTS_PROVIDER_ID}`);
+    expect(script).toContain(`oc_config_set "$TTS_HOME.providers.${LOCAL_TTS_PROVIDER_ID}"`);
   });
 });
 

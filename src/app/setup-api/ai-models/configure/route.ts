@@ -698,7 +698,13 @@ function buildClawboxAiImageOps(
 ): OpenclawConfigSetArgs[] {
   let existingOpenAiProvider: OpenAiProviderConfig | undefined =
     snapshot?.models?.providers?.[CLAWBOX_AI_IMAGE_PROVIDER];
-  const existingImageModel: unknown = snapshot?.agents?.defaults?.imageGenerationModel;
+  // OpenClaw 2 home first (agents.defaults.mediaModels.image); the legacy
+  // key is still honoured as "already configured" so a box the loader has
+  // not migrated yet is not double-claimed.
+  const defaults = snapshot?.agents?.defaults as
+    | { imageGenerationModel?: unknown; mediaModels?: { image?: unknown } }
+    | undefined;
+  const existingImageModel: unknown = defaults?.mediaModels?.image ?? defaults?.imageGenerationModel;
   if (typeof existingOpenAiProvider !== "object" || existingOpenAiProvider === null) {
     existingOpenAiProvider = undefined;
   }
@@ -730,12 +736,15 @@ function buildClawboxAiImageOps(
   ];
   if (hasToolModelConfig(existingImageModel)) {
     console.log(
-      "[AI Config] Left agents.defaults.imageGenerationModel alone: it already names an image model",
+      "[AI Config] Left the image-generation model alone: it already names one (mediaModels.image or the legacy imageGenerationModel)",
     );
     return ops;
   }
   ops.push([
-    "agents.defaults.imageGenerationModel",
+    // OpenClaw 2's home for the image-generation model. gateway-pre-start.sh
+    // writes the same key under the same version gate; the two must stay in
+    // step.
+    "agents.defaults.mediaModels.image",
     JSON.stringify({ primary: CLAWBOX_AI_IMAGE_MODEL }),
     "--json",
   ]);
@@ -1947,8 +1956,11 @@ export async function POST(request: Request) {
     if (gatewayToken !== null) {
       baseOps.push(["gateway.auth.token", gatewayToken]);
     }
-    baseOps.push(["gateway.controlUi.allowInsecureAuth", "true", "--json"]);
-    baseOps.push(["gateway.controlUi.dangerouslyDisableDeviceAuth", "true", "--json"]);
+    // OpenClaw 2 retired gateway.controlUi.allowInsecureAuth and
+    // dangerouslyDisableDeviceAuth — a config carrying either fails
+    // validation outright. Browsers authenticate with the gateway token plus
+    // a device identity now (src/lib/gateway-device-identity.ts), so there
+    // is nothing to write here any more.
     await runConfigSetBatch(baseOps);
 
     // 5. Ensure openclaw config files are owned by clawbox

@@ -438,6 +438,22 @@ BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 OPENCLAW_VERSION="2026.8.1"
+
+# Is the OpenClaw on this box generation 2 (>= 2026.8)? The INSTALLED binary
+# answers when it can — it is the process that parses whatever we write — and
+# the pinned target only fills in before the first install. Used to route the
+# steps that speak different config dialects per generation.
+openclaw_is_v2() {
+  local v=""
+  if [ -x "$NPM_PREFIX/bin/openclaw" ]; then
+    v=$("$NPM_PREFIX/bin/openclaw" --version 2>/dev/null | grep -oE '20[0-9]{2}\.[0-9]+\.[0-9]+' | head -1)
+  fi
+  if [ -z "$v" ] && [ -f "$PROJECT_DIR/config/openclaw-target.txt" ]; then
+    v=$(head -1 "$PROJECT_DIR/config/openclaw-target.txt" | awk '{print $1}')
+  fi
+  [ -z "$v" ] && v="$OPENCLAW_VERSION"
+  [ "$(printf '%s\n' 2026.8 "$v" | sort -V | head -1)" = "2026.8" ]
+}
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
 # NousResearch/hermes-agent had on `main` the second a box was flashed.
@@ -2205,6 +2221,22 @@ step_openclaw_install() {
     echo "  OpenClaw installed: $($OPENCLAW_BIN --version 2>/dev/null || echo 'unknown version')"
   fi
 
+  # OpenClaw 2 (>= 2026.8) refuses gateway readiness while legacy state is
+  # present: the sessions/transcripts move into SQLite and stale config keys
+  # fail validation, and BOTH migrations are doctor's to run. A box upgraded
+  # without this step boots into a gateway that never comes up. Non-fatal on
+  # purpose — a doctor refusal leaves evidence in the gateway's own logs and
+  # the gateway start below will say so loudly — and non-interactive so an
+  # unattended update never parks on a prompt.
+  if [ "$(printf '%s\n' 2026.8 "$TARGET" | sort -V | head -1)" = "2026.8" ]; then
+    echo "  Running openclaw doctor --fix (OpenClaw 2 config + session migrations)..."
+    # The sessions-to-SQLite move must not race a still-running v1 gateway
+    # writing the very files being migrated; gateway_setup restarts it later.
+    systemctl stop clawbox-gateway.service 2>/dev/null || true
+    as_clawbox -H "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null \
+      || echo "  WARN: openclaw doctor --fix did not complete; the gateway may refuse readiness until it is run"
+  fi
+
   # Force-reinstall every externally-installed plugin so they're bumped
   # alongside the core. Without this, a core 5.12→5.22 bump leaves
   # @openclaw/codex stuck at whatever was first installed by
@@ -2343,6 +2375,15 @@ step_clawkeep_install() {
 
 step_openclaw_patch() {
   is_hermes_edition && return 0
+  # OpenClaw 2 rewrote the connect handler this step used to sed: the scope
+  # regex now matches sites where the injected identifiers do not exist (a
+  # broken bundle), and the device-identity bypass it papered over is retired
+  # outright — ClawBox implements the REAL device identity client-side now
+  # (src/lib/gateway-device-identity.ts). Nothing here applies to gen 2.
+  if openclaw_is_v2; then
+    echo "  Gateway patches: not needed on OpenClaw 2 (device identity implemented client-side)"
+    return 0
+  fi
   # Patcher restricts file searches to .js (runtime bundles) — newer openclaw
   # releases ship .d.ts declaration files alongside bundled JS, and literal
   # type strings would otherwise match files we cannot patch.
@@ -2792,7 +2833,12 @@ step_openclaw_tts() {
   # chosen ElevenLabs (or turned TTS off) must not have it silently reset by
   # every update, and rebuild_reboot re-invokes this step.
   local CURRENT_TTS
-  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get messages.tts.provider 2>/dev/null || echo "")
+  # OpenClaw 2 moved the speech block from messages.tts to a top-level tts
+  # object; writing the old home there fails config validation and a fresh
+  # v2 box would never get its local voice.
+  local TTS_HOME="messages.tts"
+  openclaw_is_v2 && TTS_HOME="tts"
+  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get "$TTS_HOME.provider" 2>/dev/null || echo "")
   if [ -n "$CURRENT_TTS" ] && [ "$CURRENT_TTS" != "null" ]; then
     # An owner who chose ElevenLabs keeps it. But when the box is already on
     # OUR provider, preserving the selection is not enough: the update that
@@ -2846,7 +2892,7 @@ step_openclaw_tts() {
   # then gives up; if the provider definition did not land, naming it as THE
   # provider leaves the box pointing at a provider that does not exist, and
   # every spoken reply fails — strictly worse than not having run at all.
-  if ! oc_config_set messages.tts.providers.tts-local-cli "$TTS_PROVIDER_JSON" --json; then
+  if ! oc_config_set "$TTS_HOME.providers.tts-local-cli" "$TTS_PROVIDER_JSON" --json; then
     echo "  ERROR: could not write the tts-local-cli provider — leaving messages.tts.provider unset" >&2
     return 1
   fi
@@ -2864,7 +2910,7 @@ step_openclaw_tts() {
     return 1
   fi
 
-  if ! oc_config_set messages.tts.provider "tts-local-cli"; then
+  if ! oc_config_set "$TTS_HOME.provider" "tts-local-cli"; then
     echo "  ERROR: could not select the tts-local-cli provider" >&2
     return 1
   fi

@@ -70,16 +70,31 @@ function loadOrCreateIdentity(): { priv: Uint8Array; pub: Uint8Array } | null {
       if (typeof parsed?.priv === "string" && typeof parsed?.pub === "string") {
         const priv = fromB64u(parsed.priv);
         const pub = fromB64u(parsed.pub);
-        if (priv.length === 32 && pub.length === 32) return { priv, pub };
+        // The pair must actually BE a pair: a half-corrupted store (one key
+        // survives, the other does not) would otherwise sign challenges the
+        // gateway can never verify, for ever, with no self-heal. A mismatch
+        // falls through to minting a fresh identity — one new pairing beats
+        // an unusable chat.
+        if (priv.length === 32 && pub.length === 32
+            && toB64u(ed.getPublicKey(priv)) === toB64u(pub)) {
+          return { priv, pub };
+        }
       }
     }
   } catch {
     /* fall through to minting a fresh one */
   }
   try {
-    const priv = ed.utils.randomSecretKey();
+    const priv = ed.utils.randomPrivateKey();
     const pub = ed.getPublicKey(priv);
-    window.localStorage?.setItem(STORAGE_KEY, JSON.stringify({ priv: toB64u(priv), pub: toB64u(pub) } satisfies StoredIdentity));
+    try {
+      window.localStorage?.setItem(STORAGE_KEY, JSON.stringify({ priv: toB64u(priv), pub: toB64u(pub) } satisfies StoredIdentity));
+    } catch {
+      // Storage refused (private window, blocked site data): keep the
+      // identity for THIS page load anyway. The device pairs afresh next
+      // time — with loopback auto-approval that is invisible; without it,
+      // one approval per visit still beats never connecting at all.
+    }
     return { priv, pub };
   } catch {
     return null;

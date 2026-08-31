@@ -1717,14 +1717,12 @@ describe("POST /setup-api/ai-models/configure", () => {
         "agents.defaults.compaction.reserveTokensFloor",
         "gateway.auth.mode",
         "gateway.auth.token",
-        "gateway.controlUi.allowInsecureAuth",
-        "gateway.controlUi.dangerouslyDisableDeviceAuth",
         "models.providers.deepseek",
         "models.mode",
         "agents.defaults.imageModel",
         "models.providers.openai.apiKey",
         "models.providers.openai.models",
-        "agents.defaults.imageGenerationModel",
+        "agents.defaults.mediaModels.image",
         "agents.defaults.model.fallbacks",
       ]) {
         expect(paths).toContain(expected);
@@ -1742,7 +1740,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       // The expensive ones. Each of these used to be written twice.
       expect(paths.filter((p) => p === "models.providers.deepseek")).toHaveLength(1);
       expect(paths.filter((p) => p === "models.providers.openai.apiKey")).toHaveLength(1);
-      expect(paths.filter((p) => p === "agents.defaults.imageGenerationModel")).toHaveLength(1);
+      expect(paths.filter((p) => p === "agents.defaults.mediaModels.image")).toHaveLength(1);
       // Two, not one: the generic auth-profile step and the ClawBox AI step
       // both name this path, with the same value. That overlap predates this
       // change (it used to make three) and removing it is a different edit.

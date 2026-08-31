@@ -63,6 +63,8 @@ interface Options {
   storeExists?: boolean;
   /** A device store that is not an object, or not JSON. */
   storeBody?: string;
+  /** Run the block in its OpenClaw 2 mode (top-level tts home). */
+  v2?: boolean;
 }
 
 /**
@@ -74,7 +76,7 @@ interface Options {
  * provider entry. `CLAWBOX_DEVICE_STORE` is the env var the shell exports.
  */
 function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boolean; log: string } {
-  const { routeIsOurs = true, deviceTier = MAX_DEVICE_TIER, storeExists = true, storeBody } = opts;
+  const { routeIsOurs = true, deviceTier = MAX_DEVICE_TIER, storeExists = true, storeBody, v2 = false } = opts;
   const file = path.join(dir, "config.json");
   writeFileSync(file, JSON.stringify(cfg));
   const store = path.join(dir, "device-store.json");
@@ -89,6 +91,7 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
     `_clawai_proxy_base_url = ${JSON.stringify(PROXY)}`,
     `_clawai_token = ${JSON.stringify(TOKEN)}`,
     SAME_ENDPOINT,
+    ...(v2 ? ["CLAWBOX_OPENCLAW_V2 = True"] : []),
     POLICY,
     "print(json.dumps({'cfg': cfg, 'changed': changed}))",
   ].join("\n");
@@ -373,5 +376,36 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI cloud voice migrat
     const { cfg } = JSON.parse(out[out.length - 1]);
 
     expect(speech(cfg)?.baseUrl).toBe(staging);
+  });
+});
+
+// OpenClaw 2 moved the whole speech block from messages.tts to a top-level
+// tts object, inner shape unchanged. Same block, other home — picked from
+// CLAWBOX_OPENCLAW_V2, bound via globals() so this preamble can set it.
+describe.skipIf(!hasPython3)("the same migration on OpenClaw 2's top-level tts home", () => {
+  it("writes the cloud voice under tts.providers and leaves messages alone", () => {
+    const { cfg, changed } = migrate({}, { v2: true });
+    expect(changed).toBe(true);
+    const tts = cfg.tts as { providers?: Record<string, SpeechEntry> } | undefined;
+    expect(tts?.providers?.openai).toEqual({ baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED });
+    expect(cfg.messages).toBeUndefined();
+  });
+
+  it("takes back only its own stamped entry from the v2 home on a downgrade", () => {
+    const seeded = {
+      tts: { providers: { openai: { baseUrl: PROXY, model: SPEECH_MODEL, apiKey: TOKEN, ...MANAGED } } },
+    };
+    const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+    expect(changed).toBe(true);
+    const tts = cfg.tts as { providers?: Record<string, SpeechEntry> };
+    expect(tts.providers?.openai).toBeUndefined();
+  });
+
+  it("leaves an owner's own entry in the v2 home alone on a downgrade", () => {
+    const seeded = { tts: { providers: { openai: { baseUrl: "https://their.own/voice", model: "x" } } } };
+    const { cfg, changed } = migrate(seeded, { v2: true, deviceTier: PRO_DEVICE_TIER });
+    expect(changed).toBe(false);
+    const tts = cfg.tts as { providers?: Record<string, SpeechEntry> };
+    expect(tts.providers?.openai).toEqual({ baseUrl: "https://their.own/voice", model: "x" });
   });
 });

@@ -141,7 +141,7 @@ describe("POST /setup-api/tts — select", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "local" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", LOCAL]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", LOCAL]);
     // The choice, and nothing the owner did not pick: no backfilled language.
     expect(writeStateMock.mock.calls[0][0]).toEqual({ choice: "local" });
   });
@@ -163,7 +163,7 @@ describe("POST /setup-api/tts — select", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "select", choice: "cloud" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.provider", "openai"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.provider", "openai"]);
   });
 
   it("does not rewrite the config when the box is already on that provider", async () => {
@@ -249,7 +249,7 @@ describe("POST /setup-api/tts — voice and language", () => {
     const { POST } = await route();
     const res = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
     expect(res.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"]);
   });
 
   it("refuses a cloud voice the configured model cannot speak, and says which model", async () => {
@@ -264,7 +264,7 @@ describe("POST /setup-api/tts — voice and language", () => {
     expect(configSetMock).not.toHaveBeenCalled();
     const ok = await POST(post({ action: "voice", engine: "cloud", voice: "nova" }));
     expect(ok.status).toBe(200);
-    expect(configSetMock).toHaveBeenCalledWith(["messages.tts.providers.openai.voice", "nova"]);
+    expect(configSetMock).toHaveBeenCalledWith(["tts.providers.openai.voice", "nova"]);
   });
 
   it("refuses a cloud voice for a box that has no cloud voice", async () => {

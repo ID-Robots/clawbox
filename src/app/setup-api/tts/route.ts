@@ -105,8 +105,9 @@ async function status(): Promise<VoiceOutputStatus> {
 
 /**
  * Every write below runs through the openclaw CLI (`config set
- * messages.tts.provider` for the selection, `…providers.<cloud>.voice` for the
- * cloud voice). The Hermes SKU ships no openclaw binary at all, so the panel
+ * tts.provider` for the selection, `…providers.<cloud>.voice` for the cloud
+ * voice — OpenClaw 2 moved the whole block from messages.tts to a top-level
+ * tts object; the readers in voice-output.ts accept both homes). The Hermes SKU ships no openclaw binary at all, so the panel
  * offered a Select the route then refused with a 409. Say the true thing once,
  * here, instead of letting the customer discover it a button at a time. Same
  * shape ClawKeep reports for the same reason (lib/clawkeep.ts).
@@ -167,7 +168,7 @@ async function handleVoice(engine: unknown, voice: unknown) {
     if (!isCloudVoiceFor(target.model, voice)) {
       return refuse(`The cloud voice's model (${target.model}) does not have that voice.`, "unknown_voice", 400);
     }
-    await runOpenclawConfigSet([`messages.tts.providers.${target.providerId}.voice`, voice]);
+    await runOpenclawConfigSet([`tts.providers.${target.providerId}.voice`, voice]);
   } else {
     return refuse("Pick the voice on this box or the cloud voice.", "unknown_engine", 400);
   }
@@ -205,7 +206,7 @@ async function handleSelect(choice: VoiceChoice) {
     if (openclawIsAbsent()) {
       return refuse("This box cannot change the voice.", "cannot_change", 409);
     }
-    await runOpenclawConfigSet(["messages.tts.provider", providerId]);
+    await runOpenclawConfigSet(["tts.provider", providerId]);
   }
 
   // Re-read under the lock: the copy above decided the refusal, but the CLI

@@ -41,7 +41,7 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 const PROXY = "https://clawbox.com/api/ai";
-const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe" };
+const CLOUD = { provider: "openai", model: "gpt-4o-mini-transcribe", capabilities: ["audio"] };
 const INSTALLED = { installed: true, detail: "faster-whisper, kept warm by whisper-server." };
 const MISSING = { installed: false, detail: "The on-box transcriber is not installed." };
 
@@ -177,7 +177,7 @@ describe("POST /setup-api/stt — the write", () => {
     expect(batchMock).toHaveBeenCalledTimes(1);
     const [ops] = batchMock.mock.calls[0];
     expect(ops[0]).toEqual(["tools.media.audio.baseUrl", JSON.stringify(PROXY), "--json"]);
-    expect(ops[1][0]).toBe("tools.media.audio.models");
+    expect(ops[1][0]).toBe("tools.media.models");
     expect(ops[1][2]).toBe("--json");
     const models = JSON.parse(ops[1][1]);
     expect(models).toHaveLength(2);
@@ -220,19 +220,18 @@ describe("POST /setup-api/stt — the write", () => {
     readConfigMock.mockResolvedValue({
       tools: {
         media: {
-          audio: {
-            baseUrl: PROXY,
-            models: [
-              { model: "gpt-4o-mini-transcribe", provider: "openai" },
-              {
-                capabilities: ["audio"],
-                timeoutSeconds: 120,
-                args: [`${process.env.HOME || "/home/clawbox"}/.openclaw/workspace/scripts/stt-client.py`, "{{MediaPath}}"],
-                command: "/usr/bin/python3",
-                type: "cli",
-              },
-            ],
-          },
+          audio: { baseUrl: PROXY },
+          // OpenClaw 2's shared list, beside audio rather than under it.
+          models: [
+            { model: "gpt-4o-mini-transcribe", provider: "openai", capabilities: ["audio"] },
+            {
+              capabilities: ["audio"],
+              timeoutSeconds: 120,
+              args: [`${process.env.HOME || "/home/clawbox"}/.openclaw/workspace/scripts/stt-client.py`, "{{MediaPath}}"],
+              command: "/usr/bin/python3",
+              type: "cli",
+            },
+          ],
         },
       },
     });
@@ -247,7 +246,7 @@ describe("POST /setup-api/stt — the write", () => {
 
   it("rewrites when only the order differs", async () => {
     readConfigMock.mockResolvedValue({
-      tools: { media: { audio: { baseUrl: PROXY, models: [CLOUD, { type: "cli", command: "/usr/bin/python3", args: ["/x/stt-client.py", "{{MediaPath}}"] }] } } },
+      tools: { media: { audio: { baseUrl: PROXY }, models: [CLOUD, { type: "cli", command: "/usr/bin/python3", args: ["/x/stt-client.py", "{{MediaPath}}"] }] } },
     });
     const { POST } = await route();
     await POST(post({ primary: "local" }));

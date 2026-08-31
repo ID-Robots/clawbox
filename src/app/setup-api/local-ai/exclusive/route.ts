@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import fs from "fs/promises";
+import { listAgentIds, sessionStorePath, sweepSessionEntries } from "@/lib/openclaw-session-store";
 import path from "path";
 import { NextResponse } from "next/server";
 import { get, set, setMany } from "@/lib/config-store";
@@ -127,6 +128,34 @@ async function patchAllSessionOverrides(
   localModelId: string,
 ): Promise<FilesBackup> {
   const filesBackup: FilesBackup = {};
+  // OpenClaw 2 agents keep their sessions in SQLite. The sweep and its
+  // backup work exactly as for the legacy files; the backup key is the
+  // synthetic `sqlite:<agentId>` and restore routes it back to the store.
+  for (const agentId of listAgentIds(AGENTS_DIR)) {
+    if (!sessionStorePath(agentId, AGENTS_DIR)) continue;
+    const fileBackup: SessionsFileBackup = {};
+    const swept = sweepSessionEntries(agentId, (sessionKey, session) => {
+      const snapshot: SessionOverrideSnapshot = {};
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(session, field)) {
+          snapshot[field] = session[field];
+        }
+      }
+      fileBackup[sessionKey] = snapshot;
+      session.providerOverride = localProvider;
+      session.modelOverride = localModelId;
+      session.modelOverrideSource = "manual";
+      session.authProfileOverride = `${localProvider}:default`;
+      session.authProfileOverrideSource = "manual";
+      session.modelProvider = localProvider;
+      session.model = localModelId;
+      return true;
+    }, AGENTS_DIR);
+    // A failed sweep wrote nothing (single transaction) - recording its
+    // backup would let a later restore write stale values over sessions
+    // this pass never touched.
+    if (swept?.ok) filesBackup[`sqlite:${agentId}`] = fileBackup;
+  }
   const files = await listSessionsFiles();
   for (const file of files) {
     const parsed = await readSessionsJson(file, "patch");
@@ -175,9 +204,38 @@ async function patchAllSessionOverrides(
  * (no backup entry → nothing to restore → user's current state wins).
  */
 async function restoreSessionOverrides(backup: FilesBackup): Promise<void> {
+  const restoreIntoStore = (agentId: string, sessions: SessionsFileBackup) => {
+    sweepSessionEntries(agentId, (sessionKey, session) => {
+      const snapshot = sessions[sessionKey];
+      if (!snapshot) return false;
+      for (const field of SESSION_OVERRIDE_FIELDS) {
+        if (Object.prototype.hasOwnProperty.call(snapshot, field)) {
+          session[field] = snapshot[field];
+        } else {
+          delete session[field];
+        }
+      }
+      return true;
+    }, AGENTS_DIR);
+  };
   for (const [file, sessions] of Object.entries(backup)) {
+    if (file.startsWith("sqlite:")) {
+      restoreIntoStore(file.slice("sqlite:".length), sessions);
+      continue;
+    }
     const parsed = await readSessionsJson(file, "restore");
-    if (!parsed) continue;
+    if (!parsed) {
+      // Local-only switched on BEFORE the OpenClaw 2 migration, switched
+      // off after: the backup names a sessions.json the doctor has since
+      // folded into the agent SQLite store. The snapshots still apply -
+      // same keys, same entries - so route them into the store instead of
+      // silently leaving every session pinned to the local model.
+      const agentId = path.basename(path.dirname(path.dirname(file)));
+      if (agentId && sessionStorePath(agentId, AGENTS_DIR)) {
+        restoreIntoStore(agentId, sessions);
+      }
+      continue;
+    }
 
     for (const [sessionKey, snapshot] of Object.entries(sessions)) {
       const session = parsed[sessionKey];
