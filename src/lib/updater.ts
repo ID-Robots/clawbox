@@ -35,6 +35,26 @@ const OPENCLAW_VERSION_FALLBACK = "2026.8.1";
 const execShell = promisify(execCb);
 const execFile = promisify(execFileCb);
 
+/**
+ * Run git without a shell.
+ *
+ * `CLAWBOX_ROOT` is an environment-provided path and update branches come from
+ * a persisted preference. Passing both as argv keeps shell metacharacters inert
+ * (branch grammar is validated separately by isSafeBranch) and centralizes the
+ * repository/safe-directory arguments every updater git call requires.
+ */
+function execGit(
+  projectDir: string,
+  args: string[],
+  options: { timeout: number; maxBuffer?: number },
+) {
+  return execFile(
+    "git",
+    ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args],
+    options,
+  );
+}
+
 const VALID_HOST = /^[A-Za-z0-9.\-:]+$/;
 const PING_TARGETS = (process.env.PING_TARGETS || "8.8.8.8,1.1.1.1")
   .split(",")
@@ -295,9 +315,9 @@ export class UnresolvableUpdateBranchError extends Error {
  */
 async function gitRef(projectDir: string, ...args: string[]): Promise<string | null> {
   try {
-    const { stdout } = await execFile(
-      "git",
-      ["-c", `safe.directory=${projectDir}`, "-C", projectDir, ...args],
+    const { stdout } = await execGit(
+      projectDir,
+      args,
       { timeout: 15_000, maxBuffer: 4 * 1024 * 1024 },
     );
     return stdout.trim() || null;
@@ -673,7 +693,6 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
 
-  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
   // Throws UnresolvableUpdateBranchError rather than retargeting a device that
   // cannot say which branch it belongs to; this step is failFast, so the owner
   // gets the message instead of a silent channel change.
@@ -716,14 +735,16 @@ async function updateClawBoxAndReboot(): Promise<void> {
   //      not -fdx: gitignored dirs (data/, .env, node_modules, .next)
   //      are preserved so we don't nuke user state or force a multi-
   //      minute rebuild.
-  await execShell(
-    `${gitCmd} fetch origin` +
-    ` && ${gitCmd} reset --hard HEAD` +
-    ` && (${gitCmd} checkout ${local} 2>/dev/null || ${gitCmd} checkout -b ${local} ${upstream})` +
-    ` && ${gitCmd} reset --hard ${upstream}` +
-    ` && ${gitCmd} clean -fd`,
-    { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 },
-  );
+  const gitOptions = { timeout: 60_000, maxBuffer: 2 * 1024 * 1024 };
+  await execGit(PROJECT_DIR, ["fetch", "origin"], gitOptions);
+  await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
+  try {
+    await execGit(PROJECT_DIR, ["checkout", local], gitOptions);
+  } catch {
+    await execGit(PROJECT_DIR, ["checkout", "-b", local, upstream], gitOptions);
+  }
+  await execGit(PROJECT_DIR, ["reset", "--hard", upstream], gitOptions);
+  await execGit(PROJECT_DIR, ["clean", "-fd"], gitOptions);
   // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
   // every successful `next build`, so the continuation can demand positive
   // evidence the rebuild actually happened. Without it, a power cycle in the
@@ -1153,7 +1174,7 @@ async function readHermesVersion(): Promise<string | null> {
   }
 }
 
-async function getPinnedBranchTarget(gitCmd: string): Promise<{
+async function getPinnedBranchTarget(projectDir: string): Promise<{
   branch: string;
   currentSha: string;
   targetSha: string;
@@ -1167,10 +1188,10 @@ async function getPinnedBranchTarget(gitCmd: string): Promise<{
   if (!branch || !isSafeBranch(branch)) return null;
 
   try {
-    await execShell(`${gitCmd} fetch --quiet origin ${branch}`, { timeout: 20_000 }).catch(() => {});
+    await execGit(projectDir, ["fetch", "--quiet", "origin", branch], { timeout: 20_000 }).catch(() => {});
     const [{ stdout: currentOut }, { stdout: targetOut }] = await Promise.all([
-      execShell(`${gitCmd} rev-parse HEAD`, { timeout: 10_000 }),
-      execShell(`${gitCmd} rev-parse origin/${branch}`, { timeout: 10_000 }),
+      execGit(projectDir, ["rev-parse", "HEAD"], { timeout: 10_000 }),
+      execGit(projectDir, ["rev-parse", `origin/${branch}`], { timeout: 10_000 }),
     ]);
     const currentSha = currentOut.trim();
     const targetSha = targetOut.trim();
@@ -1186,7 +1207,6 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     return cachedVersionInfo;
   }
 
-  const gitCmd = `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR}`;
   const edition = readEdition();
   const hasHermes = hasHermesHarness();
   const [targetVersion, openclawCurrent, openclawTarget, rawVersion, hermesCurrent] = await Promise.all([
@@ -1218,7 +1238,7 @@ export async function getVersionInfo(): Promise<VersionInfo> {
     // hermes binary, so this must never spawn there.
     hasHermes ? readHermesVersion() : Promise.resolve(null),
   ]);
-  const pinnedBranchTarget = await getPinnedBranchTarget(gitCmd);
+  const pinnedBranchTarget = await getPinnedBranchTarget(PROJECT_DIR);
 
   // rawVersion is the installed release (e.g. "v3.1.0"); extract the base tag
   // so it compares cleanly against the target tag.
@@ -1259,12 +1279,14 @@ export async function getVersionInfo(): Promise<VersionInfo> {
 export async function getTargetVersion(): Promise<string | null> {
   if (Date.now() - targetVersionCacheTime < TARGET_VERSION_CACHE_TTL) return cachedTargetVersion;
   try {
-    await execShell(
-      `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} fetch --quiet --tags origin`,
+    await execGit(
+      PROJECT_DIR,
+      ["fetch", "--quiet", "--tags", "origin"],
       { timeout: 20_000 },
     ).catch(() => {});
-    const { stdout } = await execShell(
-      `git -c safe.directory=${PROJECT_DIR} -C ${PROJECT_DIR} ls-remote --tags --refs origin`,
+    const { stdout } = await execGit(
+      PROJECT_DIR,
+      ["ls-remote", "--tags", "--refs", "origin"],
       { timeout: 10_000 },
     );
     const tags = stdout

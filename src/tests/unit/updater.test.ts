@@ -36,8 +36,13 @@ const mockExec = vi.mocked(childProcess.exec);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockReadFile = vi.mocked(fs.readFile);
 const mockIsPortOpen = vi.mocked(isPortOpen);
+let execFileFallbackResults: Record<string, { stdout: string; stderr: string } | Error> = {};
 
 function setupExecMock(results: Record<string, { stdout: string; stderr: string } | Error> = {}) {
+  // Git used to run through `exec`; it now correctly uses `execFile` argv.
+  // Keep one result vocabulary so the behavioral tests below describe the
+  // command once while both process mocks can answer during the migration.
+  execFileFallbackResults = results;
   mockExec.mockImplementation(((
     cmd: string,
     optsOrCallback?: object | ((error: Error | null, result: { stdout: string; stderr: string }) => void),
@@ -93,9 +98,9 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
     const key = `${cmd} ${args.join(" ")}`;
 
     let result: { stdout: string; stderr: string } | Error | undefined;
-    for (const k of Object.keys(results)) {
+    for (const k of [...Object.keys(results), ...Object.keys(execFileFallbackResults)]) {
       if (key.includes(k) || k.includes(cmd)) {
-        result = results[k];
+        result = results[k] ?? execFileFallbackResults[k];
         break;
       }
     }
@@ -551,6 +556,40 @@ describe("updater", () => {
   });
 
   describe("getTargetVersion", () => {
+    it("passes an environment-provided project path to git as inert argv, never shell text", async () => {
+      const originalRoot = process.env.CLAWBOX_ROOT;
+      const taintedLookingRoot = "/tmp/claw box;touch /tmp/codeql-pwned";
+      try {
+        process.env.CLAWBOX_ROOT = taintedLookingRoot;
+        setupExecMock({
+          "ls-remote": { stdout: "abc123\trefs/tags/v2.0.0\n", stderr: "" },
+        });
+        vi.resetModules();
+        const freshUpdater = await import("@/lib/updater");
+
+        expect(await freshUpdater.getTargetVersion()).toBe("v2.0.0");
+        const gitCall = mockExecFile.mock.calls.find(([, args]) =>
+          Array.isArray(args) && args.includes("ls-remote"),
+        );
+        expect(gitCall?.[0]).toBe("git");
+        expect(gitCall?.[1]).toEqual([
+          "-c",
+          `safe.directory=${taintedLookingRoot}`,
+          "-C",
+          taintedLookingRoot,
+          "ls-remote",
+          "--tags",
+          "--refs",
+          "origin",
+        ]);
+        expect(mockExec.mock.calls.some(([command]) => String(command).includes(taintedLookingRoot))).toBe(false);
+      } finally {
+        if (originalRoot === undefined) delete process.env.CLAWBOX_ROOT;
+        else process.env.CLAWBOX_ROOT = originalRoot;
+        vi.resetModules();
+      }
+    });
+
     it("returns latest semver tag", async () => {
       setupExecMock({
         "ls-remote": {

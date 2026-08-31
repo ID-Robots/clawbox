@@ -1008,21 +1008,18 @@ async function pidIsDefinitelyDead(pid: number): Promise<boolean> {
  * stale; fail-closed is the safe direction for another process's lock.
  */
 async function readLockSnapshot(lockPath: string): Promise<LockSnapshot | null> {
-  let before: FileStat;
-  try {
-    before = await fs.lstat(lockPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
-  if (!before.isFile() || before.isSymbolicLink()) return null;
-
   const noFollow = typeof fsSync.constants.O_NOFOLLOW === "number" ? fsSync.constants.O_NOFOLLOW : 0;
+  const nonBlock = typeof fsSync.constants.O_NONBLOCK === "number" ? fsSync.constants.O_NONBLOCK : 0;
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
-    handle = await fs.open(lockPath, fsSync.constants.O_RDONLY | noFollow);
+    // Open first, with symlink following disabled, then inspect and read only
+    // through that pinned descriptor. A pathname lstat before open is a TOCTOU:
+    // another process can replace the sidecar between the check and use. The
+    // post-read lstat below is only an identity proof that this still-pinned
+    // file remains the path's current owner.
+    handle = await fs.open(lockPath, fsSync.constants.O_RDONLY | noFollow | nonBlock);
     const opened = await handle.stat();
-    if (!opened.isFile() || !sameFileIdentity(before, opened as FileStat)) return null;
+    if (!opened.isFile()) return null;
     const capacity = Math.min(opened.size, OPENCLAW_CONFIG_LOCK_MAX_BYTES) + 1;
     const buffer = Buffer.alloc(capacity);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
