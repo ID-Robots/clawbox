@@ -1605,7 +1605,7 @@ if [ "$CODEX_NEEDS_INSTALL" = "1" ]; then
   # log a warning and let the gateway start anyway. Codex is one provider;
   # a degraded Codex is far better than a dead box, and the next boot (or a
   # manual `openclaw plugins install`) can still repair it.
-  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force >/dev/null 2>&1; then
+  if timeout 120 "$OPENCLAW_BIN" plugins install "$CODEX_SPEC" --force --accept-capabilities >/dev/null 2>&1; then
     echo "  Codex runtime plugin installed/repaired ($CODEX_SPEC)"
   else
     echo "  WARN: 'openclaw plugins install $CODEX_SPEC' failed or timed out; Codex chats will fail until resolved (gateway will still start)"

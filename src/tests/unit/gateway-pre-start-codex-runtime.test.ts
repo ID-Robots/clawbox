@@ -17,6 +17,7 @@ import path from "node:path";
 // shipped script so that deletion can never come back for codex models.
 
 const SCRIPT = path.resolve(process.cwd(), "scripts/gateway-pre-start.sh");
+const SCRIPT_SOURCE = readFileSync(SCRIPT, "utf-8");
 const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 
 /** Pull the agentRuntime policy block out of the .sh verbatim. */
@@ -59,6 +60,12 @@ function applyPolicy(config: Record<string, any>): Record<string, any> {
 }
 
 describe.skipIf(!hasPython3)("gateway-pre-start.sh agentRuntime policy", () => {
+  it("accepts declared capabilities when repairing the Codex plugin", () => {
+    expect(SCRIPT_SOURCE).toContain(
+      'plugins install "$CODEX_SPEC" --force --accept-capabilities',
+    );
+  });
+
   it("sets agentRuntime on the configured codex primary", () => {
     const models = applyPolicy({
       agents: { defaults: { model: { primary: "codex/gpt-5.5", fallbacks: [] } } },
